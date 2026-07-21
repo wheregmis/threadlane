@@ -23,7 +23,7 @@ pub use engine::{get_runtime, AgentEngine, AgentUIEvent};
 pub use events::AgentEvent;
 pub use hooks::*;
 pub use loop_engine::AgentLoop;
-pub use plan_mode::{PlanItem, PlanModeState};
+pub use plan_mode::{HarnessPolicy, HarnessPolicyDecision, PlanItem, PlanModeState};
 pub use queue::PendingMessageQueue;
 pub use session::{Message, Role, Session};
 pub use session_tree::{SessionNode, SessionTree};

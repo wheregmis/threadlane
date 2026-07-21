@@ -1,8 +1,8 @@
 use mypi_agent::{
     compact_messages, parse_slash_command, AfterToolCallHook, AfterToolCallResult, Agent,
     AgentMessage, AgentState, AgentToolCall, AgentToolResult, BeforeToolCallHook,
-    BeforeToolCallResult, CommandAction, CompactionOptions, PlanModeState, ProjectContext,
-    SessionTree, ToolExecutionMode,
+    BeforeToolCallResult, CommandAction, CompactionOptions, HarnessPolicy, PlanModeState,
+    ProjectContext, SessionTree, ToolExecutionMode,
 };
 use std::fs::File;
 use std::io::Write;
@@ -154,6 +154,31 @@ fn test_slash_command_parsing() {
         parse_slash_command("/session"),
         Some(CommandAction::ShowSession)
     );
+}
+
+#[test]
+fn test_harness_policy_centralizes_plan_mode_enforcement() {
+    let decision = HarnessPolicy::ReadOnly.evaluate_tool_call("write_file", "{}");
+    assert!(decision.block);
+    assert!(decision
+        .reason
+        .as_deref()
+        .unwrap_or_default()
+        .contains("blocked because Plan Mode is ACTIVE"));
+
+    let decision = HarnessPolicy::ReadOnly.evaluate_tool_call("run_command", "cargo check");
+    assert!(!decision.block);
+
+    let decision = HarnessPolicy::ReadOnly.evaluate_tool_call("run_command", "rm -rf .");
+    assert!(decision.block);
+    assert!(decision
+        .reason
+        .as_deref()
+        .unwrap_or_default()
+        .contains("restricted in Plan Mode"));
+
+    let decision = HarnessPolicy::FullAccess.evaluate_tool_call("write_file", "{}");
+    assert!(!decision.block);
 }
 
 #[test]

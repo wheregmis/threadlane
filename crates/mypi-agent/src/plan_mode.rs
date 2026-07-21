@@ -7,6 +7,94 @@ pub struct PlanItem {
     pub completed: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HarnessPolicy {
+    FullAccess,
+    ReadOnly,
+}
+
+impl Default for HarnessPolicy {
+    fn default() -> Self {
+        Self::FullAccess
+    }
+}
+
+impl HarnessPolicy {
+    pub fn system_prompt_instructions(self) -> &'static str {
+        match self {
+            Self::FullAccess => "",
+            Self::ReadOnly => {
+                "\n\n=== PLAN MODE ACTIVE (READ-ONLY EXPLORATION) ===\n\
+                You are currently in Plan Mode. File modifications are disabled.\n\
+                1. Analyze code and workspace using read_file, list_dir, and read-only shell commands.\n\
+                2. When proposing a plan, output it under a `Plan:` header with numbered items:\n\
+                   Plan:\n\
+                   1. First step description\n\
+                   2. Second step description\n\
+                3. During execution, mark completed steps using `[DONE:n]` markers."
+            }
+        }
+    }
+
+    pub fn evaluate_tool_call(self, tool_name: &str, arguments: &str) -> HarnessPolicyDecision {
+        match self {
+            Self::FullAccess => HarnessPolicyDecision::allow(),
+            Self::ReadOnly => {
+                if matches!(tool_name, "write_file" | "edit_file" | "write" | "edit") {
+                    return HarnessPolicyDecision::block(format!(
+                        "Tool `{}` is blocked because Plan Mode is ACTIVE (Read-only exploration). Toggle off using /plan.",
+                        tool_name
+                    ));
+                }
+
+                if tool_name == "run_command" {
+                    let first_word = arguments.trim().split_whitespace().next().unwrap_or("");
+                    if !matches!(
+                        first_word,
+                        "ls"
+                            | "cat"
+                            | "grep"
+                            | "rg"
+                            | "find"
+                            | "pwd"
+                            | "git"
+                            | "cargo"
+                            | "echo"
+                            | "head"
+                            | "tail"
+                    ) {
+                        return HarnessPolicyDecision::block(format!(
+                            "Command `{}` is restricted in Plan Mode. Only read-only commands (ls, cat, grep, cargo check, git status) are permitted.",
+                            arguments
+                        ));
+                    }
+                }
+
+                HarnessPolicyDecision::allow()
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HarnessPolicyDecision {
+    pub block: bool,
+    pub reason: Option<String>,
+}
+
+impl HarnessPolicyDecision {
+    pub fn allow() -> Self {
+        Self::default()
+    }
+
+    pub fn block(reason: impl Into<String>) -> Self {
+        Self {
+            block: true,
+            reason: Some(reason.into()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PlanModeState {
     pub enabled: bool,
@@ -21,6 +109,14 @@ impl PlanModeState {
     pub fn toggle(&mut self) -> bool {
         self.enabled = !self.enabled;
         self.enabled
+    }
+
+    pub fn harness_policy(&self) -> HarnessPolicy {
+        if self.enabled {
+            HarnessPolicy::ReadOnly
+        } else {
+            HarnessPolicy::FullAccess
+        }
     }
 
     pub fn parse_and_update_plan(&mut self, text: &str) -> usize {
@@ -119,49 +215,21 @@ impl PlanModeState {
     }
 
     pub fn is_tool_allowed(&self, tool_name: &str) -> bool {
-        if !self.enabled {
-            return true;
-        }
-
-        // Write and edit tools are blocked in plan mode
-        !matches!(tool_name, "write_file" | "edit_file" | "write" | "edit")
+        !self
+            .harness_policy()
+            .evaluate_tool_call(tool_name, "")
+            .block
     }
 
     pub fn is_command_allowed(&self, command_line: &str) -> bool {
-        if !self.enabled {
-            return true;
-        }
-
-        let first_word = command_line.trim().split_whitespace().next().unwrap_or("");
-
-        matches!(
-            first_word,
-            "ls" | "cat"
-                | "grep"
-                | "rg"
-                | "find"
-                | "pwd"
-                | "git"
-                | "cargo"
-                | "echo"
-                | "head"
-                | "tail"
-        )
+        !self
+            .harness_policy()
+            .evaluate_tool_call("run_command", command_line)
+            .block
     }
 
     pub fn system_prompt_instructions(&self) -> &'static str {
-        if !self.enabled {
-            ""
-        } else {
-            "\n\n=== PLAN MODE ACTIVE (READ-ONLY EXPLORATION) ===\n\
-            You are currently in Plan Mode. File modifications are disabled.\n\
-            1. Analyze code and workspace using read_file, list_dir, and read-only shell commands.\n\
-            2. When proposing a plan, output it under a `Plan:` header with numbered items:\n\
-               Plan:\n\
-               1. First step description\n\
-               2. Second step description\n\
-            3. During execution, mark completed steps using `[DONE:n]` markers."
-        }
+        self.harness_policy().system_prompt_instructions()
     }
 }
 

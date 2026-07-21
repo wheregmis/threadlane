@@ -36,30 +36,14 @@ impl BeforeToolCallHook for PlanModeBeforeHook {
         _state: &AgentState,
     ) -> BeforeToolCallResult {
         let plan = self.plan_state.lock().await;
+        let decision = plan
+            .harness_policy()
+            .evaluate_tool_call(&tool_call.name, &tool_call.arguments);
 
-        if !plan.is_tool_allowed(&tool_call.name) {
-            return BeforeToolCallResult {
-                block: true,
-                reason: Some(format!(
-                    "Tool `{}` is blocked because Plan Mode is ACTIVE (Read-only exploration). Toggle off using /plan.",
-                    tool_call.name
-                )),
-            };
+        BeforeToolCallResult {
+            block: decision.block,
+            reason: decision.reason,
         }
-
-        if tool_call.name == "run_command" {
-            if !plan.is_command_allowed(&tool_call.arguments) {
-                return BeforeToolCallResult {
-                    block: true,
-                    reason: Some(format!(
-                        "Command `{}` is restricted in Plan Mode. Only read-only commands (ls, cat, grep, cargo check, git status) are permitted.",
-                        tool_call.arguments
-                    )),
-                };
-            }
-        }
-
-        BeforeToolCallResult::default()
     }
 }
 

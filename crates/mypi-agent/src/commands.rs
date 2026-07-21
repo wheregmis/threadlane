@@ -11,6 +11,7 @@ pub enum CommandAction {
     SwitchTreeBranch(String),
     Fork(String),
     CloneSession,
+    ClearPlan,
 
     Quit,
     Unknown(String),
@@ -34,6 +35,7 @@ pub fn parse_slash_command(input: &str) -> Option<CommandAction> {
         "tree" => Some(CommandAction::SwitchTreeBranch(arg)),
         "fork" => Some(CommandAction::Fork(arg)),
         "clone" => Some(CommandAction::CloneSession),
+        "clear-plan" => Some(CommandAction::ClearPlan),
 
         "quit" | "exit" => Some(CommandAction::Quit),
         other => Some(CommandAction::Unknown(other.to_string())),
@@ -104,6 +106,10 @@ pub async fn execute_slash_command(
             let mut cloned = session_tree.clone();
             cloned.session_id = format!("{}_clone", session_tree.session_id);
             format!("Cloned active session tree into ID: {}", cloned.session_id)
+        }
+        CommandAction::ClearPlan => {
+            plan_mode.items.clear();
+            "Cleared active plan items.".to_string()
         }
 
         CommandAction::Quit => "Quitting mypi agent.".to_string(),
