@@ -1,0 +1,69 @@
+use crate::compaction::{compact_messages, CompactionOptions};
+use crate::events::AgentEvent;
+use crate::loop_engine::AgentLoop;
+use crate::types::{AgentMessage, AgentState, ToolExecutionMode};
+use tokio::sync::broadcast;
+
+pub struct Agent {
+    pub loop_engine: AgentLoop,
+}
+
+impl Agent {
+    pub fn new(
+        api_key: impl Into<String>,
+        account_id: Option<String>,
+        model: impl Into<String>,
+    ) -> Self {
+        Self {
+            loop_engine: AgentLoop::new(api_key, account_id, model),
+        }
+    }
+
+    pub fn set_tool_execution_mode(&mut self, mode: ToolExecutionMode) {
+        self.loop_engine.tool_execution_mode = mode;
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
+        self.loop_engine.subscribe()
+    }
+
+    pub fn steer(&mut self, message: AgentMessage) {
+        self.loop_engine.steer(message);
+    }
+
+    pub fn follow_up(&mut self, message: AgentMessage) {
+        self.loop_engine.follow_up(message);
+    }
+
+    pub async fn prompt(&mut self, text: &str) {
+        self.loop_engine.run_prompt(text).await;
+    }
+
+    /// Updates both the cached prompt and the system message sent to the provider.
+    pub async fn set_system_prompt(&mut self, system_prompt: String) {
+        let mut state = self.loop_engine.state.lock().await;
+        state.system_prompt = system_prompt.clone();
+
+        if let Some(AgentMessage::System { content }) = state.messages.first_mut() {
+            *content = system_prompt;
+        } else {
+            state.messages.insert(
+                0,
+                AgentMessage::System {
+                    content: system_prompt,
+                },
+            );
+        }
+    }
+
+    pub async fn get_state(&self) -> AgentState {
+        let st = self.loop_engine.state.lock().await;
+        st.clone()
+    }
+
+    pub async fn compact_history(&self, options: Option<CompactionOptions>) {
+        let opts = options.unwrap_or_default();
+        let mut st = self.loop_engine.state.lock().await;
+        st.messages = compact_messages(&st.messages, &opts);
+    }
+}
