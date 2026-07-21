@@ -4,6 +4,5 @@ members = [
     "crates/mypi-provider",
     "crates/mypi-agent",
     "crates/mypi-gui",
-    "extensions"
 ]
 resolver = "2"

@@ -21,35 +21,19 @@ script_mod! {
                         spacing: 10
                         padding: 15
 
-                        // Header Bar
+                        // Authenticated users only need model selection. Credentials and login
+                        // are kept in a compact fallback row for first-run/API-key usage.
                         header := View {
                             width: Fill
                             height: Fit
                             flow: Right
                             align: Center
-                            spacing: 10
+                            spacing: 8
 
-                            title_label := Label {
-                                text: "⚡ mypi coding agent"
-                                draw_text.text_style.font_size: 16.0
-                            }
-
-                            api_key_label := Label {
-                                text: "Key:"
-                            }
-
-                            api_key_input := TextInput {
-                                width: 220
-                                height: 32
-                                empty_text: "sk-... (or click Login ChatGPT)"
-                            }
-
-                            model_label := Label {
-                                text: "Model:"
-                            }
-
+                            View { width: Fill height: 1 }
+                            Label { text: "Model" }
                             model_drop := DropDown {
-                                width: 170
+                                width: 190
                                 height: 32
                                 labels: [
                                     "gpt-5.4",
@@ -63,30 +47,76 @@ script_mod! {
                                     "gpt-4o-mini"
                                 ]
                             }
+                        }
 
+                        auth_row := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            align: Center
+                            spacing: 8
+                            visible: false
+
+                            api_key_input := TextInput {
+                                width: Fill
+                                height: 32
+                                empty_text: "OpenAI API key (or sign in with ChatGPT)"
+                            }
                             login_btn := Button {
-                                width: 120
+                                width: 130
                                 height: 32
                                 text: "Login ChatGPT"
                             }
-
-                            status_label := Label {
-                                text: "Status: Ready"
-                            }
+                            status_label := Label { text: "Not authenticated" }
                         }
 
-                        // Chat Log View
-                        log_view := View {
+                        // Keep the conversational response separate from diagnostics.
+                        content_row := View {
                             width: Fill
                             height: Fill
-                            padding: 10
+                            flow: Right
+                            spacing: 10
 
-                            chat_text := TextInput {
+                            log_view := View {
                                 width: Fill
                                 height: Fill
-                                is_read_only: true
-                                is_multiline: true
-                                empty_text: "Welcome to mypi! Enter a prompt or slash command (/plan, /todos, /model, /compact, /session, /tree, /fork, /clone)..."
+                                padding: 10
+
+                                chat_text := TextInput {
+                                    width: Fill
+                                    height: Fill
+                                    is_read_only: true
+                                    is_multiline: true
+                                    empty_text: "Ask mypi to inspect files, or use an extension command such as /plan..."
+                                }
+                            }
+
+                            sidebar := View {
+                                width: 300
+                                height: Fill
+                                flow: Down
+                                spacing: 8
+                                padding: 10
+
+                                Label { text: "Workspace" draw_text.text_style.font_size: 13.0 }
+                                workspace_label := Label { text: "loading..." }
+                                plan_status_label := Label { text: "Plan: inactive" }
+                                Label { text: "Active Plan" draw_text.text_style.font_size: 15.0 }
+                                plan_text := TextInput {
+                                    width: Fill
+                                    height: 260
+                                    is_read_only: true
+                                    is_multiline: true
+                                    empty_text: "No active extension plan. Use /plan <task>."
+                                }
+                                Label { text: "Activity" draw_text.text_style.font_size: 13.0 }
+                                activity_text := TextInput {
+                                    width: Fill
+                                    height: Fill
+                                    is_read_only: true
+                                    is_multiline: true
+                                    empty_text: "Tool activity appears here."
+                                }
                             }
                         }
 
@@ -132,6 +162,8 @@ pub struct App {
     #[rust]
     pub chat_history: String,
     #[rust]
+    pub activity_history: String,
+    #[rust]
     pub rx: Option<Arc<Mutex<Receiver<GuiAgentEvent>>>>,
     #[rust]
     pub agent: Option<Arc<tokio::sync::Mutex<CodingAgent>>>,
@@ -158,9 +190,16 @@ impl MatchEvent for App {
             );
             key_opt = Some(creds.access_token.clone());
             account_id_opt = creds.account_id.clone();
+            self.ui.widget(cx, ids!(auth_row)).set_visible(cx, false);
+        } else {
+            self.ui.widget(cx, ids!(auth_row)).set_visible(cx, true);
         }
 
         let work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        self.ui
+            .label(cx, ids!(workspace_label))
+            .set_text(cx, &work_dir.display().to_string());
+        self.refresh_plan_panel(cx, &work_dir);
         let context = mypi_agent::ProjectContext::discover(&work_dir);
 
         if !context.context_files.is_empty() {
@@ -282,7 +321,13 @@ impl MatchEvent for App {
             });
         }
 
-        if self.ui.button(cx, ids!(send_btn)).clicked(actions) {
+        let submit_prompt = self.ui.button(cx, ids!(send_btn)).clicked(actions)
+            || self
+                .ui
+                .text_input(cx, ids!(prompt_input))
+                .returned(actions)
+                .is_some();
+        if submit_prompt {
             let prompt_widget = self.ui.text_input(cx, ids!(prompt_input));
             let input_text = prompt_widget.text();
 
@@ -395,7 +440,11 @@ impl App {
         for evt in events {
             match evt {
                 GuiAgentEvent::CommandOutput(output) => {
-                    self.append_chat(cx, &format!("💻 Output: {}\n", output));
+                    self.append_chat(cx, &format!("\n💻 Output: {}\n", output));
+                    self.refresh_plan_panel(
+                        cx,
+                        &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                    );
                 }
                 GuiAgentEvent::AvailableModelsLoaded(models) => {
                     self.ui
@@ -419,6 +468,7 @@ impl App {
                         acc_opt = creds.account_id;
                     }
                     self.append_chat(cx, "\n✅ Successfully authenticated with ChatGPT!\n");
+                    self.ui.widget(cx, ids!(auth_row)).set_visible(cx, false);
                     self.ui
                         .label(cx, ids!(status_label))
                         .set_text(cx, "Status: Logged in via ChatGPT");
@@ -441,7 +491,7 @@ impl App {
                             .set_text(cx, "Status: Agent Started");
                     }
                     AgentEvent::TurnStart { turn_number } => {
-                        self.append_chat(cx, &format!("\n--- Turn {} ---\n", turn_number));
+                        self.append_activity(cx, &format!("Turn {turn_number} started\n"));
                     }
                     AgentEvent::MessageUpdate {
                         text_delta,
@@ -452,28 +502,22 @@ impl App {
                             self.append_chat(cx, &delta);
                         }
                         if let Some(tool_name) = tool_call_name {
-                            self.append_chat(
-                                cx,
-                                &format!("\n⚙️ [Requesting Tool: `{tool_name}`]\n"),
-                            );
+                            self.append_activity(cx, &format!("Requesting tool: {tool_name}\n"));
                         }
                     }
                     AgentEvent::MessageEnd { .. } => {}
                     AgentEvent::ToolExecutionStart {
                         name, arguments, ..
                     } => {
-                        self.append_chat(
-                            cx,
-                            &format!("\n🛠️ [Executing Tool `{name}` args: {arguments}]\n"),
-                        );
+                        self.append_activity(cx, &format!("Running {name} with {arguments}\n"));
                     }
                     AgentEvent::ToolExecutionUpdate { partial_result, .. } => {
-                        self.append_chat(cx, &partial_result);
+                        self.append_activity(cx, &partial_result);
                     }
                     AgentEvent::ToolExecutionEnd { name, result, .. } => {
-                        self.append_chat(
+                        self.append_activity(
                             cx,
-                            &format!("✓ Tool `{name}` finished:\n```\n{}\n```\n", result.content),
+                            &format!("✓ {name} finished\n{}\n\n", result.content),
                         );
                     }
                     AgentEvent::TurnEnd { .. } => {
@@ -485,6 +529,10 @@ impl App {
                         self.ui
                             .label(cx, ids!(status_label))
                             .set_text(cx, "Status: Ready");
+                        self.refresh_plan_panel(
+                            cx,
+                            &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                        );
                     }
                     AgentEvent::AgentError { error } => {
                         self.append_chat(cx, &format!("\n❌ Agent Error: {error}\n"));
@@ -503,5 +551,65 @@ impl App {
         self.ui
             .text_input(cx, ids!(chat_text))
             .set_text(cx, &self.chat_history);
+    }
+
+    pub fn append_activity(&mut self, cx: &mut Cx, text: &str) {
+        self.activity_history.push_str(text);
+        self.ui
+            .text_input(cx, ids!(activity_text))
+            .set_text(cx, &self.activity_history);
+    }
+
+    fn refresh_plan_panel(&mut self, cx: &mut Cx, work_dir: &std::path::Path) {
+        let state_path = work_dir.join(".mypi/state/extensions/plan_mode_ext.json");
+        let state = std::fs::read_to_string(state_path)
+            .ok()
+            .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok());
+
+        let Some(state) = state else {
+            self.ui
+                .label(cx, ids!(plan_status_label))
+                .set_text(cx, "Plan: inactive");
+            self.ui
+                .text_input(cx, ids!(plan_text))
+                .set_text(cx, "No active extension plan. Use /plan <task>.");
+            return;
+        };
+
+        let enabled = state
+            .get("enabled")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let items = state
+            .get("items")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut plan = String::new();
+        for item in &items {
+            if let (Some(index), Some(description)) = (
+                item.get("index").and_then(serde_json::Value::as_u64),
+                item.get("description").and_then(serde_json::Value::as_str),
+            ) {
+                plan.push_str(&format!("⏳ {index}. {description}\n"));
+            }
+        }
+        if plan.is_empty() {
+            plan.push_str(if enabled {
+                "Waiting for the planning response..."
+            } else {
+                "No active extension plan."
+            });
+        }
+
+        self.ui.label(cx, ids!(plan_status_label)).set_text(
+            cx,
+            if enabled {
+                "Plan: active"
+            } else {
+                "Plan: inactive"
+            },
+        );
+        self.ui.text_input(cx, ids!(plan_text)).set_text(cx, &plan);
     }
 }
