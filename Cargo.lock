@@ -1285,6 +1285,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "unicode-segmentation 1.13.3",
 ]
 
 [[package]]

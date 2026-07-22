@@ -6,6 +6,7 @@ description = "GPU Desktop UI application for mypi agent using Makepad"
 
 [dependencies]
 makepad-widgets = { git = "https://github.com/makepad/makepad.git", branch = "dev" }
+unicode-segmentation = "1.12.0"
 mypi-agent = { path = "../mypi-agent" }
 mypi-provider = { path = "../mypi-provider" }
 mypi-tools = { path = "../mypi-tools" }

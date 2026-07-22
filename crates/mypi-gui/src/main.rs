@@ -1,6 +1,9 @@
 pub use makepad_widgets;
 
 mod app;
+mod chat;
+mod command_text_input;
+mod state;
 
 use app::App;
 use makepad_widgets::*;
