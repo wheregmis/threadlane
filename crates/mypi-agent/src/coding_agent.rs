@@ -255,6 +255,32 @@ impl CodingAgent {
             let cmd_name = parts.next().unwrap_or("");
             let cmd_args = parts.collect::<Vec<&str>>().join(" ");
 
+            if cmd_name.starts_with("skill:") || cmd_name == "skill" {
+                let skill_name = if cmd_name.starts_with("skill:") {
+                    &cmd_name[6..]
+                } else {
+                    cmd_args.trim()
+                };
+
+                let mut skill_mgr = crate::skills::SkillManager::new();
+                skill_mgr.discover_skills(Some(&self.work_dir));
+                match skill_mgr.get_skill_instructions(skill_name) {
+                    Ok(instructions) => {
+                        let prompt = format!(
+                            "Use the following Skill instructions for '{}':\n\n{}",
+                            skill_name, instructions
+                        );
+                        self.session_tree.add_message(AgentMessage::User {
+                            content: input.to_string(),
+                        });
+                        self.agent.prompt(&prompt).await;
+                        self.dispatch_assistant_message_hooks().await;
+                        return Some(format!("Loaded skill '{}'", skill_name));
+                    }
+                    Err(err) => return Some(format!("Skill Error: {}", err)),
+                }
+            }
+
             if let Some(res) = self
                 .wasi_extensions
                 .execute_command_with_effects(cmd_name, &cmd_args)

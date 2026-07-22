@@ -12,7 +12,14 @@ pub mod queue;
 pub mod session;
 pub mod session_tree;
 pub mod types;
+pub mod capabilities;
+pub mod full_trust_extension;
+pub mod packages;
+pub mod skills;
+pub mod supervisor;
 pub mod wasi_extension;
+
+
 
 pub use agent::Agent;
 pub use coding_agent::{CodingAgent, CodingAgentOptions, PlanModeBeforeHook};
@@ -27,9 +34,16 @@ pub use plan_mode::{HarnessPolicy, HarnessPolicyDecision, PlanItem, PlanModeStat
 pub use queue::PendingMessageQueue;
 pub use session::{Message, Role, Session};
 pub use session_tree::{SessionNode, SessionTree};
+pub use capabilities::{CapabilityCatalog, ExtensionMetadata};
+pub use full_trust_extension::{compute_executable_revision, FullTrustRunner, TrustStore};
+pub use packages::{PackageManifest, PackageManager, PackageRecord, PackageScope};
+pub use skills::{SkillManager, SkillMetadata, SkillScope};
+pub use supervisor::{HarnessSupervisor, ProjectRecord, TaskAgentEvent, TaskRecord, TaskStatus};
+
 pub use types::*;
 pub use wasi_extension::{
     WasiCommandDefinition, WasiExtension, WasiExtensionCommandResult, WasiExtensionEffect,
     WasiExtensionInvocation, WasiExtensionManager, WasiExtensionManifest, WasiExtensionResponse,
     WasiToolDefinition,
 };
+

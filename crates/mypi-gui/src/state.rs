@@ -6,13 +6,14 @@
 //! custom list widgets (see `chat.rs`) can read it during their draw pass
 //! without fighting `Scope` lifetimes — same pattern as makepad's aichat example.
 
-use mypi_agent::{AgentEvent, AgentMessage, SessionTree};
+use mypi_agent::{AgentEvent, AgentMessage, SessionTree, TaskAgentEvent};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Events sent from background tokio tasks to the UI thread.
 pub enum GuiAgentEvent {
+    TaskEvent(TaskAgentEvent),
     Agent(AgentEvent),
     DeviceCodePrompt { user_code: String, url: String },
     DeviceLoginSuccess,

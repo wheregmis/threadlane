@@ -1417,6 +1417,98 @@ impl App {
 
         for evt in events {
             match evt {
+                GuiAgentEvent::TaskEvent(task_event) => {
+                    let agent_event = task_event.event;
+                    match agent_event {
+                        AgentEvent::AgentStart => {
+                            self.set_status(cx, UiStatus::Working, "Working...");
+                        }
+                        AgentEvent::TurnStart { turn_number } => {
+                            push_activity(
+                                None,
+                                format!("Turn {turn_number}"),
+                                ActivityStatus::Info,
+                                "",
+                            );
+                        }
+                        AgentEvent::MessageUpdate {
+                            text_delta,
+                            tool_call_name,
+                            ..
+                        } => {
+                            if let Some(delta) = text_delta {
+                                push_stream_delta(&delta);
+                            }
+                            if let Some(tool_name) = tool_call_name {
+                                push_activity(None, tool_name, ActivityStatus::Requested, "");
+                            }
+                        }
+                        AgentEvent::MessageEnd { .. } => {
+                            flush_streaming();
+                        }
+                        AgentEvent::ToolExecutionStart {
+                            tool_call_id,
+                            name,
+                            arguments,
+                        } => {
+                            flush_streaming();
+                            let index = push_chat(MsgRole::Tool, format!("… {name}"));
+                            self.tool_msg_index.insert(tool_call_id.clone(), index);
+                            push_activity(
+                                Some(tool_call_id),
+                                name,
+                                ActivityStatus::Running,
+                                truncate_chars(&arguments, 200),
+                            );
+                        }
+                        AgentEvent::ToolExecutionUpdate {
+                            tool_call_id,
+                            partial_result,
+                        } => {
+                            update_activity(
+                                &tool_call_id,
+                                None,
+                                Some(truncate_chars(&partial_result, 200)),
+                            );
+                        }
+                        AgentEvent::ToolExecutionEnd {
+                            tool_call_id,
+                            name,
+                            result,
+                        } => {
+                            let status = if result.is_error {
+                                ActivityStatus::Error
+                            } else {
+                                ActivityStatus::Done
+                            };
+                            update_activity(
+                                &tool_call_id,
+                                Some(status),
+                                Some(truncate_chars(&result.content, 200)),
+                            );
+                            if let Some(index) = self.tool_msg_index.remove(&tool_call_id) {
+                                set_chat_text(index, format!("{} {name}", status.glyph()));
+                            }
+                        }
+                        AgentEvent::TurnEnd { .. } => {
+                            self.set_status(cx, UiStatus::Working, "Turn completed");
+                        }
+                        AgentEvent::AgentEnd { .. } => {
+                            flush_streaming();
+                            self.set_status(cx, UiStatus::Ready, "Ready");
+                            let work_dir =
+                                std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                            self.refresh_plan_ui(cx, &work_dir);
+                            refresh_sessions(&work_dir);
+                        }
+                        AgentEvent::AgentError { error } => {
+                            flush_streaming();
+                            push_chat(MsgRole::System, format!("Agent error: {error}"));
+                            self.set_status(cx, UiStatus::Error, "Error");
+                        }
+                        _ => {}
+                    }
+                }
                 GuiAgentEvent::CommandOutput(output) => {
                     push_chat(MsgRole::System, output);
                     self.set_status(cx, UiStatus::Ready, "Ready");

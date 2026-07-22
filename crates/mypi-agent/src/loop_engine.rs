@@ -8,7 +8,7 @@ use crate::types::{
 };
 use crate::wasi_extension::WasiExtensionManager;
 use mypi_provider::openai::{OpenAIClient, StreamEvent, ToolCall};
-use mypi_tools::{execute_tool, get_available_tools, get_codex_tools};
+use mypi_tools::{execute_tool, execute_tool_in_workspace, get_available_tools, get_codex_tools};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -448,7 +448,12 @@ impl AgentLoop {
         let raw_result = extension_manager
             .as_ref()
             .and_then(|manager| manager.execute_tool(&tc.function.name, &arguments))
-            .unwrap_or_else(|| Ok(execute_tool(&tc.function.name, &arguments)))
+            .unwrap_or_else(|| {
+                Ok(match work_dir.as_deref() {
+                    Some(dir) => execute_tool_in_workspace(&tc.function.name, &arguments, dir),
+                    None => execute_tool(&tc.function.name, &arguments),
+                })
+            })
             .unwrap_or_else(|error| format!("Extension tool error: {error}"));
         let mut final_result = AgentToolResult {
             tool_call_id: tc.id.clone(),

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use wasmi::{Engine, Func, Linker, Module, Store};
 
@@ -73,6 +73,7 @@ pub struct WasiExtensionCommandResult {
 
 pub struct WasiExtension {
     pub manifest: WasiExtensionManifest,
+    pub file_path: Option<PathBuf>,
     wasm_bytes: Vec<u8>,
     engine: Engine,
 }
@@ -165,6 +166,7 @@ impl WasiExtension {
 
         Ok(Self {
             manifest,
+            file_path: None,
             wasm_bytes,
             engine,
         })
@@ -173,7 +175,9 @@ impl WasiExtension {
     pub fn load_from_file(path: &Path) -> Result<Self, String> {
         let bytes =
             fs::read(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
-        Self::load_from_bytes(bytes)
+        let mut ext = Self::load_from_bytes(bytes)?;
+        ext.file_path = Some(path.to_path_buf());
+        Ok(ext)
     }
 
     pub fn call_tool(
@@ -258,6 +262,10 @@ pub struct WasiExtensionManager {
 impl WasiExtensionManager {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn get_extensions(&self) -> &HashMap<String, WasiExtension> {
+        &self.extensions
     }
 
     pub fn for_project(project_dir: &Path) -> Self {
