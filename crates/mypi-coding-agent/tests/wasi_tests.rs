@@ -19,6 +19,8 @@ fn broker_request_round_trips_and_requires_v2() {
 #[test]
 fn capability_policy_rejects_undeclared_capabilities() {
     let policy = CapabilityPolicy::new(["agent"]);
+    assert!(policy.allows("agent"));
+    assert!(!policy.allows("tools"));
     let response = policy.denied_response("tools");
     assert!(!response.ok);
     assert_eq!(response.error.unwrap().code, "capability_denied");

@@ -4,6 +4,10 @@ use std::collections::BTreeSet;
 
 pub const BROKER_API_VERSION: u32 = 2;
 
+pub trait CapabilityHandler {
+    fn handle(&self, request: &BrokerRequest) -> Result<Value, BrokerError>;
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct BrokerRequest {
     pub api_version: u32,
