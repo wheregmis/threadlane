@@ -66,36 +66,67 @@ pub fn convert_to_llm(messages: &[AgentMessage]) -> Vec<Value> {
         .collect()
 }
 
-pub fn convert_to_codex_llm(messages: &[AgentMessage]) -> Vec<Value> {
-    messages
-        .iter()
-        .filter_map(|msg| match msg {
-            AgentMessage::System { content } => Some(serde_json::json!({
-                "role": "user",
-                "content": format!("[System Instructions]\n{}", content)
-            })),
-            AgentMessage::User { content } => Some(serde_json::json!({
-                "role": "user",
-                "content": content
-            })),
-            AgentMessage::Assistant { content, .. } => {
+pub fn convert_to_codex_llm(messages: &[AgentMessage]) -> (String, Vec<Value>) {
+    let mut instructions = String::new();
+    let mut items = Vec::new();
+
+    for msg in messages {
+        match msg {
+            AgentMessage::System { content } => {
+                if !instructions.is_empty() {
+                    instructions.push_str("\n\n");
+                }
+                instructions.push_str(content);
+            }
+            AgentMessage::User { content } => {
+                items.push(serde_json::json!({
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": content }]
+                }));
+            }
+            AgentMessage::Assistant { content, tool_calls } => {
                 if let Some(c) = content {
                     if !c.trim().is_empty() {
-                        return Some(serde_json::json!({
+                        items.push(serde_json::json!({
+                            "type": "message",
                             "role": "assistant",
-                            "content": c
+                            "content": [{ "type": "output_text", "text": c }]
                         }));
                     }
                 }
-                None
+                if let Some(t_calls) = tool_calls {
+                    for tc in t_calls {
+                        items.push(serde_json::json!({
+                            "type": "function_call",
+                            "call_id": if tc.id.is_empty() { "call_0" } else { &tc.id },
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments
+                        }));
+                    }
+                }
             }
-            AgentMessage::Tool { name, content, .. } => Some(serde_json::json!({
-                "role": "user",
-                "content": format!("[Tool Output for `{}`]:\n{}", name, content)
-            })),
-            AgentMessage::Custom { .. } => None,
-        })
-        .collect()
+            AgentMessage::Tool {
+                tool_call_id,
+                content,
+                ..
+            } => {
+                let call_id = if tool_call_id.is_empty() {
+                    "call_0"
+                } else {
+                    tool_call_id
+                };
+                items.push(serde_json::json!({
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": content
+                }));
+            }
+            AgentMessage::Custom { .. } => {}
+        }
+    }
+
+    (instructions, items)
 }
 
 pub struct AgentLoop {
@@ -192,7 +223,7 @@ impl AgentLoop {
             let (api_payload, codex_payload) = {
                 let state = self.state.lock().await;
                 let api_msgs = convert_to_llm(&state.messages);
-                let codex_msgs = convert_to_codex_llm(&state.messages);
+                let (instructions, codex_msgs) = convert_to_codex_llm(&state.messages);
                 let mut tools = get_available_tools();
                 tools.extend(state.tools.clone());
                 let codex_tools = get_codex_tools();
@@ -205,6 +236,7 @@ impl AgentLoop {
                     }),
                     serde_json::json!({
                         "model": state.model,
+                        "instructions": instructions,
                         "input": codex_msgs,
                         "store": false,
                         "stream": true,

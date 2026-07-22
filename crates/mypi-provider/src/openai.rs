@@ -177,6 +177,48 @@ impl OpenAIClient {
                             let event_type =
                                 v.get("type").and_then(|value| value.as_str()).unwrap_or("");
 
+                            if event_type == "error" {
+                                let code = v.get("code").and_then(|c| c.as_str()).unwrap_or("error");
+                                let message = v
+                                    .get("message")
+                                    .and_then(|m| m.as_str())
+                                    .unwrap_or("Unknown SSE error");
+                                let _ = event_tx
+                                    .send(StreamEvent::Error(format!(
+                                        "OpenAI SSE Error [{code}]: {message}"
+                                    )))
+                                    .await;
+                                return;
+                            } else if event_type == "response.failed" {
+                                let err_obj = v.get("response").and_then(|r| r.get("error"));
+                                let code = err_obj
+                                    .and_then(|e| e.get("code"))
+                                    .and_then(|c| c.as_str())
+                                    .unwrap_or("response_failed");
+                                let message = err_obj
+                                    .and_then(|e| e.get("message"))
+                                    .and_then(|m| m.as_str())
+                                    .unwrap_or("Response failed");
+                                let _ = event_tx
+                                    .send(StreamEvent::Error(format!(
+                                        "OpenAI Response Failed [{code}]: {message}"
+                                    )))
+                                    .await;
+                                return;
+                            } else if let Some(err_val) = v.get("error") {
+                                let msg = if let Some(s) = err_val.as_str() {
+                                    s.to_string()
+                                } else if let Some(m) = err_val.get("message").and_then(|m| m.as_str()) {
+                                    m.to_string()
+                                } else {
+                                    err_val.to_string()
+                                };
+                                let _ = event_tx
+                                    .send(StreamEvent::Error(format!("OpenAI API Error: {msg}")))
+                                    .await;
+                                return;
+                            }
+
                             // Codex Responses API emits function calls as output items and
                             // their JSON arguments as a separate delta event. These must not
                             // be rendered as assistant text.

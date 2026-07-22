@@ -112,3 +112,57 @@ fn test_session_tree_persistence_and_branching() {
     let forked = tree.fork_branch(&n1).unwrap();
     assert_eq!(forked.nodes.len(), 1);
 }
+
+#[test]
+fn test_convert_to_codex_llm_structure() {
+    use mypi_agent::loop_engine::convert_to_codex_llm;
+    use mypi_provider::openai::ToolCallFunction;
+
+    let messages = vec![
+        AgentMessage::System {
+            content: "Be helpful.".to_string(),
+        },
+        AgentMessage::User {
+            content: "List files".to_string(),
+        },
+        AgentMessage::Assistant {
+            content: Some("Listing files:".to_string()),
+            tool_calls: Some(vec![mypi_provider::openai::ToolCall {
+                id: "call_abc123".to_string(),
+                r#type: "function".to_string(),
+                function: ToolCallFunction {
+                    name: "list_dir".to_string(),
+                    arguments: "{\"path\":\".\"}".to_string(),
+                },
+            }]),
+        },
+        AgentMessage::Tool {
+            tool_call_id: "call_abc123".to_string(),
+            name: "list_dir".to_string(),
+            content: "file1.txt\nfile2.txt".to_string(),
+            is_error: false,
+        },
+    ];
+
+    let (instructions, items) = convert_to_codex_llm(&messages);
+
+    assert_eq!(instructions, "Be helpful.");
+    assert_eq!(items.len(), 4);
+
+    // User message item
+    assert_eq!(items[0]["type"], "message");
+    assert_eq!(items[0]["role"], "user");
+
+    // Assistant message item
+    assert_eq!(items[1]["type"], "message");
+    assert_eq!(items[1]["role"], "assistant");
+
+    // Function call item
+    assert_eq!(items[2]["type"], "function_call");
+    assert_eq!(items[2]["call_id"], "call_abc123");
+    assert_eq!(items[2]["name"], "list_dir");
+
+    // Function call output item
+    assert_eq!(items[3]["type"], "function_call_output");
+    assert_eq!(items[3]["call_id"], "call_abc123");
+}
