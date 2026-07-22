@@ -96,23 +96,179 @@ pub enum StreamingKind {
     Thinking,
 }
 
+#[derive(Clone)]
 pub struct ChatData {
     pub messages: Vec<ChatMessage>,
     pub streaming_text: String,
     pub streaming_kind: Option<StreamingKind>,
 }
 
-pub static CHAT_DATA: RwLock<ChatData> = RwLock::new(ChatData {
-    messages: Vec::new(),
-    streaming_text: String::new(),
-    streaming_kind: None,
-});
+impl ChatData {
+    pub fn push_chat(&mut self, role: MsgRole, text: impl Into<String>) {
+        self.messages.push(ChatMessage::Text {
+            role,
+            text: text.into(),
+        });
+    }
 
-pub fn push_chat(role: MsgRole, text: impl Into<String>) {
-    CHAT_DATA.write().unwrap().messages.push(ChatMessage::Text {
-        role,
-        text: text.into(),
-    });
+    pub fn push_thinking(&mut self, text: String) {
+        push_thinking_locked(self, text);
+    }
+
+    pub fn push_stream_delta(&mut self, kind: StreamingKind, delta: &str) {
+        if delta.is_empty() {
+            return;
+        }
+        if self.streaming_kind != Some(kind) {
+            flush_streaming_locked(self);
+            self.streaming_kind = Some(kind);
+        }
+        self.streaming_text.push_str(delta);
+    }
+
+    pub fn flush_streaming(&mut self) {
+        flush_streaming_locked(self);
+    }
+
+    pub fn flush_tool_call_preamble(&mut self) {
+        let text = std::mem::take(&mut self.streaming_text);
+        self.streaming_kind = None;
+        self.push_thinking(text);
+    }
+
+    pub fn push_tool(&mut self, id: String, name: String, arguments: String) {
+        self.flush_streaming();
+        let presentation = tool_presentation(&name, &arguments);
+        if let Some(ChatMessage::Tool {
+            name: existing_name,
+            arguments: existing_arguments,
+            status,
+            presentation: existing_presentation,
+            output,
+            result_preview,
+            result_metadata,
+            started_at,
+            ..
+        }) = self.messages.iter_mut().rev().find(|message| {
+            matches!(message, ChatMessage::Tool { id: existing_id, .. } if existing_id == &id)
+        }) {
+            *existing_name = name;
+            *existing_arguments = arguments;
+            *existing_presentation = presentation;
+            *output = String::new();
+            *result_preview = String::new();
+            *result_metadata = "Running…".into();
+            *status = ToolStatus::Running;
+            *started_at = Instant::now();
+            return;
+        }
+        self.messages.push(ChatMessage::Tool {
+            id,
+            name,
+            arguments,
+            output: String::new(),
+            status: ToolStatus::Running,
+            presentation,
+            result_preview: String::new(),
+            result_metadata: "Running…".into(),
+            started_at: Instant::now(),
+        });
+    }
+
+    pub fn update_tool(&mut self, id: &str, output: String, status: Option<ToolStatus>) {
+        if let Some(ChatMessage::Tool {
+            output: existing_output,
+            status: existing_status,
+            result_preview,
+            result_metadata,
+            started_at,
+            ..
+        }) = self.messages.iter_mut().rev().find(
+            |message| matches!(message, ChatMessage::Tool { id: existing_id, .. } if existing_id == id),
+        ) {
+            *existing_output = output;
+            *result_preview = tool_result_preview(existing_output, 800);
+            *result_metadata = result_metadata_for(
+                existing_output,
+                status.unwrap_or(*existing_status),
+                started_at.elapsed(),
+            );
+            if let Some(status) = status {
+                *existing_status = status;
+            }
+        }
+    }
+
+    pub fn replace_from_agent_messages(&mut self, messages: &[AgentMessage]) {
+        self.messages.clear();
+        self.streaming_text.clear();
+        self.streaming_kind = None;
+        for msg in messages {
+            match msg {
+                AgentMessage::User { content } => self.push_chat(MsgRole::User, content.clone()),
+                AgentMessage::Assistant {
+                    content,
+                    tool_calls,
+                } => {
+                    if let Some(text) = content {
+                        if !text.is_empty() {
+                            if tool_calls.is_some() {
+                                self.push_thinking(text.clone());
+                            } else {
+                                self.push_chat(MsgRole::Assistant, text.clone());
+                            }
+                        }
+                    }
+                    if let Some(tool_calls) = tool_calls {
+                        for call in tool_calls {
+                            let presentation =
+                                tool_presentation(&call.function.name, &call.function.arguments);
+                            self.messages.push(ChatMessage::Tool {
+                                id: call.id.clone(),
+                                name: call.function.name.clone(),
+                                arguments: call.function.arguments.clone(),
+                                output: String::new(),
+                                status: ToolStatus::Running,
+                                presentation,
+                                result_preview: String::new(),
+                                result_metadata: "Awaiting result…".into(),
+                                started_at: Instant::now(),
+                            });
+                        }
+                    }
+                }
+                AgentMessage::Tool {
+                    tool_call_id,
+                    name,
+                    content,
+                    is_error,
+                } => {
+                    let status = if *is_error {
+                        ToolStatus::Error
+                    } else {
+                        ToolStatus::Done
+                    };
+                    self.update_tool(tool_call_id, content.clone(), Some(status));
+                    if !self.messages.iter().any(|message| matches!(message, ChatMessage::Tool { id, .. } if id == tool_call_id)) {
+                        let presentation = tool_presentation(name, "");
+                        self.messages.push(ChatMessage::Tool {
+                            id: tool_call_id.clone(), name: name.clone(), arguments: String::new(), output: content.clone(), status, presentation,
+                            result_preview: tool_result_preview(content, 800), result_metadata: result_metadata_for(content, status, Duration::ZERO), started_at: Instant::now(),
+                        });
+                    }
+                }
+                AgentMessage::Custom {
+                    custom_type,
+                    payload,
+                } if custom_type == "thinking" => {
+                    if let Some(text) = payload.get("text").and_then(serde_json::Value::as_str) {
+                        self.push_thinking(text.to_string());
+                    }
+                }
+                AgentMessage::System { .. } | AgentMessage::Custom { .. } => {}
+            }
+        }
+    }
 }
 
 fn push_thinking_locked(data: &mut ChatData, text: String) {
@@ -141,104 +297,6 @@ fn flush_streaming_locked(data: &mut ChatData) {
             role: MsgRole::Assistant,
             text,
         }),
-    }
-}
-
-/// A textual preamble paired with a function call is work narration, not a
-/// user-facing answer. Keep it inside the adjacent Thinking entry.
-pub fn flush_tool_call_preamble() {
-    let mut data = CHAT_DATA.write().unwrap();
-    let text = std::mem::take(&mut data.streaming_text);
-    data.streaming_kind = None;
-    push_thinking_locked(&mut data, text);
-}
-
-fn push_stream_delta_for(kind: StreamingKind, delta: &str) {
-    if delta.is_empty() {
-        return;
-    }
-    let mut data = CHAT_DATA.write().unwrap();
-    if data.streaming_kind != Some(kind) {
-        flush_streaming_locked(&mut data);
-        data.streaming_kind = Some(kind);
-    }
-    data.streaming_text.push_str(delta);
-}
-
-pub fn push_stream_delta(delta: &str) {
-    push_stream_delta_for(StreamingKind::Assistant, delta);
-}
-
-pub fn push_reasoning_delta(delta: &str) {
-    push_stream_delta_for(StreamingKind::Thinking, delta);
-}
-
-pub fn flush_streaming() {
-    flush_streaming_locked(&mut CHAT_DATA.write().unwrap());
-}
-
-pub fn push_tool(id: String, name: String, arguments: String) {
-    flush_streaming();
-    let presentation = tool_presentation(&name, &arguments);
-    let mut data = CHAT_DATA.write().unwrap();
-    if let Some(ChatMessage::Tool {
-        name: existing_name,
-        arguments: existing_arguments,
-        status,
-        presentation: existing_presentation,
-        output,
-        result_preview,
-        result_metadata,
-        started_at,
-        ..
-    }) = data.messages.iter_mut().rev().find(|message| {
-        matches!(message, ChatMessage::Tool { id: existing_id, .. } if existing_id == &id)
-    }) {
-        *existing_name = name;
-        *existing_arguments = arguments;
-        *existing_presentation = presentation;
-        *output = String::new();
-        *result_preview = String::new();
-        *result_metadata = "Running…".into();
-        *status = ToolStatus::Running;
-        *started_at = Instant::now();
-        return;
-    }
-    data.messages.push(ChatMessage::Tool {
-        id,
-        name,
-        arguments,
-        output: String::new(),
-        status: ToolStatus::Running,
-        presentation,
-        result_preview: String::new(),
-        result_metadata: "Running…".into(),
-        started_at: Instant::now(),
-    });
-}
-
-pub fn update_tool(id: &str, output: String, status: Option<ToolStatus>) {
-    let mut data = CHAT_DATA.write().unwrap();
-    if let Some(ChatMessage::Tool {
-        output: existing_output,
-        status: existing_status,
-        result_preview,
-        result_metadata,
-        started_at,
-        ..
-    }) = data.messages.iter_mut().rev().find(
-        |message| matches!(message, ChatMessage::Tool { id: existing_id, .. } if existing_id == id),
-    ) {
-        *existing_output = output;
-        *result_preview = tool_result_preview(existing_output, 800);
-        *result_metadata = result_metadata_for(
-            existing_output,
-            status.unwrap_or(*existing_status),
-            started_at.elapsed(),
-        );
-        if let Some(status) = status {
-            *existing_status = status;
-        }
     }
 }
 
@@ -432,12 +490,14 @@ pub fn tool_result_preview(text: &str, max_chars: usize) -> String {
 // Plan panel (session-scoped plan_mode_ext extension state)
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
 pub struct PlanItem {
     pub index: u64,
     pub description: String,
     pub completed: bool,
 }
 
+#[derive(Clone)]
 pub struct PlanData {
     /// Whether a plan state file was found at all.
     pub available: bool,
@@ -445,22 +505,13 @@ pub struct PlanData {
     pub items: Vec<PlanItem>,
 }
 
-pub static PLAN_DATA: RwLock<PlanData> = RwLock::new(PlanData {
-    available: false,
-    enabled: false,
-    items: Vec::new(),
-});
-
-/// Re-read the selected session's plan extension state into `PLAN_DATA`.
-/// Returns whether that session has plan mode enabled.
-pub fn refresh_plan(work_dir: &Path, session_id: &str) -> bool {
+pub fn refresh_plan_data(data: &mut PlanData, work_dir: &Path, session_id: &str) -> bool {
     let state_path =
         WasiExtensionManager::session_state_path(work_dir, session_id, "plan_mode_ext");
     let state = std::fs::read_to_string(state_path)
         .ok()
         .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok());
 
-    let mut data = PLAN_DATA.write().unwrap();
     let Some(state) = state else {
         data.available = false;
         data.enabled = false;
@@ -816,113 +867,6 @@ pub fn relative_time_label(updated_at: u64) -> String {
     format!("{}d", secs / 86400)
 }
 
-/// Replace the chat transcript with messages from a session branch.
-pub fn replace_chat_from_agent_messages(messages: &[AgentMessage]) {
-    let mut data = CHAT_DATA.write().unwrap();
-    data.messages.clear();
-    data.streaming_text.clear();
-    data.streaming_kind = None;
-    for msg in messages {
-        match msg {
-            AgentMessage::User { content } => data.messages.push(ChatMessage::Text {
-                role: MsgRole::User,
-                text: content.clone(),
-            }),
-            AgentMessage::Assistant {
-                content,
-                tool_calls,
-            } => {
-                if let Some(text) = content {
-                    if !text.is_empty() {
-                        if tool_calls.is_some() {
-                            push_thinking_locked(&mut data, text.clone());
-                        } else {
-                            data.messages.push(ChatMessage::Text {
-                                role: MsgRole::Assistant,
-                                text: text.clone(),
-                            });
-                        }
-                    }
-                }
-                if let Some(tool_calls) = tool_calls {
-                    for call in tool_calls {
-                        let presentation =
-                            tool_presentation(&call.function.name, &call.function.arguments);
-                        data.messages.push(ChatMessage::Tool {
-                            id: call.id.clone(),
-                            name: call.function.name.clone(),
-                            arguments: call.function.arguments.clone(),
-                            output: String::new(),
-                            status: ToolStatus::Running,
-                            presentation,
-                            result_preview: String::new(),
-                            result_metadata: "Awaiting result…".into(),
-                            started_at: Instant::now(),
-                        });
-                    }
-                }
-            }
-            AgentMessage::Tool {
-                tool_call_id,
-                name,
-                content,
-                is_error,
-            } => {
-                if let Some(ChatMessage::Tool {
-                    output,
-                    status,
-                    result_preview,
-                    result_metadata,
-                    started_at,
-                    ..
-                }) = data.messages.iter_mut().rev().find(
-                    |message| matches!(message, ChatMessage::Tool { id, .. } if id == tool_call_id),
-                ) {
-                    *output = content.clone();
-                    *status = if *is_error {
-                        ToolStatus::Error
-                    } else {
-                        ToolStatus::Done
-                    };
-                    *result_preview = tool_result_preview(content, 800);
-                    *result_metadata = result_metadata_for(content, *status, started_at.elapsed());
-                } else {
-                    let status = if *is_error {
-                        ToolStatus::Error
-                    } else {
-                        ToolStatus::Done
-                    };
-                    let presentation = tool_presentation(name, "");
-                    data.messages.push(ChatMessage::Tool {
-                        id: tool_call_id.clone(),
-                        name: name.clone(),
-                        arguments: String::new(),
-                        output: content.clone(),
-                        status,
-                        presentation,
-                        result_preview: tool_result_preview(content, 800),
-                        result_metadata: result_metadata_for(content, status, Duration::ZERO),
-                        started_at: Instant::now(),
-                    });
-                }
-            }
-            AgentMessage::Custom {
-                custom_type,
-                payload,
-            } if custom_type == "thinking" => {
-                if let Some(text) = payload.get("text").and_then(serde_json::Value::as_str) {
-                    if !text.trim().is_empty() {
-                        data.messages.push(ChatMessage::Thinking {
-                            text: text.to_string(),
-                        });
-                    }
-                }
-            }
-            AgentMessage::System { .. } | AgentMessage::Custom { .. } => {}
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Slash commands
 // ---------------------------------------------------------------------------
@@ -992,13 +936,36 @@ mod tests {
     }
 
     #[test]
+    fn chat_data_flushes_previous_stream_when_kind_changes() {
+        let mut data = ChatData {
+            messages: Vec::new(),
+            streaming_text: String::new(),
+            streaming_kind: None,
+        };
+
+        data.push_stream_delta(StreamingKind::Assistant, "answer");
+        data.push_stream_delta(StreamingKind::Thinking, "reasoning");
+
+        assert!(matches!(
+            data.messages.as_slice(),
+            [ChatMessage::Text { role: MsgRole::Assistant, text }] if text == "answer"
+        ));
+        assert!(matches!(data.streaming_kind, Some(StreamingKind::Thinking)));
+        assert_eq!(data.streaming_text, "reasoning");
+    }
+
+    #[test]
     fn restores_saved_thinking_entries() {
-        replace_chat_from_agent_messages(&[AgentMessage::Custom {
+        let mut data = ChatData {
+            messages: Vec::new(),
+            streaming_text: String::new(),
+            streaming_kind: None,
+        };
+        data.replace_from_agent_messages(&[AgentMessage::Custom {
             custom_type: "thinking".into(),
             payload: serde_json::json!({ "text": "Inspecting the session lifecycle." }),
         }]);
 
-        let data = CHAT_DATA.read().unwrap();
         assert!(matches!(
             data.messages.as_slice(),
             [ChatMessage::Thinking { text }] if text == "Inspecting the session lifecycle."

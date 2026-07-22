@@ -1,13 +1,14 @@
 //! Custom list widgets: chat transcript, plan items, and sessions sidebar.
 //!
 //! Each wraps a `PortalList` (templates are defined in `app.rs`'s
-//! `script_mod!`) and reads its rows from the shared state in `state.rs`
+//! `script_mod!`) and reads the active session workspace from Makepad scope.
 //! during the draw pass — same pattern as makepad's aichat example.
 
 use crate::state::{
     relative_time_label, truncate_chars, ChatMessage, MsgRole, SessionListRow, StreamingKind,
-    CHAT_DATA, PLAN_DATA, SESSIONS_DATA,
+    SESSIONS_DATA,
 };
+use crate::workspace::AppState;
 use makepad_widgets::fold_button::{FoldButton, FoldButtonAction};
 use makepad_widgets::*;
 
@@ -175,7 +176,14 @@ pub struct ChatList {
 
 impl Widget for ChatList {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        let data = CHAT_DATA.read().unwrap();
+        let Some(data) = scope
+            .data
+            .get::<AppState>()
+            .and_then(AppState::active_workspace)
+            .map(|workspace| workspace.chat.clone())
+        else {
+            return DrawStep::done();
+        };
 
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
@@ -299,7 +307,14 @@ pub struct PlanList {
 
 impl Widget for PlanList {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        let data = PLAN_DATA.read().unwrap();
+        let Some(data) = scope
+            .data
+            .get::<AppState>()
+            .and_then(AppState::active_workspace)
+            .map(|workspace| workspace.plan.clone())
+        else {
+            return DrawStep::done();
+        };
 
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = item.as_portal_list().borrow_mut() {

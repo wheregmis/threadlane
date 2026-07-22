@@ -7,11 +7,11 @@ use crate::chat::{ChatList, PlanList, SessionList, ToolFoldHeader};
 use crate::command_text_input::*;
 use crate::state::{
     active_session_entry, archive_session, builtin_commands, create_new_session, delete_session,
-    flush_streaming, flush_tool_call_preamble, push_chat, push_reasoning_delta, push_stream_delta,
-    push_tool, refresh_plan, refresh_sessions, replace_chat_from_agent_messages,
-    session_entry_at_row, set_active_session, set_sessions_working, truncate_chars, update_tool,
-    CommandInfo, GuiAgentEvent, MsgRole, SessionEntry, ToolStatus, PLAN_DATA,
+    refresh_plan_data, refresh_sessions, session_entry_at_row, set_active_session,
+    set_sessions_working, truncate_chars, CommandInfo, GuiAgentEvent, MsgRole, SessionEntry,
+    ToolStatus,
 };
+use crate::workspace::{AppState, SessionKey};
 use makepad_widgets::text::selection::Cursor;
 use makepad_widgets::*;
 use mypi_agent::{get_runtime, AgentEvent};
@@ -836,13 +836,12 @@ pub struct App {
     /// Popup item widget -> command name for the currently shown items.
     #[rust]
     cmd_items: Vec<(WidgetRef, String)>,
+    #[rust]
+    workspace_state: AppState,
 
     /// Session selected by a right-click while its archive/delete menu is open.
     #[rust]
     session_context_entry: Option<SessionEntry>,
-    /// Whether the active session's plan drawer is expanded.
-    #[rust]
-    plan_drawer_open: bool,
 }
 
 impl ScriptHook for App {
@@ -880,6 +879,9 @@ impl MatchEvent for App {
         self.tx = Some(tx);
         self.rx = Some(Arc::new(Mutex::new(rx)));
 
+        let work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        self.select_workspace(work_dir.clone(), "draft");
+
         let mut key_opt = None;
         let mut account_id_opt = None;
 
@@ -887,7 +889,7 @@ impl MatchEvent for App {
             self.ui
                 .text_input(cx, ids!(api_key_input))
                 .set_text(cx, &creds.access_token);
-            push_chat(
+            self.push_chat(
                 MsgRole::System,
                 format!("Loaded saved credentials from {}", creds.source),
             );
@@ -900,7 +902,6 @@ impl MatchEvent for App {
             self.set_status(cx, UiStatus::Error, "Not signed in");
         }
 
-        let work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         self.ui
             .label(cx, ids!(workspace_label))
             .set_text(cx, &work_dir.display().to_string());
@@ -908,7 +909,7 @@ impl MatchEvent for App {
         let context = ProjectContext::discover(&work_dir);
 
         if !context.context_files.is_empty() {
-            push_chat(
+            self.push_chat(
                 MsgRole::System,
                 format!(
                     "Discovered {} context file(s): {:?}",
@@ -937,7 +938,7 @@ impl MatchEvent for App {
         // Slash-command list: built-ins + WASI extension commands.
         self.commands = builtin_commands();
         if coding_agent.wasi_extensions.extensions.is_empty() {
-            push_chat(
+            self.push_chat(
                 MsgRole::System,
                 "No WASI extensions loaded (place packages in ./.mypi/extensions/<id>/)",
             );
@@ -951,7 +952,7 @@ impl MatchEvent for App {
                         description: cmd.description.clone(),
                     });
                 }
-                push_chat(
+                self.push_chat(
                     MsgRole::System,
                     format!(
                         "Loaded WASI extension `{}` ({}) — commands: {}",
@@ -962,7 +963,7 @@ impl MatchEvent for App {
                 );
             }
         }
-        push_chat(
+        self.push_chat(
             MsgRole::System,
             "Type / in the input bar to browse slash commands.",
         );
@@ -978,7 +979,7 @@ impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         // --- ChatGPT device-code login ---
         if self.ui.button(cx, ids!(login_btn)).clicked(actions) {
-            push_chat(MsgRole::System, "Initiating ChatGPT device code login...");
+            self.push_chat(MsgRole::System, "Initiating ChatGPT device code login...");
             self.set_status(cx, UiStatus::Working, "Connecting to ChatGPT...");
             cx.redraw_all();
 
@@ -1033,7 +1034,7 @@ impl MatchEvent for App {
         }
 
         if self.ui.button(cx, ids!(caps_btn)).clicked(actions) {
-            push_chat(
+            self.push_chat(
                 MsgRole::System,
                 "=== Capabilities Manager ===\nSkills: Global (~/.agents/skills), Project (.mypi/skills)\nExtensions: Sandboxed WASI (.wasm)\nPackages: Local & Git packages",
             );
@@ -1042,14 +1043,14 @@ impl MatchEvent for App {
 
         // --- Session-local plan drawer ---
         if self.ui.button(cx, ids!(plan_toggle_btn)).clicked(actions) {
-            self.plan_drawer_open = !self.plan_drawer_open;
+            let plan_drawer_open = self.toggle_plan_drawer();
             self.ui
                 .widget(cx, ids!(plan_drawer))
-                .set_visible(cx, self.plan_drawer_open);
+                .set_visible(cx, plan_drawer_open);
             cx.redraw_all();
         }
         if self.ui.button(cx, ids!(plan_close_btn)).clicked(actions) {
-            self.plan_drawer_open = false;
+            self.set_plan_drawer_open(false);
             self.ui.widget(cx, ids!(plan_drawer)).set_visible(cx, false);
             cx.redraw_all();
         }
@@ -1166,11 +1167,57 @@ impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.match_event(cx, event);
         self.poll_agent_events(cx);
-        self.ui.handle_event(cx, event, &mut Scope::empty());
+        let mut scope = Scope::with_data(&mut self.workspace_state);
+        self.ui.handle_event(cx, event, &mut scope);
     }
 }
 
 impl App {
+    fn select_workspace(&mut self, work_dir: PathBuf, session_id: impl Into<String>) {
+        self.workspace_state
+            .select(SessionKey::new(work_dir, session_id));
+    }
+
+    fn save_active_draft(&mut self, cx: &Cx) {
+        let draft = self.ui.text_input(cx, ids!(prompt_input)).text();
+        if let Some(workspace) = self.workspace_state.active_workspace_mut() {
+            workspace.ui.draft = draft;
+        }
+    }
+
+    fn select_workspace_ui(&mut self, cx: &mut Cx, work_dir: PathBuf, session_id: String) {
+        self.save_active_draft(cx);
+        self.select_workspace(work_dir, session_id);
+        let draft = self
+            .workspace_state
+            .active_workspace()
+            .map(|workspace| workspace.ui.draft.clone())
+            .unwrap_or_default();
+        self.ui
+            .text_input(cx, ids!(prompt_input))
+            .set_text(cx, &draft);
+    }
+
+    fn push_chat(&mut self, role: MsgRole, text: impl Into<String>) {
+        if let Some(workspace) = self.workspace_state.active_workspace_mut() {
+            workspace.chat.push_chat(role, text);
+        }
+    }
+
+    fn toggle_plan_drawer(&mut self) -> bool {
+        let Some(workspace) = self.workspace_state.active_workspace_mut() else {
+            return false;
+        };
+        workspace.ui.plan_drawer_open = !workspace.ui.plan_drawer_open;
+        workspace.ui.plan_drawer_open
+    }
+
+    fn set_plan_drawer_open(&mut self, open: bool) {
+        if let Some(workspace) = self.workspace_state.active_workspace_mut() {
+            workspace.ui.plan_drawer_open = open;
+        }
+    }
+
     // -----------------------------------------------------------------
     // Working indicator
     // -----------------------------------------------------------------
@@ -1192,14 +1239,14 @@ impl App {
     // Plan panel
     // -----------------------------------------------------------------
     fn refresh_plan_ui(&mut self, cx: &mut Cx, work_dir: &std::path::Path, session_id: &str) {
-        refresh_plan(work_dir, session_id);
-        let (enabled, item_count) = {
-            let plan = PLAN_DATA.read().unwrap();
-            (plan.enabled, plan.items.len())
-        };
+        let key = SessionKey::new(work_dir.to_path_buf(), session_id);
+        let workspace = self.workspace_state.workspace_mut(key);
+        let enabled = refresh_plan_data(&mut workspace.plan, work_dir, session_id);
+        let item_count = workspace.plan.items.len();
+        let plan_drawer_open = &mut workspace.ui.plan_drawer_open;
 
         if !enabled {
-            self.plan_drawer_open = false;
+            *plan_drawer_open = false;
         }
 
         self.ui
@@ -1214,7 +1261,7 @@ impl App {
         );
         self.ui
             .widget(cx, ids!(plan_drawer))
-            .set_visible(cx, enabled && self.plan_drawer_open);
+            .set_visible(cx, enabled && *plan_drawer_open);
         self.ui
             .widget(cx, ids!(plan_list))
             .set_visible(cx, enabled && item_count > 0);
@@ -1251,7 +1298,7 @@ impl App {
             .set_visible(cx, false);
 
         if !action(&entry) {
-            push_chat(
+            self.push_chat(
                 MsgRole::System,
                 format!(
                     "Could not {} session `{}`.",
@@ -1262,33 +1309,31 @@ impl App {
             cx.redraw_all();
             return;
         }
-
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let was_active = active_session_entry()
             .is_some_and(|active| active.id == entry.id && active.work_dir == entry.work_dir);
+        self.workspace_state
+            .remove(&SessionKey::new(entry.work_dir.clone(), entry.id.clone()));
         refresh_sessions(&cwd);
-        push_chat(
-            MsgRole::System,
-            format!("{} session `{}`.", action_name, entry.title),
-        );
 
-        // If the current session disappeared, bind the agent and transcript to
-        // the fallback selected by refresh_sessions. If none remains, clear the
-        // transcript rather than leaving deleted-session content on screen.
         if was_active {
             if let Some(fallback) = active_session_entry() {
                 self.activate_session(cx, fallback);
                 return;
             }
-            replace_chat_from_agent_messages(&[]);
+            self.select_workspace_ui(cx, cwd, "draft".to_string());
         }
+        self.push_chat(
+            MsgRole::System,
+            format!("{} session `{}`.", action_name, entry.title),
+        );
         cx.redraw_all();
     }
 
     fn create_and_activate_session(&mut self, cx: &mut Cx) {
         let work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let Some(entry) = create_new_session(&work_dir) else {
-            push_chat(MsgRole::System, "Could not create a new session file.");
+            self.push_chat(MsgRole::System, "Could not create a new session file.");
             cx.redraw_all();
             return;
         };
@@ -1302,7 +1347,7 @@ impl App {
 
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         if entry.work_dir != cwd {
-            push_chat(
+            self.push_chat(
                 MsgRole::System,
                 format!(
                     "Session `{}` belongs to another project ({}). \
@@ -1314,6 +1359,8 @@ impl App {
             cx.redraw_all();
             return;
         }
+
+        self.select_workspace_ui(cx, entry.work_dir.clone(), entry.id.clone());
 
         // Skip reload if the agent is already bound to this session file.
         if let Some(agent_arc) = &self.agent {
@@ -1327,13 +1374,13 @@ impl App {
         }
 
         set_active_session(&entry.work_dir, &entry.id);
-        self.plan_drawer_open = false;
-
         let Some(tx) = self.tx.clone() else { return };
         let Some(agent_arc) = self.agent.clone() else {
             // No agent yet — still update sidebar selection and clear chat.
-            replace_chat_from_agent_messages(&[]);
-            push_chat(
+            if let Some(workspace) = self.workspace_state.active_workspace_mut() {
+                workspace.chat.replace_from_agent_messages(&[]);
+            }
+            self.push_chat(
                 MsgRole::System,
                 format!(
                     "Selected session `{}` (agent not started yet).",
@@ -1420,7 +1467,7 @@ impl App {
         }
 
         if api_key.is_empty() {
-            push_chat(
+            self.push_chat(
                 MsgRole::System,
                 "Please provide an OpenAI API key or click 'Login ChatGPT' to authenticate.",
             );
@@ -1444,10 +1491,11 @@ impl App {
             match create_new_session(&work_dir) {
                 Some(entry) => {
                     set_active_session(&entry.work_dir, &entry.id);
+                    self.select_workspace_ui(cx, entry.work_dir, entry.id);
                     Some(entry.session_file)
                 }
                 None => {
-                    push_chat(MsgRole::System, "Could not create a new session file.");
+                    self.push_chat(MsgRole::System, "Could not create a new session file.");
                     cx.redraw_all();
                     return;
                 }
@@ -1477,7 +1525,7 @@ impl App {
         let input_str = input_text.trim().to_string();
 
         if show_in_chat {
-            push_chat(MsgRole::User, input_str.clone());
+            self.push_chat(MsgRole::User, input_str.clone());
         }
         self.set_status(cx, UiStatus::Working, "Working...");
 
@@ -1530,10 +1578,18 @@ impl App {
                 ..
             } => {
                 if let Some(delta) = reasoning_delta {
-                    push_reasoning_delta(&delta);
+                    if let Some(workspace) = self.workspace_state.active_workspace_mut() {
+                        workspace
+                            .chat
+                            .push_stream_delta(crate::state::StreamingKind::Thinking, &delta);
+                    }
                 }
                 if let Some(delta) = text_delta {
-                    push_stream_delta(&delta);
+                    if let Some(workspace) = self.workspace_state.active_workspace_mut() {
+                        workspace
+                            .chat
+                            .push_stream_delta(crate::state::StreamingKind::Assistant, &delta);
+                    }
                 }
             }
             AgentEvent::MessageEnd { message } => {
@@ -1544,36 +1600,56 @@ impl App {
                         ..
                     }
                 ) {
-                    flush_tool_call_preamble();
+                    if let Some(workspace) = self.workspace_state.active_workspace_mut() {
+                        workspace.chat.flush_tool_call_preamble();
+                    }
                 } else {
-                    flush_streaming();
+                    if let Some(workspace) = self.workspace_state.active_workspace_mut() {
+                        workspace.chat.flush_streaming();
+                    }
                 }
             }
             AgentEvent::ToolExecutionStart {
                 tool_call_id,
                 name,
                 arguments,
-            } => push_tool(tool_call_id, name, arguments),
+            } => {
+                if let Some(workspace) = self.workspace_state.active_workspace_mut() {
+                    workspace.chat.push_tool(tool_call_id, name, arguments);
+                }
+            }
             AgentEvent::ToolExecutionUpdate {
                 tool_call_id,
                 partial_result,
-            } => update_tool(&tool_call_id, partial_result, None),
+            } => {
+                if let Some(workspace) = self.workspace_state.active_workspace_mut() {
+                    workspace
+                        .chat
+                        .update_tool(&tool_call_id, partial_result, None);
+                }
+            }
             AgentEvent::ToolExecutionEnd {
                 tool_call_id,
                 result,
                 ..
-            } => update_tool(
-                &tool_call_id,
-                result.content,
-                Some(if result.is_error {
-                    ToolStatus::Error
-                } else {
-                    ToolStatus::Done
-                }),
-            ),
+            } => {
+                if let Some(workspace) = self.workspace_state.active_workspace_mut() {
+                    workspace.chat.update_tool(
+                        &tool_call_id,
+                        result.content,
+                        Some(if result.is_error {
+                            ToolStatus::Error
+                        } else {
+                            ToolStatus::Done
+                        }),
+                    );
+                }
+            }
             AgentEvent::TurnEnd { .. } => self.set_status(cx, UiStatus::Working, "Turn completed"),
             AgentEvent::AgentEnd { .. } => {
-                flush_streaming();
+                if let Some(workspace) = self.workspace_state.active_workspace_mut() {
+                    workspace.chat.flush_streaming();
+                }
                 self.set_status(cx, UiStatus::Ready, "Ready");
                 let work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
                 if let Some(session) = active_session_entry() {
@@ -1582,8 +1658,10 @@ impl App {
                 refresh_sessions(&work_dir);
             }
             AgentEvent::AgentError { error } => {
-                flush_streaming();
-                push_chat(MsgRole::System, format!("Agent error: {error}"));
+                if let Some(workspace) = self.workspace_state.active_workspace_mut() {
+                    workspace.chat.flush_streaming();
+                }
+                self.push_chat(MsgRole::System, format!("Agent error: {error}"));
                 self.set_status(cx, UiStatus::Error, "Error");
             }
             AgentEvent::TurnStart { .. } | AgentEvent::MessageStart { .. } => {}
@@ -1612,7 +1690,7 @@ impl App {
                     self.handle_agent_event(cx, task_event.event);
                 }
                 GuiAgentEvent::CommandOutput(output) => {
-                    push_chat(MsgRole::System, output);
+                    self.push_chat(MsgRole::System, output);
                     self.set_status(cx, UiStatus::Ready, "Ready");
                     let work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
                     if let Some(session) = active_session_entry() {
@@ -1627,8 +1705,11 @@ impl App {
                     messages,
                 } => {
                     set_active_session(&work_dir, &session_id);
-                    replace_chat_from_agent_messages(&messages);
-                    push_chat(MsgRole::System, format!("Switched to session `{title}`."));
+                    self.select_workspace_ui(cx, work_dir.clone(), session_id.clone());
+                    if let Some(workspace) = self.workspace_state.active_workspace_mut() {
+                        workspace.chat.replace_from_agent_messages(&messages);
+                    }
+                    self.push_chat(MsgRole::System, format!("Switched to session `{title}`."));
                     self.refresh_plan_ui(cx, &work_dir, &session_id);
                     refresh_sessions(&work_dir);
                     set_active_session(&work_dir, &session_id);
@@ -1640,7 +1721,7 @@ impl App {
                         .set_labels(cx, models);
                 }
                 GuiAgentEvent::DeviceCodePrompt { user_code, url } => {
-                    push_chat(
+                    self.push_chat(
                         MsgRole::System,
                         format!(
                             "Sign in: open {url} in your browser and enter code {user_code} \
@@ -1659,7 +1740,7 @@ impl App {
                         key_opt = Some(creds.access_token.clone());
                         acc_opt = creds.account_id;
                     }
-                    push_chat(MsgRole::System, "Successfully authenticated with ChatGPT.");
+                    self.push_chat(MsgRole::System, "Successfully authenticated with ChatGPT.");
                     self.ui.widget(cx, ids!(auth_row)).set_visible(cx, false);
                     self.set_status(cx, UiStatus::Ready, "Signed in");
 
