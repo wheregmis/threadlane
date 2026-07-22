@@ -1,4 +1,3 @@
-use crate::plan_mode::PlanModeState;
 use mypi_agent::{Agent, SessionTree};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10,7 +9,6 @@ pub enum CommandAction {
     SwitchTreeBranch(String),
     Fork(String),
     CloneSession,
-    ClearPlan,
     InvokeSkill(String),
     PromptTemplate(String),
 
@@ -36,7 +34,6 @@ pub fn parse_slash_command(input: &str) -> Option<CommandAction> {
         "tree" => Some(CommandAction::SwitchTreeBranch(arg)),
         "fork" => Some(CommandAction::Fork(arg)),
         "clone" => Some(CommandAction::CloneSession),
-        "clear-plan" => Some(CommandAction::ClearPlan),
         "skill" => Some(CommandAction::InvokeSkill(arg)),
         "prompt" => Some(CommandAction::PromptTemplate(arg)),
 
@@ -49,7 +46,6 @@ pub async fn execute_slash_command(
     action: CommandAction,
     agent: &mut Agent,
     session_tree: &mut SessionTree,
-    plan_mode: &mut PlanModeState,
 ) -> String {
     match action {
         CommandAction::SwitchModel(new_model) => {
@@ -69,16 +65,11 @@ pub async fn execute_slash_command(
         CommandAction::ShowSession => {
             let st = agent.get_state().await;
             format!(
-                "Session ID: {}\nName: {}\nMessage Count: {}\nModel: {}\nPlan Mode: {}",
+                "Session ID: {}\nName: {}\nMessage Count: {}\nModel: {}",
                 session_tree.session_id,
                 session_tree.name.as_deref().unwrap_or("unnamed"),
                 st.messages.len(),
                 st.model,
-                if plan_mode.enabled {
-                    "Enabled 🟢"
-                } else {
-                    "Disabled ⚪"
-                }
             )
         }
         CommandAction::SetName(name) => {
@@ -109,10 +100,6 @@ pub async fn execute_slash_command(
             let mut cloned = session_tree.clone();
             cloned.session_id = format!("{}_clone", session_tree.session_id);
             format!("Cloned active session tree into ID: {}", cloned.session_id)
-        }
-        CommandAction::ClearPlan => {
-            plan_mode.items.clear();
-            "Cleared active plan items.".to_string()
         }
         CommandAction::InvokeSkill(skill) => format!("Invoking skill: {}", skill),
         CommandAction::PromptTemplate(tmpl) => format!("Prompt template: {}", tmpl),

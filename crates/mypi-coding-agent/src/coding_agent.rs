@@ -4,12 +4,17 @@ use mypi_agent::{
 };
 use crate::commands::{execute_slash_command, parse_slash_command, CommandAction};
 use crate::context::ProjectContext;
-use crate::plan_mode::PlanModeState;
 use crate::wasi_extension::WasiExtensionManager;
 use async_trait::async_trait;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolPolicy {
+    FullAccess,
+    ReadOnly,
+}
 
 pub struct CodingAgentOptions {
     pub api_key: String,
@@ -20,26 +25,50 @@ pub struct CodingAgentOptions {
     pub enable_plan_mode: bool,
 }
 
-pub struct PlanModeBeforeHook {
-    pub plan_state: Arc<tokio::sync::Mutex<PlanModeState>>,
+pub struct ExtensionBeforeToolHook {
+    pub tool_policy: Arc<tokio::sync::Mutex<ToolPolicy>>,
+    pub extensions: Arc<WasiExtensionManager>,
 }
 
 #[async_trait]
-impl BeforeToolCallHook for PlanModeBeforeHook {
+impl BeforeToolCallHook for ExtensionBeforeToolHook {
     async fn before_tool_call(
         &self,
         tool_call: &AgentToolCall,
         _state: &AgentState,
     ) -> BeforeToolCallResult {
-        let plan = self.plan_state.lock().await;
-        let decision = plan
-            .harness_policy()
-            .evaluate_tool_call(&tool_call.name, &tool_call.arguments);
-
-        BeforeToolCallResult {
-            block: decision.block,
-            reason: decision.reason,
+        let policy = *self.tool_policy.lock().await;
+        if policy == ToolPolicy::ReadOnly {
+            if matches!(tool_call.name.as_str(), "write_file" | "edit_file" | "write" | "edit") {
+                return BeforeToolCallResult {
+                    block: true,
+                    reason: Some(format!(
+                        "Tool `{}` is blocked because read-only tool policy is ACTIVE.",
+                        tool_call.name
+                    )),
+                };
+            }
         }
+
+        let arguments = serde_json::json!({
+            "tool_name": tool_call.name,
+            "tool_arguments": tool_call.arguments,
+        });
+        let hook_responses = self.extensions.execute_hook("before_tool_call", &arguments.to_string());
+        for resp in hook_responses {
+            if let Ok(res) = resp {
+                if let Some(msg) = res.message {
+                    if msg.contains("blocked") {
+                        return BeforeToolCallResult {
+                            block: true,
+                            reason: Some(msg),
+                        };
+                    }
+                }
+            }
+        }
+
+        BeforeToolCallResult::default()
     }
 }
 
@@ -73,7 +102,7 @@ pub struct CodingAgent {
     pub session_tree: SessionTree,
     pub project_context: ProjectContext,
     pub wasi_extensions: Arc<WasiExtensionManager>,
-    pub plan_mode: Arc<tokio::sync::Mutex<PlanModeState>>,
+    pub tool_policy: Arc<tokio::sync::Mutex<ToolPolicy>>,
     pub work_dir: PathBuf,
     base_system_prompt: String,
 }
@@ -86,10 +115,12 @@ impl CodingAgent {
         let mut wasi_extensions = WasiExtensionManager::for_project(&options.work_dir);
         let loaded_ext_count = wasi_extensions.discover_and_load(&options.work_dir);
 
-        let mut plan_mode_state = PlanModeState::new();
-        if options.enable_plan_mode {
-            plan_mode_state.enabled = true;
-        }
+        let tool_policy = Arc::new(tokio::sync::Mutex::new(if options.enable_plan_mode {
+            ToolPolicy::ReadOnly
+        } else {
+            ToolPolicy::FullAccess
+        }));
+
         let mut system_prompt = format!(
             "You are mypi, an AI coding agent with tool execution capability in workspace: {}.\n\
             Always use the provided tools (read_file, write_file, edit_file, list_dir, run_command) \
@@ -109,19 +140,14 @@ impl CodingAgent {
             system_prompt.push_str(&project_context.combined_instructions);
         }
 
-        let base_system_prompt = system_prompt;
-        let active_system_prompt = format!(
-            "{}{}",
-            base_system_prompt,
-            plan_mode_state.system_prompt_instructions()
-        );
-        let plan_mode_arc = Arc::new(tokio::sync::Mutex::new(plan_mode_state));
+        let base_system_prompt = system_prompt.clone();
         let wasi_extensions = Arc::new(wasi_extensions);
         agent.loop_engine.extension_manager = Some(wasi_extensions.clone());
         agent.loop_engine.work_dir = Some(options.work_dir.clone());
 
-        agent.loop_engine.before_tool_call_hook = Some(Arc::new(PlanModeBeforeHook {
-            plan_state: plan_mode_arc.clone(),
+        agent.loop_engine.before_tool_call_hook = Some(Arc::new(ExtensionBeforeToolHook {
+            tool_policy: tool_policy.clone(),
+            extensions: wasi_extensions.clone(),
         }));
         agent.loop_engine.after_tool_call_hook = Some(Arc::new(ExtensionAfterToolHook {
             extensions: wasi_extensions.clone(),
@@ -133,10 +159,10 @@ impl CodingAgent {
                 .state
                 .try_lock()
                 .expect("Failed to lock initial state");
-            state.system_prompt = active_system_prompt.clone();
+            state.system_prompt = base_system_prompt.clone();
             state.tools.extend(wasi_extensions.get_tools());
             state.messages.push(AgentMessage::System {
-                content: active_system_prompt,
+                content: base_system_prompt.clone(),
             });
         }
 
@@ -160,7 +186,7 @@ impl CodingAgent {
             session_tree,
             project_context,
             wasi_extensions,
-            plan_mode: plan_mode_arc,
+            tool_policy,
             work_dir: options.work_dir,
             base_system_prompt,
         }
@@ -192,9 +218,6 @@ impl CodingAgent {
         }
     }
 
-    /// Swap the active session transcript file and rebuild in-memory agent
-    /// messages from that session's active branch. System prompt / tools /
-    /// extensions stay as configured for this `CodingAgent` (same work_dir).
     pub async fn switch_session_file(&mut self, session_file: PathBuf) {
         let session_tree = if session_file.exists() {
             SessionTree::load_from_file(&session_file).unwrap_or_else(|_| {
@@ -301,19 +324,12 @@ impl CodingAgent {
                                 crate::wasi_extension::WasiExtensionEffect::SetToolPolicy {
                                     policy,
                                 } => {
-                                    let mut plan = self.plan_mode.lock().await;
+                                    let mut pol = self.tool_policy.lock().await;
                                     match policy.as_str() {
-                                        "read_only" => plan.enabled = true,
-                                        "full" => plan.enabled = false,
+                                        "read_only" => *pol = ToolPolicy::ReadOnly,
+                                        "full" => *pol = ToolPolicy::FullAccess,
                                         _ => continue,
                                     }
-                                    self.agent
-                                        .set_system_prompt(format!(
-                                            "{}{}",
-                                            self.base_system_prompt,
-                                            plan.system_prompt_instructions()
-                                        ))
-                                        .await;
                                 }
                                 crate::wasi_extension::WasiExtensionEffect::RequestModelTurn {
                                     prompt,
@@ -333,12 +349,10 @@ impl CodingAgent {
                 if cmd_action == CommandAction::Quit {
                     return Some("quitting".to_string());
                 }
-                let mut plan_lock = self.plan_mode.lock().await;
                 let output = execute_slash_command(
                     cmd_action,
                     &mut self.agent,
                     &mut self.session_tree,
-                    &mut plan_lock,
                 )
                 .await;
                 return Some(output);
@@ -350,21 +364,6 @@ impl CodingAgent {
         };
         self.session_tree.add_message(msg);
         self.agent.prompt(effective_input).await;
-
-        let mut plan_lock = self.plan_mode.lock().await;
-        let st = self.agent.get_state().await;
-        for msg in st.messages.iter().rev() {
-            if let AgentMessage::Assistant {
-                content: Some(ref text),
-                ..
-            } = msg
-            {
-                if plan_lock.parse_and_update_plan(text) > 0 {
-                    break;
-                }
-            }
-        }
-        drop(plan_lock);
         self.dispatch_assistant_message_hooks().await;
 
         None

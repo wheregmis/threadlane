@@ -172,12 +172,15 @@ impl HarnessSupervisor {
                 .ok_or_else(|| format!("Project ID '{project_id}' not found"))?
         };
 
+        static TASK_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let count = TASK_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let task_id = format!(
-            "task-{}",
+            "task-{}-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
-                .as_millis()
+                .as_millis(),
+            count
         );
 
         let final_session_file = session_file.unwrap_or_else(|| {
