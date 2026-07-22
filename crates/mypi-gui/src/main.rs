@@ -2,6 +2,7 @@ pub use makepad_widgets;
 
 mod app;
 mod chat;
+mod components;
 mod command_text_input;
 mod state;
 

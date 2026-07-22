@@ -25,6 +25,7 @@ use std::sync::{Arc, Mutex};
 
 script_mod! {
     use mod.prelude.widgets.*
+    use mod.components.*
 
     // -------------------------------------------------------------------
     // Chat message list: bubbles + markdown + streaming tail
@@ -43,41 +44,21 @@ script_mod! {
             selectable: true
             reuse_items: false
 
-            UserMsg := RoundedView {
-                width: Fill
-                height: Fit
+            UserMsg := ChatBubble {
                 margin: Inset{top: 6 bottom: 6 left: 50 right: 8}
-                padding: Inset{left: 14 top: 10 right: 14 bottom: 10}
                 draw_bg +: {
                     color: #x2a3547
                     border_radius: 10.0
                 }
-                md := Markdown {
-                    width: Fill
-                    height: Fit
-                    selectable: true
-                    use_code_block_widget: false
-                    body: ""
-                }
             }
 
-            AssistantMsg := RoundedView {
-                width: Fill
-                height: Fit
+            AssistantMsg := ChatBubble {
                 margin: Inset{top: 6 bottom: 6 left: 8 right: 40}
-                padding: Inset{left: 14 top: 10 right: 14 bottom: 10}
                 draw_bg +: {
                     color: #x20252d
                     border_radius: 10.0
                     border_size: 1.0
                     border_color: #x2d3540
-                }
-                md := Markdown {
-                    width: Fill
-                    height: Fit
-                    selectable: true
-                    use_code_block_widget: false
-                    body: ""
                 }
             }
 
@@ -153,46 +134,18 @@ script_mod! {
                 animator +: {
                     active: { default: @off }
                 }
-                header: RoundedView {
-                    width: Fill
-                    height: 28
-                    cursor: MouseCursor.Hand
-                    padding: Inset{left: 8 top: 3 right: 8 bottom: 3}
-                    flow: Right
-                    spacing: 7
-                    align: Align{y: 0.5}
-                    draw_bg +: {
-                        color: #x20242c
-                        border_radius: 6.0
-                        border_size: 0.0
-                    }
-                    thinking_icon_lbl := Label {
-                        width: 18
-                        height: Fit
-                        text: "⋯"
-                        draw_text +: {
-                            color: #x8fa7c4
-                            text_style: theme.font_bold { font_size: 10.0 }
-                        }
-                    }
-                    thinking_title_lbl := Label {
-                        width: 112
-                        height: Fit
-                        text: "Thinking"
-                        draw_text +: {
-                            color: #xcbd2dc
-                            text_style: theme.font_bold { font_size: 10.0 }
-                        }
-                    }
+                header: ActivityHeader {
+                    icon_lbl := Label { text: "⋯" }
+                    title_lbl := Label { text: "Thinking" }
                     // Match the fixed tool metadata columns so previews align.
                     View { width: 120 height: 1 }
                     View { width: 130 height: 1 }
                     // Keep this Fill slot visible while the text is hidden
                     // during expansion; otherwise the chevron shifts left.
-                    thinking_preview_slot := View {
+                    preview_slot := View {
                         width: Fill
                         height: Fit
-                        thinking_preview_lbl := Label {
+                        preview_lbl := Label {
                             width: Fill
                             height: Fit
                             text: ""
@@ -200,12 +153,6 @@ script_mod! {
                                 color: #xd6dce5
                                 text_style: theme.font_code { font_size: 9.0 }
                             }
-                        }
-                    }
-                    fold_button := FoldButton {
-                        draw_bg +: { active: 0.0 }
-                        animator +: {
-                            active: { default: @off }
                         }
                     }
                 }
@@ -237,37 +184,7 @@ script_mod! {
                 animator +: {
                     active: { default: @off }
                 }
-                header: RoundedView {
-                    width: Fill
-                    height: 28
-                    cursor: MouseCursor.Hand
-                    padding: Inset{left: 8 top: 3 right: 8 bottom: 3}
-                    flow: Right
-                    spacing: 7
-                    align: Align{y: 0.5}
-                    draw_bg +: {
-                        color: #x20242c
-                        border_radius: 6.0
-                        border_size: 0.0
-                    }
-                    tool_icon_lbl := Label {
-                        width: 18
-                        height: Fit
-                        text: "•"
-                        draw_text +: {
-                            color: #x8fa7c4
-                            text_style: theme.font_bold { font_size: 10.0 }
-                        }
-                    }
-                    title_lbl := Label {
-                        width: 112
-                        height: Fit
-                        text: "Tool"
-                        draw_text +: {
-                            color: #xcbd2dc
-                            text_style: theme.font_bold { font_size: 10.0 }
-                        }
-                    }
+                header: ActivityHeader {
                     summary := View {
                         width: Fill
                         height: Fit
@@ -303,13 +220,7 @@ script_mod! {
                         }
                         // Disclosure sits at the far edge, matching the
                         // familiar compact activity-row pattern.
-                        fold_button := FoldButton {
-                            draw_bg +: { active: 0.0 }
-                            animator +: {
-                                active: { default: @off }
-                            }
-                        }
-                    }
+                }
                 }
                 body: RoundedView {
                     width: Fill
@@ -321,49 +232,12 @@ script_mod! {
                         color: #x1f232b
                         border_radius: 7.0
                     }
-                    args_section := View {
-                        width: Fill
-                        height: Fit
-                        flow: Down
-                        spacing: 4
-                        Label {
-                            text: "ARGUMENTS"
-                            draw_text +: {
-                                color: #x6fa8ff
-                                text_style: theme.font_bold { font_size: 8.0 }
-                            }
-                        }
-                        args_lbl := Label {
-                            width: Fill
-                            height: Fit
-                            text: ""
-                            draw_text +: {
-                                color: #xaab4c1
-                                text_style: theme.font_code { font_size: 9.0 }
-                            }
-                        }
+                    args_section := ToolSection {
+                        section_label +: { text: "ARGUMENTS" }
                     }
-                    result_section := View {
-                        width: Fill
-                        height: Fit
-                        flow: Down
-                        spacing: 4
-                        Label {
-                            text: "RESULT"
-                            draw_text +: {
-                                color: #x6fa8ff
-                                text_style: theme.font_bold { font_size: 8.0 }
-                            }
-                        }
-                        result_lbl := Label {
-                            width: Fill
-                            height: Fit
-                            text: ""
-                            draw_text +: {
-                                color: #x9faab8
-                                text_style: theme.font_code { font_size: 9.0 }
-                            }
-                        }
+                    result_section := ToolSection {
+                        section_label +: { text: "RESULT" }
+                        content_lbl +: { draw_text +: { color: #x9faab8 } }
                     }
                 }
             }
@@ -408,19 +282,8 @@ script_mod! {
                 }
             }
 
-            EmptyRow := View {
-                width: Fill
-                height: Fit
+            EmptyRow := EmptyRowBase {
                 padding: Inset{left: 10 top: 4 right: 10 bottom: 4}
-                lbl := Label {
-                    width: Fill
-                    height: Fit
-                    text: ""
-                    draw_text +: {
-                        color: #x6f7a88
-                        text_style +: { font_size: 10.0 }
-                    }
-                }
             }
         }
     }
@@ -467,59 +330,15 @@ script_mod! {
                 }
             }
 
-            SessionRow := RoundedView {
-                width: Fill
-                height: Fit
-                cursor: MouseCursor.Hand
-                flow: Right
-                spacing: 8
-                align: Align{y: 0.5}
-                margin: Inset{left: 6 right: 6 top: 1 bottom: 1}
-                padding: Inset{left: 12 top: 7 right: 10 bottom: 7}
-                draw_bg +: {
-                    color: #x00000000
-                    border_radius: 8.0
-                }
-                title_lbl := Label {
-                    width: Fill
-                    height: Fit
-                    text: ""
-                    draw_text +: {
-                        color: #x9aa3b0
-                        text_style +: { font_size: 11.0 }
-                    }
-                }
-                time_lbl := Label {
-                    width: Fit
-                    height: Fit
-                    text: ""
-                    draw_text +: {
-                        color: #x6f7a88
-                        text_style +: { font_size: 10.0 }
-                    }
-                }
-            }
+            SessionRow := SessionRowBase {}
 
-            SessionRowActive := RoundedView {
-                width: Fill
-                height: Fit
-                cursor: MouseCursor.Hand
-                flow: Right
-                spacing: 8
-                align: Align{y: 0.5}
-                margin: Inset{left: 6 right: 6 top: 1 bottom: 1}
-                padding: Inset{left: 12 top: 7 right: 10 bottom: 7}
+            SessionRowActive := SessionRowBase {
                 draw_bg +: {
                     color: #x3a424e
-                    border_radius: 8.0
                 }
-                title_lbl := Label {
-                    width: Fill
-                    height: Fit
-                    text: ""
+                title_lbl +: {
                     draw_text +: {
                         color: #xe8edf4
-                        text_style +: { font_size: 11.0 }
                     }
                 }
                 session_row_spinner := LoadingSpinner {
@@ -528,29 +347,18 @@ script_mod! {
                     visible: false
                     draw_bg +: { stroke_width: 1.5 }
                 }
-                time_lbl := Label {
-                    width: Fit
-                    height: Fit
-                    text: ""
+                time_lbl +: {
                     draw_text +: {
                         color: #xaeb6c2
-                        text_style +: { font_size: 10.0 }
                     }
                 }
             }
 
-            EmptyRow := View {
-                width: Fill
-                height: Fit
+            EmptyRow := EmptyRowBase {
                 padding: Inset{left: 22 top: 4 right: 10 bottom: 8}
-                lbl := Label {
-                    width: Fill
-                    height: Fit
+                lbl +: {
                     text: "No agents yet"
-                    draw_text +: {
-                        color: #x555d6a
-                        text_style +: { font_size: 11.0 }
-                    }
+                    draw_text +: { color: #x555d6a text_style +: { font_size: 11.0 } }
                 }
             }
         }
@@ -609,12 +417,8 @@ script_mod! {
                         // ------------------------------------------------
                         // Header: title | workspace | model | status pill
                         // ------------------------------------------------
-                        header := View {
-                            width: Fill
-                            height: Fit
-                            flow: Right
+                        header := PanelHeader {
                             spacing: 10
-                            align: Align{y: 0.5}
                             padding: Inset{left: 2 top: 0 right: 2 bottom: 2}
 
                             Label {
@@ -631,7 +435,7 @@ script_mod! {
                                     text_style +: { font_size: 10.0 }
                                 }
                             }
-                            View { width: Fill height: 1 }
+                            FlexSpacer {}
                             caps_btn := Button {
                                 width: Fit
                                 height: 28
@@ -719,23 +523,16 @@ script_mod! {
                                 flow: Down
                                 spacing: 2
                                 align: Align{x: 0.5 y: 0.5}
-                                progress_dot_1 := RoundedView {
-                                    width: 3
-                                    height: 3
+                                progress_dot_1 := ProgressDot {
                                     visible: false
-                                    draw_bg +: { color: #x8b93a0 border_radius: 1.5 }
                                 }
-                                progress_dot_2 := RoundedView {
-                                    width: 3
-                                    height: 3
+                                progress_dot_2 := ProgressDot {
                                     visible: false
-                                    draw_bg +: { color: #xaeb6c2 border_radius: 1.5 }
+                                    draw_bg +: { color: #xaeb6c2 }
                                 }
-                                progress_dot_3 := RoundedView {
-                                    width: 3
-                                    height: 3
+                                progress_dot_3 := ProgressDot {
                                     visible: false
-                                    draw_bg +: { color: #x6f7a88 border_radius: 1.5 }
+                                    draw_bg +: { color: #x6f7a88 }
                                 }
                                 error_dot := RoundedView {
                                     width: 5
@@ -798,11 +595,9 @@ script_mod! {
                                 spacing: 6
                                 padding: Inset{left: 2 top: 2 right: 2 bottom: 2}
 
-                                View {
+                                PanelHeader {
                                     width: Fill
                                     height: Fit
-                                    flow: Right
-                                    align: Align{y: 0.5}
                                     padding: Inset{left: 8 right: 6 top: 2 bottom: 2}
                                     Label {
                                         text: "Sessions"
@@ -811,7 +606,7 @@ script_mod! {
                                             text_style: theme.font_bold { font_size: 10.5 }
                                         }
                                     }
-                                    View { width: Fill height: 1 }
+                                    FlexSpacer {}
                                     new_session_btn := Button {
                                         width: Fit
                                         height: 26
@@ -874,9 +669,7 @@ script_mod! {
                                 session_list := SessionList { height: Fill }
                             }
 
-                            chat_panel := RoundedView {
-                                width: Fill
-                                height: Fill
+                            chat_panel := PanelSurface {
                                 flow: Down
                                 padding: Inset{left: 4 top: 6 right: 4 bottom: 6}
                                 draw_bg +: {
@@ -897,21 +690,14 @@ script_mod! {
                                 }
                             }
 
-                            plan_drawer := RoundedView {
+                            plan_drawer := PanelSurface {
                                 width: 300
-                                height: Fill
                                 visible: false
                                 flow: Down
                                 padding: Inset{left: 2 top: 10 right: 2 bottom: 8}
-                                draw_bg +: {
-                                    color: #x1f232b
-                                    border_radius: 10.0
-                                }
-                                View {
+                                PanelHeader {
                                     width: Fill
                                     height: Fit
-                                    flow: Right
-                                    align: Align{y: 0.5}
                                     padding: Inset{left: 12 right: 8 bottom: 8}
                                     Label {
                                         text: "Plan"
@@ -920,7 +706,7 @@ script_mod! {
                                             text_style: theme.font_bold { font_size: 11.0 }
                                         }
                                     }
-                                    View { width: Fill height: 1 }
+                                    FlexSpacer {}
                                     plan_status_label := Label {
                                         text: "active"
                                         draw_text +: {
@@ -1372,6 +1158,7 @@ impl MatchEvent for App {
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         crate::makepad_widgets::script_mod(vm);
+        crate::components::script_mod(vm);
         crate::command_text_input::script_mod(vm);
         self::script_mod(vm)
     }

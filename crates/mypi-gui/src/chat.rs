@@ -142,7 +142,7 @@ impl ToolFoldHeader {
         // Thinking shows the full text in its body when open. Keep its preview
         // out of that state without removing the persistent Fill slot.
         self.header
-            .widget(cx, ids!(thinking_preview_lbl))
+            .widget(cx, ids!(preview_lbl))
             .set_visible(cx, !open);
         self.animator_play(
             cx,
@@ -199,7 +199,7 @@ impl Widget for ChatList {
                             .set_text(cx, &data.streaming_text);
                         if data.streaming_kind == Some(StreamingKind::Thinking) {
                             item_widget
-                                .label(cx, ids!(thinking_preview_lbl))
+                                .label(cx, ids!(preview_lbl))
                                 .set_text(cx, &truncate_chars(&data.streaming_text, 72));
                         }
                         item_widget.draw_all_unscoped(cx);
@@ -229,7 +229,7 @@ impl Widget for ChatList {
                                 let item_widget = list.item(cx, item_id, id!(ThinkingMsg));
                                 item_widget.markdown(cx, ids!(md)).set_text(cx, text);
                                 item_widget
-                                    .label(cx, ids!(thinking_preview_lbl))
+                                    .label(cx, ids!(preview_lbl))
                                     .set_text(cx, &truncate_chars(text, 72));
                                 item_widget.draw_all_unscoped(cx);
                             }
@@ -241,7 +241,7 @@ impl Widget for ChatList {
                             } => {
                                 let item_widget = list.item(cx, item_id, id!(ToolMsg));
                                 item_widget
-                                    .label(cx, ids!(tool_icon_lbl))
+                                    .label(cx, ids!(icon_lbl))
                                     .set_text(cx, &presentation.icon);
                                 item_widget
                                     .label(cx, ids!(title_lbl))
@@ -259,13 +259,15 @@ impl Widget for ChatList {
                                     .label(cx, ids!(result_meta_lbl))
                                     .set_text(cx, result_metadata);
                                 item_widget
-                                    .label(cx, ids!(args_lbl))
+                                    .widget(cx, ids!(args_section))
+                                    .label(cx, ids!(content_lbl))
                                     .set_text(cx, &presentation.arguments_detail);
                                 item_widget
                                     .widget(cx, ids!(args_section))
                                     .set_visible(cx, !presentation.arguments_detail.is_empty());
                                 item_widget
-                                    .label(cx, ids!(result_lbl))
+                                    .widget(cx, ids!(result_section))
+                                    .label(cx, ids!(content_lbl))
                                     .set_text(cx, result_preview);
                                 item_widget
                                     .widget(cx, ids!(result_section))

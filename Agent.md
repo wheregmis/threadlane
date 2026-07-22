@@ -193,6 +193,26 @@ text_style: theme.font_code { font_size: 11.0 }
 
 ## 5. Widget System
 
+### Reusable GUI Components
+Keep reusable DSL components in a dedicated module such as `components.rs`.
+Initialize the namespace before assigning components, import it where used, and
+register its generated script module before the app module loads it:
+
+```rust
+// components.rs
+script_mod! {
+    use mod.prelude.widgets.*
+    mod.components = {}
+    mod.components.PanelSurface = RoundedView { width: Fill height: Fill }
+}
+
+// AppMain::script_mod
+crate::components::script_mod(vm);
+```
+
+Call sites should use component defaults and override only properties that
+differ for that screen.
+
 ### Widget Registration
 ```rust
 script_mod! {
