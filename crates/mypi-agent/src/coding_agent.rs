@@ -196,6 +196,58 @@ impl CodingAgent {
         }
     }
 
+    /// Swap the active session transcript file and rebuild in-memory agent
+    /// messages from that session's active branch. System prompt / tools /
+    /// extensions stay as configured for this `CodingAgent` (same work_dir).
+    pub async fn switch_session_file(&mut self, session_file: PathBuf) {
+        let session_tree = if session_file.exists() {
+            SessionTree::load_from_file(&session_file).unwrap_or_else(|_| {
+                let mut tree = SessionTree::new(
+                    session_file
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "session".into()),
+                );
+                tree.file_path = Some(session_file.clone());
+                tree
+            })
+        } else {
+            if let Some(parent) = session_file.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let mut tree = SessionTree::new(
+                session_file
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "session".into()),
+            );
+            tree.file_path = Some(session_file);
+            tree
+        };
+
+        let branch = session_tree.get_active_branch_messages();
+        self.session_tree = session_tree;
+
+        let mut state = self.agent.loop_engine.state.lock().await;
+        let system_prompt = state.system_prompt.clone();
+        state.messages.clear();
+        state.messages.push(AgentMessage::System {
+            content: system_prompt,
+        });
+        for msg in branch {
+            if matches!(msg, AgentMessage::System { .. }) {
+                continue;
+            }
+            state.messages.push(msg);
+        }
+        state.is_streaming = false;
+        state.pending_tool_calls.clear();
+    }
+
+    pub fn session_file_path(&self) -> Option<&PathBuf> {
+        self.session_tree.file_path.as_ref()
+    }
+
     pub async fn handle_input(&mut self, input: &str) -> Option<String> {
         let trimmed = input.trim();
         if trimmed.starts_with('/') {

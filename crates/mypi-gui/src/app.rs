@@ -3,12 +3,14 @@
 //! Chat/plan/activity rows are drawn by the custom widgets in `chat.rs`
 //! from the shared state in `state.rs`.
 
-use crate::chat::{ActivityList, ChatList, PlanList};
+use crate::chat::{ActivityList, ChatList, PlanList, SessionList};
 use crate::command_text_input::*;
 use crate::state::{
-    builtin_commands, flush_streaming, push_activity, push_chat, push_stream_delta, refresh_plan,
-    set_chat_text, truncate_chars, update_activity, ActivityStatus, CommandInfo, GuiAgentEvent,
-    MsgRole,
+    active_session_entry, builtin_commands, clear_activity, create_new_session, flush_streaming,
+    push_activity, push_chat, push_stream_delta, refresh_plan, refresh_sessions,
+    replace_chat_from_agent_messages, session_entry_at_row, set_active_session, set_chat_text,
+    truncate_chars, update_activity, ActivityStatus, CommandInfo, GuiAgentEvent, MsgRole,
+    SessionEntry,
 };
 use makepad_widgets::text::selection::Cursor;
 use makepad_widgets::*;
@@ -215,6 +217,129 @@ script_mod! {
         }
     }
 
+    // -------------------------------------------------------------------
+    // Sessions sidebar: project folders + session rows
+    // -------------------------------------------------------------------
+    let SessionList = #(SessionList::register_widget(vm)) {
+        width: Fill
+        height: Fill
+
+        list := PortalList {
+            width: Fill
+            height: Fill
+            flow: Down
+            drag_scrolling: true
+
+            ProjectHeader := View {
+                width: Fill
+                height: Fit
+                flow: Right
+                spacing: 8
+                align: Align{y: 0.5}
+                padding: Inset{left: 10 top: 10 right: 10 bottom: 4}
+                folder_lbl := Label {
+                    width: Fit
+                    height: Fit
+                    text: "📁"
+                    draw_text +: {
+                        color: #xc7cdd6
+                        text_style +: { font_size: 11.0 }
+                    }
+                }
+                name_lbl := Label {
+                    width: Fill
+                    height: Fit
+                    text: ""
+                    draw_text +: {
+                        color: #xb8c0cc
+                        text_style +: { font_size: 11.0 }
+                    }
+                }
+            }
+
+            SessionRow := RoundedView {
+                width: Fill
+                height: Fit
+                cursor: MouseCursor.Hand
+                flow: Right
+                spacing: 8
+                align: Align{y: 0.5}
+                margin: Inset{left: 6 right: 6 top: 1 bottom: 1}
+                padding: Inset{left: 12 top: 7 right: 10 bottom: 7}
+                draw_bg +: {
+                    color: #x00000000
+                    border_radius: 8.0
+                }
+                title_lbl := Label {
+                    width: Fill
+                    height: Fit
+                    text: ""
+                    draw_text +: {
+                        color: #x9aa3b0
+                        text_style +: { font_size: 11.0 }
+                    }
+                }
+                time_lbl := Label {
+                    width: Fit
+                    height: Fit
+                    text: ""
+                    draw_text +: {
+                        color: #x6f7a88
+                        text_style +: { font_size: 10.0 }
+                    }
+                }
+            }
+
+            SessionRowActive := RoundedView {
+                width: Fill
+                height: Fit
+                cursor: MouseCursor.Hand
+                flow: Right
+                spacing: 8
+                align: Align{y: 0.5}
+                margin: Inset{left: 6 right: 6 top: 1 bottom: 1}
+                padding: Inset{left: 12 top: 7 right: 10 bottom: 7}
+                draw_bg +: {
+                    color: #x3a424e
+                    border_radius: 8.0
+                }
+                title_lbl := Label {
+                    width: Fill
+                    height: Fit
+                    text: ""
+                    draw_text +: {
+                        color: #xe8edf4
+                        text_style +: { font_size: 11.0 }
+                    }
+                }
+                time_lbl := Label {
+                    width: Fit
+                    height: Fit
+                    text: ""
+                    draw_text +: {
+                        color: #xaeb6c2
+                        text_style +: { font_size: 10.0 }
+                    }
+                }
+            }
+
+            EmptyRow := View {
+                width: Fill
+                height: Fit
+                padding: Inset{left: 22 top: 4 right: 10 bottom: 8}
+                lbl := Label {
+                    width: Fill
+                    height: Fit
+                    text: "No agents yet"
+                    draw_text +: {
+                        color: #x555d6a
+                        text_style +: { font_size: 11.0 }
+                    }
+                }
+            }
+        }
+    }
+
     startup() do #(App::script_component(vm)){
         // Template minted at runtime for slash-command autocomplete rows
         // (collected in App::on_after_apply, instantiated per command).
@@ -247,7 +372,7 @@ script_mod! {
 
         ui: Root {
             main_window := Window {
-                window.inner_size: vec2(1100, 768)
+                window.inner_size: vec2(1280, 768)
                 window.title: "mypi"
                 pass.clear_color: #x181a1f
                 body +: {
@@ -438,13 +563,55 @@ script_mod! {
                         }
 
                         // ------------------------------------------------
-                        // Chat + plan sidebar
+                        // Sessions | Chat | Plan
                         // ------------------------------------------------
                         content_row := View {
                             width: Fill
                             height: Fill
                             flow: Right
                             spacing: 10
+
+                            sessions_panel := View {
+                                width: 240
+                                height: Fill
+                                flow: Down
+                                spacing: 6
+                                padding: Inset{left: 2 top: 2 right: 2 bottom: 2}
+
+                                View {
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    align: Align{y: 0.5}
+                                    padding: Inset{left: 8 right: 6 top: 2 bottom: 2}
+                                    Label {
+                                        text: "Sessions"
+                                        draw_text +: {
+                                            color: #xaeb6c2
+                                            text_style: theme.font_bold { font_size: 10.5 }
+                                        }
+                                    }
+                                    View { width: Fill height: 1 }
+                                    new_session_btn := Button {
+                                        width: Fit
+                                        height: 26
+                                        text: "New"
+                                        draw_bg +: {
+                                            color: #x2a313c
+                                            color_hover: #x343d4a
+                                            color_down: #x3a424e
+                                            border_radius: 6.0
+                                            border_size: 0.0
+                                        }
+                                        draw_text +: {
+                                            color: #xc7cdd6
+                                            text_style +: { font_size: 10.0 }
+                                        }
+                                    }
+                                }
+
+                                session_list := SessionList {}
+                            }
 
                             chat_panel := RoundedView {
                                 width: Fill
@@ -694,6 +861,7 @@ impl MatchEvent for App {
             .label(cx, ids!(workspace_label))
             .set_text(cx, &work_dir.display().to_string());
         self.refresh_plan_ui(cx, &work_dir);
+        refresh_sessions(&work_dir);
         let context = mypi_agent::ProjectContext::discover(&work_dir);
 
         if !context.context_files.is_empty() {
@@ -715,11 +883,18 @@ impl MatchEvent for App {
             account_id: account_id_opt.clone(),
             model: "gpt-5.4".to_string(),
             work_dir: work_dir.clone(),
-            session_file: None,
+            session_file: active_session_entry().map(|e| e.session_file),
             enable_plan_mode: false,
         };
 
         let coding_agent = CodingAgent::new(agent_opts);
+        if let Some(path) = coding_agent.session_file_path() {
+            let id = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "default".into());
+            set_active_session(&work_dir, &id);
+        }
 
         // Slash-command list: built-ins + WASI extension commands.
         self.commands = builtin_commands();
@@ -819,6 +994,21 @@ impl MatchEvent for App {
                         }
                     }
                 });
+            }
+        }
+
+        // --- Sessions: new + select ---
+        if self.ui.button(cx, ids!(new_session_btn)).clicked(actions) && !self.busy {
+            self.create_and_activate_session(cx);
+        }
+        let session_list = self.ui.portal_list(cx, ids!(session_list.list));
+        for (item_id, item) in session_list.items_with_actions(actions) {
+            if let Some(fe) = item.as_view().finger_up(actions) {
+                if fe.is_over && fe.is_primary_hit() && fe.was_tap() && !self.busy {
+                    if let Some(entry) = session_entry_at_row(item_id) {
+                        self.activate_session(cx, entry);
+                    }
+                }
             }
         }
 
@@ -923,6 +1113,87 @@ impl App {
     }
 
     // -----------------------------------------------------------------
+    // Sessions sidebar
+    // -----------------------------------------------------------------
+    fn create_and_activate_session(&mut self, cx: &mut Cx) {
+        let work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let Some(entry) = create_new_session(&work_dir) else {
+            push_chat(MsgRole::System, "Could not create a new session file.");
+            cx.redraw_all();
+            return;
+        };
+        self.activate_session(cx, entry);
+    }
+
+    fn activate_session(&mut self, cx: &mut Cx, entry: SessionEntry) {
+        if self.busy {
+            return;
+        }
+
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        if entry.work_dir != cwd {
+            push_chat(
+                MsgRole::System,
+                format!(
+                    "Session `{}` belongs to another project ({}). \
+                     Cross-project agent switch is not wired yet — open that folder to use it.",
+                    entry.title,
+                    entry.work_dir.display()
+                ),
+            );
+            cx.redraw_all();
+            return;
+        }
+
+        // Skip reload if the agent is already bound to this session file.
+        if let Some(agent_arc) = &self.agent {
+            if let Ok(agent) = agent_arc.try_lock() {
+                if agent.session_file_path() == Some(&entry.session_file) {
+                    set_active_session(&entry.work_dir, &entry.id);
+                    cx.redraw_all();
+                    return;
+                }
+            }
+        }
+
+        set_active_session(&entry.work_dir, &entry.id);
+
+        let Some(tx) = self.tx.clone() else { return };
+        let Some(agent_arc) = self.agent.clone() else {
+            // No agent yet — still update sidebar selection and clear chat.
+            replace_chat_from_agent_messages(&[]);
+            clear_activity();
+            push_chat(
+                MsgRole::System,
+                format!("Selected session `{}` (agent not started yet).", entry.title),
+            );
+            self.refresh_plan_ui(cx, &entry.work_dir);
+            self.refresh_activity_header(cx);
+            cx.redraw_all();
+            return;
+        };
+
+        self.set_status(cx, UiStatus::Working, "Switching session...");
+        let session_file = entry.session_file.clone();
+        let session_id = entry.id.clone();
+        let title = entry.title.clone();
+        let work_dir = entry.work_dir.clone();
+
+        get_runtime().spawn(async move {
+            let mut agent = agent_arc.lock().await;
+            agent.switch_session_file(session_file).await;
+            let messages = agent.session_tree.get_active_branch_messages();
+            let _ = tx.send(GuiAgentEvent::SessionSwitched {
+                session_id,
+                title,
+                work_dir,
+                messages,
+            });
+            SignalToUI::set_ui_signal();
+        });
+    }
+
+    // -----------------------------------------------------------------
     // Activity fold header
     // -----------------------------------------------------------------
     fn refresh_activity_header(&mut self, cx: &mut Cx) {
@@ -1022,8 +1293,8 @@ impl App {
                 api_key,
                 account_id,
                 model: model_name,
-                work_dir,
-                session_file: None,
+                work_dir: work_dir.clone(),
+                session_file: active_session_entry().map(|e| e.session_file),
                 enable_plan_mode: false,
             };
             self.agent = Some(Arc::new(tokio::sync::Mutex::new(CodingAgent::new(
@@ -1099,6 +1370,27 @@ impl App {
                     self.set_status(cx, UiStatus::Ready, "Ready");
                     let work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
                     self.refresh_plan_ui(cx, &work_dir);
+                    refresh_sessions(&work_dir);
+                }
+                GuiAgentEvent::SessionSwitched {
+                    session_id,
+                    title,
+                    work_dir,
+                    messages,
+                } => {
+                    set_active_session(&work_dir, &session_id);
+                    replace_chat_from_agent_messages(&messages);
+                    clear_activity();
+                    push_chat(
+                        MsgRole::System,
+                        format!("Switched to session `{title}`."),
+                    );
+                    self.refresh_plan_ui(cx, &work_dir);
+                    self.refresh_activity_header(cx);
+                    refresh_sessions(&work_dir);
+                    set_active_session(&work_dir, &session_id);
+                    self.set_status(cx, UiStatus::Ready, "Ready");
+                    self.tool_msg_index.clear();
                 }
                 GuiAgentEvent::AvailableModelsLoaded(models) => {
                     self.ui
@@ -1214,6 +1506,7 @@ impl App {
                         let work_dir =
                             std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
                         self.refresh_plan_ui(cx, &work_dir);
+                        refresh_sessions(&work_dir);
                     }
                     AgentEvent::AgentError { error } => {
                         flush_streaming();
