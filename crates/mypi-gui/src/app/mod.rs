@@ -5,12 +5,12 @@
 use crate::panels::chat::{ChatList, ToolFoldHeader};
 use crate::panels::command_palette::*;
 use crate::panels::plan::PlanList;
-use crate::panels::sessions::SessionList;
+use crate::panels::sessions::{SessionContextMenu, SessionContextMenuAction, SessionList};
 use crate::state::{
     active_session_entry, archive_session, builtin_commands, create_new_session, delete_session,
     refresh_plan_data, refresh_sessions, session_entry_at_row, set_active_session,
-    set_sessions_working, truncate_chars, CommandInfo, GuiAgentEvent, MsgRole, SessionEntry,
-    ToolStatus,
+    set_session_context_target, set_sessions_working, CommandInfo, GuiAgentEvent, MsgRole,
+    SessionEntry, ToolStatus,
 };
 use crate::workspace::{AppState, SessionKey};
 use makepad_widgets::text::selection::Cursor;
@@ -362,6 +362,7 @@ script_mod! {
             SessionRowActive := SessionRowBase {
                 draw_bg +: {
                     color: #x3a424e
+                    color_hover: #x46505d
                 }
                 title_lbl +: {
                     draw_text +: {
@@ -376,6 +377,31 @@ script_mod! {
                 time_lbl +: {
                     draw_text +: {
                         color: #xaeb6c2
+                    }
+                }
+            }
+
+            SessionRowContext := SessionRowBase {
+                draw_bg +: {
+                    color: #x273344
+                    color_hover: #x30425a
+                    border_color: #x4f82bd
+                    border_size: 1.0
+                    border_radius: 8.0
+                }
+                title_lbl +: {
+                    draw_text +: {
+                        color: #xf0f4fa
+                    }
+                }
+                session_row_spinner := ActivityLoader {
+                    width: 18
+                    height: 10
+                    visible: false
+                }
+                time_lbl +: {
+                    draw_text +: {
+                        color: #xb7c5d8
                     }
                 }
             }
@@ -637,46 +663,7 @@ script_mod! {
                                     }
                                 }
 
-                                session_context_menu := RoundedView {
-                                    width: Fill
-                                    height: Fit
-                                    visible: false
-                                    flow: Down
-                                    spacing: 4
-                                    padding: Inset{left: 8 top: 7 right: 8 bottom: 7}
-                                    draw_bg +: {
-                                        color: #x252b35
-                                        border_color: #x4a5564
-                                        border_size: 1.0
-                                        border_radius: 7.0
-                                    }
-                                    session_context_title := Label {
-                                        width: Fill
-                                        height: Fit
-                                        text: "Session"
-                                        draw_text +: {
-                                            color: #xaeb6c2
-                                            text_style +: { font_size: 9.5 }
-                                        }
-                                    }
-                                    View {
-                                        width: Fill
-                                        height: Fit
-                                        flow: Right
-                                        spacing: 5
-                                        archive_session_btn := Button {
-                                            width: Fill
-                                            height: 25
-                                            text: "Archive"
-                                        }
-                                        delete_session_btn := Button {
-                                            width: Fill
-                                            height: 25
-                                            text: "Delete"
-                                            draw_text +: { color: #xe5534b }
-                                        }
-                                    }
-                                }
+                                session_context_menu := SessionContextMenu {}
 
                                 session_list := SessionList { height: Fill }
                             }
@@ -1050,19 +1037,17 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(new_session_btn)).clicked(actions) && !self.busy {
             self.create_and_activate_session(cx);
         }
-        if self
-            .ui
-            .button(cx, ids!(archive_session_btn))
-            .clicked(actions)
-        {
-            self.apply_session_context_action(cx, archive_session, "Archived");
-        }
-        if self
-            .ui
-            .button(cx, ids!(delete_session_btn))
-            .clicked(actions)
-        {
-            self.apply_session_context_action(cx, delete_session, "Deleted");
+        let session_menu_uid = self.ui.widget(cx, ids!(session_context_menu)).widget_uid();
+        if let Some(action) = actions.find_widget_action(session_menu_uid) {
+            match action.cast::<SessionContextMenuAction>() {
+                SessionContextMenuAction::Archive => {
+                    self.apply_session_context_action(cx, archive_session, "Archived");
+                }
+                SessionContextMenuAction::Delete => {
+                    self.apply_session_context_action(cx, delete_session, "Deleted");
+                }
+                SessionContextMenuAction::None => {}
+            }
         }
         let session_list = self.ui.portal_list(cx, ids!(session_list.list));
         for (item_id, item) in session_list.items_with_actions(actions) {
@@ -1077,17 +1062,23 @@ impl MatchEvent for App {
                         .is_some_and(|button| button.is_secondary())
                 {
                     self.session_context_entry = Some(entry.clone());
-                    self.ui
-                        .label(cx, ids!(session_context_title))
-                        .set_text(cx, &truncate_chars(&entry.title, 30));
-                    self.ui
+                    set_session_context_target(Some(&entry));
+                    if let Some(mut menu) = self
+                        .ui
                         .widget(cx, ids!(session_context_menu))
-                        .set_visible(cx, true);
+                        .borrow_mut::<SessionContextMenu>()
+                    {
+                        menu.open(cx, fe.abs);
+                    }
                     cx.redraw_all();
                 } else if fe.is_over && fe.is_primary_hit() && fe.was_tap() && !self.busy {
-                    self.ui
+                    if let Some(mut menu) = self
+                        .ui
                         .widget(cx, ids!(session_context_menu))
-                        .set_visible(cx, false);
+                        .borrow_mut::<SessionContextMenu>()
+                    {
+                        menu.close(cx);
+                    }
                     self.session_context_entry = None;
                     self.activate_session(cx, entry);
                 }
@@ -1274,9 +1265,13 @@ impl App {
         let Some(entry) = self.session_context_entry.take() else {
             return;
         };
-        self.ui
+        if let Some(mut menu) = self
+            .ui
             .widget(cx, ids!(session_context_menu))
-            .set_visible(cx, false);
+            .borrow_mut::<SessionContextMenu>()
+        {
+            menu.close(cx);
+        }
 
         if !action(&entry) {
             self.push_chat(

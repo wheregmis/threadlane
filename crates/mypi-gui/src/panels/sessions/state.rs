@@ -24,8 +24,13 @@ pub struct ProjectGroup {
 
 #[derive(Clone, Copy, Debug)]
 pub enum SessionListRow {
-    ProjectHeader { project_idx: usize },
-    Session { project_idx: usize, session_idx: usize },
+    ProjectHeader {
+        project_idx: usize,
+    },
+    Session {
+        project_idx: usize,
+        session_idx: usize,
+    },
     EmptyProject,
 }
 
@@ -34,6 +39,8 @@ pub struct SessionsData {
     pub is_working: bool,
     pub active_session_id: Option<String>,
     pub active_work_dir: PathBuf,
+    pub context_session_id: Option<String>,
+    pub context_work_dir: PathBuf,
     pub rows: Vec<SessionListRow>,
 }
 
@@ -42,6 +49,8 @@ pub static SESSIONS_DATA: RwLock<SessionsData> = RwLock::new(SessionsData {
     is_working: false,
     active_session_id: None,
     active_work_dir: PathBuf::new(),
+    context_session_id: None,
+    context_work_dir: PathBuf::new(),
     rows: Vec::new(),
 });
 
@@ -215,6 +224,17 @@ pub fn refresh_sessions(work_dir: &Path) -> Vec<SessionListRow> {
 
 pub fn set_sessions_working(is_working: bool) {
     SESSIONS_DATA.write().unwrap().is_working = is_working;
+}
+
+pub fn set_session_context_target(entry: Option<&SessionEntry>) {
+    let mut data = SESSIONS_DATA.write().unwrap();
+    if let Some(entry) = entry {
+        data.context_session_id = Some(entry.id.clone());
+        data.context_work_dir = entry.work_dir.clone();
+    } else {
+        data.context_session_id = None;
+        data.context_work_dir.clear();
+    }
 }
 
 pub fn set_active_session(work_dir: &Path, session_id: &str) {

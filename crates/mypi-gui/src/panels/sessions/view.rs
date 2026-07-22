@@ -59,7 +59,12 @@ impl Widget for SessionList {
                             let active = data.active_session_id.as_deref()
                                 == Some(session.id.as_str())
                                 && data.active_work_dir == session.work_dir;
-                            let template = if active {
+                            let context_target = data.context_session_id.as_deref()
+                                == Some(session.id.as_str())
+                                && data.context_work_dir == session.work_dir;
+                            let template = if context_target {
+                                id!(SessionRowContext)
+                            } else if active {
                                 id!(SessionRowActive)
                             } else {
                                 id!(SessionRow)
