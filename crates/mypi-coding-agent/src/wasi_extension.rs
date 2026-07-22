@@ -1,3 +1,4 @@
+use crate::extension_broker::{CapabilityPolicy, BROKER_API_VERSION};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -26,6 +27,8 @@ pub struct WasiExtensionManifest {
     pub name: String,
     pub version: String,
     pub description: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
     #[serde(default)]
     pub tools: Vec<WasiToolDefinition>,
     #[serde(default)]
@@ -166,13 +169,14 @@ impl WasiExtension {
                 name: "unnamed_wasi_ext".into(),
                 version: "0.1.0".into(),
                 description: "WASI extension".into(),
+                capabilities: vec![],
                 tools: vec![],
                 commands: vec![],
                 hooks: vec![],
             },
         };
 
-        if manifest.api_version != 1 {
+        if manifest.api_version != 1 && manifest.api_version != BROKER_API_VERSION {
             return Err(format!(
                 "Unsupported extension API version: {}",
                 manifest.api_version
@@ -185,6 +189,14 @@ impl WasiExtension {
             wasm_bytes,
             engine,
         })
+    }
+
+    pub fn capability_policy(&self) -> CapabilityPolicy {
+        if self.manifest.api_version < BROKER_API_VERSION {
+            CapabilityPolicy::default()
+        } else {
+            CapabilityPolicy::new(self.manifest.capabilities.clone())
+        }
     }
 
     pub fn load_from_file(path: &Path) -> Result<Self, String> {

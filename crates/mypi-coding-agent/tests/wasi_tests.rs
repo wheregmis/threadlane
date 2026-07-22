@@ -1,5 +1,5 @@
 use mypi_coding_agent::{
-    BrokerRequest, BrokerResponse, CapabilityPolicy, WasiExtension, WasiExtensionEffect,
+    BrokerRequest, CapabilityPolicy, WasiExtension, WasiExtensionEffect,
     WasiExtensionManager, WasiExtensionManifest, WasiToolDefinition,
 };
 use std::path::PathBuf;
@@ -38,12 +38,31 @@ fn test_wasi_extension_manager_discovery() {
 }
 
 #[test]
+fn v1_manifest_defaults_to_no_capabilities() {
+    let manifest: WasiExtensionManifest = serde_json::from_str(
+        r#"{"api_version":1,"name":"old","version":"1","description":"old"}"#,
+    )
+    .unwrap();
+    assert!(manifest.capabilities.is_empty());
+}
+
+#[test]
+fn v2_manifest_preserves_declared_capabilities() {
+    let manifest: WasiExtensionManifest = serde_json::from_str(
+        r#"{"api_version":2,"name":"new","version":"1","description":"new","capabilities":["tools","agent"]}"#,
+    )
+    .unwrap();
+    assert_eq!(manifest.capabilities, vec!["tools", "agent"]);
+}
+
+#[test]
 fn test_wasi_manifest_serde() {
     let manifest = WasiExtensionManifest {
         api_version: 1,
         name: "test_ext".into(),
         version: "1.0.0".into(),
         description: "Test extension".into(),
+        capabilities: vec![],
         tools: vec![WasiToolDefinition {
             name: "test_tool".into(),
             description: "A test tool".into(),
