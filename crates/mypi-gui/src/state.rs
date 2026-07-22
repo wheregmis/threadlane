@@ -621,8 +621,8 @@ fn load_extra_project_dirs(work_dir: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-/// Rescan session files into `SESSIONS_DATA`. Preserves the active selection
-/// when still present; otherwise selects the newest session in `work_dir`.
+/// Rescan session files into `SESSIONS_DATA`. Preserves an active selection
+/// when still present, while deliberately preserving no selection at startup.
 pub fn refresh_sessions(work_dir: &Path) -> Vec<SessionListRow> {
     let mut projects = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -650,9 +650,10 @@ pub fn refresh_sessions(work_dir: &Path) -> Vec<SessionListRow> {
     let prev_id = data.active_session_id.clone();
     let prev_dir = data.active_work_dir.clone();
 
-    let still_active = projects.iter().any(|p| {
-        p.work_dir == prev_dir && p.sessions.iter().any(|s| Some(&s.id) == prev_id.as_ref())
-    });
+    let still_active = prev_id.is_none()
+        || projects.iter().any(|p| {
+            p.work_dir == prev_dir && p.sessions.iter().any(|s| Some(&s.id) == prev_id.as_ref())
+        });
 
     if !still_active {
         if let Some(session) = projects

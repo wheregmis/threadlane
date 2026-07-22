@@ -155,7 +155,10 @@ pub fn get_codex_tools() -> Vec<Value> {
     ]
 }
 
-pub fn validate_path_in_workspace(path_input: &str, workspace_root: &Path) -> Result<PathBuf, String> {
+pub fn validate_path_in_workspace(
+    path_input: &str,
+    workspace_root: &Path,
+) -> Result<PathBuf, String> {
     let canonical_root = workspace_root
         .canonicalize()
         .map_err(|e| format!("Invalid workspace root '{}': {e}", workspace_root.display()))?;
@@ -179,9 +182,12 @@ pub fn validate_path_in_workspace(path_input: &str, workspace_root: &Path) -> Re
     }
 
     if normalized.exists() {
-        let canonical_target = normalized
-            .canonicalize()
-            .map_err(|e| format!("Failed to canonicalize path '{}': {e}", normalized.display()))?;
+        let canonical_target = normalized.canonicalize().map_err(|e| {
+            format!(
+                "Failed to canonicalize path '{}': {e}",
+                normalized.display()
+            )
+        })?;
         if !canonical_target.starts_with(&canonical_root) {
             return Err(format!(
                 "Access denied: Path '{}' escapes workspace root '{}'",
@@ -199,9 +205,12 @@ pub fn validate_path_in_workspace(path_input: &str, workspace_root: &Path) -> Re
                 break;
             }
         }
-        let canonical_ancestor = ancestor
-            .canonicalize()
-            .map_err(|e| format!("Failed to canonicalize ancestor '{}': {e}", ancestor.display()))?;
+        let canonical_ancestor = ancestor.canonicalize().map_err(|e| {
+            format!(
+                "Failed to canonicalize ancestor '{}': {e}",
+                ancestor.display()
+            )
+        })?;
         if !canonical_ancestor.starts_with(&canonical_root) {
             return Err(format!(
                 "Access denied: Path '{}' escapes workspace root '{}'",
@@ -220,7 +229,10 @@ pub fn validate_path_in_workspace(path_input: &str, workspace_root: &Path) -> Re
     }
 }
 
-pub fn validate_cwd_in_workspace(cwd_input: Option<&str>, workspace_root: &Path) -> Result<PathBuf, String> {
+pub fn validate_cwd_in_workspace(
+    cwd_input: Option<&str>,
+    workspace_root: &Path,
+) -> Result<PathBuf, String> {
     let canonical_root = workspace_root
         .canonicalize()
         .map_err(|e| format!("Invalid workspace root '{}': {e}", workspace_root.display()))?;
@@ -272,8 +284,14 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
                 Err(err) => return err,
             };
 
-            let start = args.get("start_line").and_then(|v| v.as_u64()).map(|n| n as usize);
-            let end = args.get("end_line").and_then(|v| v.as_u64()).map(|n| n as usize);
+            let start = args
+                .get("start_line")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize);
+            let end = args
+                .get("end_line")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize);
 
             match fs::read_to_string(&validated_path) {
                 Ok(content) => {
@@ -282,6 +300,13 @@ pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &P
                     let end_idx = end.unwrap_or(lines.len()).min(lines.len());
                     if start_idx >= lines.len() {
                         return format!("File only has {} lines.", lines.len());
+                    }
+                    if end_idx <= start_idx {
+                        return format!(
+                            "Invalid line range: end_line ({}) must not be before start_line ({}).",
+                            end.unwrap_or(lines.len()),
+                            start.unwrap_or(1),
+                        );
                     }
                     let selected = &lines[start_idx..end_idx];
                     selected.join("\n")
@@ -425,12 +450,26 @@ mod tests {
     fn test_workspace_containment_command_cwd_escape() {
         let dir = tempdir().unwrap();
         let root = dir.path();
-        let res = execute_tool_in_workspace(
-            "run_command",
-            r#"{"command": "ls", "cwd": "/tmp"}"#,
-            root,
-        );
+        let res =
+            execute_tool_in_workspace("run_command", r#"{"command": "ls", "cwd": "/tmp"}"#, root);
         assert!(res.contains("Access denied"));
     }
-}
 
+    #[test]
+    fn test_read_file_rejects_reversed_line_range_without_panicking() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("sample.txt");
+        fs::write(&file, "one\ntwo\nthree\n").unwrap();
+
+        let res = execute_tool_in_workspace(
+            "read_file",
+            r#"{"path": "sample.txt", "start_line": 3, "end_line": 2}"#,
+            dir.path(),
+        );
+
+        assert_eq!(
+            res,
+            "Invalid line range: end_line (2) must not be before start_line (3)."
+        );
+    }
+}

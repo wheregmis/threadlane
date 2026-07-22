@@ -145,7 +145,7 @@ script_mod! {
                 width: Fill
                 height: Fit
                 margin: Inset{top: 5 bottom: 5 left: 16 right: 48}
-                opened: 0.0
+                opened: 1.0
                 animator +: {
                     active: { default: @off }
                 }
@@ -510,6 +510,13 @@ script_mod! {
             spacing: 1
             padding: Inset{left: 12 top: 6 right: 12 bottom: 6}
             show_bg: true
+            draw_bg +: {
+                color: #x1f232b
+                color_hover: #x2f3a4d
+                color_down: #x3a4a5f
+                border_size: 0.0
+                border_radius: 5.0
+            }
             cmd_name := Label {
                 width: Fill
                 height: Fit
@@ -1089,15 +1096,9 @@ impl MatchEvent for App {
             enable_plan_mode: false,
         };
 
+        // Start in an unsaved draft. Existing sessions remain visible in the
+        // sidebar but are only loaded when the user explicitly selects one.
         let coding_agent = CodingAgent::new(agent_opts);
-        if let Some(path) = coding_agent.session_file_path() {
-            let id = path
-                .file_stem()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| "default".into());
-            set_active_session(&work_dir, &id);
-            self.refresh_plan_ui(cx, &work_dir, &id);
-        }
 
         // Slash-command list: built-ins + WASI extension commands.
         self.commands = builtin_commands();
@@ -1606,6 +1607,25 @@ impl App {
 
         let work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
+        // The first submitted message owns a fresh session. Opening the app
+        // alone deliberately leaves the sidebar unselected and the draft
+        // unbound, so old transcripts are never restored implicitly.
+        let new_session_file = if show_in_chat && active_session_entry().is_none() {
+            match create_new_session(&work_dir) {
+                Some(entry) => {
+                    set_active_session(&entry.work_dir, &entry.id);
+                    Some(entry.session_file)
+                }
+                None => {
+                    push_chat(MsgRole::System, "Could not create a new session file.");
+                    cx.redraw_all();
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+
         if self.agent.is_none() {
             let agent_opts = CodingAgentOptions {
                 api_key,
@@ -1638,6 +1658,9 @@ impl App {
 
         get_runtime().spawn(async move {
             let mut agent_lock = agent_arc.lock().await;
+            if let Some(session_file) = new_session_file {
+                agent_lock.switch_session_file(session_file).await;
+            }
             if attach_events {
                 let mut event_rx = agent_lock.subscribe();
                 let tx_event = tx.clone();

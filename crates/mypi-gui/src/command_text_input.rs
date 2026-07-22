@@ -17,7 +17,10 @@ script_mod! {
     mod.widgets.CommandTextInputList = mod.widgets.CommandTextInputListBase{
         flow: Down
         width: Fill
-        height: Fill
+        // `List` does not reliably enforce a Fit max while measuring dynamic
+        // command rows. Use a real viewport so long command lists scroll rather
+        // than expanding across the chat.
+        height: 208
     }
 
     mod.widgets.CommandTextInputBase = #(CommandTextInput::register_widget(vm))
@@ -28,14 +31,15 @@ script_mod! {
 
         popup := RoundedView{
             flow: Down
+            width: Fill
             height: Fit
             visible: false
 
             draw_bg +: {
-                color: theme.color_fg_app
-                border_size: theme.beveling
-                border_color: theme.color_bevel
-                border_radius: theme.corner_radius
+                color: #x1f232b
+                border_size: 1.0
+                border_color: #x3a424e
+                border_radius: 8.0
 
                 pixel: fn() {
                     let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -72,10 +76,8 @@ script_mod! {
 
             header_view := View{
                 width: Fill
-                height: Fit
-                padding: Inset{left: 12. right: 12. top: 12. bottom: 12.}
-                show_bg: true
-                visible: true
+                height: 0
+                visible: false
                 draw_bg +: {
                     color: theme.color_fg_app
                     top_radius: instance(theme.corner_radius)
@@ -119,7 +121,7 @@ script_mod! {
             }
 
             list := mod.widgets.CommandTextInputList{
-                height: Fit
+                height: 208
             }
         }
 

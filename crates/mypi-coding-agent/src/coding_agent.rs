@@ -118,20 +118,23 @@ impl CodingAgent {
         let mut agent = Agent::new(&options.api_key, options.account_id, &options.model);
         let project_context = ProjectContext::discover(&options.work_dir);
 
-        let session_path = options
-            .session_file
-            .clone()
-            .unwrap_or_else(|| options.work_dir.join(".mypi/sessions/default.jsonl"));
-        let session_tree = if session_path.exists() {
-            SessionTree::load_from_file(&session_path)
-                .unwrap_or_else(|_| SessionTree::new("default"))
-        } else {
-            if let Some(parent) = session_path.parent() {
-                let _ = std::fs::create_dir_all(parent);
+        // A missing session file represents an unsaved draft. GUI startup uses
+        // this mode so merely opening the app neither creates nor selects a
+        // conversation; the first send binds the draft to a new session.
+        let session_tree = if let Some(session_path) = options.session_file.clone() {
+            if session_path.exists() {
+                SessionTree::load_from_file(&session_path)
+                    .unwrap_or_else(|_| SessionTree::new("session"))
+            } else {
+                if let Some(parent) = session_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let mut session = SessionTree::new("session");
+                session.file_path = Some(session_path);
+                session
             }
-            let mut session = SessionTree::new("default");
-            session.file_path = Some(session_path);
-            session
+        } else {
+            SessionTree::new("draft")
         };
 
         let mut wasi_extensions = WasiExtensionManager::for_project_session(
@@ -230,6 +233,7 @@ impl CodingAgent {
             self.agent.get_state().await.model,
             self.work_dir.clone(),
             self.wasi_extensions.clone(),
+            self.agent.loop_engine.event_tx.clone(),
         )
         .await
     }
@@ -462,6 +466,7 @@ async fn run_subagent_task(
     parent_model: String,
     work_dir: PathBuf,
     extensions: Arc<WasiExtensionManager>,
+    parent_event_tx: broadcast::Sender<AgentEvent>,
 ) -> Result<String, String> {
     let model = config.model.clone().unwrap_or(parent_model);
     let mut agent = Agent::new(api_key, account_id, model);
@@ -491,8 +496,19 @@ async fn run_subagent_task(
     }));
     agent.loop_engine.after_tool_call_hook = Some(Arc::new(ExtensionAfterToolHook { extensions }));
 
-    // Child events are not subscribed to by the GUI. Preserve any provider or
-    // tool-loop failure here so delegation does not incorrectly look successful.
+    // The GUI subscribes only to the parent agent. Relay child lifecycle,
+    // reasoning, and tool events so users can see subagent progress live.
+    // Assistant text stays local and is returned below as one labelled result.
+    let mut ui_events = agent.subscribe();
+    tokio::spawn(async move {
+        while let Ok(event) = ui_events.recv().await {
+            if let Some(event) = subagent_ui_event(event) {
+                let _ = parent_event_tx.send(event);
+            }
+        }
+    });
+
+    // Preserve provider and tool-loop errors in the command result as well.
     let mut events = agent.subscribe();
     agent.prompt(&task).await;
     let mut error = None;
@@ -523,6 +539,24 @@ async fn run_subagent_task(
                 config.name
             )
         })
+}
+
+fn subagent_ui_event(event: AgentEvent) -> Option<AgentEvent> {
+    match event {
+        // Keep internal child prose out of the transcript: the labelled command
+        // result below is the child’s final report. Reasoning remains visible.
+        AgentEvent::MessageUpdate {
+            reasoning_delta: Some(reasoning_delta),
+            tool_call_name,
+            ..
+        } => Some(AgentEvent::MessageUpdate {
+            text_delta: None,
+            reasoning_delta: Some(reasoning_delta),
+            tool_call_name,
+        }),
+        AgentEvent::MessageUpdate { .. } => None,
+        event => Some(event),
+    }
 }
 
 fn format_subagent_results(
