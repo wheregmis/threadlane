@@ -6,11 +6,11 @@
 use crate::chat::{ActivityList, ChatList, PlanList, SessionList};
 use crate::command_text_input::*;
 use crate::state::{
-    active_session_entry, builtin_commands, clear_activity, create_new_session, flush_streaming,
-    push_activity, push_chat, push_stream_delta, refresh_plan, refresh_sessions,
-    replace_chat_from_agent_messages, session_entry_at_row, set_active_session, set_chat_text,
-    truncate_chars, update_activity, ActivityStatus, CommandInfo, GuiAgentEvent, MsgRole,
-    SessionEntry,
+    active_session_entry, archive_session, builtin_commands, clear_activity, create_new_session,
+    delete_session, flush_streaming, push_activity, push_chat, push_stream_delta, refresh_plan,
+    refresh_sessions, replace_chat_from_agent_messages, session_entry_at_row, set_active_session,
+    set_chat_text, truncate_chars, update_activity, ActivityStatus, CommandInfo, GuiAgentEvent,
+    MsgRole, SessionEntry,
 };
 use makepad_widgets::text::selection::Cursor;
 use makepad_widgets::*;
@@ -680,6 +680,47 @@ script_mod! {
                                     }
                                 }
 
+                                session_context_menu := RoundedView {
+                                    width: Fill
+                                    height: Fit
+                                    visible: false
+                                    flow: Down
+                                    spacing: 4
+                                    padding: Inset{left: 8 top: 7 right: 8 bottom: 7}
+                                    draw_bg +: {
+                                        color: #x252b35
+                                        border_color: #x4a5564
+                                        border_size: 1.0
+                                        border_radius: 7.0
+                                    }
+                                    session_context_title := Label {
+                                        width: Fill
+                                        height: Fit
+                                        text: "Session"
+                                        draw_text +: {
+                                            color: #xaeb6c2
+                                            text_style +: { font_size: 9.5 }
+                                        }
+                                    }
+                                    View {
+                                        width: Fill
+                                        height: Fit
+                                        flow: Right
+                                        spacing: 5
+                                        archive_session_btn := Button {
+                                            width: Fill
+                                            height: 25
+                                            text: "Archive"
+                                        }
+                                        delete_session_btn := Button {
+                                            width: Fill
+                                            height: 25
+                                            text: "Delete"
+                                            draw_text +: { color: #xe5534b }
+                                        }
+                                    }
+                                }
+
                                 session_list := SessionList {}
                             }
 
@@ -869,6 +910,9 @@ pub struct App {
     /// tool_call_id -> chat message index for in-flight tool lines.
     #[rust]
     tool_msg_index: HashMap<String, usize>,
+    /// Session selected by a right-click while its archive/delete menu is open.
+    #[rust]
+    session_context_entry: Option<SessionEntry>,
 }
 
 impl ScriptHook for App {
@@ -1075,17 +1119,50 @@ impl MatchEvent for App {
             cx.redraw_all();
         }
 
-        // --- Sessions: new + select ---
+        // --- Sessions: new, select, and right-click management menu ---
         if self.ui.button(cx, ids!(new_session_btn)).clicked(actions) && !self.busy {
             self.create_and_activate_session(cx);
+        }
+        if self
+            .ui
+            .button(cx, ids!(archive_session_btn))
+            .clicked(actions)
+        {
+            self.apply_session_context_action(cx, archive_session, "Archived");
+        }
+        if self
+            .ui
+            .button(cx, ids!(delete_session_btn))
+            .clicked(actions)
+        {
+            self.apply_session_context_action(cx, delete_session, "Deleted");
         }
         let session_list = self.ui.portal_list(cx, ids!(session_list.list));
         for (item_id, item) in session_list.items_with_actions(actions) {
             if let Some(fe) = item.as_view().finger_up(actions) {
-                if fe.is_over && fe.is_primary_hit() && fe.was_tap() && !self.busy {
-                    if let Some(entry) = session_entry_at_row(item_id) {
-                        self.activate_session(cx, entry);
-                    }
+                let Some(entry) = session_entry_at_row(item_id) else {
+                    continue;
+                };
+                if fe.is_over
+                    && fe.was_tap()
+                    && fe
+                        .mouse_button()
+                        .is_some_and(|button| button.is_secondary())
+                {
+                    self.session_context_entry = Some(entry.clone());
+                    self.ui
+                        .label(cx, ids!(session_context_title))
+                        .set_text(cx, &truncate_chars(&entry.title, 30));
+                    self.ui
+                        .widget(cx, ids!(session_context_menu))
+                        .set_visible(cx, true);
+                    cx.redraw_all();
+                } else if fe.is_over && fe.is_primary_hit() && fe.was_tap() && !self.busy {
+                    self.ui
+                        .widget(cx, ids!(session_context_menu))
+                        .set_visible(cx, false);
+                    self.session_context_entry = None;
+                    self.activate_session(cx, entry);
                 }
             }
         }
@@ -1193,6 +1270,59 @@ impl App {
     // -----------------------------------------------------------------
     // Sessions sidebar
     // -----------------------------------------------------------------
+    fn apply_session_context_action(
+        &mut self,
+        cx: &mut Cx,
+        action: fn(&SessionEntry) -> bool,
+        action_name: &str,
+    ) {
+        if self.busy {
+            return;
+        }
+        let Some(entry) = self.session_context_entry.take() else {
+            return;
+        };
+        self.ui
+            .widget(cx, ids!(session_context_menu))
+            .set_visible(cx, false);
+
+        if !action(&entry) {
+            push_chat(
+                MsgRole::System,
+                format!(
+                    "Could not {} session `{}`.",
+                    action_name.to_lowercase(),
+                    entry.title
+                ),
+            );
+            cx.redraw_all();
+            return;
+        }
+
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let was_active = active_session_entry()
+            .is_some_and(|active| active.id == entry.id && active.work_dir == entry.work_dir);
+        refresh_sessions(&cwd);
+        push_chat(
+            MsgRole::System,
+            format!("{} session `{}`.", action_name, entry.title),
+        );
+
+        // If the current session disappeared, bind the agent and transcript to
+        // the fallback selected by refresh_sessions. If none remains, clear the
+        // transcript rather than leaving deleted-session content on screen.
+        if was_active {
+            if let Some(fallback) = active_session_entry() {
+                self.activate_session(cx, fallback);
+                return;
+            }
+            replace_chat_from_agent_messages(&[]);
+            clear_activity();
+            self.refresh_activity_header(cx);
+        }
+        cx.redraw_all();
+    }
+
     fn create_and_activate_session(&mut self, cx: &mut Cx) {
         let work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let Some(entry) = create_new_session(&work_dir) else {
@@ -1243,7 +1373,10 @@ impl App {
             clear_activity();
             push_chat(
                 MsgRole::System,
-                format!("Selected session `{}` (agent not started yet).", entry.title),
+                format!(
+                    "Selected session `{}` (agent not started yet).",
+                    entry.title
+                ),
             );
             self.refresh_plan_ui(cx, &entry.work_dir);
             self.refresh_activity_header(cx);
@@ -1551,10 +1684,7 @@ impl App {
                     set_active_session(&work_dir, &session_id);
                     replace_chat_from_agent_messages(&messages);
                     clear_activity();
-                    push_chat(
-                        MsgRole::System,
-                        format!("Switched to session `{title}`."),
-                    );
+                    push_chat(MsgRole::System, format!("Switched to session `{title}`."));
                     self.refresh_plan_ui(cx, &work_dir);
                     self.refresh_activity_header(cx);
                     refresh_sessions(&work_dir);
