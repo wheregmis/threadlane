@@ -1,9 +1,72 @@
 use mypi_coding_agent::{
-    BrokerRequest, CapabilityPolicy, WasiExtension, WasiExtensionEffect,
-    WasiExtensionManager, WasiExtensionManifest, WasiToolDefinition,
+    BrokerRequest, CapabilityPolicy, WasiExtension, WasiExtensionEffect, WasiExtensionManager,
+    WasiExtensionManifest, WasiToolDefinition,
 };
 use std::path::PathBuf;
 use tempfile::tempdir;
+
+fn push_unsigned_leb(mut value: u32, bytes: &mut Vec<u8>) {
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        bytes.push(byte);
+        if value == 0 {
+            break;
+        }
+    }
+}
+
+fn push_signed_leb(mut value: i64, bytes: &mut Vec<u8>) {
+    loop {
+        let byte = (value as u8) & 0x7f;
+        value >>= 7;
+        let done = (value == 0 && byte & 0x40 == 0) || (value == -1 && byte & 0x40 != 0);
+        bytes.push(if done { byte } else { byte | 0x80 });
+        if done {
+            break;
+        }
+    }
+}
+
+fn push_section(wasm: &mut Vec<u8>, id: u8, payload: &[u8]) {
+    wasm.push(id);
+    push_unsigned_leb(payload.len() as u32, wasm);
+    wasm.extend_from_slice(payload);
+}
+
+fn manifest_wasm(json: &str) -> Vec<u8> {
+    let mut wasm = b"\0asm\x01\0\0\0".to_vec();
+
+    push_section(&mut wasm, 1, &[1, 0x60, 0, 1, 0x7e]);
+    push_section(&mut wasm, 3, &[1, 0]);
+    push_section(&mut wasm, 5, &[1, 0, 1]);
+
+    let mut exports = vec![2];
+    push_unsigned_leb("extension_info".len() as u32, &mut exports);
+    exports.extend_from_slice(b"extension_info");
+    exports.extend_from_slice(&[0, 0]);
+    push_unsigned_leb("memory".len() as u32, &mut exports);
+    exports.extend_from_slice(b"memory");
+    exports.extend_from_slice(&[2, 0]);
+    push_section(&mut wasm, 7, &exports);
+
+    let mut body = vec![0, 0x42];
+    push_signed_leb(json.len() as i64, &mut body);
+    body.push(0x0b);
+    let mut code = vec![1];
+    push_unsigned_leb(body.len() as u32, &mut code);
+    code.extend_from_slice(&body);
+    push_section(&mut wasm, 10, &code);
+
+    let mut data = vec![1, 0, 0x41, 0, 0x0b];
+    push_unsigned_leb(json.len() as u32, &mut data);
+    data.extend_from_slice(json.as_bytes());
+    push_section(&mut wasm, 11, &data);
+    wasm
+}
 
 #[test]
 fn broker_request_round_trips_and_requires_v2() {
@@ -39,10 +102,9 @@ fn test_wasi_extension_manager_discovery() {
 
 #[test]
 fn v1_manifest_defaults_to_no_capabilities() {
-    let manifest: WasiExtensionManifest = serde_json::from_str(
-        r#"{"api_version":1,"name":"old","version":"1","description":"old"}"#,
-    )
-    .unwrap();
+    let manifest: WasiExtensionManifest =
+        serde_json::from_str(r#"{"api_version":1,"name":"old","version":"1","description":"old"}"#)
+            .unwrap();
     assert!(manifest.capabilities.is_empty());
 }
 
@@ -53,6 +115,41 @@ fn v2_manifest_preserves_declared_capabilities() {
     )
     .unwrap();
     assert_eq!(manifest.capabilities, vec!["tools", "agent"]);
+}
+
+#[test]
+fn load_from_bytes_rejects_unknown_manifest_api_version() {
+    let result = WasiExtension::load_from_bytes(manifest_wasm(
+        r#"{"api_version":99,"name":"unknown","version":"1","description":"unknown"}"#,
+    ));
+    let error = match result {
+        Ok(_) => panic!("unknown API version was accepted"),
+        Err(error) => error,
+    };
+    assert_eq!(error, "Unsupported extension API version: 99");
+}
+
+#[test]
+fn loaded_v1_extension_has_no_capability_grants() {
+    let extension = WasiExtension::load_from_bytes(manifest_wasm(
+        r#"{"api_version":1,"name":"old","version":"1","description":"old","capabilities":["tools"]}"#,
+    ))
+    .unwrap();
+    let policy = extension.capability_policy();
+    assert!(!policy.allows("tools"));
+    assert!(!policy.allows("agent"));
+}
+
+#[test]
+fn loaded_v2_extension_has_declared_capability_grants() {
+    let extension = WasiExtension::load_from_bytes(manifest_wasm(
+        r#"{"api_version":2,"name":"new","version":"1","description":"new","capabilities":["tools","agent"]}"#,
+    ))
+    .unwrap();
+    let policy = extension.capability_policy();
+    assert!(policy.allows("tools"));
+    assert!(policy.allows("agent"));
+    assert!(!policy.allows("filesystem"));
 }
 
 #[test]
