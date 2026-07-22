@@ -1,9 +1,8 @@
 pub use makepad_widgets;
 
 mod app;
-mod chat;
-mod command_text_input;
 mod components;
+mod panels;
 mod state;
 mod workspace;
 

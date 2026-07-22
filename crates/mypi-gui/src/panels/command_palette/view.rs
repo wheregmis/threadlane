@@ -1,8 +1,4 @@
-//! Local copy of Makepad's `CommandTextInput`.
-//!
-//! Kept in `mypi-gui` so command mentions do not require a vendored Makepad
-//! checkout. Based on Makepad rev `a4fea8e`, including the DSL compatibility
-//! fixes required by this app.
+//! CommandTextInput widget implementation and completion popup view.
 
 use makepad_widgets::text::selection::Cursor;
 use makepad_widgets::*;
@@ -17,9 +13,6 @@ script_mod! {
     mod.widgets.CommandTextInputList = mod.widgets.CommandTextInputListBase{
         flow: Down
         width: Fill
-        // `List` does not reliably enforce a Fit max while measuring dynamic
-        // command rows. Use a real viewport so long command lists scroll rather
-        // than expanding across the chat.
         height: 208
     }
 
@@ -44,7 +37,6 @@ script_mod! {
                 pixel: fn() {
                     let sdf = Sdf2d.viewport(self.pos * self.rect_size)
 
-                    // External outline (entire component including border)
                     sdf.box_all(
                         0.0
                         0.0
@@ -55,9 +47,8 @@ script_mod! {
                         self.border_radius
                         self.border_radius
                     )
-                    sdf.fill(self.border_color)  // Fill the entire area with border color
+                    sdf.fill(self.border_color)
 
-                    // Internal outline (content area)
                     sdf.box_all(
                         self.border_size
                         self.border_size
@@ -68,7 +59,7 @@ script_mod! {
                         self.border_radius - self.border_size
                         self.border_radius - self.border_size
                     )
-                    sdf.fill(self.color)  // Fill content area with background color
+                    sdf.fill(self.color)
 
                     return sdf.result
                 }
@@ -110,8 +101,6 @@ script_mod! {
                 }
             }
 
-            // Wrapper workaround to hide search input when inline search is enabled
-            // as we currently can't hide the search input avoiding events.
             search_input_wrapper := RoundedView{
                 height: Fit
                 search_input := TextInput{
@@ -134,7 +123,6 @@ script_mod! {
                 flow: Right
                 width: Fill
                 height: Fit
-                // `left` and `right` seems to not work with `height: Fill`.
                 left := View{ width: Fit, height: Fit }
                 text_input := TextInput{ width: Fill, height: Fit }
                 right := View{ width: Fit, height: Fit }
@@ -152,10 +140,6 @@ enum InternalAction {
     None,
 }
 
-/// `TextInput` wrapper glued to a popup list of options that is shown when a
-/// trigger character is typed.
-///
-/// Limitation: Selectable items are expected to be `View`s.
 #[derive(Script, ScriptHook, Widget)]
 pub struct CommandTextInput {
     #[source]
@@ -163,61 +147,39 @@ pub struct CommandTextInput {
     #[deref]
     deref: View,
 
-    /// The character that triggers the popup.
-    ///
-    /// If not set, popup can't be triggerd by keyboard.
-    ///
-    /// Behavior is undefined if this string contains anything other than a
-    /// single grapheme.
     #[live]
     pub trigger: Option<String>,
 
-    /// Handle search within the main text input instead of using a separate
-    /// search input.
-    ///
-    /// Note: Any kind of whitespace will terminate search.
     #[live]
     pub inline_search: bool,
 
-    /// Strong color to highlight the item that would be submitted if `Return` is pressed.
     #[live]
     pub color_focus: Vec4f,
 
-    /// Weak color to highlight the item that the pointer is hovering over.
     #[live]
     pub color_hover: Vec4f,
 
-    /// To deal with focus requesting issues.
     #[rust]
     is_search_input_focus_pending: bool,
 
-    /// To deal with focus requesting issues.
     #[rust]
     is_text_input_focus_pending: bool,
 
-    /// Index from `selectable_widgets` that would be submitted if `Return` is pressed.
-    /// `None` if there are no selectable widgets.
     #[rust]
     keyboard_focus_index: Option<usize>,
 
-    /// Index from `selectable_widgets` that the pointer is hovering over.
-    /// `None` if there are no selectable widgets.
     #[rust]
     pointer_hover_index: Option<usize>,
 
-    /// Convenience copy of the selectable widgets on the popup list.
     #[rust]
     selectable_widgets: Vec<WidgetRef>,
 
-    /// To deal with widgets not being `Send`.
     #[rust]
     last_selected_widget: WidgetRef,
 
-    /// Remember where trigger was inserted to support `inline_search`.
     #[rust]
     trigger_position: Option<usize>,
 
-    /// Remmeber which was the last cursor position handled, to support `inline_search`.
     #[rust]
     prev_cursor_position: usize,
 }
@@ -228,9 +190,6 @@ impl Widget for CommandTextInput {
     }
 
     fn text(&self) -> String {
-        // Cannot use text_input_ref() here as it requires cx.
-        // The text is accessible via the Widget trait default;
-        // callers with cx should use text_input_ref(cx).text() instead.
         String::new()
     }
 
@@ -263,12 +222,10 @@ impl Widget for CommandTextInput {
 
                     match key_event.key_code {
                         KeyCode::ArrowDown => {
-                            // Clear mouse hover when using up/down keys
                             self.pointer_hover_index = None;
                             self.on_keyboard_move(cx, 1);
                         }
                         KeyCode::ArrowUp => {
-                            // Clear mouse hover when using up/down keys
                             self.pointer_hover_index = None;
                             self.on_keyboard_move(cx, -1);
                         }
@@ -308,7 +265,6 @@ impl Widget for CommandTextInput {
                         self.hide_popup(cx);
                         self.redraw(cx);
                     } else if self.prev_cursor_position != current_pos {
-                        // mimic how discord updates the filter when moving the cursor
                         cx.widget_action(self.widget_uid(), InternalAction::ShouldBuildItems);
                         self.ensure_popup_consistent(cx);
                     }
@@ -329,8 +285,6 @@ impl Widget for CommandTextInput {
                     .unwrap_or(false)
                 {
                     selected_by_click = Some((&*item).clone());
-
-                    // Clear keyboard focus when mouse is clicked
                     self.keyboard_focus_index = None;
                 }
 
@@ -341,7 +295,6 @@ impl Widget for CommandTextInput {
                 }
 
                 if item.finger_hover_in(actions).is_some() {
-                    // When mouse enters item, clear keyboard focus and set mouse hover index
                     self.pointer_hover_index = Some(idx);
                     self.keyboard_focus_index = None;
                     should_redraw = true;
@@ -366,7 +319,6 @@ impl Widget for CommandTextInput {
 
                 if action.widget_uid == self.search_input_ref(cx).widget_uid() {
                     if let TextInputAction::Changed(search) = action.cast() {
-                        // disallow multiline input
                         self.search_input_ref(cx)
                             .set_text(cx, search.lines().next().unwrap_or_default());
 
@@ -383,7 +335,6 @@ impl Widget for CommandTextInput {
 }
 
 impl CommandTextInput {
-    // Ensure popup state consistency
     fn ensure_popup_consistent(&mut self, cx: &mut Cx) {
         if self.view(cx, ids!(popup)).visible() {
             if self.inline_search {
@@ -400,12 +351,8 @@ impl CommandTextInput {
         self.keyboard_focus_index
     }
 
-    /// Sets the keyboard focus index for the list of selectable items
-    /// Only updates the visual highlight state of the dropdown items
     pub fn set_keyboard_focus_index(&mut self, idx: usize) {
-        // Only process if popup is visible and we have items
         if !self.selectable_widgets.is_empty() {
-            // Simply update the focus index within valid bounds
             self.keyboard_focus_index = Some(idx.clamp(0, self.selectable_widgets.len() - 1));
         }
     }
@@ -455,12 +402,10 @@ impl CommandTextInput {
 
         let text = self.text_input_ref(cx).text();
         let end = get_head(&self.text_input_ref(cx));
-        // Use graphemes instead of byte indices
         let text_graphemes: Vec<&str> = text.graphemes(true).collect();
         let mut byte_index = 0;
         let mut end_grapheme_idx = 0;
 
-        // Find the grapheme index corresponding to the end position
         for (i, g) in text_graphemes.iter().enumerate() {
             if byte_index <= end && byte_index + g.len() > end {
                 end_grapheme_idx = i;
@@ -469,18 +414,15 @@ impl CommandTextInput {
             byte_index += g.len();
         }
 
-        // Calculate the start grapheme index
         let start_grapheme_idx = if end_grapheme_idx >= to_remove.graphemes(true).count() {
             end_grapheme_idx - to_remove.graphemes(true).count()
         } else {
             return;
         };
 
-        // Rebuild the string
         let new_text = text_graphemes[..start_grapheme_idx].join("")
             + &text_graphemes[end_grapheme_idx..].join("");
 
-        // Calculate the new cursor position (grapheme)
         let new_cursor_pos = text_graphemes[..start_grapheme_idx]
             .join("")
             .graphemes(true)
@@ -514,7 +456,6 @@ impl CommandTextInput {
         self.view(cx, ids!(popup)).set_visible(cx, false);
     }
 
-    /// Clear all text and hide the popup going back to initial state.
     pub fn reset(&mut self, cx: &mut Cx) {
         self.hide_popup(cx);
         self.text_input_ref(cx).set_text(cx, "");
@@ -534,9 +475,6 @@ impl CommandTextInput {
         self.clear_items(cx);
     }
 
-    /// Clears the list of items.
-    ///
-    /// Normally called as response to `should_build_items`.
     pub fn clear_items(&mut self, cx: &Cx) {
         self.list(cx, ids!(list)).clear();
         self.selectable_widgets.clear();
@@ -544,29 +482,17 @@ impl CommandTextInput {
         self.pointer_hover_index = None;
     }
 
-    /// Add a custom selectable item to the list.
-    ///
-    /// Normally called after clearing the previous items.
     pub fn add_item(&mut self, cx: &Cx, widget: WidgetRef) {
         self.list(cx, ids!(list)).add(widget.clone());
         self.selectable_widgets.push(widget);
         self.keyboard_focus_index = self.keyboard_focus_index.or(Some(0));
     }
 
-    /// Add a custom unselectable item to the list.
-    ///
-    /// Ex: Headers, dividers, etc.
-    ///
-    /// Normally called after clearing the previous items.
     pub fn add_unselectable_item(&mut self, cx: &Cx, widget: WidgetRef) {
         self.list(cx, ids!(list)).add(widget);
     }
 
-    /// Get the current search query.
-    ///
-    /// You probably want this for filtering purposes when updating the items.
     pub fn search_text(&self, cx: &Cx) -> String {
-        // Define maximum search text length to prevent performance issues with very long search texts
         const MAX_SEARCH_TEXT_LENGTH: usize = 100;
 
         if self.inline_search {
@@ -575,32 +501,22 @@ impl CommandTextInput {
                 let head = get_head(&self.text_input_ref(cx));
 
                 if head > trigger_pos {
-                    // Parse text into graphemes (Unicode grapheme clusters)
                     let text_graphemes: Vec<&str> = text.graphemes(true).collect();
                     let mut byte_pos = 0;
                     let mut trigger_grapheme_idx = None;
                     let mut head_grapheme_idx = None;
                     let mut last_grapheme_end = 0;
 
-                    // Single-pass traversal to calculate all grapheme indices
                     for (i, g) in text_graphemes.iter().enumerate() {
-                        // Check if the trigger character is within this grapheme
                         if byte_pos <= trigger_pos && byte_pos + g.len() > trigger_pos {
                             trigger_grapheme_idx = Some(i);
-                        }
-                        // Check if the trigger character is exactly at the end of this grapheme
-                        else if byte_pos + g.len() == trigger_pos {
-                            // Special case: trigger at grapheme boundary, point to the next grapheme
+                        } else if byte_pos + g.len() == trigger_pos {
                             trigger_grapheme_idx = Some(i + 1);
                         }
 
-                        // Check if the cursor is within this grapheme
                         if byte_pos <= head && byte_pos + g.len() > head {
                             head_grapheme_idx = Some(i);
-                        }
-                        // Check if the cursor is exactly at the end of this grapheme
-                        else if byte_pos + g.len() == head {
-                            // Special case: cursor at grapheme boundary, point to the next grapheme
+                        } else if byte_pos + g.len() == head {
                             head_grapheme_idx = Some(i + 1);
                         }
 
@@ -608,7 +524,6 @@ impl CommandTextInput {
                         last_grapheme_end = byte_pos;
                     }
 
-                    // Handle edge cases at the end of text symmetrically for both positions
                     if head_grapheme_idx.is_none() && head >= last_grapheme_end {
                         head_grapheme_idx = Some(text_graphemes.len());
                     }
@@ -617,30 +532,18 @@ impl CommandTextInput {
                         trigger_grapheme_idx = Some(text_graphemes.len());
                     }
 
-                    // Safety check and use indices only if they're valid
                     if let (Some(t_idx), Some(h_idx)) = (trigger_grapheme_idx, head_grapheme_idx) {
-                        // Additional range check to prevent index errors
                         if t_idx >= text_graphemes.len() || h_idx > text_graphemes.len() {
-                            log!("Error: Grapheme indices out of range: t_idx={}, h_idx={}, graphemes_len={}",
-                                 t_idx, h_idx, text_graphemes.len());
                             return String::new();
                         }
 
                         if t_idx < h_idx {
-                            // Check length limit
                             let length = h_idx - t_idx;
                             if length > MAX_SEARCH_TEXT_LENGTH {
-                                log!(
-                                    "Warning: Search text length({}) exceeds maximum limit({})",
-                                    length,
-                                    MAX_SEARCH_TEXT_LENGTH
-                                );
-                                // Still return text but truncated to the maximum length
                                 return text_graphemes[t_idx..t_idx + MAX_SEARCH_TEXT_LENGTH]
                                     .join("");
                             }
 
-                            // Optimized string building with pre-allocated capacity
                             let mut result = String::with_capacity(
                                 text_graphemes[t_idx..h_idx].iter().map(|g| g.len()).sum(),
                             );
@@ -649,36 +552,24 @@ impl CommandTextInput {
                             }
                             return result;
                         } else if t_idx == h_idx {
-                            // Edge case: trigger character and cursor in the same grapheme
                             return String::new();
                         } else {
-                            // Abnormal case: trigger character is after the cursor
-                            log!("Warning: Trigger character is after cursor: trigger_idx={}, head_idx={}, trigger_pos={}, head={}",
-                                 t_idx, h_idx, trigger_pos, head);
                             return String::new();
                         }
                     } else {
-                        // Comprehensive diagnostic information
-                        log!("Warning: Unable to find valid grapheme indices: trigger_idx={:?}, head_idx={:?}, trigger_pos={}, head={}, text_len={}, graphemes_len={}",
-                             trigger_grapheme_idx, head_grapheme_idx, trigger_pos, head, text.len(), text_graphemes.len());
                         return String::new();
                     }
                 }
 
-                // Cursor is at or before the trigger position
                 String::new()
             } else {
-                // No trigger position
                 String::new()
             }
         } else {
-            // Non-inline search mode
             self.search_input_ref(cx).text()
         }
     }
 
-    /// Checks if any item has been selected in the given `actions`
-    /// and returns a reference to the selected item as a widget.
     pub fn item_selected(&self, actions: &Actions) -> Option<WidgetRef> {
         actions
             .iter()
@@ -693,11 +584,6 @@ impl CommandTextInput {
             })
     }
 
-    /// Returns `true` if an action in the given `actions` indicates that
-    /// the items to display need to be recomputed again.
-    ///
-    /// For example, this returns true if the trigger character was typed,
-    /// if the search filter changes, etc.
     pub fn should_build_items(&self, actions: &Actions) -> bool {
         actions
             .iter()
@@ -706,12 +592,10 @@ impl CommandTextInput {
             .any(|a| matches!(a.cast(), InternalAction::ShouldBuildItems))
     }
 
-    /// Returns a reference to the inner `TextInput` widget.
     pub fn text_input_ref(&self, cx: &Cx) -> TextInputRef {
         self.text_input(cx, ids!(text_input))
     }
 
-    /// Returns a reference to the inner `TextInput` widget used for search.
     pub fn search_input_ref(&self, cx: &Cx) -> TextInputRef {
         self.text_input(cx, ids!(search_input))
     }
@@ -730,7 +614,6 @@ impl CommandTextInput {
 
     fn on_keyboard_move(&mut self, cx: &mut Cx, delta: i32) {
         let Some(idx) = self.keyboard_focus_index else {
-            // If no keyboard focus exists but user pressed arrow keys, focus on first item
             if !self.selectable_widgets.is_empty() {
                 if delta > 0 {
                     self.keyboard_focus_index = Some(0);
@@ -749,27 +632,18 @@ impl CommandTextInput {
             self.keyboard_focus_index = Some(new_index);
         }
 
-        // Clear mouse hover state when using keyboard navigation
-        // This ensures keyboard navigation and mouse hover don't appear simultaneously
         self.pointer_hover_index = None;
-
         self.redraw(cx);
     }
 
     fn update_highlights(&mut self, cx: &mut Cx) {
-        // Check if currently there is a keyboard-focused item
         let has_keyboard_focus = self.keyboard_focus_index.is_some();
 
         for (idx, item) in self.selectable_widgets.iter().enumerate() {
             let mut item = item.clone();
-            // Cursor styling belongs to the item template. `script_apply_eval!`
-            // does not inherit the module scope where `MouseCursor` is registered.
             script_apply_eval!(cx, item, { show_bg: true });
 
-            // If there is a keyboard focus, prioritize it over mouse hover
-            // If there is no keyboard focus, show mouse hover
             if Some(idx) == self.keyboard_focus_index {
-                // Keyboard-selected item is highlighted in blue
                 let color = self.color_focus;
                 script_apply_eval!(cx, item, {
                     draw_bg +: {
@@ -777,7 +651,6 @@ impl CommandTextInput {
                     }
                 });
             } else if Some(idx) == self.pointer_hover_index && !has_keyboard_focus {
-                // Mouse-hovered item is highlighted in gray, but only when there is no keyboard focus
                 let color = self.color_hover;
                 script_apply_eval!(cx, item, {
                     draw_bg +: {
@@ -785,7 +658,6 @@ impl CommandTextInput {
                     }
                 });
             } else {
-                // Default state
                 script_apply_eval!(cx, item, {
                     draw_bg +: {
                         color: #(Vec4f::all(0.))
@@ -795,46 +667,39 @@ impl CommandTextInput {
         }
     }
 
-    /// Obtain focus in the main `TextInput` widget as soon as possible.
     pub fn request_text_input_focus(&mut self) {
         self.is_text_input_focus_pending = true;
     }
 }
 
 impl CommandTextInputRef {
-    /// See [`CommandTextInput::should_build_items()`].
     pub fn should_build_items(&self, actions: &Actions) -> bool {
         self.borrow()
             .map_or(false, |inner| inner.should_build_items(actions))
     }
 
-    /// See [`CommandTextInput::clear_items()`].
     pub fn clear_items(&mut self, cx: &Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.clear_items(cx);
         }
     }
 
-    /// See [`CommandTextInput::add_item()`].
     pub fn add_item(&self, cx: &Cx, widget: WidgetRef) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.add_item(cx, widget);
         }
     }
 
-    /// See [`CommandTextInput::add_unselectable_item()`].
     pub fn add_unselectable_item(&self, cx: &Cx, widget: WidgetRef) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.add_unselectable_item(cx, widget);
         }
     }
 
-    /// See [`CommandTextInput::item_selected()`].
     pub fn item_selected(&self, actions: &Actions) -> Option<WidgetRef> {
         self.borrow().and_then(|inner| inner.item_selected(actions))
     }
 
-    /// See [`CommandTextInput::text_input_ref()`].
     pub fn text_input_ref(&self, cx: &Cx) -> TextInputRef {
         self.borrow()
             .map_or(WidgetRef::empty().as_text_input(), |inner| {
@@ -842,7 +707,6 @@ impl CommandTextInputRef {
             })
     }
 
-    /// See [`CommandTextInput::search_input_ref()`].
     pub fn search_input_ref(&self, cx: &Cx) -> TextInputRef {
         self.borrow()
             .map_or(WidgetRef::empty().as_text_input(), |inner| {
@@ -850,21 +714,18 @@ impl CommandTextInputRef {
             })
     }
 
-    /// See [`CommandTextInput::reset()`].
     pub fn reset(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.reset(cx);
         }
     }
 
-    /// See [`CommandTextInput::request_text_input_focus()`].
     pub fn request_text_input_focus(&self) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.request_text_input_focus();
         }
     }
 
-    /// See [`CommandTextInput::search_text()`].
     pub fn search_text(&self, cx: &Cx) -> String {
         self.borrow()
             .map_or(String::new(), |inner| inner.search_text(cx))
@@ -883,7 +744,6 @@ fn is_whitespace(grapheme: &str) -> bool {
     grapheme.chars().all(char::is_whitespace)
 }
 
-/// Reduced and adapted copy of the `List` widget from Moly.
 #[derive(Script, ScriptHook, Widget)]
 struct List {
     #[source]

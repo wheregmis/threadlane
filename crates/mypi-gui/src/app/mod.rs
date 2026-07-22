@@ -1,10 +1,11 @@
 //! App shell: script_mod! DSL, startup/auth wiring, agent event pump.
 //!
-//! Chat and plan rows are drawn by the custom widgets in `chat.rs` from the
-//! shared state in `state.rs`.
+//! Chat, sessions, plan, and command palette panels are modularized under `crate::panels`.
 
-use crate::chat::{ChatList, PlanList, SessionList, ToolFoldHeader};
-use crate::command_text_input::*;
+use crate::panels::chat::{ChatList, ToolFoldHeader};
+use crate::panels::command_palette::*;
+use crate::panels::plan::PlanList;
+use crate::panels::sessions::SessionList;
 use crate::state::{
     active_session_entry, archive_session, builtin_commands, create_new_session, delete_session,
     refresh_plan_data, refresh_sessions, session_entry_at_row, set_active_session,
@@ -122,8 +123,6 @@ script_mod! {
                 }
             }
 
-            // Thinking uses the same row-local disclosure and compact activity
-            // geometry as tools, keeping a mixed trace aligned and scannable.
             ThinkingMsg := #(ToolFoldHeader::register_widget(vm)) {
                 width: Fill
                 height: Fit
@@ -137,11 +136,8 @@ script_mod! {
                 header: ActivityHeader {
                     icon_lbl := Label { text: "⋯" }
                     title_lbl := Label { text: "Thinking" }
-                    // Match the fixed tool metadata columns so previews align.
                     View { width: 120 height: 1 }
                     View { width: 130 height: 1 }
-                    // Keep this Fill slot visible while the text is hidden
-                    // during expansion; otherwise the chevron shifts left.
                     preview_slot := View {
                         width: Fill
                         height: Fit
@@ -218,9 +214,7 @@ script_mod! {
                                 text_style: theme.font_code { font_size: 9.0 }
                             }
                         }
-                        // Disclosure sits at the far edge, matching the
-                        // familiar compact activity-row pattern.
-                }
+                    }
                 }
                 body: RoundedView {
                     width: Fill
@@ -287,8 +281,6 @@ script_mod! {
             }
         }
     }
-
-
 
     // -------------------------------------------------------------------
     // Sessions sidebar: project folders + session rows
@@ -365,8 +357,6 @@ script_mod! {
     }
 
     startup() do #(App::script_component(vm)){
-        // Template minted at runtime for slash-command autocomplete rows
-        // (collected in App::on_after_apply, instantiated per command).
         CmdItem := View {
             width: Fill
             height: Fit
@@ -414,9 +404,6 @@ script_mod! {
                         spacing: 8
                         padding: Inset{left: 12 top: 10 right: 12 bottom: 10}
 
-                        // ------------------------------------------------
-                        // Header: title | workspace | model | status pill
-                        // ------------------------------------------------
                         header := PanelHeader {
                             spacing: 10
                             padding: Inset{left: 2 top: 0 right: 2 bottom: 2}
@@ -513,9 +500,6 @@ script_mod! {
                                     }
                                 }
                             }
-                            // Idle needs no persistent status label. A small
-                            // vertical ellipsis appears only while the agent is
-                            // working; errors use a single unobtrusive red dot.
                             status_pill := View {
                                 width: 16
                                 height: 20
@@ -543,9 +527,6 @@ script_mod! {
                             }
                         }
 
-                        // ------------------------------------------------
-                        // First-run auth banner (hidden once authenticated)
-                        // ------------------------------------------------
                         auth_row := RoundedView {
                             width: Fill
                             height: Fit
@@ -579,9 +560,6 @@ script_mod! {
                             }
                         }
 
-                        // ------------------------------------------------
-                        // Sessions | Chat | Plan
-                        // ------------------------------------------------
                         content_row := View {
                             width: Fill
                             height: Fill
@@ -734,11 +712,6 @@ script_mod! {
                             }
                         }
 
-
-
-                        // ------------------------------------------------
-                        // Growing prompt input + Send
-                        // ------------------------------------------------
                         input_bar := RoundedView {
                             width: Fill
                             height: Fit
@@ -759,9 +732,6 @@ script_mod! {
                                 color_focus: #x2f3a4d
                                 color_hover: #x262c37
 
-                                // Use `+:` so we merge into the stock RoundedView/TextInput
-                                // children. `:= { ... }` replaces them and drops the TextInput
-                                // widget type, leaving an invisible empty view.
                                 persistent +: {
                                     width: Fill
                                     height: Fit
@@ -827,19 +797,14 @@ pub struct App {
     agent_events_attached: bool,
     #[rust]
     busy: bool,
-    /// Built-in + extension slash commands for autocomplete.
     #[rust]
     commands: Vec<CommandInfo>,
-    /// The `CmdItem` DSL template, collected in `on_after_apply`.
     #[rust]
     cmd_item_template: Option<ScriptObjectRef>,
-    /// Popup item widget -> command name for the currently shown items.
     #[rust]
     cmd_items: Vec<(WidgetRef, String)>,
     #[rust]
     workspace_state: AppState,
-
-    /// Session selected by a right-click while its archive/delete menu is open.
     #[rust]
     session_context_entry: Option<SessionEntry>,
 }
@@ -852,8 +817,6 @@ impl ScriptHook for App {
         _scope: &mut Scope,
         value: ScriptValue,
     ) {
-        // Collect the CmdItem template from the app object's vec entries
-        // (same mechanism PortalList uses for its item templates).
         if !apply.is_eval() {
             if let Some(obj) = value.as_object() {
                 vm.vec_with(obj, |vm, vec| {
@@ -873,8 +836,6 @@ impl ScriptHook for App {
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
-        // Single event channel for the whole app lifetime; the Sender is
-        // cloned into every background task so no in-flight event gets lost.
         let (tx, rx) = channel::<GuiAgentEvent>();
         self.tx = Some(tx);
         self.rx = Some(Arc::new(Mutex::new(rx)));
@@ -931,11 +892,8 @@ impl MatchEvent for App {
             enable_plan_mode: false,
         };
 
-        // Start in an unsaved draft. Existing sessions remain visible in the
-        // sidebar but are only loaded when the user explicitly selects one.
         let coding_agent = CodingAgent::new(agent_opts);
 
-        // Slash-command list: built-ins + WASI extension commands.
         self.commands = builtin_commands();
         if coding_agent.wasi_extensions.extensions.is_empty() {
             self.push_chat(
@@ -970,14 +928,12 @@ impl MatchEvent for App {
 
         self.agent = Some(Arc::new(tokio::sync::Mutex::new(coding_agent)));
 
-        // Fetch models in background.
         self.spawn_model_fetch(api_key, account_id_opt);
 
         cx.redraw_all();
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        // --- ChatGPT device-code login ---
         if self.ui.button(cx, ids!(login_btn)).clicked(actions) {
             self.push_chat(MsgRole::System, "Initiating ChatGPT device code login...");
             self.set_status(cx, UiStatus::Working, "Connecting to ChatGPT...");
@@ -1041,7 +997,6 @@ impl MatchEvent for App {
             cx.redraw_all();
         }
 
-        // --- Session-local plan drawer ---
         if self.ui.button(cx, ids!(plan_toggle_btn)).clicked(actions) {
             let plan_drawer_open = self.toggle_plan_drawer();
             self.ui
@@ -1055,7 +1010,6 @@ impl MatchEvent for App {
             cx.redraw_all();
         }
 
-        // --- Sessions: new, select, and right-click management menu ---
         if self.ui.button(cx, ids!(new_session_btn)).clicked(actions) && !self.busy {
             self.create_and_activate_session(cx);
         }
@@ -1103,7 +1057,6 @@ impl MatchEvent for App {
             }
         }
 
-        // --- Slash-command autocomplete popup ---
         let cti = self.ui.command_text_input(cx, ids!(prompt_input));
         if cti.should_build_items(actions) {
             self.build_cmd_items(cx);
@@ -1130,7 +1083,6 @@ impl MatchEvent for App {
             }
         }
 
-        // --- Model selection dispatches /model through the agent ---
         if self
             .ui
             .drop_down(cx, ids!(model_drop))
@@ -1143,7 +1095,6 @@ impl MatchEvent for App {
             }
         }
 
-        // --- Prompt submission ---
         let submit_prompt = self.ui.button(cx, ids!(send_btn)).clicked(actions)
             || cti.text_input_ref(cx).returned(actions).is_some();
         if submit_prompt && !self.busy {
@@ -1160,7 +1111,9 @@ impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         crate::makepad_widgets::script_mod(vm);
         crate::components::script_mod(vm);
-        crate::command_text_input::script_mod(vm);
+        crate::panels::command_palette::view::script_mod(vm);
+        crate::panels::chat::components::script_mod(vm);
+        crate::panels::sessions::components::script_mod(vm);
         self::script_mod(vm)
     }
 
@@ -1218,9 +1171,6 @@ impl App {
         }
     }
 
-    // -----------------------------------------------------------------
-    // Working indicator
-    // -----------------------------------------------------------------
     fn set_status(&mut self, cx: &mut Cx, status: UiStatus, _text: &str) {
         self.busy = status == UiStatus::Working;
         self.ui
@@ -1235,9 +1185,6 @@ impl App {
         self.ui.widget(cx, ids!(chat_working_indicator)).redraw(cx);
     }
 
-    // -----------------------------------------------------------------
-    // Plan panel
-    // -----------------------------------------------------------------
     fn refresh_plan_ui(&mut self, cx: &mut Cx, work_dir: &std::path::Path, session_id: &str) {
         let key = SessionKey::new(work_dir.to_path_buf(), session_id);
         let workspace = self.workspace_state.workspace_mut(key);
@@ -1278,9 +1225,6 @@ impl App {
         );
     }
 
-    // -----------------------------------------------------------------
-    // Sessions sidebar
-    // -----------------------------------------------------------------
     fn apply_session_context_action(
         &mut self,
         cx: &mut Cx,
@@ -1362,7 +1306,6 @@ impl App {
 
         self.select_workspace_ui(cx, entry.work_dir.clone(), entry.id.clone());
 
-        // Skip reload if the agent is already bound to this session file.
         if let Some(agent_arc) = &self.agent {
             if let Ok(agent) = agent_arc.try_lock() {
                 if agent.session_file_path() == Some(&entry.session_file) {
@@ -1376,7 +1319,6 @@ impl App {
         set_active_session(&entry.work_dir, &entry.id);
         let Some(tx) = self.tx.clone() else { return };
         let Some(agent_arc) = self.agent.clone() else {
-            // No agent yet — still update sidebar selection and clear chat.
             if let Some(workspace) = self.workspace_state.active_workspace_mut() {
                 workspace.chat.replace_from_agent_messages(&[]);
             }
@@ -1412,9 +1354,6 @@ impl App {
         });
     }
 
-    // -----------------------------------------------------------------
-    // Slash-command autocomplete
-    // -----------------------------------------------------------------
     fn build_cmd_items(&mut self, cx: &mut Cx) {
         let mut cti = self.ui.command_text_input(cx, ids!(prompt_input));
         let search = cti.search_text(cx).to_lowercase();
@@ -1447,9 +1386,6 @@ impl App {
         Some(widget)
     }
 
-    // -----------------------------------------------------------------
-    // Prompt / command dispatch
-    // -----------------------------------------------------------------
     fn dispatch_input(&mut self, cx: &mut Cx, input_text: String, show_in_chat: bool) {
         let api_key_widget = self.ui.text_input(cx, ids!(api_key_input));
         let mut api_key = api_key_widget.text();
@@ -1484,9 +1420,6 @@ impl App {
 
         let work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
-        // The first submitted message owns a fresh session. Opening the app
-        // alone deliberately leaves the sidebar unselected and the draft
-        // unbound, so old transcripts are never restored implicitly.
         let new_session_file = if show_in_chat && active_session_entry().is_none() {
             match create_new_session(&work_dir) {
                 Some(entry) => {
@@ -1529,7 +1462,6 @@ impl App {
         }
         self.set_status(cx, UiStatus::Working, "Working...");
 
-        // Keep the chat pinned to the tail for the response.
         let chat_list = self.ui.widget(cx, ids!(chat_list));
         chat_list.portal_list(cx, ids!(list)).set_tail_range(true);
         cx.redraw_all();
@@ -1668,9 +1600,6 @@ impl App {
         }
     }
 
-    // -----------------------------------------------------------------
-    // Background event pump
-    // -----------------------------------------------------------------
     pub fn poll_agent_events(&mut self, cx: &mut Cx) {
         let mut events = Vec::new();
         if let Some(rx_arc) = &self.rx {
@@ -1752,7 +1681,6 @@ impl App {
             }
         }
 
-        // Chat and plan rows read shared state during their draw pass.
         cx.redraw_all();
     }
 }
