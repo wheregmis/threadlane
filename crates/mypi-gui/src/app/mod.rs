@@ -128,26 +128,34 @@ script_mod! {
                 height: Fit
                 flow: Down
                 body_walk: Walk{width: Fill, height: Fit}
-                margin: Inset{top: 2 bottom: 2 left: 12 right: 28}
+                margin: Inset{top: 1 bottom: 1 left: 12 right: 12}
                 opened: 0.0
                 animator +: {
                     active: { default: @off }
                 }
                 header: ActivityHeader {
-                    icon_lbl := Label { text: "⋯" }
-                    title_lbl := Label { text: "Thinking" }
-                    View { width: 120 height: 1 }
-                    View { width: 130 height: 1 }
-                    preview_slot := View {
-                        width: Fill
+                    icon_tile +: {
+                        icon_lbl +: {
+                            text: "⋯"
+                            draw_text +: { color: #x8d8aa3 }
+                        }
+                    }
+                    title_lbl +: {
+                        width: 70
+                        text: "Thinking"
+                        draw_text +: { color: #xbcb8cf }
+                    }
+                    summary := View {
+                        width: Fit
                         height: Fit
+                        align: Align{y: 0.5}
                         preview_lbl := Label {
-                            width: Fill
+                            width: Fit
                             height: Fit
                             text: ""
                             draw_text +: {
-                                color: #xd6dce5
-                                text_style: theme.font_code { font_size: 9.0 }
+                                color: #x8f98a6
+                                text_style +: { font_size: 9.0 }
                             }
                         }
                     }
@@ -155,10 +163,10 @@ script_mod! {
                 body: RoundedView {
                     width: Fill
                     height: Fit
-                    padding: Inset{left: 10 top: 8 right: 10 bottom: 8}
+                    padding: Inset{left: 30 top: 5 right: 24 bottom: 8}
                     draw_bg +: {
-                        color: #x1f232b
-                        border_radius: 6.0
+                        color: #x00000000
+                        border_size: 0.0
                     }
                     md := Markdown {
                         width: Fill
@@ -175,43 +183,46 @@ script_mod! {
                 height: Fit
                 flow: Down
                 body_walk: Walk{width: Fill, height: Fit}
-                margin: Inset{top: 2 bottom: 2 left: 12 right: 28}
+                margin: Inset{top: 1 bottom: 1 left: 12 right: 12}
                 opened: 0.0
                 animator +: {
                     active: { default: @off }
                 }
                 header: ActivityHeader {
                     summary := View {
-                        width: Fill
+                        width: Fit
                         height: Fit
                         flow: Right
-                        spacing: 7
+                        spacing: 9
                         align: Align{y: 0.5}
-                        meta_lbl := Label {
-                            width: 120
-                            height: Fit
-                            text: ""
-                            draw_text +: {
-                                color: #x7f8b9a
-                                text_style: theme.font_code { font_size: 8.5 }
-                            }
-                        }
-                        result_meta_lbl := Label {
-                            width: 130
-                            height: Fit
-                            text: "Running…"
-                            draw_text +: {
-                                color: #x7f8b9a
-                                text_style +: { font_size: 8.5 }
-                            }
-                        }
                         preview_lbl := Label {
-                            width: Fill
+                            width: Fit
                             height: Fit
                             text: ""
                             draw_text +: {
-                                color: #xd6dce5
+                                color: #xc7d0dc
                                 text_style: theme.font_code { font_size: 9.0 }
+                            }
+                        }
+
+                        status_running_indicator := ActivityLoader {
+                            width: 18
+                            height: 10
+                            visible: false
+                            draw_bg +: {
+                                dot_radius: 1.0
+                                speed: 3.6
+                            }
+                        }
+
+                        status_error_lbl := Label {
+                            width: Fit
+                            height: Fit
+                            visible: false
+                            text: "!"
+                            draw_text +: {
+                                color: #xe06c75
+                                text_style: theme.font_bold { font_size: 8.0 }
                             }
                         }
                     }
@@ -219,19 +230,43 @@ script_mod! {
                 body: RoundedView {
                     width: Fill
                     height: Fit
-                    padding: Inset{left: 10 top: 9 right: 10 bottom: 9}
+                    padding: Inset{left: 30 top: 4 right: 18 bottom: 7}
                     flow: Down
-                    spacing: 10
+                    spacing: 5
                     draw_bg +: {
-                        color: #x1f232b
-                        border_radius: 7.0
+                        color: #x00000000
+                        border_size: 0.0
+                    }
+                    details_row := View {
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        meta_lbl := Label {
+                            width: Fit
+                            height: Fit
+                            text: ""
+                            draw_text +: {
+                                color: #x8494a8
+                                text_style: theme.font_code { font_size: 8.5 }
+                            }
+                        }
+                        result_meta_lbl := Label {
+                            width: Fit
+                            height: Fit
+                            text: ""
+                            draw_text +: {
+                                color: #x768292
+                                text_style +: { font_size: 8.5 }
+                            }
+                        }
                     }
                     args_section := ToolSection {
-                        section_label +: { text: "ARGUMENTS" }
+                        section_label +: { text: "INPUT" }
                     }
                     result_section := ToolSection {
-                        section_label +: { text: "RESULT" }
-                        content_lbl +: { draw_text +: { color: #x9faab8 } }
+                        section_label +: { text: "OUTPUT" }
+                        content_lbl +: { draw_text +: { color: #xaeb8c5 } }
                     }
                 }
             }
@@ -333,11 +368,10 @@ script_mod! {
                         color: #xe8edf4
                     }
                 }
-                session_row_spinner := LoadingSpinner {
-                    width: 10
+                session_row_spinner := ActivityLoader {
+                    width: 18
                     height: 10
                     visible: false
-                    draw_bg +: { stroke_width: 1.5 }
                 }
                 time_lbl +: {
                     draw_text +: {
@@ -660,10 +694,13 @@ script_mod! {
                                     height: 18
                                     visible: false
                                     align: Align{x: 0.0 y: 0.5}
-                                    chat_working_spinner := LoadingSpinner {
-                                        width: 12
-                                        height: 12
-                                        draw_bg +: { stroke_width: 2.0 }
+                                    chat_working_spinner := ActivityLoader {
+                                        width: 22
+                                        height: 11
+                                        draw_bg +: {
+                                            dot_radius: 1.25
+                                            speed: 3.0
+                                        }
                                     }
                                 }
                             }

@@ -126,7 +126,7 @@ impl ChatData {
             *existing_presentation = presentation;
             *output = String::new();
             *result_preview = String::new();
-            *result_metadata = "Running…".into();
+            result_metadata.clear();
             *status = ToolStatus::Running;
             *started_at = Instant::now();
             return;
@@ -139,7 +139,7 @@ impl ChatData {
             status: ToolStatus::Running,
             presentation,
             result_preview: String::new(),
-            result_metadata: "Running…".into(),
+            result_metadata: String::new(),
             started_at: Instant::now(),
         });
     }
@@ -200,7 +200,7 @@ impl ChatData {
                                 status: ToolStatus::Running,
                                 presentation,
                                 result_preview: String::new(),
-                                result_metadata: "Awaiting result…".into(),
+                                result_metadata: String::new(),
                                 started_at: Instant::now(),
                             });
                         }
@@ -241,10 +241,14 @@ impl ChatData {
 }
 
 fn push_thinking_locked(data: &mut ChatData, text: String) {
-    if text.trim().is_empty() {
+    let incoming = text.trim();
+    if incoming.is_empty() {
         return;
     }
     if let Some(ChatMessage::Thinking { text: existing }) = data.messages.last_mut() {
+        if existing.trim() == incoming {
+            return;
+        }
         if !existing.is_empty() {
             existing.push_str("\n\n");
         }
@@ -426,6 +430,14 @@ pub fn tool_result_preview(output: &str, max_chars: usize) -> String {
     truncate_chars(first_line, max_chars)
 }
 
+pub fn tool_result_detail(output: &str, max_chars: usize) -> String {
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        return "(empty output)".into();
+    }
+    truncate_chars(trimmed, max_chars)
+}
+
 pub fn result_metadata_for(output: &str, status: ToolStatus, duration: Duration) -> String {
     let secs = duration.as_secs_f32();
     let time_label = if secs < 0.1 {
@@ -434,7 +446,7 @@ pub fn result_metadata_for(output: &str, status: ToolStatus, duration: Duration)
         format!("{secs:.1}s")
     };
     match status {
-        ToolStatus::Running => "Running…".into(),
+        ToolStatus::Running => String::new(),
         ToolStatus::Error => format!("Failed · {time_label}"),
         ToolStatus::Done => {
             let lines = line_count(output);
@@ -450,5 +462,39 @@ pub fn truncate_chars(s: &str, max_chars: usize) -> String {
     } else {
         let truncated: String = s.chars().take(max_chars.saturating_sub(1)).collect();
         format!("{truncated}…")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identical_consecutive_thinking_is_not_duplicated() {
+        let mut data = ChatData::default();
+
+        data.push_thinking("Listing repository files and status".into());
+        data.push_thinking("Listing repository files and status".into());
+
+        assert_eq!(data.messages.len(), 1);
+        assert!(matches!(
+            &data.messages[0],
+            ChatMessage::Thinking { text }
+                if text == "Listing repository files and status"
+        ));
+    }
+
+    #[test]
+    fn distinct_consecutive_thinking_is_preserved() {
+        let mut data = ChatData::default();
+
+        data.push_thinking("Listing repository files".into());
+        data.push_thinking("Reviewing manifests".into());
+
+        assert!(matches!(
+            &data.messages[0],
+            ChatMessage::Thinking { text }
+                if text == "Listing repository files\n\nReviewing manifests"
+        ));
     }
 }

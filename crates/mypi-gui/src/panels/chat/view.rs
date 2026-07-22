@@ -76,8 +76,9 @@ impl Widget for ChatList {
                                 item_widget.draw_all_unscoped(cx);
                             }
                             ChatMessage::Tool {
+                                output,
+                                status,
                                 presentation,
-                                result_preview,
                                 result_metadata,
                                 ..
                             } => {
@@ -101,19 +102,30 @@ impl Widget for ChatList {
                                     .label(cx, ids!(result_meta_lbl))
                                     .set_text(cx, result_metadata);
                                 item_widget
+                                    .widget(cx, ids!(result_meta_lbl))
+                                    .set_visible(cx, !result_metadata.is_empty());
+                                item_widget
+                                    .widget(cx, ids!(status_running_indicator))
+                                    .set_visible(cx, *status == super::state::ToolStatus::Running);
+
+                                item_widget
+                                    .widget(cx, ids!(status_error_lbl))
+                                    .set_visible(cx, *status == super::state::ToolStatus::Error);
+                                item_widget
                                     .widget(cx, ids!(args_section))
                                     .label(cx, ids!(content_lbl))
                                     .set_text(cx, &presentation.arguments_detail);
                                 item_widget
                                     .widget(cx, ids!(args_section))
                                     .set_visible(cx, !presentation.arguments_detail.is_empty());
+                                let output_detail = super::state::tool_result_detail(output, 6_000);
                                 item_widget
                                     .widget(cx, ids!(result_section))
                                     .label(cx, ids!(content_lbl))
-                                    .set_text(cx, result_preview);
+                                    .set_text(cx, &output_detail);
                                 item_widget
                                     .widget(cx, ids!(result_section))
-                                    .set_visible(cx, !result_preview.is_empty());
+                                    .set_visible(cx, !output.is_empty());
                                 item_widget.draw_all_unscoped(cx);
                             }
                         }

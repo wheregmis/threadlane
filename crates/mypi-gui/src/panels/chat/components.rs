@@ -49,6 +49,14 @@ impl Widget for ToolFoldHeader {
         self.header.handle_event(cx, event, scope);
         self.body.handle_event(cx, event, scope);
         if let Event::Actions(actions) = event {
+            let header_view = self.header.as_view();
+            if header_view.finger_hover_in(actions).is_some() {
+                self.set_disclosure_fade(cx, 1.0);
+            }
+            if header_view.finger_hover_out(actions).is_some() {
+                self.set_disclosure_fade(cx, 0.0);
+            }
+
             let fold_button_uid = self.header.widget(cx, ids!(fold_button)).widget_uid();
             let mut button_handled = false;
             for action in actions {
@@ -116,6 +124,14 @@ impl Widget for ToolFoldHeader {
 }
 
 impl ToolFoldHeader {
+    fn set_disclosure_fade(&mut self, cx: &mut Cx, fade: f64) {
+        let mut fold_button = self.header.widget(cx, ids!(fold_button));
+        script_apply_eval!(cx, fold_button, {
+            draw_bg +: { fade: #(fade) }
+        });
+        self.area.redraw(cx);
+    }
+
     fn set_open(&mut self, cx: &mut Cx, open: bool) {
         self.opened = if open { 1.0 } else { 0.0 };
         self.header
@@ -144,30 +160,57 @@ script_mod! {
     use mod.prelude.widgets.*
 
     mod.components.ActivityHeader = RoundedView {
-        width: Fill
+        width: Fit
         height: 28
         cursor: MouseCursor.Hand
-        padding: Inset{left: 8 top: 3 right: 8 bottom: 3}
+        padding: Inset{left: 3 top: 2 right: 3 bottom: 2}
         flow: Right
         spacing: 7
         align: Align{y: 0.5}
-        draw_bg +: { color: #x20242c border_radius: 6.0 border_size: 0.0 }
-        icon_lbl := Label {
-            width: 18
-            height: Fit
-            text: "•"
-            draw_text +: { color: #x8fa7c4 text_style: theme.font_bold { font_size: 10.0 } }
+        draw_bg +: {
+            color: #x00000000
+            border_radius: 5.0
+            border_size: 0.0
+        }
+        icon_tile := View {
+            width: 20
+            height: 20
+            align: Align{x: 0.5 y: 0.5}
+            icon_lbl := Label {
+                width: Fit
+                height: Fit
+                text: "•"
+                draw_text +: {
+                    color: #x7f8b9a
+                    text_style: theme.font_bold { font_size: 9.5 }
+                }
+            }
         }
         title_lbl := Label {
-            width: 112
+            width: 108
             height: Fit
             text: "Tool"
-            draw_text +: { color: #xcbd2dc text_style: theme.font_bold { font_size: 10.0 } }
+            draw_text +: {
+                color: #xb8c0cc
+                text_style: theme.font_bold { font_size: 9.5 }
+            }
         }
-        summary := View { width: Fill height: Fit flow: Right spacing: 7 align: Align{y: 0.5} }
-        fold_button := FoldButton {
-            draw_bg +: { active: 0.0 }
-            animator +: { active: { default: @off } }
+        summary := View {
+            width: Fit
+            height: Fit
+            flow: Right
+            spacing: 8
+            align: Align{y: 0.5}
+        }
+        fold_slot := View {
+            width: 18
+            height: 20
+            align: Align{x: 0.5 y: 0.5}
+            fold_button := FoldButton {
+                width: 15
+                draw_bg +: { active: 0.0 fade: 0.0 }
+                animator +: { active: { default: @off } }
+            }
         }
     }
 
@@ -178,22 +221,34 @@ script_mod! {
         md := Markdown { width: Fill height: Fit selectable: true use_code_block_widget: false body: "" }
     }
 
-    mod.components.ToolSection = View {
+    mod.components.ToolSection = RoundedView {
         width: Fill
         height: Fit
         flow: Down
-        spacing: 4
+        spacing: 5
+        padding: Inset{left: 8 top: 6 right: 8 bottom: 7}
+        draw_bg +: {
+            color: #x1c2027
+            border_radius: 4.0
+            border_size: 0.0
+        }
         section_label := Label {
             width: Fill
             height: Fit
             text: "SECTION"
-            draw_text +: { color: #x6fa8ff text_style: theme.font_bold { font_size: 8.0 } }
+            draw_text +: {
+                color: #x748397
+                text_style: theme.font_bold { font_size: 7.5 }
+            }
         }
         content_lbl := Label {
             width: Fill
             height: Fit
             text: ""
-            draw_text +: { color: #xaab4c1 text_style: theme.font_code { font_size: 9.0 } }
+            draw_text +: {
+                color: #xaeb7c4
+                text_style: theme.font_code { font_size: 8.5 }
+            }
         }
     }
 }
