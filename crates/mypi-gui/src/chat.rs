@@ -154,19 +154,24 @@ impl Widget for ActivityList {
                         let item_widget = list.item(cx, item_id, id!(EmptyRow));
                         item_widget
                             .label(cx, ids!(lbl))
-                            .set_text(cx, "Tool activity appears here.");
+                            .set_text(cx, "No tool activity yet.");
                         item_widget.draw_all_unscoped(cx);
                     } else if let Some(entry) = data.get(item_id) {
                         let item_widget = list.item(cx, item_id, id!(ActivityRow));
                         item_widget
                             .label(cx, ids!(head_lbl))
                             .set_text(cx, &format!("{} {}", entry.status.glyph(), entry.name));
+                        let detail = if entry.detail.is_empty() {
+                            String::new()
+                        } else {
+                            crate::state::truncate_chars(&entry.detail, 72)
+                        };
                         item_widget
                             .label(cx, ids!(detail_lbl))
-                            .set_text(cx, &entry.detail);
+                            .set_text(cx, &detail);
                         item_widget
                             .widget(cx, ids!(detail_lbl))
-                            .set_visible(cx, !entry.detail.is_empty());
+                            .set_visible(cx, !detail.is_empty());
                         item_widget.draw_all_unscoped(cx);
                     }
                 }

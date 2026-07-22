@@ -174,11 +174,12 @@ script_mod! {
             ActivityRow := View {
                 width: Fill
                 height: Fit
-                flow: Down
-                spacing: 2
-                padding: Inset{left: 10 top: 4 right: 10 bottom: 4}
+                flow: Right
+                spacing: 8
+                align: Align{y: 0.5}
+                padding: Inset{left: 8 top: 3 right: 8 bottom: 3}
                 head_lbl := Label {
-                    width: Fill
+                    width: Fit
                     height: Fit
                     text: ""
                     draw_text +: {
@@ -192,7 +193,7 @@ script_mod! {
                     text: ""
                     draw_text +: {
                         color: #x6f7a88
-                        text_style +: { font_size: 9.0 }
+                        text_style +: { font_size: 9.5 }
                     }
                 }
             }
@@ -200,7 +201,7 @@ script_mod! {
             EmptyRow := View {
                 width: Fill
                 height: Fit
-                padding: Inset{left: 10 top: 4 right: 10 bottom: 4}
+                padding: Inset{left: 8 top: 4 right: 8 bottom: 4}
                 lbl := Label {
                     width: Fill
                     height: Fit
@@ -254,8 +255,8 @@ script_mod! {
                         width: Fill
                         height: Fill
                         flow: Down
-                        spacing: 10
-                        padding: 14
+                        spacing: 8
+                        padding: Inset{left: 12 top: 10 right: 12 bottom: 10}
 
                         // ------------------------------------------------
                         // Header: title | workspace | model | status pill
@@ -264,15 +265,15 @@ script_mod! {
                             width: Fill
                             height: Fit
                             flow: Right
-                            spacing: 12
+                            spacing: 10
                             align: Align{y: 0.5}
-                            padding: Inset{left: 4 top: 2 right: 4 bottom: 2}
+                            padding: Inset{left: 2 top: 0 right: 2 bottom: 2}
 
                             Label {
                                 text: "mypi"
                                 draw_text +: {
                                     color: #xdde3ea
-                                    text_style: theme.font_bold { font_size: 15.0 }
+                                    text_style: theme.font_bold { font_size: 14.0 }
                                 }
                             }
                             workspace_label := Label {
@@ -283,15 +284,8 @@ script_mod! {
                                 }
                             }
                             View { width: Fill height: 1 }
-                            Label {
-                                text: "Model"
-                                draw_text +: {
-                                    color: #x8b93a0
-                                    text_style +: { font_size: 10.5 }
-                                }
-                            }
                             model_drop := DropDown {
-                                width: 190
+                                width: 180
                                 height: 28
                                 labels: [
                                     "gpt-5.4",
@@ -304,6 +298,51 @@ script_mod! {
                                     "gpt-4o",
                                     "gpt-4o-mini"
                                 ]
+                                draw_bg +: {
+                                    color: #x232830
+                                    color_hover: #x2a313c
+                                    color_focus: #x2a313c
+                                    color_down: #x2a313c
+                                    border_color: #x3a424e
+                                    border_color_hover: #x4a5564
+                                    border_color_focus: #x4a5564
+                                    border_color_down: #x4a5564
+                                    arrow_color: #xc7cdd6
+                                    arrow_color_hover: #xdde3ea
+                                    arrow_color_focus: #xdde3ea
+                                    arrow_color_down: #xdde3ea
+                                }
+                                draw_text +: {
+                                    color: #xdde3ea
+                                    color_hover: #xffffff
+                                    color_focus: #xffffff
+                                    color_down: #xffffff
+                                    text_style +: { font_size: 10.5 }
+                                }
+                                popup_menu: PopupMenuFlat {
+                                    width: 210
+                                    draw_bg +: {
+                                        color: #x232830
+                                        border_color: #x4a5564
+                                        border_size: 1.0
+                                        border_radius: 8.0
+                                    }
+                                    menu_item: PopupMenuItem {
+                                        draw_text +: {
+                                            color: #xdde3ea
+                                            color_hover: #xffffff
+                                            color_active: #xffffff
+                                            text_style +: { font_size: 10.5 }
+                                        }
+                                        draw_bg +: {
+                                            color: #x00000000
+                                            color_hover: #x2f3a4d
+                                            color_active: #x3a4a5f
+                                            mark_color: #x00000000
+                                            mark_color_active: #x4ac26b
+                                        }
+                                    }
+                                }
                             }
                             status_pill := RoundedView {
                                 width: Fit
@@ -313,7 +352,7 @@ script_mod! {
                                 align: Align{y: 0.5}
                                 padding: Inset{left: 10 top: 5 right: 10 bottom: 5}
                                 draw_bg +: {
-                                    color: #x232830
+                                    color: #x1f232b
                                     border_radius: 12.0
                                 }
                                 // Pre-styled dots toggled by visibility (no
@@ -399,7 +438,7 @@ script_mod! {
                         }
 
                         // ------------------------------------------------
-                        // Chat + sidebar
+                        // Chat + plan sidebar
                         // ------------------------------------------------
                         content_row := View {
                             width: Fill
@@ -407,83 +446,112 @@ script_mod! {
                             flow: Right
                             spacing: 10
 
-                            chat_list := ChatList {}
+                            chat_panel := RoundedView {
+                                width: Fill
+                                height: Fill
+                                padding: Inset{left: 4 top: 6 right: 4 bottom: 6}
+                                draw_bg +: {
+                                    color: #x1c1f26
+                                    border_radius: 10.0
+                                }
+                                chat_list := ChatList {}
+                            }
 
-                            sidebar := View {
-                                width: 300
+                            plan_card := RoundedView {
+                                width: 280
                                 height: Fill
                                 flow: Down
-                                spacing: 10
-
-                                plan_card := RoundedView {
-                                    width: Fill
-                                    height: 240
-                                    flow: Down
-                                    padding: Inset{left: 2 top: 10 right: 2 bottom: 8}
-                                    draw_bg +: {
-                                        color: #x1f232b
-                                        border_radius: 8.0
-                                    }
-                                    View {
-                                        width: Fill
-                                        height: Fit
-                                        flow: Right
-                                        align: Align{y: 0.5}
-                                        padding: Inset{left: 10 right: 10 bottom: 8}
-                                        Label {
-                                            text: "Plan"
-                                            draw_text +: {
-                                                color: #xdde3ea
-                                                text_style: theme.font_bold { font_size: 11.0 }
-                                            }
-                                        }
-                                        View { width: Fill height: 1 }
-                                        plan_status_label := Label {
-                                            text: "inactive"
-                                            draw_text +: {
-                                                color: #x6f7a88
-                                                text_style +: { font_size: 9.5 }
-                                            }
-                                        }
-                                    }
-                                    plan_list := PlanList {}
+                                padding: Inset{left: 2 top: 10 right: 2 bottom: 8}
+                                draw_bg +: {
+                                    color: #x1f232b
+                                    border_radius: 10.0
                                 }
-
-                                activity_card := RoundedView {
+                                View {
                                     width: Fill
-                                    height: Fill
-                                    flow: Down
-                                    padding: Inset{left: 2 top: 10 right: 2 bottom: 8}
-                                    draw_bg +: {
-                                        color: #x1f232b
-                                        border_radius: 8.0
-                                    }
-                                    View {
-                                        width: Fill
-                                        height: Fit
-                                        padding: Inset{left: 10 right: 10 bottom: 8}
-                                        Label {
-                                            text: "Activity"
-                                            draw_text +: {
-                                                color: #xdde3ea
-                                                text_style: theme.font_bold { font_size: 11.0 }
-                                            }
+                                    height: Fit
+                                    flow: Right
+                                    align: Align{y: 0.5}
+                                    padding: Inset{left: 12 right: 12 bottom: 8}
+                                    Label {
+                                        text: "Plan"
+                                        draw_text +: {
+                                            color: #xdde3ea
+                                            text_style: theme.font_bold { font_size: 11.0 }
                                         }
                                     }
-                                    activity_list := ActivityList {}
+                                    View { width: Fill height: 1 }
+                                    plan_status_label := Label {
+                                        text: "inactive"
+                                        draw_text +: {
+                                            color: #x6f7a88
+                                            text_style +: { font_size: 9.5 }
+                                        }
+                                    }
                                 }
+                                plan_list := PlanList {}
                             }
                         }
 
                         // ------------------------------------------------
-                        // Input bar: slash-command aware input + Send
+                        // Compact foldable activity (collapsed by default)
                         // ------------------------------------------------
-                        input_bar := View {
+                        activity_fold := FoldHeader {
+                            width: Fill
+                            height: Fit
+                            opened: 0.0
+
+                            header: RoundedView {
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                spacing: 8
+                                align: Align{y: 0.5}
+                                padding: Inset{left: 10 top: 6 right: 10 bottom: 6}
+                                draw_bg +: {
+                                    color: #x1f232b
+                                    border_radius: 8.0
+                                }
+                                fold_button := FoldButton {}
+                                Label {
+                                    text: "Activity"
+                                    draw_text +: {
+                                        color: #xaeb6c2
+                                        text_style: theme.font_bold { font_size: 10.5 }
+                                    }
+                                }
+                                activity_summary := Label {
+                                    width: Fill
+                                    height: Fit
+                                    text: "No recent tools"
+                                    draw_text +: {
+                                        color: #x6f7a88
+                                        text_style +: { font_size: 10.0 }
+                                    }
+                                }
+                            }
+
+                            body: View {
+                                width: Fill
+                                height: Fit{max: FitBound.Abs(132)}
+                                padding: Inset{left: 2 top: 2 right: 2 bottom: 2}
+                                activity_list := ActivityList {}
+                            }
+                        }
+
+                        // ------------------------------------------------
+                        // Growing prompt input + Send
+                        // ------------------------------------------------
+                        input_bar := RoundedView {
                             width: Fill
                             height: Fit
                             flow: Right
-                            spacing: 10
+                            spacing: 8
                             align: Align{y: 1.0}
+                            padding: Inset{left: 8 top: 8 right: 8 bottom: 8}
+                            draw_bg +: {
+                                color: #x1f232b
+                                border_radius: 10.0
+                            }
 
                             prompt_input := mod.widgets.CommandTextInput {
                                 width: Fill
@@ -504,14 +572,16 @@ script_mod! {
                                         height: Fit
                                         text_input +: {
                                             width: Fill
-                                            height: 44
+                                            height: Fit{min: FitBound.Abs(40), max: FitBound.Abs(160)}
                                             margin: 0
-                                            empty_text: "Ask mypi to inspect files, edit code, or run commands (type / for commands)..."
+                                            is_multiline: true
+                                            submit_on_enter: true
+                                            empty_text: "Message mypi…  (/ commands · Enter to send · Shift+Enter for newline)"
                                             draw_bg +: {
-                                                color: #x232830
-                                                color_empty: #x232830
-                                                color_hover: #x2a313c
-                                                color_focus: #x2a313c
+                                                color: #x181a1f
+                                                color_empty: #x181a1f
+                                                color_hover: #x1c2028
+                                                color_focus: #x1c2028
                                             }
                                         }
                                     }
@@ -519,8 +589,8 @@ script_mod! {
                             }
 
                             send_btn := Button {
-                                width: 90
-                                height: 44
+                                width: 84
+                                height: 40
                                 text: "Send"
                             }
                         }
@@ -688,6 +758,10 @@ impl MatchEvent for App {
 
         // Fetch models in background.
         self.spawn_model_fetch(api_key, account_id_opt);
+        self.ui
+            .fold_header(cx, ids!(activity_fold))
+            .set_is_open(cx, false, Animate::No);
+        self.refresh_activity_header(cx);
         cx.redraw_all();
     }
 
@@ -846,6 +920,29 @@ impl App {
         self.ui
             .label(cx, ids!(plan_status_label))
             .set_text(cx, if enabled { "active" } else { "inactive" });
+    }
+
+    // -----------------------------------------------------------------
+    // Activity fold header
+    // -----------------------------------------------------------------
+    fn refresh_activity_header(&mut self, cx: &mut Cx) {
+        let data = crate::state::ACTIVITY_DATA.read().unwrap();
+        let summary = if data.is_empty() {
+            "No recent tools".to_string()
+        } else if let Some(last) = data.last() {
+            let count = data.len();
+            let noun = if count == 1 { "tool" } else { "tools" };
+            format!(
+                "{} {} · {count} {noun}",
+                last.status.glyph(),
+                truncate_chars(&last.name, 36)
+            )
+        } else {
+            "No recent tools".to_string()
+        };
+        self.ui
+            .label(cx, ids!(activity_summary))
+            .set_text(cx, &summary);
     }
 
     // -----------------------------------------------------------------
@@ -1130,6 +1227,7 @@ impl App {
 
         // Something changed — repaint everything (chat/plan/activity read
         // their rows from the shared state during draw).
+        self.refresh_activity_header(cx);
         cx.redraw_all();
     }
 }
