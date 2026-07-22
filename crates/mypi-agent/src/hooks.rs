@@ -50,4 +50,8 @@ pub type DynShouldStopFn =
 
 pub trait ToolExecutor: Send + Sync {
     fn execute_tool(&self, name: &str, args: &str) -> Option<Result<String, String>>;
+    fn get_tool_schemas(&self) -> Vec<serde_json::Value> {
+        Vec::new()
+    }
 }
+

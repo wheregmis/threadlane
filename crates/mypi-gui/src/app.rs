@@ -590,10 +590,10 @@ script_mod! {
                                 width: 180
                                 height: 28
                                 labels: [
+                                    "gpt-5.6-luna",
                                     "gpt-5.4",
                                     "gpt-5.4-mini",
                                     "gpt-5.5",
-                                    "gpt-5.6-luna",
                                     "gpt-5.6-sol",
                                     "gpt-5.6-terra",
                                     "gpt-5.3-codex-spark",
@@ -1083,7 +1083,7 @@ impl MatchEvent for App {
         let agent_opts = CodingAgentOptions {
             api_key: api_key.clone(),
             account_id: account_id_opt.clone(),
-            model: "gpt-5.4".to_string(),
+            model: "gpt-5.6-luna".to_string(),
             work_dir: work_dir.clone(),
             session_file: active_session_entry().map(|e| e.session_file),
             enable_plan_mode: false,
@@ -1599,7 +1599,7 @@ impl App {
 
         let selected_model = self.ui.drop_down(cx, ids!(model_drop)).selected_label();
         let model_name = if selected_model.is_empty() {
-            "gpt-5.4".to_string()
+            "gpt-5.6-luna".to_string()
         } else {
             selected_model
         };

@@ -108,10 +108,10 @@ pub async fn fetch_available_models(api_key: &str, account_id: Option<&str>) -> 
     }
 
     vec![
+        "gpt-5.6-luna".to_string(),
         "gpt-5.4".to_string(),
         "gpt-5.4-mini".to_string(),
         "gpt-5.5".to_string(),
-        "gpt-5.6-luna".to_string(),
         "gpt-5.6-sol".to_string(),
         "gpt-5.6-terra".to_string(),
         "gpt-5.3-codex-spark".to_string(),

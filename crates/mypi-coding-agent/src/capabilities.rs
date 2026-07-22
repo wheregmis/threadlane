@@ -1,3 +1,4 @@
+use crate::agents::{discover_agents, AgentConfig, AgentScope};
 use crate::full_trust_extension::{compute_executable_revision, TrustStore};
 use crate::packages::{PackageManager, PackageRecord};
 use crate::skills::{SkillManager, SkillMetadata};
@@ -23,6 +24,7 @@ pub struct CapabilityCatalog {
     pub skills: Vec<SkillMetadata>,
     pub extensions: Vec<ExtensionMetadata>,
     pub packages: Vec<PackageRecord>,
+    pub agents: Vec<AgentConfig>,
 }
 
 impl CapabilityCatalog {
@@ -33,6 +35,9 @@ impl CapabilityCatalog {
 
         let pkg_mgr = PackageManager::new(global_dir.to_path_buf());
         let packages = pkg_mgr.list_packages(project_root);
+
+        let cwd = project_root.unwrap_or_else(|| global_dir);
+        let agents = discover_agents(cwd, AgentScope::Both).agents;
 
         let mut extensions = Vec::new();
 
@@ -89,6 +94,8 @@ impl CapabilityCatalog {
             skills,
             extensions,
             packages,
+            agents,
         }
     }
 }
+

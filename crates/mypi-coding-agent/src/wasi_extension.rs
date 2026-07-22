@@ -51,8 +51,23 @@ pub struct WasiExtensionInvocation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WasiExtensionEffect {
-    SetToolPolicy { policy: String },
-    RequestModelTurn { prompt: String },
+    SetToolPolicy {
+        policy: String,
+    },
+    RequestModelTurn {
+        prompt: String,
+    },
+    RunSubagents {
+        tasks: Vec<WasiSubagentTask>,
+        #[serde(default)]
+        parallel: bool,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WasiSubagentTask {
+    pub agent: String,
+    pub task: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

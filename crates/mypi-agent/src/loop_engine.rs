@@ -229,7 +229,13 @@ impl AgentLoop {
                 let (instructions, codex_msgs) = convert_to_codex_llm(&state.messages);
                 let mut tools = get_available_tools();
                 tools.extend(state.tools.clone());
-                let codex_tools = get_codex_tools();
+                if let Some(ref ext_mgr) = self.extension_manager {
+                    tools.extend(ext_mgr.get_tool_schemas());
+                }
+                let mut codex_tools = get_codex_tools();
+                if let Some(ref ext_mgr) = self.extension_manager {
+                    codex_tools.extend(ext_mgr.get_tool_schemas());
+                }
                 (
                     serde_json::json!({
                         "model": state.model,

@@ -1,4 +1,6 @@
 /target
+**/target
 /temp
 .DS_Store
 .mypi
+

@@ -1,9 +1,8 @@
 [workspace]
 members = [
-    "crates/mypi-tools",
-    "crates/mypi-provider",
-    "crates/mypi-agent",
-    "crates/mypi-coding-agent",
-    "crates/mypi-gui",
+    "crates/*",
+    "extensions/*",
 ]
 resolver = "2"
+
+

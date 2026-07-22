@@ -1,8 +1,8 @@
 [package]
-name = "plan-mode-ext"
+name = "subagent-ext"
 version = "0.1.0"
 edition = "2021"
-description = "Plan Mode WASI extension for mypi"
+description = "Subagent WASI extension for mypi"
 
 [lib]
 crate-type = ["cdylib"]

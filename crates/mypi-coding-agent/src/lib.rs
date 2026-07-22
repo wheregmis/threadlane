@@ -1,3 +1,4 @@
+pub mod agents;
 pub mod capabilities;
 pub mod coding_agent;
 pub mod commands;
@@ -9,6 +10,7 @@ pub mod skills;
 pub mod supervisor;
 pub mod wasi_extension;
 
+pub use agents::{discover_agents, AgentConfig, AgentDiscoveryResult, AgentScope, AgentSource};
 pub use capabilities::{CapabilityCatalog, ExtensionMetadata};
 pub use coding_agent::{CodingAgent, CodingAgentOptions, ExtensionBeforeToolHook, ToolPolicy};
 pub use commands::{execute_slash_command, parse_slash_command, CommandAction};
@@ -26,3 +28,7 @@ pub use wasi_extension::{
     WasiExtensionInvocation, WasiExtensionManager, WasiExtensionManifest, WasiExtensionResponse,
     WasiToolDefinition,
 };
+
+
+
+

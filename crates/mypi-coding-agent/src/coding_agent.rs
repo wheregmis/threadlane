@@ -1,6 +1,7 @@
+use crate::agents::{discover_agents, AgentConfig, AgentScope};
 use crate::commands::{execute_slash_command, parse_slash_command, CommandAction};
 use crate::context::ProjectContext;
-use crate::wasi_extension::WasiExtensionManager;
+use crate::wasi_extension::{WasiExtensionManager, WasiSubagentTask};
 use async_trait::async_trait;
 use mypi_agent::{
     AfterToolCallHook, AfterToolCallResult, Agent, AgentEvent, AgentMessage, AgentState,
@@ -210,6 +211,52 @@ impl CodingAgent {
         self.agent.subscribe()
     }
 
+    async fn run_subagent(&self, task: &WasiSubagentTask) -> Result<String, String> {
+        let config = discover_agents(&self.work_dir, AgentScope::Both)
+            .agents
+            .into_iter()
+            .find(|candidate| candidate.name == task.agent)
+            .ok_or_else(|| {
+                format!(
+                    "Unknown subagent '{}'. Add it to .mypi/agents or ~/.mypi/agents.",
+                    task.agent
+                )
+            })?;
+        run_subagent_task(
+            config,
+            task.task.clone(),
+            self.agent.loop_engine.api_key.clone(),
+            self.agent.loop_engine.account_id.clone(),
+            self.agent.get_state().await.model,
+            self.work_dir.clone(),
+            self.wasi_extensions.clone(),
+        )
+        .await
+    }
+
+    async fn run_subagents(&self, tasks: Vec<WasiSubagentTask>, parallel: bool) -> String {
+        if parallel {
+            let futures = tasks.iter().map(|task| self.run_subagent(task));
+            let results = futures::future::join_all(futures).await;
+            return format_subagent_results(tasks, results);
+        }
+
+        let mut previous = String::new();
+        let mut results = Vec::with_capacity(tasks.len());
+        for task in &tasks {
+            let task = WasiSubagentTask {
+                agent: task.agent.clone(),
+                task: task.task.replace("{previous}", &previous),
+            };
+            let result = self.run_subagent(&task).await;
+            if let Ok(output) = &result {
+                previous = output.clone();
+            }
+            results.push(result);
+        }
+        format_subagent_results(tasks, results)
+    }
+
     async fn dispatch_assistant_message_hooks(&mut self) {
         let state = self.agent.get_state().await;
         if let Some(AgentMessage::Assistant {
@@ -366,6 +413,17 @@ impl CodingAgent {
                                     self.agent.prompt(&prompt).await;
                                     self.dispatch_assistant_message_hooks().await;
                                 }
+                                crate::wasi_extension::WasiExtensionEffect::RunSubagents {
+                                    tasks,
+                                    parallel,
+                                } => {
+                                    let output = self.run_subagents(tasks, parallel).await;
+                                    self.session_tree.add_message(AgentMessage::Assistant {
+                                        content: Some(output.clone()),
+                                        tool_calls: None,
+                                    });
+                                    return Some(output);
+                                }
                             }
                         }
                         Some(result.message)
@@ -394,4 +452,96 @@ impl CodingAgent {
 
         None
     }
+}
+
+async fn run_subagent_task(
+    config: AgentConfig,
+    task: String,
+    api_key: String,
+    account_id: Option<String>,
+    parent_model: String,
+    work_dir: PathBuf,
+    extensions: Arc<WasiExtensionManager>,
+) -> Result<String, String> {
+    let model = config.model.clone().unwrap_or(parent_model);
+    let mut agent = Agent::new(api_key, account_id, model);
+    let system_prompt = format!(
+        "{}\n\nYou are an isolated subagent working in {}. Complete only the assigned task and return a concise final report to your parent agent.",
+        config.system_prompt,
+        work_dir.display(),
+    );
+    agent.set_system_prompt(system_prompt).await;
+    agent.loop_engine.work_dir = Some(work_dir);
+    agent.loop_engine.extension_manager = Some(extensions.clone());
+
+    let policy = Arc::new(tokio::sync::Mutex::new(
+        if config.tools.as_ref().is_some_and(|tools| {
+            !tools
+                .iter()
+                .any(|tool| matches!(tool.as_str(), "write_file" | "edit_file" | "write" | "edit"))
+        }) {
+            ToolPolicy::ReadOnly
+        } else {
+            ToolPolicy::FullAccess
+        },
+    ));
+    agent.loop_engine.before_tool_call_hook = Some(Arc::new(ExtensionBeforeToolHook {
+        tool_policy: policy,
+        extensions: extensions.clone(),
+    }));
+    agent.loop_engine.after_tool_call_hook = Some(Arc::new(ExtensionAfterToolHook { extensions }));
+
+    // Child events are not subscribed to by the GUI. Preserve any provider or
+    // tool-loop failure here so delegation does not incorrectly look successful.
+    let mut events = agent.subscribe();
+    agent.prompt(&task).await;
+    let mut error = None;
+    while let Ok(event) = events.try_recv() {
+        if let AgentEvent::AgentError { error: message } = event {
+            error = Some(message);
+        }
+    }
+    if let Some(error) = error {
+        return Err(format!("Subagent '{}' failed: {error}", config.name));
+    }
+
+    let state = agent.get_state().await;
+    state
+        .messages
+        .iter()
+        .rev()
+        .find_map(|message| match message {
+            AgentMessage::Assistant {
+                content: Some(content),
+                ..
+            } => Some(content.clone()),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            format!(
+                "Subagent '{}' completed without a final text response.",
+                config.name
+            )
+        })
+}
+
+fn format_subagent_results(
+    tasks: Vec<WasiSubagentTask>,
+    results: Vec<Result<String, String>>,
+) -> String {
+    tasks
+        .into_iter()
+        .zip(results)
+        .enumerate()
+        .map(|(index, (task, result))| match result {
+            Ok(output) => format!("## Subagent {}: {}\n\n{}", index + 1, task.agent, output),
+            Err(error) => format!(
+                "## Subagent {}: {} (failed)\n\n{}",
+                index + 1,
+                task.agent,
+                error
+            ),
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
