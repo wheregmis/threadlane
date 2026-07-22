@@ -249,6 +249,9 @@ impl AgentLoop {
                         "input": codex_msgs,
                         "store": false,
                         "stream": true,
+                        // Reasoning deltas are opt-in on the Responses API.
+                        // The GUI already renders them as a live Thinking row.
+                        "reasoning": { "summary": "auto" },
                         "tools": codex_tools
                     }),
                 )
@@ -270,6 +273,7 @@ impl AgentLoop {
             });
 
             let mut current_turn_text = String::new();
+            let mut current_turn_reasoning = String::new();
             let mut captured_tool_calls: Vec<ToolCall> = Vec::new();
 
             while let Some(evt) = stream_rx.recv().await {
@@ -283,6 +287,7 @@ impl AgentLoop {
                         });
                     }
                     StreamEvent::ReasoningToken(token) => {
+                        current_turn_reasoning.push_str(&token);
                         let _ = self.event_tx.send(AgentEvent::MessageUpdate {
                             text_delta: None,
                             reasoning_delta: Some(token),
@@ -325,6 +330,12 @@ impl AgentLoop {
 
             {
                 let mut state = self.state.lock().await;
+                if !current_turn_reasoning.trim().is_empty() {
+                    state.messages.push(AgentMessage::Custom {
+                        custom_type: "thinking".into(),
+                        payload: serde_json::json!({ "text": current_turn_reasoning }),
+                    });
+                }
                 state.messages.push(assistant_msg.clone());
             }
 

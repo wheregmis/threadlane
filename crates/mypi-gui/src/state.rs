@@ -61,6 +61,7 @@ impl ToolStatus {
 
 #[derive(Clone)]
 pub struct ToolPresentation {
+    pub icon: String,
     pub title: String,
     pub primary: String,
     pub metadata: String,
@@ -114,19 +115,42 @@ pub fn push_chat(role: MsgRole, text: impl Into<String>) {
     });
 }
 
+fn push_thinking_locked(data: &mut ChatData, text: String) {
+    if text.trim().is_empty() {
+        return;
+    }
+    if let Some(ChatMessage::Thinking { text: existing }) = data.messages.last_mut() {
+        if !existing.is_empty() {
+            existing.push_str("\n\n");
+        }
+        existing.push_str(&text);
+    } else {
+        data.messages.push(ChatMessage::Thinking { text });
+    }
+}
+
 fn flush_streaming_locked(data: &mut ChatData) {
     let text = std::mem::take(&mut data.streaming_text);
     let kind = data.streaming_kind.take();
     if text.trim().is_empty() {
         return;
     }
-    data.messages.push(match kind {
-        Some(StreamingKind::Thinking) => ChatMessage::Thinking { text },
-        _ => ChatMessage::Text {
+    match kind {
+        Some(StreamingKind::Thinking) => push_thinking_locked(data, text),
+        _ => data.messages.push(ChatMessage::Text {
             role: MsgRole::Assistant,
             text,
-        },
-    });
+        }),
+    }
+}
+
+/// A textual preamble paired with a function call is work narration, not a
+/// user-facing answer. Keep it inside the adjacent Thinking entry.
+pub fn flush_tool_call_preamble() {
+    let mut data = CHAT_DATA.write().unwrap();
+    let text = std::mem::take(&mut data.streaming_text);
+    data.streaming_kind = None;
+    push_thinking_locked(&mut data, text);
 }
 
 fn push_stream_delta_for(kind: StreamingKind, delta: &str) {
@@ -218,6 +242,17 @@ pub fn update_tool(id: &str, output: String, status: Option<ToolStatus>) {
     }
 }
 
+pub fn tool_icon(name: &str) -> &'static str {
+    match name {
+        "read_file" => "⌕",
+        "write_file" => "+",
+        "edit_file" => "✎",
+        "list_dir" => "□",
+        "run_command" => "›_",
+        _ => "•",
+    }
+}
+
 pub fn tool_title(name: &str) -> String {
     match name {
         "run_command" => "Run command".into(),
@@ -240,11 +275,10 @@ pub fn tool_presentation(name: &str, arguments: &str) -> ToolPresentation {
 
     let (primary, metadata) = match name {
         "run_command" => (
-            truncate_chars(get_str("command").unwrap_or(arguments), 300),
-            get_str("cwd")
-                .filter(|cwd| !cwd.is_empty())
-                .map(|cwd| format!("in {cwd}"))
-                .unwrap_or_default(),
+            compact_command(get_str("command").unwrap_or(arguments)),
+            // The expanded arguments retain the working directory; keeping it
+            // out of the closed row leaves enough room for one-line commands.
+            String::new(),
         ),
         "read_file" => {
             let start = args
@@ -280,13 +314,14 @@ pub fn tool_presentation(name: &str, arguments: &str) -> ToolPresentation {
             },
             String::new(),
         ),
-        _ => (truncate_chars(arguments, 220), String::new()),
+        _ => (truncate_chars(arguments, 120), String::new()),
     };
 
     let arguments_detail = parsed
         .and_then(|value| serde_json::to_string_pretty(&value).ok())
         .unwrap_or_else(|| arguments.to_string());
     ToolPresentation {
+        icon: tool_icon(name).into(),
         title: tool_title(name),
         primary,
         metadata,
@@ -304,6 +339,11 @@ pub fn tool_preview(name: &str, arguments: &str) -> String {
     } else {
         presentation.primary
     }
+}
+
+fn compact_command(command: &str) -> String {
+    let normalized = command.split_whitespace().collect::<Vec<_>>().join(" ");
+    truncate_chars(&normalized, 48)
 }
 
 fn compact_path(path: &str) -> String {
@@ -491,6 +531,7 @@ pub enum SessionListRow {
 
 pub struct SessionsData {
     pub projects: Vec<ProjectGroup>,
+    pub is_working: bool,
     pub active_session_id: Option<String>,
     pub active_work_dir: PathBuf,
     /// Cached flat rows matching `projects` (rebuilt on refresh).
@@ -499,6 +540,7 @@ pub struct SessionsData {
 
 pub static SESSIONS_DATA: RwLock<SessionsData> = RwLock::new(SessionsData {
     projects: Vec::new(),
+    is_working: false,
     active_session_id: None,
     active_work_dir: PathBuf::new(),
     rows: Vec::new(),
@@ -677,6 +719,10 @@ pub fn refresh_sessions(work_dir: &Path) -> Vec<SessionListRow> {
     rows
 }
 
+pub fn set_sessions_working(is_working: bool) {
+    SESSIONS_DATA.write().unwrap().is_working = is_working;
+}
+
 pub fn set_active_session(work_dir: &Path, session_id: &str) {
     let mut data = SESSIONS_DATA.write().unwrap();
     data.active_work_dir = work_dir.to_path_buf();
@@ -788,10 +834,14 @@ pub fn replace_chat_from_agent_messages(messages: &[AgentMessage]) {
             } => {
                 if let Some(text) = content {
                     if !text.is_empty() {
-                        data.messages.push(ChatMessage::Text {
-                            role: MsgRole::Assistant,
-                            text: text.clone(),
-                        });
+                        if tool_calls.is_some() {
+                            push_thinking_locked(&mut data, text.clone());
+                        } else {
+                            data.messages.push(ChatMessage::Text {
+                                role: MsgRole::Assistant,
+                                text: text.clone(),
+                            });
+                        }
                     }
                 }
                 if let Some(tool_calls) = tool_calls {
@@ -854,6 +904,18 @@ pub fn replace_chat_from_agent_messages(messages: &[AgentMessage]) {
                         result_metadata: result_metadata_for(content, status, Duration::ZERO),
                         started_at: Instant::now(),
                     });
+                }
+            }
+            AgentMessage::Custom {
+                custom_type,
+                payload,
+            } if custom_type == "thinking" => {
+                if let Some(text) = payload.get("text").and_then(serde_json::Value::as_str) {
+                    if !text.trim().is_empty() {
+                        data.messages.push(ChatMessage::Thinking {
+                            text: text.to_string(),
+                        });
+                    }
                 }
             }
             AgentMessage::System { .. } | AgentMessage::Custom { .. } => {}
@@ -930,6 +992,20 @@ mod tests {
     }
 
     #[test]
+    fn restores_saved_thinking_entries() {
+        replace_chat_from_agent_messages(&[AgentMessage::Custom {
+            custom_type: "thinking".into(),
+            payload: serde_json::json!({ "text": "Inspecting the session lifecycle." }),
+        }]);
+
+        let data = CHAT_DATA.read().unwrap();
+        assert!(matches!(
+            data.messages.as_slice(),
+            [ChatMessage::Thinking { text }] if text == "Inspecting the session lifecycle."
+        ));
+    }
+
+    #[test]
     fn result_preview_keeps_head_and_tail() {
         let text = "abcdefghij";
         assert_eq!(
@@ -963,6 +1039,10 @@ mod tests {
         assert_eq!(
             tool_preview("run_command", r#"{"command":"cargo test","cwd":"."}"#),
             "cargo test"
+        );
+        assert_eq!(
+            compact_command("rg   -n\n  --glob '*.rs'   session_tree"),
+            "rg -n --glob '*.rs' session_tree"
         );
     }
 }

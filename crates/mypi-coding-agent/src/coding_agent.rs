@@ -214,7 +214,7 @@ impl CodingAgent {
         self.agent.subscribe()
     }
 
-    async fn run_subagent(&self, task: &WasiSubagentTask) -> Result<String, String> {
+    async fn run_subagent(&self, task: &WasiSubagentTask) -> Result<SubagentResult, String> {
         let config = discover_agents(&self.work_dir, AgentScope::Both)
             .agents
             .into_iter()
@@ -238,48 +238,105 @@ impl CodingAgent {
         .await
     }
 
-    async fn run_subagents(&self, tasks: Vec<WasiSubagentTask>, parallel: bool) -> String {
-        if parallel {
+    async fn run_subagents(&mut self, tasks: Vec<WasiSubagentTask>, parallel: bool) -> String {
+        let results = if parallel {
             let futures = tasks.iter().map(|task| self.run_subagent(task));
-            let results = futures::future::join_all(futures).await;
-            return format_subagent_results(tasks, results);
-        }
-
-        let mut previous = String::new();
-        let mut results = Vec::with_capacity(tasks.len());
-        for task in &tasks {
-            let task = WasiSubagentTask {
-                agent: task.agent.clone(),
-                task: task.task.replace("{previous}", &previous),
-            };
-            let result = self.run_subagent(&task).await;
-            if let Ok(output) = &result {
-                previous = output.clone();
+            futures::future::join_all(futures).await
+        } else {
+            let mut previous = String::new();
+            let mut results = Vec::with_capacity(tasks.len());
+            for task in &tasks {
+                let task = WasiSubagentTask {
+                    agent: task.agent.clone(),
+                    task: task.task.replace("{previous}", &previous),
+                };
+                let result = self.run_subagent(&task).await;
+                if let Ok(result) = &result {
+                    previous = result.output.clone();
+                }
+                results.push(result);
             }
-            results.push(result);
+            results
+        };
+
+        for result in &results {
+            if let Ok(result) = result {
+                for thinking in &result.thinking {
+                    self.session_tree.add_message(thinking.clone());
+                }
+            }
         }
         format_subagent_results(tasks, results)
     }
 
     async fn dispatch_assistant_message_hooks(&mut self) {
         let state = self.agent.get_state().await;
-        if let Some(AgentMessage::Assistant {
-            content: Some(content),
-            tool_calls,
-        }) = state
+
+        // The loop engine keeps the complete provider conversation in memory,
+        // including assistant tool-call messages and the tool results that
+        // follow them. Persist the portion that is not in the session yet so
+        // reloading a session produces the same provider history (and keeps
+        // the tool-call/result ordering intact).
+        let state_messages: Vec<AgentMessage> = state
             .messages
+            .into_iter()
+            .filter(|message| !matches!(message, AgentMessage::System { .. }))
+            .collect();
+        let persisted_messages = self.session_tree.get_active_branch_messages();
+
+        let common_prefix = state_messages
             .iter()
-            .rev()
-            .find(|message| matches!(message, AgentMessage::Assistant { .. }))
+            .zip(persisted_messages.iter())
+            .take_while(|(state_message, persisted_message)| {
+                serde_json::to_value(state_message).ok()
+                    == serde_json::to_value(persisted_message).ok()
+            })
+            .count();
+
+        let start_index = if common_prefix == persisted_messages.len() {
+            // Agent::prompt records the same user message that CodingAgent
+            // already stored for normal prompts. Avoid storing that duplicate.
+            if matches!(
+                (state_messages.get(common_prefix), persisted_messages.last()),
+                (Some(AgentMessage::User { content: state_content }),
+                    Some(AgentMessage::User { content: persisted_content }))
+                    if state_content == persisted_content
+            ) {
+                common_prefix + 1
+            } else {
+                common_prefix
+            }
+        } else if persisted_messages.len() == common_prefix + 1
+            && matches!(
+                state_messages.get(common_prefix),
+                Some(AgentMessage::User { .. })
+            )
         {
-            let arguments = serde_json::json!({ "content": content });
-            let _ = self
-                .wasi_extensions
-                .execute_hook("assistant_message", &arguments.to_string());
-            self.session_tree.add_message(AgentMessage::Assistant {
-                content: Some(content.clone()),
-                tool_calls: tool_calls.clone(),
-            });
+            // Skills and extensions store the visible command, then prompt
+            // the model with a different, generated user message. Keep that
+            // generated message so the restored provider history is exact.
+            common_prefix
+        } else {
+            // A non-prefix means the session was changed independently. Do
+            // not append a second, potentially duplicated conversation.
+            return;
+        };
+
+        for message in state_messages.into_iter().skip(start_index) {
+            if let AgentMessage::Assistant {
+                content,
+                tool_calls,
+            } = &message
+            {
+                let arguments = serde_json::json!({
+                    "content": content,
+                    "tool_calls": tool_calls,
+                });
+                let _ = self
+                    .wasi_extensions
+                    .execute_hook("assistant_message", &arguments.to_string());
+            }
+            self.session_tree.add_message(message);
         }
     }
 
@@ -467,7 +524,7 @@ async fn run_subagent_task(
     work_dir: PathBuf,
     extensions: Arc<WasiExtensionManager>,
     parent_event_tx: broadcast::Sender<AgentEvent>,
-) -> Result<String, String> {
+) -> Result<SubagentResult, String> {
     let model = config.model.clone().unwrap_or(parent_model);
     let mut agent = Agent::new(api_key, account_id, model);
     let system_prompt = format!(
@@ -522,7 +579,7 @@ async fn run_subagent_task(
     }
 
     let state = agent.get_state().await;
-    state
+    let output = state
         .messages
         .iter()
         .rev()
@@ -538,7 +595,13 @@ async fn run_subagent_task(
                 "Subagent '{}' completed without a final text response.",
                 config.name
             )
-        })
+        })?;
+    let thinking = state
+        .messages
+        .into_iter()
+        .filter(|message| matches!(message, AgentMessage::Custom { custom_type, .. } if custom_type == "thinking"))
+        .collect();
+    Ok(SubagentResult { output, thinking })
 }
 
 fn subagent_ui_event(event: AgentEvent) -> Option<AgentEvent> {
@@ -559,16 +622,26 @@ fn subagent_ui_event(event: AgentEvent) -> Option<AgentEvent> {
     }
 }
 
+struct SubagentResult {
+    output: String,
+    thinking: Vec<AgentMessage>,
+}
+
 fn format_subagent_results(
     tasks: Vec<WasiSubagentTask>,
-    results: Vec<Result<String, String>>,
+    results: Vec<Result<SubagentResult, String>>,
 ) -> String {
     tasks
         .into_iter()
         .zip(results)
         .enumerate()
         .map(|(index, (task, result))| match result {
-            Ok(output) => format!("## Subagent {}: {}\n\n{}", index + 1, task.agent, output),
+            Ok(result) => format!(
+                "## Subagent {}: {}\n\n{}",
+                index + 1,
+                task.agent,
+                result.output
+            ),
             Err(error) => format!(
                 "## Subagent {}: {} (failed)\n\n{}",
                 index + 1,

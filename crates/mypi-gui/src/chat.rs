@@ -5,10 +5,10 @@
 //! during the draw pass — same pattern as makepad's aichat example.
 
 use crate::state::{
-    relative_time_label, ChatMessage, MsgRole, SessionListRow, StreamingKind, CHAT_DATA, PLAN_DATA,
-    SESSIONS_DATA,
+    relative_time_label, truncate_chars, ChatMessage, MsgRole, SessionListRow, StreamingKind,
+    CHAT_DATA, PLAN_DATA, SESSIONS_DATA,
 };
-use makepad_widgets::fold_button::FoldButtonAction;
+use makepad_widgets::fold_button::{FoldButton, FoldButtonAction};
 use makepad_widgets::*;
 
 // FoldHeader's stock action check only tests whether the action widget exists
@@ -61,21 +61,29 @@ impl Widget for ToolFoldHeader {
         self.header.handle_event(cx, event, scope);
         self.body.handle_event(cx, event, scope);
         if let Event::Actions(actions) = event {
-            let header_uid = self.header.widget_uid();
-            let header_path = cx.widget_tree().path_to(header_uid);
+            // `PortalList` reuses row widgets, so tree-path containment is not
+            // stable here. Match the exact fold-button UID owned by this row.
+            let fold_button_uid = self.header.widget(cx, ids!(fold_button)).widget_uid();
+            let mut button_handled = false;
             for action in actions {
                 if let Some(widget_action) = action.downcast_ref::<WidgetAction>() {
-                    let action_path = cx.widget_tree().path_to(widget_action.widget_uid);
-                    let belongs_to_header =
-                        !header_path.is_empty() && action_path.starts_with(&header_path);
-                    if belongs_to_header {
-                        match widget_action.cast::<FoldButtonAction>() {
-                            FoldButtonAction::Opening => self.animator_play(cx, ids!(active.on)),
-                            FoldButtonAction::Closing => self.animator_play(cx, ids!(active.off)),
-                            _ => (),
-                        }
+                    if widget_action.widget_uid != fold_button_uid {
+                        continue;
+                    }
+                    button_handled = true;
+                    match widget_action.cast::<FoldButtonAction>() {
+                        FoldButtonAction::Opening => self.set_open(cx, true),
+                        FoldButtonAction::Closing => self.set_open(cx, false),
+                        _ => (),
                     }
                 }
+            }
+
+            // The entire compact activity row is the disclosure target. The
+            // dedicated button is excluded to prevent a single click toggling
+            // twice through both its own action and the row tap action.
+            if !button_handled && self.header.as_view().finger_down(actions).is_some() {
+                self.set_open(cx, self.opened <= 0.0);
             }
         }
     }
@@ -86,9 +94,19 @@ impl Widget for ToolFoldHeader {
         if let Some(ToolFoldDrawState::DrawHeader) = self.draw_state.get() {
             let header_walk = self.header.walk(cx);
             self.header.draw_walk(cx, scope, header_walk)?;
-            let (body_walk, scroll_y) = if self.rect_size == 0.0 {
+            // Do not draw merely to measure a closed body. That first-fit pass
+            // leaked the body below a collapsed row, duplicating Thinking text.
+            if self.opened <= 0.0 {
+                cx.end_turtle_with_area(&mut self.area);
+                self.draw_state.end();
+                return DrawStep::done();
+            }
+            let (body_walk, scroll_y) = if self.opened >= 1.0 || self.rect_size == 0.0 {
+                // A fully open body must measure at its natural height. Reusing
+                // a stale fixed height clips newly rendered tool/thinking text.
                 (self.body_walk, 0.0)
             } else {
+                // Only constrain the body while it is animating between states.
                 (
                     Walk {
                         height: Size::Fixed(self.rect_size * self.opened),
@@ -115,6 +133,33 @@ impl Widget for ToolFoldHeader {
             self.draw_state.end();
         }
         DrawStep::done()
+    }
+}
+
+impl ToolFoldHeader {
+    fn set_open(&mut self, cx: &mut Cx, open: bool) {
+        self.opened = if open { 1.0 } else { 0.0 };
+        // Thinking shows the full text in its body when open. Keep its preview
+        // out of that state without removing the persistent Fill slot.
+        self.header
+            .widget(cx, ids!(thinking_preview_lbl))
+            .set_visible(cx, !open);
+        self.animator_play(
+            cx,
+            if open {
+                ids!(active.on)
+            } else {
+                ids!(active.off)
+            },
+        );
+        if let Some(mut fold_button) = self
+            .header
+            .widget(cx, ids!(fold_button))
+            .borrow_mut::<FoldButton>()
+        {
+            fold_button.set_is_open(cx, open, Animate::Yes);
+        }
+        self.area.redraw(cx);
     }
 }
 
@@ -152,6 +197,11 @@ impl Widget for ChatList {
                         item_widget
                             .markdown(cx, ids!(md))
                             .set_text(cx, &data.streaming_text);
+                        if data.streaming_kind == Some(StreamingKind::Thinking) {
+                            item_widget
+                                .label(cx, ids!(thinking_preview_lbl))
+                                .set_text(cx, &truncate_chars(&data.streaming_text, 72));
+                        }
                         item_widget.draw_all_unscoped(cx);
                         continue;
                     }
@@ -178,10 +228,12 @@ impl Widget for ChatList {
                             ChatMessage::Thinking { text } => {
                                 let item_widget = list.item(cx, item_id, id!(ThinkingMsg));
                                 item_widget.markdown(cx, ids!(md)).set_text(cx, text);
+                                item_widget
+                                    .label(cx, ids!(thinking_preview_lbl))
+                                    .set_text(cx, &truncate_chars(text, 72));
                                 item_widget.draw_all_unscoped(cx);
                             }
                             ChatMessage::Tool {
-                                status,
                                 presentation,
                                 result_preview,
                                 result_metadata,
@@ -189,8 +241,8 @@ impl Widget for ChatList {
                             } => {
                                 let item_widget = list.item(cx, item_id, id!(ToolMsg));
                                 item_widget
-                                    .label(cx, ids!(status_lbl))
-                                    .set_text(cx, status.glyph());
+                                    .label(cx, ids!(tool_icon_lbl))
+                                    .set_text(cx, &presentation.icon);
                                 item_widget
                                     .label(cx, ids!(title_lbl))
                                     .set_text(cx, &presentation.title);
@@ -346,6 +398,11 @@ impl Widget for SessionList {
                             item_widget
                                 .label(cx, ids!(time_lbl))
                                 .set_text(cx, &relative_time_label(session.updated_at));
+                            if active {
+                                item_widget
+                                    .widget(cx, ids!(session_row_spinner))
+                                    .set_visible(cx, data.is_working);
+                            }
                             item_widget.draw_all_unscoped(cx);
                         }
                         None => {}
