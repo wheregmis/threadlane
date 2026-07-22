@@ -3,6 +3,7 @@ pub mod capabilities;
 pub mod coding_agent;
 pub mod commands;
 pub mod context;
+pub mod extension_broker;
 pub mod full_trust_extension;
 pub mod packages;
 pub mod prompt_templates;
@@ -15,6 +16,9 @@ pub use capabilities::{CapabilityCatalog, ExtensionMetadata};
 pub use coding_agent::{CodingAgent, CodingAgentOptions, ExtensionBeforeToolHook, ToolPolicy};
 pub use commands::{execute_slash_command, parse_slash_command, CommandAction};
 pub use context::ProjectContext;
+pub use extension_broker::{
+    BrokerError, BrokerRequest, BrokerResponse, CapabilityPolicy, BROKER_API_VERSION,
+};
 pub use full_trust_extension::{compute_executable_revision, FullTrustRunner, TrustStore};
 pub use packages::{PackageManifest, PackageManager, PackageRecord, PackageScope};
 pub use prompt_templates::{

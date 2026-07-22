@@ -1,9 +1,28 @@
 use mypi_coding_agent::{
-    WasiExtension, WasiExtensionEffect, WasiExtensionManager, WasiExtensionManifest,
-    WasiToolDefinition,
+    BrokerRequest, BrokerResponse, CapabilityPolicy, WasiExtension, WasiExtensionEffect,
+    WasiExtensionManager, WasiExtensionManifest, WasiToolDefinition,
 };
 use std::path::PathBuf;
 use tempfile::tempdir;
+
+#[test]
+fn broker_request_round_trips_and_requires_v2() {
+    let request: BrokerRequest = serde_json::from_str(
+        r#"{"api_version":2,"capability":"tools","operation":"set_policy","arguments":{"policy":"read_only"}}"#,
+    )
+    .unwrap();
+    assert_eq!(request.api_version, 2);
+    assert_eq!(request.capability, "tools");
+    assert_eq!(request.operation, "set_policy");
+}
+
+#[test]
+fn capability_policy_rejects_undeclared_capabilities() {
+    let policy = CapabilityPolicy::new(["agent"]);
+    let response = policy.denied_response("tools");
+    assert!(!response.ok);
+    assert_eq!(response.error.unwrap().code, "capability_denied");
+}
 
 #[test]
 fn test_wasi_extension_manager_discovery() {
