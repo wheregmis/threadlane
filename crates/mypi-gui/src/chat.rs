@@ -1,15 +1,103 @@
-//! Custom list widgets: chat message list, plan item list, activity feed,
-//! and sessions sidebar.
+//! Custom list widgets: chat transcript, plan items, and sessions sidebar.
 //!
 //! Each wraps a `PortalList` (templates are defined in `app.rs`'s
 //! `script_mod!`) and reads its rows from the shared state in `state.rs`
 //! during the draw pass — same pattern as makepad's aichat example.
 
-use crate::state::MsgRole;
 use crate::state::{
-    relative_time_label, SessionListRow, ACTIVITY_DATA, CHAT_DATA, PLAN_DATA, SESSIONS_DATA,
+    relative_time_label, ChatMessage, MsgRole, SessionListRow, StreamingKind, CHAT_DATA, PLAN_DATA,
+    SESSIONS_DATA,
 };
 use makepad_widgets::*;
+use makepad_widgets::fold_button::FoldButtonAction;
+
+// FoldHeader's stock action check only tests whether the action widget exists
+// somewhere in the widget tree. With PortalList rows that makes every row
+// respond to the same FoldButton action. This row-local variant additionally
+// verifies that the button belongs to this header.
+#[derive(Script, ScriptHook, Widget, Animator)]
+pub struct ToolFoldHeader {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[rust]
+    draw_state: DrawStateWrap<ToolFoldDrawState>,
+    #[rust]
+    rect_size: f64,
+    #[rust]
+    area: Area,
+    #[find]
+    #[redraw]
+    #[live]
+    header: WidgetRef,
+    #[find]
+    #[redraw]
+    #[live]
+    body: WidgetRef,
+    #[apply_default]
+    animator: Animator,
+    #[live]
+    opened: f64,
+    #[layout]
+    layout: Layout,
+    #[walk]
+    walk: Walk,
+    #[live]
+    body_walk: Walk,
+}
+
+#[derive(Clone)]
+enum ToolFoldDrawState { DrawHeader, DrawBody }
+
+impl Widget for ToolFoldHeader {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if self.animator_handle_event(cx, event).must_redraw() { self.area.redraw(cx); }
+        self.header.handle_event(cx, event, scope);
+        self.body.handle_event(cx, event, scope);
+        if let Event::Actions(actions) = event {
+            let header_uid = self.header.widget_uid();
+            let header_path = cx.widget_tree().path_to(header_uid);
+            for action in actions {
+                if let Some(widget_action) = action.downcast_ref::<WidgetAction>() {
+                    let action_path = cx.widget_tree().path_to(widget_action.widget_uid);
+                    let belongs_to_header = !header_path.is_empty()
+                        && action_path.starts_with(&header_path);
+                    if belongs_to_header {
+                        match widget_action.cast::<FoldButtonAction>() {
+                            FoldButtonAction::Opening => self.animator_play(cx, ids!(active.on)),
+                            FoldButtonAction::Closing => self.animator_play(cx, ids!(active.off)),
+                            _ => (),
+                        }
+                    }
+                }
+            }
+        }
+    }
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        if self.draw_state.begin(cx, ToolFoldDrawState::DrawHeader) { cx.begin_turtle(walk, self.layout); }
+        if let Some(ToolFoldDrawState::DrawHeader) = self.draw_state.get() {
+            let header_walk = self.header.walk(cx);
+            self.header.draw_walk(cx, scope, header_walk)?;
+            let (body_walk, scroll_y) = if self.rect_size == 0.0 {
+                (self.body_walk, 0.0)
+            } else {
+                (Walk { height: Size::Fixed(self.rect_size * self.opened), ..self.body_walk },
+                 self.rect_size * (1.0 - self.opened))
+            };
+            cx.begin_turtle(body_walk, Layout::flow_down().with_scroll(dvec2(0.0, scroll_y)));
+            self.draw_state.set(ToolFoldDrawState::DrawBody);
+        }
+        if let Some(ToolFoldDrawState::DrawBody) = self.draw_state.get() {
+            let body_walk = self.body.walk(cx);
+            self.body.draw_walk(cx, scope, body_walk)?;
+            let used_y = cx.turtle().used().y;
+            if used_y > 0.0 { self.rect_size = used_y; }
+            cx.end_turtle(); cx.end_turtle_with_area(&mut self.area); self.draw_state.end();
+        }
+        DrawStep::done()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // ChatList — message bubbles + streaming tail
@@ -28,44 +116,89 @@ impl Widget for ChatList {
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
                 let msg_count = data.messages.len();
-                let items_len = msg_count + data.is_streaming as usize;
+                let has_streaming_tail =
+                    data.streaming_kind.is_some() && !data.streaming_text.is_empty();
+                let items_len = msg_count + has_streaming_tail as usize;
                 list.set_item_range(cx, 0, items_len);
 
                 while let Some(item_id) = list.next_visible_item(cx) {
                     // The in-progress assistant response streams as a virtual
                     // tail item; it becomes a real message once flushed.
-                    if data.is_streaming && item_id == msg_count {
-                        let item_widget = list.item(cx, item_id, id!(AssistantMsg));
-                        let text = if data.streaming_text.is_empty() {
-                            "…"
-                        } else {
-                            &data.streaming_text
+                    if has_streaming_tail && item_id == msg_count {
+                        let template = match data.streaming_kind {
+                            Some(StreamingKind::Thinking) => id!(ThinkingMsg),
+                            _ => id!(AssistantMsg),
                         };
-                        item_widget.markdown(cx, ids!(md)).set_text(cx, text);
+                        let item_widget = list.item(cx, item_id, template);
+                        item_widget
+                            .markdown(cx, ids!(md))
+                            .set_text(cx, &data.streaming_text);
                         item_widget.draw_all_unscoped(cx);
                         continue;
                     }
 
                     if let Some(msg) = data.messages.get(item_id) {
-                        match msg.role {
-                            MsgRole::User => {
-                                let item_widget = list.item(cx, item_id, id!(UserMsg));
-                                item_widget.markdown(cx, ids!(md)).set_text(cx, &msg.text);
+                        match msg {
+                            ChatMessage::Text { role, text } => match role {
+                                MsgRole::User => {
+                                    let item_widget = list.item(cx, item_id, id!(UserMsg));
+                                    item_widget.markdown(cx, ids!(md)).set_text(cx, text);
+                                    item_widget.draw_all_unscoped(cx);
+                                }
+                                MsgRole::Assistant => {
+                                    let item_widget = list.item(cx, item_id, id!(AssistantMsg));
+                                    item_widget.markdown(cx, ids!(md)).set_text(cx, text);
+                                    item_widget.draw_all_unscoped(cx);
+                                }
+                                MsgRole::System => {
+                                    let item_widget = list.item(cx, item_id, id!(SystemMsg));
+                                    item_widget.label(cx, ids!(lbl)).set_text(cx, text);
+                                    item_widget.draw_all_unscoped(cx);
+                                }
+                            },
+                            ChatMessage::Thinking { text } => {
+                                let item_widget = list.item(cx, item_id, id!(ThinkingMsg));
+                                item_widget.markdown(cx, ids!(md)).set_text(cx, text);
                                 item_widget.draw_all_unscoped(cx);
                             }
-                            MsgRole::Assistant => {
-                                let item_widget = list.item(cx, item_id, id!(AssistantMsg));
-                                item_widget.markdown(cx, ids!(md)).set_text(cx, &msg.text);
-                                item_widget.draw_all_unscoped(cx);
-                            }
-                            MsgRole::System => {
-                                let item_widget = list.item(cx, item_id, id!(SystemMsg));
-                                item_widget.label(cx, ids!(lbl)).set_text(cx, &msg.text);
-                                item_widget.draw_all_unscoped(cx);
-                            }
-                            MsgRole::Tool => {
+                            ChatMessage::Tool {
+                                status,
+                                presentation,
+                                result_preview,
+                                result_metadata,
+                                ..
+                            } => {
                                 let item_widget = list.item(cx, item_id, id!(ToolMsg));
-                                item_widget.label(cx, ids!(lbl)).set_text(cx, &msg.text);
+                                item_widget
+                                    .label(cx, ids!(status_lbl))
+                                    .set_text(cx, status.glyph());
+                                item_widget
+                                    .label(cx, ids!(title_lbl))
+                                    .set_text(cx, &presentation.title);
+                                item_widget
+                                    .label(cx, ids!(meta_lbl))
+                                    .set_text(cx, &presentation.metadata);
+                                item_widget
+                                    .widget(cx, ids!(meta_lbl))
+                                    .set_visible(cx, !presentation.metadata.is_empty());
+                                item_widget
+                                    .label(cx, ids!(preview_lbl))
+                                    .set_text(cx, &presentation.primary);
+                                item_widget
+                                    .label(cx, ids!(result_meta_lbl))
+                                    .set_text(cx, result_metadata);
+                                item_widget
+                                    .label(cx, ids!(args_lbl))
+                                    .set_text(cx, &presentation.arguments_detail);
+                                item_widget
+                                    .widget(cx, ids!(args_section))
+                                    .set_visible(cx, !presentation.arguments_detail.is_empty());
+                                item_widget
+                                    .label(cx, ids!(result_lbl))
+                                    .set_text(cx, result_preview);
+                                item_widget
+                                    .widget(cx, ids!(result_section))
+                                    .set_visible(cx, !result_preview.is_empty());
                                 item_widget.draw_all_unscoped(cx);
                             }
                         }
@@ -112,69 +245,13 @@ impl Widget for PlanList {
                         item_widget.draw_all_unscoped(cx);
                     } else if let Some(plan_item) = data.items.get(item_id) {
                         let item_widget = list.item(cx, item_id, id!(PlanRow));
-                        item_widget.label(cx, ids!(status_lbl)).set_text(
-                            cx,
-                            if plan_item.completed { "✓" } else { "○" },
-                        );
+                        item_widget
+                            .label(cx, ids!(status_lbl))
+                            .set_text(cx, if plan_item.completed { "✓" } else { "○" });
                         item_widget.label(cx, ids!(desc_lbl)).set_text(
                             cx,
                             &format!("{}. {}", plan_item.index, plan_item.description),
                         );
-                        item_widget.draw_all_unscoped(cx);
-                    }
-                }
-            }
-        }
-        DrawStep::done()
-    }
-
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        self.view.handle_event(cx, event, scope);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// ActivityList — compact tool execution feed
-// ---------------------------------------------------------------------------
-
-#[derive(Script, ScriptHook, Widget)]
-pub struct ActivityList {
-    #[deref]
-    view: View,
-}
-
-impl Widget for ActivityList {
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        let data = ACTIVITY_DATA.read().unwrap();
-
-        while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
-            if let Some(mut list) = item.as_portal_list().borrow_mut() {
-                let rows = data.len().max(1);
-                list.set_item_range(cx, 0, rows);
-
-                while let Some(item_id) = list.next_visible_item(cx) {
-                    if data.is_empty() {
-                        let item_widget = list.item(cx, item_id, id!(EmptyRow));
-                        item_widget
-                            .label(cx, ids!(lbl))
-                            .set_text(cx, "No tool activity yet.");
-                        item_widget.draw_all_unscoped(cx);
-                    } else if let Some(entry) = data.get(item_id) {
-                        let item_widget = list.item(cx, item_id, id!(ActivityRow));
-                        item_widget
-                            .label(cx, ids!(head_lbl))
-                            .set_text(cx, &format!("{} {}", entry.status.glyph(), entry.name));
-                        let detail = if entry.detail.is_empty() {
-                            String::new()
-                        } else {
-                            crate::state::truncate_chars(&entry.detail, 72)
-                        };
-                        item_widget
-                            .label(cx, ids!(detail_lbl))
-                            .set_text(cx, &detail);
-                        item_widget
-                            .widget(cx, ids!(detail_lbl))
-                            .set_visible(cx, !detail.is_empty());
                         item_widget.draw_all_unscoped(cx);
                     }
                 }
@@ -245,7 +322,8 @@ impl Widget for SessionList {
                             let Some(session) = project.sessions.get(*session_idx) else {
                                 continue;
                             };
-                            let active = data.active_session_id.as_deref() == Some(session.id.as_str())
+                            let active = data.active_session_id.as_deref()
+                                == Some(session.id.as_str())
                                 && data.active_work_dir == session.work_dir;
                             let template = if active {
                                 id!(SessionRowActive)

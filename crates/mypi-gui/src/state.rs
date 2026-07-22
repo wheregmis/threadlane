@@ -1,22 +1,24 @@
-//! Shared GUI state: chat transcript, plan panel, activity feed, sessions
-//! sidebar, and the event type used to pump agent/background-task results
-//! onto the UI thread.
+//! Shared GUI state: chat transcript, plan panel, sessions sidebar, and the
+//! event type used to pump agent/background-task results onto the UI thread.
 //!
-//! The chat/plan/activity/session data lives in `static RwLock`s so the
-//! custom list widgets (see `chat.rs`) can read it during their draw pass
+//! The chat/plan/session data lives in `static RwLock`s so the custom list
+//! widgets (see `chat.rs`) can read it during their draw pass
 //! without fighting `Scope` lifetimes — same pattern as makepad's aichat example.
 
 use mypi_agent::{AgentEvent, AgentMessage, SessionTree};
 use mypi_coding_agent::TaskAgentEvent;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Events sent from background tokio tasks to the UI thread.
 pub enum GuiAgentEvent {
     TaskEvent(TaskAgentEvent),
     Agent(AgentEvent),
-    DeviceCodePrompt { user_code: String, url: String },
+    DeviceCodePrompt {
+        user_code: String,
+        url: String,
+    },
     DeviceLoginSuccess,
     AvailableModelsLoaded(Vec<String>),
     CommandOutput(String),
@@ -38,66 +40,352 @@ pub enum MsgRole {
     User,
     Assistant,
     System,
-    Tool,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum ToolStatus {
+    Running,
+    Done,
+    Error,
+}
+
+impl ToolStatus {
+    pub fn glyph(self) -> &'static str {
+        match self {
+            ToolStatus::Running => "◌",
+            ToolStatus::Done => "✓",
+            ToolStatus::Error => "✗",
+        }
+    }
 }
 
 #[derive(Clone)]
-pub struct ChatMessage {
-    pub role: MsgRole,
-    pub text: String,
+pub struct ToolPresentation {
+    pub title: String,
+    pub primary: String,
+    pub metadata: String,
+    pub arguments_detail: String,
+}
+
+#[derive(Clone)]
+pub enum ChatMessage {
+    Text {
+        role: MsgRole,
+        text: String,
+    },
+    Thinking {
+        text: String,
+    },
+    Tool {
+        id: String,
+        name: String,
+        arguments: String,
+        output: String,
+        status: ToolStatus,
+        presentation: ToolPresentation,
+        result_preview: String,
+        result_metadata: String,
+        started_at: Instant,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum StreamingKind {
+    Assistant,
+    Thinking,
 }
 
 pub struct ChatData {
     pub messages: Vec<ChatMessage>,
     pub streaming_text: String,
-    pub is_streaming: bool,
+    pub streaming_kind: Option<StreamingKind>,
 }
 
 pub static CHAT_DATA: RwLock<ChatData> = RwLock::new(ChatData {
     messages: Vec::new(),
     streaming_text: String::new(),
-    is_streaming: false,
+    streaming_kind: None,
 });
 
-/// Append a finished message; returns its index (stable — messages are only appended).
-pub fn push_chat(role: MsgRole, text: impl Into<String>) -> usize {
-    let mut data = CHAT_DATA.write().unwrap();
-    data.messages.push(ChatMessage {
+pub fn push_chat(role: MsgRole, text: impl Into<String>) {
+    CHAT_DATA.write().unwrap().messages.push(ChatMessage::Text {
         role,
         text: text.into(),
     });
-    data.messages.len() - 1
 }
 
-/// Replace the text of an existing message (used to flip tool lines to done/failed).
-pub fn set_chat_text(index: usize, text: impl Into<String>) {
-    let mut data = CHAT_DATA.write().unwrap();
-    if let Some(msg) = data.messages.get_mut(index) {
-        msg.text = text.into();
+fn flush_streaming_locked(data: &mut ChatData) {
+    let text = std::mem::take(&mut data.streaming_text);
+    let kind = data.streaming_kind.take();
+    if text.trim().is_empty() {
+        return;
     }
+    data.messages.push(match kind {
+        Some(StreamingKind::Thinking) => ChatMessage::Thinking { text },
+        _ => ChatMessage::Text {
+            role: MsgRole::Assistant,
+            text,
+        },
+    });
 }
 
-/// Append a streamed text delta to the in-progress assistant message.
-pub fn push_stream_delta(delta: &str) {
+fn push_stream_delta_for(kind: StreamingKind, delta: &str) {
+    if delta.is_empty() {
+        return;
+    }
     let mut data = CHAT_DATA.write().unwrap();
-    if !data.is_streaming {
-        data.is_streaming = true;
-        data.streaming_text.clear();
+    if data.streaming_kind != Some(kind) {
+        flush_streaming_locked(&mut data);
+        data.streaming_kind = Some(kind);
     }
     data.streaming_text.push_str(delta);
 }
 
-/// Finalize the streaming buffer into a proper assistant message (if any).
+pub fn push_stream_delta(delta: &str) {
+    push_stream_delta_for(StreamingKind::Assistant, delta);
+}
+
+pub fn push_reasoning_delta(delta: &str) {
+    push_stream_delta_for(StreamingKind::Thinking, delta);
+}
+
 pub fn flush_streaming() {
+    flush_streaming_locked(&mut CHAT_DATA.write().unwrap());
+}
+
+pub fn push_tool(id: String, name: String, arguments: String) {
+    flush_streaming();
+    let presentation = tool_presentation(&name, &arguments);
     let mut data = CHAT_DATA.write().unwrap();
-    let text = std::mem::take(&mut data.streaming_text);
-    data.is_streaming = false;
-    if !text.is_empty() {
-        data.messages.push(ChatMessage {
-            role: MsgRole::Assistant,
-            text,
-        });
+    if let Some(ChatMessage::Tool {
+        name: existing_name,
+        arguments: existing_arguments,
+        status,
+        presentation: existing_presentation,
+        output,
+        result_preview,
+        result_metadata,
+        started_at,
+        ..
+    }) = data.messages.iter_mut().rev().find(|message| {
+        matches!(message, ChatMessage::Tool { id: existing_id, .. } if existing_id == &id)
+    }) {
+        *existing_name = name;
+        *existing_arguments = arguments;
+        *existing_presentation = presentation;
+        *output = String::new();
+        *result_preview = String::new();
+        *result_metadata = "Running…".into();
+        *status = ToolStatus::Running;
+        *started_at = Instant::now();
+        return;
     }
+    data.messages.push(ChatMessage::Tool {
+        id,
+        name,
+        arguments,
+        output: String::new(),
+        status: ToolStatus::Running,
+        presentation,
+        result_preview: String::new(),
+        result_metadata: "Running…".into(),
+        started_at: Instant::now(),
+    });
+}
+
+pub fn update_tool(id: &str, output: String, status: Option<ToolStatus>) {
+    let mut data = CHAT_DATA.write().unwrap();
+    if let Some(ChatMessage::Tool {
+        output: existing_output,
+        status: existing_status,
+        result_preview,
+        result_metadata,
+        started_at,
+        ..
+    }) = data.messages.iter_mut().rev().find(
+        |message| matches!(message, ChatMessage::Tool { id: existing_id, .. } if existing_id == id),
+    ) {
+        *existing_output = output;
+        *result_preview = tool_result_preview(existing_output, 800);
+        *result_metadata = result_metadata_for(
+            existing_output,
+            status.unwrap_or(*existing_status),
+            started_at.elapsed(),
+        );
+        if let Some(status) = status {
+            *existing_status = status;
+        }
+    }
+}
+
+pub fn tool_title(name: &str) -> String {
+    match name {
+        "run_command" => "Run command".into(),
+        "read_file" => "Read file".into(),
+        "write_file" => "Write file".into(),
+        "edit_file" => "Edit file".into(),
+        "list_dir" => "List directory".into(),
+        _ => name.replace('_', " "),
+    }
+}
+
+pub fn tool_presentation(name: &str, arguments: &str) -> ToolPresentation {
+    let parsed = serde_json::from_str::<serde_json::Value>(arguments).ok();
+    let args = parsed.as_ref();
+    let get_str = |key: &str| {
+        args.and_then(|value| value.get(key))
+            .and_then(serde_json::Value::as_str)
+    };
+    let path = get_str("path").map(compact_path).unwrap_or_default();
+
+    let (primary, metadata) = match name {
+        "run_command" => (
+            truncate_chars(get_str("command").unwrap_or(arguments), 300),
+            get_str("cwd")
+                .filter(|cwd| !cwd.is_empty())
+                .map(|cwd| format!("in {cwd}"))
+                .unwrap_or_default(),
+        ),
+        "read_file" => {
+            let start = args
+                .and_then(|value| value.get("start_line"))
+                .and_then(serde_json::Value::as_u64);
+            let end = args
+                .and_then(|value| value.get("end_line"))
+                .and_then(serde_json::Value::as_u64);
+            let range = match (start, end) {
+                (Some(start), Some(end)) => format!("lines {start}–{end}"),
+                (Some(start), None) => format!("from line {start}"),
+                _ => String::new(),
+            };
+            (path.clone(), range)
+        }
+        "write_file" => {
+            let content = get_str("content").unwrap_or_default();
+            (path.clone(), text_size_label(content))
+        }
+        "edit_file" => {
+            let old = get_str("target").unwrap_or_default();
+            let new = get_str("replacement").unwrap_or_default();
+            (
+                path.clone(),
+                format!("−{} +{} lines", line_count(old), line_count(new)),
+            )
+        }
+        "list_dir" => (
+            if path.is_empty() {
+                ".".into()
+            } else {
+                path.clone()
+            },
+            String::new(),
+        ),
+        _ => (truncate_chars(arguments, 220), String::new()),
+    };
+
+    let arguments_detail = parsed
+        .and_then(|value| serde_json::to_string_pretty(&value).ok())
+        .unwrap_or_else(|| arguments.to_string());
+    ToolPresentation {
+        title: tool_title(name),
+        primary,
+        metadata,
+        arguments_detail,
+    }
+}
+
+/// Backwards-compatible compact preview used by tests and other callers.
+pub fn tool_preview(name: &str, arguments: &str) -> String {
+    let presentation = tool_presentation(name, arguments);
+    if presentation.metadata.is_empty() {
+        presentation.primary
+    } else if name == "read_file" {
+        format!("{}  ({})", presentation.primary, presentation.metadata)
+    } else {
+        presentation.primary
+    }
+}
+
+fn compact_path(path: &str) -> String {
+    let candidate = Path::new(path);
+    if let Ok(work_dir) = std::env::current_dir() {
+        if let Ok(relative) = candidate.strip_prefix(&work_dir) {
+            return relative.display().to_string();
+        }
+    }
+    // Absolute paths outside the active project are shortened without hiding
+    // their filename, while relative paths remain untouched.
+    if candidate.is_absolute() {
+        let parts: Vec<_> = candidate.components().collect();
+        if parts.len() > 4 {
+            return format!(
+                "…/{}/{}/{}",
+                parts[parts.len() - 3].as_os_str().to_string_lossy(),
+                parts[parts.len() - 2].as_os_str().to_string_lossy(),
+                parts[parts.len() - 1].as_os_str().to_string_lossy()
+            );
+        }
+    }
+    path.to_string()
+}
+
+fn line_count(text: &str) -> usize {
+    if text.is_empty() {
+        0
+    } else {
+        text.lines().count()
+    }
+}
+
+fn text_size_label(text: &str) -> String {
+    format!(
+        "{} lines · {}",
+        line_count(text),
+        byte_size_label(text.len())
+    )
+}
+
+fn byte_size_label(bytes: usize) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+fn result_metadata_for(output: &str, status: ToolStatus, elapsed: Duration) -> String {
+    if status == ToolStatus::Running {
+        return format!("Running… · {}", byte_size_label(output.len()));
+    }
+    let outcome = if status == ToolStatus::Error {
+        "Failed"
+    } else {
+        "Done"
+    };
+    format!(
+        "{outcome} · {} · {:.1}s",
+        byte_size_label(output.len()),
+        elapsed.as_secs_f64()
+    )
+}
+
+/// Preserve both the beginning and the diagnostically useful tail of output.
+pub fn tool_result_preview(text: &str, max_chars: usize) -> String {
+    let text = text.trim();
+    let count = text.chars().count();
+    if count <= max_chars {
+        return text.to_string();
+    }
+    let head_len = max_chars * 3 / 4;
+    let tail_len = max_chars - head_len;
+    let head: String = text.chars().take(head_len).collect();
+    let tail: String = text.chars().skip(count - tail_len).collect();
+    format!(
+        "{head}\n\n… {} characters omitted …\n\n{tail}",
+        count - max_chars
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -166,67 +454,6 @@ pub fn refresh_plan(work_dir: &Path) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Activity feed (tool executions)
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Copy, PartialEq)]
-pub enum ActivityStatus {
-    Info,
-    Requested,
-    Running,
-    Done,
-    Error,
-}
-
-impl ActivityStatus {
-    pub fn glyph(self) -> &'static str {
-        match self {
-            ActivityStatus::Info => "·",
-            ActivityStatus::Requested => "→",
-            ActivityStatus::Running => "…",
-            ActivityStatus::Done => "✓",
-            ActivityStatus::Error => "✗",
-        }
-    }
-}
-
-pub struct ActivityEntry {
-    /// tool_call_id when this row tracks a tool execution.
-    pub id: Option<String>,
-    pub name: String,
-    pub status: ActivityStatus,
-    pub detail: String,
-}
-
-pub static ACTIVITY_DATA: RwLock<Vec<ActivityEntry>> = RwLock::new(Vec::new());
-
-pub fn push_activity(id: Option<String>, name: impl Into<String>, status: ActivityStatus, detail: impl Into<String>) {
-    ACTIVITY_DATA.write().unwrap().push(ActivityEntry {
-        id,
-        name: name.into(),
-        status,
-        detail: detail.into(),
-    });
-}
-
-/// Update the most recent activity entry with the given tool_call_id.
-pub fn update_activity(id: &str, status: Option<ActivityStatus>, detail: Option<String>) {
-    let mut data = ACTIVITY_DATA.write().unwrap();
-    if let Some(entry) = data
-        .iter_mut()
-        .rev()
-        .find(|entry| entry.id.as_deref() == Some(id))
-    {
-        if let Some(status) = status {
-            entry.status = status;
-        }
-        if let Some(detail) = detail {
-            entry.detail = detail;
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Sessions sidebar (projects → session rows)
 // ---------------------------------------------------------------------------
 
@@ -250,7 +477,9 @@ pub struct ProjectGroup {
 /// Flattened PortalList rows for the sessions sidebar.
 #[derive(Clone, Copy, Debug)]
 pub enum SessionListRow {
-    ProjectHeader { project_idx: usize },
+    ProjectHeader {
+        project_idx: usize,
+    },
     Session {
         project_idx: usize,
         session_idx: usize,
@@ -382,11 +611,7 @@ fn load_extra_project_dirs(work_dir: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     for item in list {
         let p = PathBuf::from(item);
-        let resolved = if p.is_absolute() {
-            p
-        } else {
-            work_dir.join(p)
-        };
+        let resolved = if p.is_absolute() { p } else { work_dir.join(p) };
         if resolved != work_dir && resolved.is_dir() {
             dirs.push(resolved);
         }
@@ -547,39 +772,90 @@ pub fn replace_chat_from_agent_messages(messages: &[AgentMessage]) {
     let mut data = CHAT_DATA.write().unwrap();
     data.messages.clear();
     data.streaming_text.clear();
-    data.is_streaming = false;
+    data.streaming_kind = None;
     for msg in messages {
         match msg {
-            AgentMessage::User { content } => {
-                data.messages.push(ChatMessage {
-                    role: MsgRole::User,
-                    text: content.clone(),
-                });
-            }
-            AgentMessage::Assistant { content, .. } => {
+            AgentMessage::User { content } => data.messages.push(ChatMessage::Text {
+                role: MsgRole::User,
+                text: content.clone(),
+            }),
+            AgentMessage::Assistant {
+                content,
+                tool_calls,
+            } => {
                 if let Some(text) = content {
                     if !text.is_empty() {
-                        data.messages.push(ChatMessage {
+                        data.messages.push(ChatMessage::Text {
                             role: MsgRole::Assistant,
                             text: text.clone(),
                         });
                     }
                 }
+                if let Some(tool_calls) = tool_calls {
+                    for call in tool_calls {
+                        let presentation =
+                            tool_presentation(&call.function.name, &call.function.arguments);
+                        data.messages.push(ChatMessage::Tool {
+                            id: call.id.clone(),
+                            name: call.function.name.clone(),
+                            arguments: call.function.arguments.clone(),
+                            output: String::new(),
+                            status: ToolStatus::Running,
+                            presentation,
+                            result_preview: String::new(),
+                            result_metadata: "Awaiting result…".into(),
+                            started_at: Instant::now(),
+                        });
+                    }
+                }
             }
-            AgentMessage::Tool { name, is_error, .. } => {
-                let glyph = if *is_error { "✗" } else { "✓" };
-                data.messages.push(ChatMessage {
-                    role: MsgRole::Tool,
-                    text: format!("{glyph} {name}"),
-                });
+            AgentMessage::Tool {
+                tool_call_id,
+                name,
+                content,
+                is_error,
+            } => {
+                if let Some(ChatMessage::Tool {
+                    output,
+                    status,
+                    result_preview,
+                    result_metadata,
+                    started_at,
+                    ..
+                }) = data.messages.iter_mut().rev().find(
+                    |message| matches!(message, ChatMessage::Tool { id, .. } if id == tool_call_id),
+                ) {
+                    *output = content.clone();
+                    *status = if *is_error {
+                        ToolStatus::Error
+                    } else {
+                        ToolStatus::Done
+                    };
+                    *result_preview = tool_result_preview(content, 800);
+                    *result_metadata = result_metadata_for(content, *status, started_at.elapsed());
+                } else {
+                    let status = if *is_error {
+                        ToolStatus::Error
+                    } else {
+                        ToolStatus::Done
+                    };
+                    let presentation = tool_presentation(name, "");
+                    data.messages.push(ChatMessage::Tool {
+                        id: tool_call_id.clone(),
+                        name: name.clone(),
+                        arguments: String::new(),
+                        output: content.clone(),
+                        status,
+                        presentation,
+                        result_preview: tool_result_preview(content, 800),
+                        result_metadata: result_metadata_for(content, status, Duration::ZERO),
+                        started_at: Instant::now(),
+                    });
+                }
             }
             AgentMessage::System { .. } | AgentMessage::Custom { .. } => {}
         }
     }
-}
-
-pub fn clear_activity() {
-    ACTIVITY_DATA.write().unwrap().clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -622,4 +898,68 @@ pub fn truncate_chars(text: &str, max_chars: usize) -> String {
     }
     let truncated: String = text.chars().take(max_chars).collect();
     format!("{truncated}…")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn streaming_kind_switch_preserves_assistant_reasoning_order() {
+        let mut data = ChatData {
+            messages: Vec::new(),
+            streaming_text: "answer prefix".into(),
+            streaming_kind: Some(StreamingKind::Assistant),
+        };
+        flush_streaming_locked(&mut data);
+        data.streaming_text = "reasoning".into();
+        data.streaming_kind = Some(StreamingKind::Thinking);
+        flush_streaming_locked(&mut data);
+
+        assert!(matches!(
+            &data.messages[0],
+            ChatMessage::Text { role: MsgRole::Assistant, text } if text == "answer prefix"
+        ));
+        assert!(matches!(
+            &data.messages[1],
+            ChatMessage::Thinking { text } if text == "reasoning"
+        ));
+    }
+
+    #[test]
+    fn result_preview_keeps_head_and_tail() {
+        let text = "abcdefghij";
+        assert_eq!(
+            tool_result_preview(text, 6),
+            "abcd\n\n… 4 characters omitted …\n\nij"
+        );
+    }
+
+    #[test]
+    fn formats_structured_write_and_edit_metadata() {
+        let write = tool_presentation("write_file", r#"{"path":"src/a.rs","content":"one\ntwo"}"#);
+        assert_eq!(write.primary, "src/a.rs");
+        assert_eq!(write.metadata, "2 lines · 7 B");
+
+        let edit = tool_presentation(
+            "edit_file",
+            r#"{"path":"src/a.rs","target":"one\ntwo","replacement":"three"}"#,
+        );
+        assert_eq!(edit.metadata, "−2 +1 lines");
+    }
+
+    #[test]
+    fn formats_core_tool_previews() {
+        assert_eq!(
+            tool_preview(
+                "read_file",
+                r#"{"path":"src/main.rs","start_line":10,"end_line":20}"#,
+            ),
+            "src/main.rs  (lines 10–20)"
+        );
+        assert_eq!(
+            tool_preview("run_command", r#"{"command":"cargo test","cwd":"."}"#),
+            "cargo test"
+        );
+    }
 }

@@ -760,7 +760,9 @@ impl CommandTextInput {
 
         for (idx, item) in self.selectable_widgets.iter().enumerate() {
             let mut item = item.clone();
-            script_apply_eval!(cx, item, { show_bg: true, cursor: MouseCursor.Hand });
+            // Cursor styling belongs to the item template. `script_apply_eval!`
+            // does not inherit the module scope where `MouseCursor` is registered.
+            script_apply_eval!(cx, item, { show_bg: true });
 
             // If there is a keyboard focus, prioritize it over mouse hover
             // If there is no keyboard focus, show mouse hover

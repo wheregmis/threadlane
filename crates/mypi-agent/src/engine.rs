@@ -77,6 +77,7 @@ impl AgentEngine {
                         current_turn_text.push_str(&token);
                         let _ = ui_tx.send(AgentUIEvent::TokenStream(token)).await;
                     }
+                    StreamEvent::ReasoningToken(_) => {}
                     StreamEvent::ToolCallStart { name, .. } => {
                         let _ = ui_tx
                             .send(AgentUIEvent::TokenStream(format!(

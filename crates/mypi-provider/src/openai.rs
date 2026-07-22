@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use futures_util::StreamExt;
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -22,10 +22,54 @@ pub struct ToolCall {
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     ContentToken(String),
+    ReasoningToken(String),
     ToolCallStart { name: String },
     ToolCallArgsDelta { args_chunk: String },
     Finished { tool_calls: Vec<ToolCall> },
     Error(String),
+}
+
+fn is_responses_text_delta(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "response.output_text.delta"
+            | "response.reasoning_summary_text.delta"
+            | "response.reasoning_text.delta"
+    )
+}
+
+fn parse_responses_text_delta(value: &Value) -> Option<StreamEvent> {
+    let event_type = value.get("type")?.as_str()?;
+    let delta = value.get("delta")?.as_str()?.to_string();
+
+    match event_type {
+        "response.output_text.delta" => Some(StreamEvent::ContentToken(delta)),
+        "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+            Some(StreamEvent::ReasoningToken(delta))
+        }
+        _ => None,
+    }
+}
+
+fn api_error_details(value: &Value) -> (String, String) {
+    let nested = value.get("error").or_else(|| {
+        value
+            .get("response")
+            .and_then(|response| response.get("error"))
+    });
+    let code = nested
+        .and_then(|error| error.get("code"))
+        .or_else(|| value.get("code"))
+        .and_then(Value::as_str)
+        .unwrap_or("error")
+        .to_string();
+    let message = nested
+        .and_then(|error| error.get("message"))
+        .or_else(|| value.get("message"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| nested.unwrap_or(value).to_string());
+    (code, message)
 }
 
 pub async fn fetch_available_models(api_key: &str, account_id: Option<&str>) -> Vec<String> {
@@ -118,7 +162,12 @@ impl OpenAIClient {
             .header(CONTENT_TYPE, "application/json");
 
         if let Some(ref acc_id) = self.account_id {
-            req = req.header("chatgpt-account-id", acc_id.clone());
+            req = req
+                .header("chatgpt-account-id", acc_id.clone())
+                .header("OpenAI-Beta", "responses=experimental")
+                .header(ACCEPT, "text/event-stream")
+                .header("originator", "mypi")
+                .header(USER_AGENT, "mypi");
         }
 
         let res = match req.json(&payload).send().await {
@@ -178,11 +227,7 @@ impl OpenAIClient {
                                 v.get("type").and_then(|value| value.as_str()).unwrap_or("");
 
                             if event_type == "error" {
-                                let code = v.get("code").and_then(|c| c.as_str()).unwrap_or("error");
-                                let message = v
-                                    .get("message")
-                                    .and_then(|m| m.as_str())
-                                    .unwrap_or("Unknown SSE error");
+                                let (code, message) = api_error_details(&v);
                                 let _ = event_tx
                                     .send(StreamEvent::Error(format!(
                                         "OpenAI SSE Error [{code}]: {message}"
@@ -190,15 +235,7 @@ impl OpenAIClient {
                                     .await;
                                 return;
                             } else if event_type == "response.failed" {
-                                let err_obj = v.get("response").and_then(|r| r.get("error"));
-                                let code = err_obj
-                                    .and_then(|e| e.get("code"))
-                                    .and_then(|c| c.as_str())
-                                    .unwrap_or("response_failed");
-                                let message = err_obj
-                                    .and_then(|e| e.get("message"))
-                                    .and_then(|m| m.as_str())
-                                    .unwrap_or("Response failed");
+                                let (code, message) = api_error_details(&v);
                                 let _ = event_tx
                                     .send(StreamEvent::Error(format!(
                                         "OpenAI Response Failed [{code}]: {message}"
@@ -208,7 +245,9 @@ impl OpenAIClient {
                             } else if let Some(err_val) = v.get("error") {
                                 let msg = if let Some(s) = err_val.as_str() {
                                     s.to_string()
-                                } else if let Some(m) = err_val.get("message").and_then(|m| m.as_str()) {
+                                } else if let Some(m) =
+                                    err_val.get("message").and_then(|m| m.as_str())
+                                {
                                     m.to_string()
                                 } else {
                                     err_val.to_string()
@@ -296,12 +335,9 @@ impl OpenAIClient {
                                         })
                                         .await;
                                 }
-                            } else if event_type == "response.output_text.delta" {
-                                if let Some(delta) = v.get("delta").and_then(|value| value.as_str())
-                                {
-                                    let _ = event_tx
-                                        .send(StreamEvent::ContentToken(delta.to_string()))
-                                        .await;
+                            } else if is_responses_text_delta(event_type) {
+                                if let Some(event) = parse_responses_text_delta(&v) {
+                                    let _ = event_tx.send(event).await;
                                 }
                             // 1. Handle remaining Codex text delta fields
                             } else if let Some(delta) = v.get("delta") {
@@ -324,12 +360,16 @@ impl OpenAIClient {
                                 }
                             }
 
-                            // 2. Handle Codex output_text / text fields
-                            if let Some(text) = v.get("text").and_then(|t| t.as_str()) {
-                                if !text.is_empty() {
-                                    let _ = event_tx
-                                        .send(StreamEvent::ContentToken(text.to_string()))
-                                        .await;
+                            // 2. Handle Codex output_text / text fields. Known Responses
+                            // text delta events were handled above and must not be duplicated
+                            // or allow reasoning to fall through as assistant output.
+                            if !is_responses_text_delta(event_type) {
+                                if let Some(text) = v.get("text").and_then(|t| t.as_str()) {
+                                    if !text.is_empty() {
+                                        let _ = event_tx
+                                            .send(StreamEvent::ContentToken(text.to_string()))
+                                            .await;
+                                    }
                                 }
                             }
 
@@ -426,5 +466,66 @@ impl OpenAIClient {
                 tool_calls: final_tool_calls,
             })
             .await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{api_error_details, parse_responses_text_delta, StreamEvent};
+    use serde_json::json;
+
+    #[test]
+    fn parses_responses_output_text_delta_as_content() {
+        let event = parse_responses_text_delta(&json!({
+            "type": "response.output_text.delta",
+            "delta": "answer"
+        }));
+
+        assert!(matches!(event, Some(StreamEvent::ContentToken(text)) if text == "answer"));
+    }
+
+    #[test]
+    fn parses_responses_reasoning_deltas_separately_from_content() {
+        for event_type in [
+            "response.reasoning_summary_text.delta",
+            "response.reasoning_text.delta",
+        ] {
+            let event = parse_responses_text_delta(&json!({
+                "type": event_type,
+                "delta": "thinking"
+            }));
+
+            assert!(matches!(event, Some(StreamEvent::ReasoningToken(text)) if text == "thinking"));
+        }
+    }
+
+    #[test]
+    fn extracts_nested_sse_error_details() {
+        let (code, message) = api_error_details(&json!({
+            "type": "error",
+            "error": {
+                "code": "model_not_found",
+                "message": "The requested model does not exist."
+            }
+        }));
+
+        assert_eq!(code, "model_not_found");
+        assert_eq!(message, "The requested model does not exist.");
+    }
+
+    #[test]
+    fn extracts_response_failed_error_details() {
+        let (code, message) = api_error_details(&json!({
+            "type": "response.failed",
+            "response": {
+                "error": {
+                    "code": "invalid_request_error",
+                    "message": "Invalid request."
+                }
+            }
+        }));
+
+        assert_eq!(code, "invalid_request_error");
+        assert_eq!(message, "Invalid request.");
     }
 }

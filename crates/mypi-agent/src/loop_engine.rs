@@ -85,7 +85,10 @@ pub fn convert_to_codex_llm(messages: &[AgentMessage]) -> (String, Vec<Value>) {
                     "content": [{ "type": "input_text", "text": content }]
                 }));
             }
-            AgentMessage::Assistant { content, tool_calls } => {
+            AgentMessage::Assistant {
+                content,
+                tool_calls,
+            } => {
                 if let Some(c) = content {
                     if !c.trim().is_empty() {
                         items.push(serde_json::json!({
@@ -270,6 +273,13 @@ impl AgentLoop {
                         let _ = self.event_tx.send(AgentEvent::MessageUpdate {
                             text_delta: Some(token),
                             reasoning_delta: None,
+                            tool_call_name: None,
+                        });
+                    }
+                    StreamEvent::ReasoningToken(token) => {
+                        let _ = self.event_tx.send(AgentEvent::MessageUpdate {
+                            text_delta: None,
+                            reasoning_delta: Some(token),
                             tool_call_name: None,
                         });
                     }

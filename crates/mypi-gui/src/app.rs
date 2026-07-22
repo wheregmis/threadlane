@@ -1,16 +1,15 @@
 //! App shell: script_mod! DSL, startup/auth wiring, agent event pump.
 //!
-//! Chat/plan/activity rows are drawn by the custom widgets in `chat.rs`
-//! from the shared state in `state.rs`.
+//! Chat and plan rows are drawn by the custom widgets in `chat.rs` from the
+//! shared state in `state.rs`.
 
-use crate::chat::{ActivityList, ChatList, PlanList, SessionList};
+use crate::chat::{ChatList, PlanList, SessionList, ToolFoldHeader};
 use crate::command_text_input::*;
 use crate::state::{
-    active_session_entry, archive_session, builtin_commands, clear_activity, create_new_session,
-    delete_session, flush_streaming, push_activity, push_chat, push_stream_delta, refresh_plan,
+    active_session_entry, archive_session, builtin_commands, create_new_session, delete_session,
+    flush_streaming, push_chat, push_reasoning_delta, push_stream_delta, push_tool, refresh_plan,
     refresh_sessions, replace_chat_from_agent_messages, session_entry_at_row, set_active_session,
-    set_chat_text, truncate_chars, update_activity, ActivityStatus, CommandInfo, GuiAgentEvent,
-    MsgRole, SessionEntry,
+    truncate_chars, update_tool, CommandInfo, GuiAgentEvent, MsgRole, SessionEntry, ToolStatus,
 };
 use makepad_widgets::text::selection::Cursor;
 use makepad_widgets::*;
@@ -18,7 +17,7 @@ use mypi_agent::{get_runtime, AgentEvent};
 use mypi_coding_agent::{CodingAgent, CodingAgentOptions, ProjectContext};
 use mypi_provider::auth;
 use mypi_provider::openai::fetch_available_models;
-use std::collections::HashMap;
+
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -141,17 +140,179 @@ script_mod! {
                 }
             }
 
-            ToolMsg := View {
+            ThinkingMsg := FoldHeader {
                 width: Fill
                 height: Fit
-                margin: Inset{top: 2 bottom: 2 left: 12 right: 12}
-                lbl := Label {
+                margin: Inset{top: 5 bottom: 5 left: 16 right: 48}
+                opened: 0.0
+                animator +: {
+                    active: { default: @off }
+                }
+                header: View {
                     width: Fill
                     height: Fit
-                    text: ""
-                    draw_text +: {
-                        color: #x6f7a88
-                        text_style: theme.font_code { font_size: 9.5 }
+                    flow: Right
+                    spacing: 6
+                    fold_button := FoldButton {
+                        draw_bg +: { active: 0.0 }
+                        animator +: {
+                            active: { default: @off }
+                        }
+                    }
+                    Label {
+                        text: "Thinking"
+                        draw_text +: {
+                            color: #x7f8996
+                            text_style: theme.font_bold { font_size: 9.5 }
+                        }
+                    }
+                }
+                body: View {
+                    width: Fill
+                    height: Fit
+                    padding: Inset{left: 18 top: 4 right: 0 bottom: 0}
+                    md := Markdown {
+                        width: Fill
+                        height: Fit
+                        selectable: true
+                        use_code_block_widget: false
+                        body: ""
+                    }
+                }
+            }
+
+            ToolMsg := #(ToolFoldHeader::register_widget(vm)) {
+                width: Fill
+                height: Fit
+                margin: Inset{top: 5 bottom: 5 left: 12 right: 28}
+                opened: 0.0
+                animator +: {
+                    active: { default: @off }
+                }
+                header: RoundedView {
+                    width: Fill
+                    height: Fit
+                    padding: Inset{left: 10 top: 8 right: 10 bottom: 8}
+                    flow: Down
+                    spacing: 5
+                    draw_bg +: {
+                        color: #x252a33
+                        border_radius: 7.0
+                        border_size: 1.0
+                        border_color: #x353c47
+                    }
+                    View {
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 7
+                        fold_button := FoldButton {
+                            draw_bg +: { active: 0.0 }
+                            animator +: {
+                                active: { default: @off }
+                            }
+                        }
+                        status_lbl := Label {
+                            width: 14
+                            height: Fit
+                            text: "◌"
+                            draw_text +: {
+                                color: #x8fa7c4
+                                text_style: theme.font_bold { font_size: 10.0 }
+                            }
+                        }
+                        title_lbl := Label {
+                            width: Fit
+                            height: Fit
+                            text: "Tool"
+                            draw_text +: {
+                                color: #xcbd2dc
+                                text_style: theme.font_bold { font_size: 10.0 }
+                            }
+                        }
+                        View { width: Fill height: 1 }
+                        meta_lbl := Label {
+                            width: Fit
+                            height: Fit
+                            text: ""
+                            draw_text +: {
+                                color: #x7f8b9a
+                                text_style: theme.font_code { font_size: 9.0 }
+                            }
+                        }
+                    }
+                    preview_lbl := Label {
+                        width: Fill
+                        height: Fit
+                        text: ""
+                        draw_text +: {
+                            color: #xd6dce5
+                            text_style: theme.font_code { font_size: 9.5 }
+                        }
+                    }
+                    result_meta_lbl := Label {
+                        width: Fill
+                        height: Fit
+                        text: "Running…"
+                        draw_text +: {
+                            color: #x7f8b9a
+                            text_style +: { font_size: 8.5 }
+                        }
+                    }
+                }
+                body: RoundedView {
+                    width: Fill
+                    height: Fit
+                    padding: Inset{left: 10 top: 9 right: 10 bottom: 9}
+                    flow: Down
+                    spacing: 10
+                    draw_bg +: {
+                        color: #x1f232b
+                        border_radius: 7.0
+                    }
+                    args_section := View {
+                        width: Fill
+                        height: Fit
+                        flow: Down
+                        spacing: 4
+                        Label {
+                            text: "ARGUMENTS"
+                            draw_text +: {
+                                color: #x6fa8ff
+                                text_style: theme.font_bold { font_size: 8.0 }
+                            }
+                        }
+                        args_lbl := Label {
+                            width: Fill
+                            height: Fit
+                            text: ""
+                            draw_text +: {
+                                color: #xaab4c1
+                                text_style: theme.font_code { font_size: 9.0 }
+                            }
+                        }
+                    }
+                    result_section := View {
+                        width: Fill
+                        height: Fit
+                        flow: Down
+                        spacing: 4
+                        Label {
+                            text: "RESULT"
+                            draw_text +: {
+                                color: #x6fa8ff
+                                text_style: theme.font_bold { font_size: 8.0 }
+                            }
+                        }
+                        result_lbl := Label {
+                            width: Fill
+                            height: Fit
+                            text: ""
+                            draw_text +: {
+                                color: #x9faab8
+                                text_style: theme.font_code { font_size: 9.0 }
+                            }
+                        }
                     }
                 }
             }
@@ -213,62 +374,7 @@ script_mod! {
         }
     }
 
-    // -------------------------------------------------------------------
-    // Activity card rows
-    // -------------------------------------------------------------------
-    let ActivityList = #(ActivityList::register_widget(vm)) {
-        width: Fill
-        height: Fill
 
-        list := PortalList {
-            width: Fill
-            height: Fill
-            flow: Down
-            auto_tail: true
-
-            ActivityRow := View {
-                width: Fill
-                height: Fit
-                flow: Right
-                spacing: 8
-                align: Align{y: 0.5}
-                padding: Inset{left: 8 top: 3 right: 8 bottom: 3}
-                head_lbl := Label {
-                    width: Fit
-                    height: Fit
-                    text: ""
-                    draw_text +: {
-                        color: #xc7cdd6
-                        text_style: theme.font_code { font_size: 10.0 }
-                    }
-                }
-                detail_lbl := Label {
-                    width: Fill
-                    height: Fit
-                    text: ""
-                    draw_text +: {
-                        color: #x6f7a88
-                        text_style +: { font_size: 9.5 }
-                    }
-                }
-            }
-
-            EmptyRow := View {
-                width: Fill
-                height: Fit
-                padding: Inset{left: 8 top: 4 right: 8 bottom: 4}
-                lbl := Label {
-                    width: Fill
-                    height: Fit
-                    text: ""
-                    draw_text +: {
-                        color: #x6f7a88
-                        text_style +: { font_size: 10.0 }
-                    }
-                }
-            }
-        }
-    }
 
     // -------------------------------------------------------------------
     // Sessions sidebar: project folders + session rows
@@ -770,51 +876,7 @@ script_mod! {
                             }
                         }
 
-                        // ------------------------------------------------
-                        // Compact foldable activity (collapsed by default)
-                        // ------------------------------------------------
-                        activity_fold := FoldHeader {
-                            width: Fill
-                            height: Fit
-                            opened: 0.0
 
-                            header: RoundedView {
-                                width: Fill
-                                height: Fit
-                                flow: Right
-                                spacing: 8
-                                align: Align{y: 0.5}
-                                padding: Inset{left: 10 top: 6 right: 10 bottom: 6}
-                                draw_bg +: {
-                                    color: #x1f232b
-                                    border_radius: 8.0
-                                }
-                                fold_button := FoldButton {}
-                                Label {
-                                    text: "Activity"
-                                    draw_text +: {
-                                        color: #xaeb6c2
-                                        text_style: theme.font_bold { font_size: 10.5 }
-                                    }
-                                }
-                                activity_summary := Label {
-                                    width: Fill
-                                    height: Fit
-                                    text: "No recent tools"
-                                    draw_text +: {
-                                        color: #x6f7a88
-                                        text_style +: { font_size: 10.0 }
-                                    }
-                                }
-                            }
-
-                            body: View {
-                                width: Fill
-                                height: Fit{max: FitBound.Abs(132)}
-                                padding: Inset{left: 2 top: 2 right: 2 bottom: 2}
-                                activity_list := ActivityList {}
-                            }
-                        }
 
                         // ------------------------------------------------
                         // Growing prompt input + Send
@@ -897,6 +959,8 @@ pub struct App {
     #[rust]
     agent: Option<Arc<tokio::sync::Mutex<CodingAgent>>>,
     #[rust]
+    agent_events_attached: bool,
+    #[rust]
     busy: bool,
     /// Built-in + extension slash commands for autocomplete.
     #[rust]
@@ -907,9 +971,7 @@ pub struct App {
     /// Popup item widget -> command name for the currently shown items.
     #[rust]
     cmd_items: Vec<(WidgetRef, String)>,
-    /// tool_call_id -> chat message index for in-flight tool lines.
-    #[rust]
-    tool_msg_index: HashMap<String, usize>,
+
     /// Session selected by a right-click while its archive/delete menu is open.
     #[rust]
     session_context_entry: Option<SessionEntry>,
@@ -1047,10 +1109,7 @@ impl MatchEvent for App {
 
         // Fetch models in background.
         self.spawn_model_fetch(api_key, account_id_opt);
-        self.ui
-            .fold_header(cx, ids!(activity_fold))
-            .set_is_open(cx, false, Animate::No);
-        self.refresh_activity_header(cx);
+
         cx.redraw_all();
     }
 
@@ -1317,8 +1376,6 @@ impl App {
                 return;
             }
             replace_chat_from_agent_messages(&[]);
-            clear_activity();
-            self.refresh_activity_header(cx);
         }
         cx.redraw_all();
     }
@@ -1370,7 +1427,6 @@ impl App {
         let Some(agent_arc) = self.agent.clone() else {
             // No agent yet — still update sidebar selection and clear chat.
             replace_chat_from_agent_messages(&[]);
-            clear_activity();
             push_chat(
                 MsgRole::System,
                 format!(
@@ -1379,7 +1435,6 @@ impl App {
                 ),
             );
             self.refresh_plan_ui(cx, &entry.work_dir);
-            self.refresh_activity_header(cx);
             cx.redraw_all();
             return;
         };
@@ -1402,29 +1457,6 @@ impl App {
             });
             SignalToUI::set_ui_signal();
         });
-    }
-
-    // -----------------------------------------------------------------
-    // Activity fold header
-    // -----------------------------------------------------------------
-    fn refresh_activity_header(&mut self, cx: &mut Cx) {
-        let data = crate::state::ACTIVITY_DATA.read().unwrap();
-        let summary = if data.is_empty() {
-            "No recent tools".to_string()
-        } else if let Some(last) = data.last() {
-            let count = data.len();
-            let noun = if count == 1 { "tool" } else { "tools" };
-            format!(
-                "{} {} · {count} {noun}",
-                last.status.glyph(),
-                truncate_chars(&last.name, 36)
-            )
-        } else {
-            "No recent tools".to_string()
-        };
-        self.ui
-            .label(cx, ids!(activity_summary))
-            .set_text(cx, &summary);
     }
 
     // -----------------------------------------------------------------
@@ -1515,6 +1547,8 @@ impl App {
 
         let Some(tx) = self.tx.clone() else { return };
         let agent_arc = self.agent.as_ref().unwrap().clone();
+        let attach_events = !self.agent_events_attached;
+        self.agent_events_attached = true;
         let input_str = input_text.trim().to_string();
 
         if show_in_chat {
@@ -1529,15 +1563,16 @@ impl App {
 
         get_runtime().spawn(async move {
             let mut agent_lock = agent_arc.lock().await;
-            let mut event_rx = agent_lock.subscribe();
-
-            let tx_event = tx.clone();
-            tokio::spawn(async move {
-                while let Ok(evt) = event_rx.recv().await {
-                    let _ = tx_event.send(GuiAgentEvent::Agent(evt));
-                    SignalToUI::set_ui_signal();
-                }
-            });
+            if attach_events {
+                let mut event_rx = agent_lock.subscribe();
+                let tx_event = tx.clone();
+                tokio::spawn(async move {
+                    while let Ok(evt) = event_rx.recv().await {
+                        let _ = tx_event.send(GuiAgentEvent::Agent(evt));
+                        SignalToUI::set_ui_signal();
+                    }
+                });
+            }
 
             if let Some(out) = agent_lock.handle_input(&input_str).await {
                 let _ = tx.send(GuiAgentEvent::CommandOutput(out));
@@ -1556,6 +1591,61 @@ impl App {
             let _ = tx.send(GuiAgentEvent::AvailableModelsLoaded(models));
             SignalToUI::set_ui_signal();
         });
+    }
+
+    fn handle_agent_event(&mut self, cx: &mut Cx, event: AgentEvent) {
+        match event {
+            AgentEvent::AgentStart => self.set_status(cx, UiStatus::Working, "Working..."),
+            AgentEvent::MessageUpdate {
+                text_delta,
+                reasoning_delta,
+                ..
+            } => {
+                if let Some(delta) = reasoning_delta {
+                    push_reasoning_delta(&delta);
+                }
+                if let Some(delta) = text_delta {
+                    push_stream_delta(&delta);
+                }
+            }
+            AgentEvent::MessageEnd { .. } => flush_streaming(),
+            AgentEvent::ToolExecutionStart {
+                tool_call_id,
+                name,
+                arguments,
+            } => push_tool(tool_call_id, name, arguments),
+            AgentEvent::ToolExecutionUpdate {
+                tool_call_id,
+                partial_result,
+            } => update_tool(&tool_call_id, partial_result, None),
+            AgentEvent::ToolExecutionEnd {
+                tool_call_id,
+                result,
+                ..
+            } => update_tool(
+                &tool_call_id,
+                result.content,
+                Some(if result.is_error {
+                    ToolStatus::Error
+                } else {
+                    ToolStatus::Done
+                }),
+            ),
+            AgentEvent::TurnEnd { .. } => self.set_status(cx, UiStatus::Working, "Turn completed"),
+            AgentEvent::AgentEnd { .. } => {
+                flush_streaming();
+                self.set_status(cx, UiStatus::Ready, "Ready");
+                let work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                self.refresh_plan_ui(cx, &work_dir);
+                refresh_sessions(&work_dir);
+            }
+            AgentEvent::AgentError { error } => {
+                flush_streaming();
+                push_chat(MsgRole::System, format!("Agent error: {error}"));
+                self.set_status(cx, UiStatus::Error, "Error");
+            }
+            AgentEvent::TurnStart { .. } | AgentEvent::MessageStart { .. } => {}
+        }
     }
 
     // -----------------------------------------------------------------
@@ -1577,96 +1667,7 @@ impl App {
         for evt in events {
             match evt {
                 GuiAgentEvent::TaskEvent(task_event) => {
-                    let agent_event = task_event.event;
-                    match agent_event {
-                        AgentEvent::AgentStart => {
-                            self.set_status(cx, UiStatus::Working, "Working...");
-                        }
-                        AgentEvent::TurnStart { turn_number } => {
-                            push_activity(
-                                None,
-                                format!("Turn {turn_number}"),
-                                ActivityStatus::Info,
-                                "",
-                            );
-                        }
-                        AgentEvent::MessageUpdate {
-                            text_delta,
-                            tool_call_name,
-                            ..
-                        } => {
-                            if let Some(delta) = text_delta {
-                                push_stream_delta(&delta);
-                            }
-                            if let Some(tool_name) = tool_call_name {
-                                push_activity(None, tool_name, ActivityStatus::Requested, "");
-                            }
-                        }
-                        AgentEvent::MessageEnd { .. } => {
-                            flush_streaming();
-                        }
-                        AgentEvent::ToolExecutionStart {
-                            tool_call_id,
-                            name,
-                            arguments,
-                        } => {
-                            flush_streaming();
-                            let index = push_chat(MsgRole::Tool, format!("… {name}"));
-                            self.tool_msg_index.insert(tool_call_id.clone(), index);
-                            push_activity(
-                                Some(tool_call_id),
-                                name,
-                                ActivityStatus::Running,
-                                truncate_chars(&arguments, 200),
-                            );
-                        }
-                        AgentEvent::ToolExecutionUpdate {
-                            tool_call_id,
-                            partial_result,
-                        } => {
-                            update_activity(
-                                &tool_call_id,
-                                None,
-                                Some(truncate_chars(&partial_result, 200)),
-                            );
-                        }
-                        AgentEvent::ToolExecutionEnd {
-                            tool_call_id,
-                            name,
-                            result,
-                        } => {
-                            let status = if result.is_error {
-                                ActivityStatus::Error
-                            } else {
-                                ActivityStatus::Done
-                            };
-                            update_activity(
-                                &tool_call_id,
-                                Some(status),
-                                Some(truncate_chars(&result.content, 200)),
-                            );
-                            if let Some(index) = self.tool_msg_index.remove(&tool_call_id) {
-                                set_chat_text(index, format!("{} {name}", status.glyph()));
-                            }
-                        }
-                        AgentEvent::TurnEnd { .. } => {
-                            self.set_status(cx, UiStatus::Working, "Turn completed");
-                        }
-                        AgentEvent::AgentEnd { .. } => {
-                            flush_streaming();
-                            self.set_status(cx, UiStatus::Ready, "Ready");
-                            let work_dir =
-                                std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                            self.refresh_plan_ui(cx, &work_dir);
-                            refresh_sessions(&work_dir);
-                        }
-                        AgentEvent::AgentError { error } => {
-                            flush_streaming();
-                            push_chat(MsgRole::System, format!("Agent error: {error}"));
-                            self.set_status(cx, UiStatus::Error, "Error");
-                        }
-                        _ => {}
-                    }
+                    self.handle_agent_event(cx, task_event.event);
                 }
                 GuiAgentEvent::CommandOutput(output) => {
                     push_chat(MsgRole::System, output);
@@ -1683,14 +1684,11 @@ impl App {
                 } => {
                     set_active_session(&work_dir, &session_id);
                     replace_chat_from_agent_messages(&messages);
-                    clear_activity();
                     push_chat(MsgRole::System, format!("Switched to session `{title}`."));
                     self.refresh_plan_ui(cx, &work_dir);
-                    self.refresh_activity_header(cx);
                     refresh_sessions(&work_dir);
                     set_active_session(&work_dir, &session_id);
                     self.set_status(cx, UiStatus::Ready, "Ready");
-                    self.tool_msg_index.clear();
                 }
                 GuiAgentEvent::AvailableModelsLoaded(models) => {
                     self.ui
@@ -1725,102 +1723,11 @@ impl App {
                         self.spawn_model_fetch(key, acc_opt);
                     }
                 }
-                GuiAgentEvent::Agent(agent_event) => match agent_event {
-                    AgentEvent::AgentStart => {
-                        self.set_status(cx, UiStatus::Working, "Working...");
-                    }
-                    AgentEvent::TurnStart { turn_number } => {
-                        push_activity(
-                            None,
-                            format!("Turn {turn_number}"),
-                            ActivityStatus::Info,
-                            "",
-                        );
-                    }
-                    AgentEvent::MessageUpdate {
-                        text_delta,
-                        tool_call_name,
-                        ..
-                    } => {
-                        if let Some(delta) = text_delta {
-                            push_stream_delta(&delta);
-                        }
-                        if let Some(tool_name) = tool_call_name {
-                            push_activity(None, tool_name, ActivityStatus::Requested, "");
-                        }
-                    }
-                    AgentEvent::MessageEnd { .. } => {
-                        flush_streaming();
-                    }
-                    AgentEvent::ToolExecutionStart {
-                        tool_call_id,
-                        name,
-                        arguments,
-                    } => {
-                        // Flush any streamed text so the tool line lands after it.
-                        flush_streaming();
-                        let index = push_chat(MsgRole::Tool, format!("… {name}"));
-                        self.tool_msg_index.insert(tool_call_id.clone(), index);
-                        push_activity(
-                            Some(tool_call_id),
-                            name,
-                            ActivityStatus::Running,
-                            truncate_chars(&arguments, 200),
-                        );
-                    }
-                    AgentEvent::ToolExecutionUpdate {
-                        tool_call_id,
-                        partial_result,
-                    } => {
-                        update_activity(
-                            &tool_call_id,
-                            None,
-                            Some(truncate_chars(&partial_result, 200)),
-                        );
-                    }
-                    AgentEvent::ToolExecutionEnd {
-                        tool_call_id,
-                        name,
-                        result,
-                    } => {
-                        let status = if result.is_error {
-                            ActivityStatus::Error
-                        } else {
-                            ActivityStatus::Done
-                        };
-                        update_activity(
-                            &tool_call_id,
-                            Some(status),
-                            Some(truncate_chars(&result.content, 200)),
-                        );
-                        if let Some(index) = self.tool_msg_index.remove(&tool_call_id) {
-                            set_chat_text(index, format!("{} {name}", status.glyph()));
-                        }
-                    }
-                    AgentEvent::TurnEnd { .. } => {
-                        self.set_status(cx, UiStatus::Working, "Turn completed");
-                    }
-                    AgentEvent::AgentEnd { .. } => {
-                        flush_streaming();
-                        self.set_status(cx, UiStatus::Ready, "Ready");
-                        let work_dir =
-                            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                        self.refresh_plan_ui(cx, &work_dir);
-                        refresh_sessions(&work_dir);
-                    }
-                    AgentEvent::AgentError { error } => {
-                        flush_streaming();
-                        push_chat(MsgRole::System, format!("Agent error: {error}"));
-                        self.set_status(cx, UiStatus::Error, "Error");
-                    }
-                    _ => {}
-                },
+                GuiAgentEvent::Agent(agent_event) => self.handle_agent_event(cx, agent_event),
             }
         }
 
-        // Something changed — repaint everything (chat/plan/activity read
-        // their rows from the shared state during draw).
-        self.refresh_activity_header(cx);
+        // Chat and plan rows read shared state during their draw pass.
         cx.redraw_all();
     }
 }
