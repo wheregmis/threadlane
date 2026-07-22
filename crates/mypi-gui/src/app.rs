@@ -60,16 +60,68 @@ script_mod! {
                 }
             }
 
-            AssistantMsg := View {
+            AssistantMsg := RoundedView {
                 width: Fill
                 height: Fit
                 margin: Inset{top: 6 bottom: 6 left: 8 right: 40}
+                padding: Inset{left: 14 top: 10 right: 14 bottom: 10}
+                draw_bg +: {
+                    color: #x20252d
+                    border_radius: 10.0
+                    border_size: 1.0
+                    border_color: #x2d3540
+                }
                 md := Markdown {
                     width: Fill
                     height: Fit
                     selectable: true
                     use_code_block_widget: false
                     body: ""
+                }
+            }
+
+            EmptyChat := View {
+                width: Fill
+                height: Fit
+                margin: Inset{top: 80 bottom: 20 left: 36 right: 36}
+                flow: Down
+                spacing: 10
+                align: Align{x: 0.5}
+                title_lbl := Label {
+                    width: Fit
+                    height: Fit
+                    text: "What would you like to build?"
+                    draw_text +: {
+                        color: #xe7ebf0
+                        text_style: theme.font_bold { font_size: 18.0 }
+                    }
+                }
+                desc_lbl := Label {
+                    width: Fit
+                    height: Fit
+                    text: "Ask mypi to inspect your project, explain code, edit files, or run tests."
+                    draw_text +: {
+                        color: #x9aa4b2
+                        text_style +: { font_size: 11.0 }
+                    }
+                }
+                examples_lbl := Label {
+                    width: Fit
+                    height: Fit
+                    text: "Try:  Review the authentication flow   ·   Find unused dependencies   ·   Run the test suite"
+                    draw_text +: {
+                        color: #x6f7a88
+                        text_style +: { font_size: 10.0 }
+                    }
+                }
+                hint_lbl := Label {
+                    width: Fit
+                    height: Fit
+                    text: "Type / for commands  ·  Enter to send  ·  Shift+Enter for a new line"
+                    draw_text +: {
+                        color: #x6fa8ff
+                        text_style +: { font_size: 10.0 }
+                    }
                 }
             }
 
