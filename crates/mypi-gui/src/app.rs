@@ -461,6 +461,23 @@ script_mod! {
                                 }
                             }
                             View { width: Fill height: 1 }
+                            caps_btn := Button {
+                                width: Fit
+                                height: 28
+                                text: "Capabilities"
+                                draw_bg +: {
+                                    color: #x232830
+                                    color_hover: #x2a313c
+                                    color_down: #x3a424e
+                                    border_color: #x3a424e
+                                    border_radius: 6.0
+                                    border_size: 1.0
+                                }
+                                draw_text +: {
+                                    color: #xc7cdd6
+                                    text_style +: { font_size: 10.0 }
+                                }
+                            }
                             model_drop := DropDown {
                                 width: 180
                                 height: 28
@@ -1047,6 +1064,14 @@ impl MatchEvent for App {
                     }
                 });
             }
+        }
+
+        if self.ui.button(cx, ids!(caps_btn)).clicked(actions) {
+            push_chat(
+                MsgRole::System,
+                "=== Capabilities Manager ===\nSkills: Global (~/.agents/skills), Project (.mypi/skills)\nExtensions: Sandboxed WASI (.wasm)\nPackages: Local & Git packages",
+            );
+            cx.redraw_all();
         }
 
         // --- Sessions: new + select ---

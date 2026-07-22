@@ -250,8 +250,18 @@ impl CodingAgent {
 
     pub async fn handle_input(&mut self, input: &str) -> Option<String> {
         let trimmed = input.trim();
-        if trimmed.starts_with('/') {
-            let mut parts = trimmed[1..].split_whitespace();
+
+        // 1. Expand prompt templates (e.g. /review, /component Button) if match
+        let global_dir = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|h| h.join(".mypi"))
+            .unwrap_or_else(|| self.work_dir.join(".mypi"));
+        let templates = crate::prompt_templates::load_prompt_templates(&self.work_dir, &global_dir);
+        let expanded_input = crate::prompt_templates::expand_prompt_template(trimmed, &templates);
+        let effective_input = expanded_input.trim();
+
+        if effective_input.starts_with('/') {
+            let mut parts = effective_input[1..].split_whitespace();
             let cmd_name = parts.next().unwrap_or("");
             let cmd_args = parts.collect::<Vec<&str>>().join(" ");
 
@@ -323,7 +333,7 @@ impl CodingAgent {
                 };
             }
 
-            if let Some(cmd_action) = parse_slash_command(input) {
+            if let Some(cmd_action) = parse_slash_command(effective_input) {
                 if cmd_action == CommandAction::Quit {
                     return Some("quitting".to_string());
                 }
@@ -340,10 +350,10 @@ impl CodingAgent {
         }
 
         let msg = AgentMessage::User {
-            content: input.to_string(),
+            content: effective_input.to_string(),
         };
         self.session_tree.add_message(msg);
-        self.agent.prompt(input).await;
+        self.agent.prompt(effective_input).await;
 
         let mut plan_lock = self.plan_mode.lock().await;
         let st = self.agent.get_state().await;

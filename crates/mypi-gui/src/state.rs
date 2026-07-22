@@ -507,6 +507,21 @@ pub fn create_new_session(work_dir: &Path) -> Option<SessionEntry> {
     Some(entry)
 }
 
+pub fn archive_session(entry: &SessionEntry) -> bool {
+    let archive_dir = entry.work_dir.join(".mypi/sessions/archive");
+    if std::fs::create_dir_all(&archive_dir).is_err() {
+        return false;
+    }
+    let Some(file_name) = entry.session_file.file_name() else {
+        return false;
+    };
+    std::fs::rename(&entry.session_file, archive_dir.join(file_name)).is_ok()
+}
+
+pub fn delete_session(entry: &SessionEntry) -> bool {
+    std::fs::remove_file(&entry.session_file).is_ok()
+}
+
 /// Human relative timestamp matching the sidebar mockup (`1m`, `2h`, `6d`).
 pub fn relative_time_label(updated_at: u64) -> String {
     let now = SystemTime::now()

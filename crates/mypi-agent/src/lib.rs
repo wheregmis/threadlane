@@ -18,8 +18,7 @@ pub mod packages;
 pub mod skills;
 pub mod supervisor;
 pub mod wasi_extension;
-
-
+pub mod prompt_templates;
 
 pub use agent::Agent;
 pub use coding_agent::{CodingAgent, CodingAgentOptions, PlanModeBeforeHook};
@@ -37,6 +36,10 @@ pub use session_tree::{SessionNode, SessionTree};
 pub use capabilities::{CapabilityCatalog, ExtensionMetadata};
 pub use full_trust_extension::{compute_executable_revision, FullTrustRunner, TrustStore};
 pub use packages::{PackageManifest, PackageManager, PackageRecord, PackageScope};
+pub use prompt_templates::{
+    expand_prompt_template, load_prompt_templates, load_prompt_templates_from_dir,
+    parse_command_args, substitute_args, PromptTemplate,
+};
 pub use skills::{SkillManager, SkillMetadata, SkillScope};
 pub use supervisor::{HarnessSupervisor, ProjectRecord, TaskAgentEvent, TaskRecord, TaskStatus};
 
@@ -46,4 +49,5 @@ pub use wasi_extension::{
     WasiExtensionInvocation, WasiExtensionManager, WasiExtensionManifest, WasiExtensionResponse,
     WasiToolDefinition,
 };
+
 

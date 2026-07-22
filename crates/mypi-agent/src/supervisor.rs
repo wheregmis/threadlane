@@ -56,12 +56,16 @@ pub struct TaskAgentEvent {
 }
 
 struct TaskRuntime {
+    #[allow(dead_code)]
     id: String,
     project_id: String,
+    #[allow(dead_code)]
     work_dir: PathBuf,
+    #[allow(dead_code)]
     session_file: PathBuf,
     agent: Arc<tokio::sync::Mutex<CodingAgent>>,
     status: TaskStatus,
+    #[allow(dead_code)]
     capability_generation: u64,
     prompt_lock: Arc<tokio::sync::Mutex<()>>,
 }

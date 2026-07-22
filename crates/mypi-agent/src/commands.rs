@@ -12,6 +12,8 @@ pub enum CommandAction {
     Fork(String),
     CloneSession,
     ClearPlan,
+    InvokeSkill(String),
+    PromptTemplate(String),
 
     Quit,
     Unknown(String),
@@ -36,6 +38,8 @@ pub fn parse_slash_command(input: &str) -> Option<CommandAction> {
         "fork" => Some(CommandAction::Fork(arg)),
         "clone" => Some(CommandAction::CloneSession),
         "clear-plan" => Some(CommandAction::ClearPlan),
+        "skill" => Some(CommandAction::InvokeSkill(arg)),
+        "prompt" => Some(CommandAction::PromptTemplate(arg)),
 
         "quit" | "exit" => Some(CommandAction::Quit),
         other => Some(CommandAction::Unknown(other.to_string())),
@@ -111,6 +115,8 @@ pub async fn execute_slash_command(
             plan_mode.items.clear();
             "Cleared active plan items.".to_string()
         }
+        CommandAction::InvokeSkill(skill) => format!("Invoking skill: {}", skill),
+        CommandAction::PromptTemplate(tmpl) => format!("Prompt template: {}", tmpl),
 
         CommandAction::Quit => "Quitting mypi agent.".to_string(),
         CommandAction::Unknown(cmd) => format!("Unknown command: /{}", cmd),
