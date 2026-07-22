@@ -252,11 +252,23 @@ fn read_json_result<T: for<'de> Deserialize<'de>>(
     serde_json::from_slice(&buffer).map_err(|e| e.to_string())
 }
 
+/// Produces a filesystem-safe, collision-free directory name for a session ID.
+fn encode_state_component(component: &str) -> String {
+    component
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 #[derive(Default)]
 pub struct WasiExtensionManager {
     pub extensions: HashMap<String, WasiExtension>,
     states: Mutex<HashMap<String, Value>>,
-    state_dir: Option<std::path::PathBuf>,
+    state_dir: Option<PathBuf>,
+    /// Stateful conversational extensions are isolated by the active session.
+    /// `None` retains the project-wide scope for callers that explicitly need it.
+    session_id: Mutex<Option<String>>,
 }
 
 impl WasiExtensionManager {
@@ -273,6 +285,55 @@ impl WasiExtensionManager {
             state_dir: Some(project_dir.join(".mypi/state/extensions")),
             ..Self::default()
         }
+    }
+
+    /// Creates a manager whose extension state belongs to one conversation.
+    pub fn for_project_session(project_dir: &Path, session_id: impl Into<String>) -> Self {
+        Self {
+            state_dir: Some(project_dir.join(".mypi/state/extensions")),
+            session_id: Mutex::new(Some(session_id.into())),
+            ..Self::default()
+        }
+    }
+
+    /// Switches the active state scope and reloads every registered extension.
+    /// Callers should serialize this with extension invocation.
+    pub fn set_session_scope(&self, session_id: impl Into<String>) -> Result<(), String> {
+        let session_id = session_id.into();
+        *self
+            .session_id
+            .lock()
+            .map_err(|_| "Extension session lock poisoned".to_string())? = Some(session_id);
+
+        let mut states = self
+            .states
+            .lock()
+            .map_err(|_| "Extension state lock poisoned".to_string())?;
+        states.clear();
+        for name in self.extensions.keys() {
+            if let Some(state) = self.load_state(name) {
+                states.insert(name.clone(), state);
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns the current persisted/in-memory state for an extension.
+    pub fn extension_state(&self, extension_name: &str) -> Option<Value> {
+        self.states.lock().ok()?.get(extension_name).cloned()
+    }
+
+    /// Location used for session-owned extension state. This is public so UI
+    /// code can render persisted state without duplicating the naming scheme.
+    pub fn session_state_path(
+        project_dir: &Path,
+        session_id: &str,
+        extension_name: &str,
+    ) -> PathBuf {
+        project_dir
+            .join(".mypi/state/extensions/sessions")
+            .join(encode_state_component(session_id))
+            .join(format!("{extension_name}.json"))
     }
 
     pub fn discover_and_load(&mut self, dir: &Path) -> usize {
@@ -316,10 +377,26 @@ impl WasiExtensionManager {
         true
     }
 
-    fn state_path(&self, extension_name: &str) -> Option<std::path::PathBuf> {
-        self.state_dir
-            .as_ref()
-            .map(|directory| directory.join(format!("{extension_name}.json")))
+    fn state_path(&self, extension_name: &str) -> Option<PathBuf> {
+        let directory = self.state_dir.as_ref()?;
+        let session_id = self.session_id.lock().ok()?.clone();
+        Some(match session_id {
+            Some(session_id) => {
+                Self::session_state_path_from_dir(directory, &session_id, extension_name)
+            }
+            None => directory.join(format!("{extension_name}.json")),
+        })
+    }
+
+    fn session_state_path_from_dir(
+        state_dir: &Path,
+        session_id: &str,
+        extension_name: &str,
+    ) -> PathBuf {
+        state_dir
+            .join("sessions")
+            .join(encode_state_component(session_id))
+            .join(format!("{extension_name}.json"))
     }
 
     fn load_state(&self, extension_name: &str) -> Option<Value> {

@@ -6,7 +6,7 @@
 //! without fighting `Scope` lifetimes — same pattern as makepad's aichat example.
 
 use mypi_agent::{AgentEvent, AgentMessage, SessionTree};
-use mypi_coding_agent::TaskAgentEvent;
+use mypi_coding_agent::{TaskAgentEvent, WasiExtensionManager};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -389,7 +389,7 @@ pub fn tool_result_preview(text: &str, max_chars: usize) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Plan panel (.mypi/state/extensions/plan_mode_ext.json)
+// Plan panel (session-scoped plan_mode_ext extension state)
 // ---------------------------------------------------------------------------
 
 pub struct PlanItem {
@@ -411,9 +411,11 @@ pub static PLAN_DATA: RwLock<PlanData> = RwLock::new(PlanData {
     items: Vec::new(),
 });
 
-/// Re-read the plan extension state file into `PLAN_DATA`. Returns `enabled`.
-pub fn refresh_plan(work_dir: &Path) -> bool {
-    let state_path = work_dir.join(".mypi/state/extensions/plan_mode_ext.json");
+/// Re-read the selected session's plan extension state into `PLAN_DATA`.
+/// Returns whether that session has plan mode enabled.
+pub fn refresh_plan(work_dir: &Path, session_id: &str) -> bool {
+    let state_path =
+        WasiExtensionManager::session_state_path(work_dir, session_id, "plan_mode_ext");
     let state = std::fs::read_to_string(state_path)
         .ok()
         .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok());

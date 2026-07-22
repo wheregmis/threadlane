@@ -8,8 +8,8 @@ use crate::state::{
     relative_time_label, ChatMessage, MsgRole, SessionListRow, StreamingKind, CHAT_DATA, PLAN_DATA,
     SESSIONS_DATA,
 };
-use makepad_widgets::*;
 use makepad_widgets::fold_button::FoldButtonAction;
+use makepad_widgets::*;
 
 // FoldHeader's stock action check only tests whether the action widget exists
 // somewhere in the widget tree. With PortalList rows that makes every row
@@ -48,11 +48,16 @@ pub struct ToolFoldHeader {
 }
 
 #[derive(Clone)]
-enum ToolFoldDrawState { DrawHeader, DrawBody }
+enum ToolFoldDrawState {
+    DrawHeader,
+    DrawBody,
+}
 
 impl Widget for ToolFoldHeader {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        if self.animator_handle_event(cx, event).must_redraw() { self.area.redraw(cx); }
+        if self.animator_handle_event(cx, event).must_redraw() {
+            self.area.redraw(cx);
+        }
         self.header.handle_event(cx, event, scope);
         self.body.handle_event(cx, event, scope);
         if let Event::Actions(actions) = event {
@@ -61,8 +66,8 @@ impl Widget for ToolFoldHeader {
             for action in actions {
                 if let Some(widget_action) = action.downcast_ref::<WidgetAction>() {
                     let action_path = cx.widget_tree().path_to(widget_action.widget_uid);
-                    let belongs_to_header = !header_path.is_empty()
-                        && action_path.starts_with(&header_path);
+                    let belongs_to_header =
+                        !header_path.is_empty() && action_path.starts_with(&header_path);
                     if belongs_to_header {
                         match widget_action.cast::<FoldButtonAction>() {
                             FoldButtonAction::Opening => self.animator_play(cx, ids!(active.on)),
@@ -75,25 +80,39 @@ impl Widget for ToolFoldHeader {
         }
     }
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        if self.draw_state.begin(cx, ToolFoldDrawState::DrawHeader) { cx.begin_turtle(walk, self.layout); }
+        if self.draw_state.begin(cx, ToolFoldDrawState::DrawHeader) {
+            cx.begin_turtle(walk, self.layout);
+        }
         if let Some(ToolFoldDrawState::DrawHeader) = self.draw_state.get() {
             let header_walk = self.header.walk(cx);
             self.header.draw_walk(cx, scope, header_walk)?;
             let (body_walk, scroll_y) = if self.rect_size == 0.0 {
                 (self.body_walk, 0.0)
             } else {
-                (Walk { height: Size::Fixed(self.rect_size * self.opened), ..self.body_walk },
-                 self.rect_size * (1.0 - self.opened))
+                (
+                    Walk {
+                        height: Size::Fixed(self.rect_size * self.opened),
+                        ..self.body_walk
+                    },
+                    self.rect_size * (1.0 - self.opened),
+                )
             };
-            cx.begin_turtle(body_walk, Layout::flow_down().with_scroll(dvec2(0.0, scroll_y)));
+            cx.begin_turtle(
+                body_walk,
+                Layout::flow_down().with_scroll(dvec2(0.0, scroll_y)),
+            );
             self.draw_state.set(ToolFoldDrawState::DrawBody);
         }
         if let Some(ToolFoldDrawState::DrawBody) = self.draw_state.get() {
             let body_walk = self.body.walk(cx);
             self.body.draw_walk(cx, scope, body_walk)?;
             let used_y = cx.turtle().used().y;
-            if used_y > 0.0 { self.rect_size = used_y; }
-            cx.end_turtle(); cx.end_turtle_with_area(&mut self.area); self.draw_state.end();
+            if used_y > 0.0 {
+                self.rect_size = used_y;
+            }
+            cx.end_turtle();
+            cx.end_turtle_with_area(&mut self.area);
+            self.draw_state.end();
         }
         DrawStep::done()
     }
@@ -230,20 +249,10 @@ impl Widget for PlanList {
 
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
-                let rows = data.items.len().max(1);
-                list.set_item_range(cx, 0, rows);
+                list.set_item_range(cx, 0, data.items.len());
 
                 while let Some(item_id) = list.next_visible_item(cx) {
-                    if data.items.is_empty() {
-                        let item_widget = list.item(cx, item_id, id!(EmptyRow));
-                        let text = if data.enabled {
-                            "Waiting for the planning response…"
-                        } else {
-                            "No active plan. Use /plan <task>."
-                        };
-                        item_widget.label(cx, ids!(lbl)).set_text(cx, text);
-                        item_widget.draw_all_unscoped(cx);
-                    } else if let Some(plan_item) = data.items.get(item_id) {
+                    if let Some(plan_item) = data.items.get(item_id) {
                         let item_widget = list.item(cx, item_id, id!(PlanRow));
                         item_widget
                             .label(cx, ids!(status_lbl))

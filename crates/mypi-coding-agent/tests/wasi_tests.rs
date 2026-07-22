@@ -102,6 +102,19 @@ fn test_extension_command_state_is_host_managed() {
 }
 
 #[test]
+fn test_session_state_paths_are_isolated_and_filesystem_safe() {
+    let project = tempdir().unwrap();
+    let first =
+        WasiExtensionManager::session_state_path(project.path(), "session/one", "plan_mode_ext");
+    let second =
+        WasiExtensionManager::session_state_path(project.path(), "session/two", "plan_mode_ext");
+
+    assert_ne!(first, second);
+    assert!(first.ends_with("plan_mode_ext.json"));
+    assert!(first.starts_with(project.path().join(".mypi/state/extensions/sessions")));
+}
+
+#[test]
 fn test_extension_state_persists_in_project_mypi_directory() {
     let source = PathBuf::from(
         "/Users/wheregmis/Documents/exploration/mypi/.mypi/extensions/plan_mode_ext/extension.wasm",
@@ -127,4 +140,33 @@ fn test_extension_state_persists_in_project_mypi_directory() {
         .path()
         .join(".mypi/state/extensions/plan_mode_ext.json")
         .exists());
+}
+
+#[test]
+fn test_extension_state_is_scoped_to_a_session() {
+    let source = PathBuf::from(
+        "/Users/wheregmis/Documents/exploration/mypi/.mypi/extensions/plan_mode_ext/extension.wasm",
+    );
+    if !source.exists() {
+        return;
+    }
+
+    let project = tempdir().unwrap();
+    let package_dir = project.path().join(".mypi/extensions/plan_mode_ext");
+    std::fs::create_dir_all(&package_dir).unwrap();
+    std::fs::copy(source, package_dir.join("extension.wasm")).unwrap();
+
+    let mut first = WasiExtensionManager::for_project_session(project.path(), "session_a");
+    assert_eq!(first.discover_and_load(project.path()), 1);
+    first.execute_command("plan", "").unwrap().unwrap();
+
+    let mut second = WasiExtensionManager::for_project_session(project.path(), "session_b");
+    assert_eq!(second.discover_and_load(project.path()), 1);
+    let second_status = second.execute_command("todos", "").unwrap().unwrap();
+    assert!(second_status.contains("disabled"));
+
+    let mut restored = WasiExtensionManager::for_project_session(project.path(), "session_a");
+    assert_eq!(restored.discover_and_load(project.path()), 1);
+    let restored_status = restored.execute_command("todos", "").unwrap().unwrap();
+    assert!(restored_status.contains("No plan items yet"));
 }

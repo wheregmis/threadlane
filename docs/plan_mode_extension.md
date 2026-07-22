@@ -1,6 +1,6 @@
 # Plan Mode Extension Guide (`mypi` & `mypi-gui`)
 
-Plan Mode is a read-only exploration and structured task planning mode for `mypi`. It allows the model to safely analyze codebases, propose step-by-step plans under a `Plan:` header, and track progress via TODO items without accidentally modifying files or running destructive shell commands.
+Plan Mode is a session-scoped, read-only exploration and structured task-planning mode for `mypi`. It lets the model analyze a codebase and propose step-by-step plans under a `Plan:` header without using the built-in file-writing tools.
 
 ---
 
@@ -8,16 +8,16 @@ Plan Mode is a read-only exploration and structured task planning mode for `mypi
 
 1. **Read-Only Safety Guard**:
    - Disables modifying tools (`write_file`, `edit_file`) while Plan Mode is enabled.
-   - Restricts shell execution (`run_command`) strictly to safe read-only commands (e.g. `ls`, `cat`, `grep`, `git diff`, `git status`, `cargo check`).
+   - Arbitrary shell commands are not currently restricted by Plan Mode; review commands before running them.
 
-2. **Automatic Plan Parsing & Progress Tracking**:
+2. **Automatic Plan Parsing**:
    - Parses structured `Plan:` blocks in model output.
-   - Extracts numbered plan steps into an interactive TODO checklist.
-   - Tracks completion using `[DONE:n]` markers in assistant responses.
+   - Extracts numbered plan steps into a TODO checklist.
+   - Completion markers are not yet persisted by the reference extension.
 
 3. **Interactive Slash Commands**:
-   - `/plan`: Toggle Plan Mode on/off.
-   - `/todos`: View current plan items and completion progress.
+   - `/plan`: Toggle Plan Mode on/off for the current session.
+   - `/todos`: View the current session's plan items.
 
 4. **WASI WebAssembly Sandbox Integration**:
    - Extensions can be compiled to `.wasm` and loaded dynamically via `wasmi`.
@@ -27,7 +27,7 @@ Plan Mode is a read-only exploration and structured task planning mode for `mypi
 ## Installation & Setup
 
 ### 1. Built-In Integration
-Plan Mode is natively supported inside `crates/mypi-agent`.
+Plan Mode is provided by the WASI extension host in `crates/mypi-coding-agent`.
 
 To enable Plan Mode on startup in your Rust code:
 ```rust
@@ -91,19 +91,17 @@ Plan:
 3. Run cargo check to validate syntax
 ```
 
-### Checking Plan Progress
+### Checking the Current Session Plan
 Type `/todos` to view active items and completion status:
 ```text
 /todos
 ```
 Output:
 ```text
-📋 Current Plan Progress:
-  ✅ 1. Inspect src/main.rs for entry point configuration
+📋 Current Plan:
+  ⏳ 1. Inspect src/main.rs for entry point configuration
   ⏳ 2. Verify dependency versions in Cargo.toml
   ⏳ 3. Run cargo check to validate syntax
-
-Progress: 1/3 steps completed.
 ```
 
 ### Disabling Plan Mode

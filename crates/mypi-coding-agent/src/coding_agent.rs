@@ -1,11 +1,11 @@
-use mypi_agent::{
-    AfterToolCallHook, AfterToolCallResult, Agent, AgentEvent, AgentMessage, AgentState,
-    AgentToolCall, AgentToolResult, BeforeToolCallHook, BeforeToolCallResult, SessionTree,
-};
 use crate::commands::{execute_slash_command, parse_slash_command, CommandAction};
 use crate::context::ProjectContext;
 use crate::wasi_extension::WasiExtensionManager;
 use async_trait::async_trait;
+use mypi_agent::{
+    AfterToolCallHook, AfterToolCallResult, Agent, AgentEvent, AgentMessage, AgentState,
+    AgentToolCall, AgentToolResult, BeforeToolCallHook, BeforeToolCallResult, SessionTree,
+};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -39,7 +39,10 @@ impl BeforeToolCallHook for ExtensionBeforeToolHook {
     ) -> BeforeToolCallResult {
         let policy = *self.tool_policy.lock().await;
         if policy == ToolPolicy::ReadOnly {
-            if matches!(tool_call.name.as_str(), "write_file" | "edit_file" | "write" | "edit") {
+            if matches!(
+                tool_call.name.as_str(),
+                "write_file" | "edit_file" | "write" | "edit"
+            ) {
                 return BeforeToolCallResult {
                     block: true,
                     reason: Some(format!(
@@ -54,7 +57,9 @@ impl BeforeToolCallHook for ExtensionBeforeToolHook {
             "tool_name": tool_call.name,
             "tool_arguments": tool_call.arguments,
         });
-        let hook_responses = self.extensions.execute_hook("before_tool_call", &arguments.to_string());
+        let hook_responses = self
+            .extensions
+            .execute_hook("before_tool_call", &arguments.to_string());
         for resp in hook_responses {
             if let Ok(res) = resp {
                 if let Some(msg) = res.message {
@@ -112,14 +117,38 @@ impl CodingAgent {
         let mut agent = Agent::new(&options.api_key, options.account_id, &options.model);
         let project_context = ProjectContext::discover(&options.work_dir);
 
-        let mut wasi_extensions = WasiExtensionManager::for_project(&options.work_dir);
-        let loaded_ext_count = wasi_extensions.discover_and_load(&options.work_dir);
-
-        let tool_policy = Arc::new(tokio::sync::Mutex::new(if options.enable_plan_mode {
-            ToolPolicy::ReadOnly
+        let session_path = options
+            .session_file
+            .clone()
+            .unwrap_or_else(|| options.work_dir.join(".mypi/sessions/default.jsonl"));
+        let session_tree = if session_path.exists() {
+            SessionTree::load_from_file(&session_path)
+                .unwrap_or_else(|_| SessionTree::new("default"))
         } else {
-            ToolPolicy::FullAccess
-        }));
+            if let Some(parent) = session_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let mut session = SessionTree::new("default");
+            session.file_path = Some(session_path);
+            session
+        };
+
+        let mut wasi_extensions = WasiExtensionManager::for_project_session(
+            &options.work_dir,
+            session_tree.session_id.clone(),
+        );
+        let loaded_ext_count = wasi_extensions.discover_and_load(&options.work_dir);
+        let restored_plan_mode = wasi_extensions
+            .extension_state("plan_mode_ext")
+            .and_then(|state| state.get("enabled").and_then(serde_json::Value::as_bool))
+            .unwrap_or(false);
+        let tool_policy = Arc::new(tokio::sync::Mutex::new(
+            if options.enable_plan_mode || restored_plan_mode {
+                ToolPolicy::ReadOnly
+            } else {
+                ToolPolicy::FullAccess
+            },
+        ));
 
         let mut system_prompt = format!(
             "You are mypi, an AI coding agent with tool execution capability in workspace: {}.\n\
@@ -165,21 +194,6 @@ impl CodingAgent {
                 content: base_system_prompt.clone(),
             });
         }
-
-        let session_path = options
-            .session_file
-            .unwrap_or_else(|| options.work_dir.join(".mypi/sessions/default.jsonl"));
-        let session_tree = if session_path.exists() {
-            SessionTree::load_from_file(&session_path)
-                .unwrap_or_else(|_| SessionTree::new("default"))
-        } else {
-            if let Some(parent) = session_path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let mut session = SessionTree::new("default");
-            session.file_path = Some(session_path);
-            session
-        };
 
         Self {
             agent,
@@ -245,6 +259,21 @@ impl CodingAgent {
         };
 
         let branch = session_tree.get_active_branch_messages();
+        self.wasi_extensions
+            .set_session_scope(session_tree.session_id.clone())
+            .unwrap_or_else(|error| {
+                eprintln!("Failed to restore session extension state: {error}")
+            });
+        let restored_plan_mode = self
+            .wasi_extensions
+            .extension_state("plan_mode_ext")
+            .and_then(|state| state.get("enabled").and_then(serde_json::Value::as_bool))
+            .unwrap_or(false);
+        *self.tool_policy.lock().await = if restored_plan_mode {
+            ToolPolicy::ReadOnly
+        } else {
+            ToolPolicy::FullAccess
+        };
         self.session_tree = session_tree;
 
         let mut state = self.agent.loop_engine.state.lock().await;
@@ -349,12 +378,9 @@ impl CodingAgent {
                 if cmd_action == CommandAction::Quit {
                     return Some("quitting".to_string());
                 }
-                let output = execute_slash_command(
-                    cmd_action,
-                    &mut self.agent,
-                    &mut self.session_tree,
-                )
-                .await;
+                let output =
+                    execute_slash_command(cmd_action, &mut self.agent, &mut self.session_tree)
+                        .await;
                 return Some(output);
             }
         }

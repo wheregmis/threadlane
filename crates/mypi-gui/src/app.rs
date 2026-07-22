@@ -10,6 +10,7 @@ use crate::state::{
     flush_streaming, push_chat, push_reasoning_delta, push_stream_delta, push_tool, refresh_plan,
     refresh_sessions, replace_chat_from_agent_messages, session_entry_at_row, set_active_session,
     truncate_chars, update_tool, CommandInfo, GuiAgentEvent, MsgRole, SessionEntry, ToolStatus,
+    PLAN_DATA,
 };
 use makepad_widgets::text::selection::Cursor;
 use makepad_widgets::*;
@@ -841,9 +842,10 @@ script_mod! {
                                 chat_list := ChatList {}
                             }
 
-                            plan_card := RoundedView {
-                                width: 280
+                            plan_drawer := RoundedView {
+                                width: 300
                                 height: Fill
+                                visible: false
                                 flow: Down
                                 padding: Inset{left: 2 top: 10 right: 2 bottom: 8}
                                 draw_bg +: {
@@ -855,7 +857,7 @@ script_mod! {
                                     height: Fit
                                     flow: Right
                                     align: Align{y: 0.5}
-                                    padding: Inset{left: 12 right: 12 bottom: 8}
+                                    padding: Inset{left: 12 right: 8 bottom: 8}
                                     Label {
                                         text: "Plan"
                                         draw_text +: {
@@ -865,11 +867,26 @@ script_mod! {
                                     }
                                     View { width: Fill height: 1 }
                                     plan_status_label := Label {
-                                        text: "inactive"
+                                        text: "active"
                                         draw_text +: {
-                                            color: #x6f7a88
+                                            color: #x6fa8ff
                                             text_style +: { font_size: 9.5 }
                                         }
+                                    }
+                                    plan_close_btn := Button {
+                                        width: 28
+                                        height: 24
+                                        text: "×"
+                                    }
+                                }
+                                plan_empty_label := Label {
+                                    width: Fill
+                                    height: Fit
+                                    visible: false
+                                    text: "Waiting for the planning response…"
+                                    draw_text +: {
+                                        color: #x8b93a0
+                                        text_style +: { font_size: 10.0 }
                                     }
                                 }
                                 plan_list := PlanList {}
@@ -928,6 +945,13 @@ script_mod! {
                                 }
                             }
 
+                            plan_toggle_btn := Button {
+                                width: Fit
+                                height: 40
+                                visible: false
+                                text: "Plan · 0 steps"
+                            }
+
                             send_btn := Button {
                                 width: 84
                                 height: 40
@@ -975,6 +999,9 @@ pub struct App {
     /// Session selected by a right-click while its archive/delete menu is open.
     #[rust]
     session_context_entry: Option<SessionEntry>,
+    /// Whether the active session's plan drawer is expanded.
+    #[rust]
+    plan_drawer_open: bool,
 }
 
 impl ScriptHook for App {
@@ -1036,7 +1063,6 @@ impl MatchEvent for App {
         self.ui
             .label(cx, ids!(workspace_label))
             .set_text(cx, &work_dir.display().to_string());
-        self.refresh_plan_ui(cx, &work_dir);
         refresh_sessions(&work_dir);
         let context = ProjectContext::discover(&work_dir);
 
@@ -1070,6 +1096,7 @@ impl MatchEvent for App {
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| "default".into());
             set_active_session(&work_dir, &id);
+            self.refresh_plan_ui(cx, &work_dir, &id);
         }
 
         // Slash-command list: built-ins + WASI extension commands.
@@ -1175,6 +1202,20 @@ impl MatchEvent for App {
                 MsgRole::System,
                 "=== Capabilities Manager ===\nSkills: Global (~/.agents/skills), Project (.mypi/skills)\nExtensions: Sandboxed WASI (.wasm)\nPackages: Local & Git packages",
             );
+            cx.redraw_all();
+        }
+
+        // --- Session-local plan drawer ---
+        if self.ui.button(cx, ids!(plan_toggle_btn)).clicked(actions) {
+            self.plan_drawer_open = !self.plan_drawer_open;
+            self.ui
+                .widget(cx, ids!(plan_drawer))
+                .set_visible(cx, self.plan_drawer_open);
+            cx.redraw_all();
+        }
+        if self.ui.button(cx, ids!(plan_close_btn)).clicked(actions) {
+            self.plan_drawer_open = false;
+            self.ui.widget(cx, ids!(plan_drawer)).set_visible(cx, false);
             cx.redraw_all();
         }
 
@@ -1319,11 +1360,44 @@ impl App {
     // -----------------------------------------------------------------
     // Plan panel
     // -----------------------------------------------------------------
-    fn refresh_plan_ui(&mut self, cx: &mut Cx, work_dir: &std::path::Path) {
-        let enabled = refresh_plan(work_dir);
+    fn refresh_plan_ui(&mut self, cx: &mut Cx, work_dir: &std::path::Path, session_id: &str) {
+        refresh_plan(work_dir, session_id);
+        let (enabled, item_count) = {
+            let plan = PLAN_DATA.read().unwrap();
+            (plan.enabled, plan.items.len())
+        };
+
+        if !enabled {
+            self.plan_drawer_open = false;
+        }
+
         self.ui
-            .label(cx, ids!(plan_status_label))
-            .set_text(cx, if enabled { "active" } else { "inactive" });
+            .button(cx, ids!(plan_toggle_btn))
+            .set_visible(cx, enabled);
+        self.ui.button(cx, ids!(plan_toggle_btn)).set_text(
+            cx,
+            &format!(
+                "Plan · {item_count} step{}",
+                if item_count == 1 { "" } else { "s" }
+            ),
+        );
+        self.ui
+            .widget(cx, ids!(plan_drawer))
+            .set_visible(cx, enabled && self.plan_drawer_open);
+        self.ui
+            .widget(cx, ids!(plan_list))
+            .set_visible(cx, enabled && item_count > 0);
+        self.ui
+            .label(cx, ids!(plan_empty_label))
+            .set_visible(cx, enabled && item_count == 0);
+        self.ui.label(cx, ids!(plan_status_label)).set_text(
+            cx,
+            if item_count == 0 {
+                "planning"
+            } else {
+                "active"
+            },
+        );
     }
 
     // -----------------------------------------------------------------
@@ -1422,6 +1496,7 @@ impl App {
         }
 
         set_active_session(&entry.work_dir, &entry.id);
+        self.plan_drawer_open = false;
 
         let Some(tx) = self.tx.clone() else { return };
         let Some(agent_arc) = self.agent.clone() else {
@@ -1434,7 +1509,7 @@ impl App {
                     entry.title
                 ),
             );
-            self.refresh_plan_ui(cx, &entry.work_dir);
+            self.refresh_plan_ui(cx, &entry.work_dir, &entry.id);
             cx.redraw_all();
             return;
         };
@@ -1636,7 +1711,9 @@ impl App {
                 flush_streaming();
                 self.set_status(cx, UiStatus::Ready, "Ready");
                 let work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                self.refresh_plan_ui(cx, &work_dir);
+                if let Some(session) = active_session_entry() {
+                    self.refresh_plan_ui(cx, &work_dir, &session.id);
+                }
                 refresh_sessions(&work_dir);
             }
             AgentEvent::AgentError { error } => {
@@ -1673,7 +1750,9 @@ impl App {
                     push_chat(MsgRole::System, output);
                     self.set_status(cx, UiStatus::Ready, "Ready");
                     let work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                    self.refresh_plan_ui(cx, &work_dir);
+                    if let Some(session) = active_session_entry() {
+                        self.refresh_plan_ui(cx, &work_dir, &session.id);
+                    }
                     refresh_sessions(&work_dir);
                 }
                 GuiAgentEvent::SessionSwitched {
@@ -1685,7 +1764,7 @@ impl App {
                     set_active_session(&work_dir, &session_id);
                     replace_chat_from_agent_messages(&messages);
                     push_chat(MsgRole::System, format!("Switched to session `{title}`."));
-                    self.refresh_plan_ui(cx, &work_dir);
+                    self.refresh_plan_ui(cx, &work_dir, &session_id);
                     refresh_sessions(&work_dir);
                     set_active_session(&work_dir, &session_id);
                     self.set_status(cx, UiStatus::Ready, "Ready");
