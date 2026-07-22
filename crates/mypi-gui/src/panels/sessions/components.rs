@@ -32,6 +32,8 @@ pub struct SessionContextMenu {
     #[rust]
     menu_rect: Rect,
     #[rust]
+    hovered_item: Option<ContextMenuItem>,
+    #[rust]
     pressed_item: Option<ContextMenuItem>,
 }
 
@@ -97,7 +99,7 @@ impl Widget for SessionContextMenu {
                 }
             }
             Event::KeyDown(event) if event.key_code == KeyCode::Escape => self.close(cx),
-            Event::BackPressed { .. } | Event::Scroll(_) => self.close(cx),
+            Event::BackPressed { .. } => self.close(cx),
             Event::MouseLeave(_) => self.set_hovered_item(cx, None),
             _ => self.view.handle_event(cx, event, scope),
         }
@@ -159,6 +161,10 @@ impl SessionContextMenu {
     }
 
     fn set_hovered_item(&mut self, cx: &mut Cx, item: Option<ContextMenuItem>) {
+        if self.hovered_item == item {
+            return;
+        }
+        self.hovered_item = item;
         self.set_menu_item_state(
             cx,
             match item {
@@ -170,6 +176,7 @@ impl SessionContextMenu {
     }
 
     fn set_pressed_item(&mut self, cx: &mut Cx, item: ContextMenuItem) {
+        self.hovered_item = Some(item);
         self.set_menu_item_state(
             cx,
             match item {
@@ -193,7 +200,9 @@ impl SessionContextMenu {
     pub fn open(&mut self, cx: &mut Cx, position: Vec2d) {
         self.menu_pos = position;
         self.opened = true;
+        self.hovered_item = None;
         self.pressed_item = None;
+        self.set_menu_item_state(cx, 0.0);
         if let Some(draw_list) = &self.draw_list {
             draw_list.redraw(cx);
         }
@@ -332,15 +341,15 @@ script_mod! {
         height: Fit
         cursor: MouseCursor.Hand
         flow: Right
-        spacing: 8
+        spacing: 7
         align: Align{y: 0.5}
         margin: Inset{left: 6 right: 6 top: 1 bottom: 1}
-        padding: Inset{left: 12 top: 7 right: 10 bottom: 7}
+        padding: Inset{left: 30 top: 5 right: 9 bottom: 5}
         draw_bg +: {
             hover: instance(0.0)
             color: #x00000000
             color_hover: uniform(#x262c35)
-            border_radius: 8.0
+            border_radius: 6.0
 
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -375,13 +384,13 @@ script_mod! {
             width: Fill
             height: Fit
             text: ""
-            draw_text +: { color: #x9aa3b0 text_style +: { font_size: 11.0 } }
+            draw_text +: { color: #xa6afbc text_style +: { font_size: 9.75 } }
         }
         time_lbl := Label {
             width: Fit
             height: Fit
             text: ""
-            draw_text +: { color: #x6f7a88 text_style +: { font_size: 10.0 } }
+            draw_text +: { color: #x697483 text_style +: { font_size: 8.75 } }
         }
     }
 }

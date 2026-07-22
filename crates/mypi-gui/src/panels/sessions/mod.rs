@@ -6,8 +6,8 @@ pub mod view;
 
 pub use components::{SessionContextMenu, SessionContextMenuAction};
 pub use state::{
-    active_session_entry, archive_session, create_new_session, delete_session, refresh_sessions,
-    session_entry_at_row, set_active_session, set_session_context_target, set_sessions_working,
-    SessionEntry,
+    active_session_entry, archive_session, create_new_session, delete_session,
+    project_work_dir_at_row, refresh_sessions, session_entry_at_row, set_active_session,
+    set_session_context_target, set_sessions_working, SessionEntry,
 };
 pub use view::SessionList;

@@ -82,7 +82,11 @@ fn session_title_from_tree(tree: &SessionTree, fallback_id: &str) -> String {
             }
         }
     }
-    fallback_id.to_string()
+    if fallback_id.starts_with("session_") {
+        "Untitled session".to_string()
+    } else {
+        fallback_id.to_string()
+    }
 }
 
 fn session_updated_at(tree: &SessionTree, path: &Path) -> u64 {
@@ -255,6 +259,16 @@ pub fn active_session_entry() -> Option<SessionEntry> {
         }
     }
     None
+}
+
+pub fn project_work_dir_at_row(row_idx: usize) -> Option<PathBuf> {
+    let data = SESSIONS_DATA.read().unwrap();
+    let SessionListRow::ProjectHeader { project_idx } = data.rows.get(row_idx)? else {
+        return None;
+    };
+    data.projects
+        .get(*project_idx)
+        .map(|project| project.work_dir.clone())
 }
 
 pub fn session_entry_at_row(row_idx: usize) -> Option<SessionEntry> {

@@ -8,9 +8,9 @@ use crate::panels::plan::PlanList;
 use crate::panels::sessions::{SessionContextMenu, SessionContextMenuAction, SessionList};
 use crate::state::{
     active_session_entry, archive_session, builtin_commands, create_new_session, delete_session,
-    refresh_plan_data, refresh_sessions, session_entry_at_row, set_active_session,
-    set_session_context_target, set_sessions_working, CommandInfo, GuiAgentEvent, MsgRole,
-    SessionEntry, ToolStatus,
+    project_work_dir_at_row, refresh_plan_data, refresh_sessions, session_entry_at_row,
+    set_active_session, set_session_context_target, set_sessions_working, CommandInfo,
+    GuiAgentEvent, MsgRole, SessionEntry, ToolStatus,
 };
 use crate::workspace::{AppState, SessionKey};
 use makepad_widgets::text::selection::Cursor;
@@ -332,18 +332,25 @@ script_mod! {
 
             ProjectHeader := View {
                 width: Fill
-                height: Fit
+                height: 28
                 flow: Right
-                spacing: 8
+                spacing: 7
                 align: Align{y: 0.5}
-                padding: Inset{left: 10 top: 10 right: 10 bottom: 4}
-                folder_lbl := Label {
-                    width: Fit
-                    height: Fit
-                    text: "📁"
-                    draw_text +: {
-                        color: #xc7cdd6
-                        text_style +: { font_size: 11.0 }
+                padding: Inset{left: 10 top: 3 right: 5 bottom: 3}
+                View {
+                    width: 14
+                    height: 12
+                    show_bg: true
+                    draw_bg +: {
+                        color: uniform(#x8090a3)
+                        pixel: fn() {
+                            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                            sdf.box(2.0, 1.0, 5.5, 4.0, 1.0)
+                            sdf.fill_keep(self.color)
+                            sdf.box(1.0, 3.0, 12.0, 8.0, 1.5)
+                            sdf.stroke(self.color, 1.0)
+                            return sdf.result
+                        }
                     }
                 }
                 name_lbl := Label {
@@ -351,8 +358,21 @@ script_mod! {
                     height: Fit
                     text: ""
                     draw_text +: {
-                        color: #xb8c0cc
-                        text_style +: { font_size: 11.0 }
+                        color: #xb2bbc7
+                        text_style: theme.font_bold { font_size: 9.75 }
+                    }
+                }
+                new_project_session_btn := glass.GlassButton {
+                    width: 24
+                    height: 22
+                    padding: 0
+                    text: "+"
+                    draw_text +: {
+                        color: #xeef2f7
+                        text_style: theme.font_bold { font_size: 10.5 }
+                    }
+                    draw_glass +: {
+                        corner_radius: 5.0
                     }
                 }
             }
@@ -387,7 +407,7 @@ script_mod! {
                     color_hover: #x30425a
                     border_color: #x4f82bd
                     border_size: 1.0
-                    border_radius: 8.0
+                    border_radius: 6.0
                 }
                 title_lbl +: {
                     draw_text +: {
@@ -409,7 +429,7 @@ script_mod! {
             EmptyRow := EmptyRowBase {
                 padding: Inset{left: 22 top: 4 right: 10 bottom: 8}
                 lbl +: {
-                    text: "No agents yet"
+                    text: "No sessions yet"
                     draw_text +: { color: #x555d6a text_style +: { font_size: 11.0 } }
                 }
             }
@@ -630,38 +650,8 @@ script_mod! {
                                 width: 240
                                 height: Fill
                                 flow: Down
-                                spacing: 6
+                                spacing: 2
                                 padding: Inset{left: 2 top: 2 right: 2 bottom: 2}
-
-                                PanelHeader {
-                                    width: Fill
-                                    height: Fit
-                                    padding: Inset{left: 8 right: 6 top: 2 bottom: 2}
-                                    Label {
-                                        text: "Sessions"
-                                        draw_text +: {
-                                            color: #xaeb6c2
-                                            text_style: theme.font_bold { font_size: 10.5 }
-                                        }
-                                    }
-                                    FlexSpacer {}
-                                    new_session_btn := Button {
-                                        width: Fit
-                                        height: 26
-                                        text: "New"
-                                        draw_bg +: {
-                                            color: #x2a313c
-                                            color_hover: #x343d4a
-                                            color_down: #x3a424e
-                                            border_radius: 6.0
-                                            border_size: 0.0
-                                        }
-                                        draw_text +: {
-                                            color: #xc7cdd6
-                                            text_style +: { font_size: 10.0 }
-                                        }
-                                    }
-                                }
 
                                 session_context_menu := SessionContextMenu {}
 
@@ -1034,9 +1024,6 @@ impl MatchEvent for App {
             cx.redraw_all();
         }
 
-        if self.ui.button(cx, ids!(new_session_btn)).clicked(actions) && !self.busy {
-            self.create_and_activate_session(cx);
-        }
         let session_menu_uid = self.ui.widget(cx, ids!(session_context_menu)).widget_uid();
         if let Some(action) = actions.find_widget_action(session_menu_uid) {
             match action.cast::<SessionContextMenuAction>() {
@@ -1051,6 +1038,16 @@ impl MatchEvent for App {
         }
         let session_list = self.ui.portal_list(cx, ids!(session_list.list));
         for (item_id, item) in session_list.items_with_actions(actions) {
+            if item
+                .glass_button(cx, ids!(new_project_session_btn))
+                .clicked(actions)
+                && !self.busy
+            {
+                if let Some(work_dir) = project_work_dir_at_row(item_id) {
+                    self.create_and_activate_session(cx, work_dir);
+                }
+                continue;
+            }
             if let Some(fe) = item.as_view().finger_up(actions) {
                 let Some(entry) = session_entry_at_row(item_id) else {
                     continue;
@@ -1306,8 +1303,7 @@ impl App {
         cx.redraw_all();
     }
 
-    fn create_and_activate_session(&mut self, cx: &mut Cx) {
-        let work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    fn create_and_activate_session(&mut self, cx: &mut Cx, work_dir: PathBuf) {
         let Some(entry) = create_new_session(&work_dir) else {
             self.push_chat(MsgRole::System, "Could not create a new session file.");
             cx.redraw_all();

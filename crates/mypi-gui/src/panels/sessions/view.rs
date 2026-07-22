@@ -23,7 +23,7 @@ impl Widget for SessionList {
                         let item_widget = list.item(cx, item_id, id!(EmptyRow));
                         item_widget
                             .label(cx, ids!(lbl))
-                            .set_text(cx, "No agents yet");
+                            .set_text(cx, "No sessions yet");
                         item_widget.draw_all_unscoped(cx);
                         continue;
                     }
@@ -43,7 +43,7 @@ impl Widget for SessionList {
                             let item_widget = list.item(cx, item_id, id!(EmptyRow));
                             item_widget
                                 .label(cx, ids!(lbl))
-                                .set_text(cx, "No agents yet");
+                                .set_text(cx, "No sessions yet");
                             item_widget.draw_all_unscoped(cx);
                         }
                         Some(SessionListRow::Session {
