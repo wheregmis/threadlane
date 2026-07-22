@@ -1,4 +1,4 @@
-use mypi_agent::{
+use mypi_coding_agent::{
     WasiExtension, WasiExtensionEffect, WasiExtensionManager, WasiExtensionManifest,
     WasiToolDefinition,
 };
@@ -86,8 +86,6 @@ fn test_extension_command_state_is_host_managed() {
         .iter()
         .any(|effect| matches!(effect, WasiExtensionEffect::RequestModelTurn { .. })));
 
-    // Each invocation starts a new WASM instance. This only remains active because
-    // the manager supplies the previous response state to the next invocation.
     let hook_results = manager.execute_hook(
         "assistant_message",
         r#"{"content":"Plan:\n1. Inspect the extension boundary\n2. Add hook tests"}"#,

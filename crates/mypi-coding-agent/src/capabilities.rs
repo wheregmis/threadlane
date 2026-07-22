@@ -27,19 +27,15 @@ pub struct CapabilityCatalog {
 
 impl CapabilityCatalog {
     pub fn discover(project_root: Option<&Path>, global_dir: &Path) -> Self {
-        // Discover skills
         let mut skill_mgr = SkillManager::new();
         skill_mgr.discover_skills(project_root);
         let skills = skill_mgr.list_skills();
 
-        // Discover packages
         let pkg_mgr = PackageManager::new(global_dir.to_path_buf());
         let packages = pkg_mgr.list_packages(project_root);
 
-        // Discover extensions (both WASM and Full-Trust)
         let mut extensions = Vec::new();
 
-        // Sandboxed WASM extensions
         if let Some(proj) = project_root {
             let mut wasi_mgr = WasiExtensionManager::for_project(proj);
             wasi_mgr.discover_and_load(proj);
@@ -53,12 +49,11 @@ impl CapabilityCatalog {
                     is_valid: true,
                     validation_error: None,
                     revision: None,
-                    is_trusted: true, // WASM sandboxed
+                    is_trusted: true,
                 });
             }
         }
 
-        // Full-trust extensions from packages
         let trust_file = global_dir.join("state/trust.json");
         let trust_store = TrustStore::load_from_file(&trust_file);
 

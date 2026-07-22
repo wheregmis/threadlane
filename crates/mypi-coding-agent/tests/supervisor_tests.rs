@@ -1,4 +1,4 @@
-use mypi_agent::{
+use mypi_coding_agent::{
     CapabilityCatalog, CodingAgentOptions, FullTrustRunner, HarnessSupervisor, SkillManager,
     SkillScope, TrustStore,
 };

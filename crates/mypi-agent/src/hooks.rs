@@ -47,3 +47,7 @@ pub type DynAfterToolCallFn =
 pub type DynTransformContextFn = Arc<dyn Fn(Vec<AgentMessage>) -> Vec<AgentMessage> + Send + Sync>;
 pub type DynShouldStopFn =
     Arc<dyn Fn(usize, &[AgentToolResult], &AgentState) -> bool + Send + Sync>;
+
+pub trait ToolExecutor: Send + Sync {
+    fn execute_tool(&self, name: &str, args: &str) -> Option<Result<String, String>>;
+}

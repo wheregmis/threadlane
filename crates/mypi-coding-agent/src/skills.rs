@@ -68,22 +68,15 @@ impl SkillManager {
     pub fn discover_skills_with_home(&mut self, project_root: Option<&Path>, home_dir: Option<&Path>) {
         self.skills.clear();
 
-        // 1. ~/.agents/skills/
         if let Some(home) = home_dir {
             self.scan_directory(&home.join(".agents/skills"), SkillScope::GlobalAgents);
-            // 2. ~/.mypi/skills/
             self.scan_directory(&home.join(".mypi/skills"), SkillScope::GlobalMypi);
-            // 3. ~/.mypi/packages/*/skills/
             self.scan_packages(&home.join(".mypi/packages"), SkillScope::GlobalPackage);
         }
 
-        // Project scopes
         if let Some(proj) = project_root {
-            // 4. <project>/.agents/skills/
             self.scan_directory(&proj.join(".agents/skills"), SkillScope::ProjectAgents);
-            // 5. <project>/.mypi/skills/
             self.scan_directory(&proj.join(".mypi/skills"), SkillScope::ProjectMypi);
-            // 6. <project>/.mypi/packages/*/skills/
             self.scan_packages(&proj.join(".mypi/packages"), SkillScope::ProjectPackage);
         }
     }

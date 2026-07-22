@@ -14,7 +14,8 @@ use crate::state::{
 };
 use makepad_widgets::text::selection::Cursor;
 use makepad_widgets::*;
-use mypi_agent::{get_runtime, AgentEvent, CodingAgent, CodingAgentOptions};
+use mypi_agent::{get_runtime, AgentEvent};
+use mypi_coding_agent::{CodingAgent, CodingAgentOptions, ProjectContext};
 use mypi_provider::auth;
 use mypi_provider::openai::fetch_available_models;
 use std::collections::HashMap;
@@ -931,7 +932,7 @@ impl MatchEvent for App {
             .set_text(cx, &work_dir.display().to_string());
         self.refresh_plan_ui(cx, &work_dir);
         refresh_sessions(&work_dir);
-        let context = mypi_agent::ProjectContext::discover(&work_dir);
+        let context = ProjectContext::discover(&work_dir);
 
         if !context.context_files.is_empty() {
             push_chat(

@@ -126,7 +126,6 @@ impl PlanModeState {
         for line in text.lines() {
             let trimmed = line.trim();
 
-            // Check for [DONE:n] markers in assistant responses even outside a plan block.
             if let Some(start) = trimmed.find("[DONE:") {
                 let rest = &trimmed[start + 6..];
                 if let Some(end) = rest.find(']') {
@@ -161,7 +160,6 @@ impl PlanModeState {
                     continue;
                 }
 
-                // A new Markdown heading or ordinary prose ends this plan block.
                 if !trimmed.is_empty() && (trimmed.starts_with('#') || !trimmed.starts_with('-')) {
                     in_plan_block = false;
                 }

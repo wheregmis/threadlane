@@ -41,10 +41,8 @@ impl PackageManager {
     pub fn list_packages(&self, project_root: Option<&Path>) -> Vec<PackageRecord> {
         let mut packages = Vec::new();
 
-        // Scan global packages: ~/.mypi/packages/
         self.scan_packages_dir(&self.global_dir.join("packages"), PackageScope::Global, &mut packages);
 
-        // Scan project packages: <project>/.mypi/packages/
         if let Some(proj) = project_root {
             self.scan_packages_dir(&proj.join(".mypi/packages"), PackageScope::Project, &mut packages);
         }

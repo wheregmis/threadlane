@@ -1,6 +1,5 @@
-use crate::agent::Agent;
 use crate::plan_mode::PlanModeState;
-use crate::session_tree::SessionTree;
+use mypi_agent::{Agent, SessionTree};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandAction {

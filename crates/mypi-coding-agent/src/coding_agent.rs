@@ -1,14 +1,10 @@
-use crate::agent::Agent;
+use mypi_agent::{
+    AfterToolCallHook, AfterToolCallResult, Agent, AgentEvent, AgentMessage, AgentState,
+    AgentToolCall, AgentToolResult, BeforeToolCallHook, BeforeToolCallResult, SessionTree,
+};
 use crate::commands::{execute_slash_command, parse_slash_command, CommandAction};
 use crate::context::ProjectContext;
-use crate::events::AgentEvent;
-use crate::hooks::{AfterToolCallHook, BeforeToolCallHook};
 use crate::plan_mode::PlanModeState;
-use crate::session_tree::SessionTree;
-use crate::types::{
-    AfterToolCallResult, AgentMessage, AgentState, AgentToolCall, AgentToolResult,
-    BeforeToolCallResult,
-};
 use crate::wasi_extension::WasiExtensionManager;
 use async_trait::async_trait;
 use std::path::PathBuf;

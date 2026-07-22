@@ -1,5 +1,5 @@
 use crate::coding_agent::{CodingAgent, CodingAgentOptions};
-use crate::events::AgentEvent;
+use mypi_agent::AgentEvent;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -226,7 +226,6 @@ impl HarnessSupervisor {
         }
         self.save_registry();
 
-        // Spawn event forwarder for this task
         let event_tx = self.event_tx.clone();
         let tid = task_id.clone();
         let pid = project_id.to_string();
@@ -264,7 +263,6 @@ impl HarnessSupervisor {
             let mut agent = agent_arc.lock().await;
             let _ = agent.handle_input(&prompt).await;
 
-            // Update status back to Idle after turn finishes
             let mut t_lock = tasks_map.lock().unwrap();
             if let Some(tr) = t_lock.get_mut(&tid) {
                 if tr.status == TaskStatus::Running {

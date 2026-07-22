@@ -1271,7 +1271,22 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures",
+ "mypi-provider",
+ "mypi-tools",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "mypi-coding-agent"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
  "md5",
+ "mypi-agent",
  "mypi-provider",
  "mypi-tools",
  "serde",
@@ -1287,6 +1302,7 @@ version = "0.1.0"
 dependencies = [
  "makepad-widgets",
  "mypi-agent",
+ "mypi-coding-agent",
  "mypi-provider",
  "mypi-tools",
  "serde",

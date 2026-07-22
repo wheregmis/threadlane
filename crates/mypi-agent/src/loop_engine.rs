@@ -1,12 +1,12 @@
 use crate::events::AgentEvent;
 use crate::hooks::{
-    AfterToolCallHook, BeforeToolCallHook, ShouldStopAfterTurnHook, TransformContextHook,
+    AfterToolCallHook, BeforeToolCallHook, ShouldStopAfterTurnHook, ToolExecutor,
+    TransformContextHook,
 };
 use crate::queue::PendingMessageQueue;
 use crate::types::{
     AgentMessage, AgentState, AgentToolCall, AgentToolResult, QueueMode, ToolExecutionMode,
 };
-use crate::wasi_extension::WasiExtensionManager;
 use mypi_provider::openai::{OpenAIClient, StreamEvent, ToolCall};
 use mypi_tools::{execute_tool, execute_tool_in_workspace, get_available_tools, get_codex_tools};
 use serde_json::Value;
@@ -110,7 +110,7 @@ pub struct AgentLoop {
     pub transform_context_hook: Option<Arc<dyn TransformContextHook>>,
     pub should_stop_hook: Option<Arc<dyn ShouldStopAfterTurnHook>>,
     pub event_tx: broadcast::Sender<AgentEvent>,
-    pub extension_manager: Option<Arc<WasiExtensionManager>>,
+    pub extension_manager: Option<Arc<dyn ToolExecutor>>,
     pub work_dir: Option<PathBuf>,
 }
 
@@ -403,7 +403,7 @@ impl AgentLoop {
         after_hook: Option<Arc<dyn AfterToolCallHook>>,
         event_tx: broadcast::Sender<AgentEvent>,
         state: Arc<Mutex<AgentState>>,
-        extension_manager: Option<Arc<WasiExtensionManager>>,
+        extension_manager: Option<Arc<dyn ToolExecutor>>,
         work_dir: Option<PathBuf>,
     ) -> AgentToolResult {
         let arguments = normalize_tool_arguments(

@@ -453,3 +453,9 @@ impl WasiExtensionManager {
         Ok(response)
     }
 }
+
+impl mypi_agent::ToolExecutor for WasiExtensionManager {
+    fn execute_tool(&self, name: &str, args: &str) -> Option<Result<String, String>> {
+        self.execute_tool(name, args)
+    }
+}

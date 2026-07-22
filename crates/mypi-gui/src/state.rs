@@ -6,7 +6,8 @@
 //! custom list widgets (see `chat.rs`) can read it during their draw pass
 //! without fighting `Scope` lifetimes — same pattern as makepad's aichat example.
 
-use mypi_agent::{AgentEvent, AgentMessage, SessionTree, TaskAgentEvent};
+use mypi_agent::{AgentEvent, AgentMessage, SessionTree};
+use mypi_coding_agent::TaskAgentEvent;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
