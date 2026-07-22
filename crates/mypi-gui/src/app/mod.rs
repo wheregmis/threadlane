@@ -477,12 +477,91 @@ script_mod! {
                 window.title: "mypi"
                 pass.clear_color: #x181a1f
                 body +: {
-                    View {
+                    dock := DockFlat {
                         width: Fill
                         height: Fill
-                        flow: Down
-                        spacing: 8
-                        padding: Inset{left: 12 top: 10 right: 12 bottom: 10}
+                        padding: 0
+
+                        round_corner +: {
+                            border_radius: 0.0
+                        }
+
+                        splitter: Splitter {
+                            size: 6.0
+                            draw_bg +: {
+                                color: uniform(#x303641)
+                                color_hover: uniform(#x4b5665)
+                                color_drag: uniform(#x6a7b91)
+
+                                pixel: fn() {
+                                    let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                                    sdf.clear(#x181a1f)
+                                    let line_color = mix(
+                                        self.color
+                                        mix(self.color_hover, self.color_drag, self.drag)
+                                        self.hover
+                                    )
+                                    if self.is_vertical > 0.5 {
+                                        sdf.rect(0.0, self.rect_size.y * 0.5 - 0.5, self.rect_size.x, 1.0)
+                                    } else {
+                                        sdf.rect(self.rect_size.x * 0.5 - 0.5, 0.0, 1.0, self.rect_size.y)
+                                    }
+                                    sdf.fill(line_color)
+                                    return sdf.result
+                                }
+                            }
+                        }
+
+                        root := DockSplitter {
+                            axis: SplitterAxis.Horizontal
+                            align: SplitterAlign.FromA(250.0)
+                            a: @sessions_tabs
+                            b: @workspace_tabs
+                        }
+
+                        sessions_tabs := DockTabs {
+                            tabs: [@sessions_tab]
+                            selected: 0
+                            closable: false
+                            hide_tab_bar: true
+                        }
+
+                        workspace_tabs := DockTabs {
+                            tabs: [@workspace_tab]
+                            selected: 0
+                            closable: false
+                            hide_tab_bar: true
+                        }
+
+                        sessions_tab := DockTab {
+                            name: "Sessions"
+                            template: @PermanentTab
+                            kind: @SessionsDock
+                        }
+
+                        workspace_tab := DockTab {
+                            name: "Workspace"
+                            template: @PermanentTab
+                            kind: @WorkspaceDock
+                        }
+
+                        SessionsDock := View {
+                            width: Fill
+                            height: Fill
+                            flow: Down
+                            spacing: 2
+                            padding: Inset{left: 8 top: 10 right: 8 bottom: 10}
+
+                            session_context_menu := SessionContextMenu {}
+                            session_list := SessionList { height: Fill }
+                        }
+
+                        WorkspaceDock := View {
+                            width: Fill
+                            height: Fill
+                            flow: Down
+                            spacing: 8
+                            padding: Inset{left: 10 top: 10 right: 12 bottom: 10}
 
                         header := PanelHeader {
                             spacing: 10
@@ -520,66 +599,7 @@ script_mod! {
                                     text_style +: { font_size: 10.0 }
                                 }
                             }
-                            model_drop := DropDown {
-                                width: 180
-                                height: 28
-                                labels: [
-                                    "gpt-5.6-luna",
-                                    "gpt-5.4",
-                                    "gpt-5.4-mini",
-                                    "gpt-5.5",
-                                    "gpt-5.6-sol",
-                                    "gpt-5.6-terra",
-                                    "gpt-5.3-codex-spark",
-                                    "gpt-4o",
-                                    "gpt-4o-mini"
-                                ]
-                                draw_bg +: {
-                                    color: #x232830
-                                    color_hover: #x2a313c
-                                    color_focus: #x2a313c
-                                    color_down: #x2a313c
-                                    border_color: #x3a424e
-                                    border_color_hover: #x4a5564
-                                    border_color_focus: #x4a5564
-                                    border_color_down: #x4a5564
-                                    arrow_color: #xc7cdd6
-                                    arrow_color_hover: #xdde3ea
-                                    arrow_color_focus: #xdde3ea
-                                    arrow_color_down: #xdde3ea
-                                }
-                                draw_text +: {
-                                    color: #xdde3ea
-                                    color_hover: #xffffff
-                                    color_focus: #xffffff
-                                    color_down: #xffffff
-                                    text_style +: { font_size: 10.5 }
-                                }
-                                popup_menu: PopupMenuFlat {
-                                    width: 210
-                                    draw_bg +: {
-                                        color: #x232830
-                                        border_color: #x4a5564
-                                        border_size: 1.0
-                                        border_radius: 8.0
-                                    }
-                                    menu_item: PopupMenuItem {
-                                        draw_text +: {
-                                            color: #xdde3ea
-                                            color_hover: #xffffff
-                                            color_active: #xffffff
-                                            text_style +: { font_size: 10.5 }
-                                        }
-                                        draw_bg +: {
-                                            color: #x00000000
-                                            color_hover: #x2f3a4d
-                                            color_active: #x3a4a5f
-                                            mark_color: #x00000000
-                                            mark_color_active: #x4ac26b
-                                        }
-                                    }
-                                }
-                            }
+
                             status_pill := View {
                                 width: 16
                                 height: 20
@@ -646,17 +666,11 @@ script_mod! {
                             flow: Right
                             spacing: 10
 
-                            sessions_panel := View {
-                                width: 240
+                            chat_column := View {
+                                width: Fill
                                 height: Fill
                                 flow: Down
-                                spacing: 2
-                                padding: Inset{left: 2 top: 2 right: 2 bottom: 2}
-
-                                session_context_menu := SessionContextMenu {}
-
-                                session_list := SessionList { height: Fill }
-                            }
+                                spacing: 8
 
                             chat_panel := PanelSurface {
                                 flow: Down
@@ -680,6 +694,229 @@ script_mod! {
                                         }
                                     }
                                 }
+                            }
+
+                            input_bar := RoundedView {
+                                width: Fill
+                                height: Fit
+                                flow: Down
+                                spacing: 4
+                                padding: Inset{left: 9 top: 7 right: 7 bottom: 7}
+                                new_batch: true
+                                draw_bg +: {
+                                    color: #x1d2128
+                                    border_color: #x343b46
+                                    border_size: 1.0
+                                    border_radius: 9.0
+                                }
+
+                                prompt_input := mod.widgets.CommandTextInput {
+                                    width: Fill
+                                    height: Fit
+                                    trigger: "/"
+                                    inline_search: true
+                                    color_focus: #x2f3a4d
+                                    color_hover: #x262c37
+
+                                    persistent +: {
+                                        width: Fill
+                                        height: Fit
+                                        center +: {
+                                            width: Fill
+                                            height: Fit
+                                            text_input +: {
+                                                width: Fill
+                                                height: Fit{min: FitBound.Abs(56), max: FitBound.Abs(180)}
+                                                margin: 0
+                                                padding: Inset{left: 3 top: 6 right: 3 bottom: 6}
+                                                is_multiline: true
+                                                submit_on_enter: true
+                                                empty_text: "Ask mypi anything…"
+                                                draw_bg +: {
+                                                    color: #x00000000
+                                                    color_empty: #x00000000
+                                                    color_hover: #x00000000
+                                                    color_focus: #x00000000
+                                                    color_down: #x00000000
+                                                    border_color: #x00000000
+                                                    border_color_empty: #x00000000
+                                                    border_color_hover: #x00000000
+                                                    border_color_focus: #x00000000
+                                                    border_color_down: #x00000000
+                                                    border_size: 0.0
+                                                }
+                                                draw_text +: {
+                                                    color: #xd9dfe8
+                                                    color_hover: #xe8edf4
+                                                    color_focus: #xf0f4fa
+                                                    color_empty: #x717b89
+                                                    color_empty_hover: #x8792a1
+                                                    color_empty_focus: #x8792a1
+                                                    text_style +: {
+                                                        font_size: 10.5
+                                                        line_spacing: 1.35
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                composer_footer := View {
+                                    width: Fill
+                                    height: 30
+                                    flow: Right
+                                    spacing: 8
+                                    align: Align{y: 0.5}
+
+                                    plan_toggle_btn := Button {
+                                        width: Fit
+                                        height: 26
+                                        visible: false
+                                        text: "Plan · 0 steps"
+                                        draw_bg +: {
+                                            color: #x252b34
+                                            color_hover: #x303844
+                                            color_down: #x394453
+                                            border_color: #x3a424e
+                                            border_size: 1.0
+                                            border_radius: 6.0
+                                        }
+                                        draw_text +: {
+                                            color: #x9eabc0
+                                            text_style +: { font_size: 9.0 }
+                                        }
+                                    }
+
+                                    composer_hint := Label {
+                                        width: Fit
+                                        height: Fit
+                                        text: "Enter to send · Shift+Enter for newline"
+                                        draw_text +: {
+                                            color: #x687382
+                                            text_style +: { font_size: 8.5 }
+                                        }
+                                    }
+
+                                    FlexSpacer {}
+
+                                    model_picker := View {
+                                        width: 158
+                                        height: 28
+                                        flow: Overlay
+                                        clip_x: false
+                                        clip_y: false
+                                        align: Align{x: 0.0 y: 1.0}
+
+                                        model_drop := DropDown {
+                                            width: 158
+                                            height: 1
+                                            margin: Inset{bottom: 58}
+                                            padding: 0
+                                            labels: [
+                                                "gpt-5.6-luna",
+                                                "gpt-5.4",
+                                                "gpt-5.4-mini",
+                                                "gpt-5.5",
+                                                "gpt-5.6-sol",
+                                                "gpt-5.6-terra",
+                                                "gpt-5.3-codex-spark",
+                                                "gpt-4o",
+                                                "gpt-4o-mini"
+                                            ]
+                                            draw_bg +: {
+                                                pixel: fn() {
+                                                    return vec4(0.0, 0.0, 0.0, 0.0)
+                                                }
+                                            }
+                                            draw_text +: {
+                                                color: #x00000000
+                                                color_hover: #x00000000
+                                                color_focus: #x00000000
+                                                color_down: #x00000000
+                                            }
+                                            popup_menu: PopupMenuFlat {
+                                                width: 220
+                                                draw_bg +: {
+                                                    color: #x242932
+                                                    border_color: #x454e5b
+                                                    border_size: 1.0
+                                                    border_radius: 7.0
+                                                }
+                                                menu_item: PopupMenuItem {
+                                                    draw_text +: {
+                                                        color: #xc9d0da
+                                                        color_hover: #xffffff
+                                                        color_active: #xffffff
+                                                        text_style +: { font_size: 10.0 }
+                                                    }
+                                                    draw_bg +: {
+                                                        color: #x00000000
+                                                        color_hover: #x303844
+                                                        color_active: #x354153
+                                                        mark_color: #x00000000
+                                                        mark_color_active: #x6fa8ff
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        model_picker_btn := Button {
+                                            width: Fill
+                                            height: Fill
+                                            text: "gpt-5.6-luna"
+                                            align: Align{x: 0.0 y: 0.5}
+                                            padding: Inset{left: 10 right: 24}
+                                            draw_bg +: {
+                                                color: #x232831
+                                                color_hover: #x2b323d
+                                                color_down: #x313a47
+                                                border_color: #x353d49
+                                                border_color_hover: #x4a5666
+                                                border_color_down: #x536174
+                                                border_size: 1.0
+                                                border_radius: 6.0
+                                            }
+                                            draw_text +: {
+                                                color: #xb8c1ce
+                                                color_hover: #xdde3ea
+                                                color_down: #xffffff
+                                                text_style +: { font_size: 9.5 }
+                                            }
+                                        }
+
+                                        View {
+                                            width: Fill
+                                            height: Fill
+                                            align: Align{x: 1.0 y: 0.5}
+                                            padding: Inset{right: 9}
+                                            Label {
+                                                width: Fit
+                                                height: Fit
+                                                text: "⌃"
+                                                draw_text +: {
+                                                    color: #x7f8b9a
+                                                    text_style +: { font_size: 8.5 }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    send_btn := glass.GlassButtonProminent {
+                                        width: 34
+                                        height: 30
+                                        padding: 0
+                                        text: "↑"
+                                        draw_text +: {
+                                            color: #xffffff
+                                            text_style: theme.font_bold { font_size: 12.0 }
+                                        }
+                                        draw_glass +: {
+                                            corner_radius: 6.0
+                                        }
+                                    }
+                                }
+                            }
                             }
 
                             plan_drawer := PanelSurface {
@@ -726,62 +963,6 @@ script_mod! {
                             }
                         }
 
-                        input_bar := RoundedView {
-                            width: Fill
-                            height: Fit
-                            flow: Right
-                            spacing: 8
-                            align: Align{y: 1.0}
-                            padding: Inset{left: 8 top: 8 right: 8 bottom: 8}
-                            draw_bg +: {
-                                color: #x1f232b
-                                border_radius: 10.0
-                            }
-
-                            prompt_input := mod.widgets.CommandTextInput {
-                                width: Fill
-                                height: Fit
-                                trigger: "/"
-                                inline_search: true
-                                color_focus: #x2f3a4d
-                                color_hover: #x262c37
-
-                                persistent +: {
-                                    width: Fill
-                                    height: Fit
-                                    center +: {
-                                        width: Fill
-                                        height: Fit
-                                        text_input +: {
-                                            width: Fill
-                                            height: Fit{min: FitBound.Abs(40), max: FitBound.Abs(160)}
-                                            margin: 0
-                                            is_multiline: true
-                                            submit_on_enter: true
-                                            empty_text: "Message mypi…  (/ commands · Enter to send · Shift+Enter for newline)"
-                                            draw_bg +: {
-                                                color: #x181a1f
-                                                color_empty: #x181a1f
-                                                color_hover: #x1c2028
-                                                color_focus: #x1c2028
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            plan_toggle_btn := Button {
-                                width: Fit
-                                height: 40
-                                visible: false
-                                text: "Plan · 0 steps"
-                            }
-
-                            send_btn := Button {
-                                width: 84
-                                height: 40
-                                text: "Send"
-                            }
                         }
                     }
                 }
@@ -813,6 +994,8 @@ pub struct App {
     busy: bool,
     #[rust]
     commands: Vec<CommandInfo>,
+    #[rust]
+    available_models: Vec<String>,
     #[rust]
     cmd_item_template: Option<ScriptObjectRef>,
     #[rust]
@@ -853,6 +1036,21 @@ impl MatchEvent for App {
         let (tx, rx) = channel::<GuiAgentEvent>();
         self.tx = Some(tx);
         self.rx = Some(Arc::new(Mutex::new(rx)));
+        self.set_model_dropup_options(
+            cx,
+            vec![
+                "gpt-5.6-luna".into(),
+                "gpt-5.4".into(),
+                "gpt-5.4-mini".into(),
+                "gpt-5.5".into(),
+                "gpt-5.6-sol".into(),
+                "gpt-5.6-terra".into(),
+                "gpt-5.3-codex-spark".into(),
+                "gpt-4o".into(),
+                "gpt-4o-mini".into(),
+            ],
+            "gpt-5.6-luna",
+        );
 
         let work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         self.select_workspace(work_dir.clone(), "draft");
@@ -1108,6 +1306,17 @@ impl MatchEvent for App {
             }
         }
 
+        if self.ui.button(cx, ids!(model_picker_btn)).clicked(actions) {
+            if let Some(mut model_drop) = self
+                .ui
+                .widget(cx, ids!(model_drop))
+                .borrow_mut::<DropDown>()
+            {
+                model_drop.set_key_focus(cx);
+                model_drop.set_active(cx);
+            }
+        }
+
         if self
             .ui
             .drop_down(cx, ids!(model_drop))
@@ -1116,11 +1325,12 @@ impl MatchEvent for App {
         {
             let model_name = self.ui.drop_down(cx, ids!(model_drop)).selected_label();
             if !model_name.is_empty() && !self.busy {
+                self.set_model_dropup_options(cx, self.available_models.clone(), &model_name);
                 self.dispatch_input(cx, format!("/model {model_name}"), false);
             }
         }
 
-        let submit_prompt = self.ui.button(cx, ids!(send_btn)).clicked(actions)
+        let submit_prompt = self.ui.glass_button(cx, ids!(send_btn)).clicked(actions)
             || cti.text_input_ref(cx).returned(actions).is_some();
         if submit_prompt && !self.busy {
             let input_text = cti.text_input_ref(cx).text();
@@ -1151,6 +1361,35 @@ impl AppMain for App {
 }
 
 impl App {
+    fn set_model_dropup_options(&mut self, cx: &mut Cx, models: Vec<String>, selected_model: &str) {
+        let mut ordered = Vec::new();
+        for model in models {
+            if !model.is_empty() && !ordered.contains(&model) {
+                ordered.push(model);
+            }
+        }
+        if ordered.is_empty() {
+            return;
+        }
+
+        let selected_model = if ordered.iter().any(|model| model == selected_model) {
+            selected_model.to_string()
+        } else {
+            ordered[0].clone()
+        };
+        ordered.retain(|model| model != &selected_model);
+        ordered.push(selected_model);
+
+        let selected_item = ordered.len() - 1;
+        self.available_models = ordered.clone();
+        let model_drop = self.ui.drop_down(cx, ids!(model_drop));
+        model_drop.set_labels(cx, ordered);
+        model_drop.set_selected_item(cx, selected_item);
+        self.ui
+            .button(cx, ids!(model_picker_btn))
+            .set_text(cx, &self.available_models[selected_item]);
+    }
+
     fn select_workspace(&mut self, work_dir: PathBuf, session_id: impl Into<String>) {
         self.workspace_state
             .select(SessionKey::new(work_dir, session_id));
@@ -1198,9 +1437,6 @@ impl App {
 
     fn set_status(&mut self, cx: &mut Cx, status: UiStatus, _text: &str) {
         self.busy = status == UiStatus::Working;
-        self.ui
-            .button(cx, ids!(send_btn))
-            .set_enabled(cx, !self.busy);
         let working = status == UiStatus::Working;
         set_sessions_working(working);
         self.ui
@@ -1673,9 +1909,8 @@ impl App {
                     self.set_status(cx, UiStatus::Ready, "Ready");
                 }
                 GuiAgentEvent::AvailableModelsLoaded(models) => {
-                    self.ui
-                        .drop_down(cx, ids!(model_drop))
-                        .set_labels(cx, models);
+                    let selected_model = self.ui.drop_down(cx, ids!(model_drop)).selected_label();
+                    self.set_model_dropup_options(cx, models, &selected_model);
                 }
                 GuiAgentEvent::DeviceCodePrompt { user_code, url } => {
                     self.push_chat(

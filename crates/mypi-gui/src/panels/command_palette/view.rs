@@ -229,7 +229,7 @@ impl Widget for CommandTextInput {
                             self.pointer_hover_index = None;
                             self.on_keyboard_move(cx, -1);
                         }
-                        KeyCode::ReturnKey => {
+                        KeyCode::ReturnKey | KeyCode::Tab => {
                             self.on_keyboard_controller_input_submit(cx, scope);
                         }
                         KeyCode::Escape => {
