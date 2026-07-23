@@ -38,6 +38,26 @@ fn build_broker_smoke_extension(agent_only: bool) -> PathBuf {
     target_dir.join("wasm32-wasip1/debug/broker_smoke_ext.wasm")
 }
 
+fn build_subagent_extension() -> PathBuf {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let target_dir = root.join("target/subagent-integration");
+    let status = Command::new("cargo")
+        .current_dir(&root)
+        .args([
+            "build",
+            "--manifest-path",
+            "extensions/subagent_ext/Cargo.toml",
+            "--target",
+            "wasm32-wasip1",
+            "--target-dir",
+        ])
+        .arg(&target_dir)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    target_dir.join("wasm32-wasip1/debug/subagent_ext.wasm")
+}
+
 fn build_plan_mode_extension() -> PathBuf {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let target_dir = root.join("target/plan-mode-integration");
@@ -79,6 +99,30 @@ fn broker_smoke_manifest_matches_v2_documentation() {
             .map(|command| command.name.as_str())
             .collect::<Vec<_>>(),
         vec!["broker-smoke"]
+    );
+}
+
+#[test]
+fn subagent_v2_command_uses_generic_agent_run_broker_request() {
+    let extension = WasiExtension::load_from_file(&build_subagent_extension()).unwrap();
+    assert_eq!(extension.manifest.api_version, 2);
+    assert_eq!(extension.manifest.capabilities, vec!["agent"]);
+    let name = extension.manifest.name.clone();
+    let mut manager = WasiExtensionManager::new();
+    manager.extensions.insert(name, extension);
+
+    let result = manager
+        .execute_command_with_effects("subagent", "inspect the project")
+        .unwrap()
+        .unwrap();
+    assert!(result.message.contains("Running 1 subagent task"));
+    assert_eq!(result.broker_requests.len(), 1);
+    assert_eq!(result.broker_requests[0].capability, "agent");
+    assert_eq!(result.broker_requests[0].operation, "run");
+    assert_eq!(result.broker_requests[0].arguments["parallel"], false);
+    assert_eq!(
+        result.broker_requests[0].arguments["tasks"][0]["agent"],
+        "scout"
     );
 }
 

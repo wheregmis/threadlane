@@ -13,7 +13,9 @@ use mypi_agent::{
 use serde_json::Value;
 use std::collections::HashSet;
 use std::fs;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -22,6 +24,17 @@ use tokio::time::{timeout, Duration};
 
 const CAPABILITY_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_CAPABILITY_BUFFER_BYTES: usize = 64 * 1024;
+
+type AgentRunner = Arc<
+    dyn Fn(
+            Vec<WasiSubagentTask>,
+            bool,
+        ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + Send>>
+        + Send
+        + Sync,
+>;
+
+type SubagentObserverState = Arc<std::sync::Mutex<Option<Arc<std::sync::Mutex<Vec<AgentWork>>>>>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolPolicy {
@@ -98,6 +111,7 @@ struct HostCapabilityHandler {
     event_tx: tokio::sync::broadcast::Sender<AgentEvent>,
     allowed_hosts: Arc<HashSet<String>>,
     agent_work: AgentWorkScheduler,
+    agent_runner: Option<AgentRunner>,
 }
 
 impl HostCapabilityHandler {
@@ -149,6 +163,7 @@ impl CapabilityHandler for HostCapabilityHandler {
         invoking_extension: &str,
     ) -> Result<Value, BrokerError> {
         match self.capability {
+            "agent" if request.operation == "run" => self.handle_agent_run_async(request).await,
             "process" => self.handle_process_async(request).await,
             "network" => self.handle_network_async(request).await,
             _ => self.handle_for_extension(request, invoking_extension),
@@ -186,6 +201,48 @@ impl HostCapabilityHandler {
             }
             _ => unknown_operation(self.capability, &request.operation),
         }
+    }
+
+    async fn handle_agent_run_async(&self, request: &BrokerRequest) -> Result<Value, BrokerError> {
+        let values = request
+            .arguments
+            .get("tasks")
+            .and_then(Value::as_array)
+            .ok_or_else(|| invalid_argument("missing argument `tasks`"))?;
+        let tasks = values
+            .iter()
+            .map(|value| {
+                let agent = value
+                    .get("agent")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|agent| !agent.is_empty())
+                    .ok_or_else(|| invalid_argument("each task requires a non-empty `agent`"))?;
+                let task = value
+                    .get("task")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|task| !task.is_empty())
+                    .ok_or_else(|| invalid_argument("each task requires a non-empty `task`"))?;
+                Ok(WasiSubagentTask {
+                    agent: agent.into(),
+                    task: task.into(),
+                })
+            })
+            .collect::<Result<Vec<_>, BrokerError>>()?;
+        if tasks.is_empty() {
+            return Err(invalid_argument("agent.run requires at least one task"));
+        }
+        let parallel = request
+            .arguments
+            .get("parallel")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let runner = self
+            .agent_runner
+            .as_ref()
+            .ok_or_else(|| internal_error("Child-agent runner unavailable"))?;
+        (runner)(tasks, parallel).await.map_err(host_error)
     }
 
     fn handle_agent(&self, request: &BrokerRequest) -> Result<Value, BrokerError> {
@@ -674,6 +731,7 @@ fn build_broker_dispatcher(
     work_dir: PathBuf,
     event_tx: tokio::sync::broadcast::Sender<AgentEvent>,
     agent_work: AgentWorkScheduler,
+    agent_runner: Option<AgentRunner>,
 ) -> Arc<tokio::sync::Mutex<CapabilityDispatcher>> {
     let allowed_hosts: Arc<HashSet<String>> = Arc::new(
         std::env::var("MYPI_NETWORK_ALLOW_HOSTS")
@@ -698,6 +756,7 @@ fn build_broker_dispatcher(
                 event_tx: event_tx.clone(),
                 allowed_hosts: allowed_hosts.clone(),
                 agent_work: agent_work.clone(),
+                agent_runner: agent_runner.clone(),
             }),
         );
     }
@@ -796,12 +855,44 @@ impl CodingAgent {
         let base_system_prompt = system_prompt.clone();
         let wasi_extensions = Arc::new(wasi_extensions);
         let agent_work = AgentWorkScheduler::default();
+        #[cfg(test)]
+        let subagent_work_observer = Arc::new(std::sync::Mutex::new(None));
+        #[cfg(test)]
+        let runner_observer: Option<SubagentObserverState> = Some(subagent_work_observer.clone());
+        #[cfg(not(test))]
+        let runner_observer: Option<SubagentObserverState> = None;
+        let runner_api_key = agent.loop_engine.api_key.clone();
+        let runner_account_id = agent.loop_engine.account_id.clone();
+        let runner_model = options.model.clone();
+        let runner_work_dir = options.work_dir.clone();
+        let runner_extensions = wasi_extensions.clone();
+        let runner_event_tx = agent.loop_engine.event_tx.clone();
+        let agent_runner: AgentRunner = Arc::new(move |tasks, parallel| {
+            let observer = runner_observer.clone();
+            let api_key = runner_api_key.clone();
+            let account_id = runner_account_id.clone();
+            let model = runner_model.clone();
+            let work_dir = runner_work_dir.clone();
+            let extensions = runner_extensions.clone();
+            let event_tx = runner_event_tx.clone();
+            Box::pin(async move {
+                let observer = observer
+                    .and_then(|observer| observer.lock().ok().and_then(|value| value.clone()));
+                let (output, thinking) = run_subagents_with_context(
+                    tasks, parallel, api_key, account_id, model, work_dir, extensions, event_tx,
+                    observer,
+                )
+                .await?;
+                Ok(serde_json::json!({"output": output, "thinking": thinking}))
+            })
+        });
         let broker_dispatcher = build_broker_dispatcher(
             tool_policy.clone(),
             wasi_extensions.clone(),
             options.work_dir.clone(),
             agent.loop_engine.event_tx.clone(),
             agent_work.clone(),
+            Some(agent_runner.clone()),
         );
         agent.loop_engine.extension_manager = Some(wasi_extensions.clone());
         agent.loop_engine.work_dir = Some(options.work_dir.clone());
@@ -840,7 +931,7 @@ impl CodingAgent {
             agent_work,
             base_system_prompt,
             #[cfg(test)]
-            subagent_work_observer: Arc::new(std::sync::Mutex::new(None)),
+            subagent_work_observer,
         }
     }
 
@@ -1151,6 +1242,37 @@ impl CodingAgent {
                                 return Some(format!("WASI Broker Error: {}", error.message))
                             }
                         };
+                        let agent_run = dispatch.operation_results.iter().find(|result| {
+                            result.request.capability == "agent"
+                                && result.request.operation == "run"
+                        });
+                        if let Some(result) = agent_run {
+                            if let Some(error) = &result.error {
+                                return Some(format!("WASI Broker Error: {}", error.message));
+                            }
+                            let output = result.value["output"].as_str().ok_or_else(|| {
+                                "agent.run returned no formatted output".to_string()
+                            });
+                            let thinking = serde_json::from_value::<Vec<AgentMessage>>(
+                                result.value["thinking"].clone(),
+                            )
+                            .map_err(|error| {
+                                format!("agent.run returned invalid thinking: {error}")
+                            });
+                            match (output, thinking) {
+                                (Ok(output), Ok(thinking)) => {
+                                    for message in thinking {
+                                        self.session_tree.add_message(message);
+                                    }
+                                    self.session_tree.add_message(AgentMessage::Assistant {
+                                        content: Some(output.to_string()),
+                                        tool_calls: None,
+                                    });
+                                    return Some(output.to_string());
+                                }
+                                (Err(error), _) | (_, Err(error)) => return Some(error),
+                            }
+                        }
                         self.wasi_extensions
                             .enqueue_broker_results(dispatch.operation_results);
                         self.run_scheduled_agent_work().await;
@@ -1214,6 +1336,70 @@ impl CodingAgent {
     }
 }
 
+async fn run_subagents_with_context(
+    tasks: Vec<WasiSubagentTask>,
+    parallel: bool,
+    api_key: String,
+    account_id: Option<String>,
+    parent_model: String,
+    work_dir: PathBuf,
+    extensions: Arc<WasiExtensionManager>,
+    parent_event_tx: broadcast::Sender<AgentEvent>,
+    scheduler_observer: Option<Arc<std::sync::Mutex<Vec<AgentWork>>>>,
+) -> Result<(String, Vec<AgentMessage>), String> {
+    let run_one = |task: WasiSubagentTask| {
+        let config = discover_agents(&work_dir, AgentScope::Both)
+            .agents
+            .into_iter()
+            .find(|candidate| candidate.name == task.agent)
+            .ok_or_else(|| {
+                format!(
+                    "Unknown subagent '{}'. Add it to .mypi/agents or ~/.mypi/agents.",
+                    task.agent
+                )
+            });
+        async {
+            let config = config?;
+            run_subagent_task(
+                config,
+                task.task,
+                api_key.clone(),
+                account_id.clone(),
+                parent_model.clone(),
+                work_dir.clone(),
+                extensions.clone(),
+                parent_event_tx.clone(),
+                scheduler_observer.clone(),
+            )
+            .await
+        }
+    };
+    let results = if parallel {
+        futures::future::join_all(tasks.iter().cloned().map(run_one)).await
+    } else {
+        let mut previous = String::new();
+        let mut results = Vec::with_capacity(tasks.len());
+        for task in tasks.iter().cloned() {
+            let task = WasiSubagentTask {
+                agent: task.agent,
+                task: task.task.replace("{previous}", &previous),
+            };
+            let result = run_one(task).await;
+            if let Ok(result) = &result {
+                previous = result.output.clone();
+            }
+            results.push(result);
+        }
+        results
+    };
+    let thinking = results
+        .iter()
+        .filter_map(|result| result.as_ref().ok())
+        .flat_map(|result| result.thinking.clone())
+        .collect();
+    Ok((format_subagent_results(tasks, results), thinking))
+}
+
 async fn run_subagent_task(
     config: AgentConfig,
     task: String,
@@ -1266,6 +1452,7 @@ async fn run_subagent_task(
         work_dir.clone(),
         agent.loop_engine.event_tx.clone(),
         agent_work.clone(),
+        None,
     );
     agent.loop_engine.before_tool_call_hook = Some(Arc::new(ExtensionBeforeToolHook {
         tool_policy: policy,
@@ -1404,6 +1591,7 @@ mod tests {
             event_tx,
             allowed_hosts: Arc::new(HashSet::new()),
             agent_work,
+            agent_runner: None,
         }
     }
 
