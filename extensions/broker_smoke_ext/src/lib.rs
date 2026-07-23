@@ -54,6 +54,7 @@ struct Response {
     message: String,
 }
 
+#[cfg(target_arch = "wasm32")]
 #[link(wasm_import_module = "threadlane_host")]
 extern "C" {
     #[link_name = "request"]
@@ -63,6 +64,16 @@ extern "C" {
         response_ptr: i32,
         response_capacity: i32,
     ) -> i32;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+unsafe fn broker_request(
+    _request_ptr: i32,
+    _request_len: i32,
+    _response_ptr: i32,
+    _response_capacity: i32,
+) -> i32 {
+    -1
 }
 
 static mut OUTPUT_PTR: *mut u8 = std::ptr::null_mut();

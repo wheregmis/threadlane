@@ -49,7 +49,7 @@ before-each-package-command = """
 robius-packaging-commands before-each-package \
     --force-makepad \
     --binary-name threadlane \
-    --path-to-binary ./target/release/threadlane
+    --path-to-binary ../../target/release/threadlane
 """
 
 [package.metadata.packager.macos]
