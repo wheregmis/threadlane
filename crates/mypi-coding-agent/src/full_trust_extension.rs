@@ -67,7 +67,10 @@ pub struct FullTrustRunner {
 impl FullTrustRunner {
     pub fn new(package_id: String, exe_path: PathBuf) -> Result<Self, String> {
         if !exe_path.exists() {
-            return Err(format!("Executable path does not exist: {}", exe_path.display()));
+            return Err(format!(
+                "Executable path does not exist: {}",
+                exe_path.display()
+            ));
         }
         let revision = compute_executable_revision(&exe_path)?;
         Ok(Self {
@@ -109,7 +112,9 @@ impl FullTrustRunner {
             .map_err(|e| format!("Error waiting on extension process: {e}"))?;
 
         if !status.success() {
-            return Err(format!("Full-trust extension process exited with status: {status}"));
+            return Err(format!(
+                "Full-trust extension process exited with status: {status}"
+            ));
         }
 
         Ok(response_line.trim().to_string())

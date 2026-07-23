@@ -32,7 +32,11 @@ fn test_substitute_args_positional_and_defaults() {
 #[test]
 fn test_substitute_args_slices() {
     let template = "All after first: ${@:2}";
-    let args = vec!["first".to_string(), "second".to_string(), "third".to_string()];
+    let args = vec![
+        "first".to_string(),
+        "second".to_string(),
+        "third".to_string(),
+    ];
     let result = substitute_args(template, &args);
     assert_eq!(result, "All after first: second third");
 
@@ -81,8 +85,14 @@ Review code in branch ${1:-main} focusing on ${2:-bugs}.
     assert_eq!(templates[0].name, "review");
 
     let expanded_default = expand_prompt_template("/review", &templates);
-    assert_eq!(expanded_default, "Review code in branch main focusing on bugs.");
+    assert_eq!(
+        expanded_default,
+        "Review code in branch main focusing on bugs."
+    );
 
     let expanded_args = expand_prompt_template("/review dev security", &templates);
-    assert_eq!(expanded_args, "Review code in branch dev focusing on security.");
+    assert_eq!(
+        expanded_args,
+        "Review code in branch dev focusing on security."
+    );
 }

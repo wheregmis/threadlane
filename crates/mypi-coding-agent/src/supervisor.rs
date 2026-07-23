@@ -127,9 +127,12 @@ impl HarnessSupervisor {
     }
 
     pub fn register_project(&self, raw_path: &Path) -> Result<ProjectRecord, String> {
-        let canonical = raw_path
-            .canonicalize()
-            .map_err(|e| format!("Failed to canonicalize project path '{}': {e}", raw_path.display()))?;
+        let canonical = raw_path.canonicalize().map_err(|e| {
+            format!(
+                "Failed to canonicalize project path '{}': {e}",
+                raw_path.display()
+            )
+        })?;
 
         let id = md5_hash(&canonical.to_string_lossy());
         let name = canonical
@@ -252,7 +255,11 @@ impl HarnessSupervisor {
             let rt = runtimes
                 .get(task_id)
                 .ok_or_else(|| format!("Task ID '{task_id}' not found"))?;
-            (rt.agent.clone(), rt.prompt_lock.clone(), rt.project_id.clone())
+            (
+                rt.agent.clone(),
+                rt.prompt_lock.clone(),
+                rt.project_id.clone(),
+            )
         };
 
         self.update_task_status(task_id, TaskStatus::Running);

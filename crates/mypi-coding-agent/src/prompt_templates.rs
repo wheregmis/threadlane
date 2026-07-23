@@ -121,7 +121,10 @@ fn eval_braced_expr(expr: &str, args: &[String], all_args: &str) -> String {
     if expr.starts_with("@:") {
         let slice_spec = &expr[2..];
         let parts: Vec<&str> = slice_spec.split(':').collect();
-        let start_idx = parts.first().and_then(|s| s.parse::<usize>().ok()).unwrap_or(1);
+        let start_idx = parts
+            .first()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(1);
         let start_0 = if start_idx == 0 { 0 } else { start_idx - 1 };
 
         if start_0 >= args.len() {

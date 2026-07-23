@@ -41,10 +41,18 @@ impl PackageManager {
     pub fn list_packages(&self, project_root: Option<&Path>) -> Vec<PackageRecord> {
         let mut packages = Vec::new();
 
-        self.scan_packages_dir(&self.global_dir.join("packages"), PackageScope::Global, &mut packages);
+        self.scan_packages_dir(
+            &self.global_dir.join("packages"),
+            PackageScope::Global,
+            &mut packages,
+        );
 
         if let Some(proj) = project_root {
-            self.scan_packages_dir(&proj.join(".mypi/packages"), PackageScope::Project, &mut packages);
+            self.scan_packages_dir(
+                &proj.join(".mypi/packages"),
+                PackageScope::Project,
+                &mut packages,
+            );
         }
 
         packages
@@ -81,7 +89,12 @@ impl PackageManager {
         }
     }
 
-    pub fn install_from_local(&self, source_path: &Path, scope: PackageScope, project_root: Option<&Path>) -> Result<PackageRecord, String> {
+    pub fn install_from_local(
+        &self,
+        source_path: &Path,
+        scope: PackageScope,
+        project_root: Option<&Path>,
+    ) -> Result<PackageRecord, String> {
         let manifest_file = source_path.join("mypi-package.json");
         if !manifest_file.exists() {
             return Err("Source directory does not contain 'mypi-package.json'".into());
@@ -95,7 +108,9 @@ impl PackageManager {
         let target_dir = match scope {
             PackageScope::Global => self.global_dir.join("packages").join(&manifest.id),
             PackageScope::Project => {
-                let proj = project_root.ok_or_else(|| "Project root required for project-scoped package".to_string())?;
+                let proj = project_root.ok_or_else(|| {
+                    "Project root required for project-scoped package".to_string()
+                })?;
                 proj.join(".mypi/packages").join(&manifest.id)
             }
         };
@@ -115,11 +130,18 @@ impl PackageManager {
         })
     }
 
-    pub fn remove_package(&self, package_id: &str, scope: PackageScope, project_root: Option<&Path>) -> Result<(), String> {
+    pub fn remove_package(
+        &self,
+        package_id: &str,
+        scope: PackageScope,
+        project_root: Option<&Path>,
+    ) -> Result<(), String> {
         let target_dir = match scope {
             PackageScope::Global => self.global_dir.join("packages").join(package_id),
             PackageScope::Project => {
-                let proj = project_root.ok_or_else(|| "Project root required for project-scoped package".to_string())?;
+                let proj = project_root.ok_or_else(|| {
+                    "Project root required for project-scoped package".to_string()
+                })?;
                 proj.join(".mypi/packages").join(package_id)
             }
         };

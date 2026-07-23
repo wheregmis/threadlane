@@ -63,7 +63,10 @@ pub struct DeviceCodeResponse {
     pub expires_at: Option<String>,
     #[serde(default)]
     pub expires_in: Option<u64>,
-    #[serde(deserialize_with = "deserialize_string_or_number", default = "default_interval")]
+    #[serde(
+        deserialize_with = "deserialize_string_or_number",
+        default = "default_interval"
+    )]
     pub interval: u64,
 }
 
@@ -143,7 +146,10 @@ pub fn load_credentials() -> Option<StoredCredentials> {
 
                         return Some(StoredCredentials {
                             access_token: token.to_string(),
-                            refresh_token: tokens.get("refresh_token").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                            refresh_token: tokens
+                                .get("refresh_token")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string()),
                             account_id,
                             source: "~/.codex/auth.json".to_string(),
                         });
@@ -192,7 +198,10 @@ pub async fn start_device_login() -> Result<DeviceCodeResponse, String> {
         .map_err(|e| format!("Failed to parse device code response ({e}): {text}"))
 }
 
-pub async fn poll_device_token(device_auth_id: &str, user_code: &str) -> Result<OAuthTokens, String> {
+pub async fn poll_device_token(
+    device_auth_id: &str,
+    user_code: &str,
+) -> Result<OAuthTokens, String> {
     let client = reqwest::Client::new();
     let res = client
         .post("https://auth.openai.com/api/accounts/deviceauth/token")
@@ -217,10 +226,19 @@ pub async fn poll_device_token(device_auth_id: &str, user_code: &str) -> Result<
     if let Some(access_token) = val.get("access_token").and_then(|v| v.as_str()) {
         let tokens = OAuthTokens {
             access_token: access_token.to_string(),
-            refresh_token: val.get("refresh_token").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            refresh_token: val
+                .get("refresh_token")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
             expires_in: val.get("expires_in").and_then(|v| v.as_u64()),
-            id_token: val.get("id_token").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            account_id: val.get("account_id").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            id_token: val
+                .get("id_token")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            account_id: val
+                .get("account_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
         };
         let _ = save_credentials(&tokens);
         return Ok(tokens);
@@ -259,10 +277,19 @@ pub async fn exchange_authorization_code(code: &str) -> Result<OAuthTokens, Stri
     if let Some(access_token) = val.get("access_token").and_then(|v| v.as_str()) {
         let tokens = OAuthTokens {
             access_token: access_token.to_string(),
-            refresh_token: val.get("refresh_token").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            refresh_token: val
+                .get("refresh_token")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
             expires_in: val.get("expires_in").and_then(|v| v.as_u64()),
-            id_token: val.get("id_token").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            account_id: val.get("account_id").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            id_token: val
+                .get("id_token")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            account_id: val
+                .get("account_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
         };
         let _ = save_credentials(&tokens);
         return Ok(tokens);
@@ -287,7 +314,10 @@ mod tests {
         let resp: DeviceCodeResponse = serde_json::from_str(sample_json).unwrap();
         assert_eq!(resp.user_code, "JLHW-OEIT1");
         assert_eq!(resp.interval, 5);
-        assert_eq!(resp.verification_uri, "https://auth.openai.com/codex/device");
+        assert_eq!(
+            resp.verification_uri,
+            "https://auth.openai.com/codex/device"
+        );
     }
 
     #[test]
