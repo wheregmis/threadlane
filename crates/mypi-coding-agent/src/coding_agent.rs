@@ -450,18 +450,40 @@ impl BeforeToolCallHook for ExtensionBeforeToolHook {
         });
         let hook_responses = self
             .extensions
-            .execute_hook_with_effects("before_tool_call", &arguments.to_string());
+            .execute_hook_with_broker_requests("before_tool_call", &arguments.to_string());
         for resp in hook_responses {
-            if let Ok(res) = resp {
-                dispatch_hook_requests(&self.broker_dispatcher, res.host_broker_requests).await;
-                let res = res.response;
-                if let Some(msg) = res.message {
-                    if msg.contains("blocked") {
-                        return BeforeToolCallResult {
-                            block: true,
-                            reason: Some(msg),
-                        };
-                    }
+            let res = match resp {
+                Ok(res) => res,
+                Err(error) => {
+                    return BeforeToolCallResult {
+                        block: true,
+                        reason: Some(format!("Extension hook error: {error}")),
+                    };
+                }
+            };
+            if let Err(error) =
+                dispatch_hook_requests(&self.broker_dispatcher, res.host_broker_requests).await
+            {
+                return BeforeToolCallResult {
+                    block: true,
+                    reason: Some(format!("Extension broker error: {}", error.message)),
+                };
+            }
+            let response = res.response;
+            if let Some(middleware) = response.middleware {
+                if middleware.block == Some(true) {
+                    return BeforeToolCallResult {
+                        block: true,
+                        reason: middleware.reason,
+                    };
+                }
+            }
+            if let Some(msg) = response.message {
+                if msg.contains("blocked") {
+                    return BeforeToolCallResult {
+                        block: true,
+                        reason: Some(msg),
+                    };
                 }
             }
         }
@@ -491,18 +513,30 @@ impl AfterToolCallHook for ExtensionAfterToolHook {
         });
         for response in self
             .extensions
-            .execute_hook_with_effects("after_tool_call", &arguments.to_string())
+            .execute_hook_with_broker_requests("after_tool_call", &arguments.to_string())
         {
-            if let Ok(response) = response {
-                dispatch_hook_requests(&self.broker_dispatcher, response.host_broker_requests)
-                    .await;
+            match response {
+                Ok(response) => {
+                    if let Err(error) = dispatch_hook_requests(
+                        &self.broker_dispatcher,
+                        response.host_broker_requests,
+                    )
+                    .await
+                    {
+                        eprintln!("WASI after-tool hook broker error: {}", error.message);
+                    }
+                }
+                Err(error) => eprintln!("WASI after-tool hook error: {error}"),
             }
         }
-        dispatch_hook_requests(
+        if let Err(error) = dispatch_hook_requests(
             &self.broker_dispatcher,
             self.extensions.take_pending_broker_requests(),
         )
-        .await;
+        .await
+        {
+            eprintln!("WASI tool broker error: {}", error.message);
+        }
         AfterToolCallResult::default()
     }
 }
@@ -555,14 +589,15 @@ fn build_broker_dispatcher(
 async fn dispatch_hook_requests(
     dispatcher: &Arc<tokio::sync::Mutex<CapabilityDispatcher>>,
     requests: Vec<crate::extension_broker::HostBrokerRequest>,
-) {
+) -> Result<(), BrokerError> {
     for request in requests {
-        let _ = dispatcher
+        dispatcher
             .lock()
             .await
             .dispatch_envelopes(vec![request])
-            .await;
+            .await?;
     }
+    Ok(())
 }
 
 fn append_dispatch_message(message: &mut Option<String>, dispatch: BrokerDispatchResult) {
@@ -810,14 +845,14 @@ impl CodingAgent {
                     .execute_hook_with_effects("assistant_message", &arguments.to_string())
                 {
                     if let Ok(response) = response {
-                        dispatch_hook_requests(
+                        let _ = dispatch_hook_requests(
                             &self.broker_dispatcher,
                             response.host_broker_requests,
                         )
                         .await;
                     }
                 }
-                dispatch_hook_requests(
+                let _ = dispatch_hook_requests(
                     &self.broker_dispatcher,
                     self.wasi_extensions.take_pending_broker_requests(),
                 )

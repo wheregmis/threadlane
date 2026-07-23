@@ -30,6 +30,7 @@ pub use skills::{SkillManager, SkillMetadata, SkillScope};
 pub use supervisor::{HarnessSupervisor, ProjectRecord, TaskAgentEvent, TaskRecord, TaskStatus};
 pub use wasi_extension::{
     WasiCommandDefinition, WasiExtension, WasiExtensionCommandResult, WasiExtensionEffect,
-    WasiExtensionInvocation, WasiExtensionInvocationResult, WasiExtensionManager,
-    WasiExtensionEvent, WasiExtensionManifest, WasiExtensionResponse, WasiToolDefinition,
+    WasiExtensionEvent, WasiExtensionInvocation, WasiExtensionInvocationResult,
+    WasiExtensionManager, WasiExtensionManifest, WasiExtensionResponse, WasiHookMiddleware,
+    WasiToolDefinition,
 };

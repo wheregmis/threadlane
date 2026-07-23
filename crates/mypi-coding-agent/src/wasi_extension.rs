@@ -86,6 +86,20 @@ pub struct WasiSubagentTask {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WasiHookMiddleware {
+    #[serde(default)]
+    pub block: Option<bool>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub arguments: Option<Value>,
+    #[serde(default)]
+    pub result: Option<Value>,
+    #[serde(default)]
+    pub context: Option<Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WasiExtensionResponse {
     #[serde(default)]
     pub message: Option<String>,
@@ -93,6 +107,8 @@ pub struct WasiExtensionResponse {
     pub state: Option<Value>,
     #[serde(default)]
     pub effects: Vec<WasiExtensionEffect>,
+    #[serde(default)]
+    pub middleware: Option<WasiHookMiddleware>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -696,12 +712,20 @@ impl WasiExtensionManager {
         self.execute("tool", name, args)
     }
 
-    pub fn execute_tool_with_effects(
+    pub fn execute_tool_with_broker_requests(
         &self,
         name: &str,
         args: &str,
     ) -> Option<Result<WasiExtensionInvocationResult, String>> {
         self.execute_response("tool", name, args)
+    }
+
+    pub fn execute_tool_with_effects(
+        &self,
+        name: &str,
+        args: &str,
+    ) -> Option<Result<WasiExtensionInvocationResult, String>> {
+        self.execute_tool_with_broker_requests(name, args)
     }
 
     pub fn execute_command(&self, name: &str, args: &str) -> Option<Result<String, String>> {
@@ -769,7 +793,7 @@ impl WasiExtensionManager {
             .collect()
     }
 
-    pub fn execute_hook_with_effects(
+    pub fn execute_hook_with_broker_requests(
         &self,
         name: &str,
         args: &str,
@@ -779,6 +803,14 @@ impl WasiExtensionManager {
             .filter(|extension| extension.manifest.hooks.iter().any(|hook| hook == name))
             .map(|extension| self.invoke(extension, "hook", name, args))
             .collect()
+    }
+
+    pub fn execute_hook_with_effects(
+        &self,
+        name: &str,
+        args: &str,
+    ) -> Vec<Result<WasiExtensionInvocationResult, String>> {
+        self.execute_hook_with_broker_requests(name, args)
     }
 
     fn execute_response(

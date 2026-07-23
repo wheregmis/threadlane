@@ -1,9 +1,11 @@
+use mypi_agent::{AgentState, AgentToolCall, BeforeToolCallHook};
 use mypi_coding_agent::{
     BrokerError, BrokerRequest, CapabilityDispatcher, CapabilityHandler, CapabilityPolicy,
-    WasiExtension, WasiExtensionEffect, WasiExtensionEvent, WasiExtensionManager,
-    WasiExtensionManifest, WasiToolDefinition,
+    ExtensionBeforeToolHook, ToolPolicy, WasiExtension, WasiExtensionEffect, WasiExtensionEvent,
+    WasiExtensionManager, WasiExtensionManifest, WasiToolDefinition,
 };
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -138,6 +140,76 @@ fn manifest_wasm(json: &str) -> Vec<u8> {
     let mut data = vec![1, 0, 0x41, 0, 0x0b];
     push_unsigned_leb(json.len() as u32, &mut data);
     data.extend_from_slice(json.as_bytes());
+    push_section(&mut wasm, 11, &data);
+    wasm
+}
+
+fn hook_wasm(api_version: u32, response: &str) -> Vec<u8> {
+    let manifest = serde_json::json!({
+        "api_version": api_version,
+        "name": format!("hook_v{api_version}"),
+        "version": "1.0.0",
+        "description": "test hook",
+        "hooks": ["before_tool_call"]
+    })
+    .to_string();
+    let response_offset = 1024usize;
+    let manifest_len = manifest.len();
+    let mut data_bytes = manifest.into_bytes();
+    data_bytes.resize(response_offset, 0);
+    data_bytes.extend_from_slice(response.as_bytes());
+
+    let mut wasm = b"\0asm\x01\0\0\0".to_vec();
+    push_section(
+        &mut wasm,
+        1,
+        &[
+            3, 0x60, 0, 1, 0x7e, // extension_info() -> i64
+            0x60, 1, 0x7f, 1, 0x7f, // alloc(i32) -> i32
+            0x60, 2, 0x7f, 0x7f, 1, 0x7e, // handle_hook(i32, i32) -> i64
+        ],
+    );
+    push_section(&mut wasm, 3, &[3, 0, 1, 2]);
+    push_section(&mut wasm, 5, &[1, 0, 1]);
+
+    let mut exports = vec![4];
+    for (name, kind, index) in [
+        ("extension_info", 0, 0),
+        ("alloc", 0, 1),
+        ("handle_hook", 0, 2),
+        ("memory", 2, 0),
+    ] {
+        push_unsigned_leb(name.len() as u32, &mut exports);
+        exports.extend_from_slice(name.as_bytes());
+        exports.extend_from_slice(&[kind, index]);
+    }
+    push_section(&mut wasm, 7, &exports);
+
+    let mut bodies = Vec::new();
+    for (index, (offset, len)) in [(0, manifest_len), (0, 0), (response_offset, response.len())]
+        .into_iter()
+        .enumerate()
+    {
+        let mut body = vec![0];
+        if index == 1 {
+            body.push(0x41);
+            push_signed_leb(offset as i64, &mut body);
+        } else {
+            body.push(0x42);
+            let result = ((offset as u64) << 32) | len as u64;
+            push_signed_leb(result as i64, &mut body);
+        }
+        body.push(0x0b);
+        push_unsigned_leb(body.len() as u32, &mut bodies);
+        bodies.extend_from_slice(&body);
+    }
+    let mut code = vec![3];
+    code.extend_from_slice(&bodies);
+    push_section(&mut wasm, 10, &code);
+
+    let mut data = vec![1, 0, 0x41, 0, 0x0b];
+    push_unsigned_leb(data_bytes.len() as u32, &mut data);
+    data.extend_from_slice(&data_bytes);
     push_section(&mut wasm, 11, &data);
     wasm
 }
@@ -425,6 +497,80 @@ fn test_load_actual_plan_mode_wasm() {
         println!("Load result: {:?}", ext.as_ref().map(|e| &e.manifest));
         assert!(ext.is_ok(), "Failed to load WASM: {:?}", ext.err());
     }
+}
+
+#[tokio::test]
+async fn structured_hook_middleware_blocks_without_message_matching() {
+    let response =
+        r#"{"message":"","state":{},"middleware":{"block":true,"reason":"Protected path"}}"#;
+    let extension = WasiExtension::load_from_bytes(hook_wasm(2, response)).unwrap();
+    let mut manager = WasiExtensionManager::new();
+    manager
+        .extensions
+        .insert(extension.manifest.name.clone(), extension);
+    let hook = ExtensionBeforeToolHook {
+        tool_policy: Arc::new(tokio::sync::Mutex::new(ToolPolicy::FullAccess)),
+        extensions: Arc::new(manager),
+        broker_dispatcher: Arc::new(tokio::sync::Mutex::new(CapabilityDispatcher::new())),
+    };
+    let state = AgentState {
+        system_prompt: String::new(),
+        model: String::new(),
+        tools: vec![],
+        messages: vec![],
+        is_streaming: false,
+        pending_tool_calls: vec![],
+        metadata: HashMap::new(),
+    };
+    let result = hook
+        .before_tool_call(
+            &AgentToolCall {
+                id: "call-1".into(),
+                name: "read_file".into(),
+                arguments: "{}".into(),
+            },
+            &state,
+        )
+        .await;
+    assert!(result.block);
+    assert_eq!(result.reason.as_deref(), Some("Protected path"));
+}
+
+#[tokio::test]
+async fn structured_hook_v1_message_behavior_is_preserved() {
+    let extension =
+        WasiExtension::load_from_bytes(hook_wasm(1, r#"{"message":"blocked by v1","state":{}}"#))
+            .unwrap();
+    let mut manager = WasiExtensionManager::new();
+    manager
+        .extensions
+        .insert(extension.manifest.name.clone(), extension);
+    let hook = ExtensionBeforeToolHook {
+        tool_policy: Arc::new(tokio::sync::Mutex::new(ToolPolicy::FullAccess)),
+        extensions: Arc::new(manager),
+        broker_dispatcher: Arc::new(tokio::sync::Mutex::new(CapabilityDispatcher::new())),
+    };
+    let state = AgentState {
+        system_prompt: String::new(),
+        model: String::new(),
+        tools: vec![],
+        messages: vec![],
+        is_streaming: false,
+        pending_tool_calls: vec![],
+        metadata: HashMap::new(),
+    };
+    let result = hook
+        .before_tool_call(
+            &AgentToolCall {
+                id: "call-1".into(),
+                name: "read_file".into(),
+                arguments: "{}".into(),
+            },
+            &state,
+        )
+        .await;
+    assert!(result.block);
+    assert_eq!(result.reason.as_deref(), Some("blocked by v1"));
 }
 
 #[test]
