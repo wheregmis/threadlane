@@ -480,8 +480,8 @@ pub struct WasiExtensionManager {
     pub extensions: HashMap<String, WasiExtension>,
     states: Mutex<HashMap<String, Value>>,
     subscriptions: Mutex<HashMap<String, HashSet<String>>>,
-    pending_events: Mutex<HashMap<String, Vec<WasiExtensionEvent>>>,
-    pending_broker_requests: Mutex<Vec<HostBrokerRequest>>,
+    pending_events: Mutex<HashMap<Option<String>, HashMap<String, Vec<WasiExtensionEvent>>>>,
+    pending_broker_requests: Mutex<HashMap<Option<String>, Vec<HostBrokerRequest>>>,
     capability_grant_policy: Mutex<HostCapabilityGrantPolicy>,
     state_dir: Option<PathBuf>,
     /// Stateful conversational extensions are isolated by the active session.
@@ -543,10 +543,23 @@ impl WasiExtensionManager {
     /// Callers should serialize this with extension invocation.
     pub fn set_session_scope(&self, session_id: impl Into<String>) -> Result<(), String> {
         let session_id = session_id.into();
+        let scope = Some(session_id);
         *self
             .session_id
             .lock()
-            .map_err(|_| "Extension session lock poisoned".to_string())? = Some(session_id);
+            .map_err(|_| "Extension session lock poisoned".to_string())? = scope.clone();
+        // Queued work is session-owned too: switching scope selects a separate
+        // queue so one conversation cannot receive another's broker outcomes.
+        self.pending_events
+            .lock()
+            .map_err(|_| "Extension event lock poisoned".to_string())?
+            .entry(scope.clone())
+            .or_default();
+        self.pending_broker_requests
+            .lock()
+            .map_err(|_| "Extension broker request lock poisoned".to_string())?
+            .entry(scope)
+            .or_default();
 
         let mut states = self
             .states
@@ -590,6 +603,7 @@ impl WasiExtensionManager {
     }
 
     pub fn publish_event(&self, topic: String, payload: Value) -> Result<(), String> {
+        let scope = self.session_scope()?;
         let subscribers = self
             .subscriptions
             .lock()
@@ -602,6 +616,7 @@ impl WasiExtensionManager {
             .pending_events
             .lock()
             .map_err(|_| "Extension event lock poisoned".to_string())?;
+        let pending = pending.entry(scope).or_default();
         for (extension, topics) in subscribers.iter() {
             if topics.contains(&topic) {
                 pending
@@ -619,8 +634,11 @@ impl WasiExtensionManager {
             .lock()
             .map_err(|_| "Extension event lock poisoned".to_string())?;
         Ok(pending
-            .drain()
-            .flat_map(|(_, events)| events.into_iter().map(|event| (event.topic, event.payload)))
+            .remove(&self.session_scope()?)
+            .unwrap_or_default()
+            .into_values()
+            .flatten()
+            .map(|event| (event.topic, event.payload))
             .collect())
     }
 
@@ -629,10 +647,13 @@ impl WasiExtensionManager {
         &self,
         extension_name: &str,
     ) -> Result<Vec<WasiExtensionEvent>, String> {
+        let scope = self.session_scope()?;
         Ok(self
             .pending_events
             .lock()
             .map_err(|_| "Extension event lock poisoned".to_string())?
+            .entry(scope)
+            .or_default()
             .remove(extension_name)
             .unwrap_or_default())
     }
@@ -810,30 +831,48 @@ impl WasiExtensionManager {
     }
 
     pub fn take_pending_broker_requests(&self) -> Vec<HostBrokerRequest> {
+        let scope = match self.session_scope() {
+            Ok(scope) => scope,
+            Err(_) => return Vec::new(),
+        };
         let requests = self
             .pending_broker_requests
             .lock()
-            .map(|mut requests| std::mem::take(&mut *requests))
+            .map(|mut requests| requests.remove(&scope).unwrap_or_default())
             .unwrap_or_default();
         self.filter_granted_requests(requests)
     }
 
-    /// Queues successful broker outputs for delivery in a later invocation.
+    /// Queues broker outcomes for delivery in a later invocation.
     pub fn enqueue_broker_results(&self, results: Vec<BrokerOperationResult>) {
+        let Ok(scope) = self.session_scope() else {
+            return;
+        };
         if let Ok(mut pending) = self.pending_events.lock() {
+            let pending = pending.entry(scope).or_default();
             for result in results {
+                let payload = match result.error {
+                    Some(error) => serde_json::json!({
+                        "api_version": BROKER_API_VERSION,
+                        "capability": result.request.capability,
+                        "operation": result.request.operation,
+                        "ok": false,
+                        "error": {"code": error.code, "message": error.message},
+                    }),
+                    None => serde_json::json!({
+                        "api_version": BROKER_API_VERSION,
+                        "capability": result.request.capability,
+                        "operation": result.request.operation,
+                        "ok": true,
+                        "value": result.value,
+                    }),
+                };
                 pending
                     .entry(result.invoking_extension)
                     .or_default()
                     .push(WasiExtensionEvent {
                         topic: "broker_response".into(),
-                        payload: serde_json::json!({
-                            "api_version": BROKER_API_VERSION,
-                            "capability": result.request.capability,
-                            "operation": result.request.operation,
-                            "ok": true,
-                            "value": result.value,
-                        }),
+                        payload,
                     });
             }
         }
@@ -841,9 +880,19 @@ impl WasiExtensionManager {
 
     fn enqueue_broker_requests(&self, requests: Vec<HostBrokerRequest>) {
         let requests = self.filter_granted_requests(requests);
+        let Ok(scope) = self.session_scope() else {
+            return;
+        };
         if let Ok(mut pending) = self.pending_broker_requests.lock() {
-            pending.extend(requests);
+            pending.entry(scope).or_default().extend(requests);
         }
+    }
+
+    fn session_scope(&self) -> Result<Option<String>, String> {
+        self.session_id
+            .lock()
+            .map(|scope| scope.clone())
+            .map_err(|_| "Extension session lock poisoned".to_string())
     }
 
     fn filter_granted_requests(&self, requests: Vec<HostBrokerRequest>) -> Vec<HostBrokerRequest> {

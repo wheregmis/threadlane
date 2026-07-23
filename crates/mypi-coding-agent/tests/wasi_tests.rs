@@ -1,8 +1,8 @@
 use mypi_agent::{AgentState, AgentToolCall, BeforeToolCallHook};
 use mypi_coding_agent::{
-    BrokerError, BrokerRequest, CapabilityDispatcher, CapabilityHandler, CapabilityPolicy,
-    ExtensionBeforeToolHook, HostBrokerRequest, HostCapabilityGrantPolicy, ToolPolicy,
-    WasiExtension, WasiExtensionEffect, WasiExtensionEvent, WasiExtensionManager,
+    BrokerError, BrokerOperationResult, BrokerRequest, CapabilityDispatcher, CapabilityHandler,
+    CapabilityPolicy, ExtensionBeforeToolHook, HostBrokerRequest, HostCapabilityGrantPolicy,
+    ToolPolicy, WasiExtension, WasiExtensionEffect, WasiExtensionEvent, WasiExtensionManager,
     WasiExtensionManifest, WasiToolDefinition,
 };
 use serde_json::Value;
@@ -395,7 +395,7 @@ async fn broker_dispatch_routes_capability_operations_in_order() {
 }
 
 #[tokio::test]
-async fn broker_dispatch_returns_unknown_operation_without_panicking() {
+async fn broker_dispatch_delivers_failed_outcomes_and_continues() {
     let mut dispatcher = CapabilityDispatcher::new();
     dispatcher.register(
         "tools",
@@ -403,31 +403,100 @@ async fn broker_dispatch_returns_unknown_operation_without_panicking() {
             recorded: Arc::new(Mutex::new(Vec::new())),
         }),
     );
-    let error = dispatcher
-        .dispatch(vec![BrokerRequest {
-            api_version: 2,
-            capability: "tools".into(),
-            operation: "unsupported".into(),
-            arguments: Value::Null,
-        }])
+    let outcomes = dispatcher
+        .dispatch_envelopes(vec![
+            HostBrokerRequest {
+                request: BrokerRequest {
+                    api_version: 2,
+                    capability: "missing".into(),
+                    operation: "anything".into(),
+                    arguments: Value::Null,
+                },
+                invoking_extension: "extension".into(),
+            },
+            HostBrokerRequest {
+                request: BrokerRequest {
+                    api_version: 2,
+                    capability: "tools".into(),
+                    operation: "unsupported".into(),
+                    arguments: Value::Null,
+                },
+                invoking_extension: "extension".into(),
+            },
+            HostBrokerRequest {
+                request: BrokerRequest {
+                    api_version: 2,
+                    capability: "tools".into(),
+                    operation: "set_policy".into(),
+                    arguments: Value::Null,
+                },
+                invoking_extension: "extension".into(),
+            },
+        ])
         .await
-        .unwrap_err();
-    assert_eq!(error.code, "unknown_operation");
+        .unwrap();
+    assert_eq!(outcomes.operation_results.len(), 3);
+
+    let manager = WasiExtensionManager::new();
+    manager.enqueue_broker_results(outcomes.operation_results);
+    let events = manager.drain_events_for("extension").unwrap();
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0].payload["error"]["code"], "unknown_capability");
+    assert_eq!(events[1].payload["error"]["code"], "unknown_operation");
+    assert_eq!(events[2].payload["ok"], true);
 }
 
-#[tokio::test]
-async fn broker_dispatch_returns_unknown_capability_structured_error() {
-    let mut dispatcher = CapabilityDispatcher::new();
-    let error = dispatcher
-        .dispatch(vec![BrokerRequest {
+#[test]
+fn broker_results_are_isolated_by_session_scope() {
+    let manager = WasiExtensionManager::new();
+    manager
+        .subscribe_event("listener", "updates".into())
+        .unwrap();
+    manager.set_session_scope("session-a").unwrap();
+    manager
+        .publish_event("updates".into(), serde_json::json!({"session":"a"}))
+        .unwrap();
+    manager.enqueue_broker_results(vec![BrokerOperationResult {
+        invoking_extension: "extension".into(),
+        request: BrokerRequest {
             api_version: 2,
-            capability: "missing".into(),
-            operation: "anything".into(),
+            capability: "tools".into(),
+            operation: "set_policy".into(),
             arguments: Value::Null,
-        }])
-        .await
-        .unwrap_err();
-    assert_eq!(error.code, "unknown_capability");
+        },
+        value: serde_json::json!({"session":"a"}),
+        error: None,
+    }]);
+
+    manager.set_session_scope("session-b").unwrap();
+    assert!(manager.drain_events_for("listener").unwrap().is_empty());
+    assert!(manager.drain_events_for("extension").unwrap().is_empty());
+    manager.enqueue_broker_results(vec![BrokerOperationResult {
+        invoking_extension: "extension".into(),
+        request: BrokerRequest {
+            api_version: 2,
+            capability: "tools".into(),
+            operation: "set_policy".into(),
+            arguments: Value::Null,
+        },
+        value: serde_json::json!({"session":"b"}),
+        error: None,
+    }]);
+
+    manager.set_session_scope("session-a").unwrap();
+    assert_eq!(
+        manager.drain_events_for("listener").unwrap()[0].payload["session"],
+        "a"
+    );
+    assert_eq!(
+        manager.drain_events_for("extension").unwrap()[0].payload["value"]["session"],
+        "a"
+    );
+    manager.set_session_scope("session-b").unwrap();
+    assert_eq!(
+        manager.drain_events_for("extension").unwrap()[0].payload["value"]["session"],
+        "b"
+    );
 }
 
 #[test]

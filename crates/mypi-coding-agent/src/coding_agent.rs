@@ -16,10 +16,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::broadcast;
 use tokio::time::{timeout, Duration};
 
 const CAPABILITY_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_CAPABILITY_BUFFER_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolPolicy {
@@ -290,17 +292,30 @@ impl HostCapabilityHandler {
                     .ok_or_else(|| invalid_argument("args must be strings"))?,
             );
         }
-        let child = command.spawn().map_err(host_error)?;
-        let output = timeout(CAPABILITY_TIMEOUT, child.wait_with_output())
-            .await
-            .map_err(|_| timeout_error("process.run"))?
-            .map_err(host_error)?;
-        let stdout = String::from_utf8(output.stdout)
-            .map_err(|_| invalid_argument("stdout was not UTF-8"))?;
-        let stderr = String::from_utf8(output.stderr)
-            .map_err(|_| invalid_argument("stderr was not UTF-8"))?;
+        let mut child = command.spawn().map_err(host_error)?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| internal_error("process stdout pipe unavailable"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| internal_error("process stderr pipe unavailable"))?;
+        let (stdout, stderr, status) = timeout(CAPABILITY_TIMEOUT, async {
+            tokio::try_join!(
+                read_limited(stdout, "process_output_too_large", "process stdout"),
+                read_limited(stderr, "process_output_too_large", "process stderr"),
+                async { child.wait().await.map_err(host_error) },
+            )
+        })
+        .await
+        .map_err(|_| timeout_error("process.run"))??;
+        let stdout =
+            String::from_utf8(stdout).map_err(|_| invalid_argument("stdout was not UTF-8"))?;
+        let stderr =
+            String::from_utf8(stderr).map_err(|_| invalid_argument("stderr was not UTF-8"))?;
         Ok(serde_json::json!({"message": serde_json::json!({
-            "exit_code": output.status.code(), "stdout": stdout, "stderr": stderr
+            "exit_code": status.code(), "stdout": stdout, "stderr": stderr
         }).to_string()}))
     }
 
@@ -331,10 +346,12 @@ impl HostCapabilityHandler {
             tokio::io::AsyncWriteExt::write_all(&mut stream, request.as_bytes())
                 .await
                 .map_err(host_error)?;
-            let mut response = Vec::new();
-            tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut response)
-                .await
-                .map_err(host_error)?;
+            let response = read_limited(
+                &mut stream,
+                "network_response_too_large",
+                "network response",
+            )
+            .await?;
             String::from_utf8(response).map_err(|_| invalid_argument("response was not UTF-8"))
         })
         .await
@@ -387,6 +404,30 @@ impl HostCapabilityHandler {
             }
             _ => unknown_operation(self.capability, &request.operation),
         }
+    }
+}
+
+async fn read_limited(
+    mut reader: impl AsyncRead + Unpin,
+    code: &'static str,
+    source: &'static str,
+) -> Result<Vec<u8>, BrokerError> {
+    let mut bytes = Vec::new();
+    let mut chunk = [0; 8192];
+    loop {
+        let read = reader.read(&mut chunk).await.map_err(host_error)?;
+        if read == 0 {
+            return Ok(bytes);
+        }
+        if bytes.len().saturating_add(read) > MAX_CAPABILITY_BUFFER_BYTES {
+            return Err(BrokerError {
+                code: code.into(),
+                message: format!(
+                    "{source} exceeds the {MAX_CAPABILITY_BUFFER_BYTES}-byte buffer limit"
+                ),
+            });
+        }
+        bytes.extend_from_slice(&chunk[..read]);
     }
 }
 
@@ -1655,6 +1696,62 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, "timeout");
         assert!(started.elapsed() < StdDuration::from_secs(4));
+    }
+
+    #[tokio::test]
+    async fn process_output_is_bounded_before_buffering() {
+        let dir = tempfile::tempdir().unwrap();
+        let process = handler("process", dir.path().to_path_buf());
+        let request = BrokerRequest {
+            api_version: 2,
+            capability: "process".into(),
+            operation: "run".into(),
+            arguments: serde_json::json!({
+                "program": "sh",
+                "args": ["-c", format!("head -c {} /dev/zero", MAX_CAPABILITY_BUFFER_BYTES + 1)]
+            }),
+        };
+        let error = process
+            .handle_for_extension_async(&request, "ext")
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "process_output_too_large");
+    }
+
+    #[tokio::test]
+    async fn network_response_is_bounded_before_buffering() {
+        let dir = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut response = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_vec();
+            response.resize(MAX_CAPABILITY_BUFFER_BYTES + 1, b'x');
+            tokio::io::AsyncWriteExt::write_all(&mut socket, &response)
+                .await
+                .unwrap();
+        });
+        let network = HostCapabilityHandler {
+            allowed_hosts: Arc::new(HashSet::from(["127.0.0.1".to_string()])),
+            ..handler("network", dir.path().to_path_buf())
+        };
+        let request = BrokerRequest {
+            api_version: 2,
+            capability: "network".into(),
+            operation: "http".into(),
+            arguments: serde_json::json!({
+                "url": format!("http://127.0.0.1:{port}/"),
+                "method": "GET",
+                "body": ""
+            }),
+        };
+        let error = network
+            .handle_for_extension_async(&request, "ext")
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "network_response_too_large");
     }
 
     #[tokio::test]

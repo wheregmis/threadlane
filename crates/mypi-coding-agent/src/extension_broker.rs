@@ -85,11 +85,12 @@ pub struct BrokerOperationResult {
     pub invoking_extension: String,
     pub request: BrokerRequest,
     pub value: Value,
+    pub error: Option<BrokerError>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct BrokerDispatchResult {
-    /// Successful operation outputs are delivered to the extension as queued
+    /// Operation outcomes are delivered to the invoking extension as queued
     /// events, never folded into the importing invocation's result.
     pub operation_results: Vec<BrokerOperationResult>,
 }
@@ -131,30 +132,33 @@ impl CapabilityDispatcher {
         let mut result = BrokerDispatchResult::default();
         for envelope in requests {
             let request = &envelope.request;
-            if request.api_version != BROKER_API_VERSION {
-                return Err(BrokerError {
+            let outcome = if request.api_version != BROKER_API_VERSION {
+                Err(BrokerError {
                     code: "invalid_request".into(),
                     message: format!("Unsupported broker API version: {}", request.api_version),
-                });
-            }
-            let handler = self
-                .handlers
-                .get(&request.capability)
-                .cloned()
-                .ok_or_else(|| BrokerError {
+                })
+            } else if let Some(handler) = self.handlers.get(&request.capability).cloned() {
+                handler
+                    .handle_for_extension_async(request, &envelope.invoking_extension)
+                    .await
+            } else {
+                Err(BrokerError {
                     code: "unknown_capability".into(),
                     message: format!(
                         "Host does not implement capability `{}`",
                         request.capability
                     ),
-                })?;
-            let value = handler
-                .handle_for_extension_async(request, &envelope.invoking_extension)
-                .await?;
+                })
+            };
+            let (value, error) = match outcome {
+                Ok(value) => (value, None),
+                Err(error) => (Value::Null, Some(error)),
+            };
             result.operation_results.push(BrokerOperationResult {
-                invoking_extension: envelope.invoking_extension.clone(),
+                invoking_extension: envelope.invoking_extension,
                 request: request.clone(),
                 value,
+                error,
             });
         }
         Ok(result)
