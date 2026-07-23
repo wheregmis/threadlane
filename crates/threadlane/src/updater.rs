@@ -5,8 +5,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-const UPDATE_ENDPOINT: &str =
-    "https://github.com/wheregmis/threadlane/releases/latest/download/latest.json";
+const UPDATE_ENDPOINT: &str = match option_env!("THREADLANE_UPDATER_ENDPOINT") {
+    Some(endpoint) => endpoint,
+    None => "https://github.com/wheregmis/threadlane/releases/latest/download/latest.json",
+};
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const UPDATER_PUBLIC_KEY: &str = match option_env!("THREADLANE_UPDATER_PUBLIC_KEY") {
     Some(key) => key,
@@ -28,6 +30,7 @@ pub enum UpdateStatus {
     Available(UpdateReleaseInfo),
     UpToDate,
     Downloading {
+        version: String,
         progress: f32,
     },
     ReadyToInstall {
@@ -39,8 +42,6 @@ pub enum UpdateStatus {
 }
 
 pub fn check_for_update() -> Result<Option<UpdateReleaseInfo>, String> {
-    ensure_packaged_app()?;
-
     if UPDATER_PUBLIC_KEY.trim().is_empty() {
         return Err(
             "Updater public key is not configured in this build. Set THREADLANE_UPDATER_PUBLIC_KEY when compiling Threadlane."
@@ -107,16 +108,12 @@ pub fn install_and_relaunch(info: UpdateReleaseInfo, bytes: Vec<u8>) -> Result<(
     std::process::exit(0);
 }
 
-fn ensure_packaged_app() -> Result<(), String> {
-    current_app_bundle().map(|_| ())
-}
-
 fn current_app_bundle() -> Result<PathBuf, String> {
     let executable = std::env::current_exe()
         .map_err(|error| format!("Failed to locate the current executable: {error}"))?;
 
     app_bundle_for_executable(&executable).ok_or_else(|| {
-        "Updates are only available from an installed Threadlane.app, not from cargo run."
+        "Installing updates is only available from a packaged Threadlane.app. cargo run can check and download updates, but cannot replace target/debug."
             .to_string()
     })
 }
@@ -147,7 +144,7 @@ mod tests {
     }
 
     #[test]
-    fn only_installed_app_executables_resolve_to_an_update_target() {
+    fn only_installed_app_executables_resolve_to_an_install_target() {
         assert_eq!(
             app_bundle_for_executable(Path::new(
                 "/Applications/Threadlane.app/Contents/MacOS/threadlane"

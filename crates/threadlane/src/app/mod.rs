@@ -740,27 +740,27 @@ script_mod! {
                             FlexSpacer {}
                             update_btn := Button {
                                 width: Fit
-                                height: 30
-                                padding: Inset{left: 10 right: 11 top: 5 bottom: 5}
-                                text: "Check for Updates"
+                                height: 28
+                                padding: Inset{left: 9 right: 10 top: 4 bottom: 4}
+                                text: "Check updates"
                                 draw_bg +: {
-                                    color: #x1e2d24
-                                    color_hover: #x273b2f
-                                    color_focus: #x273b2f
-                                    color_down: #x324d3e
-                                    border_color: #x396348
-                                    border_color_hover: #x4d8a63
-                                    border_color_focus: #x4d8a63
-                                    border_color_down: #x6bc08b
+                                    color: #x1d2822
+                                    color_hover: #x25342b
+                                    color_focus: #x25342b
+                                    color_down: #x2c4034
+                                    border_color: #x344b3c
+                                    border_color_hover: #x466853
+                                    border_color_focus: #x466853
+                                    border_color_down: #x5c8b6d
                                     border_radius: 7.0
                                     border_size: 1.0
                                 }
                                 draw_text +: {
-                                    color: #x6bc08b
-                                    color_hover: #x8fa9c7
-                                    color_focus: #x8fa9c7
-                                    color_down: #xffffff
-                                    text_style: theme.font_bold { font_size: 9.5 }
+                                    color: #x8eb89d
+                                    color_hover: #xb5d4be
+                                    color_focus: #xb5d4be
+                                    color_down: #xe7f5eb
+                                    text_style: theme.font_bold { font_size: 9.0 }
                                 }
                             }
                             caps_btn := Button {
@@ -797,6 +797,73 @@ script_mod! {
                             }
 
                             status_pill := StatusPill {}
+                        }
+
+                        update_notice := RoundedView {
+                            width: Fill
+                            height: 38
+                            visible: false
+                            flow: Right
+                            spacing: 8
+                            align: Align{y: 0.5}
+                            padding: Inset{left: 10 right: 11}
+                            margin: Inset{left: 2 right: 2}
+                            show_bg: true
+                            draw_bg +: {
+                                color: #x1b232dc8
+                                border_color: #x354353
+                                border_size: 1.0
+                                border_radius: 8.0
+                            }
+
+                            update_notice_visual := View {
+                                width: 18
+                                height: 18
+                                align: Align{x: 0.5 y: 0.5}
+                                update_notice_loader := ActivityLoader {
+                                    width: 18
+                                    height: 11
+                                    visible: false
+                                    draw_bg +: { dot_radius: 1.05 speed: 3.0 }
+                                }
+                                update_notice_available_dot := RoundedView {
+                                    width: 7
+                                    height: 7
+                                    visible: false
+                                    draw_bg +: { color: #x78aef0 border_radius: 3.5 }
+                                }
+                                update_notice_ready_dot := RoundedView {
+                                    width: 7
+                                    height: 7
+                                    visible: false
+                                    draw_bg +: { color: #x67c58b border_radius: 3.5 }
+                                }
+                                update_notice_error_dot := RoundedView {
+                                    width: 7
+                                    height: 7
+                                    visible: false
+                                    draw_bg +: { color: #xe86a64 border_radius: 3.5 }
+                                }
+                            }
+
+                            update_notice_title := Label {
+                                width: Fit
+                                height: Fit
+                                text: ""
+                                draw_text +: {
+                                    color: #xdce6f2
+                                    text_style: theme.font_bold { font_size: 9.5 }
+                                }
+                            }
+                            update_notice_detail := Label {
+                                width: Fill
+                                height: Fit
+                                text: ""
+                                draw_text +: {
+                                    color: #x8493a5
+                                    text_style +: { font_size: 8.5 }
+                                }
+                            }
                         }
 
                         auth_row := AuthRow {}
@@ -2078,14 +2145,6 @@ impl App {
             }
         }
         if let Some(status) = new_status {
-            if let crate::updater::UpdateStatus::Available(info) = &status {
-                if !info.notes.trim().is_empty() {
-                    self.push_chat(
-                        MsgRole::System,
-                        format!("Threadlane v{} is available:\n{}", info.version, info.notes),
-                    );
-                }
-            }
             self.update_status = status;
             self.sync_update_button(cx);
         }
@@ -2093,31 +2152,80 @@ impl App {
 
     fn sync_update_button(&mut self, cx: &mut Cx) {
         let btn = self.ui.button(cx, ids!(update_btn));
+        let notice = self.ui.widget(cx, ids!(update_notice));
+        let loader = self.ui.widget(cx, ids!(update_notice_loader));
+        let available_dot = self.ui.widget(cx, ids!(update_notice_available_dot));
+        let ready_dot = self.ui.widget(cx, ids!(update_notice_ready_dot));
+        let error_dot = self.ui.widget(cx, ids!(update_notice_error_dot));
+        let title = self.ui.label(cx, ids!(update_notice_title));
+        let detail = self.ui.label(cx, ids!(update_notice_detail));
+
+        notice.set_visible(
+            cx,
+            !matches!(
+                self.update_status,
+                crate::updater::UpdateStatus::Idle | crate::updater::UpdateStatus::UpToDate
+            ),
+        );
+        loader.set_visible(cx, false);
+        available_dot.set_visible(cx, false);
+        ready_dot.set_visible(cx, false);
+        error_dot.set_visible(cx, false);
+
         match &self.update_status {
             crate::updater::UpdateStatus::Idle => {
-                btn.set_text(cx, "Check for Updates");
+                btn.set_text(cx, "Check updates");
             }
             crate::updater::UpdateStatus::Checking => {
-                btn.set_text(cx, "Checking...");
+                btn.set_text(cx, "Checking…");
+                loader.set_visible(cx, true);
+                title.set_text(cx, "Checking for updates");
+                detail.set_text(cx, "Looking for the latest signed release");
             }
             crate::updater::UpdateStatus::Available(info) => {
                 btn.set_text(cx, &format!("Update to v{}", info.version));
+                available_dot.set_visible(cx, true);
+                title.set_text(cx, &format!("Threadlane v{} is available", info.version));
+                let release_detail = if info.notes.trim().is_empty() {
+                    format!(
+                        "You’re currently on v{}. The update is signed and ready to download.",
+                        crate::updater::CURRENT_VERSION
+                    )
+                } else {
+                    truncate_chars(&normalize_catalog_text(&info.notes), 100)
+                };
+                detail.set_text(cx, &release_detail);
             }
             crate::updater::UpdateStatus::UpToDate => {
-                btn.set_text(cx, "Up to date ✓");
+                btn.set_text(cx, "Up to date");
             }
-            crate::updater::UpdateStatus::Downloading { progress } => {
-                let pct = (progress * 100.0) as u32;
-                btn.set_text(cx, &format!("Downloading... {pct}%"));
+            crate::updater::UpdateStatus::Downloading { version, progress } => {
+                let pct = (progress.clamp(0.0, 1.0) * 100.0).round() as u32;
+                btn.set_text(cx, &format!("Downloading · {pct}%"));
+                loader.set_visible(cx, true);
+                title.set_text(cx, &format!("Downloading Threadlane v{version}"));
+                detail.set_text(
+                    cx,
+                    &format!("{pct}% complete · Verifying before installation"),
+                );
             }
-            crate::updater::UpdateStatus::ReadyToInstall { .. } => {
-                btn.set_text(cx, "Install & Relaunch 🚀");
+            crate::updater::UpdateStatus::ReadyToInstall { info, .. } => {
+                btn.set_text(cx, "Install & relaunch");
+                ready_dot.set_visible(cx, true);
+                title.set_text(cx, &format!("Threadlane v{} is ready", info.version));
+                detail.set_text(cx, "Verified · Relaunch to finish installation");
             }
             crate::updater::UpdateStatus::Installing => {
-                btn.set_text(cx, "Installing...");
+                btn.set_text(cx, "Installing…");
+                loader.set_visible(cx, true);
+                title.set_text(cx, "Installing update");
+                detail.set_text(cx, "Threadlane will relaunch automatically");
             }
             crate::updater::UpdateStatus::Error(err) => {
-                btn.set_text(cx, "Check for Updates");
+                btn.set_text(cx, "Retry update check");
+                error_dot.set_visible(cx, true);
+                title.set_text(cx, "Couldn’t update Threadlane");
+                detail.set_text(cx, &truncate_chars(&normalize_catalog_text(err), 100));
                 eprintln!("[Threadlane Updater] Error: {err}");
             }
         }
@@ -2143,7 +2251,10 @@ impl App {
     }
 
     fn trigger_update_download(&mut self, cx: &mut Cx, info: crate::updater::UpdateReleaseInfo) {
-        self.update_status = crate::updater::UpdateStatus::Downloading { progress: 0.0 };
+        self.update_status = crate::updater::UpdateStatus::Downloading {
+            version: info.version.clone(),
+            progress: 0.0,
+        };
         self.sync_update_button(cx);
 
         let (tx, rx) = std::sync::mpsc::channel();
@@ -2151,8 +2262,12 @@ impl App {
 
         get_runtime().spawn_blocking(move || {
             let progress_tx = tx.clone();
+            let download_version = info.version.clone();
             let result = crate::updater::download_update(&info, move |progress| {
-                let _ = progress_tx.send(crate::updater::UpdateStatus::Downloading { progress });
+                let _ = progress_tx.send(crate::updater::UpdateStatus::Downloading {
+                    version: download_version.clone(),
+                    progress,
+                });
                 SignalToUI::set_ui_signal();
             });
 

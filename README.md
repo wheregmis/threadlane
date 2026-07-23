@@ -82,6 +82,74 @@ gh secret set CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD
 
 The release binary embeds `THREADLANE_UPDATER_PUBLIC_KEY`. The private key is available only to the release workflow and signs `Threadlane.app.tar.gz`; existing installations reject updates whose signatures do not match the embedded public key. Do not rotate or lose the private key without providing an explicit updater-key migration path.
 
+#### Testing Updates Locally
+
+`cargo run` can exercise update checks, signature verification, downloads, and the complete updater UI. Installation and relaunch are restricted to a packaged `.app` so a development run can never replace `target/debug`.
+
+For a quick UI test against the published GitHub Releases manifest, embed the local public key for that run:
+
+```bash
+THREADLANE_UPDATER_PUBLIC_KEY="$(cat threadlane-updater.key.pub)" \
+cargo run -p threadlane
+```
+
+To test an unpublished update locally, also override the manifest endpoint at compile time:
+
+```bash
+export THREADLANE_UPDATER_PUBLIC_KEY="$(cat threadlane-updater.key.pub)"
+export THREADLANE_UPDATER_ENDPOINT="http://127.0.0.1:8787/latest.json"
+```
+
+Build and preserve the lower-version app first, then increase `crates/threadlane/Cargo.toml` to the test update version and create a signed app archive:
+
+```bash
+./scripts/build_extensions.sh
+cargo build --release --bin threadlane
+cargo packager --release --formats app \
+  --manifest-path crates/threadlane/Cargo.toml
+mkdir -p "$HOME/Applications"
+rm -rf "$HOME/Applications/Threadlane Test.app"
+cp -R crates/threadlane/dist/Threadlane.app \
+  "$HOME/Applications/Threadlane Test.app"
+
+# Increase the threadlane package version before continuing.
+rm -f crates/threadlane/dist/Threadlane.app.tar.gz*
+cargo build --release --bin threadlane
+CARGO_PACKAGER_SIGN_PRIVATE_KEY=threadlane-updater.key \
+CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD='your-key-password' \
+  cargo packager --release --formats app \
+  --manifest-path crates/threadlane/Cargo.toml
+```
+
+Create `crates/threadlane/dist/latest.json`, using the higher test version and the generated signature:
+
+```bash
+TEST_VERSION=0.0.7
+jq -n \
+  --arg version "$TEST_VERSION" \
+  --arg signature "$(cat crates/threadlane/dist/Threadlane.app.tar.gz.sig)" \
+  '{
+    version: $version,
+    platforms: {
+      "macos-aarch64": {
+        url: "http://127.0.0.1:8787/Threadlane.app.tar.gz",
+        signature: $signature,
+        format: "app"
+      }
+    }
+  }' > crates/threadlane/dist/latest.json
+
+python3 -m http.server 8787 --directory crates/threadlane/dist
+```
+
+While that server is running, either run the app from the terminal to test check/download behavior:
+
+```bash
+cargo run -p threadlane
+```
+
+or open `$HOME/Applications/Threadlane Test.app` to test the complete install-and-relaunch flow. Restore the intended package version and unset `THREADLANE_UPDATER_ENDPOINT` afterward so normal builds use GitHub Releases.
+
 ### Unsigned macOS Distribution
 
 Release bundles use an ad-hoc macOS signature so their internal resource seals are valid without an Apple Developer certificate. This does not establish Gatekeeper trust or notarize the application. After copying Threadlane to `/Applications`, users may need to allow it in **System Settings → Privacy & Security** or remove the quarantine attribute explicitly:
