@@ -5,6 +5,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
@@ -49,6 +50,11 @@ fn replace_file(temp_path: &Path, destination: &Path) -> std::io::Result<()> {
 #[cfg(not(windows))]
 fn replace_file(temp_path: &Path, destination: &Path) -> std::io::Result<()> {
     std::fs::rename(temp_path, destination)
+}
+
+fn session_file_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,30 +105,48 @@ impl SessionTree {
         }
 
         let previous_name = self.name.clone();
-        self.name = Some(name);
+        self.name = Some(name.clone());
         if let Some(path) = self.file_path.clone() {
-            let directory = path.parent().unwrap_or_else(|| Path::new("."));
-            static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-            let temp_path = directory.join(format!(
-                ".{}.{}.{}.tmp",
-                path.file_name().unwrap_or_default().to_string_lossy(),
-                std::process::id(),
-                TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
-            ));
-
-            let result = self
-                .save_to_file(&temp_path)
-                .and_then(|_| replace_file(&temp_path, &path));
-            if result.is_err() {
-                let _ = std::fs::remove_file(&temp_path);
-                // A failed rewrite must not make memory claim a title that is
-                // absent from the persisted session.
+            // Reload while holding the same process-wide lock used by node
+            // appends. This closes the read/replace window: nodes appended by
+            // the normal agent turn are included in the title rewrite.
+            let _guard = session_file_lock().lock().unwrap();
+            let mut latest = match Self::load_from_file(&path) {
+                Ok(tree) => tree,
+                Err(error) => {
+                    self.name = previous_name;
+                    return Err(error);
+                }
+            };
+            latest.name = Some(name);
+            let result = latest.save_transactionally(&path);
+            if result.is_ok() {
+                *self = latest;
+            } else {
                 self.name = previous_name;
             }
             result
         } else {
             Ok(())
         }
+    }
+
+    fn save_transactionally(&self, path: &Path) -> std::io::Result<()> {
+        static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+        let directory = path.parent().unwrap_or_else(|| Path::new("."));
+        let temp_path = directory.join(format!(
+            ".{}.{}.{}.tmp",
+            path.file_name().unwrap_or_default().to_string_lossy(),
+            std::process::id(),
+            TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let result = self
+            .save_to_file(&temp_path)
+            .and_then(|_| replace_file(&temp_path, path));
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temp_path);
+        }
+        result
     }
 
     pub fn add_message(&mut self, message: AgentMessage) -> String {
@@ -150,6 +174,7 @@ impl SessionTree {
         self.active_node_id = Some(node_id.clone());
 
         if let Some(ref path) = self.file_path {
+            let _guard = session_file_lock().lock().unwrap();
             let _ = self.append_node_to_file(path, &node);
         }
 
@@ -337,6 +362,34 @@ mod tests {
 
         assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
         assert_eq!(tree.name.as_deref(), Some("Existing title"));
+    }
+
+    #[test]
+    fn title_update_preserves_nodes_appended_by_normal_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut initial = SessionTree::new("session");
+        initial.file_path = Some(path.clone());
+        initial.add_message(AgentMessage::User {
+            content: "first".into(),
+        });
+
+        // Simulate the title task having loaded before the normal turn writes.
+        let mut title_task = SessionTree::load_from_file(&path).unwrap();
+        let mut normal_turn = SessionTree::load_from_file(&path).unwrap();
+        normal_turn.add_message(AgentMessage::Assistant {
+            content: Some("concurrent".into()),
+            tool_calls: None,
+        });
+
+        title_task.set_name("Generated title".into()).unwrap();
+        let loaded = SessionTree::load_from_file(&path).unwrap();
+        assert_eq!(loaded.name.as_deref(), Some("Generated title"));
+        assert_eq!(loaded.nodes.len(), 2);
+        assert!(loaded.nodes.values().any(|node| matches!(
+            &node.message,
+            AgentMessage::Assistant { content: Some(text), .. } if text == "concurrent"
+        )));
     }
 
     #[test]

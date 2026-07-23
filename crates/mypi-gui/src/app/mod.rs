@@ -13,11 +13,11 @@ use crate::panels::sessions::{
 };
 use crate::state::{
     active_session_entry, archive_session, begin_title_generation, builtin_commands,
-    create_new_session, delete_session, end_title_generation, is_project_working,
-    is_session_working, normalize_session_title, project_work_dir_at_row, refresh_sessions,
-    session_entry_at_row, session_title_eligible, set_active_project, set_active_session,
-    set_session_context_target, set_session_working, truncate_chars, CommandInfo, GuiAgentEvent,
-    MsgRole, SessionEntry, ToolStatus,
+    create_new_session, delete_session, end_title_generation, first_existing_user_prompt,
+    is_project_working, is_session_working, normalize_session_title, project_work_dir_at_row,
+    refresh_sessions, session_entry_at_row, session_title_eligible, set_active_project,
+    set_active_session, set_session_context_target, set_session_working, truncate_chars,
+    CommandInfo, GuiAgentEvent, MsgRole, SessionEntry, ToolStatus,
 };
 use crate::workspace::{AppState, SessionKey};
 use base64::Engine as _;
@@ -2812,6 +2812,7 @@ impl App {
         let Ok(tree) = mypi_agent::SessionTree::load_from_file(&path) else {
             return;
         };
+        let title_prompt = first_existing_user_prompt(&tree).unwrap_or(prompt);
         if !session_title_eligible(&tree) || !begin_title_generation(&work_dir, &session_id) {
             return;
         }
@@ -2823,7 +2824,7 @@ impl App {
             let result = async {
                 let client = OpenAIClient::new(api_key, account_id);
                 let raw = client
-                    .generate_title(&model, &prompt)
+                    .generate_title(&model, &title_prompt)
                     .await
                     .map_err(|_| ())?;
                 let title = normalize_session_title(&raw);

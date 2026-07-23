@@ -46,7 +46,7 @@ pub struct SessionsData {
     pub rows: Vec<SessionListRow>,
 }
 
-pub static TITLE_IN_FLIGHT: LazyLock<RwLock<std::collections::HashSet<(PathBuf, String)>>> =
+pub static TITLE_ATTEMPTED: LazyLock<RwLock<std::collections::HashSet<(PathBuf, String)>>> =
     LazyLock::new(|| RwLock::new(std::collections::HashSet::new()));
 
 pub fn normalize_session_title(value: &str) -> String {
@@ -79,19 +79,33 @@ pub fn normalize_session_title(value: &str) -> String {
 pub fn session_title_eligible(tree: &SessionTree) -> bool {
     !tree.has_name()
 }
+
+pub fn first_existing_user_prompt(tree: &SessionTree) -> Option<String> {
+    tree.get_active_branch_messages()
+        .into_iter()
+        .find_map(|message| {
+            if let AgentMessage::User { content } = message {
+                (!content.trim().is_empty()).then_some(content)
+            } else if let AgentMessage::UserWithImages { content, .. } = message {
+                (!content.trim().is_empty()).then_some(content)
+            } else {
+                None
+            }
+        })
+}
+
 pub fn begin_title_generation(work_dir: &Path, session_id: &str) -> bool {
     let key = (
         std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf()),
         session_id.to_string(),
     );
-    TITLE_IN_FLIGHT.write().unwrap().insert(key)
+    // This is deliberately a lifetime attempt marker, not an in-flight guard.
+    // Failed requests must not become eligible again later in this process.
+    TITLE_ATTEMPTED.write().unwrap().insert(key)
 }
-pub fn end_title_generation(work_dir: &Path, session_id: &str) {
-    let key = (
-        std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf()),
-        session_id.to_string(),
-    );
-    TITLE_IN_FLIGHT.write().unwrap().remove(&key);
+pub fn end_title_generation(_work_dir: &Path, _session_id: &str) {
+    // Kept as a no-op for callers that finish the detached task. Never clear
+    // the marker: one attempt is allowed per session per application lifetime.
 }
 
 pub static SESSIONS_DATA: RwLock<SessionsData> = RwLock::new(SessionsData {
@@ -491,8 +505,36 @@ mod tests {
         assert!(begin_title_generation(&work_dir, "session-2"));
         end_title_generation(&work_dir, "session-1");
         end_title_generation(&work_dir, "session-2");
-        assert!(begin_title_generation(&work_dir, "session-1"));
-        end_title_generation(&work_dir, "session-1");
+        assert!(!begin_title_generation(&work_dir, "session-1"));
+    }
+
+    #[test]
+    fn legacy_title_uses_first_existing_user_message() {
+        let mut tree = SessionTree::new("legacy");
+        tree.add_message(AgentMessage::User {
+            content: "First request".into(),
+        });
+        tree.add_message(AgentMessage::Assistant {
+            content: Some("reply".into()),
+            tool_calls: None,
+        });
+        tree.add_message(AgentMessage::User {
+            content: "Later request".into(),
+        });
+        assert_eq!(
+            first_existing_user_prompt(&tree).as_deref(),
+            Some("First request")
+        );
+    }
+
+    #[test]
+    fn attachment_only_message_has_no_title_prompt() {
+        let mut tree = SessionTree::new("image");
+        tree.add_message(AgentMessage::UserWithImages {
+            content: String::new(),
+            images: Vec::new(),
+        });
+        assert!(first_existing_user_prompt(&tree).is_none());
     }
 
     #[test]
