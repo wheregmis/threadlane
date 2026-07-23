@@ -4,6 +4,17 @@ use super::state::CommandInfo;
 use makepad_widgets::text::selection::Cursor;
 use makepad_widgets::*;
 use unicode_segmentation::UnicodeSegmentation;
+fn warm_active_row() -> Vec4f {
+    vec4(0.349, 0.251, 0.173, 1.0)
+}
+
+fn warm_hover_row() -> Vec4f {
+    vec4(0.275, 0.2, 0.165, 1.0)
+}
+
+fn warm_command_name() -> Vec4f {
+    vec4(1.0, 0.933, 0.886, 1.0)
+}
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -264,13 +275,13 @@ impl Widget for MypiCommandTextInput {
                         .set_text(cx, if is_active { "›" } else { "" });
 
                     let color = if is_active {
-                        vec4(0.349, 0.251, 0.173, 1.0) // #x59402c
+                        warm_active_row()
                     } else if Some(item_id) == self.pointer_hover_index {
-                        vec4(0.275, 0.2, 0.165, 1.0) // #x46332a
+                        warm_hover_row()
                     } else {
                         Vec4f::all(0.)
                     };
-                    let name_color = vec4(1.0, 0.933, 0.886, 1.0); // #xffeee2
+                    let name_color = warm_command_name();
                     let mut name_label = item_widget.label(cx, ids!(cmd_name));
                     script_apply_eval!(cx, name_label, {
                         draw_text +: { color: #(name_color) }

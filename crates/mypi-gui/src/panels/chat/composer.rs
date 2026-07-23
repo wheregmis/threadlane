@@ -1,4 +1,27 @@
-//! Pure presentation state for the chat composer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GenerationEvent {
+    AgentEnd,
+    CommandOutput,
+    AgentError,
+}
+
+/// Accept only events belonging to the current generation. An AgentEnd is a
+/// terminal marker, but its command output is still valid for that generation.
+pub fn accepts_generation_event(
+    active_generation: Option<u64>,
+    terminal_generation: Option<u64>,
+    generation: u64,
+    event: GenerationEvent,
+) -> bool {
+    match event {
+        GenerationEvent::CommandOutput => {
+            active_generation == Some(generation) || terminal_generation == Some(generation)
+        }
+        GenerationEvent::AgentEnd | GenerationEvent::AgentError => {
+            active_generation == Some(generation)
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ComposerStatus {
@@ -82,6 +105,48 @@ impl Default for ComposerState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generation_correlation_accepts_end_then_output() {
+        assert!(accepts_generation_event(
+            Some(7),
+            None,
+            7,
+            GenerationEvent::AgentEnd
+        ));
+        assert!(accepts_generation_event(
+            None,
+            Some(7),
+            7,
+            GenerationEvent::CommandOutput
+        ));
+    }
+
+    #[test]
+    fn stale_generation_is_ignored() {
+        assert!(!accepts_generation_event(
+            Some(8),
+            None,
+            7,
+            GenerationEvent::AgentError
+        ));
+        assert!(!accepts_generation_event(
+            None,
+            Some(8),
+            7,
+            GenerationEvent::CommandOutput
+        ));
+    }
+
+    #[test]
+    fn invalidation_prevents_old_output() {
+        assert!(!accepts_generation_event(
+            None,
+            None,
+            7,
+            GenerationEvent::CommandOutput
+        ));
+    }
 
     #[test]
     fn idle_is_compact_and_hides_adaptive_controls() {

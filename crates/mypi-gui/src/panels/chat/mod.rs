@@ -7,7 +7,9 @@ pub mod state;
 pub mod view;
 
 pub use components::ToolFoldHeader;
-pub use composer::{ComposerPresentation, ComposerState, ComposerStatus};
+pub use composer::{
+    accepts_generation_event, ComposerPresentation, ComposerState, ComposerStatus, GenerationEvent,
+};
 pub use state::{
     truncate_chars, ChatData, ChatMessage, MsgRole, StreamingKind, ToolPresentation, ToolStatus,
 };

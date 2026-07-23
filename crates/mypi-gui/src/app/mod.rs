@@ -2,8 +2,10 @@
 //!
 //! Chat, sessions, plan, and command palette panels are modularized under `crate::panels`.
 
-use crate::panels::chat::{ChatList, ToolFoldHeader};
-use crate::panels::chat::{ComposerState, ComposerStatus};
+use crate::panels::chat::{
+    accepts_generation_event, ChatList, ComposerState, ComposerStatus, GenerationEvent,
+    ToolFoldHeader,
+};
 use crate::panels::command_palette::*;
 use crate::panels::plan::PlanList;
 use crate::panels::sessions::{SessionContextMenu, SessionContextMenuAction, SessionList};
@@ -999,6 +1001,8 @@ pub struct App {
     #[rust]
     busy: bool,
     #[rust]
+    submitted_draft: Option<(u64, String)>,
+    #[rust]
     composer_state: ComposerState,
     #[rust]
     commands: Vec<CommandInfo>,
@@ -1372,7 +1376,6 @@ impl MatchEvent for App {
         if submit_prompt && !self.busy {
             let input_text = cti.text_input_ref(cx).text();
             if !input_text.trim().is_empty() {
-                cti.reset(cx);
                 self.dispatch_input(cx, input_text, true);
             }
         }
@@ -1571,7 +1574,15 @@ impl App {
         let presentation = self.composer_state.presentation();
         let mut input_bar = self.ui.widget(cx, ids!(input_bar));
         script_apply_eval!(cx, input_bar, {
-            draw_bg: { border_color: #x51443d }
+            height: if presentation.expanded { Fit } else { Fit }
+            padding: if presentation.expanded { Inset{left: 9 top: 7 right: 7 bottom: 7} } else { Inset{left: 9 top: 3 right: 7 bottom: 3} }
+            draw_bg: {
+                border_color: if presentation.show_error { #xb85c55 } else { #x51443d }
+            }
+        });
+        let mut footer = self.ui.widget(cx, ids!(composer_footer));
+        script_apply_eval!(cx, footer, {
+            height: if presentation.expanded { 30 } else { 22 }
         });
         self.ui
             .widget(cx, ids!(composer_status))
@@ -1865,6 +1876,7 @@ impl App {
         chat_list.portal_list(cx, ids!(list)).set_tail_range(true);
         cx.redraw_all();
 
+        let submitted_draft = input_str.clone();
         let generation_handle = get_runtime().spawn(async move {
             let mut agent_lock = agent_arc.lock().await;
             if let Some(session_file) = new_session_file {
@@ -1908,6 +1920,10 @@ impl App {
             id: generation_id,
             handle: generation_handle,
         });
+        self.submitted_draft = Some((generation_id, submitted_draft));
+        self.ui
+            .mypi_command_text_input(cx, ids!(prompt_input))
+            .reset(cx);
         self.set_status(cx, UiStatus::Working, "Working...");
     }
 
@@ -2002,11 +2018,14 @@ impl App {
             AgentEvent::TurnEnd { .. } => self.set_status(cx, UiStatus::Working, "Turn completed"),
             AgentEvent::AgentEnd { .. } => {
                 if let Some(id) = generation_id {
-                    if self
-                        .active_generation
-                        .as_ref()
-                        .is_some_and(|generation| generation.id == id)
-                    {
+                    if accepts_generation_event(
+                        self.active_generation
+                            .as_ref()
+                            .map(|generation| generation.id),
+                        self.terminal_generation_id,
+                        id,
+                        GenerationEvent::AgentEnd,
+                    ) {
                         self.active_generation = None;
                         self.terminal_generation_id = Some(id);
                     }
@@ -2022,12 +2041,40 @@ impl App {
                 refresh_sessions(&work_dir);
             }
             AgentEvent::AgentError { error } => {
+                if let Some(id) = generation_id {
+                    if !accepts_generation_event(
+                        self.active_generation
+                            .as_ref()
+                            .map(|generation| generation.id),
+                        self.terminal_generation_id,
+                        id,
+                        GenerationEvent::AgentError,
+                    ) {
+                        return;
+                    }
+                }
                 self.active_generation = None;
+                self.terminal_generation_id = None;
+                if let Some(id) = generation_id {
+                    if self
+                        .submitted_draft
+                        .as_ref()
+                        .is_some_and(|(draft_id, _)| *draft_id == id)
+                    {
+                        if let Some((_, draft)) = self.submitted_draft.take() {
+                            self.ui
+                                .mypi_command_text_input(cx, ids!(prompt_input))
+                                .text_input_ref(cx)
+                                .set_text(cx, &draft);
+                            self.composer_state.set_has_text(true);
+                        }
+                    }
+                }
                 if let Some(workspace) = self.workspace_state.active_workspace_mut() {
                     workspace.chat.flush_streaming();
                 }
                 self.push_chat(MsgRole::System, format!("Agent error: {error}"));
-                self.set_status(cx, UiStatus::Error, "Error");
+                self.set_status(cx, UiStatus::Error, &error);
             }
             AgentEvent::TurnStart { .. } | AgentEvent::MessageStart { .. } => {}
         }
@@ -2055,16 +2102,20 @@ impl App {
                     generation_id,
                     output,
                 } => {
-                    let is_current_generation = self
-                        .active_generation
-                        .as_ref()
-                        .is_some_and(|generation| generation.id == generation_id)
-                        || self.terminal_generation_id == Some(generation_id);
+                    let is_current_generation = accepts_generation_event(
+                        self.active_generation
+                            .as_ref()
+                            .map(|generation| generation.id),
+                        self.terminal_generation_id,
+                        generation_id,
+                        GenerationEvent::CommandOutput,
+                    );
                     if !is_current_generation {
                         continue;
                     }
                     self.active_generation = None;
                     self.terminal_generation_id = None;
+                    self.submitted_draft = None;
                     self.push_chat(MsgRole::System, output);
                     self.set_status(cx, UiStatus::Ready, "Ready");
                     let work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
