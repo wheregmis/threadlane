@@ -25,9 +25,83 @@ const CODEX_SSE_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 const CODEX_WS_URL: &str = "wss://chatgpt.com/backend-api/codex/responses";
 const CODEX_WS_BETA: &str = "responses_websockets=2026-02-06";
 const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-const WS_MAX_AGE: Duration = Duration::from_secs(55 * 60);
 const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const WS_RESPONSE_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const WS_MAX_AGE: Duration = Duration::from_secs(55 * 60);
+const TITLE_SYSTEM_PROMPT: &str = "Return only a concise session title, maximum 42 Unicode characters, with no Markdown or explanation.";
+const TITLE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn title_payload(model: &str, prompt: &str, is_codex: bool) -> Value {
+    if is_codex {
+        serde_json::json!({
+            "model": model,
+            "instructions": TITLE_SYSTEM_PROMPT,
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": prompt}]
+            }],
+            "store": false,
+            "stream": false
+        })
+    } else {
+        serde_json::json!({
+            "model": model,
+            "messages": [
+                {"role": "system", "content": TITLE_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt}
+            ],
+            "stream": false
+        })
+    }
+}
+
+fn title_response_text(value: &Value) -> Result<String, String> {
+    let text = value
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("content"))
+        .and_then(|content| {
+            content.as_str().map(str::to_string).or_else(|| {
+                content.as_array().map(|parts| {
+                    parts
+                        .iter()
+                        .filter_map(|part| part.get("text").and_then(Value::as_str))
+                        .collect()
+                })
+            })
+        })
+        .or_else(|| {
+            value
+                .get("output_text")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            value.get("output").and_then(Value::as_array).map(|items| {
+                items
+                    .iter()
+                    .filter(|item| item.get("type").and_then(Value::as_str) == Some("message"))
+                    .flat_map(|item| {
+                        item.get("content")
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                    })
+                    .filter_map(|part| part.get("text").and_then(Value::as_str))
+                    .collect::<String>()
+            })
+        })
+        .ok_or_else(|| "OpenAI title response did not contain text".to_string())?;
+
+    if text.trim().is_empty() {
+        Err("OpenAI title response contained empty text".to_string())
+    } else {
+        Ok(text)
+    }
+}
 
 static CLIENT_SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -652,6 +726,51 @@ impl OpenAIClient {
         }
     }
 
+    pub async fn generate_title(&self, model: &str, prompt: &str) -> Result<String, String> {
+        let is_codex = self.account_id.is_some() || self.api_key.starts_with("ey");
+        let (url, payload) = if is_codex {
+            (CODEX_SSE_URL, title_payload(model, prompt, true))
+        } else {
+            (
+                "https://api.openai.com/v1/chat/completions",
+                title_payload(model, prompt, false),
+            )
+        };
+
+        let mut request = self
+            .client
+            .post(url)
+            .timeout(TITLE_REQUEST_TIMEOUT)
+            .header(AUTHORIZATION, format!("Bearer {}", self.api_key))
+            .header(CONTENT_TYPE, "application/json");
+        if let Some(account_id) = &self.account_id {
+            request = request.header("chatgpt-account-id", account_id);
+        }
+        if is_codex {
+            request = request
+                .header("OpenAI-Beta", "responses=experimental")
+                .header("originator", "mypi")
+                .header(USER_AGENT, "mypi")
+                .header(ACCEPT, "application/json");
+        }
+
+        let response = request
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|error| format!("OpenAI title request failed: {error}"))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|error| format!("Failed to read OpenAI title response: {error}"))?;
+        if !status.is_success() {
+            return Err(format!("OpenAI title request failed ({status}): {body}"));
+        }
+        let value: Value = serde_json::from_str(&body)
+            .map_err(|error| format!("Failed to parse OpenAI title response ({error}): {body}"))?;
+        title_response_text(&value)
+    }
     pub async fn stream_chat_completion(
         &self,
         api_payload: Value,
@@ -1099,8 +1218,9 @@ impl OpenAIClient {
 mod tests {
     use super::{
         api_error_details, clamp_prompt_cache_key, continuation_payload, parse_chat_usage,
-        parse_responses_text_delta, parse_responses_usage, CodexWsState, Continuation,
-        OpenAIClient, ProviderUsage, StreamEvent, OPENAI_PROMPT_CACHE_KEY_MAX_CHARS,
+        parse_responses_text_delta, parse_responses_usage, title_payload, title_response_text,
+        CodexWsState, Continuation, OpenAIClient, ProviderUsage, StreamEvent,
+        OPENAI_PROMPT_CACHE_KEY_MAX_CHARS,
     };
     use serde_json::json;
     use std::time::{Duration, Instant};
@@ -1122,6 +1242,60 @@ mod tests {
         }
     }
 
+    #[test]
+    fn builds_chat_title_payload_without_tools() {
+        let payload = title_payload("gpt-title", "Please fix the login flow", false);
+        assert_eq!(payload["model"], "gpt-title");
+        assert_eq!(payload["messages"][0]["role"], "system");
+        assert!(payload["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Return only"));
+        assert_eq!(
+            payload["messages"][1]["content"],
+            "Please fix the login flow"
+        );
+        assert!(payload.get("tools").is_none());
+        assert_eq!(payload["stream"], false);
+    }
+
+    #[test]
+    fn builds_codex_title_payload_without_tools() {
+        let payload = title_payload("codex-title", "Summarize this session", true);
+        assert_eq!(payload["model"], "codex-title");
+        assert!(payload["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("Return only"));
+        assert_eq!(
+            payload["input"][0]["content"][0]["text"],
+            "Summarize this session"
+        );
+        assert!(payload.get("tools").is_none());
+        assert_eq!(payload["stream"], false);
+    }
+
+    #[test]
+    fn extracts_chat_and_codex_title_responses() {
+        assert_eq!(
+            title_response_text(&json!({"choices":[{"message":{"content":"A title"}}]})).unwrap(),
+            "A title"
+        );
+        assert_eq!(
+            title_response_text(&json!({"output":[{"type":"message","content":[
+                {"type":"output_text","text":"A Codex title"}
+            ]}]}))
+            .unwrap(),
+            "A Codex title"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_title_responses() {
+        let error =
+            title_response_text(&json!({"choices":[{"message":{"content":"  "}}]})).unwrap_err();
+        assert!(error.contains("empty"));
+    }
     #[test]
     fn prompt_cache_key_clamping_is_unicode_safe() {
         let key = "🦀".repeat(OPENAI_PROMPT_CACHE_KEY_MAX_CHARS + 10);
