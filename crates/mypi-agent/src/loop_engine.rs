@@ -196,7 +196,24 @@ impl AgentLoop {
                 content: prompt.to_string(),
             });
         }
+        self.run_queued_turns().await;
+    }
 
+    /// Runs messages already placed in the follow-up queue without adding an
+    /// artificial prompt. This lets host schedulers start queued work while
+    /// the agent is idle.
+    pub async fn run_follow_up(&mut self) {
+        if !self.follow_up_queue.has_items() {
+            return;
+        }
+        let items = self.follow_up_queue.drain();
+        let mut state = self.state.lock().await;
+        state.messages.extend(items);
+        drop(state);
+        self.run_queued_turns().await;
+    }
+
+    async fn run_queued_turns(&mut self) {
         let _ = self.event_tx.send(AgentEvent::AgentStart);
         let mut turn_number = 0;
 

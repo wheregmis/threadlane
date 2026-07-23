@@ -260,15 +260,20 @@ cp extensions/plan_mode_ext/target/wasm32-wasip1/release/plan_mode_ext.wasm .myp
       extension.json
   state/
     extensions/
-      plan_mode_ext.json
+      sessions/
+        64656661756c74/
+          plan_mode_ext.json
   sessions/
     default.jsonl
 ```
 
 The host persists returned extension state under the active session's
-`.mypi/state/extensions/sessions/<session-id>/<extension>.json` path. State is
-managed by the host and scoped to both the loaded extension and conversation;
-`CodingAgent` also defaults its session history to `.mypi/sessions/default.jsonl`.
+`.mypi/state/extensions/sessions/<hex-encoded-session-id>/<extension>.json` path.
+The session directory is the lowercase hexadecimal encoding of the session ID's
+UTF-8 bytes (for example, `session/one` becomes
+`73657373696f6e2f6f6e65`). State is managed by the host and scoped to both the
+loaded extension and conversation; `CodingAgent` also defaults its session
+history to `.mypi/sessions/default.jsonl`.
 The legacy `./extensions/*.wasm` location remains a discovery fallback during
 migration.
 

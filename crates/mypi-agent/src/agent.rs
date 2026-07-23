@@ -39,6 +39,10 @@ impl Agent {
         self.loop_engine.run_prompt(text).await;
     }
 
+    pub async fn run_follow_up(&mut self) {
+        self.loop_engine.run_follow_up().await;
+    }
+
     /// Updates both the cached prompt and the system message sent to the provider.
     pub async fn set_system_prompt(&mut self, system_prompt: String) {
         let mut state = self.loop_engine.state.lock().await;

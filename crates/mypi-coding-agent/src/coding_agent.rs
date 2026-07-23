@@ -51,6 +51,23 @@ impl AgentWorkScheduler {
             .map(|mut pending| std::mem::take(&mut *pending))
             .unwrap_or_default()
     }
+
+    async fn run(&self, agent: &mut Agent) -> bool {
+        let pending = self.drain();
+        if pending.is_empty() {
+            return false;
+        }
+        for work in pending {
+            match work {
+                AgentWork::RequestTurn(prompt) => agent.prompt(&prompt).await,
+                AgentWork::QueueMessage(content) => {
+                    agent.follow_up(AgentMessage::User { content });
+                    agent.run_follow_up().await;
+                }
+            }
+        }
+        true
+    }
 }
 
 struct HostCapabilityHandler {
@@ -765,22 +782,8 @@ impl CodingAgent {
     }
 
     async fn run_scheduled_agent_work(&mut self) {
-        loop {
-            let pending = self.agent_work.drain();
-            if pending.is_empty() {
-                break;
-            }
-            for work in pending {
-                match work {
-                    AgentWork::RequestTurn(prompt) => {
-                        self.agent.prompt(&prompt).await;
-                        self.dispatch_assistant_message_hooks().await;
-                    }
-                    AgentWork::QueueMessage(content) => {
-                        self.agent.follow_up(AgentMessage::User { content });
-                    }
-                }
-            }
+        while self.agent_work.run(&mut self.agent).await {
+            self.dispatch_assistant_message_hooks().await;
         }
     }
 
@@ -1159,12 +1162,13 @@ async fn run_subagent_task(
             ToolPolicy::FullAccess
         },
     ));
+    let agent_work = AgentWorkScheduler::default();
     let broker_dispatcher = build_broker_dispatcher(
         policy.clone(),
         extensions.clone(),
         work_dir.clone(),
         agent.loop_engine.event_tx.clone(),
-        AgentWorkScheduler::default(),
+        agent_work.clone(),
     );
     agent.loop_engine.before_tool_call_hook = Some(Arc::new(ExtensionBeforeToolHook {
         tool_policy: policy,
@@ -1191,6 +1195,8 @@ async fn run_subagent_task(
     // Preserve provider and tool-loop errors in the command result as well.
     let mut events = agent.subscribe();
     agent.prompt(&task).await;
+    while agent_work.run(&mut agent).await {}
+
     let mut error = None;
     while let Ok(event) = events.try_recv() {
         if let AgentEvent::AgentError { error: message } = event {
@@ -1284,6 +1290,14 @@ mod tests {
     use std::time::{Duration as StdDuration, Instant};
 
     fn handler(capability: &'static str, work_dir: PathBuf) -> HostCapabilityHandler {
+        handler_with_scheduler(capability, work_dir, AgentWorkScheduler::default())
+    }
+
+    fn handler_with_scheduler(
+        capability: &'static str,
+        work_dir: PathBuf,
+        agent_work: AgentWorkScheduler,
+    ) -> HostCapabilityHandler {
         let (event_tx, _) = broadcast::channel(4);
         HostCapabilityHandler {
             capability,
@@ -1292,8 +1306,71 @@ mod tests {
             work_dir,
             event_tx,
             allowed_hosts: Arc::new(HashSet::new()),
-            agent_work: AgentWorkScheduler::default(),
+            agent_work,
         }
+    }
+
+    #[tokio::test]
+    async fn standalone_agent_queue_message_uses_generic_scheduler() {
+        let scheduler = AgentWorkScheduler::default();
+        let mut dispatcher = CapabilityDispatcher::new();
+        dispatcher.register(
+            "agent",
+            Arc::new(handler_with_scheduler(
+                "agent",
+                PathBuf::from("."),
+                scheduler.clone(),
+            )),
+        );
+
+        let result = dispatcher
+            .dispatch_envelopes(vec![crate::extension_broker::HostBrokerRequest {
+                request: BrokerRequest {
+                    api_version: BROKER_API_VERSION,
+                    capability: "agent".into(),
+                    operation: "queue_message".into(),
+                    arguments: serde_json::json!({"content": "standalone"}),
+                },
+                invoking_extension: "command-ext".into(),
+            }])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.operation_results[0].value,
+            serde_json::json!({"queued": true})
+        );
+        assert_eq!(scheduler.drain().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn subagent_runtime_reuses_generic_agent_scheduler() {
+        let scheduler = AgentWorkScheduler::default();
+        let mut dispatcher = CapabilityDispatcher::new();
+        dispatcher.register(
+            "agent",
+            Arc::new(handler_with_scheduler(
+                "agent",
+                PathBuf::from("."),
+                scheduler.clone(),
+            )),
+        );
+
+        let result = dispatcher
+            .dispatch_envelopes(vec![crate::extension_broker::HostBrokerRequest {
+                request: BrokerRequest {
+                    api_version: BROKER_API_VERSION,
+                    capability: "agent".into(),
+                    operation: "queue_message".into(),
+                    arguments: serde_json::json!({"content": "subagent"}),
+                },
+                invoking_extension: "subagent-ext".into(),
+            }])
+            .await
+            .unwrap();
+
+        assert_eq!(result.operation_results.len(), 1);
+        assert_eq!(scheduler.drain().len(), 1);
     }
 
     #[test]

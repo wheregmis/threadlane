@@ -782,8 +782,12 @@ fn test_session_state_paths_are_isolated_and_filesystem_safe() {
         WasiExtensionManager::session_state_path(project.path(), "session/two", "plan_mode_ext");
 
     assert_ne!(first, second);
-    assert!(first.ends_with("plan_mode_ext.json"));
-    assert!(first.starts_with(project.path().join(".mypi/state/extensions/sessions")));
+    assert_eq!(
+        first,
+        project
+            .path()
+            .join(".mypi/state/extensions/sessions/73657373696f6e2f6f6e65/plan_mode_ext.json")
+    );
 }
 
 #[test]

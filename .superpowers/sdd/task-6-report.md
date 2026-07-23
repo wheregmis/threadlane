@@ -116,3 +116,15 @@ Implemented the underlying host grant and asynchronous result semantics identifi
 Validation for this follow-up: `cargo test -p mypi-coding-agent --test wasi_tests` passed (30 tests), including `wasm_extension_receives_broker_response_on_next_invocation`; `cargo test --workspace` also passed. Changed Rust/WASM sources pass targeted rustfmt checks, while repository-wide formatting remains red only on pre-existing unrelated files.
 
 Commit: `54ef910 fix: schedule v2 agent broker work`.
+
+## Final Task 6 blocker follow-up
+
+- `agent.queue_message` now schedules through the same generic `AgentWorkScheduler` and starts a queued follow-up turn immediately, including when invoked by a standalone command.
+- The subagent runtime now owns and drains that scheduler after its initial prompt instead of leaving broker work in an unused queue.
+- Added scheduler integration coverage for standalone-command and subagent-runtime dispatch paths without plan/subagent-specific broker routing.
+- Documented the actual lowercase-hex UTF-8 session-state directory and strengthened the path integration assertion.
+- GUI changes remain untouched.
+
+Validation: focused coding-agent tests, the complete WASI integration suite (30 tests), mypi-agent tests, targeted rustfmt checks, `git diff --check`, and `cargo test --workspace` passed. Repository-wide `cargo fmt --check` remains red only for pre-existing unrelated formatting drift.
+
+Commit: `de4822f fix: drain generic agent work scheduler`.
