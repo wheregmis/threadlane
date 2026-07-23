@@ -3,6 +3,7 @@
 //! Chat, sessions, plan, and command palette panels are modularized under `crate::panels`.
 
 use crate::panels::chat::{ChatList, ToolFoldHeader};
+use crate::panels::chat::{ComposerState, ComposerStatus};
 use crate::panels::command_palette::*;
 use crate::panels::plan::PlanList;
 use crate::panels::sessions::{SessionContextMenu, SessionContextMenuAction, SessionList};
@@ -998,6 +999,8 @@ pub struct App {
     #[rust]
     busy: bool,
     #[rust]
+    composer_state: ComposerState,
+    #[rust]
     commands: Vec<CommandInfo>,
     #[rust]
     capabilities_summary: String,
@@ -1319,6 +1322,27 @@ impl MatchEvent for App {
             );
         }
 
+        // Keep the presentation state synchronized with the input's actual actions;
+        // this also preserves the command popup's own focus handling.
+        let prompt_uid = cti.text_input_ref(cx).widget_uid();
+        for action in actions
+            .iter()
+            .filter_map(|action| action.as_widget_action())
+        {
+            if action.widget_uid != prompt_uid {
+                continue;
+            }
+            match action.cast::<TextInputAction>() {
+                TextInputAction::KeyFocus => self.composer_state.set_focused(true),
+                TextInputAction::KeyFocusLost => self.composer_state.set_focused(false),
+                TextInputAction::Changed(_) => {}
+                _ => continue,
+            }
+            let draft = cti.text_input_ref(cx).text();
+            self.composer_state.set_has_text(!draft.trim().is_empty());
+            self.apply_composer_presentation(cx);
+        }
+
         if self.ui.button(cx, ids!(model_picker_btn)).clicked(actions) {
             if let Some(mut model_drop) = self
                 .ui
@@ -1518,7 +1542,13 @@ impl App {
         }
     }
 
-    fn set_status(&mut self, cx: &mut Cx, status: UiStatus, _text: &str) {
+    fn set_status(&mut self, cx: &mut Cx, status: UiStatus, text: &str) {
+        let composer_status = match status {
+            UiStatus::Ready => ComposerStatus::Ready,
+            UiStatus::Working => ComposerStatus::Working,
+            UiStatus::Error => ComposerStatus::Error,
+        };
+        self.composer_state.set_status(composer_status, text);
         self.busy = status == UiStatus::Working;
         let working = status == UiStatus::Working;
         set_sessions_working(working);
@@ -1529,11 +1559,39 @@ impl App {
             .widget(cx, ids!(stop_btn))
             .set_visible(cx, working && self.active_generation.is_some());
         self.ui.widget(cx, ids!(send_btn)).set_visible(cx, !working);
-        self.ui.label(cx, ids!(composer_status)).set_text(cx, _text);
+        self.ui.label(cx, ids!(composer_status)).set_text(cx, text);
         self.ui
             .label(cx, ids!(composer_status))
             .set_visible(cx, working || status == UiStatus::Error);
         self.ui.widget(cx, ids!(chat_working_indicator)).redraw(cx);
+        self.apply_composer_presentation(cx);
+    }
+
+    fn apply_composer_presentation(&mut self, cx: &mut Cx) {
+        let presentation = self.composer_state.presentation();
+        let mut input_bar = self.ui.widget(cx, ids!(input_bar));
+        script_apply_eval!(cx, input_bar, {
+            draw_bg: { border_color: #x51443d }
+        });
+        self.ui
+            .widget(cx, ids!(composer_status))
+            .set_visible(cx, presentation.working || presentation.show_error);
+        self.ui
+            .label(cx, ids!(composer_status))
+            .set_text(cx, &presentation.status_text);
+        self.ui
+            .widget(cx, ids!(model_picker))
+            .set_visible(cx, presentation.show_model);
+        self.ui
+            .button(cx, ids!(plan_toggle_btn))
+            .set_visible(cx, presentation.show_plan);
+        self.ui
+            .button(cx, ids!(send_btn))
+            .set_visible(cx, !presentation.working);
+        self.ui
+            .button(cx, ids!(stop_btn))
+            .set_visible(cx, presentation.working);
+        self.ui.widget(cx, ids!(input_bar)).redraw(cx);
     }
 
     fn refresh_plan_ui(&mut self, cx: &mut Cx, work_dir: &std::path::Path, session_id: &str) {
@@ -1566,6 +1624,9 @@ impl App {
         self.ui
             .label(cx, ids!(plan_empty_label))
             .set_visible(cx, enabled && item_count == 0);
+        self.ui
+            .label(cx, ids!(plan_status_label))
+            .set_visible(cx, enabled);
         self.ui.label(cx, ids!(plan_status_label)).set_text(
             cx,
             if item_count == 0 {
@@ -1574,6 +1635,8 @@ impl App {
                 "active"
             },
         );
+        self.composer_state.set_plan_relevant(enabled);
+        self.apply_composer_presentation(cx);
     }
 
     fn apply_session_context_action(
