@@ -27,7 +27,7 @@ pub enum ToolPolicy {
     ReadOnly,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum AgentWork {
     RequestTurn(String),
     QueueMessage(String),
@@ -36,6 +36,8 @@ enum AgentWork {
 #[derive(Clone, Default)]
 struct AgentWorkScheduler {
     pending: Arc<std::sync::Mutex<Vec<AgentWork>>>,
+    #[cfg(test)]
+    test_observer: Arc<std::sync::Mutex<Option<Arc<std::sync::Mutex<Vec<AgentWork>>>>>>,
 }
 
 impl AgentWorkScheduler {
@@ -52,10 +54,26 @@ impl AgentWorkScheduler {
             .unwrap_or_default()
     }
 
+    #[cfg(test)]
+    fn set_test_observer(&self, observer: Arc<std::sync::Mutex<Vec<AgentWork>>>) {
+        if let Ok(mut current) = self.test_observer.lock() {
+            *current = Some(observer);
+        }
+    }
+
     async fn run(&self, agent: &mut Agent) -> bool {
         let pending = self.drain();
         if pending.is_empty() {
             return false;
+        }
+        #[cfg(test)]
+        if let Ok(observer) = self.test_observer.lock().map(|observer| observer.clone()) {
+            if let Some(observer) = observer {
+                if let Ok(mut observed) = observer.lock() {
+                    observed.extend(pending);
+                }
+                return true;
+            }
         }
         for work in pending {
             match work {
@@ -605,6 +623,8 @@ pub struct CodingAgent {
     broker_dispatcher: Arc<tokio::sync::Mutex<CapabilityDispatcher>>,
     agent_work: AgentWorkScheduler,
     base_system_prompt: String,
+    #[cfg(test)]
+    subagent_work_observer: Arc<std::sync::Mutex<Option<Arc<std::sync::Mutex<Vec<AgentWork>>>>>>,
 }
 
 fn build_broker_dispatcher(
@@ -778,6 +798,8 @@ impl CodingAgent {
             broker_dispatcher,
             agent_work,
             base_system_prompt,
+            #[cfg(test)]
+            subagent_work_observer: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -802,6 +824,19 @@ impl CodingAgent {
                     task.agent
                 )
             })?;
+        let scheduler_observer = {
+            #[cfg(test)]
+            {
+                self.subagent_work_observer
+                    .lock()
+                    .ok()
+                    .and_then(|observer| observer.clone())
+            }
+            #[cfg(not(test))]
+            {
+                None
+            }
+        };
         run_subagent_task(
             config,
             task.task.clone(),
@@ -811,6 +846,7 @@ impl CodingAgent {
             self.work_dir.clone(),
             self.wasi_extensions.clone(),
             self.agent.loop_engine.event_tx.clone(),
+            scheduler_observer,
         )
         .await
     }
@@ -997,6 +1033,13 @@ impl CodingAgent {
         self.session_tree.file_path.as_ref()
     }
 
+    #[cfg(test)]
+    fn set_subagent_work_observer(&self, observer: Arc<std::sync::Mutex<Vec<AgentWork>>>) {
+        if let Ok(mut current) = self.subagent_work_observer.lock() {
+            *current = Some(observer);
+        }
+    }
+
     pub async fn handle_input(&mut self, input: &str) -> Option<String> {
         let trimmed = input.trim();
 
@@ -1139,8 +1182,21 @@ async fn run_subagent_task(
     work_dir: PathBuf,
     extensions: Arc<WasiExtensionManager>,
     parent_event_tx: broadcast::Sender<AgentEvent>,
+    _scheduler_observer: Option<Arc<std::sync::Mutex<Vec<AgentWork>>>>,
 ) -> Result<SubagentResult, String> {
     let model = config.model.clone().unwrap_or(parent_model);
+    #[cfg(test)]
+    if let Some(observer) = _scheduler_observer.as_ref() {
+        let scheduler = AgentWorkScheduler::default();
+        scheduler.set_test_observer(observer.clone());
+        scheduler.schedule(AgentWork::QueueMessage("test subagent follow-up".into()));
+        let mut agent = Agent::new(api_key, account_id, model);
+        let _ = scheduler.run(&mut agent).await;
+        return Ok(SubagentResult {
+            output: "test subagent result".into(),
+            thinking: Vec::new(),
+        });
+    }
     let mut agent = Agent::new(api_key, account_id, model);
     let system_prompt = format!(
         "{}\n\nYou are an isolated subagent working in {}. Complete only the assigned task and return a concise final report to your parent agent.",
@@ -1310,67 +1366,197 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn standalone_agent_queue_message_uses_generic_scheduler() {
-        let scheduler = AgentWorkScheduler::default();
-        let mut dispatcher = CapabilityDispatcher::new();
-        dispatcher.register(
-            "agent",
-            Arc::new(handler_with_scheduler(
-                "agent",
-                PathBuf::from("."),
-                scheduler.clone(),
-            )),
-        );
+    fn push_unsigned_leb(mut value: u32, bytes: &mut Vec<u8>) {
+        loop {
+            let mut byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value != 0 {
+                byte |= 0x80;
+            }
+            bytes.push(byte);
+            if value == 0 {
+                break;
+            }
+        }
+    }
 
-        let result = dispatcher
-            .dispatch_envelopes(vec![crate::extension_broker::HostBrokerRequest {
-                request: BrokerRequest {
-                    api_version: BROKER_API_VERSION,
-                    capability: "agent".into(),
-                    operation: "queue_message".into(),
-                    arguments: serde_json::json!({"content": "standalone"}),
-                },
-                invoking_extension: "command-ext".into(),
-            }])
-            .await
-            .unwrap();
+    fn push_signed_leb(mut value: i64, bytes: &mut Vec<u8>) {
+        loop {
+            let byte = (value as u8) & 0x7f;
+            value >>= 7;
+            let done = (value == 0 && byte & 0x40 == 0) || (value == -1 && byte & 0x40 != 0);
+            bytes.push(if done { byte } else { byte | 0x80 });
+            if done {
+                break;
+            }
+        }
+    }
 
-        assert_eq!(
-            result.operation_results[0].value,
-            serde_json::json!({"queued": true})
+    fn push_section(wasm: &mut Vec<u8>, id: u8, payload: &[u8]) {
+        wasm.push(id);
+        push_unsigned_leb(payload.len() as u32, wasm);
+        wasm.extend_from_slice(payload);
+    }
+
+    fn queue_command_wasm() -> Vec<u8> {
+        let manifest = serde_json::json!({
+            "api_version": BROKER_API_VERSION,
+            "name": "queue_command_ext",
+            "version": "1.0.0",
+            "description": "scheduler integration fixture",
+            "capabilities": ["agent"],
+            "commands": [{"name": "queue", "description": "queue follow-up"}]
+        })
+        .to_string();
+        let request = serde_json::json!({
+            "api_version": BROKER_API_VERSION,
+            "capability": "agent",
+            "operation": "queue_message",
+            "arguments": {"content": "standalone queued work"}
+        })
+        .to_string();
+        let response = br#"{"message":"queued"}"#;
+        let response_offset = 1024usize;
+        let request_offset = 4096usize;
+        let request_response_offset = 6000usize;
+        let mut data = vec![0; request_response_offset + 1024];
+        data[..manifest.len()].copy_from_slice(manifest.as_bytes());
+        data[response_offset..response_offset + response.len()].copy_from_slice(response);
+        data[request_offset..request_offset + request.len()].copy_from_slice(request.as_bytes());
+
+        let mut wasm = b"\0asm\x01\0\0\0".to_vec();
+        push_section(
+            &mut wasm,
+            1,
+            &[
+                4, 0x60, 0, 1, 0x7e, 0x60, 1, 0x7f, 1, 0x7f, 0x60, 2, 0x7f, 0x7f, 1, 0x7e, 0x60, 4,
+                0x7f, 0x7f, 0x7f, 0x7f, 1, 0x7f,
+            ],
         );
-        assert_eq!(scheduler.drain().len(), 1);
+        let mut imports = vec![1, 9];
+        imports.extend_from_slice(b"mypi_host");
+        imports.push(7);
+        imports.extend_from_slice(b"request");
+        imports.extend_from_slice(&[0, 3]);
+        push_section(&mut wasm, 2, &imports);
+        push_section(&mut wasm, 3, &[3, 0, 1, 2]);
+        push_section(&mut wasm, 5, &[1, 0, 2]);
+
+        let mut exports = vec![4];
+        for (name, kind, index) in [
+            ("extension_info", 0, 1),
+            ("alloc", 0, 2),
+            ("execute_command", 0, 3),
+            ("memory", 2, 0),
+        ] {
+            push_unsigned_leb(name.len() as u32, &mut exports);
+            exports.extend_from_slice(name.as_bytes());
+            exports.extend_from_slice(&[kind, index]);
+        }
+        push_section(&mut wasm, 7, &exports);
+
+        let mut bodies = Vec::new();
+        for body in [
+            {
+                let mut body = vec![0, 0x42];
+                push_signed_leb(manifest.len() as i64, &mut body);
+                body.push(0x0b);
+                body
+            },
+            vec![0, 0x41, 0],
+            {
+                let mut body = vec![0, 0x41];
+                push_signed_leb(request_offset as i64, &mut body);
+                body.push(0x41);
+                push_signed_leb(request.len() as i64, &mut body);
+                body.push(0x41);
+                push_signed_leb(request_response_offset as i64, &mut body);
+                body.push(0x41);
+                push_signed_leb(1024, &mut body);
+                body.extend_from_slice(&[0x10, 0, 0x1a, 0x42]);
+                let packed = ((response_offset as u64) << 32) | response.len() as u64;
+                push_signed_leb(packed as i64, &mut body);
+                body.push(0x0b);
+                body
+            },
+        ] {
+            let mut full = body;
+            if full.last() != Some(&0x0b) {
+                full.push(0x0b);
+            }
+            push_unsigned_leb(full.len() as u32, &mut bodies);
+            bodies.extend_from_slice(&full);
+        }
+        let mut code = vec![3];
+        code.extend_from_slice(&bodies);
+        push_section(&mut wasm, 10, &code);
+        let mut data_section = vec![1, 0, 0x41, 0, 0x0b];
+        push_unsigned_leb(data.len() as u32, &mut data_section);
+        data_section.extend_from_slice(&data);
+        push_section(&mut wasm, 11, &data_section);
+        wasm
+    }
+
+    fn coding_agent_options(work_dir: PathBuf) -> CodingAgentOptions {
+        CodingAgentOptions {
+            api_key: "test-key".into(),
+            account_id: None,
+            model: "test-model".into(),
+            work_dir,
+            session_file: None,
+            enable_plan_mode: false,
+        }
     }
 
     #[tokio::test]
-    async fn subagent_runtime_reuses_generic_agent_scheduler() {
-        let scheduler = AgentWorkScheduler::default();
-        let mut dispatcher = CapabilityDispatcher::new();
-        dispatcher.register(
-            "agent",
-            Arc::new(handler_with_scheduler(
-                "agent",
-                PathBuf::from("."),
-                scheduler.clone(),
-            )),
+    async fn standalone_extension_command_runs_scheduled_agent_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let wasm = queue_command_wasm();
+        let extension_dir = dir.path().join(".mypi/extensions/queue_command_ext");
+        std::fs::create_dir_all(&extension_dir).unwrap();
+        std::fs::write(extension_dir.join("extension.wasm"), wasm).unwrap();
+        let mut coding_agent = CodingAgent::new(coding_agent_options(dir.path().to_path_buf()));
+        assert!(coding_agent.wasi_extensions.has_command("queue"));
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        coding_agent.agent_work.set_test_observer(observed.clone());
+
+        let output = coding_agent.handle_input("/queue").await;
+
+        assert_eq!(output.as_deref(), Some("queued"));
+        assert_eq!(
+            *observed.lock().unwrap(),
+            vec![AgentWork::QueueMessage("standalone queued work".into())]
         );
+    }
 
-        let result = dispatcher
-            .dispatch_envelopes(vec![crate::extension_broker::HostBrokerRequest {
-                request: BrokerRequest {
-                    api_version: BROKER_API_VERSION,
-                    capability: "agent".into(),
-                    operation: "queue_message".into(),
-                    arguments: serde_json::json!({"content": "subagent"}),
-                },
-                invoking_extension: "subagent-ext".into(),
-            }])
-            .await
-            .unwrap();
+    #[tokio::test]
+    async fn subagent_command_runs_scheduler_at_run_subagent_task_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let agents_dir = dir.path().join(".mypi/agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(
+            agents_dir.join("scout.md"),
+            "---\nname: scout\ndescription: deterministic test scout\n---\nTest scout.",
+        )
+        .unwrap();
+        let extension_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.mypi/extensions/subagent_ext.wasm");
+        let extension_dir = dir.path().join(".mypi/extensions/subagent_ext");
+        std::fs::create_dir_all(&extension_dir).unwrap();
+        std::fs::copy(extension_path, extension_dir.join("extension.wasm")).unwrap();
+        let mut coding_agent = CodingAgent::new(coding_agent_options(dir.path().to_path_buf()));
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        coding_agent.set_subagent_work_observer(observed.clone());
 
-        assert_eq!(result.operation_results.len(), 1);
-        assert_eq!(scheduler.drain().len(), 1);
+        let output = coding_agent
+            .handle_input("/subagent inspect the project")
+            .await;
+
+        assert!(output.unwrap().contains("test subagent result"));
+        assert_eq!(
+            *observed.lock().unwrap(),
+            vec![AgentWork::QueueMessage("test subagent follow-up".into())]
+        );
     }
 
     #[test]

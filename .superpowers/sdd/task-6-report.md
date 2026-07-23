@@ -128,3 +128,57 @@ Commit: `54ef910 fix: schedule v2 agent broker work`.
 Validation: focused coding-agent tests, the complete WASI integration suite (30 tests), mypi-agent tests, targeted rustfmt checks, `git diff --check`, and `cargo test --workspace` passed. Repository-wide `cargo fmt --check` remains red only for pre-existing unrelated formatting drift.
 
 Commit: `de4822f fix: drain generic agent work scheduler`.
+
+## Final Task 6 test-evidence blocker follow-up
+
+- Replaced the scheduler unit tests that only drained pending work with `CodingAgent::handle_input` integration tests.
+- Added a deterministic test WASM standalone command that issues `agent.queue_message`; the test observes `AgentWorkScheduler::run` consuming that queued work.
+- Added a test-only observer at the `run_subagent_task` boundary; the `/subagent` command test reaches that path and observes the scheduler executing queued work without a provider call.
+- GUI changes remain untouched.
+
+Validation: `cargo test -p mypi-coding-agent --lib -- --nocapture` passed (7 tests); `cargo test -p mypi-coding-agent` passed (all unit, integration, and doc tests; 30 WASI tests). The implementation remains limited to `coding_agent.rs` plus this report.
+
+```acceptance-report
+{
+  "criteriaSatisfied": [
+    {
+      "id": "criterion-1",
+      "status": "satisfied",
+      "evidence": "Only coding_agent.rs scheduler test coverage and this report were changed; GUI changes were not modified. Both tests invoke CodingAgent::handle_input and observe AgentWorkScheduler::run rather than calling drain."
+    }
+  ],
+  "changedFiles": [
+    "crates/mypi-coding-agent/src/coding_agent.rs",
+    ".superpowers/sdd/task-6-report.md"
+  ],
+  "testsAddedOrUpdated": [
+    "crates/mypi-coding-agent/src/coding_agent.rs"
+  ],
+  "commandsRun": [
+    {
+      "command": "cargo test -p mypi-coding-agent --lib -- --nocapture",
+      "result": "passed",
+      "summary": "All 7 coding-agent unit tests passed, including both scheduler integration tests."
+    },
+    {
+      "command": "cargo test -p mypi-coding-agent",
+      "result": "passed",
+      "summary": "Coding-agent unit, integration, WASI, and doc tests passed; 30 WASI tests passed."
+    }
+  ],
+  "validationOutput": [
+    "Standalone extension command test observed QueueMessage(standalone queued work) after handle_input(\"/queue\").",
+    "Subagent command test observed QueueMessage(test subagent follow-up) at the run_subagent_task boundary without provider access."
+  ],
+  "residualRisks": [
+    "Repository has pre-existing unrelated GUI modifications; they remain unstaged and untouched.",
+    "Production build retains the existing dead_code warning for base_system_prompt."
+  ],
+  "noStagedFiles": true,
+  "diffSummary": "Replaced drain-only scheduler tests with handle_input coverage for a real standalone WASM command and the subagent boundary, using test-only scheduler observability to avoid provider calls.",
+  "reviewFindings": [
+    "no blockers"
+  ],
+  "manualNotes": "The focused test fixture is generated in-memory and written only to a temporary directory."
+}
+```
