@@ -26,6 +26,18 @@ script_mod! {
         }
     }
 
+    mod.components.AttachmentChip = mod.components.ComposerChip {
+        visible: false
+        padding: Inset{left: 8 right: 9 top: 2 bottom: 2}
+        icon_walk: Walk{width: 12 height: 12 margin: Inset{right: 5}}
+        draw_icon +: {
+            svg: crate_resource("self:resources/icons/image.svg")
+            color: #x8eb7ef
+            color_hover: #xb8d5ff
+            color_down: #xffffff
+        }
+    }
+
     mod.components.ComposerAction = Button {
         width: Fit
         height: 28

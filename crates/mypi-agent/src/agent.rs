@@ -39,6 +39,11 @@ impl Agent {
         self.loop_engine.run_prompt(text).await;
     }
 
+    /// Prompts with a complete user message, including any image attachments.
+    pub async fn prompt_message(&mut self, message: AgentMessage) {
+        self.loop_engine.run_prompt_message(message).await;
+    }
+
     pub async fn run_follow_up(&mut self) {
         self.loop_engine.run_follow_up().await;
     }

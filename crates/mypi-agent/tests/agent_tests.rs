@@ -1,8 +1,8 @@
 use mypi_agent::{
     compact_messages, AfterToolCallHook, AfterToolCallResult, Agent, AgentLoop, AgentMessage,
     AgentState, AgentToolCall, AgentToolDefinition, AgentToolResult, BeforeToolCallHook,
-    BeforeToolCallResult, CompactionOptions, ReasoningEffort, SessionTree, ToolExecutionMode,
-    ToolExecutor,
+    BeforeToolCallResult, CompactionOptions, ImageAttachment, ReasoningEffort, SessionTree,
+    ToolExecutionMode, ToolExecutor,
 };
 use mypi_provider::openai::{ToolCall, ToolCallFunction};
 use std::collections::HashSet;
@@ -117,6 +117,153 @@ fn test_session_tree_persistence_and_branching() {
 
     let forked = tree.fork_branch(&n1).unwrap();
     assert_eq!(forked.nodes.len(), 1);
+}
+
+#[test]
+fn test_multimodal_provider_payloads() {
+    use mypi_agent::loop_engine::{convert_to_codex_llm, convert_to_llm};
+
+    let text_message = AgentMessage::User {
+        content: "Text only".to_string(),
+    };
+    assert_eq!(
+        convert_to_llm(std::slice::from_ref(&text_message)),
+        vec![serde_json::json!({
+            "role": "user",
+            "content": "Text only"
+        })]
+    );
+    let (instructions, items) = convert_to_codex_llm(&[text_message]);
+    assert!(instructions.is_empty());
+    assert_eq!(
+        items,
+        vec![serde_json::json!({
+            "type": "message",
+            "role": "user",
+            "content": [{ "type": "input_text", "text": "Text only" }]
+        })]
+    );
+
+    let message = AgentMessage::UserWithImages {
+        content: "What is in these images?".to_string(),
+        images: vec![
+            ImageAttachment {
+                display_name: "diagram.png".to_string(),
+                data_url: "data:image/png;base64,AAAA".to_string(),
+            },
+            ImageAttachment {
+                display_name: "photo.jpg".to_string(),
+                data_url: "data:image/jpeg;base64,BBBB".to_string(),
+            },
+        ],
+    };
+
+    assert_eq!(
+        convert_to_llm(std::slice::from_ref(&message)),
+        vec![serde_json::json!({
+            "role": "user",
+            "content": [
+                { "type": "text", "text": "What is in these images?" },
+                { "type": "image_url", "image_url": { "url": "data:image/png;base64,AAAA", "detail": "auto" } },
+                { "type": "image_url", "image_url": { "url": "data:image/jpeg;base64,BBBB", "detail": "auto" } }
+            ]
+        })]
+    );
+
+    let (instructions, items) = convert_to_codex_llm(&[message]);
+    assert!(instructions.is_empty());
+    assert_eq!(
+        items,
+        vec![serde_json::json!({
+            "type": "message",
+            "role": "user",
+            "content": [
+                { "type": "input_text", "text": "What is in these images?" },
+                { "type": "input_image", "image_url": "data:image/png;base64,AAAA", "detail": "auto" },
+                { "type": "input_image", "image_url": "data:image/jpeg;base64,BBBB", "detail": "auto" }
+            ]
+        })]
+    );
+
+    let image_only = AgentMessage::UserWithImages {
+        content: String::new(),
+        images: vec![ImageAttachment {
+            display_name: "screen.png".to_string(),
+            data_url: "data:image/png;base64,CCCC".to_string(),
+        }],
+    };
+    assert_eq!(
+        convert_to_llm(std::slice::from_ref(&image_only))[0]["content"],
+        serde_json::json!([
+            { "type": "image_url", "image_url": { "url": "data:image/png;base64,CCCC", "detail": "auto" } }
+        ])
+    );
+    assert_eq!(
+        convert_to_codex_llm(&[image_only]).1[0]["content"],
+        serde_json::json!([
+            { "type": "input_image", "image_url": "data:image/png;base64,CCCC", "detail": "auto" }
+        ])
+    );
+}
+
+#[test]
+fn test_session_tree_persists_images_and_loads_legacy_users() {
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("multimodal.jsonl");
+    let image_message = AgentMessage::UserWithImages {
+        content: "Inspect this".to_string(),
+        images: vec![ImageAttachment {
+            display_name: "screen.png".to_string(),
+            data_url: "data:image/png;base64,AAAA".to_string(),
+        }],
+    };
+
+    let mut tree = SessionTree::new("multimodal");
+    tree.file_path = Some(file_path.clone());
+    tree.add_message(image_message.clone());
+
+    let loaded = SessionTree::load_from_file(&file_path).unwrap();
+    let loaded_messages = loaded.get_active_branch_messages();
+    assert_eq!(loaded_messages.len(), 1);
+    assert!(loaded_messages[0].same_user_message(&image_message));
+
+    let legacy_path = dir.path().join("legacy.jsonl");
+    std::fs::write(
+        &legacy_path,
+        r#"{"id":"node_1","parent_id":null,"timestamp":1,"message":{"role":"user","content":"legacy text"}}
+"#,
+    )
+    .unwrap();
+    let legacy = SessionTree::load_from_file(&legacy_path).unwrap();
+    assert!(matches!(
+        legacy.get_active_branch_messages().as_slice(),
+        [AgentMessage::User { content }] if content == "legacy text"
+    ));
+}
+
+#[test]
+fn test_multimodal_user_equality_includes_images() {
+    let first = AgentMessage::user(
+        "inspect",
+        vec![ImageAttachment {
+            display_name: "screen.png".to_string(),
+            data_url: "data:image/png;base64,AAAA".to_string(),
+        }],
+    );
+    let same = first.clone();
+    let different_data = AgentMessage::user(
+        "inspect",
+        vec![ImageAttachment {
+            display_name: "screen.png".to_string(),
+            data_url: "data:image/png;base64,BBBB".to_string(),
+        }],
+    );
+
+    assert!(first.same_user_message(&same));
+    assert!(!first.same_user_message(&different_data));
+    assert!(!first.same_user_message(&AgentMessage::User {
+        content: "inspect".to_string(),
+    }));
 }
 
 #[test]

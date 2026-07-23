@@ -16,18 +16,20 @@ use crate::state::{
     CommandInfo, GuiAgentEvent, MsgRole, SessionEntry, ToolStatus,
 };
 use crate::workspace::{AppState, SessionKey};
+use base64::Engine as _;
 use makepad_widgets::text::selection::Cursor;
 use makepad_widgets::*;
-use mypi_agent::{get_runtime, AgentEvent, ReasoningEffort};
+use mypi_agent::{get_runtime, AgentEvent, ImageAttachment, ReasoningEffort};
 use mypi_coding_agent::{
     discover_agents, AgentConfig, AgentScope, CodingAgent, CodingAgentOptions, ProjectContext,
     SkillMetadata,
 };
 use mypi_provider::auth;
 use mypi_provider::openai::fetch_available_models;
+use robius_file_picker::FileDialog;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
@@ -595,6 +597,20 @@ script_mod! {
                                     border_radius: 11.0
                                 }
 
+                                attachment_row := View {
+                                    width: Fill
+                                    height: 24
+                                    visible: false
+                                    flow: Right
+                                    spacing: 6
+                                    clip_x: true
+
+                                    attachment_chip_0 := mod.components.AttachmentChip { text: "" }
+                                    attachment_chip_1 := mod.components.AttachmentChip { text: "" }
+                                    attachment_chip_2 := mod.components.AttachmentChip { text: "" }
+                                    attachment_chip_3 := mod.components.AttachmentChip { text: "" }
+                                }
+
                                 prompt_input := mod.components.MypiCommandTextInput {
                                     width: Fill
                                     height: Fit
@@ -676,6 +692,21 @@ script_mod! {
                                             color: #xb85c55
                                             color_hover: #xd4775f
                                             color_down: #e39a5d
+                                        }
+                                    }
+
+                                    attach_btn := mod.components.ComposerChip {
+                                        width: 30
+                                        height: 28
+                                        padding: 0
+                                        text: ""
+                                        align: Align{x: 0.5 y: 0.5}
+                                        icon_walk: Walk{width: 14 height: 14}
+                                        draw_icon +: {
+                                            svg: crate_resource("self:resources/icons/attach.svg")
+                                            color: #x9aa5b3
+                                            color_hover: #xdde3ea
+                                            color_down: #xffffff
                                         }
                                     }
 
@@ -764,6 +795,106 @@ script_mod! {
     }
 }
 
+#[derive(Clone, Debug)]
+enum ImagePickerAction {
+    Loaded {
+        key: SessionKey,
+        attachment: Result<Option<ImageAttachment>, String>,
+    },
+}
+
+const MAX_IMAGE_ATTACHMENTS: usize = 4;
+const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
+
+fn image_attachment_from_rgba(
+    display_name: String,
+    width: usize,
+    height: usize,
+    rgba: &[u8],
+) -> Result<ImageAttachment, String> {
+    let expected_len = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "Clipboard image dimensions are too large".to_string())?;
+    if rgba.len() != expected_len {
+        return Err("Clipboard image has invalid pixel data".to_string());
+    }
+
+    let mut encoded = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut encoded, width as u32, height as u32);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder
+            .write_header()
+            .map_err(|error| format!("Could not encode clipboard image: {error}"))?;
+        writer
+            .write_image_data(rgba)
+            .map_err(|error| format!("Could not encode clipboard image: {error}"))?;
+    }
+    if encoded.len() as u64 > MAX_IMAGE_BYTES {
+        return Err("Clipboard image is larger than 10 MB after encoding".to_string());
+    }
+
+    Ok(ImageAttachment {
+        display_name,
+        data_url: format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(encoded)
+        ),
+    })
+}
+
+fn clipboard_image_attachment() -> Result<Option<ImageAttachment>, String> {
+    let mut clipboard = match arboard::Clipboard::new() {
+        Ok(clipboard) => clipboard,
+        Err(_) => return Ok(None),
+    };
+    let image = match clipboard.get_image() {
+        Ok(image) => image,
+        Err(_) => return Ok(None),
+    };
+    image_attachment_from_rgba(
+        "clipboard.png".to_string(),
+        image.width,
+        image.height,
+        image.bytes.as_ref(),
+    )
+    .map(Some)
+}
+
+fn load_image_attachment(path: &Path) -> Result<ImageAttachment, String> {
+    let display_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "image".to_string());
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| format!("Could not read {display_name}: {error}"))?;
+    if metadata.len() > MAX_IMAGE_BYTES {
+        return Err(format!("{display_name} is larger than 10 MB"));
+    }
+    let bytes =
+        std::fs::read(path).map_err(|error| format!("Could not read {display_name}: {error}"))?;
+    let mime = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "image/png"
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        "image/jpeg"
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        "image/gif"
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        "image/webp"
+    } else {
+        return Err(format!(
+            "{display_name} is not a supported PNG, JPEG, GIF, or WebP image"
+        ));
+    };
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Ok(ImageAttachment {
+        display_name,
+        data_url: format!("data:{mime};base64,{encoded}"),
+    })
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum UiStatus {
     Ready,
@@ -781,6 +912,7 @@ struct SessionRuntime {
     generation: Option<GenerationRun>,
     terminal_generation_id: Option<u64>,
     submitted_draft: Option<(u64, String)>,
+    submitted_attachments: Option<(u64, Vec<ImageAttachment>)>,
     status: UiStatus,
     status_text: String,
     model: String,
@@ -794,6 +926,7 @@ impl SessionRuntime {
             generation: None,
             terminal_generation_id: None,
             submitted_draft: None,
+            submitted_attachments: None,
             status: UiStatus::Ready,
             status_text: String::new(),
             model,
@@ -988,6 +1121,14 @@ impl MatchEvent for App {
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        for action in actions {
+            if let Some(ImagePickerAction::Loaded { key, attachment }) =
+                action.downcast_ref::<ImagePickerAction>()
+            {
+                self.apply_image_picker_result(cx, key.clone(), attachment.clone());
+            }
+        }
+
         if self.ui.button(cx, ids!(login_btn)).clicked(actions) {
             self.auth_workspace = self.workspace_state.active_key().cloned();
             self.push_chat(MsgRole::System, "Initiating ChatGPT device code login...");
@@ -1054,19 +1195,30 @@ impl MatchEvent for App {
                     .mypi_command_text_input(cx, ids!(prompt_input))
                     .text_input_ref(cx)
                     .text();
-                let restored_draft = self.session_runtimes.get_mut(&key).and_then(|runtime| {
-                    let generation = runtime.generation.take()?;
-                    let generation_id = generation.id;
-                    generation.handle.abort();
-                    runtime.terminal_generation_id = None;
-                    let draft = draft_for_cancellation(
-                        Some(generation_id),
-                        runtime.submitted_draft.as_ref(),
-                        generation_id,
-                    );
-                    runtime.submitted_draft = None;
-                    draft
-                });
+                let (restored_draft, restored_attachments) = self
+                    .session_runtimes
+                    .get_mut(&key)
+                    .and_then(|runtime| {
+                        let generation = runtime.generation.take()?;
+                        let generation_id = generation.id;
+                        generation.handle.abort();
+                        runtime.terminal_generation_id = None;
+                        let draft = draft_for_cancellation(
+                            Some(generation_id),
+                            runtime.submitted_draft.as_ref(),
+                            generation_id,
+                        );
+                        let attachments = runtime
+                            .submitted_attachments
+                            .as_ref()
+                            .filter(|(id, _)| *id == generation_id)
+                            .map(|(_, attachments)| attachments.clone())
+                            .unwrap_or_default();
+                        runtime.submitted_draft = None;
+                        runtime.submitted_attachments = None;
+                        Some((draft, attachments))
+                    })
+                    .unwrap_or_default();
                 let draft = if current_draft.trim().is_empty() {
                     restored_draft.unwrap_or_default()
                 } else {
@@ -1074,11 +1226,13 @@ impl MatchEvent for App {
                 };
                 if let Some(workspace) = self.workspace_state.active_workspace_mut() {
                     workspace.ui.draft = draft.clone();
+                    workspace.ui.attachments = restored_attachments;
                 }
                 self.ui
                     .mypi_command_text_input(cx, ids!(prompt_input))
                     .text_input_ref(cx)
                     .set_text(cx, &draft);
+                self.refresh_attachment_ui(cx);
                 self.set_session_status(cx, &key, UiStatus::Ready, "Stopped");
                 self.push_chat(MsgRole::System, "Generation stopped.");
                 cx.redraw_all();
@@ -1142,6 +1296,22 @@ impl MatchEvent for App {
             }
         }
 
+        if self.ui.button(cx, ids!(attach_btn)).clicked(actions) && !self.busy {
+            self.open_image_picker(cx);
+        }
+        if self.ui.button(cx, ids!(attachment_chip_0)).clicked(actions) {
+            self.remove_attachment(cx, 0);
+        }
+        if self.ui.button(cx, ids!(attachment_chip_1)).clicked(actions) {
+            self.remove_attachment(cx, 1);
+        }
+        if self.ui.button(cx, ids!(attachment_chip_2)).clicked(actions) {
+            self.remove_attachment(cx, 2);
+        }
+        if self.ui.button(cx, ids!(attachment_chip_3)).clicked(actions) {
+            self.remove_attachment(cx, 3);
+        }
+
         let cti = self.ui.mypi_command_text_input(cx, ids!(prompt_input));
         if cti.should_build_items(actions) {
             self.build_cmd_items(cx);
@@ -1196,7 +1366,11 @@ impl MatchEvent for App {
             || cti.text_input_ref(cx).returned(actions).is_some();
         if submit_prompt && !self.busy {
             let input_text = cti.text_input_ref(cx).text();
-            if !input_text.trim().is_empty() {
+            let has_attachments = self
+                .workspace_state
+                .active_workspace()
+                .is_some_and(|workspace| !workspace.ui.attachments.is_empty());
+            if !input_text.trim().is_empty() || has_attachments {
                 self.dispatch_input(cx, input_text, true);
             }
         }
@@ -1211,6 +1385,9 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        if self.handle_clipboard_image_paste(cx, event) {
+            return;
+        }
         self.match_event(cx, event);
         self.poll_agent_events(cx);
         let mut scope = Scope::with_data(&mut self.workspace_state);
@@ -1340,6 +1517,167 @@ impl App {
         effort_drop.set_selected_item(cx, ordered.len() - 1);
     }
 
+    fn refresh_attachment_ui(&self, cx: &mut Cx) {
+        let names = self
+            .workspace_state
+            .active_workspace()
+            .map(|workspace| {
+                workspace
+                    .ui
+                    .attachments
+                    .iter()
+                    .map(|attachment| attachment.display_name.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        self.ui
+            .widget(cx, ids!(attachment_row))
+            .set_visible(cx, !names.is_empty());
+        for (index, path) in [
+            ids!(attachment_chip_0),
+            ids!(attachment_chip_1),
+            ids!(attachment_chip_2),
+            ids!(attachment_chip_3),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let chip = self.ui.button(cx, path);
+            if let Some(name) = names.get(index) {
+                chip.set_text(cx, &format!("{name}  ×"));
+                chip.set_visible(cx, true);
+            } else {
+                chip.set_visible(cx, false);
+            }
+        }
+    }
+
+    fn remove_attachment(&mut self, cx: &mut Cx, index: usize) {
+        if let Some(workspace) = self.workspace_state.active_workspace_mut() {
+            if index < workspace.ui.attachments.len() {
+                workspace.ui.attachments.remove(index);
+            }
+        }
+        self.refresh_attachment_ui(cx);
+    }
+
+    fn handle_clipboard_image_paste(&mut self, cx: &mut Cx, event: &Event) -> bool {
+        if self.busy
+            || !cx.has_key_focus(
+                self.ui
+                    .mypi_command_text_input(cx, ids!(prompt_input))
+                    .text_input_ref(cx)
+                    .area(),
+            )
+        {
+            return false;
+        }
+        let is_paste = match event {
+            Event::TextInput(input) => input.was_paste,
+            Event::KeyDown(key) => {
+                key.key_code == KeyCode::KeyV && (key.modifiers.logo || key.modifiers.control)
+            }
+            _ => false,
+        };
+        if !is_paste {
+            return false;
+        }
+
+        match clipboard_image_attachment() {
+            Ok(Some(attachment)) => {
+                if let Some(key) = self.workspace_state.active_key().cloned() {
+                    self.apply_image_picker_result(cx, key, Ok(Some(attachment)));
+                }
+                true
+            }
+            Ok(None) => false,
+            Err(error) => {
+                self.push_chat(MsgRole::System, error);
+                cx.redraw_all();
+                true
+            }
+        }
+    }
+
+    fn apply_image_picker_result(
+        &mut self,
+        cx: &mut Cx,
+        key: SessionKey,
+        result: Result<Option<ImageAttachment>, String>,
+    ) {
+        if self.workspace_state.workspace(&key).is_none() {
+            return;
+        }
+        match result {
+            Ok(Some(attachment)) => {
+                let workspace = self.workspace_state.workspace_mut(key.clone());
+                if workspace.ui.attachments.len() >= MAX_IMAGE_ATTACHMENTS {
+                    self.push_chat_to(
+                        key.clone(),
+                        MsgRole::System,
+                        format!("You can attach up to {MAX_IMAGE_ATTACHMENTS} images per prompt"),
+                    );
+                } else if !workspace
+                    .ui
+                    .attachments
+                    .iter()
+                    .any(|existing| existing.data_url == attachment.data_url)
+                {
+                    workspace.ui.attachments.push(attachment);
+                }
+            }
+            Ok(None) => {}
+            Err(error) => self.push_chat_to(key.clone(), MsgRole::System, error),
+        }
+        if self.workspace_state.is_active(&key) {
+            self.refresh_attachment_ui(cx);
+        }
+    }
+
+    fn open_image_picker(&mut self, cx: &mut Cx) {
+        let Some(key) = self.workspace_state.active_key().cloned() else {
+            return;
+        };
+        if self
+            .workspace_state
+            .workspace(&key)
+            .is_some_and(|workspace| workspace.ui.attachments.len() >= MAX_IMAGE_ATTACHMENTS)
+        {
+            self.push_chat(
+                MsgRole::System,
+                format!("You can attach up to {MAX_IMAGE_ATTACHMENTS} images per prompt"),
+            );
+            return;
+        }
+
+        let callback_key = key.clone();
+        let result = FileDialog::new()
+            .set_title("Attach an image")
+            .add_filter("Images", &["png", "jpg", "jpeg", "gif", "webp"])
+            .pick_image(move |result| {
+                let attachment = match result {
+                    Ok(Some(file)) => match file.into_local_file() {
+                        Ok(local_file) => load_image_attachment(local_file.path()).map(Some),
+                        Err(error) => Err(format!("Could not access selected image: {error}")),
+                    },
+                    Ok(None) => Ok(None),
+                    Err(error) => Err(format!("Image picker failed: {error}")),
+                };
+                Cx::post_action(ImagePickerAction::Loaded {
+                    key: callback_key,
+                    attachment,
+                });
+            });
+        if let Err(error) = result {
+            self.push_chat_to(
+                key,
+                MsgRole::System,
+                format!("Image picker failed: {error}"),
+            );
+            cx.redraw_all();
+        }
+    }
+
     fn current_credentials(&self, cx: &Cx) -> (String, Option<String>) {
         let mut api_key = self.ui.text_input(cx, ids!(api_key_input)).text();
         let mut account_id = None;
@@ -1385,6 +1723,7 @@ impl App {
             .mypi_command_text_input(cx, ids!(prompt_input))
             .text_input_ref(cx)
             .set_text(cx, &draft);
+        self.refresh_attachment_ui(cx);
     }
 
     fn push_chat(&mut self, role: MsgRole, text: impl Into<String>) {
@@ -1476,6 +1815,9 @@ impl App {
             .widget(cx, ids!(model_picker))
             .set_visible(cx, presentation.show_model);
 
+        self.ui
+            .button(cx, ids!(attach_btn))
+            .set_visible(cx, !presentation.working);
         self.ui
             .button(cx, ids!(send_btn))
             .set_visible(cx, !presentation.working);
@@ -1634,6 +1976,14 @@ impl App {
     }
 
     fn dispatch_input(&mut self, cx: &mut Cx, input_text: String, show_in_chat: bool) {
+        let attachments = if show_in_chat {
+            self.workspace_state
+                .active_workspace()
+                .map(|workspace| workspace.ui.attachments.clone())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let (api_key, account_id) = self.current_credentials(cx);
         if api_key.is_empty() {
             self.push_chat(
@@ -1709,14 +2059,28 @@ impl App {
 
         let Some(tx) = self.tx.clone() else { return };
         let agent_arc = self.session_runtimes[&key].agent.clone();
-        let Some((submitted_draft, input_str)) = submitted_draft(&input_text) else {
-            return;
+        let (submitted_draft, input_str) = match submitted_draft(&input_text) {
+            Some(draft) => draft,
+            None if !attachments.is_empty() => (input_text.clone(), String::new()),
+            None => return,
         };
         self.next_generation_id = self.next_generation_id.wrapping_add(1);
         let generation_id = self.next_generation_id;
 
         if show_in_chat {
-            self.push_chat(MsgRole::User, input_str.clone());
+            let attachment_names = attachments
+                .iter()
+                .map(|attachment| attachment.display_name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let visible_input = if attachment_names.is_empty() {
+                input_str.clone()
+            } else if input_str.is_empty() {
+                format!("Attached: {attachment_names}")
+            } else {
+                format!("{input_str}\n\nAttached: {attachment_names}")
+            };
+            self.push_chat(MsgRole::User, visible_input);
         }
         let chat_list = self.ui.widget(cx, ids!(chat_list));
         chat_list.portal_list(cx, ids!(list)).set_tail_range(true);
@@ -1724,6 +2088,7 @@ impl App {
 
         let event_work_dir = key.work_dir.clone();
         let event_session_id = key.session_id.clone();
+        let generation_attachments = attachments.clone();
         let generation_handle = get_runtime().spawn(async move {
             let mut agent_lock = agent_arc.lock().await;
             agent_lock.set_reasoning_effort(reasoning_effort).await;
@@ -1731,7 +2096,8 @@ impl App {
             // Poll input and its event stream in one task. This keeps event
             // forwarding scoped to the generation and preserves terminal order.
             let mut event_rx = agent_lock.subscribe();
-            let input_future = agent_lock.handle_input(&input_str);
+            let input_future =
+                agent_lock.handle_input_with_images(&input_str, generation_attachments);
             tokio::pin!(input_future);
             let output = loop {
                 tokio::select! {
@@ -1784,10 +2150,13 @@ impl App {
             });
             runtime.terminal_generation_id = None;
             runtime.submitted_draft = Some((generation_id, submitted_draft));
+            runtime.submitted_attachments = Some((generation_id, attachments));
         }
         if let Some(workspace) = self.workspace_state.active_workspace_mut() {
             workspace.ui.draft.clear();
+            workspace.ui.attachments.clear();
         }
+        self.refresh_attachment_ui(cx);
         self.ui
             .mypi_command_text_input(cx, ids!(prompt_input))
             .reset(cx);
@@ -1941,15 +2310,26 @@ impl App {
                     return;
                 }
 
-                let restored_draft = self.session_runtimes.get_mut(&key).and_then(|runtime| {
-                    runtime.generation = None;
-                    runtime.terminal_generation_id = None;
-                    runtime
-                        .submitted_draft
-                        .take()
-                        .filter(|(draft_id, _)| *draft_id == id)
-                        .map(|(_, draft)| draft)
-                });
+                let (restored_draft, restored_attachments) = self
+                    .session_runtimes
+                    .get_mut(&key)
+                    .map(|runtime| {
+                        runtime.generation = None;
+                        runtime.terminal_generation_id = None;
+                        let draft = runtime
+                            .submitted_draft
+                            .take()
+                            .filter(|(draft_id, _)| *draft_id == id)
+                            .map(|(_, draft)| draft);
+                        let attachments = runtime
+                            .submitted_attachments
+                            .take()
+                            .filter(|(attachment_id, _)| *attachment_id == id)
+                            .map(|(_, attachments)| attachments)
+                            .unwrap_or_default();
+                        (draft, attachments)
+                    })
+                    .unwrap_or_default();
                 let is_active = self.workspace_state.is_active(&key);
                 let current_draft = if is_active {
                     self.ui
@@ -1970,6 +2350,7 @@ impl App {
                 let workspace = self.workspace_state.workspace_mut(key.clone());
                 workspace.chat.flush_streaming();
                 workspace.ui.draft = draft.clone();
+                workspace.ui.attachments = restored_attachments;
                 workspace
                     .chat
                     .push_chat(MsgRole::System, format!("Agent error: {error}"));
@@ -1978,6 +2359,7 @@ impl App {
                         .mypi_command_text_input(cx, ids!(prompt_input))
                         .text_input_ref(cx)
                         .set_text(cx, &draft);
+                    self.refresh_attachment_ui(cx);
                 }
                 let status = concise_status(&error);
                 self.set_session_status(cx, &key, UiStatus::Error, &status);
@@ -2046,6 +2428,7 @@ impl App {
                         runtime.generation = None;
                         runtime.terminal_generation_id = None;
                         runtime.submitted_draft = None;
+                        runtime.submitted_attachments = None;
                     }
                     self.workspace_state
                         .workspace_mut(key.clone())
@@ -2056,6 +2439,7 @@ impl App {
                     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
                     refresh_sessions(&cwd);
                 }
+
                 GuiAgentEvent::AvailableModelsLoaded(models) => {
                     let selected_model = self.ui.drop_down(cx, ids!(model_drop)).selected_label();
                     self.set_model_dropup_options(cx, models, &selected_model);

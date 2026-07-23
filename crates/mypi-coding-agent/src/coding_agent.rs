@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use mypi_agent::{
     AfterToolCallHook, AfterToolCallResult, Agent, AgentEvent, AgentMessage, AgentState,
     AgentToolCall, AgentToolDefinition, AgentToolResult, BeforeToolCallHook, BeforeToolCallResult,
-    ReasoningEffort, SessionTree, ToolExecutor,
+    ImageAttachment, ReasoningEffort, SessionTree, ToolExecutor,
 };
 use serde_json::Value;
 use std::collections::HashSet;
@@ -1132,19 +1132,17 @@ impl CodingAgent {
             // already stored for normal prompts. Avoid storing that duplicate.
             if matches!(
                 (state_messages.get(common_prefix), persisted_messages.last()),
-                (Some(AgentMessage::User { content: state_content }),
-                    Some(AgentMessage::User { content: persisted_content }))
-                    if state_content == persisted_content
+                (Some(state_message), Some(persisted_message))
+                    if state_message.same_user_message(persisted_message)
             ) {
                 common_prefix + 1
             } else {
                 common_prefix
             }
         } else if persisted_messages.len() == common_prefix + 1
-            && matches!(
-                state_messages.get(common_prefix),
-                Some(AgentMessage::User { .. })
-            )
+            && state_messages
+                .get(common_prefix)
+                .is_some_and(AgentMessage::is_user)
         {
             // Skills and extensions store the visible command, then prompt
             // the model with a different, generated user message. Keep that
@@ -1257,6 +1255,14 @@ impl CodingAgent {
     }
 
     pub async fn handle_input(&mut self, input: &str) -> Option<String> {
+        self.handle_input_with_images(input, Vec::new()).await
+    }
+
+    pub async fn handle_input_with_images(
+        &mut self,
+        input: &str,
+        images: Vec<ImageAttachment>,
+    ) -> Option<String> {
         let trimmed = input.trim();
 
         // 1. Expand prompt templates (e.g. /review, /component Button) if match
@@ -1286,10 +1292,11 @@ impl CodingAgent {
                             "Use the following Skill instructions for '{}':\n\n{}",
                             skill_name, instructions
                         );
-                        self.session_tree.add_message(AgentMessage::User {
-                            content: input.to_string(),
-                        });
-                        self.agent.prompt(&prompt).await;
+                        self.session_tree
+                            .add_message(AgentMessage::user(input, images.clone()));
+                        self.agent
+                            .prompt_message(AgentMessage::user(prompt, images.clone()))
+                            .await;
                         self.dispatch_assistant_message_hooks().await;
                         self.run_scheduled_agent_work().await;
                         return Some(format!("Loaded skill '{}'", skill_name));
@@ -1302,9 +1309,8 @@ impl CodingAgent {
                 .wasi_extensions
                 .execute_command_with_effects(cmd_name, &cmd_args)
             {
-                self.session_tree.add_message(AgentMessage::User {
-                    content: input.to_string(),
-                });
+                self.session_tree
+                    .add_message(AgentMessage::user(input, images.clone()));
                 return match res {
                     Ok(result) => {
                         let message = if result.message.is_empty() {
@@ -1402,11 +1408,9 @@ impl CodingAgent {
             }
         }
 
-        let msg = AgentMessage::User {
-            content: effective_input.to_string(),
-        };
-        self.session_tree.add_message(msg);
-        self.agent.prompt(effective_input).await;
+        let msg = AgentMessage::user(effective_input, images);
+        self.session_tree.add_message(msg.clone());
+        self.agent.prompt_message(msg).await;
         self.dispatch_assistant_message_hooks().await;
         self.run_scheduled_agent_work().await;
 

@@ -1,4 +1,5 @@
 use crate::state::ChatData;
+use mypi_agent::ImageAttachment;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -20,6 +21,7 @@ impl SessionKey {
 #[derive(Default)]
 pub struct WorkspaceUiState {
     pub draft: String,
+    pub attachments: Vec<ImageAttachment>,
 }
 
 pub struct SessionWorkspace {

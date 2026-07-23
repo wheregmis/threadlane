@@ -190,6 +190,19 @@ impl ChatData {
         for msg in messages {
             match msg {
                 AgentMessage::User { content } => self.push_chat(MsgRole::User, content.clone()),
+                AgentMessage::UserWithImages { content, images } => {
+                    let names = images
+                        .iter()
+                        .map(|image| image.display_name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let text = if content.trim().is_empty() {
+                        format!("Attached: {names}")
+                    } else {
+                        format!("{content}\n\nAttached: {names}")
+                    };
+                    self.push_chat(MsgRole::User, text);
+                }
                 AgentMessage::Assistant {
                     content,
                     tool_calls,

@@ -28,6 +28,28 @@ pub fn convert_to_llm(messages: &[AgentMessage]) -> Vec<Value> {
                 "role": "user",
                 "content": content
             })),
+            AgentMessage::UserWithImages { content, images } => {
+                let mut parts = Vec::new();
+                if !content.trim().is_empty() {
+                    parts.push(serde_json::json!({
+                        "type": "text",
+                        "text": content
+                    }));
+                }
+                parts.extend(images.iter().map(|image| {
+                    serde_json::json!({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": image.data_url,
+                            "detail": "auto"
+                        }
+                    })
+                }));
+                Some(serde_json::json!({
+                    "role": "user",
+                    "content": parts
+                }))
+            }
             AgentMessage::Assistant {
                 content,
                 tool_calls,
@@ -85,6 +107,27 @@ pub fn convert_to_codex_llm(messages: &[AgentMessage]) -> (String, Vec<Value>) {
                     "type": "message",
                     "role": "user",
                     "content": [{ "type": "input_text", "text": content }]
+                }));
+            }
+            AgentMessage::UserWithImages { content, images } => {
+                let mut parts = Vec::new();
+                if !content.trim().is_empty() {
+                    parts.push(serde_json::json!({
+                        "type": "input_text",
+                        "text": content
+                    }));
+                }
+                parts.extend(images.iter().map(|image| {
+                    serde_json::json!({
+                        "type": "input_image",
+                        "image_url": image.data_url,
+                        "detail": "auto"
+                    })
+                }));
+                items.push(serde_json::json!({
+                    "type": "message",
+                    "role": "user",
+                    "content": parts
                 }));
             }
             AgentMessage::Assistant {
@@ -376,11 +419,20 @@ impl AgentLoop {
     }
 
     pub async fn run_prompt(&mut self, prompt: &str) {
+        self.run_prompt_message(AgentMessage::User {
+            content: prompt.to_string(),
+        })
+        .await;
+    }
+
+    /// Runs a complete user message, preserving multimodal attachments exactly.
+    ///
+    /// Panics if `message` is not a user message.
+    pub async fn run_prompt_message(&mut self, message: AgentMessage) {
+        assert!(message.is_user(), "prompt message must have a user role");
         {
             let mut state = self.state.lock().await;
-            state.messages.push(AgentMessage::User {
-                content: prompt.to_string(),
-            });
+            state.messages.push(message);
         }
         self.run_queued_turns().await;
     }

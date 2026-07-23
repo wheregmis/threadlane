@@ -179,6 +179,12 @@ impl Default for QueueMode {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageAttachment {
+    pub display_name: String,
+    pub data_url: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "snake_case")]
 pub enum AgentMessage {
@@ -187,6 +193,10 @@ pub enum AgentMessage {
     },
     User {
         content: String,
+    },
+    UserWithImages {
+        content: String,
+        images: Vec<ImageAttachment>,
     },
     Assistant {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -208,10 +218,40 @@ pub enum AgentMessage {
 }
 
 impl AgentMessage {
+    pub fn user(content: impl Into<String>, images: Vec<ImageAttachment>) -> Self {
+        let content = content.into();
+        if images.is_empty() {
+            Self::User { content }
+        } else {
+            Self::UserWithImages { content, images }
+        }
+    }
+
+    pub fn is_user(&self) -> bool {
+        matches!(self, Self::User { .. } | Self::UserWithImages { .. })
+    }
+
+    pub fn same_user_message(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::User { content: left }, Self::User { content: right }) => left == right,
+            (
+                Self::UserWithImages {
+                    content: left_content,
+                    images: left_images,
+                },
+                Self::UserWithImages {
+                    content: right_content,
+                    images: right_images,
+                },
+            ) => left_content == right_content && left_images == right_images,
+            _ => false,
+        }
+    }
+
     pub fn role_str(&self) -> &'static str {
         match self {
             AgentMessage::System { .. } => "system",
-            AgentMessage::User { .. } => "user",
+            AgentMessage::User { .. } | AgentMessage::UserWithImages { .. } => "user",
             AgentMessage::Assistant { .. } => "assistant",
             AgentMessage::Tool { .. } => "tool",
             AgentMessage::Custom { .. } => "custom",

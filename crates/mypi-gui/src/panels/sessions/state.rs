@@ -68,12 +68,23 @@ fn session_title_from_tree(tree: &SessionTree, fallback_id: &str) -> String {
         return name.clone();
     }
     for msg in tree.get_active_branch_messages() {
-        if let AgentMessage::User { content } = msg {
-            let trimmed = content.trim();
-            if trimmed.is_empty() {
-                continue;
+        match msg {
+            AgentMessage::User { content } => {
+                let trimmed = content.trim();
+                if !trimmed.is_empty() {
+                    return truncate_chars(trimmed, 42);
+                }
             }
-            return truncate_chars(trimmed, 42);
+            AgentMessage::UserWithImages { content, images } => {
+                let trimmed = content.trim();
+                if !trimmed.is_empty() {
+                    return truncate_chars(trimmed, 42);
+                }
+                if let Some(image) = images.first() {
+                    return truncate_chars(&format!("Image: {}", image.display_name), 42);
+                }
+            }
+            _ => {}
         }
     }
     if fallback_id.starts_with("session_") {
