@@ -129,13 +129,19 @@ fn request_broker(mode: Option<&str>) -> String {
     let written = unsafe {
         broker_request(
             request.as_ptr() as i32,
-            request.len() as i32,
+            if mode == Some("huge-length") {
+                i32::MAX
+            } else {
+                request.len() as i32
+            },
             response.as_mut_ptr() as i32,
             response.len() as i32,
         )
     };
     if written < 0 {
-        return if response.iter().all(|byte| *byte == 0xa5) {
+        return if mode == Some("huge-length") && written == -1 {
+            "broker invalid range".into()
+        } else if response.iter().all(|byte| *byte == 0xa5) {
             "broker response too large".into()
         } else {
             "broker response modified".into()

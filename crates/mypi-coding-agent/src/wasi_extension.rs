@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use wasmi::{Caller, Engine, Extern, Func, Linker, Memory, Module, Store};
@@ -358,11 +359,29 @@ fn broker_request(
 
 fn read_memory(caller: &Caller<WasiStoreData>, ptr: i32, len: i32) -> Result<Vec<u8>, ()> {
     let memory = exported_memory(caller)?;
-    let mut bytes = vec![0; len as usize];
+    let range = checked_memory_range(caller, ptr, len)?;
+    let mut bytes = vec![0; range.len()];
     memory
-        .read(caller, ptr as usize, &mut bytes)
+        .read(caller, range.start, &mut bytes)
         .map_err(|_| ())?;
     Ok(bytes)
+}
+
+fn checked_memory_range(
+    caller: &Caller<WasiStoreData>,
+    ptr: i32,
+    len: i32,
+) -> Result<Range<usize>, ()> {
+    if ptr < 0 || len < 0 {
+        return Err(());
+    }
+    let start = ptr as usize;
+    let end = start.checked_add(len as usize).ok_or(())?;
+    let memory = exported_memory(caller)?;
+    if end > memory.data_size(caller) {
+        return Err(());
+    }
+    Ok(start..end)
 }
 
 fn write_memory(caller: &mut Caller<WasiStoreData>, ptr: i32, bytes: &[u8]) -> Result<(), ()> {

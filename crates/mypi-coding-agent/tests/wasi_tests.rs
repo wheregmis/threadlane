@@ -140,6 +140,22 @@ fn manifest_wasm(json: &str) -> Vec<u8> {
 }
 
 #[test]
+fn broker_import_rejects_out_of_bounds_huge_request_without_allocating() {
+    let extension = WasiExtension::load_from_file(&build_broker_smoke_extension(false)).unwrap();
+    let mut manager = WasiExtensionManager::new();
+    manager
+        .extensions
+        .insert(extension.manifest.name.clone(), extension);
+
+    let result = manager
+        .execute_command_with_effects("broker-smoke", r#"{"mode":"huge-length"}"#)
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.message, "broker invalid range");
+    assert!(result.broker_requests.is_empty());
+}
+
+#[test]
 fn broker_request_round_trips_and_requires_v2() {
     let request: BrokerRequest = serde_json::from_str(
         r#"{"api_version":2,"capability":"tools","operation":"set_policy","arguments":{"policy":"read_only"}}"#,
