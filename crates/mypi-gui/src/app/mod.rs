@@ -350,6 +350,105 @@ script_mod! {
     // -------------------------------------------------------------------
     // Sessions sidebar: project folders + session rows
     // -------------------------------------------------------------------
+    let ProjectHeaderBase = RoundedView {
+        width: Fill
+        height: 34
+        cursor: MouseCursor.Hand
+        flow: Right
+        spacing: 8
+        align: Align{y: 0.5}
+        margin: Inset{left: 3 right: 3 top: 7 bottom: 2}
+        padding: Inset{left: 8 top: 4 right: 4 bottom: 4}
+        draw_bg +: {
+            color: #x00000000
+            color_hover: #x222831
+            border_radius: 8.0
+        }
+        animator +: {
+            hover: {
+                default: @off
+                off: AnimatorState {
+                    from: {all: Forward {duration: 0.12}}
+                    apply: {draw_bg: {color: #x00000000}}
+                }
+                on: AnimatorState {
+                    from: {all: Forward {duration: 0.08}}
+                    apply: {draw_bg: {color: #x222831}}
+                }
+            }
+        }
+        folder_icon := Icon {
+            width: 16
+            height: 16
+            icon_walk: Walk{width: 16 height: 16}
+            draw_icon +: {
+                svg: crate_resource("self:resources/icons/folder.svg")
+                color: #x8291a5
+            }
+        }
+        name_lbl := Label {
+            width: Fill
+            height: 18
+            text: ""
+            draw_text +: {
+                color: #xc2cad5
+                text_style: theme.font_bold { font_size: 9.75 }
+            }
+        }
+        detach_project_btn := Button {
+            width: 22
+            height: 22
+            margin: 0
+            padding: 0
+            text: "×"
+            draw_text +: {
+                color: #x626d7d
+                color_hover: #xd08a92
+                color_down: #xf2a0aa
+                text_style +: { font_size: 11.0 }
+            }
+            draw_bg +: {
+                color: #x00000000
+                color_hover: #x36272d
+                color_focus: #x36272d
+                color_down: #x482c34
+                border_color: #x00000000
+                border_color_hover: #x00000000
+                border_color_focus: #x00000000
+                border_color_down: #x00000000
+                border_size: 0.0
+                border_radius: 6.0
+            }
+        }
+        new_project_session_btn := Button {
+            width: 22
+            height: 22
+            margin: 0
+            padding: 0
+            text: ""
+            align: Align{x: 0.5 y: 0.5}
+            icon_walk: Walk{width: 11 height: 11}
+            draw_icon +: {
+                svg: crate_resource("self:resources/icons/plus.svg")
+                color: #x758294
+                color_hover: #xb8d5f5
+                color_down: #xffffff
+            }
+            draw_bg +: {
+                color: #x00000000
+                color_hover: #x283544
+                color_focus: #x283544
+                color_down: #x30445b
+                border_color: #x00000000
+                border_color_hover: #x00000000
+                border_color_focus: #x00000000
+                border_color_down: #x00000000
+                border_size: 0.0
+                border_radius: 6.0
+            }
+        }
+    }
+
     let SessionList = #(SessionList::register_widget(vm)) {
         width: Fill
         height: Fill
@@ -360,78 +459,28 @@ script_mod! {
             flow: Down
             drag_scrolling: true
 
-            ProjectHeader := View {
-                width: Fill
-                height: 28
-                flow: Right
-                spacing: 7
-                align: Align{y: 0.5}
-                padding: Inset{left: 10 top: 3 right: 5 bottom: 3}
-                Icon {
-                    width: 15
-                    height: 15
-                    icon_walk: Walk{width: 15 height: 15}
-                    draw_icon +: {
-                        svg: crate_resource("self:resources/icons/folder.svg")
-                        color: #x8090a3
-                    }
+            ProjectHeader := ProjectHeaderBase {}
+
+            ProjectHeaderActive := ProjectHeaderBase {
+                draw_bg +: {
+                    color: #x222c38
+                    color_hover: #x283543
+                    border_color: #x34465a
+                    border_size: 1.0
                 }
-                name_lbl := Label {
-                    width: Fill
-                    height: Fit
-                    text: ""
-                    draw_text +: {
-                        color: #xb2bbc7
-                        text_style: theme.font_bold { font_size: 9.75 }
-                    }
-                }
-                detach_project_btn := Button {
-                    width: 26
-                    height: 24
-                    margin: 0
-                    padding: 0
-                    text: "×"
-                    draw_text +: { color: #x8f98a6 text_style +: { font_size: 13.0 } }
-                    draw_bg +: {
-                        color: #x00000000
-                        color_hover: #x3a2930
-                        border_color: #x00000000
-                        border_radius: 6.0
-                    }
-                }
-                new_project_session_btn := Button {
-                    width: 26
-                    height: 24
-                    margin: 0
-                    padding: 0
-                    text: ""
-                    align: Align{x: 0.5 y: 0.5}
-                    icon_walk: Walk{width: 12 height: 12}
-                    draw_icon +: {
-                        svg: crate_resource("self:resources/icons/plus.svg")
-                        color: #xaeb8c5
-                    }
-                    draw_bg +: {
-                        color: #x00000000
-                        color_hover: #x2a313c
-                        color_focus: #x2a313c
-                        color_down: #x354153
-                        border_color: #x00000000
-                        border_color_hover: #x4a5564
-                        border_color_focus: #x4a5564
-                        border_color_down: #x6fa8ff
-                        border_size: 1.0
-                        border_radius: 6.0
-                    }
-                }
+                folder_icon +: { draw_icon +: { color: #x8fb9e8 } }
+                name_lbl +: { draw_text +: { color: #xe0e7ef } }
             }
 
             SessionRow := SessionRowBase {}
 
             SessionRowActive := SessionRowBase {
                 draw_bg +: {
-                    color: #x3a424e
-                    color_hover: #x46505d
+                    color: #x263445
+                    color_hover: #x2d3e52
+                    border_color: #x344b65
+                    border_size: 1.0
+                    border_radius: 7.0
                 }
                 session_icon +: {
                     draw_icon +: { color: #x9fc3ef }
@@ -472,10 +521,10 @@ script_mod! {
             }
 
             EmptyRow := EmptyRowBase {
-                padding: Inset{left: 22 top: 4 right: 10 bottom: 8}
+                padding: Inset{left: 43 top: 4 right: 10 bottom: 8}
                 lbl +: {
                     text: "No sessions yet"
-                    draw_text +: { color: #x555d6a text_style +: { font_size: 11.0 } }
+                    draw_text +: { color: #x596474 text_style +: { font_size: 9.25 } }
                 }
             }
         }
@@ -560,30 +609,53 @@ script_mod! {
                             width: Fill
                             height: Fill
                             flow: Down
-                            spacing: 2
-                            padding: Inset{left: 8 top: 10 right: 8 bottom: 10}
+                            spacing: 0
+                            padding: Inset{left: 8 top: 8 right: 8 bottom: 10}
 
                             projects_header := View {
                                 width: Fill
-                                height: 32
+                                height: 38
                                 flow: Right
+                                spacing: 8
                                 align: Align{y: 0.5}
-                                padding: Inset{left: 8 right: 4}
+                                padding: Inset{left: 7 right: 4 bottom: 4}
                                 projects_label := Label {
                                     width: Fill
                                     height: Fit
-                                    text: "Projects"
+                                    text: "PROJECTS"
                                     draw_text +: {
-                                        color: #xcbd3dd
-                                        text_style: theme.font_bold { font_size: 11.0 }
+                                        color: #x7f8b9b
+                                        text_style: theme.font_bold { font_size: 8.5 }
                                     }
                                 }
                                 add_project_btn := Button {
-                                    width: 88
-                                    height: 26
-                                    text: "Add Project"
-                                    padding: Inset{left: 7 right: 7 top: 4 bottom: 4}
-                                    draw_text +: { text_style +: { font_size: 9.5 } }
+                                    width: 62
+                                    height: 24
+                                    text: "Add"
+                                    padding: Inset{left: 7 right: 8 top: 4 bottom: 4}
+                                    icon_walk: Walk{width: 10 height: 10 margin: Inset{right: 3}}
+                                    draw_icon +: {
+                                        svg: crate_resource("self:resources/icons/plus.svg")
+                                        color: #x9fc3ef
+                                        color_hover: #xd3e8ff
+                                    }
+                                    draw_bg +: {
+                                        color: #x232a33
+                                        color_hover: #x2a3542
+                                        color_focus: #x2a3542
+                                        color_down: #x314257
+                                        border_color: #x384452
+                                        border_color_hover: #x526a84
+                                        border_color_focus: #x526a84
+                                        border_color_down: #x6fa8ff
+                                        border_size: 1.0
+                                        border_radius: 7.0
+                                    }
+                                    draw_text +: {
+                                        color: #xb9c5d3
+                                        color_hover: #xe4ebf3
+                                        text_style +: { font_size: 9.0 }
+                                    }
                                 }
                             }
                             session_context_menu := SessionContextMenu {}

@@ -1,6 +1,7 @@
 //! Sessions panel main view & sidebar list widget.
 
 use super::state::{relative_time_label, SessionListRow, SESSIONS_DATA};
+use crate::panels::chat::truncate_chars;
 use makepad_widgets::*;
 
 #[derive(Script, ScriptHook, Widget)]
@@ -30,15 +31,21 @@ impl Widget for SessionList {
 
                     match data.rows.get(item_id) {
                         Some(SessionListRow::ProjectHeader { project_idx }) => {
-                            let item_widget = list.item(cx, item_id, id!(ProjectHeader));
-                            let name = data
-                                .projects
-                                .get(*project_idx)
+                            let project = data.projects.get(*project_idx);
+                            let active = project
+                                .is_some_and(|project| project.work_dir == data.active_work_dir);
+                            let template = if active {
+                                id!(ProjectHeaderActive)
+                            } else {
+                                id!(ProjectHeader)
+                            };
+                            let item_widget = list.item(cx, item_id, template);
+                            let name = project
                                 .map(|project| {
                                     if project.available {
-                                        project.name.clone()
+                                        truncate_chars(&project.name, 15)
                                     } else {
-                                        format!("{} · Missing", project.name)
+                                        format!("{} · Missing", truncate_chars(&project.name, 9))
                                     }
                                 })
                                 .unwrap_or_else(|| "project".to_string());

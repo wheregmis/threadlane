@@ -7,18 +7,18 @@ script_mod! {
 
     mod.components.SessionRowBase = RoundedView {
         width: Fill
-        height: Fit
+        height: 32
         cursor: MouseCursor.Hand
         flow: Right
-        spacing: 7
+        spacing: 8
         align: Align{y: 0.5}
-        margin: Inset{left: 6 right: 6 top: 1 bottom: 1}
-        padding: Inset{left: 12 top: 5 right: 9 bottom: 5}
+        margin: Inset{left: 10 right: 4 top: 1 bottom: 1}
+        padding: Inset{left: 11 top: 4 right: 9 bottom: 4}
         draw_bg +: {
             hover: instance(0.0)
             color: #x00000000
-            color_hover: uniform(#x262c35)
-            border_radius: 6.0
+            color_hover: uniform(#x252b34)
+            border_radius: 7.0
 
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -50,19 +50,19 @@ script_mod! {
             }
         }
         session_icon := Icon {
-            width: 13
-            height: 13
-            icon_walk: Walk{width: 13 height: 13}
+            width: 14
+            height: 14
+            icon_walk: Walk{width: 14 height: 14}
             draw_icon +: {
                 svg: crate_resource("self:resources/icons/conversation.svg")
-                color: #x657181
+                color: #x667386
             }
         }
         title_lbl := Label {
             width: Fill
-            height: Fit
+            height: 18
             text: ""
-            draw_text +: { color: #xa6afbc text_style +: { font_size: 9.75 } }
+            draw_text +: { color: #xaab3c0 text_style +: { font_size: 9.5 } }
         }
         session_row_spinner := mod.components.ActivityLoader {
             width: 18
@@ -73,7 +73,7 @@ script_mod! {
             width: Fit
             height: Fit
             text: ""
-            draw_text +: { color: #x697483 text_style +: { font_size: 8.75 } }
+            draw_text +: { color: #x667180 text_style +: { font_size: 8.5 } }
         }
     }
 }
