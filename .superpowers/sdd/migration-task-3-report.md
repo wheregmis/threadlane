@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented and committed as `71994b7 refactor: remove legacy extension harness paths`.
+Implemented and committed as `a1b8584 refactor: remove legacy extension harness paths`.
 
 ## Changes
 
@@ -110,6 +110,6 @@ Implemented and committed as `71994b7 refactor: remove legacy extension harness 
   "reviewFindings": [
     "no blockers found"
   ],
-  "manualNotes": "Committed as 71994b7; GUI change only removes the deleted options field."
+  "manualNotes": "Committed as a1b8584; GUI change only removes the deleted options field."
 }
 ```
