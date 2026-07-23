@@ -1237,8 +1237,10 @@ impl MatchEvent for App {
         let mut registry_error = None;
         match ProjectRegistry::load(&global_threadlane_dir()) {
             Ok(mut registry) => {
-                if let Err(error) = registry.attach(&launch_dir) {
-                    registry_error = Some(error.to_string());
+                if registry.projects().is_empty() {
+                    if let Err(error) = registry.attach(&launch_dir) {
+                        registry_error = Some(error.to_string());
+                    }
                 }
                 self.project_registry = Some(registry);
             }
