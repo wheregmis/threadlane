@@ -61,7 +61,8 @@ Implemented and committed as `a1b8584 refactor: remove legacy extension harness 
     "crates/mypi-coding-agent/tests/supervisor_tests.rs",
     "crates/mypi-gui/src/app/mod.rs",
     "docs/extensions.md",
-    "docs/plan_mode_extension.md"
+    "docs/plan_mode_extension.md",
+    ".superpowers/sdd/migration-task-3-report.md"
   ],
   "testsAddedOrUpdated": [
     "crates/mypi-coding-agent/tests/supervisor_tests.rs",
