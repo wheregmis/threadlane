@@ -86,5 +86,53 @@ script_mod! {
         }
     }
 
+    mod.components.WarmComposerSurface = RoundedView {
+        width: Fill
+        height: Fit
+        draw_bg +: {
+            color: #x29231f
+            border_color: #x51443d
+            border_size: 1.0
+            border_radius: 11.0
+        }
+    }
+
+    mod.components.WarmComposerChip = Button {
+        width: Fit
+        height: 24
+        padding: Inset{left: 9 right: 9 top: 2 bottom: 2}
+        draw_bg +: {
+            color: #x332a25
+            color_hover: #x46332a
+            color_down: #x59402c
+            border_color: #x604a3f
+            border_color_hover: #xa86a4c
+            border_size: 1.0
+            border_radius: 6.0
+        }
+        draw_text +: {
+            color: #xd8c0ad
+            color_hover: #xf0d7c1
+            color_down: #xffe4ca
+            text_style +: { font_size: 9.0 }
+        }
+    }
+
+    mod.components.WarmComposerAction = Button {
+        width: Fit
+        height: 28
+        padding: Inset{left: 11 right: 11 top: 2 bottom: 2}
+        draw_bg +: {
+            color: #xb96543
+            color_hover: #xd17b50
+            color_down: #xe39a5d
+            border_radius: 7.0
+        }
+        draw_text +: {
+            color: #xfff5ea
+            text_style: theme.font_bold { font_size: 9.5 }
+        }
+    }
+
     mod.components.FlexSpacer = View { width: Fill height: 1 }
 }
