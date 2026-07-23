@@ -44,6 +44,7 @@ jobs:
         shell: bash
         run: |
           cd crates/threadlane
+          rm -rf dist/*.dmg dist/rw.*.dmg dist/.cargo-packager
           cargo packager --release
 
       - name: Upload Release Assets

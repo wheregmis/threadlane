@@ -52,6 +52,7 @@ resources = [
 ]
 
 before-each-package-command = """
+rm -rf ./dist/*.dmg ./dist/rw.*.dmg
 robius-packaging-commands before-each-package \
     --force-makepad \
     --binary-name threadlane \
