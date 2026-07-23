@@ -108,6 +108,11 @@ impl Widget for SessionList {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        // The context menu is an overlay, so list rows beneath it must not also
+        // receive hover/press events while a context target is active.
+        if SESSIONS_DATA.read().unwrap().context_session_id.is_some() {
+            return;
+        }
         self.view.handle_event(cx, event, scope);
     }
 }
