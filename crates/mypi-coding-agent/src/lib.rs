@@ -17,11 +17,11 @@ pub use coding_agent::{CodingAgent, CodingAgentOptions, ExtensionBeforeToolHook,
 pub use commands::{execute_slash_command, parse_slash_command, CommandAction};
 pub use context::ProjectContext;
 pub use extension_broker::{
-    BrokerError, BrokerRequest, BrokerResponse, CapabilityHandler, CapabilityPolicy,
-    BROKER_API_VERSION,
+    BrokerDispatchResult, BrokerError, BrokerRequest, BrokerResponse, CapabilityDispatcher,
+    CapabilityHandler, CapabilityPolicy, HostBrokerRequest, BROKER_API_VERSION,
 };
 pub use full_trust_extension::{compute_executable_revision, FullTrustRunner, TrustStore};
-pub use packages::{PackageManifest, PackageManager, PackageRecord, PackageScope};
+pub use packages::{PackageManager, PackageManifest, PackageRecord, PackageScope};
 pub use prompt_templates::{
     expand_prompt_template, load_prompt_templates, load_prompt_templates_from_dir,
     parse_command_args, substitute_args, PromptTemplate,
@@ -33,7 +33,3 @@ pub use wasi_extension::{
     WasiExtensionInvocation, WasiExtensionInvocationResult, WasiExtensionManager,
     WasiExtensionManifest, WasiExtensionResponse, WasiToolDefinition,
 };
-
-
-
-

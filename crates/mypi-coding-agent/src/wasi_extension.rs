@@ -1,5 +1,5 @@
 use crate::extension_broker::{
-    BrokerRequest, BrokerResponse, CapabilityPolicy, BROKER_API_VERSION,
+    BrokerRequest, BrokerResponse, CapabilityPolicy, HostBrokerRequest, BROKER_API_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -90,6 +90,7 @@ pub struct WasiExtensionResponse {
 pub struct WasiExtensionInvocationResult {
     pub response: WasiExtensionResponse,
     pub broker_requests: Vec<BrokerRequest>,
+    invoking_extension: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -97,6 +98,7 @@ pub struct WasiExtensionCommandResult {
     pub message: String,
     pub effects: Vec<WasiExtensionEffect>,
     pub broker_requests: Vec<BrokerRequest>,
+    pub host_broker_requests: Vec<HostBrokerRequest>,
 }
 
 #[derive(Default)]
@@ -306,6 +308,7 @@ impl WasiExtension {
         Ok(WasiExtensionInvocationResult {
             response,
             broker_requests: std::mem::take(&mut store.data_mut().requests),
+            invoking_extension: String::new(),
         })
     }
 }
@@ -433,6 +436,7 @@ fn encode_state_component(component: &str) -> String {
 pub struct WasiExtensionManager {
     pub extensions: HashMap<String, WasiExtension>,
     states: Mutex<HashMap<String, Value>>,
+    events: Mutex<Vec<(String, Value)>>,
     state_dir: Option<PathBuf>,
     /// Stateful conversational extensions are isolated by the active session.
     /// `None` retains the project-wide scope for callers that explicitly need it.
@@ -489,6 +493,29 @@ impl WasiExtensionManager {
     /// Returns the current persisted/in-memory state for an extension.
     pub fn extension_state(&self, extension_name: &str) -> Option<Value> {
         self.states.lock().ok()?.get(extension_name).cloned()
+    }
+
+    /// Updates only the state owned by the invoking extension.
+    pub fn set_extension_state(&self, extension_name: &str, state: Value) -> Result<(), String> {
+        self.states
+            .lock()
+            .map_err(|_| "Extension state lock poisoned".to_string())?
+            .insert(extension_name.to_string(), state.clone());
+        self.persist_state(extension_name, &state)
+    }
+
+    pub fn publish_event(&self, topic: String, payload: Value) -> Result<(), String> {
+        self.events
+            .lock()
+            .map_err(|_| "Extension event lock poisoned".to_string())?
+            .push((topic, payload));
+        Ok(())
+    }
+
+    pub fn drain_events(&self) -> Result<Vec<(String, Value)>, String> {
+        Ok(std::mem::take(&mut *self.events.lock().map_err(|_| {
+            "Extension event lock poisoned".to_string()
+        })?))
     }
 
     /// Location used for session-owned extension state. This is public so UI
@@ -617,10 +644,19 @@ impl WasiExtensionManager {
         self.execute_response("command", name, args).map(|result| {
             result.map(|mut result| {
                 let broker_requests = self.take_broker_requests(&mut result);
+                let host_broker_requests = broker_requests
+                    .iter()
+                    .cloned()
+                    .map(|request| HostBrokerRequest {
+                        request,
+                        invoking_extension: result.invoking_extension.clone(),
+                    })
+                    .collect();
                 WasiExtensionCommandResult {
                     message: result.response.message.unwrap_or_default(),
                     effects: result.response.effects,
                     broker_requests,
+                    host_broker_requests,
                 }
             })
         })
@@ -713,6 +749,8 @@ impl WasiExtensionManager {
                 .insert(extension.manifest.name.clone(), state.clone());
             self.persist_state(&extension.manifest.name, &state)?;
         }
+        let mut result = result;
+        result.invoking_extension = extension.manifest.name.clone();
         Ok(result)
     }
 }

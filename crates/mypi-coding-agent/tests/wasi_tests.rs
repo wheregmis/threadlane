@@ -1,9 +1,12 @@
 use mypi_coding_agent::{
-    BrokerRequest, CapabilityPolicy, WasiExtension, WasiExtensionEffect, WasiExtensionManager,
-    WasiExtensionManifest, WasiToolDefinition,
+    BrokerError, BrokerRequest, CapabilityDispatcher, CapabilityHandler, CapabilityPolicy,
+    WasiExtension, WasiExtensionEffect, WasiExtensionManager, WasiExtensionManifest,
+    WasiToolDefinition,
 };
+use serde_json::Value;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 
 fn build_broker_smoke_extension(agent_only: bool) -> PathBuf {
@@ -153,6 +156,88 @@ fn broker_import_rejects_out_of_bounds_huge_request_without_allocating() {
         .unwrap();
     assert_eq!(result.message, "broker invalid range");
     assert!(result.broker_requests.is_empty());
+}
+
+struct RecordingCapabilityHandler {
+    recorded: Arc<Mutex<Vec<(String, String)>>>,
+}
+
+impl CapabilityHandler for RecordingCapabilityHandler {
+    fn handle(&self, request: &BrokerRequest) -> Result<Value, BrokerError> {
+        self.recorded
+            .lock()
+            .unwrap()
+            .push((request.capability.clone(), request.operation.clone()));
+        if request.operation == "unsupported" {
+            return Err(BrokerError {
+                code: "unknown_operation".into(),
+                message: "unsupported operation".into(),
+            });
+        }
+        Ok(Value::Null)
+    }
+}
+
+#[tokio::test]
+async fn broker_dispatch_routes_capability_operations_in_order() {
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let mut dispatcher = CapabilityDispatcher::new();
+    dispatcher.register(
+        "tools",
+        Arc::new(RecordingCapabilityHandler {
+            recorded: recorded.clone(),
+        }),
+    );
+    let result = dispatcher
+        .dispatch(vec![BrokerRequest {
+            api_version: 2,
+            capability: "tools".into(),
+            operation: "set_policy".into(),
+            arguments: serde_json::json!({"policy":"read_only"}),
+        }])
+        .await
+        .unwrap();
+    assert_eq!(
+        *recorded.lock().unwrap(),
+        vec![("tools".into(), "set_policy".into())]
+    );
+    assert!(result.message.is_none());
+}
+
+#[tokio::test]
+async fn broker_dispatch_returns_unknown_operation_without_panicking() {
+    let mut dispatcher = CapabilityDispatcher::new();
+    dispatcher.register(
+        "tools",
+        Arc::new(RecordingCapabilityHandler {
+            recorded: Arc::new(Mutex::new(Vec::new())),
+        }),
+    );
+    let error = dispatcher
+        .dispatch(vec![BrokerRequest {
+            api_version: 2,
+            capability: "tools".into(),
+            operation: "unsupported".into(),
+            arguments: Value::Null,
+        }])
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "unknown_operation");
+}
+
+#[tokio::test]
+async fn broker_dispatch_returns_unknown_capability_structured_error() {
+    let mut dispatcher = CapabilityDispatcher::new();
+    let error = dispatcher
+        .dispatch(vec![BrokerRequest {
+            api_version: 2,
+            capability: "missing".into(),
+            operation: "anything".into(),
+            arguments: Value::Null,
+        }])
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "unknown_capability");
 }
 
 #[test]
