@@ -535,65 +535,10 @@ script_mod! {
                                 }
                             }
 
-                            status_pill := View {
-                                width: 16
-                                height: 20
-                                visible: false
-                                flow: Down
-                                spacing: 2
-                                align: Align{x: 0.5 y: 0.5}
-                                progress_dot_1 := ProgressDot {
-                                    visible: false
-                                }
-                                progress_dot_2 := ProgressDot {
-                                    visible: false
-                                    draw_bg +: { color: #xaeb6c2 }
-                                }
-                                progress_dot_3 := ProgressDot {
-                                    visible: false
-                                    draw_bg +: { color: #x6f7a88 }
-                                }
-                                error_dot := RoundedView {
-                                    width: 5
-                                    height: 5
-                                    visible: false
-                                    draw_bg +: { color: #xe5534b border_radius: 2.5 }
-                                }
-                            }
+                            status_pill := StatusPill {}
                         }
 
-                        auth_row := RoundedView {
-                            width: Fill
-                            height: Fit
-                            visible: false
-                            flow: Right
-                            spacing: 8
-                            align: Align{y: 0.5}
-                            padding: 10
-                            draw_bg +: {
-                                color: #x262133
-                                border_radius: 8.0
-                                border_size: 1.0
-                                border_color: #x4a3c55
-                            }
-                            Label {
-                                text: "Not signed in"
-                                draw_text +: {
-                                    color: #xc7cdd6
-                                    text_style +: { font_size: 10.5 }
-                                }
-                            }
-                            api_key_input := TextInput {
-                                width: Fill
-                                height: 32
-                                empty_text: "OpenAI API key (or sign in with ChatGPT)"
-                            }
-                            login_btn := Button {
-                                width: 130
-                                height: 32
-                                text: "Login ChatGPT"
-                            }
-                        }
+                        auth_row := AuthRow {}
 
                         content_row := View {
                             width: Fill
@@ -1262,9 +1207,6 @@ impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         crate::makepad_widgets::script_mod(vm);
         crate::components::script_mod(vm);
-        crate::panels::command_palette::view::script_mod(vm);
-        crate::panels::chat::components::script_mod(vm);
-        crate::panels::sessions::components::script_mod(vm);
         self::script_mod(vm)
     }
 
