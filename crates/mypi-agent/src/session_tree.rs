@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionNode {
@@ -11,6 +12,13 @@ pub struct SessionNode {
     pub parent_id: Option<String>,
     pub timestamp: u64,
     pub message: AgentMessage,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type")]
+enum SessionRecord {
+    #[serde(rename = "session_metadata")]
+    Metadata { name: Option<String> },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -30,6 +38,41 @@ impl SessionTree {
             nodes: HashMap::new(),
             active_node_id: None,
             file_path: None,
+        }
+    }
+
+    pub fn has_name(&self) -> bool {
+        self.name.as_ref().is_some_and(|name| !name.is_empty())
+    }
+
+    pub fn set_name(&mut self, name: String) -> std::io::Result<()> {
+        if name.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "session name cannot be empty",
+            ));
+        }
+
+        self.name = Some(name);
+        if let Some(path) = self.file_path.clone() {
+            let directory = path.parent().unwrap_or_else(|| Path::new("."));
+            static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+            let temp_path = directory.join(format!(
+                ".{}.{}.{}.tmp",
+                path.file_name().unwrap_or_default().to_string_lossy(),
+                std::process::id(),
+                TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+
+            let result = self
+                .save_to_file(&temp_path)
+                .and_then(|_| std::fs::rename(&temp_path, &path));
+            if result.is_err() {
+                let _ = std::fs::remove_file(&temp_path);
+            }
+            result
+        } else {
+            Ok(())
         }
     }
 
@@ -131,6 +174,12 @@ impl SessionTree {
 
     pub fn save_to_file(&self, path: &Path) -> std::io::Result<()> {
         let mut file = File::create(path)?;
+        if self.has_name() {
+            let metadata = SessionRecord::Metadata {
+                name: self.name.clone(),
+            };
+            writeln!(file, "{}", serde_json::to_string(&metadata)?)?;
+        }
         for node in self.nodes.values() {
             let line = serde_json::to_string(node)?;
             writeln!(file, "{}", line)?;
@@ -162,12 +211,75 @@ impl SessionTree {
             if l.trim().is_empty() {
                 continue;
             }
-            if let Ok(node) = serde_json::from_str::<SessionNode>(&l) {
+            if let Ok(SessionRecord::Metadata { name }) = serde_json::from_str::<SessionRecord>(&l)
+            {
+                tree.name = name;
+            } else if let Ok(node) = serde_json::from_str::<SessionNode>(&l) {
                 tree.active_node_id = Some(node.id.clone());
                 tree.nodes.insert(node.id.clone(), node);
             }
         }
 
         Ok(tree)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metadata_name_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut tree = SessionTree::new("session");
+        tree.file_path = Some(path.clone());
+        tree.name = Some("Improve session titles".into());
+        tree.add_message(AgentMessage::User {
+            content: "Help".into(),
+        });
+        tree.save_to_file(&path).unwrap();
+
+        let loaded = SessionTree::load_from_file(&path).unwrap();
+        assert_eq!(loaded.name.as_deref(), Some("Improve session titles"));
+        assert_eq!(loaded.get_active_branch_messages().len(), 1);
+    }
+
+    #[test]
+    fn legacy_node_only_file_still_loads_without_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(
+            &path,
+            "{\"id\":\"node_1\",\"parent_id\":null,\"timestamp\":1,\"message\":{\"role\":\"user\",\"content\":\"Help\"}}\n",
+        )
+        .unwrap();
+
+        let loaded = SessionTree::load_from_file(&path).unwrap();
+        assert!(loaded.name.is_none());
+        assert_eq!(loaded.nodes.len(), 1);
+    }
+
+    #[test]
+    fn set_name_rewrites_file_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut tree = SessionTree::new("session");
+        tree.file_path = Some(path.clone());
+        tree.add_message(AgentMessage::User {
+            content: "Help".into(),
+        });
+
+        tree.set_name("A useful title".into()).unwrap();
+        let loaded = SessionTree::load_from_file(&path).unwrap();
+        assert_eq!(loaded.name.as_deref(), Some("A useful title"));
+        assert_eq!(loaded.nodes.len(), 1);
+    }
+
+    #[test]
+    fn set_name_rejects_empty_name() {
+        let mut tree = SessionTree::new("session");
+        assert!(tree.set_name(String::new()).is_err());
+        assert!(tree.name.is_none());
     }
 }
