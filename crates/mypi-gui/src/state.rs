@@ -15,13 +15,20 @@ pub use crate::panels::sessions::*;
 pub enum GuiAgentEvent {
     TaskEvent(TaskAgentEvent),
     Agent(AgentEvent),
+    GenerationAgent {
+        generation_id: u64,
+        event: AgentEvent,
+    },
     DeviceCodePrompt {
         user_code: String,
         url: String,
     },
     DeviceLoginSuccess,
     AvailableModelsLoaded(Vec<String>),
-    CommandOutput(String),
+    CommandOutput {
+        generation_id: u64,
+        output: String,
+    },
     /// Session file swap finished; UI should rebuild chat from these messages.
     SessionSwitched {
         session_id: String,

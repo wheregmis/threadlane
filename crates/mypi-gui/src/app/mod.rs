@@ -975,6 +975,7 @@ enum UiStatus {
 }
 
 struct GenerationRun {
+    id: u64,
     handle: tokio::task::JoinHandle<()>,
 }
 
@@ -989,9 +990,9 @@ pub struct App {
     #[rust]
     agent: Option<Arc<tokio::sync::Mutex<CodingAgent>>>,
     #[rust]
-    agent_events_attached: bool,
-    #[rust]
     active_generation: Option<GenerationRun>,
+    #[rust]
+    next_generation_id: u64,
     #[rust]
     busy: bool,
     #[rust]
@@ -1785,9 +1786,9 @@ impl App {
 
         let Some(tx) = self.tx.clone() else { return };
         let agent_arc = self.agent.as_ref().unwrap().clone();
-        let attach_events = !self.agent_events_attached;
-        self.agent_events_attached = true;
         let input_str = input_text.trim().to_string();
+        self.next_generation_id = self.next_generation_id.wrapping_add(1);
+        let generation_id = self.next_generation_id;
 
         if show_in_chat {
             self.push_chat(MsgRole::User, input_str.clone());
@@ -1801,23 +1802,42 @@ impl App {
             if let Some(session_file) = new_session_file {
                 agent_lock.switch_session_file(session_file).await;
             }
-            if attach_events {
-                let mut event_rx = agent_lock.subscribe();
-                let tx_event = tx.clone();
-                tokio::spawn(async move {
-                    while let Ok(evt) = event_rx.recv().await {
-                        let _ = tx_event.send(GuiAgentEvent::Agent(evt));
-                        SignalToUI::set_ui_signal();
+
+            // Keep the detached forwarder correlated with this generation and
+            // stop it when the outer generation task is aborted. Without this,
+            // a forwarder can deliver late events from an aborted generation.
+            let mut event_rx = agent_lock.subscribe();
+            let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
+            let tx_event = tx.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = &mut cancel_rx => break,
+                        result = event_rx.recv() => match result {
+                            Ok(evt) => {
+                                let _ = tx_event.send(GuiAgentEvent::GenerationAgent {
+                                    generation_id,
+                                    event: evt,
+                                });
+                                SignalToUI::set_ui_signal();
+                            }
+                            Err(_) => break,
+                        }
                     }
-                });
-            }
+                }
+            });
 
             if let Some(out) = agent_lock.handle_input(&input_str).await {
-                let _ = tx.send(GuiAgentEvent::CommandOutput(out));
+                let _ = tx.send(GuiAgentEvent::CommandOutput {
+                    generation_id,
+                    output: out,
+                });
                 SignalToUI::set_ui_signal();
             }
+            let _ = cancel_tx.send(());
         });
         self.active_generation = Some(GenerationRun {
+            id: generation_id,
             handle: generation_handle,
         });
         self.set_status(cx, UiStatus::Working, "Working...");
@@ -1954,7 +1974,17 @@ impl App {
                 GuiAgentEvent::TaskEvent(task_event) => {
                     self.handle_agent_event(cx, task_event.event);
                 }
-                GuiAgentEvent::CommandOutput(output) => {
+                GuiAgentEvent::CommandOutput {
+                    generation_id,
+                    output,
+                } => {
+                    if self
+                        .active_generation
+                        .as_ref()
+                        .is_none_or(|generation| generation.id != generation_id)
+                    {
+                        continue;
+                    }
                     self.active_generation = None;
                     self.push_chat(MsgRole::System, output);
                     self.set_status(cx, UiStatus::Ready, "Ready");
@@ -2012,6 +2042,19 @@ impl App {
                     if let Some(key) = key_opt {
                         self.spawn_model_fetch(key, acc_opt);
                     }
+                }
+                GuiAgentEvent::GenerationAgent {
+                    generation_id,
+                    event: agent_event,
+                } => {
+                    if self
+                        .active_generation
+                        .as_ref()
+                        .is_none_or(|generation| generation.id != generation_id)
+                    {
+                        continue;
+                    }
+                    self.handle_agent_event(cx, agent_event)
                 }
                 GuiAgentEvent::Agent(agent_event) => self.handle_agent_event(cx, agent_event),
             }

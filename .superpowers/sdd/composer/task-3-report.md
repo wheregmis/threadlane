@@ -121,3 +121,28 @@ test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fin
 ```
 
 Existing duplicate Makepad package, unused import, and dead-code warnings remain; no errors were emitted.
+
+## High-severity review fix: stale generation event correlation
+
+- Added a monotonically advancing `generation_id` to each generation's forwarded agent and command-output events.
+- `poll_agent_events` now ignores generation events whose ID is not the currently active generation, preventing late events from clearing status/active-generation or mutating chat state for a newer run.
+- The event forwarder is now scoped to each generation and uses a cancellation signal when the outer task completes; aborting the outer task also drops its cancellation sender, allowing the forwarder to stop rather than remain detached indefinitely.
+- Existing non-generation events (authentication, session switching, model loading) remain uncorrelated and unchanged.
+
+### Exact verification
+
+`cargo check -p mypi-gui` — **PASS**
+
+```text
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.62s
+```
+
+`cargo test -p mypi-gui` — **PASS**
+
+```text
+running 17 tests
+...
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+Warnings include the existing duplicate Makepad package warnings and unused/dead-code warnings; no errors were emitted.
