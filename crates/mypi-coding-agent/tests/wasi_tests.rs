@@ -2,8 +2,8 @@ use mypi_agent::{AgentState, AgentToolCall, BeforeToolCallHook};
 use mypi_coding_agent::{
     BrokerError, BrokerOperationResult, BrokerRequest, CapabilityDispatcher, CapabilityHandler,
     CapabilityPolicy, ExtensionBeforeToolHook, HostBrokerRequest, HostCapabilityGrantPolicy,
-    ToolPolicy, WasiExtension, WasiExtensionEffect, WasiExtensionEvent, WasiExtensionManager,
-    WasiExtensionManifest, WasiToolDefinition,
+    ToolPolicy, WasiExtension, WasiExtensionEvent, WasiExtensionManager, WasiExtensionManifest,
+    WasiToolDefinition,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -36,6 +36,26 @@ fn build_broker_smoke_extension(agent_only: bool) -> PathBuf {
     }
     assert!(command.status().unwrap().success());
     target_dir.join("wasm32-wasip1/debug/broker_smoke_ext.wasm")
+}
+
+fn build_plan_mode_extension() -> PathBuf {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let target_dir = root.join("target/plan-mode-integration");
+    let status = Command::new("cargo")
+        .current_dir(&root)
+        .args([
+            "build",
+            "--manifest-path",
+            "extensions/plan_mode_ext/Cargo.toml",
+            "--target",
+            "wasm32-wasip1",
+            "--target-dir",
+        ])
+        .arg(&target_dir)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    target_dir.join("wasm32-wasip1/debug/plan_mode_ext.wasm")
 }
 
 #[test]
@@ -798,34 +818,65 @@ async fn structured_hook_v1_message_behavior_is_preserved() {
     assert_eq!(result.reason.as_deref(), Some("blocked by v1"));
 }
 
-#[test]
-fn test_extension_command_state_is_host_managed() {
-    let wasm_path = PathBuf::from(
-        "/Users/wheregmis/Documents/exploration/mypi/.mypi/extensions/plan_mode_ext/extension.wasm",
+#[tokio::test]
+async fn plan_v2_requests_generic_brokers_and_receives_async_events() {
+    let extension = WasiExtension::load_from_file(&build_plan_mode_extension()).unwrap();
+    assert_eq!(extension.manifest.api_version, 2);
+    assert_eq!(
+        extension.manifest.capabilities,
+        vec!["tools", "agent", "session"]
     );
-    if !wasm_path.exists() {
-        return;
-    }
-
-    let extension = WasiExtension::load_from_file(&wasm_path).unwrap();
+    let name = extension.manifest.name.clone();
     let mut manager = WasiExtensionManager::new();
-    manager
-        .extensions
-        .insert(extension.manifest.name.clone(), extension);
+    manager.extensions.insert(name, extension);
 
     let enabled = manager
         .execute_command_with_effects("plan", "improve extension support")
         .unwrap()
         .unwrap();
     assert!(enabled.message.contains("ENABLED"));
-    assert!(enabled.effects.iter().any(|effect| matches!(
-        effect,
-        WasiExtensionEffect::SetToolPolicy { policy } if policy == "read_only"
-    )));
-    assert!(enabled
-        .effects
+    assert_eq!(
+        enabled
+            .broker_requests
+            .iter()
+            .map(|request| (request.capability.as_str(), request.operation.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("session", "get_extension_state"),
+            ("tools", "set_policy"),
+            ("agent", "request_turn"),
+            ("session", "set_extension_state"),
+        ]
+    );
+    assert_eq!(
+        enabled.broker_requests[3].arguments["state"]["enabled"],
+        true
+    );
+
+    let mut dispatcher = CapabilityDispatcher::new();
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let handler = Arc::new(RecordingCapabilityHandler {
+        recorded: recorded.clone(),
+    });
+    dispatcher.register("tools", handler.clone());
+    dispatcher.register("agent", handler.clone());
+    dispatcher.register("session", handler);
+    let dispatch = dispatcher
+        .dispatch_envelopes(enabled.host_broker_requests)
+        .await
+        .unwrap();
+    manager.enqueue_broker_results(dispatch.operation_results);
+
+    let next = manager
+        .execute_command_with_effects("todos", "")
+        .unwrap()
+        .unwrap();
+    assert!(next
+        .events
         .iter()
-        .any(|effect| matches!(effect, WasiExtensionEffect::RequestModelTurn { .. })));
+        .any(|event| event.topic == "broker_response"));
+    assert!(next.message.contains("No plan items yet"));
+    assert_eq!(recorded.lock().unwrap().len(), 4);
 
     let hook_results = manager.execute_hook(
         "assistant_message",
@@ -837,9 +888,11 @@ fn test_extension_command_state_is_host_managed() {
     let status = manager.execute_command("todos", "").unwrap().unwrap();
     assert!(status.contains("1. Inspect the extension boundary"));
     assert!(status.contains("2. Add hook tests"));
-
-    let disabled = manager.execute_command("plan", "").unwrap().unwrap();
-    assert!(disabled.contains("DISABLED"));
+    assert!(manager
+        .execute_command("plan", "")
+        .unwrap()
+        .unwrap()
+        .contains("DISABLED"));
 }
 
 #[test]
@@ -861,13 +914,7 @@ fn test_session_state_paths_are_isolated_and_filesystem_safe() {
 
 #[test]
 fn test_extension_state_persists_in_project_mypi_directory() {
-    let source = PathBuf::from(
-        "/Users/wheregmis/Documents/exploration/mypi/.mypi/extensions/plan_mode_ext/extension.wasm",
-    );
-    if !source.exists() {
-        return;
-    }
-
+    let source = build_plan_mode_extension();
     let project = tempdir().unwrap();
     let package_dir = project.path().join(".mypi/extensions/plan_mode_ext");
     std::fs::create_dir_all(&package_dir).unwrap();
@@ -889,13 +936,7 @@ fn test_extension_state_persists_in_project_mypi_directory() {
 
 #[test]
 fn test_extension_state_is_scoped_to_a_session() {
-    let source = PathBuf::from(
-        "/Users/wheregmis/Documents/exploration/mypi/.mypi/extensions/plan_mode_ext/extension.wasm",
-    );
-    if !source.exists() {
-        return;
-    }
-
+    let source = build_plan_mode_extension();
     let project = tempdir().unwrap();
     let package_dir = project.path().join(".mypi/extensions/plan_mode_ext");
     std::fs::create_dir_all(&package_dir).unwrap();

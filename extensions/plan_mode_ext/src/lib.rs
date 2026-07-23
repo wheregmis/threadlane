@@ -1,17 +1,18 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize)]
 struct WasiCommandDefinition {
     name: String,
     description: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize)]
 struct WasiExtensionManifest {
     api_version: u32,
     name: String,
     version: String,
     description: String,
+    capabilities: Vec<String>,
     commands: Vec<WasiCommandDefinition>,
     hooks: Vec<String>,
 }
@@ -23,6 +24,15 @@ struct Invocation {
     arguments: serde_json::Value,
     #[serde(default)]
     state: PlanState,
+    #[serde(default)]
+    #[allow(dead_code)]
+    events: Vec<ExtensionEvent>,
+}
+
+#[derive(Deserialize)]
+struct ExtensionEvent {
+    #[allow(dead_code)]
+    topic: String,
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -40,18 +50,33 @@ struct PlanItem {
 }
 
 #[derive(Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum Effect {
-    SetToolPolicy { policy: String },
-    RequestModelTurn { prompt: String },
+struct BrokerRequest {
+    api_version: u32,
+    capability: String,
+    operation: String,
+    arguments: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+struct BrokerResponse {
+    ok: bool,
 }
 
 #[derive(Serialize)]
 struct Response {
     message: String,
     state: PlanState,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    effects: Vec<Effect>,
+}
+
+#[link(wasm_import_module = "mypi_host")]
+extern "C" {
+    #[link_name = "request"]
+    fn broker_request(
+        request_ptr: i32,
+        request_len: i32,
+        response_ptr: i32,
+        response_capacity: i32,
+    ) -> i32;
 }
 
 static mut OUTPUT_BUF: Vec<u8> = Vec::new();
@@ -67,10 +92,11 @@ pub extern "C" fn alloc(size: i32) -> i32 {
 #[no_mangle]
 pub extern "C" fn extension_info() -> u64 {
     write_output(&WasiExtensionManifest {
-        api_version: 1,
+        api_version: 2,
         name: "plan_mode_ext".into(),
-        version: "0.3.0".into(),
+        version: "0.4.0".into(),
         description: "Reference stateful plan-mode extension with lifecycle hooks".into(),
+        capabilities: vec!["tools".into(), "agent".into(), "session".into()],
         commands: vec![
             WasiCommandDefinition {
                 name: "plan".into(),
@@ -88,34 +114,40 @@ pub extern "C" fn extension_info() -> u64 {
 #[no_mangle]
 pub extern "C" fn execute_command(ptr: i32, len: i32) -> u64 {
     let invocation = parse_invocation(ptr, len);
+    // The host-provided state is equivalent to the session broker's durable state
+    // for this invocation; request the broker read so the generic path remains observable.
+    request_broker("session", "get_extension_state", serde_json::Value::Null);
     let mut state = invocation.state;
-    let mut effects = Vec::new();
     let message = match invocation.name.as_str() {
         "plan" => {
             state.enabled = !state.enabled;
             if state.enabled {
                 state.items.clear();
-                effects.push(Effect::SetToolPolicy {
-                    policy: "read_only".into(),
-                });
+                request_broker(
+                    "tools",
+                    "set_policy",
+                    serde_json::json!({"policy": "read_only"}),
+                );
                 if let Some(task) = invocation
                     .arguments
                     .get("raw")
                     .and_then(|value| value.as_str())
                 {
                     if !task.trim().is_empty() {
-                        effects.push(Effect::RequestModelTurn {
-                            prompt: format!(
-                                "Analyze the workspace in read-only mode and propose a concise numbered implementation plan for: {task}"
-                            ),
-                        });
+                        request_broker(
+                            "agent",
+                            "request_turn",
+                            serde_json::json!({
+                                "prompt": format!(
+                                    "Analyze the workspace in read-only mode and propose a concise numbered implementation plan for: {task}"
+                                )
+                            }),
+                        );
                     }
                 }
                 "🟢 WASI Plan Mode ENABLED (read-only policy active)".to_string()
             } else {
-                effects.push(Effect::SetToolPolicy {
-                    policy: "full".into(),
-                });
+                request_broker("tools", "set_policy", serde_json::json!({"policy": "full"}));
                 "⚪ WASI Plan Mode DISABLED".to_string()
             }
         }
@@ -123,17 +155,19 @@ pub extern "C" fn execute_command(ptr: i32, len: i32) -> u64 {
         "todos" => "📋 Plan Mode is disabled. Toggle on using /plan.".to_string(),
         other => format!("Unknown WASI plan command: {other}"),
     };
+    request_broker(
+        "session",
+        "set_extension_state",
+        serde_json::json!({"state": state}),
+    );
 
-    write_output(&Response {
-        message,
-        state,
-        effects,
-    })
+    write_output(&Response { message, state })
 }
 
 #[no_mangle]
 pub extern "C" fn handle_hook(ptr: i32, len: i32) -> u64 {
     let invocation = parse_invocation(ptr, len);
+    request_broker("session", "get_extension_state", serde_json::Value::Null);
     let mut state = invocation.state;
     let message = match invocation.name.as_str() {
         "assistant_message" if state.enabled => {
@@ -155,11 +189,35 @@ pub extern "C" fn handle_hook(ptr: i32, len: i32) -> u64 {
         }
         _ => String::new(),
     };
-    write_output(&Response {
-        message,
-        state,
-        effects: vec![],
+    request_broker(
+        "session",
+        "set_extension_state",
+        serde_json::json!({"state": state}),
+    );
+    write_output(&Response { message, state })
+}
+
+fn request_broker(capability: &str, operation: &str, arguments: serde_json::Value) -> bool {
+    let request = serde_json::to_vec(&BrokerRequest {
+        api_version: 2,
+        capability: capability.into(),
+        operation: operation.into(),
+        arguments,
     })
+    .expect("broker request serializes");
+    let mut response = vec![0u8; 1024];
+    let written = unsafe {
+        broker_request(
+            request.as_ptr() as i32,
+            request.len() as i32,
+            response.as_mut_ptr() as i32,
+            response.len() as i32,
+        )
+    };
+    written > 0
+        && serde_json::from_slice::<BrokerResponse>(&response[..written as usize])
+            .map(|response| response.ok)
+            .unwrap_or(false)
 }
 
 fn parse_invocation(ptr: i32, len: i32) -> Invocation {
@@ -168,6 +226,7 @@ fn parse_invocation(ptr: i32, len: i32) -> Invocation {
         name: String::new(),
         arguments: serde_json::Value::Null,
         state: PlanState::default(),
+        events: Vec::new(),
     })
 }
 
