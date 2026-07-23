@@ -59,7 +59,6 @@ pub enum ComposerStatus {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ComposerPresentation {
     pub show_model: bool,
-    pub show_plan: bool,
     pub working: bool,
     pub show_error: bool,
     pub status_text: String,
@@ -69,7 +68,6 @@ pub struct ComposerPresentation {
 pub struct ComposerState {
     status: ComposerStatus,
     status_text: String,
-    plan_relevant: bool,
 }
 
 impl ComposerState {
@@ -77,7 +75,6 @@ impl ComposerState {
         Self {
             status: ComposerStatus::Ready,
             status_text: String::new(),
-            plan_relevant: false,
         }
     }
 
@@ -89,17 +86,12 @@ impl ComposerState {
         };
     }
 
-    pub fn set_plan_relevant(&mut self, plan_relevant: bool) {
-        self.plan_relevant = plan_relevant;
-    }
-
     pub fn presentation(&self) -> ComposerPresentation {
         let working = self.status == ComposerStatus::Working;
         let show_error = self.status == ComposerStatus::Error;
 
         ComposerPresentation {
             show_model: !working,
-            show_plan: self.plan_relevant && !working,
             working,
             show_error,
             status_text: self.status_text.clone(),
@@ -205,7 +197,6 @@ mod tests {
             state.presentation(),
             ComposerPresentation {
                 show_model: true,
-                show_plan: false,
                 working: false,
                 show_error: false,
                 status_text: String::new(),
@@ -232,14 +223,5 @@ mod tests {
         assert!(!presentation.working);
         assert!(presentation.show_error);
         assert_eq!(presentation.status_text, "Provider unavailable");
-    }
-
-    #[test]
-    fn plan_visibility_requires_a_relevant_plan() {
-        let mut state = ComposerState::new();
-        state.set_plan_relevant(true);
-        assert!(state.presentation().show_plan);
-        state.set_plan_relevant(false);
-        assert!(!state.presentation().show_plan);
     }
 }

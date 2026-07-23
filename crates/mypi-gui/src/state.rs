@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 pub use crate::panels::chat::*;
 pub use crate::panels::command_palette::*;
-pub use crate::panels::plan::*;
+
 pub use crate::panels::sessions::*;
 
 /// Events sent from background tokio tasks to the UI thread.

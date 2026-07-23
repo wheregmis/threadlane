@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use mypi_agent::{
     AfterToolCallHook, AfterToolCallResult, Agent, AgentEvent, AgentMessage, AgentState,
     AgentToolCall, AgentToolDefinition, AgentToolResult, BeforeToolCallHook, BeforeToolCallResult,
-    SessionTree, ToolExecutor,
+    ReasoningEffort, SessionTree, ToolExecutor,
 };
 use serde_json::Value;
 use std::collections::HashSet;
@@ -1250,6 +1250,10 @@ impl CodingAgent {
         if let Ok(mut current) = self.subagent_work_observer.lock() {
             *current = Some(observer);
         }
+    }
+
+    pub async fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {
+        self.agent.set_reasoning_effort(effort).await;
     }
 
     pub async fn handle_input(&mut self, input: &str) -> Option<String> {

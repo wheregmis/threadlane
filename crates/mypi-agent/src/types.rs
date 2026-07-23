@@ -96,6 +96,64 @@ impl AgentToolDefinition {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    Off,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+}
+
+impl ReasoningEffort {
+    pub fn as_api_str(self) -> Option<&'static str> {
+        match self {
+            Self::Off => None,
+            Self::Minimal => Some("minimal"),
+            Self::Low => Some("low"),
+            Self::Medium => Some("medium"),
+            Self::High => Some("high"),
+            Self::XHigh => Some("xhigh"),
+            Self::Max => Some("max"),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Minimal => "Minimal",
+            Self::Low => "Low",
+            Self::Medium => "Medium",
+            Self::High => "High",
+            Self::XHigh => "XHigh",
+            Self::Max => "Max",
+        }
+    }
+
+    pub fn from_label(label: &str) -> Option<Self> {
+        let label = label.strip_prefix("Thinking: ").unwrap_or(label).trim();
+        match label.to_ascii_lowercase().as_str() {
+            "off" | "none" => Some(Self::Off),
+            "minimal" => Some(Self::Minimal),
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "xhigh" => Some(Self::XHigh),
+            "max" => Some(Self::Max),
+            _ => None,
+        }
+    }
+}
+
+impl Default for ReasoningEffort {
+    fn default() -> Self {
+        Self::Medium
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ToolExecutionMode {
     Sequential,
@@ -203,6 +261,7 @@ pub struct AfterToolCallResult {
 pub struct AgentState {
     pub system_prompt: String,
     pub model: String,
+    pub reasoning_effort: ReasoningEffort,
     pub tools: Vec<Value>,
     pub messages: Vec<AgentMessage>,
     pub is_streaming: bool,
@@ -215,6 +274,7 @@ impl AgentState {
         Self {
             system_prompt: system_prompt.into(),
             model: model.into(),
+            reasoning_effort: ReasoningEffort::default(),
             tools: Vec::new(),
             messages: Vec::new(),
             is_streaming: false,

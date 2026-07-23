@@ -767,6 +767,7 @@ async fn structured_hook_middleware_blocks_without_message_matching() {
     let state = AgentState {
         system_prompt: String::new(),
         model: String::new(),
+        reasoning_effort: Default::default(),
         tools: vec![],
         messages: vec![],
         is_streaming: false,
@@ -806,6 +807,7 @@ async fn structured_hook_v2_message_does_not_block() {
     let state = AgentState {
         system_prompt: String::new(),
         model: String::new(),
+        reasoning_effort: Default::default(),
         tools: vec![],
         messages: vec![],
         is_streaming: false,
@@ -842,6 +844,7 @@ async fn structured_hook_v1_message_behavior_is_preserved() {
     let state = AgentState {
         system_prompt: String::new(),
         model: String::new(),
+        reasoning_effort: Default::default(),
         tools: vec![],
         messages: vec![],
         is_streaming: false,

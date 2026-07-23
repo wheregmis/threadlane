@@ -1,7 +1,8 @@
 use mypi_agent::{
     compact_messages, AfterToolCallHook, AfterToolCallResult, Agent, AgentLoop, AgentMessage,
     AgentState, AgentToolCall, AgentToolDefinition, AgentToolResult, BeforeToolCallHook,
-    BeforeToolCallResult, CompactionOptions, SessionTree, ToolExecutionMode, ToolExecutor,
+    BeforeToolCallResult, CompactionOptions, ReasoningEffort, SessionTree, ToolExecutionMode,
+    ToolExecutor,
 };
 use mypi_provider::openai::{ToolCall, ToolCallFunction};
 use std::collections::HashSet;
@@ -268,6 +269,29 @@ fn test_agent_tool_definition_provider_shapes_round_trip() {
         AgentToolDefinition::from_provider_schema(&codex).unwrap(),
         definition
     );
+}
+
+#[tokio::test]
+async fn test_reasoning_effort_is_added_to_provider_payloads() {
+    let agent_loop = AgentLoop::new("fake_key", None, "gpt-5.6-luna");
+    agent_loop.state.lock().await.reasoning_effort = ReasoningEffort::High;
+
+    let (chat_payload, codex_payload) = agent_loop.build_api_payloads().await;
+
+    assert_eq!(chat_payload["reasoning_effort"], "high");
+    assert_eq!(codex_payload["reasoning"]["effort"], "high");
+    assert_eq!(codex_payload["reasoning"]["summary"], "auto");
+}
+
+#[tokio::test]
+async fn test_off_reasoning_effort_is_omitted_from_provider_payloads() {
+    let agent_loop = AgentLoop::new("fake_key", None, "gpt-5.6-luna");
+    agent_loop.state.lock().await.reasoning_effort = ReasoningEffort::Off;
+
+    let (chat_payload, codex_payload) = agent_loop.build_api_payloads().await;
+
+    assert!(chat_payload.get("reasoning_effort").is_none());
+    assert!(codex_payload.get("reasoning").is_none());
 }
 
 #[tokio::test]

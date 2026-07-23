@@ -337,23 +337,30 @@ impl AgentLoop {
             .map(AgentToolDefinition::to_codex_responses_tool)
             .collect();
 
-        (
-            serde_json::json!({
-                "model": state.model,
-                "messages": api_msgs,
-                "tools": tools,
-                "stream": true
-            }),
-            serde_json::json!({
-                "model": state.model,
-                "instructions": instructions,
-                "input": codex_msgs,
-                "store": false,
-                "stream": true,
-                "reasoning": { "summary": "auto" },
-                "tools": codex_tools
-            }),
-        )
+        let mut chat_payload = serde_json::json!({
+            "model": state.model,
+            "messages": api_msgs,
+            "tools": tools,
+            "stream": true
+        });
+        let mut codex_payload = serde_json::json!({
+            "model": state.model,
+            "instructions": instructions,
+            "input": codex_msgs,
+            "store": false,
+            "stream": true,
+            "tools": codex_tools
+        });
+
+        if let Some(effort) = state.reasoning_effort.as_api_str() {
+            chat_payload["reasoning_effort"] = effort.into();
+            codex_payload["reasoning"] = serde_json::json!({
+                "effort": effort,
+                "summary": "auto"
+            });
+        }
+
+        (chat_payload, codex_payload)
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {

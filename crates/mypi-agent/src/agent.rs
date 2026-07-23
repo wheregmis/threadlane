@@ -1,7 +1,7 @@
 use crate::compaction::{compact_messages, CompactionOptions};
 use crate::events::AgentEvent;
 use crate::loop_engine::AgentLoop;
-use crate::types::{AgentMessage, AgentState, ToolExecutionMode};
+use crate::types::{AgentMessage, AgentState, ReasoningEffort, ToolExecutionMode};
 use tokio::sync::broadcast;
 
 pub struct Agent {
@@ -58,6 +58,10 @@ impl Agent {
                 },
             );
         }
+    }
+
+    pub async fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {
+        self.loop_engine.state.lock().await.reasoning_effort = effort;
     }
 
     pub async fn get_state(&self) -> AgentState {

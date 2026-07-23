@@ -1,4 +1,4 @@
-use crate::state::{ChatData, PlanData};
+use crate::state::ChatData;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -20,12 +20,10 @@ impl SessionKey {
 #[derive(Default)]
 pub struct WorkspaceUiState {
     pub draft: String,
-    pub plan_drawer_open: bool,
 }
 
 pub struct SessionWorkspace {
     pub chat: ChatData,
-    pub plan: PlanData,
     pub ui: WorkspaceUiState,
 }
 
@@ -37,11 +35,7 @@ impl Default for SessionWorkspace {
                 streaming_text: String::new(),
                 streaming_kind: None,
             },
-            plan: PlanData {
-                available: false,
-                enabled: false,
-                items: Vec::new(),
-            },
+
             ui: WorkspaceUiState::default(),
         }
     }
@@ -143,7 +137,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_retains_its_own_draft_and_plan_drawer_state() {
+    fn workspace_retains_its_own_draft() {
         let first = SessionKey::new(PathBuf::from("/project"), "first");
         let second = SessionKey::new(PathBuf::from("/project"), "second");
         let mut state = AppState::default();
@@ -151,7 +145,6 @@ mod tests {
         state.select(first.clone());
         let first_workspace = state.workspace_mut(first.clone());
         first_workspace.ui.draft = "first draft".into();
-        first_workspace.ui.plan_drawer_open = true;
 
         state.select(second.clone());
         state.workspace_mut(second).ui.draft = "second draft".into();
@@ -159,11 +152,10 @@ mod tests {
         state.select(first.clone());
         let restored = state.workspace(&first).unwrap();
         assert_eq!(restored.ui.draft, "first draft");
-        assert!(restored.ui.plan_drawer_open);
     }
 
     #[test]
-    fn inactive_workspace_streaming_and_plan_do_not_affect_active_workspace() {
+    fn inactive_workspace_streaming_does_not_affect_active_workspace() {
         let first = SessionKey::new(PathBuf::from("/project"), "first");
         let second = SessionKey::new(PathBuf::from("/project"), "second");
         let mut state = AppState::default();
@@ -173,11 +165,9 @@ mod tests {
         inactive
             .chat
             .push_stream_delta(crate::state::StreamingKind::Assistant, "offscreen");
-        inactive.plan.enabled = true;
 
         let active = state.active_workspace().unwrap();
         assert!(active.chat.streaming_text.is_empty());
-        assert!(!active.plan.enabled);
     }
 
     #[test]

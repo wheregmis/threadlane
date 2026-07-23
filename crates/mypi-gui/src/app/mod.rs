@@ -1,24 +1,24 @@
 //! App shell: script_mod! DSL, startup/auth wiring, agent event pump.
 //!
-//! Chat, sessions, plan, and command palette panels are modularized under `crate::panels`.
+//! Chat, sessions, and command palette panels are modularized under `crate::panels`.
 
 use crate::panels::chat::{
     accepts_generation_event, concise_status, draft_for_cancellation, submitted_draft, ChatList,
     ComposerState, ComposerStatus, GenerationEvent, ToolFoldHeader,
 };
 use crate::panels::command_palette::*;
-use crate::panels::plan::PlanList;
+
 use crate::panels::sessions::{SessionContextMenu, SessionContextMenuAction, SessionList};
 use crate::state::{
     active_session_entry, archive_session, builtin_commands, create_new_session, delete_session,
-    is_session_working, project_work_dir_at_row, refresh_plan_data, refresh_sessions,
-    session_entry_at_row, set_active_session, set_session_context_target, set_session_working,
-    truncate_chars, CommandInfo, GuiAgentEvent, MsgRole, SessionEntry, ToolStatus,
+    is_session_working, project_work_dir_at_row, refresh_sessions, session_entry_at_row,
+    set_active_session, set_session_context_target, set_session_working, truncate_chars,
+    CommandInfo, GuiAgentEvent, MsgRole, SessionEntry, ToolStatus,
 };
 use crate::workspace::{AppState, SessionKey};
 use makepad_widgets::text::selection::Cursor;
 use makepad_widgets::*;
-use mypi_agent::{get_runtime, AgentEvent};
+use mypi_agent::{get_runtime, AgentEvent, ReasoningEffort};
 use mypi_coding_agent::{
     discover_agents, AgentConfig, AgentScope, CodingAgent, CodingAgentOptions, ProjectContext,
     SkillMetadata,
@@ -283,49 +283,7 @@ script_mod! {
         }
     }
 
-    // -------------------------------------------------------------------
-    // Plan card rows
-    // -------------------------------------------------------------------
-    let PlanList = #(PlanList::register_widget(vm)) {
-        width: Fill
-        height: Fill
 
-        list := PortalList {
-            width: Fill
-            height: Fill
-            flow: Down
-
-            PlanRow := View {
-                width: Fill
-                height: Fit
-                flow: Right
-                spacing: 8
-                padding: Inset{left: 10 top: 4 right: 10 bottom: 4}
-                status_lbl := Label {
-                    width: 16
-                    height: Fit
-                    text: "○"
-                    draw_text +: {
-                        color: #x8b93a0
-                        text_style +: { font_size: 10.5 }
-                    }
-                }
-                desc_lbl := Label {
-                    width: Fill
-                    height: Fit
-                    text: ""
-                    draw_text +: {
-                        color: #xc7cdd6
-                        text_style +: { font_size: 10.5 }
-                    }
-                }
-            }
-
-            EmptyRow := EmptyRowBase {
-                padding: Inset{left: 10 top: 4 right: 10 bottom: 4}
-            }
-        }
-    }
 
     // -------------------------------------------------------------------
     // Sessions sidebar: project folders + session rows
@@ -751,25 +709,7 @@ script_mod! {
                                     spacing: 8
                                     align: Align{y: 0.5}
 
-                                    plan_toggle_btn := Button {
-                                        width: Fit
-                                        height: 26
-                                        visible: false
-                                        text: "Plan · 0 steps"
-                                        draw_bg +: {
-                                            color: #x232830
-                                            color_hover: #x2a313c
-                                            color_down: #x354153
-                                            border_color: #x3a424e
-                                            border_color_hover: #x4a5564
-                                            border_size: 1.0
-                                            border_radius: 6.0
-                                        }
-                                        draw_text +: {
-                                            color: #xc7cdd6
-                                            text_style +: { font_size: 9.0 }
-                                        }
-                                    }
+
 
                                     composer_status := Label {
                                         width: Fit
@@ -805,6 +745,78 @@ script_mod! {
                                     }
 
                                     FlexSpacer {}
+
+                                    effort_picker := View {
+                                        width: 130
+                                        height: 28
+                                        visible: false
+                                        flow: Down
+                                        clip_x: false
+                                        clip_y: false
+
+                                        effort_drop := DropDown {
+                                            width: Fill
+                                            height: Fill
+                                            margin: 0
+                                            padding: Inset{left: 10 right: 24}
+                                            labels: [
+                                                "Thinking: Off",
+                                                "Thinking: Minimal",
+                                                "Thinking: Low",
+                                                "Thinking: Medium",
+                                                "Thinking: High",
+                                                "Thinking: XHigh",
+                                                "Thinking: Max"
+                                            ]
+                                            draw_bg +: {
+                                                color: #x232830
+                                                color_hover: #x2a313c
+                                                color_focus: #x2f3a4d
+                                                color_down: #x354153
+                                                border_color: #x3a424e
+                                                border_color_hover: #x4a5564
+                                                border_color_focus: #x6fa8ff
+                                                border_color_down: #x6fa8ff
+                                                border_size: 1.0
+                                                border_radius: 6.0
+                                                arrow_color: #x7f8b9a
+                                                arrow_color_hover: #xc7cdd6
+                                                arrow_color_focus: #xc7cdd6
+                                                arrow_color_down: #xffffff
+                                            }
+                                            draw_text +: {
+                                                color: #xc7cdd6
+                                                color_hover: #xdde3ea
+                                                color_focus: #xdde3ea
+                                                color_down: #xffffff
+                                                text_style +: { font_size: 9.5 }
+                                            }
+                                            popup_menu: PopupMenuFlat {
+                                                width: 170
+                                                draw_bg +: {
+                                                    color: #x242932
+                                                    border_color: #x454e5b
+                                                    border_size: 1.0
+                                                    border_radius: 7.0
+                                                }
+                                                menu_item: PopupMenuItem {
+                                                    draw_text +: {
+                                                        color: #xc9d0da
+                                                        color_hover: #xffffff
+                                                        color_active: #xffffff
+                                                        text_style +: { font_size: 10.0 }
+                                                    }
+                                                    draw_bg +: {
+                                                        color: #x00000000
+                                                        color_hover: #x303844
+                                                        color_active: #x354153
+                                                        mark_color: #x00000000
+                                                        mark_color_active: #x6fa8ff
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
 
                                     model_picker := View {
                                         width: 158
@@ -898,48 +910,7 @@ script_mod! {
                             }
                             }
 
-                            plan_drawer := PanelSurface {
-                                width: 300
-                                visible: false
-                                flow: Down
-                                padding: Inset{left: 2 top: 10 right: 2 bottom: 8}
-                                PanelHeader {
-                                    width: Fill
-                                    height: Fit
-                                    padding: Inset{left: 12 right: 8 bottom: 8}
-                                    Label {
-                                        text: "Plan"
-                                        draw_text +: {
-                                            color: #xdde3ea
-                                            text_style: theme.font_bold { font_size: 11.0 }
-                                        }
-                                    }
-                                    FlexSpacer {}
-                                    plan_status_label := Label {
-                                        text: "active"
-                                        draw_text +: {
-                                            color: #x6fa8ff
-                                            text_style +: { font_size: 9.5 }
-                                        }
-                                    }
-                                    plan_close_btn := Button {
-                                        width: 28
-                                        height: 24
-                                        text: "×"
-                                    }
-                                }
-                                plan_empty_label := Label {
-                                    width: Fill
-                                    height: Fit
-                                    visible: false
-                                    text: "Waiting for the planning response…"
-                                    draw_text +: {
-                                        color: #x8b93a0
-                                        text_style +: { font_size: 10.0 }
-                                    }
-                                }
-                                plan_list := PlanList {}
-                            }
+
                         }
 
                         }
@@ -970,10 +941,11 @@ struct SessionRuntime {
     status: UiStatus,
     status_text: String,
     model: String,
+    reasoning_effort: ReasoningEffort,
 }
 
 impl SessionRuntime {
-    fn new(agent: CodingAgent, model: String) -> Self {
+    fn new(agent: CodingAgent, model: String, reasoning_effort: ReasoningEffort) -> Self {
         Self {
             agent: Arc::new(tokio::sync::Mutex::new(agent)),
             generation: None,
@@ -982,6 +954,7 @@ impl SessionRuntime {
             status: UiStatus::Ready,
             status_text: String::new(),
             model,
+            reasoning_effort,
         }
     }
 }
@@ -1038,6 +1011,7 @@ impl MatchEvent for App {
             ],
             "gpt-5.6-luna",
         );
+        self.set_reasoning_effort_picker(cx, ReasoningEffort::Medium);
 
         let work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         self.select_workspace(work_dir.clone(), "draft");
@@ -1158,7 +1132,11 @@ impl MatchEvent for App {
         let draft_key = SessionKey::new(work_dir, "draft");
         self.session_runtimes.insert(
             draft_key,
-            SessionRuntime::new(coding_agent, "gpt-5.6-luna".to_string()),
+            SessionRuntime::new(
+                coding_agent,
+                "gpt-5.6-luna".to_string(),
+                ReasoningEffort::Medium,
+            ),
         );
 
         self.spawn_model_fetch(api_key, account_id_opt);
@@ -1222,19 +1200,6 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(caps_btn)).clicked(actions) {
             let summary = self.capabilities_summary.clone();
             self.push_chat(MsgRole::System, summary);
-            cx.redraw_all();
-        }
-
-        if self.ui.button(cx, ids!(plan_toggle_btn)).clicked(actions) {
-            let plan_drawer_open = self.toggle_plan_drawer();
-            self.ui
-                .widget(cx, ids!(plan_drawer))
-                .set_visible(cx, plan_drawer_open);
-            cx.redraw_all();
-        }
-        if self.ui.button(cx, ids!(plan_close_btn)).clicked(actions) {
-            self.set_plan_drawer_open(false);
-            self.ui.widget(cx, ids!(plan_drawer)).set_visible(cx, false);
             cx.redraw_all();
         }
 
@@ -1350,6 +1315,25 @@ impl MatchEvent for App {
                 },
                 false,
             );
+        }
+
+        if self
+            .ui
+            .drop_down(cx, ids!(effort_drop))
+            .selected(actions)
+            .is_some()
+        {
+            let selected_label = self.ui.drop_down(cx, ids!(effort_drop)).selected_label();
+            if !self.busy {
+                if let Some(effort) = ReasoningEffort::from_label(&selected_label) {
+                    if let Some(key) = self.workspace_state.active_key() {
+                        if let Some(runtime) = self.session_runtimes.get_mut(key) {
+                            runtime.reasoning_effort = effort;
+                        }
+                    }
+                    self.set_reasoning_effort_picker(cx, effort);
+                }
+            }
         }
 
         if self
@@ -1491,6 +1475,29 @@ impl App {
         model_drop.set_selected_item(cx, selected_item);
     }
 
+    fn set_reasoning_effort_picker(&mut self, cx: &mut Cx, effort: ReasoningEffort) {
+        let efforts = [
+            ReasoningEffort::Off,
+            ReasoningEffort::Minimal,
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High,
+            ReasoningEffort::XHigh,
+            ReasoningEffort::Max,
+        ];
+        let selected_item = efforts
+            .iter()
+            .position(|candidate| *candidate == effort)
+            .unwrap_or(3);
+        let labels = efforts
+            .iter()
+            .map(|effort| format!("Thinking: {}", effort.label()))
+            .collect();
+        let effort_drop = self.ui.drop_down(cx, ids!(effort_drop));
+        effort_drop.set_labels(cx, labels);
+        effort_drop.set_selected_item(cx, selected_item);
+    }
+
     fn current_credentials(&self, cx: &Cx) -> (String, Option<String>) {
         let mut api_key = self.ui.text_input(cx, ids!(api_key_input)).text();
         let mut account_id = None;
@@ -1549,20 +1556,6 @@ impl App {
             .workspace_mut(key)
             .chat
             .push_chat(role, text);
-    }
-
-    fn toggle_plan_drawer(&mut self) -> bool {
-        let Some(workspace) = self.workspace_state.active_workspace_mut() else {
-            return false;
-        };
-        workspace.ui.plan_drawer_open = !workspace.ui.plan_drawer_open;
-        workspace.ui.plan_drawer_open
-    }
-
-    fn set_plan_drawer_open(&mut self, open: bool) {
-        if let Some(workspace) = self.workspace_state.active_workspace_mut() {
-            workspace.ui.plan_drawer_open = open;
-        }
     }
 
     fn set_status(&mut self, cx: &mut Cx, status: UiStatus, text: &str) {
@@ -1635,11 +1628,12 @@ impl App {
             .label(cx, ids!(composer_status))
             .set_text(cx, &presentation.status_text);
         self.ui
-            .widget(cx, ids!(model_picker))
+            .widget(cx, ids!(effort_picker))
             .set_visible(cx, presentation.show_model);
         self.ui
-            .button(cx, ids!(plan_toggle_btn))
-            .set_visible(cx, presentation.show_plan);
+            .widget(cx, ids!(model_picker))
+            .set_visible(cx, presentation.show_model);
+
         self.ui
             .button(cx, ids!(send_btn))
             .set_visible(cx, !presentation.working);
@@ -1651,60 +1645,6 @@ impl App {
         self.ui
             .button(cx, ids!(stop_btn))
             .set_visible(cx, presentation.working && has_generation);
-    }
-
-    fn refresh_plan_ui(&mut self, cx: &mut Cx, work_dir: &std::path::Path, session_id: &str) {
-        let key = SessionKey::new(work_dir.to_path_buf(), session_id);
-        let is_active = self.workspace_state.is_active(&key);
-        let (enabled, item_count, plan_drawer_open) = {
-            let workspace = self.workspace_state.workspace_mut(key);
-            let enabled = refresh_plan_data(&mut workspace.plan, work_dir, session_id);
-            if !enabled {
-                workspace.ui.plan_drawer_open = false;
-            }
-            (
-                enabled,
-                workspace.plan.items.len(),
-                workspace.ui.plan_drawer_open,
-            )
-        };
-
-        if !is_active {
-            return;
-        }
-
-        self.ui
-            .button(cx, ids!(plan_toggle_btn))
-            .set_visible(cx, enabled);
-        self.ui.button(cx, ids!(plan_toggle_btn)).set_text(
-            cx,
-            &format!(
-                "Plan · {item_count} step{}",
-                if item_count == 1 { "" } else { "s" }
-            ),
-        );
-        self.ui
-            .widget(cx, ids!(plan_drawer))
-            .set_visible(cx, enabled && plan_drawer_open);
-        self.ui
-            .widget(cx, ids!(plan_list))
-            .set_visible(cx, enabled && item_count > 0);
-        self.ui
-            .label(cx, ids!(plan_empty_label))
-            .set_visible(cx, enabled && item_count == 0);
-        self.ui
-            .label(cx, ids!(plan_status_label))
-            .set_visible(cx, enabled);
-        self.ui.label(cx, ids!(plan_status_label)).set_text(
-            cx,
-            if item_count == 0 {
-                "planning"
-            } else {
-                "active"
-            },
-        );
-        self.composer_state.set_plan_relevant(enabled);
-        self.apply_composer_presentation(cx);
     }
 
     fn apply_session_context_action(
@@ -1804,6 +1744,10 @@ impl App {
             } else {
                 selected_model
             };
+            let reasoning_effort = ReasoningEffort::from_label(
+                &self.ui.drop_down(cx, ids!(effort_drop)).selected_label(),
+            )
+            .unwrap_or_default();
             let agent = CodingAgent::new(CodingAgentOptions {
                 api_key,
                 account_id,
@@ -1812,22 +1756,25 @@ impl App {
                 session_file: Some(entry.session_file.clone()),
             });
             let messages = agent.session_tree.get_active_branch_messages();
-            self.session_runtimes
-                .insert(key.clone(), SessionRuntime::new(agent, model));
+            self.session_runtimes.insert(
+                key.clone(),
+                SessionRuntime::new(agent, model, reasoning_effort),
+            );
             self.workspace_state
                 .workspace_mut(key.clone())
                 .chat
                 .replace_from_agent_messages(&messages);
         }
 
-        if let Some(model) = self
+        if let Some((model, reasoning_effort)) = self
             .session_runtimes
             .get(&key)
-            .map(|runtime| runtime.model.clone())
+            .map(|runtime| (runtime.model.clone(), runtime.reasoning_effort))
         {
             self.set_model_dropup_options(cx, self.available_models.clone(), &model);
+            self.set_reasoning_effort_picker(cx, reasoning_effort);
         }
-        self.refresh_plan_ui(cx, &entry.work_dir, &entry.id);
+
         self.restore_active_status(cx);
         cx.redraw_all();
     }
@@ -1861,6 +1808,9 @@ impl App {
         } else {
             selected_model
         };
+        let reasoning_effort =
+            ReasoningEffort::from_label(&self.ui.drop_down(cx, ids!(effort_drop)).selected_label())
+                .unwrap_or_default();
         let work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
         if show_in_chat && active_session_entry().is_none() {
@@ -1879,8 +1829,10 @@ impl App {
                 work_dir: entry.work_dir,
                 session_file: Some(entry.session_file),
             });
-            self.session_runtimes
-                .insert(key, SessionRuntime::new(agent, model_name.clone()));
+            self.session_runtimes.insert(
+                key,
+                SessionRuntime::new(agent, model_name.clone(), reasoning_effort),
+            );
         }
 
         let Some(key) = self.workspace_state.active_key().cloned() else {
@@ -1895,8 +1847,14 @@ impl App {
                 work_dir: key.work_dir.clone(),
                 session_file,
             });
-            self.session_runtimes
-                .insert(key.clone(), SessionRuntime::new(agent, model_name.clone()));
+            self.session_runtimes.insert(
+                key.clone(),
+                SessionRuntime::new(agent, model_name.clone(), reasoning_effort),
+            );
+        }
+
+        if let Some(runtime) = self.session_runtimes.get_mut(&key) {
+            runtime.reasoning_effort = reasoning_effort;
         }
 
         if let Some(model) = input_text.trim().strip_prefix("/model ") {
@@ -1926,6 +1884,7 @@ impl App {
         let event_session_id = key.session_id.clone();
         let generation_handle = get_runtime().spawn(async move {
             let mut agent_lock = agent_arc.lock().await;
+            agent_lock.set_reasoning_effort(reasoning_effort).await;
 
             // Poll input and its event stream in one task. This keeps event
             // forwarding scoped to the generation and preserves terminal order.
@@ -2251,7 +2210,7 @@ impl App {
                         .chat
                         .flush_streaming();
                     self.set_session_status(cx, &key, UiStatus::Ready, "Ready");
-                    self.refresh_plan_ui(cx, &key.work_dir, &key.session_id);
+
                     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
                     refresh_sessions(&cwd);
                 }

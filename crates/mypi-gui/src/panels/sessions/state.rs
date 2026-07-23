@@ -73,14 +73,7 @@ fn session_title_from_tree(tree: &SessionTree, fallback_id: &str) -> String {
             if trimmed.is_empty() {
                 continue;
             }
-            let cleaned = trimmed
-                .strip_prefix("/plan ")
-                .or_else(|| trimmed.strip_prefix("/plan"))
-                .unwrap_or(trimmed)
-                .trim();
-            if !cleaned.is_empty() {
-                return truncate_chars(cleaned, 42);
-            }
+            return truncate_chars(trimmed, 42);
         }
     }
     if fallback_id.starts_with("session_") {
