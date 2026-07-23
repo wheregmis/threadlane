@@ -67,6 +67,14 @@ impl AppState {
         self.workspaces.entry(key).or_default()
     }
 
+    pub fn active_key(&self) -> Option<&SessionKey> {
+        self.active.as_ref()
+    }
+
+    pub fn is_active(&self, key: &SessionKey) -> bool {
+        self.active.as_ref() == Some(key)
+    }
+
     pub fn active_workspace(&self) -> Option<&SessionWorkspace> {
         self.active
             .as_ref()

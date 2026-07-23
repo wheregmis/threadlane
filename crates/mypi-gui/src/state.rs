@@ -2,7 +2,7 @@
 //!
 //! Panel-specific state slices live in `crate::panels::<panel>::state`.
 
-use mypi_agent::{AgentEvent, AgentMessage};
+use mypi_agent::AgentEvent;
 use mypi_coding_agent::TaskAgentEvent;
 use std::path::PathBuf;
 
@@ -17,6 +17,8 @@ pub enum GuiAgentEvent {
     Agent(AgentEvent),
     GenerationAgent {
         generation_id: u64,
+        work_dir: PathBuf,
+        session_id: String,
         event: AgentEvent,
     },
     DeviceCodePrompt {
@@ -24,16 +26,17 @@ pub enum GuiAgentEvent {
         url: String,
     },
     DeviceLoginSuccess,
+    DeviceLoginError(String),
     AvailableModelsLoaded(Vec<String>),
     CommandOutput {
         generation_id: u64,
+        work_dir: PathBuf,
+        session_id: String,
         output: String,
     },
-    /// Session file swap finished; UI should rebuild chat from these messages.
-    SessionSwitched {
-        session_id: String,
-        title: String,
+    GenerationFinished {
+        generation_id: u64,
         work_dir: PathBuf,
-        messages: Vec<AgentMessage>,
+        session_id: String,
     },
 }

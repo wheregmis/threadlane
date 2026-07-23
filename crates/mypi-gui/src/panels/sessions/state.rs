@@ -2,6 +2,7 @@
 
 use crate::panels::chat::truncate_chars;
 use mypi_agent::{AgentMessage, SessionTree};
+
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -36,7 +37,7 @@ pub enum SessionListRow {
 
 pub struct SessionsData {
     pub projects: Vec<ProjectGroup>,
-    pub is_working: bool,
+    pub working_sessions: Vec<(PathBuf, String)>,
     pub active_session_id: Option<String>,
     pub active_work_dir: PathBuf,
     pub context_session_id: Option<String>,
@@ -46,7 +47,7 @@ pub struct SessionsData {
 
 pub static SESSIONS_DATA: RwLock<SessionsData> = RwLock::new(SessionsData {
     projects: Vec::new(),
-    is_working: false,
+    working_sessions: Vec::new(),
     active_session_id: None,
     active_work_dir: PathBuf::new(),
     context_session_id: None,
@@ -226,8 +227,26 @@ pub fn refresh_sessions(work_dir: &Path) -> Vec<SessionListRow> {
     rows
 }
 
-pub fn set_sessions_working(is_working: bool) {
-    SESSIONS_DATA.write().unwrap().is_working = is_working;
+pub fn set_session_working(work_dir: &Path, session_id: &str, is_working: bool) {
+    let mut data = SESSIONS_DATA.write().unwrap();
+    let normalized_dir = std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
+    let key = (normalized_dir, session_id.to_string());
+    if is_working {
+        if !data.working_sessions.contains(&key) {
+            data.working_sessions.push(key);
+        }
+    } else {
+        data.working_sessions.retain(|working| working != &key);
+    }
+}
+
+pub fn is_session_working(work_dir: &Path, session_id: &str) -> bool {
+    let normalized_dir = std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
+    SESSIONS_DATA
+        .read()
+        .unwrap()
+        .working_sessions
+        .contains(&(normalized_dir, session_id.to_string()))
 }
 
 pub fn set_session_context_target(entry: Option<&SessionEntry>) {
@@ -291,17 +310,27 @@ pub fn create_new_session(work_dir: &Path) -> Option<SessionEntry> {
     std::fs::create_dir_all(&sessions_dir).ok()?;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let id = format!("session_{now}");
-    let path = sessions_dir.join(format!("{id}.jsonl"));
-    std::fs::File::create(&path).ok()?;
+        .unwrap_or_default();
+    let mut nonce = now.as_nanos();
+    let (id, path) = loop {
+        let id = format!("session_{nonce}");
+        let path = sessions_dir.join(format!("{id}.jsonl"));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(_) => break (id, path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => nonce += 1,
+            Err(_) => return None,
+        }
+    };
     let entry = SessionEntry {
         id,
         title: "New session".to_string(),
         work_dir: work_dir.to_path_buf(),
         session_file: path,
-        updated_at: now,
+        updated_at: now.as_secs(),
     };
     refresh_sessions(work_dir);
     Some(entry)
@@ -338,4 +367,48 @@ pub fn relative_time_label(updated_at: u64) -> String {
         return format!("{}h", secs / 3600);
     }
     format!("{}d", secs / 86400)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        std::env::temp_dir().join(format!("mypi-gui-{name}-{}-{nonce}", std::process::id()))
+    }
+
+    #[test]
+    fn working_state_is_tracked_per_session() {
+        let work_dir = unique_test_dir("working-sessions");
+        set_session_working(&work_dir, "first", true);
+        set_session_working(&work_dir, "second", true);
+
+        assert!(is_session_working(&work_dir, "first"));
+        assert!(is_session_working(&work_dir, "second"));
+
+        set_session_working(&work_dir, "first", false);
+        assert!(!is_session_working(&work_dir, "first"));
+        assert!(is_session_working(&work_dir, "second"));
+        set_session_working(&work_dir, "second", false);
+    }
+
+    #[test]
+    fn rapid_session_creation_never_reuses_a_file() {
+        let work_dir = unique_test_dir("session-creation");
+        std::fs::create_dir_all(&work_dir).unwrap();
+
+        let first = create_new_session(&work_dir).unwrap();
+        let second = create_new_session(&work_dir).unwrap();
+
+        assert_ne!(first.id, second.id);
+        assert_ne!(first.session_file, second.session_file);
+        assert!(first.session_file.exists());
+        assert!(second.session_file.exists());
+
+        let _ = std::fs::remove_dir_all(work_dir);
+    }
 }

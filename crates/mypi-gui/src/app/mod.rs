@@ -11,9 +11,9 @@ use crate::panels::plan::PlanList;
 use crate::panels::sessions::{SessionContextMenu, SessionContextMenuAction, SessionList};
 use crate::state::{
     active_session_entry, archive_session, builtin_commands, create_new_session, delete_session,
-    project_work_dir_at_row, refresh_plan_data, refresh_sessions, session_entry_at_row,
-    set_active_session, set_session_context_target, set_sessions_working, truncate_chars,
-    CommandInfo, GuiAgentEvent, MsgRole, SessionEntry, ToolStatus,
+    is_session_working, project_work_dir_at_row, refresh_plan_data, refresh_sessions,
+    session_entry_at_row, set_active_session, set_session_context_target, set_session_working,
+    truncate_chars, CommandInfo, GuiAgentEvent, MsgRole, SessionEntry, ToolStatus,
 };
 use crate::workspace::{AppState, SessionKey};
 use makepad_widgets::text::selection::Cursor;
@@ -26,6 +26,7 @@ use mypi_coding_agent::{
 use mypi_provider::auth;
 use mypi_provider::openai::fetch_available_models;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -406,11 +407,6 @@ script_mod! {
                         color: #xe8edf4
                     }
                 }
-                session_row_spinner := ActivityLoader {
-                    width: 18
-                    height: 10
-                    visible: false
-                }
                 time_lbl +: {
                     draw_text +: {
                         color: #xaeb6c2
@@ -433,11 +429,6 @@ script_mod! {
                     draw_text +: {
                         color: #xf0f4fa
                     }
-                }
-                session_row_spinner := ActivityLoader {
-                    width: 18
-                    height: 10
-                    visible: false
                 }
                 time_lbl +: {
                     draw_text +: {
@@ -971,6 +962,30 @@ struct GenerationRun {
     handle: tokio::task::JoinHandle<()>,
 }
 
+struct SessionRuntime {
+    agent: Arc<tokio::sync::Mutex<CodingAgent>>,
+    generation: Option<GenerationRun>,
+    terminal_generation_id: Option<u64>,
+    submitted_draft: Option<(u64, String)>,
+    status: UiStatus,
+    status_text: String,
+    model: String,
+}
+
+impl SessionRuntime {
+    fn new(agent: CodingAgent, model: String) -> Self {
+        Self {
+            agent: Arc::new(tokio::sync::Mutex::new(agent)),
+            generation: None,
+            terminal_generation_id: None,
+            submitted_draft: None,
+            status: UiStatus::Ready,
+            status_text: String::new(),
+            model,
+        }
+    }
+}
+
 #[derive(Script)]
 pub struct App {
     #[live]
@@ -980,17 +995,11 @@ pub struct App {
     #[rust]
     rx: Option<Arc<Mutex<Receiver<GuiAgentEvent>>>>,
     #[rust]
-    agent: Option<Arc<tokio::sync::Mutex<CodingAgent>>>,
-    #[rust]
-    active_generation: Option<GenerationRun>,
-    #[rust]
-    terminal_generation_id: Option<u64>,
+    session_runtimes: HashMap<SessionKey, SessionRuntime>,
     #[rust]
     next_generation_id: u64,
     #[rust]
     busy: bool,
-    #[rust]
-    submitted_draft: Option<(u64, String)>,
     #[rust]
     composer_state: ComposerState,
     #[rust]
@@ -1003,6 +1012,8 @@ pub struct App {
     workspace_state: AppState,
     #[rust]
     session_context_entry: Option<SessionEntry>,
+    #[rust]
+    auth_workspace: Option<SessionKey>,
 }
 
 impl ScriptHook for App {}
@@ -1144,7 +1155,11 @@ impl MatchEvent for App {
             "Type / in the input bar to browse slash commands.",
         );
 
-        self.agent = Some(Arc::new(tokio::sync::Mutex::new(coding_agent)));
+        let draft_key = SessionKey::new(work_dir, "draft");
+        self.session_runtimes.insert(
+            draft_key,
+            SessionRuntime::new(coding_agent, "gpt-5.6-luna".to_string()),
+        );
 
         self.spawn_model_fetch(api_key, account_id_opt);
 
@@ -1153,12 +1168,9 @@ impl MatchEvent for App {
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         if self.ui.button(cx, ids!(login_btn)).clicked(actions) {
-            if let Some(generation) = self.active_generation.take() {
-                generation.handle.abort();
-            }
-            self.terminal_generation_id = None;
+            self.auth_workspace = self.workspace_state.active_key().cloned();
             self.push_chat(MsgRole::System, "Initiating ChatGPT device code login...");
-            self.set_status(cx, UiStatus::Working, "Connecting to ChatGPT...");
+            self.apply_status_ui(cx, UiStatus::Working, "Connecting to ChatGPT...");
             cx.redraw_all();
 
             if let Some(tx) = self.tx.clone() {
@@ -1191,10 +1203,7 @@ impl MatchEvent for App {
                                         continue
                                     }
                                     Err(e) => {
-                                        let _ =
-                                            tx.send(GuiAgentEvent::Agent(AgentEvent::AgentError {
-                                                error: e,
-                                            }));
+                                        let _ = tx.send(GuiAgentEvent::DeviceLoginError(e));
                                         SignalToUI::set_ui_signal();
                                         break;
                                     }
@@ -1202,8 +1211,7 @@ impl MatchEvent for App {
                             }
                         }
                         Err(e) => {
-                            let _ =
-                                tx.send(GuiAgentEvent::Agent(AgentEvent::AgentError { error: e }));
+                            let _ = tx.send(GuiAgentEvent::DeviceLoginError(e));
                             SignalToUI::set_ui_signal();
                         }
                     }
@@ -1231,22 +1239,39 @@ impl MatchEvent for App {
         }
 
         if self.ui.button(cx, ids!(stop_btn)).clicked(actions) {
-            if let Some(generation) = self.active_generation.take() {
-                let generation_id = generation.id;
-                generation.handle.abort();
-                self.terminal_generation_id = None;
-                if let Some(draft) = draft_for_cancellation(
-                    Some(generation_id),
-                    self.submitted_draft.as_ref(),
-                    generation_id,
-                ) {
-                    self.ui
-                        .mypi_command_text_input(cx, ids!(prompt_input))
-                        .text_input_ref(cx)
-                        .set_text(cx, &draft);
+            let active_key = self.workspace_state.active_key().cloned();
+            if let Some(key) = active_key {
+                let current_draft = self
+                    .ui
+                    .mypi_command_text_input(cx, ids!(prompt_input))
+                    .text_input_ref(cx)
+                    .text();
+                let restored_draft = self.session_runtimes.get_mut(&key).and_then(|runtime| {
+                    let generation = runtime.generation.take()?;
+                    let generation_id = generation.id;
+                    generation.handle.abort();
+                    runtime.terminal_generation_id = None;
+                    let draft = draft_for_cancellation(
+                        Some(generation_id),
+                        runtime.submitted_draft.as_ref(),
+                        generation_id,
+                    );
+                    runtime.submitted_draft = None;
+                    draft
+                });
+                let draft = if current_draft.trim().is_empty() {
+                    restored_draft.unwrap_or_default()
+                } else {
+                    current_draft
+                };
+                if let Some(workspace) = self.workspace_state.active_workspace_mut() {
+                    workspace.ui.draft = draft.clone();
                 }
-                self.submitted_draft = None;
-                self.set_status(cx, UiStatus::Ready, "Stopped");
+                self.ui
+                    .mypi_command_text_input(cx, ids!(prompt_input))
+                    .text_input_ref(cx)
+                    .set_text(cx, &draft);
+                self.set_session_status(cx, &key, UiStatus::Ready, "Stopped");
                 self.push_chat(MsgRole::System, "Generation stopped.");
                 cx.redraw_all();
             }
@@ -1269,7 +1294,6 @@ impl MatchEvent for App {
             if item
                 .button(cx, ids!(new_project_session_btn))
                 .clicked(actions)
-                && !self.busy
             {
                 if let Some(work_dir) = project_work_dir_at_row(item_id) {
                     self.create_and_activate_session(cx, work_dir);
@@ -1296,7 +1320,7 @@ impl MatchEvent for App {
                         menu.open(cx, fe.abs);
                     }
                     cx.redraw_all();
-                } else if fe.is_over && fe.is_primary_hit() && fe.was_tap() && !self.busy {
+                } else if fe.is_over && fe.is_primary_hit() && fe.was_tap() {
                     if let Some(mut menu) = self
                         .ui
                         .widget(cx, ids!(session_context_menu))
@@ -1467,13 +1491,34 @@ impl App {
         model_drop.set_selected_item(cx, selected_item);
     }
 
+    fn current_credentials(&self, cx: &Cx) -> (String, Option<String>) {
+        let mut api_key = self.ui.text_input(cx, ids!(api_key_input)).text();
+        let mut account_id = None;
+
+        if let Some(creds) = auth::load_credentials() {
+            if api_key.trim().is_empty() || api_key.trim() == creds.access_token {
+                api_key = creds.access_token;
+                account_id = creds.account_id;
+            }
+        }
+        if api_key.trim().is_empty() {
+            api_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
+        }
+
+        (api_key, account_id)
+    }
+
     fn select_workspace(&mut self, work_dir: PathBuf, session_id: impl Into<String>) {
         self.workspace_state
             .select(SessionKey::new(work_dir, session_id));
     }
 
     fn save_active_draft(&mut self, cx: &Cx) {
-        let draft = self.ui.text_input(cx, ids!(prompt_input)).text();
+        let draft = self
+            .ui
+            .mypi_command_text_input(cx, ids!(prompt_input))
+            .text_input_ref(cx)
+            .text();
         if let Some(workspace) = self.workspace_state.active_workspace_mut() {
             workspace.ui.draft = draft;
         }
@@ -1488,7 +1533,8 @@ impl App {
             .map(|workspace| workspace.ui.draft.clone())
             .unwrap_or_default();
         self.ui
-            .text_input(cx, ids!(prompt_input))
+            .mypi_command_text_input(cx, ids!(prompt_input))
+            .text_input_ref(cx)
             .set_text(cx, &draft);
     }
 
@@ -1496,6 +1542,13 @@ impl App {
         if let Some(workspace) = self.workspace_state.active_workspace_mut() {
             workspace.chat.push_chat(role, text);
         }
+    }
+
+    fn push_chat_to(&mut self, key: SessionKey, role: MsgRole, text: impl Into<String>) {
+        self.workspace_state
+            .workspace_mut(key)
+            .chat
+            .push_chat(role, text);
     }
 
     fn toggle_plan_drawer(&mut self) -> bool {
@@ -1513,6 +1566,38 @@ impl App {
     }
 
     fn set_status(&mut self, cx: &mut Cx, status: UiStatus, text: &str) {
+        if let Some(key) = self.workspace_state.active_key().cloned() {
+            self.set_session_status(cx, &key, status, text);
+        } else {
+            self.apply_status_ui(cx, status, text);
+        }
+    }
+
+    fn set_session_status(&mut self, cx: &mut Cx, key: &SessionKey, status: UiStatus, text: &str) {
+        if let Some(runtime) = self.session_runtimes.get_mut(key) {
+            runtime.status = status;
+            runtime.status_text = text.to_string();
+        }
+        set_session_working(&key.work_dir, &key.session_id, status == UiStatus::Working);
+        if self.workspace_state.is_active(key) {
+            self.apply_status_ui(cx, status, text);
+        }
+    }
+
+    fn restore_active_status(&mut self, cx: &mut Cx) {
+        let Some(key) = self.workspace_state.active_key().cloned() else {
+            self.apply_status_ui(cx, UiStatus::Ready, "Ready");
+            return;
+        };
+        let (status, text) = self
+            .session_runtimes
+            .get(&key)
+            .map(|runtime| (runtime.status, runtime.status_text.clone()))
+            .unwrap_or((UiStatus::Ready, String::new()));
+        self.apply_status_ui(cx, status, &text);
+    }
+
+    fn apply_status_ui(&mut self, cx: &mut Cx, status: UiStatus, text: &str) {
         let composer_status = match status {
             UiStatus::Ready => ComposerStatus::Ready,
             UiStatus::Working => ComposerStatus::Working,
@@ -1521,13 +1606,17 @@ impl App {
         self.composer_state.set_status(composer_status, text);
         self.busy = status == UiStatus::Working;
         let working = status == UiStatus::Working;
-        set_sessions_working(working);
+        let has_generation = self
+            .workspace_state
+            .active_key()
+            .and_then(|key| self.session_runtimes.get(key))
+            .is_some_and(|runtime| runtime.generation.is_some());
         self.ui
             .widget(cx, ids!(chat_working_indicator))
             .set_visible(cx, working);
         self.ui
             .widget(cx, ids!(stop_btn))
-            .set_visible(cx, working && self.active_generation.is_some());
+            .set_visible(cx, working && has_generation);
         self.ui.widget(cx, ids!(send_btn)).set_visible(cx, !working);
         self.ui.label(cx, ids!(composer_status)).set_text(cx, text);
         self.ui
@@ -1554,20 +1643,34 @@ impl App {
         self.ui
             .button(cx, ids!(send_btn))
             .set_visible(cx, !presentation.working);
+        let has_generation = self
+            .workspace_state
+            .active_key()
+            .and_then(|key| self.session_runtimes.get(key))
+            .is_some_and(|runtime| runtime.generation.is_some());
         self.ui
             .button(cx, ids!(stop_btn))
-            .set_visible(cx, presentation.working && self.active_generation.is_some());
+            .set_visible(cx, presentation.working && has_generation);
     }
 
     fn refresh_plan_ui(&mut self, cx: &mut Cx, work_dir: &std::path::Path, session_id: &str) {
         let key = SessionKey::new(work_dir.to_path_buf(), session_id);
-        let workspace = self.workspace_state.workspace_mut(key);
-        let enabled = refresh_plan_data(&mut workspace.plan, work_dir, session_id);
-        let item_count = workspace.plan.items.len();
-        let plan_drawer_open = &mut workspace.ui.plan_drawer_open;
+        let is_active = self.workspace_state.is_active(&key);
+        let (enabled, item_count, plan_drawer_open) = {
+            let workspace = self.workspace_state.workspace_mut(key);
+            let enabled = refresh_plan_data(&mut workspace.plan, work_dir, session_id);
+            if !enabled {
+                workspace.ui.plan_drawer_open = false;
+            }
+            (
+                enabled,
+                workspace.plan.items.len(),
+                workspace.ui.plan_drawer_open,
+            )
+        };
 
-        if !enabled {
-            *plan_drawer_open = false;
+        if !is_active {
+            return;
         }
 
         self.ui
@@ -1582,7 +1685,7 @@ impl App {
         );
         self.ui
             .widget(cx, ids!(plan_drawer))
-            .set_visible(cx, enabled && *plan_drawer_open);
+            .set_visible(cx, enabled && plan_drawer_open);
         self.ui
             .widget(cx, ids!(plan_list))
             .set_visible(cx, enabled && item_count > 0);
@@ -1610,9 +1713,6 @@ impl App {
         action: fn(&SessionEntry) -> bool,
         action_name: &str,
     ) {
-        if self.busy {
-            return;
-        }
         let Some(entry) = self.session_context_entry.take() else {
             return;
         };
@@ -1622,6 +1722,15 @@ impl App {
             .borrow_mut::<SessionContextMenu>()
         {
             menu.close(cx);
+        }
+
+        if is_session_working(&entry.work_dir, &entry.id) {
+            self.push_chat(
+                MsgRole::System,
+                format!("Stop session `{}` before modifying it.", entry.title),
+            );
+            cx.redraw_all();
+            return;
         }
 
         if !action(&entry) {
@@ -1639,8 +1748,9 @@ impl App {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let was_active = active_session_entry()
             .is_some_and(|active| active.id == entry.id && active.work_dir == entry.work_dir);
-        self.workspace_state
-            .remove(&SessionKey::new(entry.work_dir.clone(), entry.id.clone()));
+        let removed_key = SessionKey::new(entry.work_dir.clone(), entry.id.clone());
+        self.workspace_state.remove(&removed_key);
+        self.session_runtimes.remove(&removed_key);
         refresh_sessions(&cwd);
 
         if was_active {
@@ -1667,10 +1777,6 @@ impl App {
     }
 
     fn activate_session(&mut self, cx: &mut Cx, entry: SessionEntry) {
-        if self.busy {
-            return;
-        }
-
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         if entry.work_dir != cwd {
             self.push_chat(
@@ -1686,58 +1792,44 @@ impl App {
             return;
         }
 
+        let key = SessionKey::new(entry.work_dir.clone(), entry.id.clone());
         self.select_workspace_ui(cx, entry.work_dir.clone(), entry.id.clone());
-
-        if let Some(agent_arc) = &self.agent {
-            if let Ok(agent) = agent_arc.try_lock() {
-                if agent.session_file_path() == Some(&entry.session_file) {
-                    set_active_session(&entry.work_dir, &entry.id);
-                    cx.redraw_all();
-                    return;
-                }
-            }
-        }
-
         set_active_session(&entry.work_dir, &entry.id);
-        let Some(tx) = self.tx.clone() else { return };
-        let Some(agent_arc) = self.agent.clone() else {
-            if let Some(workspace) = self.workspace_state.active_workspace_mut() {
-                workspace.chat.replace_from_agent_messages(&[]);
-            }
-            self.push_chat(
-                MsgRole::System,
-                format!(
-                    "Selected session `{}` (agent not started yet).",
-                    entry.title
-                ),
-            );
-            self.refresh_plan_ui(cx, &entry.work_dir, &entry.id);
-            cx.redraw_all();
-            return;
-        };
 
-        if let Some(generation) = self.active_generation.take() {
-            generation.handle.abort();
-        }
-        self.terminal_generation_id = None;
-        self.set_status(cx, UiStatus::Working, "Switching session...");
-        let session_file = entry.session_file.clone();
-        let session_id = entry.id.clone();
-        let title = entry.title.clone();
-        let work_dir = entry.work_dir.clone();
-
-        get_runtime().spawn(async move {
-            let mut agent = agent_arc.lock().await;
-            agent.switch_session_file(session_file).await;
-            let messages = agent.session_tree.get_active_branch_messages();
-            let _ = tx.send(GuiAgentEvent::SessionSwitched {
-                session_id,
-                title,
-                work_dir,
-                messages,
+        if !self.session_runtimes.contains_key(&key) {
+            let (api_key, account_id) = self.current_credentials(cx);
+            let selected_model = self.ui.drop_down(cx, ids!(model_drop)).selected_label();
+            let model = if selected_model.is_empty() {
+                "gpt-5.6-luna".to_string()
+            } else {
+                selected_model
+            };
+            let agent = CodingAgent::new(CodingAgentOptions {
+                api_key,
+                account_id,
+                model: model.clone(),
+                work_dir: entry.work_dir.clone(),
+                session_file: Some(entry.session_file.clone()),
             });
-            SignalToUI::set_ui_signal();
-        });
+            let messages = agent.session_tree.get_active_branch_messages();
+            self.session_runtimes
+                .insert(key.clone(), SessionRuntime::new(agent, model));
+            self.workspace_state
+                .workspace_mut(key.clone())
+                .chat
+                .replace_from_agent_messages(&messages);
+        }
+
+        if let Some(model) = self
+            .session_runtimes
+            .get(&key)
+            .map(|runtime| runtime.model.clone())
+        {
+            self.set_model_dropup_options(cx, self.available_models.clone(), &model);
+        }
+        self.refresh_plan_ui(cx, &entry.work_dir, &entry.id);
+        self.restore_active_status(cx);
+        cx.redraw_all();
     }
 
     fn build_cmd_items(&mut self, cx: &mut Cx) {
@@ -1753,21 +1845,7 @@ impl App {
     }
 
     fn dispatch_input(&mut self, cx: &mut Cx, input_text: String, show_in_chat: bool) {
-        let api_key_widget = self.ui.text_input(cx, ids!(api_key_input));
-        let mut api_key = api_key_widget.text();
-        let mut account_id = None;
-
-        if let Some(creds) = auth::load_credentials() {
-            if api_key.trim().is_empty() || api_key.trim() == creds.access_token {
-                api_key = creds.access_token;
-                account_id = creds.account_id;
-            }
-        }
-
-        if api_key.trim().is_empty() {
-            api_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
-        }
-
+        let (api_key, account_id) = self.current_credentials(cx);
         if api_key.is_empty() {
             self.push_chat(
                 MsgRole::System,
@@ -1783,47 +1861,59 @@ impl App {
         } else {
             selected_model
         };
-
         let work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
-        let new_session_file = if show_in_chat && active_session_entry().is_none() {
-            match create_new_session(&work_dir) {
-                Some(entry) => {
-                    set_active_session(&entry.work_dir, &entry.id);
-                    self.select_workspace_ui(cx, entry.work_dir, entry.id);
-                    Some(entry.session_file)
-                }
-                None => {
-                    self.push_chat(MsgRole::System, "Could not create a new session file.");
-                    cx.redraw_all();
-                    return;
-                }
-            }
-        } else {
-            None
-        };
+        if show_in_chat && active_session_entry().is_none() {
+            let Some(entry) = create_new_session(&work_dir) else {
+                self.push_chat(MsgRole::System, "Could not create a new session file.");
+                cx.redraw_all();
+                return;
+            };
+            set_active_session(&entry.work_dir, &entry.id);
+            self.select_workspace_ui(cx, entry.work_dir.clone(), entry.id.clone());
+            let key = SessionKey::new(entry.work_dir.clone(), entry.id);
+            let agent = CodingAgent::new(CodingAgentOptions {
+                api_key: api_key.clone(),
+                account_id: account_id.clone(),
+                model: model_name.clone(),
+                work_dir: entry.work_dir,
+                session_file: Some(entry.session_file),
+            });
+            self.session_runtimes
+                .insert(key, SessionRuntime::new(agent, model_name.clone()));
+        }
 
-        if self.agent.is_none() {
-            let agent_opts = CodingAgentOptions {
+        let Some(key) = self.workspace_state.active_key().cloned() else {
+            return;
+        };
+        if !self.session_runtimes.contains_key(&key) {
+            let session_file = active_session_entry().map(|entry| entry.session_file);
+            let agent = CodingAgent::new(CodingAgentOptions {
                 api_key,
                 account_id,
-                model: model_name,
-                work_dir: work_dir.clone(),
-                session_file: active_session_entry().map(|e| e.session_file),
-            };
-            self.agent = Some(Arc::new(tokio::sync::Mutex::new(CodingAgent::new(
-                agent_opts,
-            ))));
+                model: model_name.clone(),
+                work_dir: key.work_dir.clone(),
+                session_file,
+            });
+            self.session_runtimes
+                .insert(key.clone(), SessionRuntime::new(agent, model_name.clone()));
+        }
+
+        if let Some(model) = input_text.trim().strip_prefix("/model ") {
+            if !model.trim().is_empty() {
+                if let Some(runtime) = self.session_runtimes.get_mut(&key) {
+                    runtime.model = model.trim().to_string();
+                }
+            }
         }
 
         let Some(tx) = self.tx.clone() else { return };
-        let agent_arc = self.agent.as_ref().unwrap().clone();
+        let agent_arc = self.session_runtimes[&key].agent.clone();
         let Some((submitted_draft, input_str)) = submitted_draft(&input_text) else {
             return;
         };
         self.next_generation_id = self.next_generation_id.wrapping_add(1);
         let generation_id = self.next_generation_id;
-        self.terminal_generation_id = None;
 
         if show_in_chat {
             self.push_chat(MsgRole::User, input_str.clone());
@@ -1832,54 +1922,75 @@ impl App {
         chat_list.portal_list(cx, ids!(list)).set_tail_range(true);
         cx.redraw_all();
 
+        let event_work_dir = key.work_dir.clone();
+        let event_session_id = key.session_id.clone();
         let generation_handle = get_runtime().spawn(async move {
             let mut agent_lock = agent_arc.lock().await;
-            if let Some(session_file) = new_session_file {
-                agent_lock.switch_session_file(session_file).await;
-            }
 
-            // Keep the detached forwarder correlated with this generation and
-            // stop it when the outer generation task is aborted. Without this,
-            // a forwarder can deliver late events from an aborted generation.
+            // Poll input and its event stream in one task. This keeps event
+            // forwarding scoped to the generation and preserves terminal order.
             let mut event_rx = agent_lock.subscribe();
-            let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
-            let tx_event = tx.clone();
-            tokio::spawn(async move {
-                loop {
-                    tokio::select! {
-                        _ = &mut cancel_rx => break,
-                        result = event_rx.recv() => match result {
-                            Ok(evt) => {
-                                let _ = tx_event.send(GuiAgentEvent::GenerationAgent {
-                                    generation_id,
-                                    event: evt,
-                                });
-                                SignalToUI::set_ui_signal();
-                            }
-                            Err(_) => break,
+            let input_future = agent_lock.handle_input(&input_str);
+            tokio::pin!(input_future);
+            let output = loop {
+                tokio::select! {
+                    output = &mut input_future => break output,
+                    result = event_rx.recv() => match result {
+                        Ok(event) => {
+                            let _ = tx.send(GuiAgentEvent::GenerationAgent {
+                                generation_id,
+                                work_dir: event_work_dir.clone(),
+                                session_id: event_session_id.clone(),
+                                event,
+                            });
+                            SignalToUI::set_ui_signal();
                         }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break None,
                     }
                 }
-            });
+            };
+            while let Ok(event) = event_rx.try_recv() {
+                let _ = tx.send(GuiAgentEvent::GenerationAgent {
+                    generation_id,
+                    work_dir: event_work_dir.clone(),
+                    session_id: event_session_id.clone(),
+                    event,
+                });
+                SignalToUI::set_ui_signal();
+            }
 
-            if let Some(out) = agent_lock.handle_input(&input_str).await {
+            if let Some(out) = output {
                 let _ = tx.send(GuiAgentEvent::CommandOutput {
                     generation_id,
+                    work_dir: event_work_dir.clone(),
+                    session_id: event_session_id.clone(),
                     output: out,
                 });
                 SignalToUI::set_ui_signal();
             }
-            let _ = cancel_tx.send(());
+            let _ = tx.send(GuiAgentEvent::GenerationFinished {
+                generation_id,
+                work_dir: event_work_dir,
+                session_id: event_session_id,
+            });
+            SignalToUI::set_ui_signal();
         });
-        self.active_generation = Some(GenerationRun {
-            id: generation_id,
-            handle: generation_handle,
-        });
-        self.submitted_draft = Some((generation_id, submitted_draft));
+        if let Some(runtime) = self.session_runtimes.get_mut(&key) {
+            runtime.generation = Some(GenerationRun {
+                id: generation_id,
+                handle: generation_handle,
+            });
+            runtime.terminal_generation_id = None;
+            runtime.submitted_draft = Some((generation_id, submitted_draft));
+        }
+        if let Some(workspace) = self.workspace_state.active_workspace_mut() {
+            workspace.ui.draft.clear();
+        }
         self.ui
             .mypi_command_text_input(cx, ids!(prompt_input))
             .reset(cx);
-        self.set_status(cx, UiStatus::Working, "Working...");
+        self.set_session_status(cx, &key, UiStatus::Working, "Working...");
     }
 
     fn spawn_model_fetch(&self, api_key: String, account_id: Option<String>) {
@@ -1894,30 +2005,44 @@ impl App {
         });
     }
 
-    fn handle_agent_event(&mut self, cx: &mut Cx, event: AgentEvent, generation_id: Option<u64>) {
+    fn handle_agent_event(
+        &mut self,
+        cx: &mut Cx,
+        event: AgentEvent,
+        generation: Option<(SessionKey, u64)>,
+    ) {
+        let target_key = generation
+            .as_ref()
+            .map(|(key, _)| key.clone())
+            .or_else(|| self.workspace_state.active_key().cloned());
+
         match event {
-            AgentEvent::AgentStart => self.set_status(cx, UiStatus::Working, "Working..."),
+            AgentEvent::AgentStart => {
+                if let Some(key) = target_key {
+                    self.set_session_status(cx, &key, UiStatus::Working, "Working...");
+                }
+            }
             AgentEvent::MessageUpdate {
                 text_delta,
                 reasoning_delta,
                 ..
             } => {
+                let Some(key) = target_key else { return };
+                let workspace = self.workspace_state.workspace_mut(key);
                 if let Some(delta) = reasoning_delta {
-                    if let Some(workspace) = self.workspace_state.active_workspace_mut() {
-                        workspace
-                            .chat
-                            .push_stream_delta(crate::state::StreamingKind::Thinking, &delta);
-                    }
+                    workspace
+                        .chat
+                        .push_stream_delta(crate::state::StreamingKind::Thinking, &delta);
                 }
                 if let Some(delta) = text_delta {
-                    if let Some(workspace) = self.workspace_state.active_workspace_mut() {
-                        workspace
-                            .chat
-                            .push_stream_delta(crate::state::StreamingKind::Assistant, &delta);
-                    }
+                    workspace
+                        .chat
+                        .push_stream_delta(crate::state::StreamingKind::Assistant, &delta);
                 }
             }
             AgentEvent::MessageEnd { message } => {
+                let Some(key) = target_key else { return };
+                let workspace = self.workspace_state.workspace_mut(key);
                 if matches!(
                     message,
                     mypi_agent::AgentMessage::Assistant {
@@ -1925,13 +2050,9 @@ impl App {
                         ..
                     }
                 ) {
-                    if let Some(workspace) = self.workspace_state.active_workspace_mut() {
-                        workspace.chat.flush_tool_call_preamble();
-                    }
+                    workspace.chat.flush_tool_call_preamble();
                 } else {
-                    if let Some(workspace) = self.workspace_state.active_workspace_mut() {
-                        workspace.chat.flush_streaming();
-                    }
+                    workspace.chat.flush_streaming();
                 }
             }
             AgentEvent::ToolExecutionStart {
@@ -1939,106 +2060,126 @@ impl App {
                 name,
                 arguments,
             } => {
-                if let Some(workspace) = self.workspace_state.active_workspace_mut() {
-                    workspace.chat.push_tool(tool_call_id, name, arguments);
-                }
+                let Some(key) = target_key else { return };
+                self.workspace_state.workspace_mut(key).chat.push_tool(
+                    tool_call_id,
+                    name,
+                    arguments,
+                );
             }
             AgentEvent::ToolExecutionUpdate {
                 tool_call_id,
                 partial_result,
             } => {
-                if let Some(workspace) = self.workspace_state.active_workspace_mut() {
-                    workspace
-                        .chat
-                        .update_tool(&tool_call_id, partial_result, None);
-                }
+                let Some(key) = target_key else { return };
+                self.workspace_state.workspace_mut(key).chat.update_tool(
+                    &tool_call_id,
+                    partial_result,
+                    None,
+                );
             }
             AgentEvent::ToolExecutionEnd {
                 tool_call_id,
                 result,
                 ..
             } => {
-                if let Some(workspace) = self.workspace_state.active_workspace_mut() {
-                    workspace.chat.update_tool(
-                        &tool_call_id,
-                        result.content,
-                        Some(if result.is_error {
-                            ToolStatus::Error
-                        } else {
-                            ToolStatus::Done
-                        }),
-                    );
+                let Some(key) = target_key else { return };
+                self.workspace_state.workspace_mut(key).chat.update_tool(
+                    &tool_call_id,
+                    result.content,
+                    Some(if result.is_error {
+                        ToolStatus::Error
+                    } else {
+                        ToolStatus::Done
+                    }),
+                );
+            }
+            AgentEvent::TurnEnd { .. } => {
+                if let Some(key) = target_key {
+                    self.set_session_status(cx, &key, UiStatus::Working, "Turn completed");
                 }
             }
-            AgentEvent::TurnEnd { .. } => self.set_status(cx, UiStatus::Working, "Turn completed"),
-            // Legacy task events are non-generation work; retain their chat
-            // updates, but never let their terminal marker clear a generation.
-            AgentEvent::AgentEnd { .. } if generation_id.is_none() => return,
+            // AgentEnd closes one agent loop, but CodingAgent may still run
+            // hooks or scheduled work. GenerationFinished is the terminal event.
+            AgentEvent::AgentEnd { .. } if generation.is_none() => return,
             AgentEvent::AgentEnd { .. } => {
-                if let Some(id) = generation_id {
-                    if accepts_generation_event(
-                        self.active_generation
-                            .as_ref()
-                            .map(|generation| generation.id),
-                        self.terminal_generation_id,
+                let Some((key, id)) = generation else { return };
+                let accepted = self.session_runtimes.get(&key).is_some_and(|runtime| {
+                    accepts_generation_event(
+                        runtime.generation.as_ref().map(|generation| generation.id),
+                        runtime.terminal_generation_id,
                         id,
                         GenerationEvent::AgentEnd,
-                    ) {
-                        self.active_generation = None;
-                        self.terminal_generation_id = Some(id);
-                    }
+                    )
+                });
+                if !accepted {
+                    return;
                 }
-                if let Some(workspace) = self.workspace_state.active_workspace_mut() {
-                    workspace.chat.flush_streaming();
-                }
-                self.set_status(cx, UiStatus::Ready, "Ready");
-                let work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                if let Some(session) = active_session_entry() {
-                    self.refresh_plan_ui(cx, &work_dir, &session.id);
-                }
-                refresh_sessions(&work_dir);
+                self.workspace_state
+                    .workspace_mut(key.clone())
+                    .chat
+                    .flush_streaming();
+                self.set_session_status(cx, &key, UiStatus::Working, "Finishing...");
             }
             AgentEvent::AgentError { error } => {
-                if generation_id.is_none() {
+                let Some((key, id)) = generation else {
                     self.push_chat(MsgRole::System, format!("Agent error: {error}"));
                     let status = concise_status(&error);
                     self.set_status(cx, UiStatus::Error, &status);
                     return;
-                }
-                if let Some(id) = generation_id {
-                    if !accepts_generation_event(
-                        self.active_generation
-                            .as_ref()
-                            .map(|generation| generation.id),
-                        self.terminal_generation_id,
+                };
+                let accepted = self.session_runtimes.get(&key).is_some_and(|runtime| {
+                    accepts_generation_event(
+                        runtime.generation.as_ref().map(|generation| generation.id),
+                        runtime.terminal_generation_id,
                         id,
                         GenerationEvent::AgentError,
-                    ) {
-                        return;
-                    }
+                    )
+                });
+                if !accepted {
+                    return;
                 }
-                self.active_generation = None;
-                self.terminal_generation_id = None;
-                if let Some(id) = generation_id {
-                    if self
+
+                let restored_draft = self.session_runtimes.get_mut(&key).and_then(|runtime| {
+                    runtime.generation = None;
+                    runtime.terminal_generation_id = None;
+                    runtime
                         .submitted_draft
-                        .as_ref()
-                        .is_some_and(|(draft_id, _)| *draft_id == id)
-                    {
-                        if let Some((_, draft)) = self.submitted_draft.take() {
-                            self.ui
-                                .mypi_command_text_input(cx, ids!(prompt_input))
-                                .text_input_ref(cx)
-                                .set_text(cx, &draft);
-                        }
-                    }
+                        .take()
+                        .filter(|(draft_id, _)| *draft_id == id)
+                        .map(|(_, draft)| draft)
+                });
+                let is_active = self.workspace_state.is_active(&key);
+                let current_draft = if is_active {
+                    self.ui
+                        .mypi_command_text_input(cx, ids!(prompt_input))
+                        .text_input_ref(cx)
+                        .text()
+                } else {
+                    self.workspace_state
+                        .workspace(&key)
+                        .map(|workspace| workspace.ui.draft.clone())
+                        .unwrap_or_default()
+                };
+                let draft = if current_draft.trim().is_empty() {
+                    restored_draft.unwrap_or_default()
+                } else {
+                    current_draft
+                };
+                let workspace = self.workspace_state.workspace_mut(key.clone());
+                workspace.chat.flush_streaming();
+                workspace.ui.draft = draft.clone();
+                workspace
+                    .chat
+                    .push_chat(MsgRole::System, format!("Agent error: {error}"));
+                if is_active {
+                    self.ui
+                        .mypi_command_text_input(cx, ids!(prompt_input))
+                        .text_input_ref(cx)
+                        .set_text(cx, &draft);
                 }
-                if let Some(workspace) = self.workspace_state.active_workspace_mut() {
-                    workspace.chat.flush_streaming();
-                }
-                self.push_chat(MsgRole::System, format!("Agent error: {error}"));
                 let status = concise_status(&error);
-                self.set_status(cx, UiStatus::Error, &status);
+                self.set_session_status(cx, &key, UiStatus::Error, &status);
             }
             AgentEvent::TurnStart { .. } | AgentEvent::MessageStart { .. } => {}
         }
@@ -2064,60 +2205,78 @@ impl App {
                 }
                 GuiAgentEvent::CommandOutput {
                     generation_id,
+                    work_dir,
+                    session_id,
                     output,
                 } => {
-                    let is_current_generation = accepts_generation_event(
-                        self.active_generation
-                            .as_ref()
-                            .map(|generation| generation.id),
-                        self.terminal_generation_id,
-                        generation_id,
-                        GenerationEvent::CommandOutput,
-                    );
+                    let key = SessionKey::new(work_dir, session_id);
+                    let is_current_generation =
+                        self.session_runtimes.get(&key).is_some_and(|runtime| {
+                            accepts_generation_event(
+                                runtime.generation.as_ref().map(|generation| generation.id),
+                                runtime.terminal_generation_id,
+                                generation_id,
+                                GenerationEvent::CommandOutput,
+                            )
+                        });
                     if !is_current_generation {
                         continue;
                     }
-                    self.active_generation = None;
-                    self.terminal_generation_id = None;
-                    self.submitted_draft = None;
-                    self.push_chat(MsgRole::System, output);
-                    self.set_status(cx, UiStatus::Ready, "Ready");
-                    let work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                    if let Some(session) = active_session_entry() {
-                        self.refresh_plan_ui(cx, &work_dir, &session.id);
-                    }
-                    refresh_sessions(&work_dir);
+                    self.workspace_state
+                        .workspace_mut(key)
+                        .chat
+                        .push_chat(MsgRole::System, output);
                 }
-                GuiAgentEvent::SessionSwitched {
-                    session_id,
-                    title,
+                GuiAgentEvent::GenerationFinished {
+                    generation_id,
                     work_dir,
-                    messages,
+                    session_id,
                 } => {
-                    set_active_session(&work_dir, &session_id);
-                    self.select_workspace_ui(cx, work_dir.clone(), session_id.clone());
-                    if let Some(workspace) = self.workspace_state.active_workspace_mut() {
-                        workspace.chat.replace_from_agent_messages(&messages);
+                    let key = SessionKey::new(work_dir, session_id);
+                    let is_current = self
+                        .session_runtimes
+                        .get(&key)
+                        .and_then(|runtime| runtime.generation.as_ref())
+                        .is_some_and(|generation| generation.id == generation_id);
+                    if !is_current {
+                        continue;
                     }
-                    self.push_chat(MsgRole::System, format!("Switched to session `{title}`."));
-                    self.refresh_plan_ui(cx, &work_dir, &session_id);
-                    refresh_sessions(&work_dir);
-                    set_active_session(&work_dir, &session_id);
-                    self.set_status(cx, UiStatus::Ready, "Ready");
+                    if let Some(runtime) = self.session_runtimes.get_mut(&key) {
+                        runtime.generation = None;
+                        runtime.terminal_generation_id = None;
+                        runtime.submitted_draft = None;
+                    }
+                    self.workspace_state
+                        .workspace_mut(key.clone())
+                        .chat
+                        .flush_streaming();
+                    self.set_session_status(cx, &key, UiStatus::Ready, "Ready");
+                    self.refresh_plan_ui(cx, &key.work_dir, &key.session_id);
+                    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                    refresh_sessions(&cwd);
                 }
                 GuiAgentEvent::AvailableModelsLoaded(models) => {
                     let selected_model = self.ui.drop_down(cx, ids!(model_drop)).selected_label();
                     self.set_model_dropup_options(cx, models, &selected_model);
                 }
                 GuiAgentEvent::DeviceCodePrompt { user_code, url } => {
-                    self.push_chat(
-                        MsgRole::System,
-                        format!(
-                            "Sign in: open {url} in your browser and enter code {user_code} \
-                             (waiting for authorization...)"
-                        ),
-                    );
-                    self.set_status(cx, UiStatus::Working, &format!("Enter code {user_code}"));
+                    if let Some(key) = self.auth_workspace.clone() {
+                        self.push_chat_to(
+                            key.clone(),
+                            MsgRole::System,
+                            format!(
+                                "Sign in: open {url} in your browser and enter code {user_code} \
+                                 (waiting for authorization...)"
+                            ),
+                        );
+                        if self.workspace_state.is_active(&key) {
+                            self.apply_status_ui(
+                                cx,
+                                UiStatus::Working,
+                                &format!("Enter code {user_code}"),
+                            );
+                        }
+                    }
                 }
                 GuiAgentEvent::DeviceLoginSuccess => {
                     let mut key_opt = None;
@@ -2129,26 +2288,50 @@ impl App {
                         key_opt = Some(creds.access_token.clone());
                         acc_opt = creds.account_id;
                     }
-                    self.push_chat(MsgRole::System, "Successfully authenticated with ChatGPT.");
+                    if let Some(key) = self.auth_workspace.take() {
+                        self.push_chat_to(
+                            key.clone(),
+                            MsgRole::System,
+                            "Successfully authenticated with ChatGPT.",
+                        );
+                        if self.workspace_state.is_active(&key) {
+                            self.restore_active_status(cx);
+                        }
+                    }
                     self.ui.widget(cx, ids!(auth_row)).set_visible(cx, false);
-                    self.set_status(cx, UiStatus::Ready, "Signed in");
 
                     if let Some(key) = key_opt {
                         self.spawn_model_fetch(key, acc_opt);
                     }
                 }
+                GuiAgentEvent::DeviceLoginError(error) => {
+                    if let Some(key) = self.auth_workspace.take() {
+                        self.push_chat_to(
+                            key.clone(),
+                            MsgRole::System,
+                            format!("Authentication error: {error}"),
+                        );
+                        if self.workspace_state.is_active(&key) {
+                            self.apply_status_ui(cx, UiStatus::Error, &concise_status(&error));
+                        }
+                    }
+                }
                 GuiAgentEvent::GenerationAgent {
                     generation_id,
+                    work_dir,
+                    session_id,
                     event: agent_event,
                 } => {
-                    if self
-                        .active_generation
-                        .as_ref()
-                        .is_none_or(|generation| generation.id != generation_id)
-                    {
+                    let key = SessionKey::new(work_dir, session_id);
+                    let is_current = self
+                        .session_runtimes
+                        .get(&key)
+                        .and_then(|runtime| runtime.generation.as_ref())
+                        .is_some_and(|generation| generation.id == generation_id);
+                    if !is_current {
                         continue;
                     }
-                    self.handle_agent_event(cx, agent_event, Some(generation_id))
+                    self.handle_agent_event(cx, agent_event, Some((key, generation_id)))
                 }
                 GuiAgentEvent::Agent(agent_event) => self.handle_agent_event(cx, agent_event, None),
             }

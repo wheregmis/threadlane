@@ -76,11 +76,14 @@ impl Widget for SessionList {
                             item_widget
                                 .label(cx, ids!(time_lbl))
                                 .set_text(cx, &relative_time_label(session.updated_at));
-                            if active {
-                                item_widget
-                                    .widget(cx, ids!(session_row_spinner))
-                                    .set_visible(cx, data.is_working);
-                            }
+                            let normalized_dir = std::fs::canonicalize(&session.work_dir)
+                                .unwrap_or_else(|_| session.work_dir.clone());
+                            let working = data
+                                .working_sessions
+                                .contains(&(normalized_dir, session.id.clone()));
+                            item_widget
+                                .widget(cx, ids!(session_row_spinner))
+                                .set_visible(cx, working);
                             item_widget.draw_all_unscoped(cx);
                         }
                         None => {}

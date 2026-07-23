@@ -395,6 +395,11 @@ script_mod! {
             text: ""
             draw_text +: { color: #xa6afbc text_style +: { font_size: 9.75 } }
         }
+        session_row_spinner := mod.components.ActivityLoader {
+            width: 18
+            height: 10
+            visible: false
+        }
         time_lbl := Label {
             width: Fit
             height: Fit
