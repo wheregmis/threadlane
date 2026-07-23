@@ -12,11 +12,12 @@ use crate::panels::sessions::{
     ProjectRegistry, SessionContextMenu, SessionContextMenuAction, SessionList,
 };
 use crate::state::{
-    active_session_entry, archive_session, builtin_commands, create_new_session, delete_session,
-    is_project_working, is_session_working, project_work_dir_at_row, refresh_sessions,
-    session_entry_at_row, set_active_project, set_active_session, set_session_context_target,
-    set_session_working, truncate_chars, CommandInfo, GuiAgentEvent, MsgRole, SessionEntry,
-    ToolStatus,
+    active_session_entry, archive_session, begin_title_generation, builtin_commands,
+    create_new_session, delete_session, end_title_generation, is_project_working,
+    is_session_working, normalize_session_title, project_work_dir_at_row, refresh_sessions,
+    session_entry_at_row, session_title_eligible, set_active_project, set_active_session,
+    set_session_context_target, set_session_working, truncate_chars, CommandInfo, GuiAgentEvent,
+    MsgRole, SessionEntry, ToolStatus,
 };
 use crate::workspace::{AppState, SessionKey};
 use base64::Engine as _;
@@ -28,7 +29,7 @@ use mypi_coding_agent::{
     SkillMetadata,
 };
 use mypi_provider::auth;
-use mypi_provider::openai::fetch_available_models;
+use mypi_provider::openai::{fetch_available_models, OpenAIClient};
 use robius_file_picker::FileDialog;
 
 use std::collections::HashMap;
@@ -875,17 +876,6 @@ script_mod! {
                                     align: Align{y: 0.5}
 
 
-
-                                    composer_status := Label {
-                                        width: Fit
-                                        height: Fit
-                                        visible: false
-                                        text: ""
-                                        draw_text +: {
-                                            color: #x9aa5b3
-                                            text_style +: { font_size: 8.5 }
-                                        }
-                                    }
 
                                     stop_btn := mod.components.ComposerAction {
                                         width: Fit
@@ -2373,10 +2363,6 @@ impl App {
             .widget(cx, ids!(stop_btn))
             .set_visible(cx, working && has_generation);
         self.ui.widget(cx, ids!(send_btn)).set_visible(cx, !working);
-        self.ui.label(cx, ids!(composer_status)).set_text(cx, text);
-        self.ui
-            .label(cx, ids!(composer_status))
-            .set_visible(cx, working || status == UiStatus::Error);
         self.ui.widget(cx, ids!(chat_working_indicator)).redraw(cx);
         self.apply_composer_presentation(cx);
     }
@@ -2384,21 +2370,13 @@ impl App {
     fn apply_composer_presentation(&mut self, cx: &mut Cx) {
         let presentation = self.composer_state.presentation();
         self.ui
-            .widget(cx, ids!(composer_status))
-            .set_visible(cx, presentation.working || presentation.show_error);
-        self.ui
-            .label(cx, ids!(composer_status))
-            .set_text(cx, &presentation.status_text);
-        self.ui
             .widget(cx, ids!(effort_picker))
             .set_visible(cx, presentation.show_model);
         self.ui
             .widget(cx, ids!(model_picker))
             .set_visible(cx, presentation.show_model);
 
-        self.ui
-            .button(cx, ids!(attach_btn))
-            .set_visible(cx, !presentation.working);
+        self.ui.button(cx, ids!(attach_btn)).set_visible(cx, true);
         self.ui
             .button(cx, ids!(send_btn))
             .set_visible(cx, !presentation.working);
@@ -2655,8 +2633,8 @@ impl App {
         if !self.session_runtimes.contains_key(&key) {
             let session_file = active_session_entry().map(|entry| entry.session_file);
             let agent = CodingAgent::new(CodingAgentOptions {
-                api_key,
-                account_id,
+                api_key: api_key.clone(),
+                account_id: account_id.clone(),
                 model: model_name.clone(),
                 work_dir: key.work_dir.clone(),
                 session_file,
@@ -2687,6 +2665,17 @@ impl App {
             None if !attachments.is_empty() => (input_text.clone(), String::new()),
             None => return,
         };
+        if show_in_chat && !input_str.trim().is_empty() {
+            if let Some(entry) = active_session_entry() {
+                self.spawn_session_title(
+                    entry,
+                    input_str.clone(),
+                    api_key.clone(),
+                    account_id.clone(),
+                    model_name.clone(),
+                );
+            }
+        }
         self.next_generation_id = self.next_generation_id.wrapping_add(1);
         let generation_id = self.next_generation_id;
 
@@ -2784,6 +2773,57 @@ impl App {
             .mypi_command_text_input(cx, ids!(prompt_input))
             .reset(cx);
         self.set_session_status(cx, &key, UiStatus::Working, "Working...");
+    }
+
+    fn spawn_session_title(
+        &self,
+        entry: SessionEntry,
+        prompt: String,
+        api_key: String,
+        account_id: Option<String>,
+        model: String,
+    ) {
+        let work_dir = entry.work_dir.clone();
+        let session_id = entry.id.clone();
+        let path = entry.session_file.clone();
+        let Ok(tree) = mypi_agent::SessionTree::load_from_file(&path) else {
+            return;
+        };
+        if !session_title_eligible(&tree) || !begin_title_generation(&work_dir, &session_id) {
+            return;
+        }
+        let Some(tx) = self.tx.clone() else {
+            end_title_generation(&work_dir, &session_id);
+            return;
+        };
+        get_runtime().spawn(async move {
+            let result = async {
+                let client = OpenAIClient::new(api_key, account_id);
+                let raw = client
+                    .generate_title(&model, &prompt)
+                    .await
+                    .map_err(|_| ())?;
+                let title = normalize_session_title(&raw);
+                if title.is_empty() {
+                    return Err(());
+                }
+                let mut tree = mypi_agent::SessionTree::load_from_file(&path).map_err(|_| ())?;
+                if tree.has_name() {
+                    return Err(());
+                }
+                tree.set_name(title).map_err(|_| ())?;
+                Ok(())
+            }
+            .await;
+            end_title_generation(&work_dir, &session_id);
+            if result.is_ok() {
+                let _ = tx.send(GuiAgentEvent::SessionTitleGenerated {
+                    work_dir,
+                    session_id,
+                });
+                SignalToUI::set_ui_signal();
+            }
+        });
     }
 
     fn spawn_model_fetch(&self, api_key: String, account_id: Option<String>) {
@@ -3062,6 +3102,9 @@ impl App {
                     self.refresh_registered_sessions();
                 }
 
+                GuiAgentEvent::SessionTitleGenerated { .. } => {
+                    self.refresh_registered_sessions();
+                }
                 GuiAgentEvent::AvailableModelsLoaded(models) => {
                     let selected_model = self.ui.drop_down(cx, ids!(model_drop)).selected_label();
                     self.set_model_dropup_options(cx, models, &selected_model);

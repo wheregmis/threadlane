@@ -27,6 +27,10 @@ pub enum GuiAgentEvent {
     },
     DeviceLoginSuccess,
     DeviceLoginError(String),
+    SessionTitleGenerated {
+        work_dir: PathBuf,
+        session_id: String,
+    },
     AvailableModelsLoaded(Vec<String>),
     ProjectFolderPicked(Result<Option<PathBuf>, String>),
     CommandOutput {

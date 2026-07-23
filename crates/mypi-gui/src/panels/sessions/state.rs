@@ -4,7 +4,7 @@ use crate::panels::chat::truncate_chars;
 use mypi_agent::{AgentMessage, SessionTree};
 
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::{LazyLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Debug)]
@@ -44,6 +44,51 @@ pub struct SessionsData {
     pub context_session_id: Option<String>,
     pub context_work_dir: PathBuf,
     pub rows: Vec<SessionListRow>,
+}
+
+pub static TITLE_IN_FLIGHT: LazyLock<RwLock<std::collections::HashSet<(PathBuf, String)>>> =
+    LazyLock::new(|| RwLock::new(std::collections::HashSet::new()));
+
+pub fn normalize_session_title(value: &str) -> String {
+    let mut title = value.trim().to_string();
+    if title
+        .get(..6)
+        .is_some_and(|p| p.eq_ignore_ascii_case("title:"))
+    {
+        title = title[6..].trim().to_string();
+    }
+    if title.chars().count() >= 2 {
+        let c: Vec<char> = title.chars().collect();
+        if (c[0] == '"' && c[c.len() - 1] == '"') || (c[0] == '\'' && c[c.len() - 1] == '\'') {
+            title = c[1..c.len() - 1].iter().collect();
+        }
+    }
+    title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    title.chars().take(42).collect()
+}
+
+pub fn session_title_eligible(tree: &SessionTree) -> bool {
+    !tree.has_name()
+        && !tree.get_active_branch_messages().iter().any(|m| {
+            matches!(
+                m,
+                AgentMessage::User { .. } | AgentMessage::UserWithImages { .. }
+            )
+        })
+}
+pub fn begin_title_generation(work_dir: &Path, session_id: &str) -> bool {
+    let key = (
+        std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf()),
+        session_id.to_string(),
+    );
+    TITLE_IN_FLIGHT.write().unwrap().insert(key)
+}
+pub fn end_title_generation(work_dir: &Path, session_id: &str) {
+    let key = (
+        std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf()),
+        session_id.to_string(),
+    );
+    TITLE_IN_FLIGHT.write().unwrap().remove(&key);
 }
 
 pub static SESSIONS_DATA: RwLock<SessionsData> = RwLock::new(SessionsData {
@@ -403,6 +448,24 @@ mod tests {
         assert!(second.session_file.exists());
 
         let _ = std::fs::remove_dir_all(work_dir);
+    }
+
+    #[test]
+    fn session_title_normalization() {
+        assert_eq!(
+            normalize_session_title(" Title: \"Fix the login flow\" "),
+            "Fix the login flow"
+        );
+        assert!(normalize_session_title(&"x".repeat(100)).chars().count() <= 42);
+        assert_eq!(normalize_session_title("   "), "");
+    }
+
+    #[test]
+    fn named_sessions_are_not_title_eligible() {
+        let mut named = SessionTree::new("named");
+        named.name = Some("Already named".into());
+        assert!(!session_title_eligible(&named));
+        assert!(session_title_eligible(&SessionTree::new("unnamed")));
     }
 
     #[test]
