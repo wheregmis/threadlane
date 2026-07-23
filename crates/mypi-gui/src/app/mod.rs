@@ -1590,7 +1590,7 @@ impl App {
             .set_visible(cx, !presentation.working);
         self.ui
             .button(cx, ids!(stop_btn))
-            .set_visible(cx, presentation.working);
+            .set_visible(cx, presentation.working && self.active_generation.is_some());
         self.ui.widget(cx, ids!(input_bar)).redraw(cx);
     }
 
