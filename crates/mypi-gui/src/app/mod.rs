@@ -35,6 +35,60 @@ script_mod! {
     use mod.prelude.widgets.*
     use mod.components.*
 
+    let ComposerDropDown = DropDown {
+        width: Fill
+        height: Fill
+        margin: 0
+        padding: Inset{left: 10 right: 24}
+        draw_bg +: {
+            color: #x232830
+            color_hover: #x2a313c
+            color_focus: #x2f3a4d
+            color_down: #x354153
+            border_color: #x3a424e
+            border_color_hover: #x4a5564
+            border_color_focus: #x6fa8ff
+            border_color_down: #x6fa8ff
+            border_size: 1.0
+            border_radius: 6.0
+            arrow_color: #x7f8b9a
+            arrow_color_hover: #xc7cdd6
+            arrow_color_focus: #xc7cdd6
+            arrow_color_down: #xffffff
+        }
+        draw_text +: {
+            color: #xc7cdd6
+            color_hover: #xdde3ea
+            color_focus: #xdde3ea
+            color_down: #xffffff
+            text_style +: { font_size: 9.5 }
+        }
+        popup_menu: PopupMenuFlat {
+            width: 220
+            draw_bg +: {
+                color: #x242932
+                border_color: #x454e5b
+                border_size: 1.0
+                border_radius: 7.0
+            }
+            menu_item: PopupMenuItem {
+                draw_text +: {
+                    color: #xc9d0da
+                    color_hover: #xffffff
+                    color_active: #xffffff
+                    text_style +: { font_size: 10.0 }
+                }
+                draw_bg +: {
+                    color: #x00000000
+                    color_hover: #x303844
+                    color_active: #x354153
+                    mark_color: #x00000000
+                    mark_color_active: #x6fa8ff
+                }
+            }
+        }
+    }
+
     // -------------------------------------------------------------------
     // Chat message list: bubbles + markdown + streaming tail
     // -------------------------------------------------------------------
@@ -754,67 +808,16 @@ script_mod! {
                                         clip_x: false
                                         clip_y: false
 
-                                        effort_drop := DropDown {
-                                            width: Fill
-                                            height: Fill
-                                            margin: 0
-                                            padding: Inset{left: 10 right: 24}
+                                        effort_drop := ComposerDropDown {
                                             labels: [
                                                 "Thinking: Off",
                                                 "Thinking: Minimal",
                                                 "Thinking: Low",
-                                                "Thinking: Medium",
                                                 "Thinking: High",
                                                 "Thinking: XHigh",
-                                                "Thinking: Max"
+                                                "Thinking: Max",
+                                                "Thinking: Medium"
                                             ]
-                                            draw_bg +: {
-                                                color: #x232830
-                                                color_hover: #x2a313c
-                                                color_focus: #x2f3a4d
-                                                color_down: #x354153
-                                                border_color: #x3a424e
-                                                border_color_hover: #x4a5564
-                                                border_color_focus: #x6fa8ff
-                                                border_color_down: #x6fa8ff
-                                                border_size: 1.0
-                                                border_radius: 6.0
-                                                arrow_color: #x7f8b9a
-                                                arrow_color_hover: #xc7cdd6
-                                                arrow_color_focus: #xc7cdd6
-                                                arrow_color_down: #xffffff
-                                            }
-                                            draw_text +: {
-                                                color: #xc7cdd6
-                                                color_hover: #xdde3ea
-                                                color_focus: #xdde3ea
-                                                color_down: #xffffff
-                                                text_style +: { font_size: 9.5 }
-                                            }
-                                            popup_menu: PopupMenuFlat {
-                                                width: 170
-                                                draw_bg +: {
-                                                    color: #x242932
-                                                    border_color: #x454e5b
-                                                    border_size: 1.0
-                                                    border_radius: 7.0
-                                                }
-                                                menu_item: PopupMenuItem {
-                                                    draw_text +: {
-                                                        color: #xc9d0da
-                                                        color_hover: #xffffff
-                                                        color_active: #xffffff
-                                                        text_style +: { font_size: 10.0 }
-                                                    }
-                                                    draw_bg +: {
-                                                        color: #x00000000
-                                                        color_hover: #x303844
-                                                        color_active: #x354153
-                                                        mark_color: #x00000000
-                                                        mark_color_active: #x6fa8ff
-                                                    }
-                                                }
-                                            }
                                         }
                                     }
 
@@ -826,13 +829,8 @@ script_mod! {
                                         clip_x: false
                                         clip_y: false
 
-                                        model_drop := DropDown {
-                                            width: Fill
-                                            height: Fill
-                                            margin: 0
-                                            padding: Inset{left: 10 right: 24}
+                                        model_drop := ComposerDropDown {
                                             labels: [
-                                                "gpt-5.6-luna",
                                                 "gpt-5.4",
                                                 "gpt-5.4-mini",
                                                 "gpt-5.5",
@@ -840,55 +838,9 @@ script_mod! {
                                                 "gpt-5.6-terra",
                                                 "gpt-5.3-codex-spark",
                                                 "gpt-4o",
-                                                "gpt-4o-mini"
+                                                "gpt-4o-mini",
+                                                "gpt-5.6-luna"
                                             ]
-                                            draw_bg +: {
-                                                color: #x232830
-                                                color_hover: #x2a313c
-                                                color_focus: #x2f3a4d
-                                                color_down: #x354153
-                                                border_color: #x3a424e
-                                                border_color_hover: #x4a5564
-                                                border_color_focus: #x6fa8ff
-                                                border_color_down: #x6fa8ff
-                                                border_size: 1.0
-                                                border_radius: 6.0
-                                                arrow_color: #x7f8b9a
-                                                arrow_color_hover: #xc7cdd6
-                                                arrow_color_focus: #xc7cdd6
-                                                arrow_color_down: #xffffff
-                                            }
-                                            draw_text +: {
-                                                color: #xc7cdd6
-                                                color_hover: #xdde3ea
-                                                color_focus: #xdde3ea
-                                                color_down: #xffffff
-                                                text_style +: { font_size: 9.5 }
-                                            }
-                                            popup_menu: PopupMenuFlat {
-                                                width: 220
-                                                draw_bg +: {
-                                                    color: #x242932
-                                                    border_color: #x454e5b
-                                                    border_size: 1.0
-                                                    border_radius: 7.0
-                                                }
-                                                menu_item: PopupMenuItem {
-                                                    draw_text +: {
-                                                        color: #xc9d0da
-                                                        color_hover: #xffffff
-                                                        color_active: #xffffff
-                                                        text_style +: { font_size: 10.0 }
-                                                    }
-                                                    draw_bg +: {
-                                                        color: #x00000000
-                                                        color_hover: #x303844
-                                                        color_active: #x354153
-                                                        mark_color: #x00000000
-                                                        mark_color_active: #x6fa8ff
-                                                    }
-                                                }
-                                            }
                                         }
 
                                     }
@@ -1485,17 +1437,19 @@ impl App {
             ReasoningEffort::XHigh,
             ReasoningEffort::Max,
         ];
-        let selected_item = efforts
-            .iter()
-            .position(|candidate| *candidate == effort)
-            .unwrap_or(3);
-        let labels = efforts
+        let mut ordered: Vec<_> = efforts
+            .into_iter()
+            .filter(|candidate| *candidate != effort)
+            .collect();
+        ordered.push(effort);
+
+        let labels = ordered
             .iter()
             .map(|effort| format!("Thinking: {}", effort.label()))
             .collect();
         let effort_drop = self.ui.drop_down(cx, ids!(effort_drop));
         effort_drop.set_labels(cx, labels);
-        effort_drop.set_selected_item(cx, selected_item);
+        effort_drop.set_selected_item(cx, ordered.len() - 1);
     }
 
     fn current_credentials(&self, cx: &Cx) -> (String, Option<String>) {
