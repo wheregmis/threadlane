@@ -184,10 +184,7 @@ impl HostCapabilityHandler {
         match request.operation.as_str() {
             "set_policy" => {
                 let value = string_argument(&request.arguments, "policy")?;
-                let mut current = policy
-                    .try_lock()
-                    .map_err(|_| internal_error("Tool policy is busy"))?;
-                *current = match value {
+                let next = match value {
                     "read_only" => ToolPolicy::ReadOnly,
                     "full" => ToolPolicy::FullAccess,
                     _ => return Err(invalid_argument("policy must be `read_only` or `full`")),
@@ -197,6 +194,10 @@ impl HostCapabilityHandler {
                         .set_host_state("tools.policy", Value::String(value.into()))
                         .map_err(host_error)?;
                 }
+                let mut current = policy
+                    .try_lock()
+                    .map_err(|_| internal_error("Tool policy is busy"))?;
+                *current = next;
                 Ok(Value::Null)
             }
             "get_policy" => {
@@ -1730,6 +1731,31 @@ mod tests {
             restored.host_state("tools.policy"),
             Some(Value::String("read_only".into()))
         );
+    }
+
+    #[test]
+    fn tool_policy_is_unchanged_when_host_state_persistence_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".mypi"), "not a directory").unwrap();
+        let policy = Arc::new(tokio::sync::Mutex::new(ToolPolicy::FullAccess));
+        let tools = HostCapabilityHandler {
+            tool_policy: Some(policy.clone()),
+            extensions: Arc::new(WasiExtensionManager::for_project_session(
+                dir.path(),
+                "session-a",
+            )),
+            persist_tool_policy: true,
+            ..handler("tools", dir.path().to_path_buf())
+        };
+        let request = BrokerRequest {
+            api_version: BROKER_API_VERSION,
+            capability: "tools".into(),
+            operation: "set_policy".into(),
+            arguments: serde_json::json!({"policy": "read_only"}),
+        };
+
+        assert_eq!(tools.handle(&request).unwrap_err().code, "host_error");
+        assert_eq!(*policy.try_lock().unwrap(), ToolPolicy::FullAccess);
     }
 
     #[test]

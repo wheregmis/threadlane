@@ -117,3 +117,15 @@ Implemented and committed as `a1b8584 refactor: remove legacy extension harness 
   "manualNotes": "Committed as a1b8584 and 32c0b75; GUI change only removes the deleted options field."
 }
 ```
+
+## Task 3 Review Follow-up
+
+- `tools.set_policy` now validates and persists the requested host state before updating the live `ToolPolicy`.
+- Added a regression test that makes host-state persistence fail and verifies the prior `FullAccess` policy remains unchanged.
+
+### Follow-up Validation
+
+- `cargo test -p mypi-coding-agent --lib tool_policy_is_unchanged_when_host_state_persistence_fails` — passed.
+- `cargo test -p mypi-coding-agent --lib` — passed, 11 tests.
+- `rustfmt --edition 2021 --check crates/mypi-coding-agent/src/coding_agent.rs` — passed.
+- `git diff --check` — passed.
