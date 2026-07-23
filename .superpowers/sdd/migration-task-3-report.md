@@ -2,14 +2,14 @@
 
 ## Status
 
-Implemented and committed as `a1b8584 refactor: remove legacy extension harness paths`.
+Implemented and committed as `a1b8584 refactor: remove legacy extension harness paths` plus `32c0b75 fix: restore generic tool policy state`.
 
 ## Changes
 
 - Removed `WasiExtensionEffect::RunSubagents` and `WasiSubagentTask`; generic `agent.run` now uses an internal validated task representation.
 - Removed plan-specific startup policy interpretation, `restored_plan_mode` lookups, and command-time legacy subagent special handling.
 - Kept API v1 `set_tool_policy` and `request_model_turn` response effects under `WasiLegacyEffect`; v2 bundled modules use broker requests only.
-- Kept generic `tools.set_policy` dispatch and session extension-state persistence behavior.
+- Kept generic `tools.set_policy` dispatch and added host-owned, session-scoped policy restoration without extension-name lookups.
 - Removed `enable_plan_mode` from options and updated its workspace call sites.
 - Updated extension documentation and plan-mode guide to describe bundled modules as ordinary v2 extensions.
 
@@ -22,11 +22,12 @@ Implemented and committed as `a1b8584 refactor: remove legacy extension harness 
 - `crates/mypi-gui/src/app/mod.rs` (option-shape update only)
 - `docs/extensions.md`
 - `docs/plan_mode_extension.md`
+- `.superpowers/sdd/migration-task-3-report.md`
 
 ## Validation
 
 - `./scripts/build_extensions.sh` — passed; all bundled WASI modules built and deployed.
-- `cargo test -p mypi-coding-agent --lib` — passed, 9 tests.
+- `cargo test -p mypi-coding-agent --lib` — passed, 10 tests, including generic policy restoration.
 - `cargo test -p mypi-coding-agent --test wasi_tests` — passed, 31 tests.
 - `cargo test --workspace` — passed.
 - `cargo check --workspace` — passed.
@@ -37,7 +38,7 @@ Implemented and committed as `a1b8584 refactor: remove legacy extension harness 
 
 - Existing `static_mut_refs` warnings remain in bundled extension crates.
 - Existing workspace dead-code/GUI warnings remain.
-- Tool policy starts as `FullAccess` rather than inspecting a plan extension's persisted state; policy changes are exclusively driven by generic v2 `tools.set_policy` requests.
+- Host policy state is stored in a hidden host-state file alongside session extension state; older sessions without this file default to `FullAccess`.
 
 ```acceptance-report
 {
@@ -63,7 +64,8 @@ Implemented and committed as `a1b8584 refactor: remove legacy extension harness 
     "docs/plan_mode_extension.md"
   ],
   "testsAddedOrUpdated": [
-    "crates/mypi-coding-agent/tests/supervisor_tests.rs"
+    "crates/mypi-coding-agent/tests/supervisor_tests.rs",
+    "crates/mypi-coding-agent/src/coding_agent.rs (unit test)"
   ],
   "commandsRun": [
     {
@@ -74,7 +76,7 @@ Implemented and committed as `a1b8584 refactor: remove legacy extension harness 
     {
       "command": "cargo test -p mypi-coding-agent --lib",
       "result": "passed",
-      "summary": "9 tests passed."
+      "summary": "10 tests passed, including generic policy restoration."
     },
     {
       "command": "cargo test -p mypi-coding-agent --test wasi_tests",
@@ -99,6 +101,7 @@ Implemented and committed as `a1b8584 refactor: remove legacy extension harness 
   ],
   "validationOutput": [
     "No runtime references remain to WasiExtensionEffect, WasiSubagentTask, enable_plan_mode, restored_plan_mode, or extension-name dispatch checks.",
+    "Generic tools.policy host state restores across a fresh manager for the same session.",
     "Workspace test result: all tests passed."
   ],
   "residualRisks": [
@@ -106,10 +109,10 @@ Implemented and committed as `a1b8584 refactor: remove legacy extension harness 
     "Bundled extension static_mut_refs warnings remain."
   ],
   "noStagedFiles": true,
-  "diffSummary": "Removed legacy plan/subagent effect harness paths, retained only required v1 effects, and documented bundled v2 modules.",
+  "diffSummary": "Removed legacy plan/subagent effect harness paths, retained only required v1 effects, restored generic tool policy state by session, and documented bundled v2 modules.",
   "reviewFindings": [
     "no blockers found"
   ],
-  "manualNotes": "Committed as a1b8584; GUI change only removes the deleted options field."
+  "manualNotes": "Committed as a1b8584 and 32c0b75; GUI change only removes the deleted options field."
 }
 ```
