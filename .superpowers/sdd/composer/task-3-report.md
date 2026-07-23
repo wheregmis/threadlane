@@ -146,3 +146,25 @@ test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fin
 ```
 
 Warnings include the existing duplicate Makepad package warnings and unused/dead-code warnings; no errors were emitted.
+
+## Important Task 3 lifecycle fix: terminal generation discriminator
+
+- Preserved `terminal_generation_id` after a correlated `AgentEnd`; this keeps same-generation `CommandOutput` accepted while the post-agent refresh/hooks run, without keeping Stop available.
+- `CommandOutput` now accepts either the active generation or its terminal discriminator, then clears the terminal state after output handling completes.
+- New generations, session switching, and login invalidate terminal lifecycle state; stale generation events remain ignored.
+
+### Exact verification results
+
+`cargo check -p mypi-gui` — **PASS**
+
+```text
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.06s
+```
+
+`cargo test -p mypi-gui` — **PASS**
+
+```text
+running 17 tests
+...
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```

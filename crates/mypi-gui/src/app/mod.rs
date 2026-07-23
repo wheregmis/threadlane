@@ -992,6 +992,8 @@ pub struct App {
     #[rust]
     active_generation: Option<GenerationRun>,
     #[rust]
+    terminal_generation_id: Option<u64>,
+    #[rust]
     next_generation_id: u64,
     #[rust]
     busy: bool,
@@ -1688,6 +1690,7 @@ impl App {
         if let Some(generation) = self.active_generation.take() {
             generation.handle.abort();
         }
+        self.terminal_generation_id = None;
         self.set_status(cx, UiStatus::Working, "Switching session...");
         let session_file = entry.session_file.clone();
         let session_id = entry.id.clone();
@@ -1789,6 +1792,7 @@ impl App {
         let input_str = input_text.trim().to_string();
         self.next_generation_id = self.next_generation_id.wrapping_add(1);
         let generation_id = self.next_generation_id;
+        self.terminal_generation_id = None;
 
         if show_in_chat {
             self.push_chat(MsgRole::User, input_str.clone());
@@ -1855,7 +1859,7 @@ impl App {
         });
     }
 
-    fn handle_agent_event(&mut self, cx: &mut Cx, event: AgentEvent) {
+    fn handle_agent_event(&mut self, cx: &mut Cx, event: AgentEvent, generation_id: Option<u64>) {
         match event {
             AgentEvent::AgentStart => self.set_status(cx, UiStatus::Working, "Working..."),
             AgentEvent::MessageUpdate {
@@ -1933,7 +1937,16 @@ impl App {
             }
             AgentEvent::TurnEnd { .. } => self.set_status(cx, UiStatus::Working, "Turn completed"),
             AgentEvent::AgentEnd { .. } => {
-                self.active_generation = None;
+                if let Some(id) = generation_id {
+                    if self
+                        .active_generation
+                        .as_ref()
+                        .is_some_and(|generation| generation.id == id)
+                    {
+                        self.active_generation = None;
+                        self.terminal_generation_id = Some(id);
+                    }
+                }
                 if let Some(workspace) = self.workspace_state.active_workspace_mut() {
                     workspace.chat.flush_streaming();
                 }
@@ -1972,20 +1985,22 @@ impl App {
         for evt in events {
             match evt {
                 GuiAgentEvent::TaskEvent(task_event) => {
-                    self.handle_agent_event(cx, task_event.event);
+                    self.handle_agent_event(cx, task_event.event, None);
                 }
                 GuiAgentEvent::CommandOutput {
                     generation_id,
                     output,
                 } => {
-                    if self
+                    let is_current_generation = self
                         .active_generation
                         .as_ref()
-                        .is_none_or(|generation| generation.id != generation_id)
-                    {
+                        .is_some_and(|generation| generation.id == generation_id)
+                        || self.terminal_generation_id == Some(generation_id);
+                    if !is_current_generation {
                         continue;
                     }
                     self.active_generation = None;
+                    self.terminal_generation_id = None;
                     self.push_chat(MsgRole::System, output);
                     self.set_status(cx, UiStatus::Ready, "Ready");
                     let work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -2054,9 +2069,9 @@ impl App {
                     {
                         continue;
                     }
-                    self.handle_agent_event(cx, agent_event)
+                    self.handle_agent_event(cx, agent_event, Some(generation_id))
                 }
-                GuiAgentEvent::Agent(agent_event) => self.handle_agent_event(cx, agent_event),
+                GuiAgentEvent::Agent(agent_event) => self.handle_agent_event(cx, agent_event, None),
             }
         }
 
