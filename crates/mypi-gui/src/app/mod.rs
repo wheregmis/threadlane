@@ -2397,9 +2397,7 @@ impl App {
             .widget(cx, ids!(model_picker))
             .set_visible(cx, presentation.show_model);
 
-        self.ui
-            .button(cx, ids!(attach_btn))
-            .set_visible(cx, !presentation.working);
+        self.ui.button(cx, ids!(attach_btn)).set_visible(cx, true);
         self.ui
             .button(cx, ids!(send_btn))
             .set_visible(cx, !presentation.working);

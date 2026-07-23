@@ -77,7 +77,7 @@ pub fn normalize_session_title(value: &str) -> String {
 }
 
 pub fn session_title_eligible(tree: &SessionTree) -> bool {
-    !tree.has_name()
+    !tree.has_name() && first_existing_user_prompt(tree).is_some()
 }
 
 pub fn first_existing_user_prompt(tree: &SessionTree) -> Option<String> {
@@ -494,7 +494,11 @@ mod tests {
         let mut named = SessionTree::new("named");
         named.name = Some("Already named".into());
         assert!(!session_title_eligible(&named));
-        assert!(session_title_eligible(&SessionTree::new("unnamed")));
+        let mut unnamed = SessionTree::new("unnamed");
+        unnamed.add_message(AgentMessage::User {
+            content: "first turn".into(),
+        });
+        assert!(session_title_eligible(&unnamed));
     }
 
     #[test]
@@ -535,6 +539,7 @@ mod tests {
             images: Vec::new(),
         });
         assert!(first_existing_user_prompt(&tree).is_none());
+        assert!(!session_title_eligible(&tree));
     }
 
     #[test]

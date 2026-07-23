@@ -69,13 +69,20 @@ pub struct SessionNode {
 #[serde(tag = "type")]
 enum SessionRecord {
     #[serde(rename = "session_metadata")]
-    Metadata { name: Option<String> },
+    Metadata {
+        name: Option<String>,
+        #[serde(default)]
+        title_attempted: bool,
+        #[serde(default)]
+        active_node_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct SessionTree {
     pub session_id: String,
     pub name: Option<String>,
+    pub title_attempted: bool,
     pub nodes: HashMap<String, SessionNode>,
     pub active_node_id: Option<String>,
     pub file_path: Option<PathBuf>,
@@ -86,6 +93,7 @@ impl SessionTree {
         Self {
             session_id: session_id.into(),
             name: None,
+            title_attempted: false,
             nodes: HashMap::new(),
             active_node_id: None,
             file_path: None,
@@ -129,6 +137,27 @@ impl SessionTree {
         } else {
             Ok(())
         }
+    }
+
+    /// Persist the one-shot automatic title attempt before the provider is spawned.
+    pub fn mark_title_attempted(&mut self) -> std::io::Result<bool> {
+        let Some(path) = self.file_path.clone() else {
+            if self.title_attempted {
+                return Ok(false);
+            }
+            self.title_attempted = true;
+            return Ok(true);
+        };
+        let _guard = session_file_lock().lock().unwrap();
+        let mut latest = Self::load_from_file(&path)?;
+        if latest.title_attempted {
+            self.title_attempted = true;
+            return Ok(false);
+        }
+        latest.title_attempted = true;
+        latest.save_transactionally(&path)?;
+        *self = latest;
+        Ok(true)
     }
 
     fn save_transactionally(&self, path: &Path) -> std::io::Result<()> {
@@ -176,6 +205,7 @@ impl SessionTree {
         if let Some(ref path) = self.file_path {
             let _guard = session_file_lock().lock().unwrap();
             let _ = self.append_node_to_file(path, &node);
+            let _ = self.append_metadata_to_file(path);
         }
 
         node_id
@@ -212,6 +242,10 @@ impl SessionTree {
     pub fn switch_active_node(&mut self, node_id: &str) -> bool {
         if self.nodes.contains_key(node_id) {
             self.active_node_id = Some(node_id.to_string());
+            if let Some(path) = self.file_path.clone() {
+                let _guard = session_file_lock().lock().unwrap();
+                let _ = self.append_metadata_to_file(&path);
+            }
             true
         } else {
             false
@@ -248,23 +282,34 @@ impl SessionTree {
 
     pub fn save_to_file(&self, path: &Path) -> std::io::Result<()> {
         let mut file = File::create(path)?;
-        if self.has_name() {
+        for node in self.nodes.values() {
+            writeln!(file, "{}", serde_json::to_string(node)?)?;
+        }
+        if self.has_name() || self.title_attempted || self.active_node_id.is_some() {
             let metadata = SessionRecord::Metadata {
                 name: self.name.clone(),
+                title_attempted: self.title_attempted,
+                active_node_id: self.active_node_id.clone(),
             };
             writeln!(file, "{}", serde_json::to_string(&metadata)?)?;
         }
-        for node in self.nodes.values() {
-            let line = serde_json::to_string(node)?;
-            writeln!(file, "{}", line)?;
-        }
+        Ok(())
+    }
+
+    fn append_metadata_to_file(&self, path: &Path) -> std::io::Result<()> {
+        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+        let metadata = SessionRecord::Metadata {
+            name: self.name.clone(),
+            title_attempted: self.title_attempted,
+            active_node_id: self.active_node_id.clone(),
+        };
+        writeln!(file, "{}", serde_json::to_string(&metadata)?)?;
         Ok(())
     }
 
     fn append_node_to_file(&self, path: &Path, node: &SessionNode) -> std::io::Result<()> {
         let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-        let line = serde_json::to_string(node)?;
-        writeln!(file, "{}", line)?;
+        writeln!(file, "{}", serde_json::to_string(node)?)?;
         Ok(())
     }
 
@@ -280,16 +325,28 @@ impl SessionTree {
         let mut tree = SessionTree::new(session_id);
         tree.file_path = Some(path.to_path_buf());
 
+        let mut explicit_active = false;
         for line in reader.lines() {
             let l = line?;
             if l.trim().is_empty() {
                 continue;
             }
-            if let Ok(SessionRecord::Metadata { name }) = serde_json::from_str::<SessionRecord>(&l)
+            if let Ok(SessionRecord::Metadata {
+                name,
+                title_attempted,
+                active_node_id,
+            }) = serde_json::from_str::<SessionRecord>(&l)
             {
                 tree.name = name;
+                tree.title_attempted = title_attempted;
+                if active_node_id.is_some() {
+                    explicit_active = true;
+                }
+                tree.active_node_id = active_node_id;
             } else if let Ok(node) = serde_json::from_str::<SessionNode>(&l) {
-                tree.active_node_id = Some(node.id.clone());
+                if !explicit_active {
+                    tree.active_node_id = Some(node.id.clone());
+                }
                 tree.nodes.insert(node.id.clone(), node);
             }
         }
@@ -392,6 +449,48 @@ mod tests {
         )));
     }
 
+    #[test]
+    fn title_attempt_marker_round_trips_without_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut tree = SessionTree::new("session");
+        tree.file_path = Some(path.clone());
+        tree.add_message(AgentMessage::User {
+            content: "hello".into(),
+        });
+        assert!(tree.mark_title_attempted().unwrap());
+        assert!(!tree.mark_title_attempted().unwrap());
+        let loaded = SessionTree::load_from_file(&path).unwrap();
+        assert!(loaded.title_attempted);
+        assert!(loaded.name.is_none());
+    }
+
+    #[test]
+    fn reload_preserves_explicit_active_branch_for_title_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut tree = SessionTree::new("session");
+        tree.file_path = Some(path.clone());
+        tree.add_message(AgentMessage::User {
+            content: "root".into(),
+        });
+        let root = tree.active_node_id.clone().unwrap();
+        tree.add_message(AgentMessage::User {
+            content: "branch a".into(),
+        });
+        assert!(tree.switch_active_node(&root));
+        tree.add_message(AgentMessage::User {
+            content: "branch b".into(),
+        });
+        let active = tree.active_node_id.clone().unwrap();
+        tree.set_name("title".into()).unwrap();
+        let loaded = SessionTree::load_from_file(&path).unwrap();
+        assert_eq!(loaded.active_node_id.as_deref(), Some(active.as_str()));
+        assert!(matches!(
+            loaded.get_active_branch_messages().last(),
+            Some(AgentMessage::User { content }) if content == "branch b"
+        ));
+    }
     #[test]
     fn set_name_rejects_empty_name() {
         let mut tree = SessionTree::new("session");
