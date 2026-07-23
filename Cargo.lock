@@ -2995,7 +2995,7 @@ dependencies = [
 
 [[package]]
 name = "threadlane"
-version = "0.0.4"
+version = "0.0.6"
 dependencies = [
  "arboard",
  "base64",
