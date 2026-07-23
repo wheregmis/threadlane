@@ -58,26 +58,6 @@ fn build_subagent_extension() -> PathBuf {
     target_dir.join("wasm32-wasip1/debug/subagent_ext.wasm")
 }
 
-fn build_plan_mode_extension() -> PathBuf {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let target_dir = root.join("target/plan-mode-integration");
-    let status = Command::new("cargo")
-        .current_dir(&root)
-        .args([
-            "build",
-            "--manifest-path",
-            "extensions/plan_mode_ext/Cargo.toml",
-            "--target",
-            "wasm32-wasip1",
-            "--target-dir",
-        ])
-        .arg(&target_dir)
-        .status()
-        .unwrap();
-    assert!(status.success());
-    target_dir.join("wasm32-wasip1/debug/plan_mode_ext.wasm")
-}
-
 #[test]
 fn broker_smoke_manifest_matches_v2_documentation() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -738,18 +718,6 @@ fn test_wasi_minimal_wasm_bytes() {
     assert_eq!(ext.manifest.name, "unnamed_wasi_ext");
 }
 
-#[test]
-fn test_load_actual_plan_mode_wasm() {
-    let wasm_path = PathBuf::from(
-        "/Users/wheregmis/Documents/exploration/mypi/.mypi/extensions/plan_mode_ext/extension.wasm",
-    );
-    if wasm_path.exists() {
-        let ext = WasiExtension::load_from_file(&wasm_path);
-        println!("Load result: {:?}", ext.as_ref().map(|e| &e.manifest));
-        assert!(ext.is_ok(), "Failed to load WASM: {:?}", ext.err());
-    }
-}
-
 #[tokio::test]
 async fn structured_hook_middleware_blocks_without_message_matching() {
     let response =
@@ -865,141 +833,19 @@ async fn structured_hook_v1_message_behavior_is_preserved() {
     assert_eq!(result.reason.as_deref(), Some("blocked by v1"));
 }
 
-#[tokio::test]
-async fn plan_v2_requests_generic_brokers_and_receives_async_events() {
-    let extension = WasiExtension::load_from_file(&build_plan_mode_extension()).unwrap();
-    assert_eq!(extension.manifest.api_version, 2);
-    assert_eq!(
-        extension.manifest.capabilities,
-        vec!["tools", "agent", "session"]
-    );
-    let name = extension.manifest.name.clone();
-    let mut manager = WasiExtensionManager::new();
-    manager.extensions.insert(name, extension);
-
-    let enabled = manager
-        .execute_command_with_effects("plan", "improve extension support")
-        .unwrap()
-        .unwrap();
-    assert!(enabled.message.contains("ENABLED"));
-    assert_eq!(
-        enabled
-            .broker_requests
-            .iter()
-            .map(|request| (request.capability.as_str(), request.operation.as_str()))
-            .collect::<Vec<_>>(),
-        vec![
-            ("session", "get_extension_state"),
-            ("tools", "set_policy"),
-            ("agent", "request_turn"),
-            ("session", "set_extension_state"),
-        ]
-    );
-    assert_eq!(
-        enabled.broker_requests[3].arguments["state"]["enabled"],
-        true
-    );
-
-    let mut dispatcher = CapabilityDispatcher::new();
-    let recorded = Arc::new(Mutex::new(Vec::new()));
-    let handler = Arc::new(RecordingCapabilityHandler {
-        recorded: recorded.clone(),
-    });
-    dispatcher.register("tools", handler.clone());
-    dispatcher.register("agent", handler.clone());
-    dispatcher.register("session", handler);
-    let dispatch = dispatcher
-        .dispatch_envelopes(enabled.host_broker_requests)
-        .await
-        .unwrap();
-    manager.enqueue_broker_results(dispatch.operation_results);
-
-    let next = manager
-        .execute_command_with_effects("todos", "")
-        .unwrap()
-        .unwrap();
-    assert!(next
-        .events
-        .iter()
-        .any(|event| event.topic == "broker_response"));
-    assert!(next.message.contains("No plan items yet"));
-    assert_eq!(recorded.lock().unwrap().len(), 4);
-
-    let hook_results = manager.execute_hook(
-        "assistant_message",
-        r#"{"content":"Plan:\n1. Inspect the extension boundary\n2. Add hook tests"}"#,
-    );
-    assert_eq!(hook_results.len(), 1);
-    assert!(hook_results.into_iter().all(|result| result.is_ok()));
-
-    let status = manager.execute_command("todos", "").unwrap().unwrap();
-    assert!(status.contains("1. Inspect the extension boundary"));
-    assert!(status.contains("2. Add hook tests"));
-    assert!(manager
-        .execute_command("plan", "")
-        .unwrap()
-        .unwrap()
-        .contains("DISABLED"));
-}
-
 #[test]
 fn test_session_state_paths_are_isolated_and_filesystem_safe() {
     let project = tempdir().unwrap();
     let first =
-        WasiExtensionManager::session_state_path(project.path(), "session/one", "plan_mode_ext");
+        WasiExtensionManager::session_state_path(project.path(), "session/one", "example_ext");
     let second =
-        WasiExtensionManager::session_state_path(project.path(), "session/two", "plan_mode_ext");
+        WasiExtensionManager::session_state_path(project.path(), "session/two", "example_ext");
 
     assert_ne!(first, second);
     assert_eq!(
         first,
         project
             .path()
-            .join(".mypi/state/extensions/sessions/73657373696f6e2f6f6e65/plan_mode_ext.json")
+            .join(".mypi/state/extensions/sessions/73657373696f6e2f6f6e65/example_ext.json")
     );
-}
-
-#[test]
-fn test_extension_state_persists_in_project_mypi_directory() {
-    let source = build_plan_mode_extension();
-    let project = tempdir().unwrap();
-    let package_dir = project.path().join(".mypi/extensions/plan_mode_ext");
-    std::fs::create_dir_all(&package_dir).unwrap();
-    std::fs::copy(source, package_dir.join("extension.wasm")).unwrap();
-
-    let mut first = WasiExtensionManager::for_project(project.path());
-    assert_eq!(first.discover_and_load(project.path()), 1);
-    first.execute_command("plan", "").unwrap().unwrap();
-
-    let mut reloaded = WasiExtensionManager::for_project(project.path());
-    assert_eq!(reloaded.discover_and_load(project.path()), 1);
-    let status = reloaded.execute_command("todos", "").unwrap().unwrap();
-    assert!(status.contains("No plan items yet"));
-    assert!(project
-        .path()
-        .join(".mypi/state/extensions/plan_mode_ext.json")
-        .exists());
-}
-
-#[test]
-fn test_extension_state_is_scoped_to_a_session() {
-    let source = build_plan_mode_extension();
-    let project = tempdir().unwrap();
-    let package_dir = project.path().join(".mypi/extensions/plan_mode_ext");
-    std::fs::create_dir_all(&package_dir).unwrap();
-    std::fs::copy(source, package_dir.join("extension.wasm")).unwrap();
-
-    let mut first = WasiExtensionManager::for_project_session(project.path(), "session_a");
-    assert_eq!(first.discover_and_load(project.path()), 1);
-    first.execute_command("plan", "").unwrap().unwrap();
-
-    let mut second = WasiExtensionManager::for_project_session(project.path(), "session_b");
-    assert_eq!(second.discover_and_load(project.path()), 1);
-    let second_status = second.execute_command("todos", "").unwrap().unwrap();
-    assert!(second_status.contains("disabled"));
-
-    let mut restored = WasiExtensionManager::for_project_session(project.path(), "session_a");
-    assert_eq!(restored.discover_and_load(project.path()), 1);
-    let restored_status = restored.execute_command("todos", "").unwrap().unwrap();
-    assert!(restored_status.contains("No plan items yet"));
 }
