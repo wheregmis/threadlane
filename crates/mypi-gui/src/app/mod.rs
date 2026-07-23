@@ -974,6 +974,10 @@ enum UiStatus {
     Error,
 }
 
+struct GenerationRun {
+    handle: tokio::task::JoinHandle<()>,
+}
+
 #[derive(Script)]
 pub struct App {
     #[live]
@@ -987,7 +991,7 @@ pub struct App {
     #[rust]
     agent_events_attached: bool,
     #[rust]
-    active_run: Option<tokio::task::JoinHandle<()>>,
+    active_generation: Option<GenerationRun>,
     #[rust]
     busy: bool,
     #[rust]
@@ -1150,6 +1154,9 @@ impl MatchEvent for App {
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         if self.ui.button(cx, ids!(login_btn)).clicked(actions) {
+            if let Some(generation) = self.active_generation.take() {
+                generation.handle.abort();
+            }
             self.push_chat(MsgRole::System, "Initiating ChatGPT device code login...");
             self.set_status(cx, UiStatus::Working, "Connecting to ChatGPT...");
             cx.redraw_all();
@@ -1224,8 +1231,8 @@ impl MatchEvent for App {
         }
 
         if self.ui.button(cx, ids!(stop_btn)).clicked(actions) {
-            if let Some(run) = self.active_run.take() {
-                run.abort();
+            if let Some(generation) = self.active_generation.take() {
+                generation.handle.abort();
                 self.set_status(cx, UiStatus::Ready, "Stopped");
                 self.push_chat(MsgRole::System, "Generation stopped.");
                 cx.redraw_all();
@@ -1516,7 +1523,7 @@ impl App {
             .set_visible(cx, working);
         self.ui
             .widget(cx, ids!(stop_btn))
-            .set_visible(cx, working && self.active_run.is_some());
+            .set_visible(cx, working && self.active_generation.is_some());
         self.ui.widget(cx, ids!(send_btn)).set_visible(cx, !working);
         self.ui.label(cx, ids!(composer_status)).set_text(cx, _text);
         self.ui
@@ -1677,6 +1684,9 @@ impl App {
             return;
         };
 
+        if let Some(generation) = self.active_generation.take() {
+            generation.handle.abort();
+        }
         self.set_status(cx, UiStatus::Working, "Switching session...");
         let session_file = entry.session_file.clone();
         let session_id = entry.id.clone();
@@ -1786,7 +1796,7 @@ impl App {
         chat_list.portal_list(cx, ids!(list)).set_tail_range(true);
         cx.redraw_all();
 
-        self.active_run = Some(get_runtime().spawn(async move {
+        let generation_handle = get_runtime().spawn(async move {
             let mut agent_lock = agent_arc.lock().await;
             if let Some(session_file) = new_session_file {
                 agent_lock.switch_session_file(session_file).await;
@@ -1806,7 +1816,10 @@ impl App {
                 let _ = tx.send(GuiAgentEvent::CommandOutput(out));
                 SignalToUI::set_ui_signal();
             }
-        }));
+        });
+        self.active_generation = Some(GenerationRun {
+            handle: generation_handle,
+        });
         self.set_status(cx, UiStatus::Working, "Working...");
     }
 
@@ -1900,7 +1913,7 @@ impl App {
             }
             AgentEvent::TurnEnd { .. } => self.set_status(cx, UiStatus::Working, "Turn completed"),
             AgentEvent::AgentEnd { .. } => {
-                self.active_run = None;
+                self.active_generation = None;
                 if let Some(workspace) = self.workspace_state.active_workspace_mut() {
                     workspace.chat.flush_streaming();
                 }
@@ -1912,6 +1925,7 @@ impl App {
                 refresh_sessions(&work_dir);
             }
             AgentEvent::AgentError { error } => {
+                self.active_generation = None;
                 if let Some(workspace) = self.workspace_state.active_workspace_mut() {
                     workspace.chat.flush_streaming();
                 }
@@ -1941,7 +1955,7 @@ impl App {
                     self.handle_agent_event(cx, task_event.event);
                 }
                 GuiAgentEvent::CommandOutput(output) => {
-                    self.active_run = None;
+                    self.active_generation = None;
                     self.push_chat(MsgRole::System, output);
                     self.set_status(cx, UiStatus::Ready, "Ready");
                     let work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));

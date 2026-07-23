@@ -97,3 +97,27 @@ test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 ```
 
 The command completed successfully with the existing duplicate-package and unused/dead-code warnings; no errors.
+
+## Final review fix: generation-only Stop discriminator
+
+- Replaced the generic `active_run` field with an explicit `active_generation` handle state.
+- Stop visibility and click handling now require that generation-specific state; login/device authorization and session switching abort/clear any generation and therefore cannot expose or cancel it through Stop.
+- The generation handle is cleared on `AgentEnd`, `CommandOutput`, and `AgentError`, covering natural success, command completion, and error completion.
+
+### Exact verification results
+
+`cargo check -p mypi-gui` — **PASS**
+
+```text
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.41s
+```
+
+`cargo test -p mypi-gui` — **PASS**
+
+```text
+running 17 tests
+...
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+Existing duplicate Makepad package, unused import, and dead-code warnings remain; no errors were emitted.
