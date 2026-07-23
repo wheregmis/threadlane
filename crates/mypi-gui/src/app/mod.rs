@@ -437,40 +437,6 @@ script_mod! {
     }
 
     startup() do #(App::script_component(vm)){
-        CmdItem := View {
-            width: Fill
-            height: Fit
-            flow: Down
-            spacing: 1
-            padding: Inset{left: 12 top: 6 right: 12 bottom: 6}
-            show_bg: true
-            draw_bg +: {
-                color: #x1f232b
-                color_hover: #x2f3a4d
-                color_down: #x3a4a5f
-                border_size: 0.0
-                border_radius: 5.0
-            }
-            cmd_name := Label {
-                width: Fill
-                height: Fit
-                text: ""
-                draw_text +: {
-                    color: #xdde3ea
-                    text_style: theme.font_code { font_size: 10.5 }
-                }
-            }
-            cmd_desc := Label {
-                width: Fill
-                height: Fit
-                text: ""
-                draw_text +: {
-                    color: #x8b93a0
-                    text_style +: { font_size: 9.0 }
-                }
-            }
-        }
-
         ui: Root {
             main_window := Window {
                 window.inner_size: vec2(1280, 768)
@@ -710,7 +676,7 @@ script_mod! {
                                     border_radius: 9.0
                                 }
 
-                                prompt_input := mod.widgets.CommandTextInput {
+                                prompt_input := mod.components.MypiCommandTextInput {
                                     width: Fill
                                     height: Fit
                                     trigger: "/"
@@ -997,39 +963,12 @@ pub struct App {
     #[rust]
     available_models: Vec<String>,
     #[rust]
-    cmd_item_template: Option<ScriptObjectRef>,
-    #[rust]
-    cmd_items: Vec<(WidgetRef, String)>,
-    #[rust]
     workspace_state: AppState,
     #[rust]
     session_context_entry: Option<SessionEntry>,
 }
 
-impl ScriptHook for App {
-    fn on_after_apply(
-        &mut self,
-        vm: &mut ScriptVm,
-        apply: &Apply,
-        _scope: &mut Scope,
-        value: ScriptValue,
-    ) {
-        if !apply.is_eval() {
-            if let Some(obj) = value.as_object() {
-                vm.vec_with(obj, |vm, vec| {
-                    for kv in vec {
-                        if kv.key.as_id() == Some(live_id!(CmdItem)) {
-                            if let Some(template_obj) = kv.value.as_object() {
-                                self.cmd_item_template =
-                                    Some(vm.bx.heap.new_object_ref(template_obj));
-                            }
-                        }
-                    }
-                });
-            }
-        }
-    }
-}
+impl ScriptHook for App {}
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
@@ -1280,30 +1219,22 @@ impl MatchEvent for App {
             }
         }
 
-        let cti = self.ui.command_text_input(cx, ids!(prompt_input));
+        let cti = self.ui.mypi_command_text_input(cx, ids!(prompt_input));
         if cti.should_build_items(actions) {
             self.build_cmd_items(cx);
         }
-        if let Some(selected) = cti.item_selected(actions) {
-            let uid = selected.widget_uid();
-            let name = self
-                .cmd_items
-                .iter()
-                .find(|(item, _)| item.widget_uid() == uid)
-                .map(|(_, name)| name.clone());
-            if let Some(name) = name {
-                let text = format!("/{name} ");
-                let text_input = cti.text_input_ref(cx);
-                text_input.set_text(cx, &text);
-                text_input.set_cursor(
-                    cx,
-                    Cursor {
-                        index: text.chars().count(),
-                        prefer_next_row: false,
-                    },
-                    false,
-                );
-            }
+        if let Some(name) = cti.item_selected(actions) {
+            let text = format!("/{name} ");
+            let text_input = cti.text_input_ref(cx);
+            text_input.set_text(cx, &text);
+            text_input.set_cursor(
+                cx,
+                Cursor {
+                    index: text.chars().count(),
+                    prefer_next_row: false,
+                },
+                false,
+            );
         }
 
         if self.ui.button(cx, ids!(model_picker_btn)).clicked(actions) {
@@ -1619,35 +1550,15 @@ impl App {
     }
 
     fn build_cmd_items(&mut self, cx: &mut Cx) {
-        let mut cti = self.ui.command_text_input(cx, ids!(prompt_input));
+        let cti = self.ui.mypi_command_text_input(cx, ids!(prompt_input));
         let search = cti.search_text(cx).to_lowercase();
-        cti.clear_items(cx);
-        self.cmd_items.clear();
-
-        let commands = self.commands.clone();
-        for cmd in commands
+        let commands = self
+            .commands
             .iter()
             .filter(|cmd| search.is_empty() || cmd.name.to_lowercase().starts_with(&search))
-        {
-            if let Some(widget) = self.make_cmd_item(cx, cmd) {
-                self.cmd_items.push((widget.clone(), cmd.name.clone()));
-                cti.add_item(cx, widget);
-            }
-        }
-        self.ui.widget(cx, ids!(prompt_input)).redraw(cx);
-    }
-
-    fn make_cmd_item(&mut self, cx: &mut Cx, cmd: &CommandInfo) -> Option<WidgetRef> {
-        let template = self.cmd_item_template.as_ref()?;
-        let template_value: ScriptValue = template.as_object().into();
-        let widget = cx.with_vm(|vm| WidgetRef::script_from_value(vm, template_value));
-        widget
-            .label(cx, ids!(cmd_name))
-            .set_text(cx, &format!("/{}", cmd.name));
-        widget
-            .label(cx, ids!(cmd_desc))
-            .set_text(cx, &cmd.description);
-        Some(widget)
+            .cloned()
+            .collect();
+        cti.set_items(cx, commands);
     }
 
     fn dispatch_input(&mut self, cx: &mut Cx, input_text: String, show_in_chat: bool) {

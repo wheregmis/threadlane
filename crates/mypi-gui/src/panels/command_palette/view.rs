@@ -1,5 +1,6 @@
 //! CommandTextInput widget implementation and completion popup view.
 
+use super::state::CommandInfo;
 use makepad_widgets::text::selection::Cursor;
 use makepad_widgets::*;
 use unicode_segmentation::UnicodeSegmentation;
@@ -8,17 +9,9 @@ script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
 
-    mod.widgets.CommandTextInputListBase = #(List::register_widget(vm))
+    mod.components.MypiCommandTextInputBase = #(MypiCommandTextInput::register_widget(vm))
 
-    mod.widgets.CommandTextInputList = mod.widgets.CommandTextInputListBase{
-        flow: Down
-        width: Fill
-        height: 208
-    }
-
-    mod.widgets.CommandTextInputBase = #(CommandTextInput::register_widget(vm))
-
-    mod.widgets.CommandTextInput = mod.widgets.CommandTextInputBase{
+    mod.components.MypiCommandTextInput = mod.components.MypiCommandTextInputBase{
         flow: Down
         height: Fit
 
@@ -109,8 +102,60 @@ script_mod! {
                 }
             }
 
-            list := mod.widgets.CommandTextInputList{
+            list := PortalList{
+                width: Fill
                 height: 208
+                flow: Down
+                drag_scrolling: true
+
+                CommandItem := View {
+                    width: Fill
+                    height: Fit
+                    flow: Right
+                    spacing: 7
+                    align: Align{y: 0.5}
+                    padding: Inset{left: 10 top: 6 right: 12 bottom: 6}
+                    cursor: MouseCursor.Hand
+                    show_bg: true
+                    draw_bg +: {
+                        color: #x00000000
+                        border_size: 0.0
+                        border_radius: 5.0
+                    }
+                    active_marker := Label {
+                        width: 10
+                        height: Fit
+                        text: ""
+                        draw_text +: {
+                            color: #x8fb3ff
+                            text_style: theme.font_bold { font_size: 12.0 }
+                        }
+                    }
+                    command_content := View {
+                        width: Fill
+                        height: Fit
+                        flow: Down
+                        spacing: 1
+                        cmd_name := Label {
+                            width: Fill
+                            height: Fit
+                            text: ""
+                            draw_text +: {
+                                color: #xdde3ea
+                                text_style: theme.font_code { font_size: 10.5 }
+                            }
+                        }
+                        cmd_desc := Label {
+                            width: Fill
+                            height: Fit
+                            text: ""
+                            draw_text +: {
+                                color: #x8b93a0
+                                text_style +: { font_size: 9.0 }
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -141,7 +186,7 @@ enum InternalAction {
 }
 
 #[derive(Script, ScriptHook, Widget)]
-pub struct CommandTextInput {
+pub struct MypiCommandTextInput {
     #[source]
     source: ScriptObjectRef,
     #[deref]
@@ -172,10 +217,10 @@ pub struct CommandTextInput {
     pointer_hover_index: Option<usize>,
 
     #[rust]
-    selectable_widgets: Vec<WidgetRef>,
+    items: Vec<CommandInfo>,
 
     #[rust]
-    last_selected_widget: WidgetRef,
+    last_selected_command: String,
 
     #[rust]
     trigger_position: Option<usize>,
@@ -184,7 +229,7 @@ pub struct CommandTextInput {
     prev_cursor_position: usize,
 }
 
-impl Widget for CommandTextInput {
+impl Widget for MypiCommandTextInput {
     fn set_text(&mut self, cx: &mut Cx, v: &str) {
         self.text_input_ref(cx).set_text(cx, v);
     }
@@ -194,10 +239,52 @@ impl Widget for CommandTextInput {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        self.update_highlights(cx);
         self.ensure_popup_consistent(cx);
 
-        while !self.deref.draw_walk(cx, scope, walk).is_done() {}
+        while let Some(item) = self.deref.draw_walk(cx, scope, walk).step() {
+            if let Some(mut list) = item.as_portal_list().borrow_mut() {
+                list.set_item_range(cx, 0, self.items.len());
+
+                while let Some(item_id) = list.next_visible_item(cx) {
+                    let Some(command) = self.items.get(item_id) else {
+                        continue;
+                    };
+                    let mut item_widget = list.item(cx, item_id, id!(CommandItem));
+                    item_widget
+                        .label(cx, ids!(cmd_name))
+                        .set_text(cx, &format!("/{}", command.name));
+                    item_widget
+                        .label(cx, ids!(cmd_desc))
+                        .set_text(cx, &command.description);
+
+                    let is_active = Some(item_id) == self.keyboard_focus_index;
+                    item_widget
+                        .label(cx, ids!(active_marker))
+                        .set_text(cx, if is_active { "›" } else { "" });
+
+                    let color = if is_active {
+                        self.color_focus
+                    } else if Some(item_id) == self.pointer_hover_index {
+                        self.color_hover
+                    } else {
+                        Vec4f::all(0.)
+                    };
+                    let name_color = if is_active {
+                        vec4(0.95, 0.97, 1.0, 1.0)
+                    } else {
+                        vec4(0.87, 0.89, 0.92, 1.0)
+                    };
+                    let mut name_label = item_widget.label(cx, ids!(cmd_name));
+                    script_apply_eval!(cx, name_label, {
+                        draw_text +: { color: #(name_color) }
+                    });
+                    script_apply_eval!(cx, item_widget, {
+                        draw_bg +: { color: #(color) }
+                    });
+                    item_widget.draw_all_unscoped(cx);
+                }
+            }
+        }
 
         if self.is_search_input_focus_pending {
             self.is_search_input_focus_pending = false;
@@ -213,38 +300,32 @@ impl Widget for CommandTextInput {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        if cx.has_key_focus(self.key_controller_text_input_ref(cx).area()) {
-            if let Event::KeyDown(key_event) = event {
-                let popup_visible = self.view(cx, ids!(popup)).visible();
-
-                if popup_visible {
-                    let mut eat_the_event = true;
-
-                    match key_event.key_code {
-                        KeyCode::ArrowDown => {
-                            self.pointer_hover_index = None;
-                            self.on_keyboard_move(cx, 1);
-                        }
-                        KeyCode::ArrowUp => {
-                            self.pointer_hover_index = None;
-                            self.on_keyboard_move(cx, -1);
-                        }
-                        KeyCode::ReturnKey | KeyCode::Tab => {
-                            self.on_keyboard_controller_input_submit(cx, scope);
-                        }
-                        KeyCode::Escape => {
-                            self.is_text_input_focus_pending = true;
-                            self.hide_popup(cx);
-                            self.redraw(cx);
-                        }
-                        _ => {
-                            eat_the_event = false;
-                        }
-                    };
-
-                    if eat_the_event {
-                        return;
+        if let Event::KeyDown(key_event) = event {
+            if self.view(cx, ids!(popup)).visible() {
+                let handled = match key_event.key_code {
+                    KeyCode::ArrowDown => {
+                        self.on_keyboard_move(cx, 1);
+                        true
                     }
+                    KeyCode::ArrowUp => {
+                        self.on_keyboard_move(cx, -1);
+                        true
+                    }
+                    KeyCode::ReturnKey | KeyCode::Tab => {
+                        self.on_keyboard_controller_input_submit(cx, scope);
+                        true
+                    }
+                    KeyCode::Escape => {
+                        self.is_text_input_focus_pending = true;
+                        self.hide_popup(cx);
+                        self.redraw(cx);
+                        true
+                    }
+                    _ => false,
+                };
+
+                if handled {
+                    return;
                 }
             }
         }
@@ -275,8 +356,9 @@ impl Widget for CommandTextInput {
         if let Event::Actions(actions) = event {
             let mut selected_by_click = None;
             let mut should_redraw = false;
+            let list = self.portal_list(cx, ids!(list));
 
-            for (idx, item) in self.selectable_widgets.iter().enumerate() {
+            for (idx, item) in list.items_with_actions(actions) {
                 let item = item.as_view();
 
                 if item
@@ -284,8 +366,7 @@ impl Widget for CommandTextInput {
                     .map(|fe| fe.tap_count == 1)
                     .unwrap_or(false)
                 {
-                    selected_by_click = Some((&*item).clone());
-                    self.keyboard_focus_index = None;
+                    selected_by_click = Some(idx);
                 }
 
                 if item.finger_hover_out(actions).is_some() && Some(idx) == self.pointer_hover_index
@@ -296,13 +377,13 @@ impl Widget for CommandTextInput {
 
                 if item.finger_hover_in(actions).is_some() {
                     self.pointer_hover_index = Some(idx);
-                    self.keyboard_focus_index = None;
+                    self.keyboard_focus_index = Some(idx);
                     should_redraw = true;
                 }
             }
 
             if should_redraw {
-                self.redraw(cx);
+                list.redraw(cx);
             }
 
             if let Some(selected) = selected_by_click {
@@ -334,7 +415,7 @@ impl Widget for CommandTextInput {
     }
 }
 
-impl CommandTextInput {
+impl MypiCommandTextInput {
     fn ensure_popup_consistent(&mut self, cx: &mut Cx) {
         if self.view(cx, ids!(popup)).visible() {
             if self.inline_search {
@@ -351,10 +432,12 @@ impl CommandTextInput {
         self.keyboard_focus_index
     }
 
-    pub fn set_keyboard_focus_index(&mut self, idx: usize) {
-        if !self.selectable_widgets.is_empty() {
-            self.keyboard_focus_index = Some(idx.clamp(0, self.selectable_widgets.len() - 1));
-        }
+    pub fn set_items(&mut self, cx: &mut Cx, items: Vec<CommandInfo>) {
+        self.items = items;
+        self.keyboard_focus_index = (!self.items.is_empty()).then_some(0);
+        self.pointer_hover_index = None;
+        self.portal_list(cx, ids!(list)).set_first_id(0);
+        self.redraw(cx);
     }
 
     fn on_text_inserted(&mut self, cx: &mut Cx, _scope: &mut Scope, inserted: &str) {
@@ -381,12 +464,15 @@ impl CommandTextInput {
             return;
         };
 
-        self.select_item(cx, scope, self.selectable_widgets[idx].clone());
+        self.select_item(cx, scope, idx);
     }
 
-    fn select_item(&mut self, cx: &mut Cx, _scope: &mut Scope, selected: WidgetRef) {
+    fn select_item(&mut self, cx: &mut Cx, _scope: &mut Scope, selected: usize) {
+        let Some(command) = self.items.get(selected) else {
+            return;
+        };
+        self.last_selected_command = command.name.clone();
         self.try_remove_trigger_and_inline_search(cx);
-        self.last_selected_widget = selected;
         cx.widget_action(self.widget_uid(), InternalAction::ItemSelected);
         self.hide_popup(cx);
         self.is_text_input_focus_pending = true;
@@ -475,21 +561,12 @@ impl CommandTextInput {
         self.clear_items(cx);
     }
 
-    pub fn clear_items(&mut self, cx: &Cx) {
-        self.list(cx, ids!(list)).clear();
-        self.selectable_widgets.clear();
+    pub fn clear_items(&mut self, cx: &mut Cx) {
+        self.items.clear();
         self.keyboard_focus_index = None;
         self.pointer_hover_index = None;
-    }
-
-    pub fn add_item(&mut self, cx: &Cx, widget: WidgetRef) {
-        self.list(cx, ids!(list)).add(widget.clone());
-        self.selectable_widgets.push(widget);
-        self.keyboard_focus_index = self.keyboard_focus_index.or(Some(0));
-    }
-
-    pub fn add_unselectable_item(&mut self, cx: &Cx, widget: WidgetRef) {
-        self.list(cx, ids!(list)).add(widget);
+        self.portal_list(cx, ids!(list)).set_first_id(0);
+        self.redraw(cx);
     }
 
     pub fn search_text(&self, cx: &Cx) -> String {
@@ -570,14 +647,14 @@ impl CommandTextInput {
         }
     }
 
-    pub fn item_selected(&self, actions: &Actions) -> Option<WidgetRef> {
+    pub fn item_selected(&self, actions: &Actions) -> Option<String> {
         actions
             .iter()
             .filter_map(|a| a.as_widget_action())
             .filter(|a| a.widget_uid == self.widget_uid())
             .find_map(|a| {
                 if let InternalAction::ItemSelected = a.cast() {
-                    Some(self.last_selected_widget.clone())
+                    Some(self.last_selected_command.clone())
                 } else {
                     None
                 }
@@ -613,58 +690,23 @@ impl CommandTextInput {
     }
 
     fn on_keyboard_move(&mut self, cx: &mut Cx, delta: i32) {
-        let Some(idx) = self.keyboard_focus_index else {
-            if !self.selectable_widgets.is_empty() {
-                if delta > 0 {
-                    self.keyboard_focus_index = Some(0);
-                } else {
-                    self.keyboard_focus_index = Some(self.selectable_widgets.len() - 1);
-                }
-            }
+        if self.items.is_empty() {
             return;
+        }
+
+        let selected = match self.keyboard_focus_index {
+            Some(idx) => idx
+                .saturating_add_signed(delta as isize)
+                .clamp(0, self.items.len() - 1),
+            None if delta > 0 => 0,
+            None => self.items.len() - 1,
         };
-
-        let new_index = idx
-            .saturating_add_signed(delta as isize)
-            .clamp(0, self.selectable_widgets.len() - 1);
-
-        if idx != new_index {
-            self.keyboard_focus_index = Some(new_index);
-        }
-
+        self.keyboard_focus_index = Some(selected);
         self.pointer_hover_index = None;
+
+        self.portal_list(cx, ids!(list))
+            .smooth_scroll_to(cx, selected, 12.0, Some(4), 4.0);
         self.redraw(cx);
-    }
-
-    fn update_highlights(&mut self, cx: &mut Cx) {
-        let has_keyboard_focus = self.keyboard_focus_index.is_some();
-
-        for (idx, item) in self.selectable_widgets.iter().enumerate() {
-            let mut item = item.clone();
-            script_apply_eval!(cx, item, { show_bg: true });
-
-            if Some(idx) == self.keyboard_focus_index {
-                let color = self.color_focus;
-                script_apply_eval!(cx, item, {
-                    draw_bg +: {
-                        color: #(color)
-                    }
-                });
-            } else if Some(idx) == self.pointer_hover_index && !has_keyboard_focus {
-                let color = self.color_hover;
-                script_apply_eval!(cx, item, {
-                    draw_bg +: {
-                        color: #(color)
-                    }
-                });
-            } else {
-                script_apply_eval!(cx, item, {
-                    draw_bg +: {
-                        color: #(Vec4f::all(0.))
-                    }
-                });
-            }
-        }
     }
 
     pub fn request_text_input_focus(&mut self) {
@@ -672,31 +714,19 @@ impl CommandTextInput {
     }
 }
 
-impl CommandTextInputRef {
+impl MypiCommandTextInputRef {
     pub fn should_build_items(&self, actions: &Actions) -> bool {
         self.borrow()
             .map_or(false, |inner| inner.should_build_items(actions))
     }
 
-    pub fn clear_items(&mut self, cx: &Cx) {
+    pub fn set_items(&self, cx: &mut Cx, items: Vec<CommandInfo>) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.clear_items(cx);
+            inner.set_items(cx, items);
         }
     }
 
-    pub fn add_item(&self, cx: &Cx, widget: WidgetRef) {
-        if let Some(mut inner) = self.borrow_mut() {
-            inner.add_item(cx, widget);
-        }
-    }
-
-    pub fn add_unselectable_item(&self, cx: &Cx, widget: WidgetRef) {
-        if let Some(mut inner) = self.borrow_mut() {
-            inner.add_unselectable_item(cx, widget);
-        }
-    }
-
-    pub fn item_selected(&self, actions: &Actions) -> Option<WidgetRef> {
+    pub fn item_selected(&self, actions: &Actions) -> Option<String> {
         self.borrow().and_then(|inner| inner.item_selected(actions))
     }
 
@@ -742,63 +772,4 @@ fn get_head(text_input: &TextInputRef) -> usize {
 
 fn is_whitespace(grapheme: &str) -> bool {
     grapheme.chars().all(char::is_whitespace)
-}
-
-#[derive(Script, ScriptHook, Widget)]
-struct List {
-    #[source]
-    source: ScriptObjectRef,
-    #[deref]
-    deref: View,
-
-    #[rust]
-    area: Area,
-
-    #[rust]
-    items: Vec<WidgetRef>,
-}
-
-impl Widget for List {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        self.items.iter().for_each(|item| {
-            item.handle_event(cx, event, scope);
-        });
-    }
-
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        cx.begin_turtle(walk, self.deref.layout);
-        self.items.iter().for_each(|item| {
-            item.draw_all(cx, scope);
-        });
-        cx.end_turtle_with_area(&mut self.area);
-        DrawStep::done()
-    }
-}
-
-impl List {
-    fn clear(&mut self) {
-        self.items.clear();
-    }
-
-    fn add(&mut self, widget: WidgetRef) {
-        self.items.push(widget);
-    }
-}
-
-impl ListRef {
-    fn clear(&self) {
-        let Some(mut inner) = self.borrow_mut() else {
-            return;
-        };
-
-        inner.clear();
-    }
-
-    fn add(&self, widget: WidgetRef) {
-        let Some(mut inner) = self.borrow_mut() else {
-            return;
-        };
-
-        inner.add(widget);
-    }
 }
