@@ -31,5 +31,5 @@ pub use supervisor::{HarnessSupervisor, ProjectRecord, TaskAgentEvent, TaskRecor
 pub use wasi_extension::{
     WasiCommandDefinition, WasiExtension, WasiExtensionCommandResult, WasiExtensionEffect,
     WasiExtensionInvocation, WasiExtensionInvocationResult, WasiExtensionManager,
-    WasiExtensionManifest, WasiExtensionResponse, WasiToolDefinition,
+    WasiExtensionEvent, WasiExtensionManifest, WasiExtensionResponse, WasiToolDefinition,
 };

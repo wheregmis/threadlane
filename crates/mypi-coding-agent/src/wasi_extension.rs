@@ -3,7 +3,7 @@ use crate::extension_broker::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -44,6 +44,12 @@ fn default_api_version() -> u32 {
     1
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WasiExtensionEvent {
+    pub topic: String,
+    pub payload: Value,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WasiExtensionInvocation {
     pub api_version: u32,
@@ -52,6 +58,9 @@ pub struct WasiExtensionInvocation {
     pub arguments: Value,
     #[serde(default)]
     pub state: Value,
+    /// Events are queued by the host and delivered on this extension's next invocation.
+    #[serde(default)]
+    pub events: Vec<WasiExtensionEvent>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -436,7 +445,8 @@ fn encode_state_component(component: &str) -> String {
 pub struct WasiExtensionManager {
     pub extensions: HashMap<String, WasiExtension>,
     states: Mutex<HashMap<String, Value>>,
-    events: Mutex<Vec<(String, Value)>>,
+    subscriptions: Mutex<HashMap<String, HashSet<String>>>,
+    pending_events: Mutex<HashMap<String, Vec<WasiExtensionEvent>>>,
     state_dir: Option<PathBuf>,
     /// Stateful conversational extensions are isolated by the active session.
     /// `None` retains the project-wide scope for callers that explicitly need it.
@@ -504,18 +514,57 @@ impl WasiExtensionManager {
         self.persist_state(extension_name, &state)
     }
 
-    pub fn publish_event(&self, topic: String, payload: Value) -> Result<(), String> {
-        self.events
+    /// Subscribe an extension to a topic. Delivery is queued until its next invocation.
+    pub fn subscribe_event(&self, extension_name: &str, topic: String) -> Result<(), String> {
+        if extension_name.is_empty() || topic.trim().is_empty() {
+            return Err("Event subscription requires extension identity and topic".into());
+        }
+        self.subscriptions
             .lock()
-            .map_err(|_| "Extension event lock poisoned".to_string())?
-            .push((topic, payload));
+            .map_err(|_| "Extension subscription lock poisoned".to_string())?
+            .entry(extension_name.to_string())
+            .or_default()
+            .insert(topic);
+        Ok(())
+    }
+
+    pub fn publish_event(&self, topic: String, payload: Value) -> Result<(), String> {
+        let subscribers = self
+            .subscriptions
+            .lock()
+            .map_err(|_| "Extension subscription lock poisoned".to_string())?;
+        let event = WasiExtensionEvent { topic: topic.clone(), payload };
+        let mut pending = self
+            .pending_events
+            .lock()
+            .map_err(|_| "Extension event lock poisoned".to_string())?;
+        for (extension, topics) in subscribers.iter() {
+            if topics.contains(&topic) {
+                pending.entry(extension.clone()).or_default().push(event.clone());
+            }
+        }
         Ok(())
     }
 
     pub fn drain_events(&self) -> Result<Vec<(String, Value)>, String> {
-        Ok(std::mem::take(&mut *self.events.lock().map_err(|_| {
-            "Extension event lock poisoned".to_string()
-        })?))
+        let mut pending = self
+            .pending_events
+            .lock()
+            .map_err(|_| "Extension event lock poisoned".to_string())?;
+        Ok(pending
+            .drain()
+            .flat_map(|(_, events)| events.into_iter().map(|event| (event.topic, event.payload)))
+            .collect())
+    }
+
+    /// Removes events queued for one extension, matching the next-invocation delivery path.
+    pub fn drain_events_for(&self, extension_name: &str) -> Result<Vec<WasiExtensionEvent>, String> {
+        Ok(self
+            .pending_events
+            .lock()
+            .map_err(|_| "Extension event lock poisoned".to_string())?
+            .remove(extension_name)
+            .unwrap_or_default())
     }
 
     /// Location used for session-owned extension state. This is public so UI
@@ -730,12 +779,14 @@ impl WasiExtensionManager {
             .unwrap_or_else(|| serde_json::json!({}));
         let arguments =
             serde_json::from_str(args).unwrap_or_else(|_| serde_json::json!({ "raw": args }));
+        let events = self.drain_events_for(&extension.manifest.name)?;
         let invocation = WasiExtensionInvocation {
             api_version: 1,
             kind: kind.into(),
             name: name.into(),
             arguments,
             state,
+            events,
         };
         let result = match kind {
             "tool" => extension.call_tool(&invocation),

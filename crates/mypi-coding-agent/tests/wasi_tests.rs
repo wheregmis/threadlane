@@ -1,7 +1,7 @@
 use mypi_coding_agent::{
     BrokerError, BrokerRequest, CapabilityDispatcher, CapabilityHandler, CapabilityPolicy,
-    WasiExtension, WasiExtensionEffect, WasiExtensionManager, WasiExtensionManifest,
-    WasiToolDefinition,
+    WasiExtension, WasiExtensionEffect, WasiExtensionEvent, WasiExtensionManager,
+    WasiExtensionManifest, WasiToolDefinition,
 };
 use serde_json::Value;
 use std::path::PathBuf;
@@ -249,6 +249,32 @@ fn broker_request_round_trips_and_requires_v2() {
     assert_eq!(request.api_version, 2);
     assert_eq!(request.capability, "tools");
     assert_eq!(request.operation, "set_policy");
+}
+
+#[test]
+fn events_are_topic_filtered_and_queued_for_next_invocation() {
+    let manager = WasiExtensionManager::new();
+    manager.subscribe_event("listener", "updates".into()).unwrap();
+    manager.publish_event("ignored".into(), serde_json::json!(1)).unwrap();
+    manager.publish_event("updates".into(), serde_json::json!({"ok":true})).unwrap();
+    assert_eq!(
+        manager.drain_events_for("listener").unwrap(),
+        vec![WasiExtensionEvent {
+            topic: "updates".into(),
+            payload: serde_json::json!({"ok":true}),
+        }]
+    );
+    assert!(manager.drain_events_for("listener").unwrap().is_empty());
+}
+
+#[test]
+fn extension_state_is_owned_by_identity() {
+    let manager = WasiExtensionManager::new();
+    manager
+        .set_extension_state("one", serde_json::json!({"secret": 1}))
+        .unwrap();
+    assert_eq!(manager.extension_state("one"), Some(serde_json::json!({"secret": 1})));
+    assert_eq!(manager.extension_state("two"), None);
 }
 
 #[test]

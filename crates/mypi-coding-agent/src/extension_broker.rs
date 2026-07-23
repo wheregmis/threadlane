@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap};
@@ -13,6 +14,7 @@ pub struct HostBrokerRequest {
     pub invoking_extension: String,
 }
 
+#[async_trait]
 pub trait CapabilityHandler: Send + Sync {
     fn handle(&self, request: &BrokerRequest) -> Result<Value, BrokerError>;
 
@@ -22,6 +24,14 @@ pub trait CapabilityHandler: Send + Sync {
         _invoking_extension: &str,
     ) -> Result<Value, BrokerError> {
         self.handle(request)
+    }
+
+    async fn handle_for_extension_async(
+        &self,
+        request: &BrokerRequest,
+        invoking_extension: &str,
+    ) -> Result<Value, BrokerError> {
+        self.handle_for_extension(request, invoking_extension)
     }
 }
 
@@ -122,6 +132,7 @@ impl CapabilityDispatcher {
             let handler = self
                 .handlers
                 .get(&request.capability)
+                .cloned()
                 .ok_or_else(|| BrokerError {
                     code: "unknown_capability".into(),
                     message: format!(
@@ -129,7 +140,9 @@ impl CapabilityDispatcher {
                         request.capability
                     ),
                 })?;
-            let value = handler.handle_for_extension(request, &envelope.invoking_extension)?;
+            let value = handler
+                .handle_for_extension_async(request, &envelope.invoking_extension)
+                .await?;
             append_outputs(&mut result, &value);
         }
         Ok(result)

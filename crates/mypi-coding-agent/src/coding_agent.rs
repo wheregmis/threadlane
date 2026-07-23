@@ -13,12 +13,12 @@ use mypi_agent::{
 use serde_json::Value;
 use std::collections::HashSet;
 use std::fs;
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 use tokio::sync::broadcast;
+use tokio::time::{timeout, Duration};
+
+const CAPABILITY_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolPolicy {
@@ -50,10 +50,12 @@ impl HostCapabilityHandler {
             "agent" => self.handle_agent(request),
             "session" => self.handle_session(request, invoking_extension),
             "fs" => self.handle_fs(request),
-            "process" => self.handle_process(request),
-            "network" => self.handle_network(request),
+            "process" | "network" => Err(BrokerError {
+                code: "async_required".into(),
+                message: format!("Capability `{}` requires async dispatch", self.capability),
+            }),
             "ui" => self.handle_ui(request),
-            "events" => self.handle_events(request),
+            "events" => self.handle_events(request, invoking_extension),
             _ => Err(BrokerError {
                 code: "unknown_capability".into(),
                 message: format!("Host does not implement capability `{}`", self.capability),
@@ -62,6 +64,7 @@ impl HostCapabilityHandler {
     }
 }
 
+#[async_trait]
 impl CapabilityHandler for HostCapabilityHandler {
     fn handle(&self, request: &BrokerRequest) -> Result<Value, BrokerError> {
         HostCapabilityHandler::handle(self, request)
@@ -73,6 +76,18 @@ impl CapabilityHandler for HostCapabilityHandler {
         invoking_extension: &str,
     ) -> Result<Value, BrokerError> {
         HostCapabilityHandler::handle_for_extension(self, request, invoking_extension)
+    }
+
+    async fn handle_for_extension_async(
+        &self,
+        request: &BrokerRequest,
+        invoking_extension: &str,
+    ) -> Result<Value, BrokerError> {
+        match self.capability {
+            "process" => self.handle_process_async(request).await,
+            "network" => self.handle_network_async(request).await,
+            _ => self.handle_for_extension(request, invoking_extension),
+        }
     }
 }
 
@@ -188,7 +203,7 @@ impl HostCapabilityHandler {
         }
     }
 
-    fn handle_process(&self, request: &BrokerRequest) -> Result<Value, BrokerError> {
+    async fn handle_process_async(&self, request: &BrokerRequest) -> Result<Value, BrokerError> {
         if request.operation != "run" {
             return unknown_operation(self.capability, &request.operation);
         }
@@ -198,15 +213,19 @@ impl HostCapabilityHandler {
             .get("args")
             .and_then(Value::as_array)
             .ok_or_else(|| invalid_argument("missing argument `args`"))?;
-        let mut command = Command::new(program);
-        command.current_dir(&self.work_dir);
+        let mut command = tokio::process::Command::new(program);
+        command.current_dir(&self.work_dir).kill_on_drop(true);
         for arg in args {
             command.arg(
                 arg.as_str()
                     .ok_or_else(|| invalid_argument("args must be strings"))?,
             );
         }
-        let output = command.output().map_err(host_error)?;
+        let child = command.spawn().map_err(host_error)?;
+        let output = timeout(CAPABILITY_TIMEOUT, child.wait_with_output())
+            .await
+            .map_err(|_| timeout_error("process.run"))?
+            .map_err(host_error)?;
         let stdout = String::from_utf8(output.stdout)
             .map_err(|_| invalid_argument("stdout was not UTF-8"))?;
         let stderr = String::from_utf8(output.stderr)
@@ -216,13 +235,17 @@ impl HostCapabilityHandler {
         }).to_string()}))
     }
 
-    fn handle_network(&self, request: &BrokerRequest) -> Result<Value, BrokerError> {
+    async fn handle_network_async(&self, request: &BrokerRequest) -> Result<Value, BrokerError> {
         if request.operation != "http" {
             return unknown_operation(self.capability, &request.operation);
         }
         let url = string_argument(&request.arguments, "url")?;
         let method = string_argument(&request.arguments, "method")?;
-        let body = string_argument(&request.arguments, "body")?;
+        let body = request
+            .arguments
+            .get("body")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid_argument("missing argument `body`"))?;
         let (host, port, path) = parse_http_url(url)?;
         if !self.allowed_hosts.contains(host) {
             return Err(BrokerError {
@@ -230,14 +253,24 @@ impl HostCapabilityHandler {
                 message: format!("Network host `{host}` is not allowed"),
             });
         }
-        let mut stream = TcpStream::connect((host, port)).map_err(host_error)?;
+        let host = host.to_string();
         let request = format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
-        stream.write_all(request.as_bytes()).map_err(host_error)?;
-        let mut response = Vec::new();
-        stream.read_to_end(&mut response).map_err(host_error)?;
-        let response =
-            String::from_utf8(response).map_err(|_| invalid_argument("response was not UTF-8"))?;
-        Ok(serde_json::json!({"message": response}))
+        let result = timeout(CAPABILITY_TIMEOUT, async move {
+            let mut stream = tokio::net::TcpStream::connect((host.as_str(), port))
+                .await
+                .map_err(host_error)?;
+            tokio::io::AsyncWriteExt::write_all(&mut stream, request.as_bytes())
+                .await
+                .map_err(host_error)?;
+            let mut response = Vec::new();
+            tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut response)
+                .await
+                .map_err(host_error)?;
+            String::from_utf8(response).map_err(|_| invalid_argument("response was not UTF-8"))
+        })
+        .await
+        .map_err(|_| timeout_error("network.http"))??;
+        Ok(serde_json::json!({"message": result}))
     }
 
     fn handle_ui(&self, request: &BrokerRequest) -> Result<Value, BrokerError> {
@@ -254,23 +287,44 @@ impl HostCapabilityHandler {
         Ok(Value::Null)
     }
 
-    fn handle_events(&self, request: &BrokerRequest) -> Result<Value, BrokerError> {
-        if request.operation != "publish" {
-            return unknown_operation(self.capability, &request.operation);
-        }
+    fn handle_events(
+        &self,
+        request: &BrokerRequest,
+        invoking_extension: &str,
+    ) -> Result<Value, BrokerError> {
         let topic = string_argument(&request.arguments, "topic")?;
-        let payload = request
-            .arguments
-            .get("payload")
-            .cloned()
-            .ok_or_else(|| invalid_argument("missing argument `payload`"))?;
-        self.extensions
-            .publish_event(topic.to_string(), payload)
-            .map_err(host_error)?;
-        Ok(Value::Null)
+        match request.operation.as_str() {
+            "subscribe" => {
+                if invoking_extension.is_empty() {
+                    return Err(invalid_argument("events subscription requires host extension identity"));
+                }
+                self.extensions
+                    .subscribe_event(invoking_extension, topic.to_string())
+                    .map_err(host_error)?;
+                Ok(Value::Null)
+            }
+            "publish" => {
+                let payload = request
+                    .arguments
+                    .get("payload")
+                    .cloned()
+                    .ok_or_else(|| invalid_argument("missing argument `payload`"))?;
+                self.extensions
+                    .publish_event(topic.to_string(), payload)
+                    .map_err(host_error)?;
+                Ok(Value::Null)
+            }
+            _ => unknown_operation(self.capability, &request.operation),
+        }
     }
 }
 
+fn timeout_error(operation: &str) -> BrokerError {
+    BrokerError {
+        code: "timeout".into(),
+        message: format!("Capability operation `{operation}` timed out"),
+    }
+}
 fn internal_error(message: impl Into<String>) -> BrokerError {
     BrokerError {
         code: "host_error".into(),
@@ -1053,4 +1107,68 @@ fn format_subagent_results(
         })
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::extension_broker::CapabilityHandler;
+    use std::time::{Duration as StdDuration, Instant};
+
+    fn handler(capability: &'static str, work_dir: PathBuf) -> HostCapabilityHandler {
+        let (event_tx, _) = broadcast::channel(4);
+        HostCapabilityHandler {
+            capability,
+            tool_policy: None,
+            extensions: Arc::new(WasiExtensionManager::new()),
+            work_dir,
+            event_tx,
+            allowed_hosts: Arc::new(HashSet::new()),
+        }
+    }
+
+    #[test]
+    fn filesystem_rejects_paths_outside_work_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let request = BrokerRequest {
+            api_version: 2,
+            capability: "fs".into(),
+            operation: "read_text".into(),
+            arguments: serde_json::json!({"path": "../outside"}),
+        };
+        let error = handler("fs", dir.path().to_path_buf()).handle(&request).unwrap_err();
+        assert_eq!(error.code, "invalid_argument");
+    }
+
+    #[tokio::test]
+    async fn process_timeout_and_network_denial_are_structured_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let process = handler("process", dir.path().to_path_buf());
+        let request = BrokerRequest {
+            api_version: 2,
+            capability: "process".into(),
+            operation: "run".into(),
+            arguments: serde_json::json!({"program": "sh", "args": ["-c", "sleep 10"]}),
+        };
+        let started = Instant::now();
+        let error = process
+            .handle_for_extension_async(&request, "ext")
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "timeout");
+        assert!(started.elapsed() < StdDuration::from_secs(4));
+
+        let network = handler("network", dir.path().to_path_buf());
+        let request = BrokerRequest {
+            api_version: 2,
+            capability: "network".into(),
+            operation: "http".into(),
+            arguments: serde_json::json!({"url": "http://not-allowed/", "method": "GET", "body": ""}),
+        };
+        let error = network
+            .handle_for_extension_async(&request, "ext")
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "host_denied");
+    }
 }
