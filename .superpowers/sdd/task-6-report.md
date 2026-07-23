@@ -182,3 +182,11 @@ Validation: `cargo test -p mypi-coding-agent --lib -- --nocapture` passed (7 tes
   "manualNotes": "The focused test fixture is generated in-memory and written only to a temporary directory."
 }
 ```
+
+## Final review blocker follow-up
+
+- Generic command handling now queues every broker operation result, including `agent.run`, for the invoking extension before returning.
+- The formatted `agent.run` output and thinking messages remain the user-visible command result; other operation outcomes from the same invocation are not discarded.
+- Added `subagent_command_delivers_agent_run_result_to_same_extension_next_invocation`, which invokes `/subagent`, invokes the same v2 extension again, and verifies the second invocation receives the `agent.run` `broker_response` event.
+
+Validation: `cargo test -p mypi-coding-agent --lib coding_agent::tests::subagent_command_delivers_agent_run_result_to_same_extension_next_invocation -- --nocapture` passed. GUI changes remain untouched.

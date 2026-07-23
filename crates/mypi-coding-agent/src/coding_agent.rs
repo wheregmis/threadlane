@@ -1180,37 +1180,42 @@ impl CodingAgent {
                                 return Some(format!("WASI Broker Error: {}", error.message))
                             }
                         };
-                        let agent_run = dispatch.operation_results.iter().find(|result| {
-                            result.request.capability == "agent"
-                                && result.request.operation == "run"
-                        });
-                        if let Some(result) = agent_run {
-                            if let Some(error) = &result.error {
-                                return Some(format!("WASI Broker Error: {}", error.message));
-                            }
-                            let output = result.value["output"].as_str().ok_or_else(|| {
-                                "agent.run returned no formatted output".to_string()
-                            });
-                            let thinking = serde_json::from_value::<Vec<AgentMessage>>(
-                                result.value["thinking"].clone(),
-                            )
-                            .map_err(|error| {
-                                format!("agent.run returned invalid thinking: {error}")
-                            });
-                            match (output, thinking) {
-                                (Ok(output), Ok(thinking)) => {
-                                    for message in thinking {
-                                        self.session_tree.add_message(message);
-                                    }
-                                    self.session_tree.add_message(AgentMessage::Assistant {
-                                        content: Some(output.to_string()),
-                                        tool_calls: None,
-                                    });
-                                    return Some(output.to_string());
+                        let agent_run_output =
+                            dispatch.operation_results.iter().find_map(|result| {
+                                if result.request.capability != "agent"
+                                    || result.request.operation != "run"
+                                {
+                                    return None;
                                 }
-                                (Err(error), _) | (_, Err(error)) => return Some(error),
-                            }
-                        }
+                                if let Some(error) = &result.error {
+                                    return Some(Err(format!(
+                                        "WASI Broker Error: {}",
+                                        error.message
+                                    )));
+                                }
+                                let output = result.value["output"].as_str().ok_or_else(|| {
+                                    "agent.run returned no formatted output".to_string()
+                                });
+                                let thinking = serde_json::from_value::<Vec<AgentMessage>>(
+                                    result.value["thinking"].clone(),
+                                )
+                                .map_err(|error| {
+                                    format!("agent.run returned invalid thinking: {error}")
+                                });
+                                match (output, thinking) {
+                                    (Ok(output), Ok(thinking)) => {
+                                        for message in thinking {
+                                            self.session_tree.add_message(message);
+                                        }
+                                        self.session_tree.add_message(AgentMessage::Assistant {
+                                            content: Some(output.to_string()),
+                                            tool_calls: None,
+                                        });
+                                        Some(Ok(output.to_string()))
+                                    }
+                                    (Err(error), _) | (_, Err(error)) => Some(Err(error)),
+                                }
+                            });
                         self.wasi_extensions
                             .enqueue_broker_results(dispatch.operation_results);
                         self.run_scheduled_agent_work().await;
@@ -1231,6 +1236,12 @@ impl CodingAgent {
                                     }
                                 }
                             }
+                        }
+                        if let Some(agent_run_output) = agent_run_output {
+                            return Some(match agent_run_output {
+                                Ok(output) => output,
+                                Err(error) => error,
+                            });
                         }
                         message
                     }
@@ -1716,6 +1727,42 @@ mod tests {
             *observed.lock().unwrap(),
             vec![AgentWork::QueueMessage("test subagent follow-up".into())]
         );
+    }
+
+    #[tokio::test]
+    async fn subagent_command_delivers_agent_run_result_to_same_extension_next_invocation() {
+        let dir = tempfile::tempdir().unwrap();
+        let agents_dir = dir.path().join(".mypi/agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(
+            agents_dir.join("scout.md"),
+            "---\nname: scout\ndescription: deterministic test scout\n---\nTest scout.",
+        )
+        .unwrap();
+        let extension_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.mypi/extensions/subagent_ext.wasm");
+        let extension_dir = dir.path().join(".mypi/extensions/subagent_ext");
+        std::fs::create_dir_all(&extension_dir).unwrap();
+        std::fs::copy(extension_path, extension_dir.join("extension.wasm")).unwrap();
+        let mut coding_agent = CodingAgent::new(coding_agent_options(dir.path().to_path_buf()));
+        coding_agent.set_subagent_work_observer(Arc::new(Mutex::new(Vec::new())));
+
+        let output = coding_agent
+            .handle_input("/subagent inspect the project")
+            .await
+            .unwrap();
+        assert!(output.contains("test subagent result"));
+
+        let next = coding_agent
+            .wasi_extensions
+            .execute_command_with_effects("subagent", "inspect the project")
+            .unwrap()
+            .unwrap();
+        assert!(next.events.iter().any(|event| {
+            event.topic == "broker_response"
+                && event.payload["capability"] == "agent"
+                && event.payload["operation"] == "run"
+        }));
     }
 
     #[test]
