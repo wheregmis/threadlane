@@ -62,7 +62,8 @@ robius-packaging-commands before-each-package \
 
 [package.metadata.packager.macos]
 minimum_system_version = "11.0"
-info_plist_path = "../../packaging/Info.plist"
+# Ad-hoc signing keeps the bundle structurally valid without an Apple certificate.
+signing_identity = "-"
 entitlements = "../../packaging/Entitlements.plist"
 
 [package.metadata.packager.dmg]

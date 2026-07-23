@@ -82,6 +82,16 @@ gh secret set CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD
 
 The release binary embeds `THREADLANE_UPDATER_PUBLIC_KEY`. The private key is available only to the release workflow and signs `Threadlane.app.tar.gz`; existing installations reject updates whose signatures do not match the embedded public key. Do not rotate or lose the private key without providing an explicit updater-key migration path.
 
+### Unsigned macOS Distribution
+
+Release bundles use an ad-hoc macOS signature so their internal resource seals are valid without an Apple Developer certificate. This does not establish Gatekeeper trust or notarize the application. After copying Threadlane to `/Applications`, users may need to allow it in **System Settings → Privacy & Security** or remove the quarantine attribute explicitly:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Threadlane.app
+```
+
+Only bypass quarantine for an artifact you trust. The release workflow verifies the ad-hoc `.app` and DMG signatures before publishing, while the separate Minisign updater signature authenticates automatic updates.
+
 ### Automated Release Workflow
 
 Threadlane uses GitHub Actions (`.github/workflows/release.yml`) for automated macOS builds. The release tag must exactly match the version in `crates/threadlane/Cargo.toml`. For example:

@@ -114,6 +114,11 @@ jobs:
             exit 1
           fi
 
+          # Ad-hoc signatures do not establish Gatekeeper trust, but these checks
+          # prevent publishing an internally malformed bundle like v0.0.4.
+          codesign --verify --deep --strict --verbose=4 dist/Threadlane.app
+          codesign --verify --strict --verbose=4 "${dmgs[0]}"
+
       - name: Generate signed update manifest
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
