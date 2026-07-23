@@ -2809,12 +2809,17 @@ impl App {
         let work_dir = entry.work_dir.clone();
         let session_id = entry.id.clone();
         let path = entry.session_file.clone();
-        let Ok(mut tree) = mypi_agent::SessionTree::load_from_file(&path) else {
-            eprintln!(
-                "warning: unable to load session for automatic title generation: {}",
-                path.display()
-            );
-            return;
+        let mut tree = match mypi_agent::SessionTree::load_from_file(&path) {
+            Ok(tree) => tree,
+            Err(error) => {
+                eprintln!(
+                    "warning: unable to load session {} for automatic title generation ({}): {}",
+                    session_id,
+                    path.display(),
+                    error
+                );
+                return;
+            }
         };
         let title_prompt = title_prompt_for_submission(&tree, Some(&prompt));
         if !session_title_eligible(&tree, Some(&prompt)) {
@@ -2824,9 +2829,17 @@ impl App {
             return;
         };
         // The durable marker is written before the detached provider task is spawned.
-        if !tree.mark_title_attempted().unwrap_or(false)
-            || !begin_title_generation(&work_dir, &session_id)
-        {
+        let title_attempted = match tree.mark_title_attempted() {
+            Ok(title_attempted) => title_attempted,
+            Err(error) => {
+                eprintln!(
+                    "warning: unable to persist automatic title attempt for session {}: {}",
+                    session_id, error
+                );
+                return;
+            }
+        };
+        if !title_attempted || !begin_title_generation(&work_dir, &session_id) {
             return;
         }
         let Some(tx) = self.tx.clone() else {
