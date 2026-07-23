@@ -1,36 +1,9 @@
-//! Cross-panel primitive widgets and reusable Makepad DSL components.
+//! ActivityLoader and ProgressDot status indicator components.
 
 use makepad_widgets::*;
 
 script_mod! {
     use mod.prelude.widgets.*
-
-    mod.components = {}
-
-    mod.components.PanelHeader = View {
-        width: Fill
-        height: Fit
-        flow: Right
-        align: Align{y: 0.5}
-        padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
-    }
-
-    mod.components.PanelSurface = RoundedView {
-        width: Fill
-        height: Fill
-        draw_bg +: { color: #x1f232b border_radius: 10.0 }
-    }
-
-    mod.components.EmptyRowBase = View {
-        width: Fill
-        height: Fit
-        lbl := Label {
-            width: Fill
-            height: Fit
-            text: ""
-            draw_text +: { color: #x6f7a88 text_style +: { font_size: 10.0 } }
-        }
-    }
 
     mod.components.ProgressDot = RoundedView {
         width: 3
@@ -85,54 +58,4 @@ script_mod! {
             }
         }
     }
-
-    mod.components.ComposerSurface = RoundedView {
-        width: Fill
-        height: Fit
-        draw_bg +: {
-            color: #x1f232b
-            border_color: #x3a424e
-            border_size: 1.0
-            border_radius: 11.0
-        }
-    }
-
-    mod.components.ComposerChip = Button {
-        width: Fit
-        height: 24
-        padding: Inset{left: 9 right: 9 top: 2 bottom: 2}
-        draw_bg +: {
-            color: #x232830
-            color_hover: #x2a313c
-            color_down: #x354153
-            border_color: #x3a424e
-            border_color_hover: #x4a5564
-            border_size: 1.0
-            border_radius: 6.0
-        }
-        draw_text +: {
-            color: #xc7cdd6
-            color_hover: #xdde3ea
-            color_down: #xffffff
-            text_style +: { font_size: 9.0 }
-        }
-    }
-
-    mod.components.ComposerAction = Button {
-        width: Fit
-        height: 28
-        padding: Inset{left: 11 right: 11 top: 2 bottom: 2}
-        draw_bg +: {
-            color: #x4f78aa
-            color_hover: #x6092cc
-            color_down: #x70a7ff
-            border_radius: 7.0
-        }
-        draw_text +: {
-            color: #xffffff
-            text_style: theme.font_bold { font_size: 9.5 }
-        }
-    }
-
-    mod.components.FlexSpacer = View { width: Fill height: 1 }
 }
