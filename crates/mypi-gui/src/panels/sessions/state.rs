@@ -51,16 +51,25 @@ pub static TITLE_IN_FLIGHT: LazyLock<RwLock<std::collections::HashSet<(PathBuf, 
 
 pub fn normalize_session_title(value: &str) -> String {
     let mut title = value.trim().to_string();
-    if title
-        .get(..6)
-        .is_some_and(|p| p.eq_ignore_ascii_case("title:"))
-    {
-        title = title[6..].trim().to_string();
-    }
-    if title.chars().count() >= 2 {
-        let c: Vec<char> = title.chars().collect();
-        if (c[0] == '"' && c[c.len() - 1] == '"') || (c[0] == '\'' && c[c.len() - 1] == '\'') {
-            title = c[1..c.len() - 1].iter().collect();
+    // Providers vary in whether they put the quote pair around the whole
+    // response or put a `Title:` prefix inside it. Peel either wrapper in
+    // either order until neither is present.
+    loop {
+        let before = title.clone();
+        let prefix: String = title.chars().take(6).collect();
+        if prefix.eq_ignore_ascii_case("title:") {
+            title = title.chars().skip(6).collect::<String>().trim().to_string();
+        }
+        let chars: Vec<char> = title.chars().collect();
+        if chars.len() >= 2
+            && ((chars[0] == '"' && chars[chars.len() - 1] == '"')
+                || (chars[0] == '\'' && chars[chars.len() - 1] == '\''))
+        {
+            title = chars[1..chars.len() - 1].iter().collect::<String>();
+            title = title.trim().to_string();
+        }
+        if title == before {
+            break;
         }
     }
     title = title.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -69,12 +78,6 @@ pub fn normalize_session_title(value: &str) -> String {
 
 pub fn session_title_eligible(tree: &SessionTree) -> bool {
     !tree.has_name()
-        && !tree.get_active_branch_messages().iter().any(|m| {
-            matches!(
-                m,
-                AgentMessage::User { .. } | AgentMessage::UserWithImages { .. }
-            )
-        })
 }
 pub fn begin_title_generation(work_dir: &Path, session_id: &str) -> bool {
     let key = (
@@ -456,8 +459,20 @@ mod tests {
             normalize_session_title(" Title: \"Fix the login flow\" "),
             "Fix the login flow"
         );
+        assert_eq!(
+            normalize_session_title("\"Title: Fix the login flow\""),
+            "Fix the login flow"
+        );
+        assert_eq!(
+            normalize_session_title("  title:   \"Fix   the   login flow\"  "),
+            "Fix the login flow"
+        );
         assert!(normalize_session_title(&"x".repeat(100)).chars().count() <= 42);
         assert_eq!(normalize_session_title("   "), "");
+        assert_eq!(
+            normalize_session_title("✨éclair: Fix the login flow"),
+            "✨éclair: Fix the login flow"
+        );
     }
 
     #[test]
@@ -466,6 +481,18 @@ mod tests {
         named.name = Some("Already named".into());
         assert!(!session_title_eligible(&named));
         assert!(session_title_eligible(&SessionTree::new("unnamed")));
+    }
+
+    #[test]
+    fn in_flight_title_generation_rejects_duplicates() {
+        let work_dir = unique_test_dir("title-in-flight");
+        assert!(begin_title_generation(&work_dir, "session-1"));
+        assert!(!begin_title_generation(&work_dir, "session-1"));
+        assert!(begin_title_generation(&work_dir, "session-2"));
+        end_title_generation(&work_dir, "session-1");
+        end_title_generation(&work_dir, "session-2");
+        assert!(begin_title_generation(&work_dir, "session-1"));
+        end_title_generation(&work_dir, "session-1");
     }
 
     #[test]

@@ -877,6 +877,17 @@ script_mod! {
 
 
 
+                                    composer_status := Label {
+                                        width: Fit
+                                        height: Fit
+                                        visible: false
+                                        text: ""
+                                        draw_text +: {
+                                            color: #x9aa5b3
+                                            text_style +: { font_size: 8.5 }
+                                        }
+                                    }
+
                                     stop_btn := mod.components.ComposerAction {
                                         width: Fit
                                         height: 28
@@ -2363,6 +2374,10 @@ impl App {
             .widget(cx, ids!(stop_btn))
             .set_visible(cx, working && has_generation);
         self.ui.widget(cx, ids!(send_btn)).set_visible(cx, !working);
+        self.ui.label(cx, ids!(composer_status)).set_text(cx, text);
+        self.ui
+            .label(cx, ids!(composer_status))
+            .set_visible(cx, working || status == UiStatus::Error);
         self.ui.widget(cx, ids!(chat_working_indicator)).redraw(cx);
         self.apply_composer_presentation(cx);
     }
@@ -2370,13 +2385,21 @@ impl App {
     fn apply_composer_presentation(&mut self, cx: &mut Cx) {
         let presentation = self.composer_state.presentation();
         self.ui
+            .widget(cx, ids!(composer_status))
+            .set_visible(cx, presentation.working || presentation.show_error);
+        self.ui
+            .label(cx, ids!(composer_status))
+            .set_text(cx, &presentation.status_text);
+        self.ui
             .widget(cx, ids!(effort_picker))
             .set_visible(cx, presentation.show_model);
         self.ui
             .widget(cx, ids!(model_picker))
             .set_visible(cx, presentation.show_model);
 
-        self.ui.button(cx, ids!(attach_btn)).set_visible(cx, true);
+        self.ui
+            .button(cx, ids!(attach_btn))
+            .set_visible(cx, !presentation.working);
         self.ui
             .button(cx, ids!(send_btn))
             .set_visible(cx, !presentation.working);
