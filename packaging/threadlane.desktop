@@ -1,0 +1,8 @@
+[Desktop Entry]
+Categories=Development;IDE;
+Exec=threadlane
+Icon=threadlane
+Name=Threadlane
+Terminal=false
+Type=Application
+Comment=High-performance GPU-accelerated AI coding assistant

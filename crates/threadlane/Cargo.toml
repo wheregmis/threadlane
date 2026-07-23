@@ -36,6 +36,15 @@ background subagents, multi-project workspaces, and instant tool execution.
 
 out_dir = "./dist"
 
+icons = [
+    "../../resources/icon_32.png",
+    "../../resources/icon_48.png",
+    "../../resources/icon_64.png",
+    "../../resources/icon_128.png",
+    "../../resources/icon_256.png",
+    "../../resources/icon_512.png",
+]
+
 before-each-package-command = """
 robius-packaging-commands before-each-package \
     --force-makepad \
@@ -45,6 +54,8 @@ robius-packaging-commands before-each-package \
 
 [package.metadata.packager.macos]
 minimum_system_version = "11.0"
+info_plist_path = "../../packaging/Info.plist"
+entitlements = "../../packaging/Entitlements.plist"
 
 [package.metadata.packager.dmg]
 window_size = { width = 960, height = 540 }
