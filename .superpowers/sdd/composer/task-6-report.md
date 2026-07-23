@@ -194,3 +194,29 @@ Implemented the final-review corrections in the adaptive composer:
 - `cargo test --workspace` — PASS, all workspace unit/integration/doc tests passed; existing duplicate-package, dead-code, and extension `static_mut_refs` warnings only.
 
 Manual visual checks remain blocked by the existing Makepad runtime shader/property errors documented above; no unrelated provider Clippy lints were changed.
+
+## Final-review blocker verification (2026-07-22)
+
+Implemented fixes for typed Makepad popup styling, generation-correlated cancellation draft restoration, legacy event isolation, bounded error status, and lifecycle helper coverage. The pure composer suite now contains 11 tests (actual output below; prior report's 9-test count was stale).
+
+Exact commands and results:
+
+```text
+cargo test -p mypi-gui panels::chat::composer::tests -- --nocapture
+PASS — running 11 tests; test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out
+
+cargo test -p mypi-gui
+PASS — running 22 tests; test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+cargo check -p mypi-gui
+PASS — Finished `dev` profile; warnings only
+
+cargo fmt --all -- --check
+PASS — no output
+
+cargo test --workspace
+PASS — all unit, integration, extension, and doc tests passed; GUI test result: 22 passed; workspace packages passed (mypi-agent 1+14, mypi-coding-agent 20+2+5+8+4+31, mypi-provider 6, mypi-tools 4, subagent-ext 9; doc-tests 0 failures)
+
+cargo run -p mypi-gui (timeout 10s)
+EXIT_CODE=124 (timeout after successful build/startup). Output: studio websocket disabled: empty studio_http. No shader field `focus`, shader `mix` type, or draw_bg/property runtime errors were emitted.
+```

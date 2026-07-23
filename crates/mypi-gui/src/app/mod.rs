@@ -3,8 +3,8 @@
 //! Chat, sessions, plan, and command palette panels are modularized under `crate::panels`.
 
 use crate::panels::chat::{
-    accepts_generation_event, ChatList, ComposerState, ComposerStatus, GenerationEvent,
-    ToolFoldHeader,
+    accepts_generation_event, concise_status, draft_for_cancellation, ChatList, ComposerState,
+    ComposerStatus, GenerationEvent, ToolFoldHeader,
 };
 use crate::panels::command_palette::*;
 use crate::panels::plan::PlanList;
@@ -1243,7 +1243,21 @@ impl MatchEvent for App {
 
         if self.ui.button(cx, ids!(stop_btn)).clicked(actions) {
             if let Some(generation) = self.active_generation.take() {
+                let generation_id = generation.id;
                 generation.handle.abort();
+                self.terminal_generation_id = None;
+                if let Some(draft) = draft_for_cancellation(
+                    Some(generation_id),
+                    self.submitted_draft.as_ref(),
+                    generation_id,
+                ) {
+                    self.ui
+                        .mypi_command_text_input(cx, ids!(prompt_input))
+                        .text_input_ref(cx)
+                        .set_text(cx, &draft);
+                    self.composer_state.set_has_text(!draft.trim().is_empty());
+                }
+                self.submitted_draft = None;
                 self.set_status(cx, UiStatus::Ready, "Stopped");
                 self.push_chat(MsgRole::System, "Generation stopped.");
                 cx.redraw_all();
@@ -1572,18 +1586,8 @@ impl App {
 
     fn apply_composer_presentation(&mut self, cx: &mut Cx) {
         let presentation = self.composer_state.presentation();
-        let mut input_bar = self.ui.widget(cx, ids!(input_bar));
-        script_apply_eval!(cx, input_bar, {
-            height: if presentation.expanded { Fit } else { Fit }
-            padding: if presentation.expanded { Inset{left: 9 top: 7 right: 7 bottom: 7} } else { Inset{left: 9 top: 3 right: 7 bottom: 3} }
-            draw_bg: {
-                border_color: if presentation.show_error { #xb85c55 } else { #x51443d }
-            }
-        });
-        let mut footer = self.ui.widget(cx, ids!(composer_footer));
-        script_apply_eval!(cx, footer, {
-            height: if presentation.expanded { 30 } else { 22 }
-        });
+        // Keep runtime updates to typed widget APIs. Makepad's script evaluator
+        // cannot safely assign Rust-derived Size/Inset/DrawQuad objects here.
         self.ui
             .widget(cx, ids!(composer_status))
             .set_visible(cx, presentation.working || presentation.show_error);
@@ -2016,6 +2020,9 @@ impl App {
                 }
             }
             AgentEvent::TurnEnd { .. } => self.set_status(cx, UiStatus::Working, "Turn completed"),
+            // Legacy task events are non-generation work; retain their chat
+            // updates, but never let their terminal marker clear a generation.
+            AgentEvent::AgentEnd { .. } if generation_id.is_none() => return,
             AgentEvent::AgentEnd { .. } => {
                 if let Some(id) = generation_id {
                     if accepts_generation_event(
@@ -2041,6 +2048,12 @@ impl App {
                 refresh_sessions(&work_dir);
             }
             AgentEvent::AgentError { error } => {
+                if generation_id.is_none() {
+                    self.push_chat(MsgRole::System, format!("Agent error: {error}"));
+                    let status = concise_status(&error);
+                    self.set_status(cx, UiStatus::Error, &status);
+                    return;
+                }
                 if let Some(id) = generation_id {
                     if !accepts_generation_event(
                         self.active_generation
@@ -2074,7 +2087,8 @@ impl App {
                     workspace.chat.flush_streaming();
                 }
                 self.push_chat(MsgRole::System, format!("Agent error: {error}"));
-                self.set_status(cx, UiStatus::Error, &error);
+                let status = concise_status(&error);
+                self.set_status(cx, UiStatus::Error, &status);
             }
             AgentEvent::TurnStart { .. } | AgentEvent::MessageStart { .. } => {}
         }

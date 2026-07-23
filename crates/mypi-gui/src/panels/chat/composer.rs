@@ -23,6 +23,27 @@ pub fn accepts_generation_event(
     }
 }
 
+pub fn concise_status(error: &str) -> String {
+    let first_line = error.lines().next().unwrap_or_default().trim();
+    let mut text: String = first_line.chars().take(160).collect();
+    if text.chars().count() < first_line.chars().count() {
+        text.push('…');
+    }
+    text
+}
+
+/// Return the draft only when cancellation belongs to the currently active
+/// generation. This keeps abort paths correlated just like agent events.
+pub fn draft_for_cancellation(
+    active_generation: Option<u64>,
+    submitted_draft: Option<&(u64, String)>,
+    cancelled_generation: u64,
+) -> Option<String> {
+    (active_generation == Some(cancelled_generation))
+        .then(|| submitted_draft.filter(|(id, _)| *id == cancelled_generation))
+        .flatten()
+        .map(|(_, draft)| draft.clone())
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ComposerStatus {
     Ready,
@@ -136,6 +157,18 @@ mod tests {
             7,
             GenerationEvent::CommandOutput
         ));
+        assert!(!accepts_generation_event(
+            Some(8),
+            Some(8),
+            7,
+            GenerationEvent::AgentEnd
+        ));
+        assert!(!accepts_generation_event(
+            None,
+            Some(7),
+            7,
+            GenerationEvent::AgentError
+        ));
     }
 
     #[test]
@@ -148,6 +181,23 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn cancellation_restores_only_matching_submitted_draft() {
+        let draft = (7, "keep this draft".to_string());
+        assert_eq!(
+            draft_for_cancellation(Some(7), Some(&draft), 7),
+            Some("keep this draft".to_string())
+        );
+        assert_eq!(draft_for_cancellation(Some(8), Some(&draft), 7), None);
+        assert_eq!(draft_for_cancellation(Some(7), None, 7), None);
+    }
+
+    #[test]
+    fn error_status_is_single_line_and_bounded() {
+        let error = format!("first line\n{}", "x".repeat(200));
+        assert_eq!(concise_status(&error), "first line");
+        assert!(concise_status(&"x".repeat(200)).chars().count() <= 161);
+    }
     #[test]
     fn idle_is_compact_and_hides_adaptive_controls() {
         let state = ComposerState::new();

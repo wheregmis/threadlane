@@ -52,7 +52,7 @@ script_mod! {
                         self.border_radius
                         self.border_radius
                     )
-                    sdf.fill(mix(self.border_color, self.border_color_focus, self.focus))
+                    sdf.fill(self.border_color)
 
                     sdf.box_all(
                         self.border_size
