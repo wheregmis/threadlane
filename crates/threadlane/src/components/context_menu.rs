@@ -113,8 +113,8 @@ impl Widget for SessionContextMenu {
         cx.begin_root_turtle(pass_size, Layout::flow_down());
 
         if self.opened {
-            const MENU_WIDTH: f64 = 156.0;
-            const MENU_HEIGHT: f64 = 57.0;
+            const MENU_WIDTH: f64 = 168.0;
+            const MENU_HEIGHT: f64 = 64.0;
             const EDGE_GAP: f64 = 6.0;
             const POINTER_GAP: f64 = 2.0;
 
@@ -151,12 +151,12 @@ impl SessionContextMenu {
             return None;
         }
         let local_y = position.y - self.menu_rect.pos.y;
-        if local_y < 28.5 {
-            Some(ContextMenuItem::Archive)
-        } else if local_y >= 28.5 {
-            Some(ContextMenuItem::Delete)
-        } else {
+        if !(4.0..60.0).contains(&local_y) {
             None
+        } else if local_y < 32.0 {
+            Some(ContextMenuItem::Archive)
+        } else {
+            Some(ContextMenuItem::Delete)
         }
     }
 
@@ -224,7 +224,7 @@ script_mod! {
     use mod.prelude.widgets.*
 
     mod.components.SessionContextMenu = #(SessionContextMenu::register_widget(vm)) {
-        width: 156
+        width: 168
         height: Fit
         flow: Down
 
@@ -233,17 +233,17 @@ script_mod! {
             height: Fit
             flow: Down
             new_batch: true
-            padding: Inset{left: 3 top: 3 right: 3 bottom: 3}
+            padding: Inset{left: 4 top: 4 right: 4 bottom: 4}
             draw_bg +: {
                 item_state: instance(0.0)
-                color: #x252a32
-                border_color: #x434b58
+                color: #x20252d
+                border_color: #x3c4654
                 border_size: 1.0
-                border_radius: 7.0
-                archive_hover_color: uniform(#x343b46)
-                archive_down_color: uniform(#x3b4451)
-                delete_hover_color: uniform(#x402d33)
-                delete_down_color: uniform(#x503138)
+                border_radius: 9.0
+                archive_hover_color: uniform(#x2c3541)
+                archive_down_color: uniform(#x344150)
+                delete_hover_color: uniform(#x3b2b31)
+                delete_down_color: uniform(#x4a2e36)
 
                 pixel: fn() {
                     let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -266,7 +266,7 @@ script_mod! {
                             self.item_state
                         }
                         let is_delete = item > 1.5
-                        let item_y = if is_delete {30.0} else {3.0}
+                        let item_y = if is_delete {32.0} else {4.0}
                         let hover_color = if is_delete {
                             self.delete_hover_color
                         } else {
@@ -277,7 +277,7 @@ script_mod! {
                         } else {
                             self.archive_down_color
                         }
-                        sdf.box(3.0, item_y, self.rect_size.x - 6.0, 24.0, 4.0)
+                        sdf.box(4.0, item_y, self.rect_size.x - 8.0, 28.0, 5.0)
                         sdf.fill(mix(hover_color, down_color, pressed_mix))
                     }
                     return sdf.result
@@ -286,10 +286,10 @@ script_mod! {
 
             archive_session_btn := Button {
                 width: Fill
-                height: 24
+                height: 28
                 text: "Archive Session"
                 align: Align{x: 0.0 y: 0.5}
-                padding: Inset{left: 9 right: 8}
+                padding: Inset{left: 11 right: 10}
                 draw_bg +: {
                     color: #x00000000
                     color_hover: #x00000000
@@ -298,27 +298,19 @@ script_mod! {
                     border_radius: 4.0
                 }
                 draw_text +: {
-                    color: #xd3d9e2
-                    color_hover: #xffffff
+                    color: #xd6dce5
+                    color_hover: #xf4f7fb
                     color_down: #xffffff
-                    text_style +: { font_size: 9.25 }
+                    text_style +: { font_size: 9.5 }
                 }
-            }
-
-            View {
-                width: Fill
-                height: 1
-                margin: Inset{left: 7 right: 7 top: 1 bottom: 1}
-                show_bg: true
-                draw_bg +: { color: #x353c47 }
             }
 
             delete_session_btn := Button {
                 width: Fill
-                height: 24
+                height: 28
                 text: "Delete Session"
                 align: Align{x: 0.0 y: 0.5}
-                padding: Inset{left: 9 right: 8}
+                padding: Inset{left: 11 right: 10}
                 draw_bg +: {
                     color: #x00000000
                     color_hover: #x00000000
@@ -327,10 +319,10 @@ script_mod! {
                     border_radius: 4.0
                 }
                 draw_text +: {
-                    color: #xe87982
-                    color_hover: #xff9aa2
+                    color: #xe67f87
+                    color_hover: #xffa0a7
                     color_down: #xffffff
-                    text_style +: { font_size: 9.25 }
+                    text_style +: { font_size: 9.5 }
                 }
             }
         }

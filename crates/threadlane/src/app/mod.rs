@@ -455,6 +455,7 @@ script_mod! {
             height: 22
             margin: 0
             padding: 0
+            spacing: 0
             text: ""
             align: Align{x: 0.5 y: 0.5}
             icon_walk: Walk{width: 11 height: 11}
@@ -1025,6 +1026,7 @@ script_mod! {
                                         width: 30
                                         height: 28
                                         padding: 0
+                                        spacing: 0
                                         text: ""
                                         align: Align{x: 0.5 y: 0.5}
                                         icon_walk: Walk{width: 14 height: 14}
@@ -1056,7 +1058,7 @@ script_mod! {
                                         clip_x: false
                                         clip_y: false
 
-                                        effort_drop := ComposerDropDown {
+                                        effort_drop := EffortDropDown {
                                             labels: [
                                                 "Thinking: Off",
                                                 "Thinking: Minimal",
@@ -1077,7 +1079,7 @@ script_mod! {
                                         clip_x: false
                                         clip_y: false
 
-                                        model_drop := ComposerDropDown {
+                                        model_drop := ModelDropDown {
                                             labels: [
                                                 "gpt-5.4",
                                                 "gpt-5.4-mini",
@@ -1098,6 +1100,7 @@ script_mod! {
                                         height: 30
                                         margin: 0
                                         padding: 0
+                                        spacing: 0
                                         text: ""
                                         align: Align{x: 0.5 y: 0.5}
                                         icon_walk: Walk{width: 15 height: 15}
