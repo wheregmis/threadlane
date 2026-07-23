@@ -38,6 +38,30 @@ fn build_broker_smoke_extension(agent_only: bool) -> PathBuf {
 }
 
 #[test]
+fn broker_smoke_manifest_matches_v2_documentation() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let path = root.join(".mypi/extensions/broker_smoke_ext.wasm");
+    let extension = WasiExtension::load_from_file(&path).unwrap_or_else(|error| {
+        panic!(
+            "load deployed broker smoke extension at {} (run scripts/build_extensions.sh): {error}",
+            path.display()
+        )
+    });
+
+    assert_eq!(extension.manifest.api_version, 2);
+    assert_eq!(extension.manifest.capabilities, vec!["tools"]);
+    assert_eq!(
+        extension
+            .manifest
+            .commands
+            .iter()
+            .map(|command| command.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["broker-smoke"]
+    );
+}
+
+#[test]
 fn broker_import_queues_accepted_requests_and_returns_denials_to_the_extension() {
     let extension = WasiExtension::load_from_file(&build_broker_smoke_extension(false)).unwrap();
     let mut manager = WasiExtensionManager::new();

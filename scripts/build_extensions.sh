@@ -19,7 +19,18 @@ echo "Cleaning previous runtime binaries in $MYPI_EXT_DIR..."
 rm -rf "$MYPI_EXT_DIR"/*
 
 echo "Deploying compiled .wasm binaries to $MYPI_EXT_DIR..."
-find "$ROOT_DIR/target/wasm32-wasip1/release" -maxdepth 1 -name "*.wasm" -exec cp {} "$MYPI_EXT_DIR/" \; 2>/dev/null || true
+for ext in "$ROOT_DIR"/extensions/*; do
+    if [ -f "$ext/Cargo.toml" ]; then
+        ext_name="$(basename "$ext")"
+        wasm_path="$ROOT_DIR/target/wasm32-wasip1/release/${ext_name}.wasm"
+        if [ ! -f "$wasm_path" ]; then
+            echo "Missing compiled WASI module: $wasm_path" >&2
+            exit 1
+        fi
+        # broker_smoke_ext is deployed as an ordinary extension module too.
+        cp "$wasm_path" "$MYPI_EXT_DIR/${ext_name}.wasm"
+    fi
+done
 
 # Copy agent presets and workflow prompts to .mypi/agents and .mypi/prompts
 for ext in "$ROOT_DIR/extensions"/*; do
