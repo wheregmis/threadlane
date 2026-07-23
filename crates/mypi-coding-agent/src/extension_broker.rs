@@ -80,10 +80,18 @@ impl BrokerResponse {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct BrokerOperationResult {
+    pub invoking_extension: String,
+    pub request: BrokerRequest,
+    pub value: Value,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct BrokerDispatchResult {
-    pub message: Option<String>,
-    pub follow_up_prompt: Option<String>,
+    /// Successful operation outputs are delivered to the extension as queued
+    /// events, never folded into the importing invocation's result.
+    pub operation_results: Vec<BrokerOperationResult>,
 }
 
 #[derive(Default)]
@@ -143,38 +151,13 @@ impl CapabilityDispatcher {
             let value = handler
                 .handle_for_extension_async(request, &envelope.invoking_extension)
                 .await?;
-            append_outputs(&mut result, &value);
+            result.operation_results.push(BrokerOperationResult {
+                invoking_extension: envelope.invoking_extension.clone(),
+                request: request.clone(),
+                value,
+            });
         }
         Ok(result)
-    }
-}
-
-fn append_outputs(result: &mut BrokerDispatchResult, value: &Value) {
-    let Some(object) = value.as_object() else {
-        return;
-    };
-    for key in ["message", "ui_notification"] {
-        if let Some(message) = object.get(key).and_then(Value::as_str) {
-            append_text(&mut result.message, message);
-        }
-    }
-    for key in ["follow_up_prompt", "queued_agent_prompt"] {
-        if let Some(prompt) = object.get(key).and_then(Value::as_str) {
-            append_text(&mut result.follow_up_prompt, prompt);
-        }
-    }
-}
-
-fn append_text(target: &mut Option<String>, text: &str) {
-    if text.is_empty() {
-        return;
-    }
-    match target {
-        Some(existing) => {
-            existing.push('\n');
-            existing.push_str(text);
-        }
-        None => *target = Some(text.to_string()),
     }
 }
 
@@ -197,7 +180,34 @@ impl CapabilityPolicy {
     pub fn denied_response(&self, capability: &str) -> BrokerResponse {
         BrokerResponse::error(
             "capability_denied",
-            format!("Extension did not declare capability `{capability}`"),
+            format!("Capability `{capability}` is not granted to this extension"),
         )
+    }
+}
+
+/// Host-owned grant restrictions applied in addition to a v2 manifest's
+/// declaration. The default preserves compatibility by granting declarations.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HostCapabilityGrantPolicy {
+    allowed: Option<BTreeSet<String>>,
+}
+
+impl HostCapabilityGrantPolicy {
+    pub fn allow_declared() -> Self {
+        Self::default()
+    }
+
+    pub fn restrict_to(granted: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self {
+            allowed: Some(granted.into_iter().map(Into::into).collect()),
+        }
+    }
+
+    pub fn allows_declared(&self, declared: &[String], capability: &str) -> bool {
+        declared.iter().any(|item| item == capability)
+            && self
+                .allowed
+                .as_ref()
+                .is_none_or(|allowed| allowed.contains(capability))
     }
 }

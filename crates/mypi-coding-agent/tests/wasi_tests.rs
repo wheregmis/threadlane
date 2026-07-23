@@ -1,8 +1,9 @@
 use mypi_agent::{AgentState, AgentToolCall, BeforeToolCallHook};
 use mypi_coding_agent::{
     BrokerError, BrokerRequest, CapabilityDispatcher, CapabilityHandler, CapabilityPolicy,
-    ExtensionBeforeToolHook, ToolPolicy, WasiExtension, WasiExtensionEffect, WasiExtensionEvent,
-    WasiExtensionManager, WasiExtensionManifest, WasiToolDefinition,
+    ExtensionBeforeToolHook, HostBrokerRequest, HostCapabilityGrantPolicy, ToolPolicy,
+    WasiExtension, WasiExtensionEffect, WasiExtensionEvent, WasiExtensionManager,
+    WasiExtensionManifest, WasiToolDefinition,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -103,6 +104,68 @@ fn broker_import_queues_accepted_requests_and_returns_denials_to_the_extension()
         .unwrap();
     assert!(result.message.contains("capability_denied"));
     assert!(result.broker_requests.is_empty());
+}
+
+#[test]
+fn restrictive_host_grant_denies_declared_capability() {
+    let extension = WasiExtension::load_from_file(&build_broker_smoke_extension(false)).unwrap();
+    let name = extension.manifest.name.clone();
+    let mut manager = WasiExtensionManager::with_capability_grant_policy(
+        HostCapabilityGrantPolicy::restrict_to(["agent"]),
+    );
+    manager.extensions.insert(name, extension);
+
+    let result = manager
+        .execute_command_with_effects("broker-smoke", "")
+        .unwrap()
+        .unwrap();
+    assert!(result.message.contains("capability_denied"));
+    assert!(result.broker_requests.is_empty());
+    assert!(manager.take_pending_broker_requests().is_empty());
+}
+
+struct OutputCapabilityHandler;
+
+impl CapabilityHandler for OutputCapabilityHandler {
+    fn handle(&self, _request: &BrokerRequest) -> Result<Value, BrokerError> {
+        Ok(serde_json::json!({"follow_up_prompt":"must be asynchronous"}))
+    }
+}
+
+#[tokio::test]
+async fn broker_outputs_are_queued_as_future_invocation_events() {
+    let mut dispatcher = CapabilityDispatcher::new();
+    dispatcher.register("agent", Arc::new(OutputCapabilityHandler));
+    let result = dispatcher
+        .dispatch_envelopes(vec![HostBrokerRequest {
+            request: BrokerRequest {
+                api_version: 2,
+                capability: "agent".into(),
+                operation: "request_turn".into(),
+                arguments: Value::Null,
+            },
+            invoking_extension: "extension".into(),
+        }])
+        .await
+        .unwrap();
+
+    assert_eq!(result.operation_results.len(), 1);
+
+    let manager = WasiExtensionManager::new();
+    manager.enqueue_broker_results(result.operation_results);
+    assert_eq!(
+        manager.drain_events_for("extension").unwrap(),
+        vec![WasiExtensionEvent {
+            topic: "broker_response".into(),
+            payload: serde_json::json!({
+                "api_version": 2,
+                "capability": "agent",
+                "operation": "request_turn",
+                "ok": true,
+                "value": {"follow_up_prompt":"must be asynchronous"}
+            }),
+        }]
+    );
 }
 
 fn push_unsigned_leb(mut value: u32, bytes: &mut Vec<u8>) {
@@ -297,7 +360,7 @@ async fn broker_dispatch_routes_capability_operations_in_order() {
         *recorded.lock().unwrap(),
         vec![("tools".into(), "set_policy".into())]
     );
-    assert!(result.message.is_none());
+    assert_eq!(result.operation_results.len(), 1);
 }
 
 #[tokio::test]

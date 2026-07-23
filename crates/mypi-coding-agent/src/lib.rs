@@ -17,8 +17,9 @@ pub use coding_agent::{CodingAgent, CodingAgentOptions, ExtensionBeforeToolHook,
 pub use commands::{execute_slash_command, parse_slash_command, CommandAction};
 pub use context::ProjectContext;
 pub use extension_broker::{
-    BrokerDispatchResult, BrokerError, BrokerRequest, BrokerResponse, CapabilityDispatcher,
-    CapabilityHandler, CapabilityPolicy, HostBrokerRequest, BROKER_API_VERSION,
+    BrokerDispatchResult, BrokerError, BrokerOperationResult, BrokerRequest, BrokerResponse,
+    CapabilityDispatcher, CapabilityHandler, CapabilityPolicy, HostBrokerRequest,
+    HostCapabilityGrantPolicy, BROKER_API_VERSION,
 };
 pub use full_trust_extension::{compute_executable_revision, FullTrustRunner, TrustStore};
 pub use packages::{PackageManager, PackageManifest, PackageRecord, PackageScope};

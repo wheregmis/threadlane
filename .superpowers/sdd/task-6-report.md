@@ -95,3 +95,12 @@ Implemented Task 6 only. Commit is recorded as `docs: document WASI capability b
   "manualNotes": "Unrelated pre-existing GUI modifications remain unstaged and untouched."
 }
 ```
+
+## Review blocker follow-up
+
+Implemented the underlying host grant and asynchronous result semantics identified in review:
+
+- Added `HostCapabilityGrantPolicy`, defaulting to declared-capability compatibility and supporting restrictive allowlists.
+- `WasiExtensionManager` applies the host grant as an intersection with each v2 manifest, rechecks requests at queue insertion/drain, and exposes testable policy configuration.
+- Broker imports acknowledge queue acceptance only. Successful operation outputs are delivered as `broker_response` events on a later extension invocation; they are no longer appended to the initiating command response or used to synchronously trigger agent turns.
+- Added focused restrictive-grant and future-event result tests in `crates/mypi-coding-agent/tests/wasi_tests.rs`.

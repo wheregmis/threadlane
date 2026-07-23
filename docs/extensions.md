@@ -75,11 +75,32 @@ request has this shape:
 }
 ```
 
-The host returns a JSON response:
+The import returns an acknowledgement JSON response only:
 
 ```json
 {"ok":true,"value":null}
 ```
+
+This acknowledgement means only that the request was accepted into the host's
+asynchronous queue; it is not the operation's output. The host dispatches queued
+requests after the current extension invocation returns. A successful operation
+result is delivered to the invoking extension on a future invocation in its
+`events` array, with topic `broker_response` and this payload shape:
+
+```json
+{
+  "api_version": 2,
+  "capability": "agent",
+  "operation": "request_turn",
+  "ok": true,
+  "value": {"...": "operation output"}
+}
+```
+
+Operation outputs are never returned synchronously through the import or folded
+into the command/tool/hook response. Extensions that need a result must retain
+request context and consume the later `broker_response` event (or another host
+future/event delivery) on a subsequent invocation.
 
 or, for malformed requests, unsupported versions, and denied grants:
 
@@ -119,8 +140,11 @@ that workspace after normalization; absolute paths and `..` escapes are
 rejected. Process execution uses the workspace as its working directory.
 Network access is subject to the host's configured host allow policy. The host
 checks each requested capability against both the extension declaration and
-host policy before dispatch, and returns `capability_denied` when the grant is
-missing. Session state is identity-scoped and cannot be read or changed for a
+host policy before import acknowledgement, and checks it again when placing the
+request on the host queue. The default host policy grants declared v2
+capabilities for compatibility; a restrictive host policy may grant a subset of
+the declaration (for example, only `tools`). A missing effective grant returns
+`capability_denied` and the request is not queued. Session state is identity-scoped and cannot be read or changed for a
 different extension.
 
 An extension response may contain a message, updated state, and broker-driven

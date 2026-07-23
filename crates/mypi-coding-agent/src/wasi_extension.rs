@@ -1,5 +1,6 @@
 use crate::extension_broker::{
-    BrokerRequest, BrokerResponse, CapabilityPolicy, HostBrokerRequest, BROKER_API_VERSION,
+    BrokerOperationResult, BrokerRequest, BrokerResponse, CapabilityPolicy, HostBrokerRequest,
+    HostCapabilityGrantPolicy, BROKER_API_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -301,11 +302,20 @@ impl WasiExtension {
         export: &str,
         invocation: &WasiExtensionInvocation,
     ) -> Result<WasiExtensionInvocationResult, String> {
+        self.call_with_policy(export, invocation, self.capability_policy())
+    }
+
+    fn call_with_policy(
+        &self,
+        export: &str,
+        invocation: &WasiExtensionInvocation,
+        policy: CapabilityPolicy,
+    ) -> Result<WasiExtensionInvocationResult, String> {
         let module = Module::new(&self.engine, &self.wasm_bytes[..]).map_err(|e| e.to_string())?;
         let mut store = Store::new(
             &self.engine,
             WasiStoreData {
-                policy: self.capability_policy(),
+                policy,
                 requests: vec![],
             },
         );
@@ -472,6 +482,7 @@ pub struct WasiExtensionManager {
     subscriptions: Mutex<HashMap<String, HashSet<String>>>,
     pending_events: Mutex<HashMap<String, Vec<WasiExtensionEvent>>>,
     pending_broker_requests: Mutex<Vec<HostBrokerRequest>>,
+    capability_grant_policy: Mutex<HostCapabilityGrantPolicy>,
     state_dir: Option<PathBuf>,
     /// Stateful conversational extensions are isolated by the active session.
     /// `None` retains the project-wide scope for callers that explicitly need it.
@@ -492,6 +503,31 @@ impl WasiExtensionManager {
             state_dir: Some(project_dir.join(".mypi/state/extensions")),
             ..Self::default()
         }
+    }
+
+    pub fn with_capability_grant_policy(policy: HostCapabilityGrantPolicy) -> Self {
+        Self {
+            capability_grant_policy: Mutex::new(policy),
+            ..Self::default()
+        }
+    }
+
+    pub fn set_capability_grant_policy(
+        &self,
+        policy: HostCapabilityGrantPolicy,
+    ) -> Result<(), String> {
+        *self
+            .capability_grant_policy
+            .lock()
+            .map_err(|_| "Extension capability policy lock poisoned".to_string())? = policy;
+        Ok(())
+    }
+
+    pub fn capability_grant_policy(&self) -> Result<HostCapabilityGrantPolicy, String> {
+        self.capability_grant_policy
+            .lock()
+            .map(|policy| policy.clone())
+            .map_err(|_| "Extension capability policy lock poisoned".to_string())
     }
 
     /// Creates a manager whose extension state belongs to one conversation.
@@ -743,14 +779,16 @@ impl WasiExtensionManager {
         self.execute_response("command", name, args).map(|result| {
             result.map(|mut result| {
                 let broker_requests = self.take_broker_requests(&mut result);
-                let host_broker_requests = broker_requests
-                    .iter()
-                    .cloned()
-                    .map(|request| HostBrokerRequest {
-                        request,
-                        invoking_extension: result.invoking_extension.clone(),
-                    })
-                    .collect();
+                let host_broker_requests = self.filter_granted_requests(
+                    broker_requests
+                        .iter()
+                        .cloned()
+                        .map(|request| HostBrokerRequest {
+                            request,
+                            invoking_extension: result.invoking_extension.clone(),
+                        })
+                        .collect(),
+                );
                 WasiExtensionCommandResult {
                     message: result.response.message.unwrap_or_default(),
                     effects: result.response.effects,
@@ -772,16 +810,60 @@ impl WasiExtensionManager {
     }
 
     pub fn take_pending_broker_requests(&self) -> Vec<HostBrokerRequest> {
-        self.pending_broker_requests
+        let requests = self
+            .pending_broker_requests
             .lock()
             .map(|mut requests| std::mem::take(&mut *requests))
-            .unwrap_or_default()
+            .unwrap_or_default();
+        self.filter_granted_requests(requests)
+    }
+
+    /// Queues successful broker outputs for delivery in a later invocation.
+    pub fn enqueue_broker_results(&self, results: Vec<BrokerOperationResult>) {
+        if let Ok(mut pending) = self.pending_events.lock() {
+            for result in results {
+                pending
+                    .entry(result.invoking_extension)
+                    .or_default()
+                    .push(WasiExtensionEvent {
+                        topic: "broker_response".into(),
+                        payload: serde_json::json!({
+                            "api_version": BROKER_API_VERSION,
+                            "capability": result.request.capability,
+                            "operation": result.request.operation,
+                            "ok": true,
+                            "value": result.value,
+                        }),
+                    });
+            }
+        }
     }
 
     fn enqueue_broker_requests(&self, requests: Vec<HostBrokerRequest>) {
+        let requests = self.filter_granted_requests(requests);
         if let Ok(mut pending) = self.pending_broker_requests.lock() {
             pending.extend(requests);
         }
+    }
+
+    fn filter_granted_requests(&self, requests: Vec<HostBrokerRequest>) -> Vec<HostBrokerRequest> {
+        let Ok(policy) = self.capability_grant_policy() else {
+            return Vec::new();
+        };
+        requests
+            .into_iter()
+            .filter(|request| {
+                self.extensions
+                    .get(&request.invoking_extension)
+                    .is_some_and(|extension| {
+                        extension.manifest.api_version == BROKER_API_VERSION
+                            && policy.allows_declared(
+                                &extension.manifest.capabilities,
+                                &request.request.capability,
+                            )
+                    })
+            })
+            .collect()
     }
 
     pub fn execute_hook(
@@ -873,10 +955,11 @@ impl WasiExtensionManager {
             state,
             events,
         };
+        let policy = self.effective_capability_policy(extension)?;
         let result = match kind {
-            "tool" => extension.call_tool(&invocation),
-            "hook" => extension.call_hook(&invocation),
-            _ => extension.call_command(&invocation),
+            "tool" => extension.call_with_policy("execute_tool", &invocation, policy),
+            "hook" => extension.call_with_policy("handle_hook", &invocation, policy),
+            _ => extension.call_with_policy("execute_command", &invocation, policy),
         }?;
         if let Some(state) = result.response.state.clone() {
             self.states
@@ -887,16 +970,38 @@ impl WasiExtensionManager {
         }
         let mut result = result;
         result.invoking_extension = extension.manifest.name.clone();
-        result.host_broker_requests = result
-            .broker_requests
-            .iter()
-            .cloned()
-            .map(|request| HostBrokerRequest {
-                request,
-                invoking_extension: result.invoking_extension.clone(),
-            })
-            .collect();
+        result.host_broker_requests = self.filter_granted_requests(
+            result
+                .broker_requests
+                .iter()
+                .cloned()
+                .map(|request| HostBrokerRequest {
+                    request,
+                    invoking_extension: result.invoking_extension.clone(),
+                })
+                .collect(),
+        );
         Ok(result)
+    }
+
+    fn effective_capability_policy(
+        &self,
+        extension: &WasiExtension,
+    ) -> Result<CapabilityPolicy, String> {
+        let host_policy = self.capability_grant_policy()?;
+        if extension.manifest.api_version < BROKER_API_VERSION {
+            return Ok(CapabilityPolicy::default());
+        }
+        Ok(CapabilityPolicy::new(
+            extension
+                .manifest
+                .capabilities
+                .iter()
+                .filter(|capability| {
+                    host_policy.allows_declared(&extension.manifest.capabilities, capability)
+                })
+                .cloned(),
+        ))
     }
 }
 

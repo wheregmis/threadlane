@@ -2,8 +2,7 @@ use crate::agents::{discover_agents, AgentConfig, AgentScope};
 use crate::commands::{execute_slash_command, parse_slash_command, CommandAction};
 use crate::context::ProjectContext;
 use crate::extension_broker::{
-    BrokerDispatchResult, BrokerError, BrokerRequest, CapabilityDispatcher, CapabilityHandler,
-    BROKER_API_VERSION,
+    BrokerError, BrokerRequest, CapabilityDispatcher, CapabilityHandler, BROKER_API_VERSION,
 };
 use crate::wasi_extension::{WasiExtensionManager, WasiSubagentTask};
 use async_trait::async_trait;
@@ -462,8 +461,12 @@ impl BeforeToolCallHook for ExtensionBeforeToolHook {
                     };
                 }
             };
-            if let Err(error) =
-                dispatch_hook_requests(&self.broker_dispatcher, res.host_broker_requests).await
+            if let Err(error) = dispatch_hook_requests(
+                &self.broker_dispatcher,
+                &self.extensions,
+                res.host_broker_requests,
+            )
+            .await
             {
                 return BeforeToolCallResult {
                     block: true,
@@ -520,6 +523,7 @@ impl AfterToolCallHook for ExtensionAfterToolHook {
         // tool's effects precede the deterministic, name-sorted after hooks.
         dispatch_hook_requests_isolated(
             &self.broker_dispatcher,
+            &self.extensions,
             self.extensions.take_pending_broker_requests(),
             "WASI tool broker error",
         )
@@ -532,6 +536,7 @@ impl AfterToolCallHook for ExtensionAfterToolHook {
                 Ok(response) => {
                     dispatch_hook_requests_isolated(
                         &self.broker_dispatcher,
+                        &self.extensions,
                         response.host_broker_requests,
                         "WASI after-tool hook broker error",
                     )
@@ -591,38 +596,29 @@ fn build_broker_dispatcher(
 
 async fn dispatch_hook_requests(
     dispatcher: &Arc<tokio::sync::Mutex<CapabilityDispatcher>>,
+    extensions: &WasiExtensionManager,
     requests: Vec<crate::extension_broker::HostBrokerRequest>,
 ) -> Result<(), BrokerError> {
     for request in requests {
-        dispatcher
+        let dispatch = dispatcher
             .lock()
             .await
             .dispatch_envelopes(vec![request])
             .await?;
+        extensions.enqueue_broker_results(dispatch.operation_results);
     }
     Ok(())
 }
 
 async fn dispatch_hook_requests_isolated(
     dispatcher: &Arc<tokio::sync::Mutex<CapabilityDispatcher>>,
+    extensions: &WasiExtensionManager,
     requests: Vec<crate::extension_broker::HostBrokerRequest>,
     label: &str,
 ) {
     for request in requests {
-        if let Err(error) = dispatch_hook_requests(dispatcher, vec![request]).await {
+        if let Err(error) = dispatch_hook_requests(dispatcher, extensions, vec![request]).await {
             eprintln!("{label}: {}", error.message);
-        }
-    }
-}
-
-fn append_dispatch_message(message: &mut Option<String>, dispatch: BrokerDispatchResult) {
-    if let Some(dispatch_message) = dispatch.message {
-        match message {
-            Some(existing) if !existing.is_empty() => {
-                existing.push('\n');
-                existing.push_str(&dispatch_message);
-            }
-            _ => *message = Some(dispatch_message),
         }
     }
 }
@@ -862,6 +858,7 @@ impl CodingAgent {
                     if let Ok(response) = response {
                         let _ = dispatch_hook_requests(
                             &self.broker_dispatcher,
+                            &self.wasi_extensions,
                             response.host_broker_requests,
                         )
                         .await;
@@ -869,6 +866,7 @@ impl CodingAgent {
                 }
                 let _ = dispatch_hook_requests(
                     &self.broker_dispatcher,
+                    &self.wasi_extensions,
                     self.wasi_extensions.take_pending_broker_requests(),
                 )
                 .await;
@@ -993,6 +991,11 @@ impl CodingAgent {
                 });
                 return match res {
                     Ok(result) => {
+                        let message = if result.message.is_empty() {
+                            None
+                        } else {
+                            Some(result.message)
+                        };
                         let dispatch = match self
                             .broker_dispatcher
                             .lock()
@@ -1005,16 +1008,8 @@ impl CodingAgent {
                                 return Some(format!("WASI Broker Error: {}", error.message))
                             }
                         };
-                        let mut message = if result.message.is_empty() {
-                            None
-                        } else {
-                            Some(result.message)
-                        };
-                        append_dispatch_message(&mut message, dispatch.clone());
-                        if let Some(prompt) = dispatch.follow_up_prompt {
-                            self.agent.prompt(&prompt).await;
-                            self.dispatch_assistant_message_hooks().await;
-                        }
+                        self.wasi_extensions
+                            .enqueue_broker_results(dispatch.operation_results);
                         for effect in result.effects {
                             match effect {
                                 crate::wasi_extension::WasiExtensionEffect::SetToolPolicy {
@@ -1301,7 +1296,9 @@ mod tests {
             })
             .collect();
 
-        dispatch_hook_requests_isolated(&dispatcher, requests, "test broker error").await;
+        let extensions = WasiExtensionManager::new();
+        dispatch_hook_requests_isolated(&dispatcher, &extensions, requests, "test broker error")
+            .await;
 
         assert_eq!(*operations.lock().unwrap(), vec!["first", "fail", "last"]);
     }
