@@ -1,7 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+
+const MAX_AGENT_DIRECTORY_ENTRIES: usize = 256;
+const MAX_AGENT_DEFINITION_SIZE: u64 = 256 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -137,17 +141,43 @@ fn load_agents_from_dir(dir: &Path, source: AgentSource) -> Vec<AgentConfig> {
         Err(_) => return agents,
     };
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() && !path.is_symlink() {
-            continue;
+    let mut paths = Vec::with_capacity(MAX_AGENT_DIRECTORY_ENTRIES + 1);
+    for entry in entries.take(MAX_AGENT_DIRECTORY_ENTRIES + 1) {
+        if let Ok(entry) = entry {
+            paths.push(entry.path());
         }
+    }
+    if paths.len() > MAX_AGENT_DIRECTORY_ENTRIES {
+        return agents;
+    }
+    paths.sort();
+
+    for path in paths {
         if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
             continue;
         }
 
-        let content = match fs::read_to_string(&path) {
-            Ok(c) => c,
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() && metadata.len() <= MAX_AGENT_DEFINITION_SIZE => {
+                metadata
+            }
+            _ => continue,
+        };
+        let file = match fs::File::open(&path) {
+            Ok(file) => file,
+            Err(_) => continue,
+        };
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        if file
+            .take(MAX_AGENT_DEFINITION_SIZE + 1)
+            .read_to_end(&mut bytes)
+            .is_err()
+            || bytes.len() as u64 > MAX_AGENT_DEFINITION_SIZE
+        {
+            continue;
+        }
+        let content = match String::from_utf8(bytes) {
+            Ok(content) => content,
             Err(_) => continue,
         };
 
@@ -170,20 +200,30 @@ fn load_agents_from_dir(dir: &Path, source: AgentSource) -> Vec<AgentConfig> {
     agents
 }
 
-fn find_nearest_project_agents_dir(cwd: &Path) -> Option<PathBuf> {
+fn find_nearest_project_agent_dirs(cwd: &Path) -> (Option<PathBuf>, Vec<PathBuf>) {
     let mut current = cwd.to_path_buf();
     loop {
-        let candidate_mypi = current.join(".mypi").join("agents");
-        if candidate_mypi.is_dir() {
-            return Some(candidate_mypi);
-        }
         let candidate_agents = current.join(".agents").join("agents");
+        let candidate_mypi = current.join(".mypi").join("agents");
+        let mut directories = Vec::new();
         if candidate_agents.is_dir() {
-            return Some(candidate_agents);
+            directories.push(candidate_agents.clone());
+        }
+        if candidate_mypi.is_dir() {
+            directories.push(candidate_mypi.clone());
+        }
+        if !directories.is_empty() {
+            return (
+                candidate_mypi
+                    .is_dir()
+                    .then_some(candidate_mypi)
+                    .or_else(|| candidate_agents.is_dir().then_some(candidate_agents)),
+                directories,
+            );
         }
 
         if !current.pop() {
-            return None;
+            return (None, Vec::new());
         }
     }
 }
@@ -193,12 +233,12 @@ pub fn discover_agents(cwd: &Path, scope: AgentScope) -> AgentDiscoveryResult {
     let user_dirs = home
         .map(|h| {
             vec![
-                h.join(".mypi").join("agents"),
                 h.join(".agents").join("agents"),
+                h.join(".mypi").join("agents"),
             ]
         })
         .unwrap_or_default();
-    let project_agents_dir = find_nearest_project_agents_dir(cwd);
+    let (project_agents_dir, project_agent_dirs) = find_nearest_project_agent_dirs(cwd);
 
     let mut user_agents = Vec::new();
     if scope != AgentScope::Project {
@@ -209,8 +249,8 @@ pub fn discover_agents(cwd: &Path, scope: AgentScope) -> AgentDiscoveryResult {
 
     let mut project_agents = Vec::new();
     if scope != AgentScope::User {
-        if let Some(ref pdir) = project_agents_dir {
-            project_agents.extend(load_agents_from_dir(pdir, AgentSource::Project));
+        for directory in project_agent_dirs {
+            project_agents.extend(load_agents_from_dir(&directory, AgentSource::Project));
         }
     }
 
@@ -278,6 +318,113 @@ You are a scout agent. Explore the codebase and report back.
         assert_eq!(
             body,
             "You are a scout agent. Explore the codebase and report back."
+        );
+    }
+
+    #[test]
+    fn oversized_agent_definition_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("valid.md"),
+            "---\nname: valid\ndescription: valid agent\n---\nValid.",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("oversized.md"),
+            vec![b'a'; MAX_AGENT_DEFINITION_SIZE as usize + 1],
+        )
+        .unwrap();
+
+        let agents = load_agents_from_dir(dir.path(), AgentSource::Project);
+
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].name, "valid");
+    }
+
+    #[test]
+    fn directory_over_entry_limit_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        for index in 0..=MAX_AGENT_DIRECTORY_ENTRIES {
+            let name = format!("agent-{index:03}");
+            std::fs::write(
+                dir.path().join(format!("{name}.md")),
+                format!("---\nname: {name}\ndescription: test agent\n---\nTest."),
+            )
+            .unwrap();
+        }
+
+        let agents = load_agents_from_dir(dir.path(), AgentSource::Project);
+
+        assert!(agents.is_empty());
+    }
+
+    #[test]
+    fn agent_definitions_are_loaded_in_filename_order() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["charlie", "alpha", "bravo"] {
+            std::fs::write(
+                dir.path().join(format!("{name}.md")),
+                format!("---\nname: {name}\ndescription: test agent\n---\nTest."),
+            )
+            .unwrap();
+        }
+
+        let agents = load_agents_from_dir(dir.path(), AgentSource::Project);
+
+        assert_eq!(
+            agents
+                .iter()
+                .map(|agent| agent.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "bravo", "charlie"]
+        );
+    }
+
+    #[test]
+    fn project_agent_locations_are_merged_with_mypi_precedence() {
+        let project = tempfile::tempdir().unwrap();
+        let agents_dir = project.path().join(".agents/agents");
+        let mypi_dir = project.path().join(".mypi/agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::create_dir_all(&mypi_dir).unwrap();
+        std::fs::write(
+            agents_dir.join("scout.md"),
+            "---\nname: scout\ndescription: agents scout\n---\nAgents scout.",
+        )
+        .unwrap();
+        std::fs::write(
+            agents_dir.join("reviewer.md"),
+            "---\nname: reviewer\ndescription: reviewer\n---\nReviewer.",
+        )
+        .unwrap();
+        std::fs::write(
+            mypi_dir.join("scout.md"),
+            "---\nname: scout\ndescription: mypi scout\n---\nMypi scout.",
+        )
+        .unwrap();
+        std::fs::write(
+            mypi_dir.join("worker.md"),
+            "---\nname: worker\ndescription: worker\n---\nWorker.",
+        )
+        .unwrap();
+
+        let result = discover_agents(project.path(), AgentScope::Project);
+        assert_eq!(
+            result
+                .agents
+                .iter()
+                .map(|agent| agent.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["reviewer", "scout", "worker"]
+        );
+        assert_eq!(
+            result
+                .agents
+                .iter()
+                .find(|agent| agent.name == "scout")
+                .unwrap()
+                .description,
+            "mypi scout"
         );
     }
 }

@@ -4,8 +4,10 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 MYPI_EXT_DIR="$ROOT_DIR/.mypi/extensions"
+MYPI_AGENT_DIR="$ROOT_DIR/.mypi/agents"
+MYPI_PROMPT_DIR="$ROOT_DIR/.mypi/prompts"
 
-mkdir -p "$MYPI_EXT_DIR"
+mkdir -p "$MYPI_EXT_DIR" "$MYPI_AGENT_DIR" "$MYPI_PROMPT_DIR"
 
 echo "Building WASI extensions (--target wasm32-wasip1 --release)..."
 for ext in "$ROOT_DIR/extensions"/*; do
@@ -32,18 +34,15 @@ for ext in "$ROOT_DIR"/extensions/*; do
     fi
 done
 
-# Copy agent presets and workflow prompts to .mypi/agents and .mypi/prompts
+# Install bundled agent presets and workflow prompts. Copy failures are fatal:
+# a subagent tool without discoverable agent definitions is not a valid deployment.
 for ext in "$ROOT_DIR/extensions"/*; do
-    if [ -d "$ext" ]; then
-        if [ -d "$ext/agents" ]; then
-            mkdir -p "$ROOT_DIR/.mypi/agents"
-            cp -r "$ext/agents/"* "$ROOT_DIR/.mypi/agents/" 2>/dev/null || true
-        fi
-        if [ -d "$ext/prompts" ]; then
-            mkdir -p "$ROOT_DIR/.mypi/prompts"
-            cp -r "$ext/prompts/"* "$ROOT_DIR/.mypi/prompts/" 2>/dev/null || true
-        fi
+    if [ -d "$ext/agents" ]; then
+        cp -R "$ext/agents/." "$MYPI_AGENT_DIR/"
+    fi
+    if [ -d "$ext/prompts" ]; then
+        cp -R "$ext/prompts/." "$MYPI_PROMPT_DIR/"
     fi
 done
 
-echo "Successfully deployed WASI binaries to $MYPI_EXT_DIR!"
+echo "Successfully deployed WASI binaries, agents, and prompts under $ROOT_DIR/.mypi!"

@@ -4,11 +4,13 @@ use crate::context::ProjectContext;
 use crate::extension_broker::{
     BrokerError, BrokerRequest, CapabilityDispatcher, CapabilityHandler, BROKER_API_VERSION,
 };
+use crate::skills::{LoadSkillToolExecutor, SkillManager, SkillRegistry};
 use crate::wasi_extension::{WasiExtensionManager, WasiLegacyEffect};
 use async_trait::async_trait;
 use mypi_agent::{
     AfterToolCallHook, AfterToolCallResult, Agent, AgentEvent, AgentMessage, AgentState,
-    AgentToolCall, AgentToolResult, BeforeToolCallHook, BeforeToolCallResult, SessionTree,
+    AgentToolCall, AgentToolDefinition, AgentToolResult, BeforeToolCallHook, BeforeToolCallResult,
+    SessionTree, ToolExecutor,
 };
 use serde_json::Value;
 use std::collections::HashSet;
@@ -17,6 +19,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::broadcast;
@@ -24,6 +27,11 @@ use tokio::time::{timeout, Duration};
 
 const CAPABILITY_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_CAPABILITY_BUFFER_BYTES: usize = 64 * 1024;
+const MAX_SUBAGENT_TASKS: usize = 8;
+const MAX_SUBAGENT_TASK_CHARS: usize = 32_000;
+const SUBAGENT_CONCURRENCY_LIMIT: usize = 4;
+const SUBAGENT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+static NEXT_SUBAGENT_UI_ID: AtomicU64 = AtomicU64::new(1);
 
 type AgentRunner = Arc<
     dyn Fn(Vec<AgentRunTask>, bool) -> Pin<Box<dyn Future<Output = Result<Value, String>> + Send>>
@@ -219,6 +227,11 @@ impl HostCapabilityHandler {
             .get("tasks")
             .and_then(Value::as_array)
             .ok_or_else(|| invalid_argument("missing argument `tasks`"))?;
+        if values.len() > MAX_SUBAGENT_TASKS {
+            return Err(invalid_argument(&format!(
+                "agent.run accepts at most {MAX_SUBAGENT_TASKS} tasks"
+            )));
+        }
         let tasks = values
             .iter()
             .map(|value| {
@@ -234,6 +247,9 @@ impl HostCapabilityHandler {
                     .map(str::trim)
                     .filter(|task| !task.is_empty())
                     .ok_or_else(|| invalid_argument("each task requires a non-empty `task`"))?;
+                if agent.chars().count() > 128 || task.chars().count() > MAX_SUBAGENT_TASK_CHARS {
+                    return Err(invalid_argument("agent.run task fields exceed size limits"));
+                }
                 Ok(AgentRunTask {
                     agent: agent.into(),
                     task: task.into(),
@@ -589,7 +605,7 @@ pub struct CodingAgentOptions {
 pub struct ExtensionBeforeToolHook {
     pub tool_policy: Arc<tokio::sync::Mutex<ToolPolicy>>,
     pub extensions: Arc<WasiExtensionManager>,
-    pub broker_dispatcher: Arc<tokio::sync::Mutex<CapabilityDispatcher>>,
+    pub broker_dispatcher: Arc<CapabilityDispatcher>,
 }
 
 #[async_trait]
@@ -603,7 +619,7 @@ impl BeforeToolCallHook for ExtensionBeforeToolHook {
         if policy == ToolPolicy::ReadOnly {
             if matches!(
                 tool_call.name.as_str(),
-                "write_file" | "edit_file" | "write" | "edit"
+                "write_file" | "edit_file" | "write" | "edit" | "run_command"
             ) {
                 return BeforeToolCallResult {
                     block: true,
@@ -673,7 +689,7 @@ impl BeforeToolCallHook for ExtensionBeforeToolHook {
 
 pub struct ExtensionAfterToolHook {
     pub extensions: Arc<WasiExtensionManager>,
-    pub broker_dispatcher: Arc<tokio::sync::Mutex<CapabilityDispatcher>>,
+    pub broker_dispatcher: Arc<CapabilityDispatcher>,
 }
 
 #[async_trait]
@@ -720,6 +736,71 @@ impl AfterToolCallHook for ExtensionAfterToolHook {
     }
 }
 
+struct BrokerAwareWasiToolExecutor {
+    extensions: Arc<WasiExtensionManager>,
+    broker_dispatcher: Arc<CapabilityDispatcher>,
+}
+
+#[async_trait]
+impl ToolExecutor for BrokerAwareWasiToolExecutor {
+    fn executor_id(&self) -> &str {
+        "mypi.wasi_broker_tools"
+    }
+
+    fn tool_definitions(&self) -> Vec<AgentToolDefinition> {
+        <WasiExtensionManager as ToolExecutor>::tool_definitions(&self.extensions)
+    }
+
+    async fn execute_tool(&self, name: &str, args: &str) -> Option<Result<String, String>> {
+        let invocation = match self
+            .extensions
+            .execute_tool_with_broker_requests(name, args)?
+        {
+            Ok(invocation) => invocation,
+            Err(error) => return Some(Err(error)),
+        };
+        if let Some(error) = invocation.response.error {
+            return Some(Err(error));
+        }
+        let immediate_message = invocation.response.message.unwrap_or_default();
+        let requests = invocation.host_broker_requests;
+        if requests.is_empty() {
+            return Some(Ok(immediate_message));
+        }
+
+        let dispatch = match self.broker_dispatcher.dispatch_envelopes(requests).await {
+            Ok(dispatch) => dispatch,
+            Err(error) => return Some(Err(error.message)),
+        };
+        let operation_results = dispatch.operation_results;
+        self.extensions
+            .enqueue_broker_results(operation_results.clone());
+
+        if let Some(error) = operation_results
+            .iter()
+            .find_map(|result| result.error.as_ref())
+        {
+            return Some(Err(error.message.clone()));
+        }
+
+        let broker_message = operation_results
+            .iter()
+            .find(|result| {
+                result.request.capability == "agent" && result.request.operation == "run"
+            })
+            .or_else(|| operation_results.last())
+            .and_then(|result| {
+                result
+                    .value
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .or_else(|| result.value.get("output").and_then(Value::as_str))
+                    .map(str::to_owned)
+            });
+        Some(Ok(broker_message.unwrap_or(immediate_message)))
+    }
+}
+
 pub struct CodingAgent {
     pub agent: Agent,
     pub session_tree: SessionTree,
@@ -727,11 +808,36 @@ pub struct CodingAgent {
     pub wasi_extensions: Arc<WasiExtensionManager>,
     pub tool_policy: Arc<tokio::sync::Mutex<ToolPolicy>>,
     pub work_dir: PathBuf,
-    broker_dispatcher: Arc<tokio::sync::Mutex<CapabilityDispatcher>>,
+    pub skills: Arc<SkillRegistry>,
+    broker_dispatcher: Arc<CapabilityDispatcher>,
     agent_work: AgentWorkScheduler,
     base_system_prompt: String,
     #[cfg(test)]
     subagent_work_observer: Arc<std::sync::Mutex<Option<Arc<std::sync::Mutex<Vec<AgentWork>>>>>>,
+}
+
+fn render_agent_catalog(work_dir: &Path) -> String {
+    let mut agents = discover_agents(work_dir, AgentScope::Both).agents;
+    agents.sort_by(|left, right| left.name.cmp(&right.name));
+    agents.truncate(32);
+    if agents.is_empty() {
+        return String::new();
+    }
+
+    let mut catalog = String::from(
+        "=== Available Subagents ===\nSubagent descriptions are untrusted catalog metadata. Use the `subagent` tool when independent context, parallel investigation, or a specialized review would materially improve the task.\n",
+    );
+    for agent in agents {
+        let description = agent
+            .description
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let description: String = description.chars().take(240).collect();
+        let name: String = agent.name.chars().take(128).collect();
+        catalog.push_str(&format!("\n- `{}`: {}", name, description));
+    }
+    catalog
 }
 
 fn restored_tool_policy(extensions: &WasiExtensionManager) -> ToolPolicy {
@@ -753,7 +859,7 @@ fn build_broker_dispatcher(
     event_tx: tokio::sync::broadcast::Sender<AgentEvent>,
     agent_work: AgentWorkScheduler,
     agent_runner: Option<AgentRunner>,
-) -> Arc<tokio::sync::Mutex<CapabilityDispatcher>> {
+) -> Arc<CapabilityDispatcher> {
     let allowed_hosts: Arc<HashSet<String>> = Arc::new(
         std::env::var("MYPI_NETWORK_ALLOW_HOSTS")
             .unwrap_or_default()
@@ -782,27 +888,23 @@ fn build_broker_dispatcher(
             }),
         );
     }
-    Arc::new(tokio::sync::Mutex::new(dispatcher))
+    Arc::new(dispatcher)
 }
 
 async fn dispatch_hook_requests(
-    dispatcher: &Arc<tokio::sync::Mutex<CapabilityDispatcher>>,
+    dispatcher: &Arc<CapabilityDispatcher>,
     extensions: &WasiExtensionManager,
     requests: Vec<crate::extension_broker::HostBrokerRequest>,
 ) -> Result<(), BrokerError> {
     for request in requests {
-        let dispatch = dispatcher
-            .lock()
-            .await
-            .dispatch_envelopes(vec![request])
-            .await?;
+        let dispatch = dispatcher.dispatch_envelopes(vec![request]).await?;
         extensions.enqueue_broker_results(dispatch.operation_results);
     }
     Ok(())
 }
 
 async fn dispatch_hook_requests_isolated(
-    dispatcher: &Arc<tokio::sync::Mutex<CapabilityDispatcher>>,
+    dispatcher: &Arc<CapabilityDispatcher>,
     extensions: &WasiExtensionManager,
     requests: Vec<crate::extension_broker::HostBrokerRequest>,
     label: &str,
@@ -818,6 +920,10 @@ impl CodingAgent {
     pub fn new(options: CodingAgentOptions) -> Self {
         let mut agent = Agent::new(&options.api_key, options.account_id, &options.model);
         let project_context = ProjectContext::discover(&options.work_dir);
+        let mut skill_manager = SkillManager::new();
+        skill_manager.discover_skills(Some(&options.work_dir));
+        let skills = skill_manager.snapshot();
+        let skill_catalog = skills.render_model_catalog();
 
         // A missing session file represents an unsaved draft. GUI startup uses
         // this mode so merely opening the app neither creates nor selects a
@@ -843,6 +949,15 @@ impl CodingAgent {
             session_tree.session_id.clone(),
         );
         let loaded_ext_count = wasi_extensions.discover_and_load(&options.work_dir);
+        let has_subagent_tool = wasi_extensions
+            .get_tools()
+            .iter()
+            .any(|tool| tool["function"]["name"] == "subagent");
+        let agent_catalog = if has_subagent_tool {
+            render_agent_catalog(&options.work_dir)
+        } else {
+            String::new()
+        };
         let tool_policy = Arc::new(tokio::sync::Mutex::new(restored_tool_policy(
             &wasi_extensions,
         )));
@@ -859,6 +974,14 @@ impl CodingAgent {
                 "\n\nLoaded {} WASI extensions into sandboxed execution environment.",
                 loaded_ext_count
             ));
+        }
+        if !skill_catalog.is_empty() {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(&skill_catalog);
+        }
+        if !agent_catalog.is_empty() {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(&agent_catalog);
         }
 
         if !project_context.combined_instructions.is_empty() {
@@ -881,6 +1004,7 @@ impl CodingAgent {
         let runner_work_dir = options.work_dir.clone();
         let runner_extensions = wasi_extensions.clone();
         let runner_event_tx = agent.loop_engine.event_tx.clone();
+        let runner_semaphore = Arc::new(tokio::sync::Semaphore::new(SUBAGENT_CONCURRENCY_LIMIT));
         let agent_runner: AgentRunner = Arc::new(move |tasks, parallel| {
             let observer = runner_observer.clone();
             let api_key = runner_api_key.clone();
@@ -889,16 +1013,21 @@ impl CodingAgent {
             let work_dir = runner_work_dir.clone();
             let extensions = runner_extensions.clone();
             let event_tx = runner_event_tx.clone();
+            let semaphore = runner_semaphore.clone();
             Box::pin(async move {
                 let model = state.lock().await.model.clone();
                 let observer = observer
                     .and_then(|observer| observer.lock().ok().and_then(|value| value.clone()));
                 let (output, thinking) = run_subagents_with_context(
                     tasks, parallel, api_key, account_id, model, work_dir, extensions, event_tx,
-                    observer,
+                    observer, semaphore,
                 )
                 .await?;
-                Ok(serde_json::json!({"output": output, "thinking": thinking}))
+                Ok(serde_json::json!({
+                    "message": output,
+                    "output": output,
+                    "thinking": thinking
+                }))
             })
         });
         let broker_dispatcher = build_broker_dispatcher(
@@ -910,7 +1039,20 @@ impl CodingAgent {
             agent_work.clone(),
             Some(agent_runner.clone()),
         );
-        agent.loop_engine.extension_manager = Some(wasi_extensions.clone());
+        agent
+            .loop_engine
+            .register_tool_executor(Arc::new(LoadSkillToolExecutor::new(skills.clone())))
+            .expect("reserved load_skill tool must register");
+        if let Err(error) =
+            agent
+                .loop_engine
+                .register_tool_executor(Arc::new(BrokerAwareWasiToolExecutor {
+                    extensions: wasi_extensions.clone(),
+                    broker_dispatcher: broker_dispatcher.clone(),
+                }))
+        {
+            eprintln!("WASI tool registration failed: {error}");
+        }
         agent.loop_engine.work_dir = Some(options.work_dir.clone());
 
         agent.loop_engine.before_tool_call_hook = Some(Arc::new(ExtensionBeforeToolHook {
@@ -930,7 +1072,6 @@ impl CodingAgent {
                 .try_lock()
                 .expect("Failed to lock initial state");
             state.system_prompt = base_system_prompt.clone();
-            state.tools.extend(wasi_extensions.get_tools());
             state.messages.push(AgentMessage::System {
                 content: base_system_prompt.clone(),
             });
@@ -943,6 +1084,7 @@ impl CodingAgent {
             wasi_extensions,
             tool_policy,
             work_dir: options.work_dir,
+            skills,
             broker_dispatcher,
             agent_work,
             base_system_prompt,
@@ -1134,9 +1276,7 @@ impl CodingAgent {
                     cmd_args.trim()
                 };
 
-                let mut skill_mgr = crate::skills::SkillManager::new();
-                skill_mgr.discover_skills(Some(&self.work_dir));
-                match skill_mgr.get_skill_instructions(skill_name) {
+                match self.skills.get_skill_instructions(skill_name) {
                     Ok(instructions) => {
                         let prompt = format!(
                             "Use the following Skill instructions for '{}':\n\n{}",
@@ -1170,8 +1310,6 @@ impl CodingAgent {
                         };
                         let dispatch = match self
                             .broker_dispatcher
-                            .lock()
-                            .await
                             .dispatch_envelopes(result.host_broker_requests)
                             .await
                         {
@@ -1282,6 +1420,7 @@ async fn run_subagents_with_context(
     extensions: Arc<WasiExtensionManager>,
     parent_event_tx: broadcast::Sender<AgentEvent>,
     scheduler_observer: Option<Arc<std::sync::Mutex<Vec<AgentWork>>>>,
+    semaphore: Arc<tokio::sync::Semaphore>,
 ) -> Result<(String, Vec<AgentMessage>), String> {
     let run_one = |task: AgentRunTask| {
         let config = discover_agents(&work_dir, AgentScope::Both)
@@ -1294,20 +1433,36 @@ async fn run_subagents_with_context(
                     task.agent
                 )
             });
-        async {
+        let semaphore = semaphore.clone();
+        let api_key = api_key.clone();
+        let account_id = account_id.clone();
+        let parent_model = parent_model.clone();
+        let work_dir = work_dir.clone();
+        let extensions = extensions.clone();
+        let parent_event_tx = parent_event_tx.clone();
+        let scheduler_observer = scheduler_observer.clone();
+        async move {
             let config = config?;
-            run_subagent_task(
-                config,
-                task.task,
-                api_key.clone(),
-                account_id.clone(),
-                parent_model.clone(),
-                work_dir.clone(),
-                extensions.clone(),
-                parent_event_tx.clone(),
-                scheduler_observer.clone(),
+            let _permit = semaphore
+                .acquire_owned()
+                .await
+                .map_err(|_| "Subagent concurrency limiter closed".to_string())?;
+            timeout(
+                SUBAGENT_TIMEOUT,
+                run_subagent_task(
+                    config,
+                    task.task,
+                    api_key,
+                    account_id,
+                    parent_model,
+                    work_dir,
+                    extensions,
+                    parent_event_tx,
+                    scheduler_observer,
+                ),
             )
             .await
+            .map_err(|_| "Subagent timed out".to_string())?
         }
     };
     let results = if parallel {
@@ -1362,6 +1517,11 @@ async fn run_subagent_task(
         });
     }
     let mut agent = Agent::new(api_key, account_id, model);
+    if let Some(tools) = config.tools.clone() {
+        agent
+            .loop_engine
+            .set_allowed_tool_names(Some(tools.into_iter().collect()));
+    }
     let system_prompt = format!(
         "{}\n\nYou are an isolated subagent working in {}. Complete only the assigned task and return a concise final report to your parent agent.",
         config.system_prompt,
@@ -1369,7 +1529,6 @@ async fn run_subagent_task(
     );
     agent.set_system_prompt(system_prompt).await;
     agent.loop_engine.work_dir = Some(work_dir.clone());
-    agent.loop_engine.extension_manager = Some(extensions.clone());
 
     let policy = Arc::new(tokio::sync::Mutex::new(
         if config.tools.as_ref().is_some_and(|tools| {
@@ -1406,9 +1565,13 @@ async fn run_subagent_task(
     // reasoning, and tool events so users can see subagent progress live.
     // Assistant text stays local and is returned below as one labelled result.
     let mut ui_events = agent.subscribe();
+    let ui_event_prefix = format!(
+        "subagent-{}:",
+        NEXT_SUBAGENT_UI_ID.fetch_add(1, Ordering::Relaxed)
+    );
     tokio::spawn(async move {
         while let Ok(event) = ui_events.recv().await {
-            if let Some(event) = subagent_ui_event(event) {
+            if let Some(event) = subagent_ui_event(event, &ui_event_prefix) {
                 let _ = parent_event_tx.send(event);
             }
         }
@@ -1455,10 +1618,18 @@ async fn run_subagent_task(
     Ok(SubagentResult { output, thinking })
 }
 
-fn subagent_ui_event(event: AgentEvent) -> Option<AgentEvent> {
+fn subagent_ui_event(event: AgentEvent, tool_call_prefix: &str) -> Option<AgentEvent> {
     match event {
-        // Keep internal child prose out of the transcript: the labelled command
-        // result below is the child’s final report. Reasoning remains visible.
+        // Parent lifecycle and the outer subagent tool own GUI status. Relaying a
+        // child's lifecycle would mark a parallel delegation ready or failed
+        // while sibling tasks and the parent turn are still running.
+        AgentEvent::AgentStart
+        | AgentEvent::AgentEnd { .. }
+        | AgentEvent::AgentError { .. }
+        | AgentEvent::TurnStart { .. }
+        | AgentEvent::TurnEnd { .. } => None,
+        // Keep internal child prose out of the transcript: the labelled tool or
+        // command result is the child’s final report. Reasoning remains visible.
         AgentEvent::MessageUpdate {
             reasoning_delta: Some(reasoning_delta),
             tool_call_name,
@@ -1469,6 +1640,31 @@ fn subagent_ui_event(event: AgentEvent) -> Option<AgentEvent> {
             tool_call_name,
         }),
         AgentEvent::MessageUpdate { .. } => None,
+        AgentEvent::ToolExecutionStart {
+            tool_call_id,
+            name,
+            arguments,
+        } => Some(AgentEvent::ToolExecutionStart {
+            tool_call_id: format!("{tool_call_prefix}{tool_call_id}"),
+            name,
+            arguments,
+        }),
+        AgentEvent::ToolExecutionUpdate {
+            tool_call_id,
+            partial_result,
+        } => Some(AgentEvent::ToolExecutionUpdate {
+            tool_call_id: format!("{tool_call_prefix}{tool_call_id}"),
+            partial_result,
+        }),
+        AgentEvent::ToolExecutionEnd {
+            tool_call_id,
+            name,
+            result,
+        } => Some(AgentEvent::ToolExecutionEnd {
+            tool_call_id: format!("{tool_call_prefix}{tool_call_id}"),
+            name,
+            result,
+        }),
         event => Some(event),
     }
 }
@@ -1510,6 +1706,56 @@ mod tests {
     use crate::extension_broker::CapabilityHandler;
     use std::sync::Mutex;
     use std::time::{Duration as StdDuration, Instant};
+
+    #[test]
+    fn subagent_ui_events_do_not_override_parent_lifecycle() {
+        assert!(subagent_ui_event(AgentEvent::AgentStart, "child:").is_none());
+        assert!(subagent_ui_event(
+            AgentEvent::AgentEnd {
+                usage: Default::default()
+            },
+            "child:"
+        )
+        .is_none());
+        assert!(subagent_ui_event(
+            AgentEvent::AgentError {
+                error: "child failed".into()
+            },
+            "child:"
+        )
+        .is_none());
+
+        let reasoning = subagent_ui_event(
+            AgentEvent::MessageUpdate {
+                text_delta: Some("hidden child prose".into()),
+                reasoning_delta: Some("visible progress".into()),
+                tool_call_name: None,
+            },
+            "child:",
+        );
+        assert!(matches!(
+            reasoning,
+            Some(AgentEvent::MessageUpdate {
+                text_delta: None,
+                reasoning_delta: Some(text),
+                ..
+            }) if text == "visible progress"
+        ));
+
+        let tool = subagent_ui_event(
+            AgentEvent::ToolExecutionStart {
+                tool_call_id: "tool".into(),
+                name: "read_file".into(),
+                arguments: "{}".into(),
+            },
+            "child:",
+        );
+        assert!(matches!(
+            tool,
+            Some(AgentEvent::ToolExecutionStart { tool_call_id, .. })
+                if tool_call_id == "child:tool"
+        ));
+    }
 
     fn handler(capability: &'static str, work_dir: PathBuf) -> HostCapabilityHandler {
         handler_with_scheduler(capability, work_dir, AgentWorkScheduler::default())
@@ -1673,6 +1919,143 @@ mod tests {
             work_dir,
             session_file: None,
         }
+    }
+
+    fn provider_tool_call(
+        id: &str,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> mypi_provider::openai::ToolCall {
+        mypi_provider::openai::ToolCall {
+            id: id.into(),
+            r#type: "function".into(),
+            function: mypi_provider::openai::ToolCallFunction {
+                name: name.into(),
+                arguments: arguments.to_string(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn coding_agent_advertises_and_executes_discovered_skills() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join(".mypi/skills/test-workflow");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: test-workflow\ndescription: Use for deterministic integration tests\n---\nBODY_SENTINEL",
+        )
+        .unwrap();
+
+        let coding_agent = CodingAgent::new(coding_agent_options(dir.path().to_path_buf()));
+        let state = coding_agent.agent.get_state().await;
+        assert!(state.system_prompt.contains("`test-workflow`"));
+        assert!(state
+            .system_prompt
+            .contains("Use for deterministic integration tests"));
+        assert!(!state.system_prompt.contains("BODY_SENTINEL"));
+
+        let (chat, codex) = coding_agent.agent.loop_engine.build_api_payloads().await;
+        assert!(chat["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| { tool["function"]["name"] == crate::skills::LOAD_SKILL_TOOL_NAME }));
+        assert!(codex["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| { tool["name"] == crate::skills::LOAD_SKILL_TOOL_NAME }));
+
+        let results = coding_agent
+            .agent
+            .loop_engine
+            .execute_tools(&[provider_tool_call(
+                "skill-call",
+                crate::skills::LOAD_SKILL_TOOL_NAME,
+                serde_json::json!({"name": "test-workflow"}),
+            )])
+            .await;
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].is_error);
+        assert!(results[0].content.contains("BODY_SENTINEL"));
+    }
+
+    #[tokio::test]
+    async fn model_subagent_tool_returns_awaited_child_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let agents_dir = dir.path().join(".mypi/agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(
+            agents_dir.join("scout.md"),
+            "---\nname: scout\ndescription: deterministic test scout\n---\nTest scout.",
+        )
+        .unwrap();
+        let extension_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.mypi/extensions/subagent_ext.wasm");
+        let extension_dir = dir.path().join(".mypi/extensions/subagent_ext");
+        std::fs::create_dir_all(&extension_dir).unwrap();
+        std::fs::copy(extension_path, extension_dir.join("extension.wasm")).unwrap();
+
+        let coding_agent = CodingAgent::new(coding_agent_options(dir.path().to_path_buf()));
+        coding_agent.set_subagent_work_observer(Arc::new(Mutex::new(Vec::new())));
+        let (chat, codex) = coding_agent.agent.loop_engine.build_api_payloads().await;
+        assert!(chat["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["function"]["name"] == "subagent"));
+        assert!(codex["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "subagent"));
+
+        let results = coding_agent
+            .agent
+            .loop_engine
+            .execute_tools(&[provider_tool_call(
+                "subagent-call",
+                "subagent",
+                serde_json::json!({
+                    "tasks": [{"agent": "scout", "task": "inspect the project"}],
+                    "parallel": false
+                }),
+            )])
+            .await;
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].is_error, "{}", results[0].content);
+        assert!(results[0]
+            .content
+            .contains("test subagent result (test-model)"));
+        assert!(!results[0].content.contains("Running 1 subagent task"));
+    }
+
+    #[tokio::test]
+    async fn malformed_model_subagent_tool_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let extension_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.mypi/extensions/subagent_ext.wasm");
+        let extension_dir = dir.path().join(".mypi/extensions/subagent_ext");
+        std::fs::create_dir_all(&extension_dir).unwrap();
+        std::fs::copy(extension_path, extension_dir.join("extension.wasm")).unwrap();
+        let coding_agent = CodingAgent::new(coding_agent_options(dir.path().to_path_buf()));
+
+        let results = coding_agent
+            .agent
+            .loop_engine
+            .execute_tools(&[provider_tool_call(
+                "invalid-subagent-call",
+                "subagent",
+                serde_json::json!({
+                    "tasks": [{"agent": "scout", "task": ""}],
+                    "parallel": false
+                }),
+            )])
+            .await;
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_error);
+        assert!(results[0].content.contains("Usage: /subagent"));
     }
 
     #[tokio::test]
@@ -1851,7 +2234,7 @@ mod tests {
                 operations: operations.clone(),
             }),
         );
-        let dispatcher = Arc::new(tokio::sync::Mutex::new(dispatcher));
+        let dispatcher = Arc::new(dispatcher);
         let requests = ["first", "fail", "last"]
             .into_iter()
             .map(|operation| crate::extension_broker::HostBrokerRequest {

@@ -762,7 +762,7 @@ async fn structured_hook_middleware_blocks_without_message_matching() {
     let hook = ExtensionBeforeToolHook {
         tool_policy: Arc::new(tokio::sync::Mutex::new(ToolPolicy::FullAccess)),
         extensions: Arc::new(manager),
-        broker_dispatcher: Arc::new(tokio::sync::Mutex::new(CapabilityDispatcher::new())),
+        broker_dispatcher: Arc::new(CapabilityDispatcher::new()),
     };
     let state = AgentState {
         system_prompt: String::new(),
@@ -801,7 +801,7 @@ async fn structured_hook_v2_message_does_not_block() {
     let hook = ExtensionBeforeToolHook {
         tool_policy: Arc::new(tokio::sync::Mutex::new(ToolPolicy::FullAccess)),
         extensions: Arc::new(manager),
-        broker_dispatcher: Arc::new(tokio::sync::Mutex::new(CapabilityDispatcher::new())),
+        broker_dispatcher: Arc::new(CapabilityDispatcher::new()),
     };
     let state = AgentState {
         system_prompt: String::new(),
@@ -837,7 +837,7 @@ async fn structured_hook_v1_message_behavior_is_preserved() {
     let hook = ExtensionBeforeToolHook {
         tool_policy: Arc::new(tokio::sync::Mutex::new(ToolPolicy::FullAccess)),
         extensions: Arc::new(manager),
-        broker_dispatcher: Arc::new(tokio::sync::Mutex::new(CapabilityDispatcher::new())),
+        broker_dispatcher: Arc::new(CapabilityDispatcher::new()),
     };
     let state = AgentState {
         system_prompt: String::new(),

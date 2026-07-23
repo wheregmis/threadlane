@@ -7,7 +7,7 @@ pub struct CommandInfo {
     pub description: String,
 }
 
-/// Built-in slash commands (kept in sync with mypi-agent/src/commands.rs).
+/// Built-in slash commands handled by the coding agent.
 pub fn builtin_commands() -> Vec<CommandInfo> {
     [
         ("model", "Switch model, or show the current one"),
@@ -17,6 +17,7 @@ pub fn builtin_commands() -> Vec<CommandInfo> {
         ("tree", "Switch session tree branch"),
         ("fork", "Fork a session tree branch"),
         ("clone", "Clone the active session tree"),
+        ("skill", "Load a discovered skill by ID"),
         ("clear-plan", "Clear active plan items"),
         ("quit", "Quit mypi agent"),
     ]
@@ -26,4 +27,16 @@ pub fn builtin_commands() -> Vec<CommandInfo> {
         description: description.to_string(),
     })
     .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skill_command_is_discoverable() {
+        let commands = builtin_commands();
+
+        assert!(commands.iter().any(|command| command.name == "skill"));
+    }
 }

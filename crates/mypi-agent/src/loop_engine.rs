@@ -5,11 +5,13 @@ use crate::hooks::{
 };
 use crate::queue::PendingMessageQueue;
 use crate::types::{
-    AgentMessage, AgentState, AgentToolCall, AgentToolResult, QueueMode, ToolExecutionMode,
+    AgentMessage, AgentState, AgentToolCall, AgentToolDefinition, AgentToolResult, QueueMode,
+    ToolExecutionMode,
 };
 use mypi_provider::openai::{OpenAIClient, StreamEvent, ToolCall};
 use mypi_tools::{execute_tool, execute_tool_in_workspace, get_available_tools, get_codex_tools};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, Mutex};
@@ -132,11 +134,18 @@ pub fn convert_to_codex_llm(messages: &[AgentMessage]) -> (String, Vec<Value>) {
     (instructions, items)
 }
 
+#[derive(Clone)]
+struct ToolExecutorRoute {
+    executor: Arc<dyn ToolExecutor>,
+    tool_names: HashSet<String>,
+}
+
 pub struct AgentLoop {
     pub state: Arc<Mutex<AgentState>>,
     pub api_key: String,
     pub account_id: Option<String>,
     pub tool_execution_mode: ToolExecutionMode,
+    allowed_tool_names: Option<HashSet<String>>,
     pub steering_queue: PendingMessageQueue,
     pub follow_up_queue: PendingMessageQueue,
     pub before_tool_call_hook: Option<Arc<dyn BeforeToolCallHook>>,
@@ -144,6 +153,9 @@ pub struct AgentLoop {
     pub transform_context_hook: Option<Arc<dyn TransformContextHook>>,
     pub should_stop_hook: Option<Arc<dyn ShouldStopAfterTurnHook>>,
     pub event_tx: broadcast::Sender<AgentEvent>,
+    tool_executors: Vec<Arc<dyn ToolExecutor>>,
+    /// Compatibility slot for existing callers. New code should use
+    /// `register_tool_executor` so ordering and schema conflicts are validated.
     pub extension_manager: Option<Arc<dyn ToolExecutor>>,
     pub work_dir: Option<PathBuf>,
 }
@@ -165,6 +177,7 @@ impl AgentLoop {
             api_key: api_key.into(),
             account_id,
             tool_execution_mode: ToolExecutionMode::Parallel,
+            allowed_tool_names: None,
             steering_queue: PendingMessageQueue::new(QueueMode::All),
             follow_up_queue: PendingMessageQueue::new(QueueMode::All),
             before_tool_call_hook: None,
@@ -172,9 +185,175 @@ impl AgentLoop {
             transform_context_hook: None,
             should_stop_hook: None,
             event_tx,
+            tool_executors: Vec::new(),
             extension_manager: None,
             work_dir: None,
         }
+    }
+
+    /// Restricts both advertised and executable tools. `None` restores the
+    /// default behavior where all registered, state, and core tools are available.
+    pub fn set_allowed_tool_names(&mut self, allowed_tool_names: Option<HashSet<String>>) {
+        self.allowed_tool_names = allowed_tool_names;
+    }
+
+    pub fn allowed_tool_names(&self) -> Option<&HashSet<String>> {
+        self.allowed_tool_names.as_ref()
+    }
+
+    pub fn register_tool_executor(
+        &mut self,
+        executor: Arc<dyn ToolExecutor>,
+    ) -> Result<(), String> {
+        let executor_id = executor.executor_id().trim();
+        if executor_id.is_empty() {
+            return Err("Tool executor id must not be empty".into());
+        }
+        if self
+            .ordered_tool_executors()
+            .iter()
+            .any(|registered| registered.executor_id() == executor_id)
+        {
+            return Err(format!(
+                "Tool executor '{executor_id}' is already registered"
+            ));
+        }
+
+        let mut known_names: HashSet<String> = core_tool_definitions()
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect();
+        for registered in self.ordered_tool_executors() {
+            known_names.extend(
+                registered
+                    .tool_definitions()
+                    .into_iter()
+                    .map(|definition| definition.name),
+            );
+        }
+        for definition in executor.tool_definitions() {
+            if definition.name.trim().is_empty() {
+                return Err(format!(
+                    "Tool executor '{executor_id}' provided an empty tool name"
+                ));
+            }
+            if !known_names.insert(definition.name.clone()) {
+                return Err(format!(
+                    "Tool schema '{}' from executor '{executor_id}' conflicts with an existing schema",
+                    definition.name
+                ));
+            }
+        }
+
+        self.tool_executors.push(executor);
+        Ok(())
+    }
+
+    pub fn tool_executor_count(&self) -> usize {
+        self.ordered_tool_executors().len()
+    }
+
+    fn compatibility_executor(&self) -> Option<Arc<dyn ToolExecutor>> {
+        self.extension_manager.clone().filter(|compatibility| {
+            !self
+                .tool_executors
+                .iter()
+                .any(|registered| registered.executor_id() == compatibility.executor_id())
+        })
+    }
+
+    fn ordered_tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
+        self.tool_executors
+            .iter()
+            .cloned()
+            .chain(self.compatibility_executor())
+            .collect()
+    }
+
+    async fn tool_execution_routes(&self) -> Vec<ToolExecutorRoute> {
+        let state_tools = self.state.lock().await.tools.clone();
+        let mut claimed_names: HashSet<String> = core_tool_definitions()
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect();
+        let mut routes = Vec::new();
+
+        for executor in &self.tool_executors {
+            let tool_names = executor
+                .tool_definitions()
+                .into_iter()
+                .filter_map(|definition| {
+                    claimed_names
+                        .insert(definition.name.clone())
+                        .then_some(definition.name)
+                })
+                .collect();
+            routes.push(ToolExecutorRoute {
+                executor: executor.clone(),
+                tool_names,
+            });
+        }
+
+        if let Some(executor) = self.compatibility_executor() {
+            let tool_names = executor
+                .tool_definitions()
+                .into_iter()
+                .map(|definition| definition.name)
+                .chain(state_tools.iter().filter_map(|schema| {
+                    AgentToolDefinition::from_provider_schema(schema)
+                        .ok()
+                        .map(|definition| definition.name)
+                }))
+                .filter(|name| claimed_names.insert(name.clone()))
+                .collect();
+            routes.push(ToolExecutorRoute {
+                executor,
+                tool_names,
+            });
+        }
+
+        routes
+    }
+
+    /// Builds both provider payloads without making a network request.
+    pub async fn build_api_payloads(&self) -> (Value, Value) {
+        let state = self.state.lock().await.clone();
+        let api_msgs = convert_to_llm(&state.messages);
+        let (instructions, codex_msgs) = convert_to_codex_llm(&state.messages);
+        let mut definitions = collect_tool_definitions(
+            &state.tools,
+            &self.tool_executors,
+            self.compatibility_executor().as_ref(),
+        );
+        if let Some(allowed_tool_names) = &self.allowed_tool_names {
+            definitions.retain(|definition| allowed_tool_names.contains(&definition.name));
+        }
+        let tools: Vec<_> = definitions
+            .iter()
+            .map(AgentToolDefinition::to_chat_completions_tool)
+            .collect();
+        let codex_tools: Vec<_> = definitions
+            .iter()
+            .map(AgentToolDefinition::to_codex_responses_tool)
+            .collect();
+
+        (
+            serde_json::json!({
+                "model": state.model,
+                "messages": api_msgs,
+                "tools": tools,
+                "stream": true
+            }),
+            serde_json::json!({
+                "model": state.model,
+                "instructions": instructions,
+                "input": codex_msgs,
+                "store": false,
+                "stream": true,
+                "reasoning": { "summary": "auto" },
+                "tools": codex_tools
+            }),
+        )
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
@@ -240,39 +419,7 @@ impl AgentLoop {
 
             let _ = self.event_tx.send(AgentEvent::TurnStart { turn_number });
 
-            let (api_payload, codex_payload) = {
-                let state = self.state.lock().await;
-                let api_msgs = convert_to_llm(&state.messages);
-                let (instructions, codex_msgs) = convert_to_codex_llm(&state.messages);
-                let mut tools = get_available_tools();
-                tools.extend(state.tools.clone());
-                if let Some(ref ext_mgr) = self.extension_manager {
-                    tools.extend(ext_mgr.get_tool_schemas());
-                }
-                let mut codex_tools = get_codex_tools();
-                if let Some(ref ext_mgr) = self.extension_manager {
-                    codex_tools.extend(ext_mgr.get_tool_schemas());
-                }
-                (
-                    serde_json::json!({
-                        "model": state.model,
-                        "messages": api_msgs,
-                        "tools": tools,
-                        "stream": true
-                    }),
-                    serde_json::json!({
-                        "model": state.model,
-                        "instructions": instructions,
-                        "input": codex_msgs,
-                        "store": false,
-                        "stream": true,
-                        // Reasoning deltas are opt-in on the Responses API.
-                        // The GUI already renders them as a live Thinking row.
-                        "reasoning": { "summary": "auto" },
-                        "tools": codex_tools
-                    }),
-                )
-            };
+            let (api_payload, codex_payload) = self.build_api_payloads().await;
 
             let (stream_tx, mut stream_rx) = mpsc::channel(100);
             let api_key = self.api_key.clone();
@@ -397,7 +544,7 @@ impl AgentLoop {
             });
 
             if let Some(ref hook) = self.should_stop_hook {
-                let state = self.state.lock().await;
+                let state = self.state.lock().await.clone();
                 if hook
                     .should_stop_after_turn(turn_number, &tool_results, &state)
                     .await
@@ -416,12 +563,16 @@ impl AgentLoop {
         });
     }
 
-    async fn execute_tools(&self, tool_calls: &[ToolCall]) -> Vec<AgentToolResult> {
+    pub async fn execute_tools(&self, tool_calls: &[ToolCall]) -> Vec<AgentToolResult> {
         let mut results = Vec::new();
+        let tool_routes = self.tool_execution_routes().await;
+        let allowed_tool_names = self.allowed_tool_names.clone();
 
         if self.tool_execution_mode == ToolExecutionMode::Sequential {
             for tc in tool_calls {
-                let res = self.execute_single_tool(tc).await;
+                let res = self
+                    .execute_single_tool(tc, tool_routes.clone(), allowed_tool_names.clone())
+                    .await;
                 results.push(res);
             }
         } else {
@@ -433,26 +584,45 @@ impl AgentLoop {
                 let after_hook = self.after_tool_call_hook.clone();
                 let event_tx = self.event_tx.clone();
                 let state = self.state.clone();
-                let extension_manager = self.extension_manager.clone();
+                let tool_routes = tool_routes.clone();
+                let allowed_tool_names = allowed_tool_names.clone();
                 let work_dir = self.work_dir.clone();
 
-                handles.push(tokio::spawn(async move {
+                let handle_tool_call = tc.clone();
+                let handle = tokio::spawn(async move {
                     Self::run_tool_with_hooks(
                         tc_clone,
                         before_hook,
                         after_hook,
                         event_tx,
                         state,
-                        extension_manager,
+                        tool_routes,
+                        allowed_tool_names,
                         work_dir,
                     )
                     .await
-                }));
+                });
+                handles.push((handle_tool_call, handle));
             }
 
-            for handle in handles {
-                if let Ok(res) = handle.await {
-                    results.push(res);
+            for (tool_call, handle) in handles {
+                match handle.await {
+                    Ok(result) => results.push(result),
+                    Err(error) => {
+                        let result = AgentToolResult {
+                            tool_call_id: tool_call.id.clone(),
+                            name: tool_call.function.name.clone(),
+                            content: format!("Tool execution task failed: {error}"),
+                            is_error: true,
+                            terminate: false,
+                        };
+                        let _ = self.event_tx.send(AgentEvent::ToolExecutionEnd {
+                            tool_call_id: tool_call.id,
+                            name: tool_call.function.name,
+                            result: result.clone(),
+                        });
+                        results.push(result);
+                    }
                 }
             }
         }
@@ -460,14 +630,20 @@ impl AgentLoop {
         results
     }
 
-    async fn execute_single_tool(&self, tc: &ToolCall) -> AgentToolResult {
+    async fn execute_single_tool(
+        &self,
+        tc: &ToolCall,
+        tool_routes: Vec<ToolExecutorRoute>,
+        allowed_tool_names: Option<HashSet<String>>,
+    ) -> AgentToolResult {
         Self::run_tool_with_hooks(
             tc.clone(),
             self.before_tool_call_hook.clone(),
             self.after_tool_call_hook.clone(),
             self.event_tx.clone(),
             self.state.clone(),
-            self.extension_manager.clone(),
+            tool_routes,
+            allowed_tool_names,
             self.work_dir.clone(),
         )
         .await
@@ -479,7 +655,8 @@ impl AgentLoop {
         after_hook: Option<Arc<dyn AfterToolCallHook>>,
         event_tx: broadcast::Sender<AgentEvent>,
         state: Arc<Mutex<AgentState>>,
-        extension_manager: Option<Arc<dyn ToolExecutor>>,
+        tool_routes: Vec<ToolExecutorRoute>,
+        allowed_tool_names: Option<HashSet<String>>,
         work_dir: Option<PathBuf>,
     ) -> AgentToolResult {
         let arguments = normalize_tool_arguments(
@@ -493,9 +670,33 @@ impl AgentLoop {
             arguments: arguments.clone(),
         };
 
+        if allowed_tool_names
+            .as_ref()
+            .is_some_and(|allowed| !allowed.contains(&tc.function.name))
+        {
+            let result = AgentToolResult {
+                tool_call_id: tc.id.clone(),
+                name: tc.function.name.clone(),
+                content: format!(
+                    "Tool '{}' is not allowed by the current agent policy",
+                    tc.function.name
+                ),
+                is_error: true,
+                terminate: false,
+            };
+            let _ = event_tx.send(AgentEvent::ToolExecutionEnd {
+                tool_call_id: tc.id,
+                name: tc.function.name,
+                result: result.clone(),
+            });
+            return result;
+        }
+
         if let Some(ref hook) = before_hook {
-            let st = state.lock().await;
-            let check = hook.before_tool_call(&agent_tool_call, &st).await;
+            let state_snapshot = state.lock().await.clone();
+            let check = hook
+                .before_tool_call(&agent_tool_call, &state_snapshot)
+                .await;
             if check.block {
                 let res = AgentToolResult {
                     tool_call_id: tc.id.clone(),
@@ -521,28 +722,42 @@ impl AgentLoop {
             arguments: arguments.clone(),
         });
 
-        let raw_result = extension_manager
-            .as_ref()
-            .and_then(|manager| manager.execute_tool(&tc.function.name, &arguments))
-            .unwrap_or_else(|| {
-                Ok(match work_dir.as_deref() {
-                    Some(dir) => execute_tool_in_workspace(&tc.function.name, &arguments, dir),
-                    None => execute_tool(&tc.function.name, &arguments),
-                })
+        let mut execution_result = None;
+        for route in tool_routes {
+            if !route.tool_names.contains(&tc.function.name) {
+                continue;
+            }
+            if let Some(result) = route
+                .executor
+                .execute_tool(&tc.function.name, &arguments)
+                .await
+            {
+                execution_result = Some(result);
+                break;
+            }
+        }
+        let execution_result = execution_result.unwrap_or_else(|| {
+            Ok(match work_dir.as_deref() {
+                Some(dir) => execute_tool_in_workspace(&tc.function.name, &arguments, dir),
+                None => execute_tool(&tc.function.name, &arguments),
             })
-            .unwrap_or_else(|error| format!("Extension tool error: {error}"));
+        });
+        let (content, is_error) = match execution_result {
+            Ok(content) => (content, false),
+            Err(error) => (format!("Tool executor error: {error}"), true),
+        };
         let mut final_result = AgentToolResult {
             tool_call_id: tc.id.clone(),
             name: tc.function.name.clone(),
-            content: raw_result,
-            is_error: false,
+            content,
+            is_error,
             terminate: false,
         };
 
         if let Some(ref hook) = after_hook {
-            let st = state.lock().await;
+            let state_snapshot = state.lock().await.clone();
             let override_res = hook
-                .after_tool_call(&agent_tool_call, &final_result, &st)
+                .after_tool_call(&agent_tool_call, &final_result, &state_snapshot)
                 .await;
             if let Some(c) = override_res.override_content {
                 final_result.content = c;
@@ -563,6 +778,50 @@ impl AgentLoop {
 
         final_result
     }
+}
+
+fn core_tool_definitions() -> Vec<AgentToolDefinition> {
+    let mut seen = HashSet::new();
+    get_available_tools()
+        .into_iter()
+        .chain(get_codex_tools())
+        .filter_map(|schema| AgentToolDefinition::from_provider_schema(&schema).ok())
+        .filter(|definition| seen.insert(definition.name.clone()))
+        .collect()
+}
+
+fn collect_tool_definitions(
+    state_tools: &[Value],
+    registered_executors: &[Arc<dyn ToolExecutor>],
+    compatibility_executor: Option<&Arc<dyn ToolExecutor>>,
+) -> Vec<AgentToolDefinition> {
+    let mut seen = HashSet::new();
+    let mut definitions = Vec::new();
+
+    for definition in core_tool_definitions()
+        .into_iter()
+        .chain(
+            registered_executors
+                .iter()
+                .flat_map(|executor| executor.tool_definitions()),
+        )
+        .chain(
+            compatibility_executor
+                .into_iter()
+                .flat_map(|executor| executor.tool_definitions()),
+        )
+        .chain(
+            state_tools
+                .iter()
+                .filter_map(|schema| AgentToolDefinition::from_provider_schema(schema).ok()),
+        )
+    {
+        if seen.insert(definition.name.clone()) {
+            definitions.push(definition);
+        }
+    }
+
+    definitions
 }
 
 fn normalize_tool_arguments(

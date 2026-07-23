@@ -1,7 +1,7 @@
 ---
 name: reviewer
 description: Performs thorough code reviews and identifies potential bugs
-tools: read_file, list_dir, grep_search, run_command
+tools: read_file, list_dir, grep_search
 model: gpt-5.6-luna
 ---
 

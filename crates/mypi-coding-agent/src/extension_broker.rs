@@ -110,7 +110,7 @@ impl CapabilityDispatcher {
     }
 
     pub async fn dispatch(
-        &mut self,
+        &self,
         requests: Vec<BrokerRequest>,
     ) -> Result<BrokerDispatchResult, BrokerError> {
         self.dispatch_envelopes(
@@ -126,7 +126,7 @@ impl CapabilityDispatcher {
     }
 
     pub async fn dispatch_envelopes(
-        &mut self,
+        &self,
         requests: Vec<HostBrokerRequest>,
     ) -> Result<BrokerDispatchResult, BrokerError> {
         let mut result = BrokerDispatchResult::default();

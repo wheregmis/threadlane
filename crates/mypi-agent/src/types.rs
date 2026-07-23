@@ -1,7 +1,99 @@
 use mypi_provider::openai::ToolCall;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::collections::HashMap;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentToolDefinition {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub parameters: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strict: Option<bool>,
+}
+
+impl AgentToolDefinition {
+    pub fn new(name: impl Into<String>, description: impl Into<String>, parameters: Value) -> Self {
+        Self {
+            name: name.into(),
+            description: Some(description.into()),
+            parameters,
+            strict: None,
+        }
+    }
+
+    /// Renders the nested function schema expected by Chat Completions.
+    pub fn to_chat_completions_tool(&self) -> Value {
+        let mut function = Map::new();
+        function.insert("name".into(), self.name.clone().into());
+        if let Some(description) = &self.description {
+            function.insert("description".into(), description.clone().into());
+        }
+        function.insert("parameters".into(), self.parameters.clone());
+        if let Some(strict) = self.strict {
+            function.insert("strict".into(), strict.into());
+        }
+
+        serde_json::json!({
+            "type": "function",
+            "function": function,
+        })
+    }
+
+    /// Renders the flat function schema expected by the Codex Responses API.
+    pub fn to_codex_responses_tool(&self) -> Value {
+        let mut tool = Map::new();
+        tool.insert("type".into(), "function".into());
+        tool.insert("name".into(), self.name.clone().into());
+        if let Some(description) = &self.description {
+            tool.insert("description".into(), description.clone().into());
+        }
+        tool.insert("parameters".into(), self.parameters.clone());
+        if let Some(strict) = self.strict {
+            tool.insert("strict".into(), strict.into());
+        }
+        Value::Object(tool)
+    }
+
+    /// Accepts either the nested Chat Completions shape or the flat Responses shape.
+    pub fn from_provider_schema(schema: &Value) -> Result<Self, String> {
+        let schema = schema
+            .as_object()
+            .ok_or_else(|| "Tool schema must be a JSON object".to_string())?;
+        if schema.get("type").and_then(Value::as_str) != Some("function") {
+            return Err("Tool schema type must be 'function'".to_string());
+        }
+
+        let function = match schema.get("function") {
+            Some(value) => value
+                .as_object()
+                .ok_or_else(|| "Tool schema 'function' must be an object".to_string())?,
+            None => schema,
+        };
+        let name = function
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty())
+            .ok_or_else(|| "Tool schema requires a non-empty name".to_string())?;
+        let parameters = function
+            .get("parameters")
+            .cloned()
+            .ok_or_else(|| format!("Tool schema '{name}' requires parameters"))?;
+        let description = function
+            .get("description")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let strict = function.get("strict").and_then(Value::as_bool);
+
+        Ok(Self {
+            name: name.to_string(),
+            description,
+            parameters,
+            strict,
+        })
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

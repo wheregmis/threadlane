@@ -9,14 +9,17 @@ use crate::panels::sessions::{SessionContextMenu, SessionContextMenuAction, Sess
 use crate::state::{
     active_session_entry, archive_session, builtin_commands, create_new_session, delete_session,
     project_work_dir_at_row, refresh_plan_data, refresh_sessions, session_entry_at_row,
-    set_active_session, set_session_context_target, set_sessions_working, CommandInfo,
-    GuiAgentEvent, MsgRole, SessionEntry, ToolStatus,
+    set_active_session, set_session_context_target, set_sessions_working, truncate_chars,
+    CommandInfo, GuiAgentEvent, MsgRole, SessionEntry, ToolStatus,
 };
 use crate::workspace::{AppState, SessionKey};
 use makepad_widgets::text::selection::Cursor;
 use makepad_widgets::*;
 use mypi_agent::{get_runtime, AgentEvent};
-use mypi_coding_agent::{CodingAgent, CodingAgentOptions, ProjectContext};
+use mypi_coding_agent::{
+    discover_agents, AgentConfig, AgentScope, CodingAgent, CodingAgentOptions, ProjectContext,
+    SkillMetadata,
+};
 use mypi_provider::auth;
 use mypi_provider::openai::fetch_available_models;
 
@@ -961,6 +964,8 @@ pub struct App {
     #[rust]
     commands: Vec<CommandInfo>,
     #[rust]
+    capabilities_summary: String,
+    #[rust]
     available_models: Vec<String>,
     #[rust]
     workspace_state: AppState,
@@ -1043,8 +1048,39 @@ impl MatchEvent for App {
         };
 
         let coding_agent = CodingAgent::new(agent_opts);
+        let discovered_skills: Vec<_> = coding_agent
+            .skills
+            .list_skills()
+            .into_iter()
+            .filter(|skill| skill.enabled && skill.is_valid)
+            .collect();
+        let discovered_agents = discover_agents(&work_dir, AgentScope::Both).agents;
+        let subagent_enabled = coding_agent
+            .wasi_extensions
+            .get_tools()
+            .iter()
+            .any(|tool| tool["function"]["name"] == "subagent");
+        self.capabilities_summary =
+            format_capabilities_summary(&discovered_skills, &discovered_agents, subagent_enabled);
+        self.ui.button(cx, ids!(caps_btn)).set_text(
+            cx,
+            &format!(
+                "{} skills · {} agents",
+                discovered_skills.len(),
+                discovered_agents.len()
+            ),
+        );
 
         self.commands = builtin_commands();
+        self.commands
+            .extend(discovered_skills.iter().map(|skill| CommandInfo {
+                name: format!("skill {}", skill.id),
+                description: format!(
+                    "{} · {}",
+                    skill.scope.display_name(),
+                    truncate_chars(&normalize_catalog_text(&skill.description), 120)
+                ),
+            }));
         if coding_agent.wasi_extensions.extensions.is_empty() {
             self.push_chat(
                 MsgRole::System,
@@ -1140,10 +1176,8 @@ impl MatchEvent for App {
         }
 
         if self.ui.button(cx, ids!(caps_btn)).clicked(actions) {
-            self.push_chat(
-                MsgRole::System,
-                "=== Capabilities Manager ===\nSkills: Global (~/.agents/skills), Project (.mypi/skills)\nExtensions: Sandboxed WASI (.wasm)\nPackages: Local & Git packages",
-            );
+            let summary = self.capabilities_summary.clone();
+            self.push_chat(MsgRole::System, summary);
             cx.redraw_all();
         }
 
@@ -1288,6 +1322,76 @@ impl AppMain for App {
         let mut scope = Scope::with_data(&mut self.workspace_state);
         self.ui.handle_event(cx, event, &mut scope);
     }
+}
+
+const MAX_CAPABILITY_SUMMARY_ITEMS: usize = 32;
+
+fn normalize_catalog_text(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn format_capabilities_summary(
+    skills: &[SkillMetadata],
+    agents: &[AgentConfig],
+    subagent_enabled: bool,
+) -> String {
+    let mut summary = format!(
+        "Capabilities\n\nSkills ({}) — use /skill <id> or let the model load one automatically.",
+        skills.len()
+    );
+    if skills.is_empty() {
+        summary.push_str("\n  No skills discovered.");
+    } else {
+        for skill in skills.iter().take(MAX_CAPABILITY_SUMMARY_ITEMS) {
+            summary.push_str(&format!(
+                "\n  • {} [{}] — {}",
+                truncate_chars(&normalize_catalog_text(&skill.id), 128),
+                skill.scope.display_name(),
+                truncate_chars(&normalize_catalog_text(&skill.description), 160)
+            ));
+        }
+        if skills.len() > MAX_CAPABILITY_SUMMARY_ITEMS {
+            summary.push_str(&format!(
+                "\n  … and {} more",
+                skills.len() - MAX_CAPABILITY_SUMMARY_ITEMS
+            ));
+        }
+    }
+
+    summary.push_str(&format!(
+        "\n\nSubagents ({}) — {}",
+        agents.len(),
+        if subagent_enabled {
+            "use /subagent <task>, or let the model delegate automatically."
+        } else {
+            "the subagent extension is not loaded."
+        }
+    ));
+    if agents.is_empty() {
+        summary.push_str("\n  No agent presets discovered.");
+    } else {
+        for agent in agents.iter().take(MAX_CAPABILITY_SUMMARY_ITEMS) {
+            let model = agent
+                .model
+                .as_deref()
+                .map(|model| format!(" · {}", truncate_chars(&normalize_catalog_text(model), 96)))
+                .unwrap_or_default();
+            summary.push_str(&format!(
+                "\n  • {} [{}{}] — {}",
+                truncate_chars(&normalize_catalog_text(&agent.name), 128),
+                agent.source.as_str(),
+                model,
+                truncate_chars(&normalize_catalog_text(&agent.description), 160)
+            ));
+        }
+        if agents.len() > MAX_CAPABILITY_SUMMARY_ITEMS {
+            summary.push_str(&format!(
+                "\n  … and {} more",
+                agents.len() - MAX_CAPABILITY_SUMMARY_ITEMS
+            ));
+        }
+    }
+    summary
 }
 
 impl App {

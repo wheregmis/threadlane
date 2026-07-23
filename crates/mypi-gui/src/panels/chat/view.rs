@@ -119,13 +119,20 @@ impl Widget for ChatList {
                                     .widget(cx, ids!(args_section))
                                     .set_visible(cx, !presentation.arguments_detail.is_empty());
                                 let output_detail = super::state::tool_result_detail(output, 6_000);
-                                item_widget
-                                    .widget(cx, ids!(result_section))
+                                let result_section = item_widget.widget(cx, ids!(result_section));
+                                result_section
                                     .label(cx, ids!(content_lbl))
                                     .set_text(cx, &output_detail);
-                                item_widget
-                                    .widget(cx, ids!(result_section))
-                                    .set_visible(cx, !output.is_empty());
+                                result_section
+                                    .widget(cx, ids!(content_lbl))
+                                    .set_visible(cx, !presentation.output_markdown);
+                                let content_md_wrap =
+                                    result_section.widget(cx, ids!(content_md_wrap));
+                                content_md_wrap
+                                    .markdown(cx, ids!(content_md))
+                                    .set_text(cx, &output_detail);
+                                content_md_wrap.set_visible(cx, presentation.output_markdown);
+                                result_section.set_visible(cx, !output.is_empty());
                                 item_widget.draw_all_unscoped(cx);
                             }
                         }

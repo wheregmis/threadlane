@@ -1,6 +1,6 @@
 use crate::types::{
-    AfterToolCallResult, AgentMessage, AgentState, AgentToolCall, AgentToolResult,
-    BeforeToolCallResult,
+    AfterToolCallResult, AgentMessage, AgentState, AgentToolCall, AgentToolDefinition,
+    AgentToolResult, BeforeToolCallResult,
 };
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -48,10 +48,25 @@ pub type DynTransformContextFn = Arc<dyn Fn(Vec<AgentMessage>) -> Vec<AgentMessa
 pub type DynShouldStopFn =
     Arc<dyn Fn(usize, &[AgentToolResult], &AgentState) -> bool + Send + Sync>;
 
+#[async_trait]
 pub trait ToolExecutor: Send + Sync {
-    fn execute_tool(&self, name: &str, args: &str) -> Option<Result<String, String>>;
+    /// Stable identity used for deterministic registration and diagnostics.
+    fn executor_id(&self) -> &str {
+        std::any::type_name::<Self>()
+    }
+
+    /// Provider-neutral definitions for tools handled by this executor.
+    fn tool_definitions(&self) -> Vec<AgentToolDefinition> {
+        self.get_tool_schemas()
+            .iter()
+            .filter_map(|schema| AgentToolDefinition::from_provider_schema(schema).ok())
+            .collect()
+    }
+
+    /// Legacy Chat Completions schemas. Prefer `tool_definitions` for new executors.
     fn get_tool_schemas(&self) -> Vec<serde_json::Value> {
         Vec::new()
     }
-}
 
+    async fn execute_tool(&self, name: &str, args: &str) -> Option<Result<String, String>>;
+}

@@ -27,7 +27,11 @@ pub use prompt_templates::{
     expand_prompt_template, load_prompt_templates, load_prompt_templates_from_dir,
     parse_command_args, substitute_args, PromptTemplate,
 };
-pub use skills::{SkillManager, SkillMetadata, SkillScope};
+pub use skills::{
+    discover_skill_registry, load_skill_tool_definition, LoadSkillToolExecutor, LoadedSkill,
+    SkillDiscoveryOptions, SkillDiscoveryReport, SkillDiscoveryWarning, SkillDiscoveryWarningKind,
+    SkillManager, SkillMetadata, SkillRegistry, SkillScope, LOAD_SKILL_TOOL_NAME,
+};
 pub use supervisor::{HarnessSupervisor, ProjectRecord, TaskAgentEvent, TaskRecord, TaskStatus};
 pub use wasi_extension::{
     WasiCommandDefinition, WasiExtension, WasiExtensionCommandResult, WasiExtensionEvent,

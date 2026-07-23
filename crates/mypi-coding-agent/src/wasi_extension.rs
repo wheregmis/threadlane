@@ -92,6 +92,8 @@ pub struct WasiExtensionResponse {
     #[serde(default)]
     pub message: Option<String>,
     #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
     pub state: Option<Value>,
     #[serde(default)]
     pub effects: Vec<WasiLegacyEffect>,
@@ -1100,8 +1102,30 @@ fn persist_json_state(path: &Path, state: &Value) -> Result<(), String> {
     fs::write(path, bytes).map_err(|error| error.to_string())
 }
 
+#[async_trait::async_trait]
 impl mypi_agent::ToolExecutor for WasiExtensionManager {
-    fn execute_tool(&self, name: &str, args: &str) -> Option<Result<String, String>> {
-        self.execute_tool(name, args)
+    fn executor_id(&self) -> &str {
+        "mypi.wasi_extensions"
+    }
+
+    fn tool_definitions(&self) -> Vec<mypi_agent::AgentToolDefinition> {
+        let mut tools: Vec<_> = self
+            .extensions
+            .values()
+            .flat_map(|extension| extension.manifest.tools.iter())
+            .map(|tool| {
+                mypi_agent::AgentToolDefinition::new(
+                    tool.name.clone(),
+                    tool.description.clone(),
+                    tool.parameters.clone(),
+                )
+            })
+            .collect();
+        tools.sort_by(|left, right| left.name.cmp(&right.name));
+        tools
+    }
+
+    async fn execute_tool(&self, name: &str, args: &str) -> Option<Result<String, String>> {
+        WasiExtensionManager::execute_tool(self, name, args)
     }
 }

@@ -250,5 +250,17 @@ script_mod! {
                 text_style: theme.font_code { font_size: 8.5 }
             }
         }
+        content_md_wrap := View {
+            width: Fill
+            height: Fit
+            visible: false
+            content_md := Markdown {
+                width: Fill
+                height: Fit
+                selectable: true
+                use_code_block_widget: false
+                body: ""
+            }
+        }
     }
 }

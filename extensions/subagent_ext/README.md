@@ -1,6 +1,6 @@
 # Subagent Extension for `mypi` Harness
 
-The `subagent-ext` dynamic extension enables task delegation to specialized AI subagents with isolated context windows, customized model/tool settings, and support for single, parallel, and sequential chain workflows.
+The `subagent-ext` WASI extension exposes task delegation both as the `/subagent` slash command and as a model-callable `subagent` tool. Both entry points normalize to the v2 broker operation `agent.run`, using isolated subagent context windows and supporting single, parallel, and sequential workflows.
 
 ## Structure
 
@@ -20,8 +20,41 @@ extensions/subagent_ext/
     └── implement-and-review.md # worker -> reviewer -> worker
 ```
 
-## Modes
+## Model-callable tool
 
-1. **Single**: `{ "agent": "scout", "task": "find auth code" }`
-2. **Parallel**: `{ "tasks": [{ "agent": "scout", "task": "..." }, ...] }`
-3. **Chain**: `{ "chain": [{ "agent": "scout", "task": "..." }, { "agent": "planner", "task": "plan based on {previous}" }] }`
+The manifest declares a `subagent` function tool with one canonical argument shape:
+
+```json
+{
+  "tasks": [
+    { "agent": "scout", "task": "find auth code" },
+    { "agent": "planner", "task": "plan based on {previous}" }
+  ],
+  "parallel": false
+}
+```
+
+`tasks` must be a non-empty array of objects containing non-empty `agent` and `task` strings. Set `parallel` to `true` for independent concurrent tasks or `false` for array-order execution. During sequential execution, the host replaces `{previous}` with the prior task result.
+
+## Slash command forms
+
+The slash command retains its concise and compatibility aliases:
+
+1. **Plain text (single scout)**: `/subagent find auth code`
+2. **Single JSON task**: `/subagent {"agent":"reviewer","task":"review auth"}` (`agent` defaults to `scout`)
+3. **Parallel tasks**: `/subagent {"tasks":[{"agent":"scout","task":"..."},{"agent":"reviewer","task":"..."}]}`
+4. **Canonical tasks**: add `"parallel": false` or `true` explicitly to a `tasks` object
+5. **Sequential aliases**: use either `"chain"` or `"sequential"`; later task prompts may include `{previous}`
+
+Example chain:
+
+```json
+{
+  "sequential": [
+    { "agent": "scout", "task": "find auth code" },
+    { "agent": "planner", "task": "plan based on {previous}" }
+  ]
+}
+```
+
+Malformed structured input and empty task lists return the existing usage-style response and do not issue a broker request.

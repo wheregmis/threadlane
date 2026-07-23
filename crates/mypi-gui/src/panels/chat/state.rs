@@ -35,6 +35,7 @@ pub struct ToolPresentation {
     pub primary: String,
     pub metadata: String,
     pub arguments_detail: String,
+    pub output_markdown: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -146,6 +147,7 @@ impl ChatData {
 
     pub fn update_tool(&mut self, id: &str, output: String, status: Option<ToolStatus>) {
         if let Some(ChatMessage::Tool {
+            name,
             output: existing_output,
             status: existing_status,
             result_preview,
@@ -157,7 +159,8 @@ impl ChatData {
         ) {
             *existing_output = output;
             *result_preview = tool_result_preview(existing_output, 800);
-            *result_metadata = result_metadata_for(
+            *result_metadata = result_metadata_for_tool(
+                name,
                 existing_output,
                 status.unwrap_or(*existing_status),
                 started_at.elapsed(),
@@ -222,7 +225,7 @@ impl ChatData {
                         let presentation = tool_presentation(name, "");
                         self.messages.push(ChatMessage::Tool {
                             id: tool_call_id.clone(), name: name.clone(), arguments: String::new(), output: content.clone(), status, presentation,
-                            result_preview: tool_result_preview(content, 800), result_metadata: result_metadata_for(content, status, Duration::ZERO), started_at: Instant::now(),
+                            result_preview: tool_result_preview(content, 800), result_metadata: result_metadata_for_tool(name, content, status, Duration::ZERO), started_at: Instant::now(),
                         });
                     }
                 }
@@ -280,6 +283,8 @@ pub fn tool_icon(name: &str) -> &'static str {
         "edit_file" => "✎",
         "list_dir" => "□",
         "run_command" => "›_",
+        "load_skill" => "◇",
+        "subagent" => "↗",
         _ => "•",
     }
 }
@@ -291,6 +296,8 @@ pub fn tool_title(name: &str) -> String {
         "write_file" => "Write file".into(),
         "edit_file" => "Edit file".into(),
         "list_dir" => "List directory".into(),
+        "load_skill" => "Load skill".into(),
+        "subagent" => "Delegate".into(),
         _ => name.replace('_', " "),
     }
 }
@@ -303,11 +310,17 @@ pub fn tool_presentation(name: &str, arguments: &str) -> ToolPresentation {
             .and_then(serde_json::Value::as_str)
     };
     let path = get_str("path").map(compact_path).unwrap_or_default();
+    let pretty_arguments = parsed
+        .as_ref()
+        .and_then(|value| serde_json::to_string_pretty(value).ok())
+        .unwrap_or_else(|| arguments.to_string());
 
-    let (primary, metadata) = match name {
+    let (primary, metadata, arguments_detail, output_markdown) = match name {
         "run_command" => (
             compact_command(get_str("command").unwrap_or(arguments)),
             String::new(),
+            pretty_arguments.clone(),
+            false,
         ),
         "read_file" => {
             let start = args
@@ -321,11 +334,16 @@ pub fn tool_presentation(name: &str, arguments: &str) -> ToolPresentation {
                 (Some(start), None) => format!("from line {start}"),
                 _ => String::new(),
             };
-            (path.clone(), range)
+            (path.clone(), range, pretty_arguments.clone(), false)
         }
         "write_file" => {
             let content = get_str("content").unwrap_or_default();
-            (path.clone(), text_size_label(content))
+            (
+                path.clone(),
+                text_size_label(content),
+                pretty_arguments.clone(),
+                false,
+            )
         }
         "edit_file" => {
             let old = get_str("target").unwrap_or_default();
@@ -333,6 +351,8 @@ pub fn tool_presentation(name: &str, arguments: &str) -> ToolPresentation {
             (
                 path.clone(),
                 format!("−{} +{} lines", line_count(old), line_count(new)),
+                pretty_arguments.clone(),
+                false,
             )
         }
         "list_dir" => (
@@ -342,20 +362,124 @@ pub fn tool_presentation(name: &str, arguments: &str) -> ToolPresentation {
                 path.clone()
             },
             String::new(),
+            pretty_arguments.clone(),
+            false,
         ),
-        _ => (truncate_chars(arguments, 120), String::new()),
+        "load_skill" => {
+            let skill_id = get_str("name").unwrap_or_default();
+            (
+                truncate_chars(skill_id, 96),
+                "skill instructions".into(),
+                format!("Skill ID: {}", truncate_chars(skill_id, 128)),
+                true,
+            )
+        }
+        "subagent" => {
+            let (primary, metadata, detail) = subagent_presentation(args, arguments);
+            (primary, metadata, detail, true)
+        }
+        _ => (
+            truncate_chars(arguments, 120),
+            String::new(),
+            pretty_arguments,
+            false,
+        ),
     };
 
-    let arguments_detail = parsed
-        .and_then(|value| serde_json::to_string_pretty(&value).ok())
-        .unwrap_or_else(|| arguments.to_string());
     ToolPresentation {
         icon: tool_icon(name).into(),
         title: tool_title(name),
         primary,
         metadata,
         arguments_detail,
+        output_markdown,
     }
+}
+
+fn subagent_presentation(
+    args: Option<&serde_json::Value>,
+    fallback: &str,
+) -> (String, String, String) {
+    const MAX_VISIBLE_TASKS: usize = 8;
+    const MAX_VISIBLE_AGENT_CHARS: usize = 128;
+    const MAX_VISIBLE_TASK_CHARS: usize = 240;
+
+    let Some(tasks) = args
+        .and_then(|value| value.get("tasks"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return (
+            truncate_chars(fallback, 120),
+            String::new(),
+            truncate_chars(fallback, 2_000),
+        );
+    };
+    let visible_tasks: Vec<_> = tasks.iter().take(MAX_VISIBLE_TASKS).collect();
+    let parallel = args
+        .and_then(|value| value.get("parallel"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let mode = if parallel { "parallel" } else { "sequential" };
+    let agents: Vec<String> = visible_tasks
+        .iter()
+        .filter_map(|task| task.get("agent").and_then(serde_json::Value::as_str))
+        .map(|agent| truncate_chars(agent, MAX_VISIBLE_AGENT_CHARS))
+        .collect();
+    let task_summary = |task: &serde_json::Value| {
+        task.get("task")
+            .and_then(serde_json::Value::as_str)
+            .map(|task| normalize_whitespace_bounded(task, MAX_VISIBLE_TASK_CHARS))
+            .unwrap_or_default()
+    };
+
+    let primary = if tasks.len() == 1 {
+        let agent = agents.first().map(String::as_str).unwrap_or("subagent");
+        let summary = task_summary(visible_tasks[0]);
+        format!(
+            "{} · {}",
+            truncate_chars(agent, 64),
+            truncate_chars(&summary, 84)
+        )
+    } else {
+        format!("{} tasks", tasks.len())
+    };
+    let metadata = {
+        let agent_list = truncate_chars(&agents.join(", "), 160);
+        if agent_list.is_empty() {
+            mode.to_string()
+        } else {
+            format!("{mode} · {agent_list}")
+        }
+    };
+    let mut detail = format!(
+        "Mode: {}\nTasks:",
+        if parallel { "Parallel" } else { "Sequential" }
+    );
+    for (index, task) in visible_tasks.iter().enumerate() {
+        let agent = task
+            .get("agent")
+            .and_then(serde_json::Value::as_str)
+            .map(|agent| truncate_chars(agent, MAX_VISIBLE_AGENT_CHARS))
+            .unwrap_or_else(|| "subagent".into());
+        let summary = task_summary(task);
+        detail.push_str(&format!("\n{}. {} — {}", index + 1, agent, summary));
+    }
+    if tasks.len() > visible_tasks.len() {
+        detail.push_str(&format!(
+            "\n… {} additional tasks omitted",
+            tasks.len() - visible_tasks.len()
+        ));
+    }
+    (primary, metadata, detail)
+}
+
+fn normalize_whitespace_bounded(text: &str, max_chars: usize) -> String {
+    text.chars()
+        .take(max_chars)
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub fn tool_preview(name: &str, arguments: &str) -> String {
@@ -439,6 +563,15 @@ pub fn tool_result_detail(output: &str, max_chars: usize) -> String {
 }
 
 pub fn result_metadata_for(output: &str, status: ToolStatus, duration: Duration) -> String {
+    result_metadata_for_tool("", output, status, duration)
+}
+
+fn result_metadata_for_tool(
+    name: &str,
+    output: &str,
+    status: ToolStatus,
+    duration: Duration,
+) -> String {
     let secs = duration.as_secs_f32();
     let time_label = if secs < 0.1 {
         format!("<0.1s")
@@ -448,6 +581,8 @@ pub fn result_metadata_for(output: &str, status: ToolStatus, duration: Duration)
     match status {
         ToolStatus::Running => String::new(),
         ToolStatus::Error => format!("Failed · {time_label}"),
+        ToolStatus::Done if name == "load_skill" => format!("Loaded · {time_label}"),
+        ToolStatus::Done if name == "subagent" => format!("Completed · {time_label}"),
         ToolStatus::Done => {
             let lines = line_count(output);
             let bytes = output.len();
@@ -496,5 +631,62 @@ mod tests {
             ChatMessage::Thinking { text }
                 if text == "Listing repository files\n\nReviewing manifests"
         ));
+    }
+
+    #[test]
+    fn load_skill_has_a_compact_markdown_presentation() {
+        let presentation = tool_presentation("load_skill", r#"{"name":"rust-review"}"#);
+
+        assert_eq!(presentation.icon, "◇");
+        assert_eq!(presentation.title, "Load skill");
+        assert_eq!(presentation.primary, "rust-review");
+        assert_eq!(presentation.metadata, "skill instructions");
+        assert_eq!(presentation.arguments_detail, "Skill ID: rust-review");
+        assert!(presentation.output_markdown);
+    }
+
+    #[test]
+    fn subagent_presentation_summarizes_parallel_tasks() {
+        let arguments = serde_json::json!({
+            "tasks": [
+                {"agent": "scout", "task": "Inspect the repository structure"},
+                {"agent": "reviewer", "task": "Review the security boundaries"}
+            ],
+            "parallel": true
+        })
+        .to_string();
+        let presentation = tool_presentation("subagent", &arguments);
+
+        assert_eq!(presentation.icon, "↗");
+        assert_eq!(presentation.title, "Delegate");
+        assert_eq!(presentation.primary, "2 tasks");
+        assert_eq!(presentation.metadata, "parallel · scout, reviewer");
+        assert!(presentation.arguments_detail.contains("Mode: Parallel"));
+        assert!(presentation
+            .arguments_detail
+            .contains("1. scout — Inspect the repository structure"));
+        assert!(presentation.output_markdown);
+    }
+
+    #[test]
+    fn specialized_tool_completion_metadata_is_action_oriented() {
+        assert_eq!(
+            result_metadata_for_tool(
+                "load_skill",
+                "instructions",
+                ToolStatus::Done,
+                Duration::from_secs(2)
+            ),
+            "Loaded · 2.0s"
+        );
+        assert_eq!(
+            result_metadata_for_tool(
+                "subagent",
+                "report",
+                ToolStatus::Done,
+                Duration::from_secs(3)
+            ),
+            "Completed · 3.0s"
+        );
     }
 }
