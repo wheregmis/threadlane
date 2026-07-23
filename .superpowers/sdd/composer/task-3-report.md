@@ -67,3 +67,33 @@ test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 `git diff --check` — **PASS** (no whitespace errors).
 
 Existing duplicate Makepad package and unused/dead-code warnings remain; no errors were emitted. Unrelated worktree modifications were preserved and not staged.
+
+## Re-review fix: active generation stop state
+
+### Changes
+
+- `stop_btn` is now visible only while `UiStatus::Working` has an `active_run`, so login and session-switching work states do not expose generation cancellation.
+- Stop handling now aborts and reports “Generation stopped.” only when an active generation exists.
+- `active_run` is cleared on `AgentEnd`, `CommandOutput`, and agent error completion paths, preventing stale cancellation state after natural completion.
+
+### Covering checks
+
+`cargo check -p mypi-gui` — **PASS**
+
+Exact final status:
+
+```text
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.37s
+```
+
+Warnings were emitted as noted above; no errors.
+
+`cargo test -p mypi-gui` — **PASS**
+
+Exact test result:
+
+```text
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+The command completed successfully with the existing duplicate-package and unused/dead-code warnings; no errors.

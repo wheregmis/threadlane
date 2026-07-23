@@ -1226,10 +1226,10 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(stop_btn)).clicked(actions) {
             if let Some(run) = self.active_run.take() {
                 run.abort();
+                self.set_status(cx, UiStatus::Ready, "Stopped");
+                self.push_chat(MsgRole::System, "Generation stopped.");
+                cx.redraw_all();
             }
-            self.set_status(cx, UiStatus::Ready, "Stopped");
-            self.push_chat(MsgRole::System, "Generation stopped.");
-            cx.redraw_all();
         }
 
         let session_menu_uid = self.ui.widget(cx, ids!(session_context_menu)).widget_uid();
@@ -1514,7 +1514,9 @@ impl App {
         self.ui
             .widget(cx, ids!(chat_working_indicator))
             .set_visible(cx, working);
-        self.ui.widget(cx, ids!(stop_btn)).set_visible(cx, working);
+        self.ui
+            .widget(cx, ids!(stop_btn))
+            .set_visible(cx, working && self.active_run.is_some());
         self.ui.widget(cx, ids!(send_btn)).set_visible(cx, !working);
         self.ui.label(cx, ids!(composer_status)).set_text(cx, _text);
         self.ui
@@ -1780,8 +1782,6 @@ impl App {
         if show_in_chat {
             self.push_chat(MsgRole::User, input_str.clone());
         }
-        self.set_status(cx, UiStatus::Working, "Working...");
-
         let chat_list = self.ui.widget(cx, ids!(chat_list));
         chat_list.portal_list(cx, ids!(list)).set_tail_range(true);
         cx.redraw_all();
@@ -1807,6 +1807,7 @@ impl App {
                 SignalToUI::set_ui_signal();
             }
         }));
+        self.set_status(cx, UiStatus::Working, "Working...");
     }
 
     fn spawn_model_fetch(&self, api_key: String, account_id: Option<String>) {
@@ -1899,6 +1900,7 @@ impl App {
             }
             AgentEvent::TurnEnd { .. } => self.set_status(cx, UiStatus::Working, "Turn completed"),
             AgentEvent::AgentEnd { .. } => {
+                self.active_run = None;
                 if let Some(workspace) = self.workspace_state.active_workspace_mut() {
                     workspace.chat.flush_streaming();
                 }
@@ -1939,6 +1941,7 @@ impl App {
                     self.handle_agent_event(cx, task_event.event);
                 }
                 GuiAgentEvent::CommandOutput(output) => {
+                    self.active_run = None;
                     self.push_chat(MsgRole::System, output);
                     self.set_status(cx, UiStatus::Ready, "Ready");
                     let work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
