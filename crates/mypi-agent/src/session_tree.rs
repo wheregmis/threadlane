@@ -84,8 +84,14 @@ pub struct SessionTree {
     pub name: Option<String>,
     pub title_attempted: bool,
     pub nodes: HashMap<String, SessionNode>,
+    /// Node IDs in persisted/insertion order. This is intentionally separate
+    /// from `nodes`: the map is only an index and does not define ordering.
+    pub node_order: Vec<String>,
     pub active_node_id: Option<String>,
     pub file_path: Option<PathBuf>,
+    /// Whether a session metadata record was present on disk. Legacy files
+    /// have no metadata and retain their historical all-branches lookup rules.
+    pub metadata_present: bool,
 }
 
 impl SessionTree {
@@ -95,8 +101,10 @@ impl SessionTree {
             name: None,
             title_attempted: false,
             nodes: HashMap::new(),
+            node_order: Vec::new(),
             active_node_id: None,
             file_path: None,
+            metadata_present: false,
         }
     }
 
@@ -200,6 +208,7 @@ impl SessionTree {
         };
 
         self.nodes.insert(node_id.clone(), node.clone());
+        self.node_order.push(node_id.clone());
         self.active_node_id = Some(node_id.clone());
 
         if let Some(ref path) = self.file_path {
@@ -237,6 +246,16 @@ impl SessionTree {
 
         path_nodes.reverse();
         path_nodes
+    }
+
+    /// Messages in persisted/insertion order, including messages from all
+    /// branches. This is used for legacy unnamed sessions only.
+    pub fn get_persisted_messages(&self) -> Vec<AgentMessage> {
+        self.node_order
+            .iter()
+            .filter_map(|id| self.nodes.get(id))
+            .map(|node| node.message.clone())
+            .collect()
     }
 
     pub fn switch_active_node(&mut self, node_id: &str) -> bool {
@@ -282,8 +301,14 @@ impl SessionTree {
 
     pub fn save_to_file(&self, path: &Path) -> std::io::Result<()> {
         let mut file = File::create(path)?;
-        for node in self.nodes.values() {
-            writeln!(file, "{}", serde_json::to_string(node)?)?;
+        for node_id in self
+            .node_order
+            .iter()
+            .chain(self.nodes.keys().filter(|id| !self.node_order.contains(id)))
+        {
+            if let Some(node) = self.nodes.get(node_id) {
+                writeln!(file, "{}", serde_json::to_string(node)?)?;
+            }
         }
         if self.has_name() || self.title_attempted || self.active_node_id.is_some() {
             let metadata = SessionRecord::Metadata {
@@ -337,6 +362,7 @@ impl SessionTree {
                 active_node_id,
             }) = serde_json::from_str::<SessionRecord>(&l)
             {
+                tree.metadata_present = true;
                 tree.name = name;
                 tree.title_attempted = title_attempted;
                 if active_node_id.is_some() {
@@ -347,6 +373,7 @@ impl SessionTree {
                 if !explicit_active {
                     tree.active_node_id = Some(node.id.clone());
                 }
+                tree.node_order.push(node.id.clone());
                 tree.nodes.insert(node.id.clone(), node);
             }
         }

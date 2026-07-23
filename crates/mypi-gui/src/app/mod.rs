@@ -2398,6 +2398,9 @@ impl App {
             .set_visible(cx, presentation.show_model);
 
         self.ui
+            .button(cx, ids!(attach_btn))
+            .set_visible(cx, !presentation.working);
+        self.ui
             .button(cx, ids!(send_btn))
             .set_visible(cx, !presentation.working);
         let has_generation = self
@@ -2807,6 +2810,10 @@ impl App {
         let session_id = entry.id.clone();
         let path = entry.session_file.clone();
         let Ok(mut tree) = mypi_agent::SessionTree::load_from_file(&path) else {
+            eprintln!(
+                "warning: unable to load session for automatic title generation: {}",
+                path.display()
+            );
             return;
         };
         let title_prompt = title_prompt_for_submission(&tree, Some(&prompt));
@@ -2823,28 +2830,36 @@ impl App {
             return;
         }
         let Some(tx) = self.tx.clone() else {
+            eprintln!(
+                "warning: automatic session title generation unavailable: UI channel is closed"
+            );
             end_title_generation(&work_dir, &session_id);
             return;
         };
         get_runtime().spawn(async move {
             let result = async {
                 let client = OpenAIClient::new(api_key, account_id);
-                let raw = client
-                    .generate_title(&model, &title_prompt)
-                    .await
-                    .map_err(|_| ())?;
+                let raw = client.generate_title(&model, &title_prompt).await?;
                 let title = normalize_session_title(&raw);
                 if title.is_empty() {
-                    return Err(());
+                    return Err("title normalization produced an empty title".to_string());
                 }
-                let mut tree = mypi_agent::SessionTree::load_from_file(&path).map_err(|_| ())?;
+                let mut tree = mypi_agent::SessionTree::load_from_file(&path)
+                    .map_err(|error| format!("reload failed: {error}"))?;
                 if tree.has_name() {
-                    return Err(());
+                    return Err("session was named while title generation was running".to_string());
                 }
-                tree.set_name(title).map_err(|_| ())?;
-                Ok(())
+                tree.set_name(title)
+                    .map_err(|error| format!("persistence failed: {error}"))?;
+                Ok::<(), String>(())
             }
             .await;
+            if let Err(error) = &result {
+                eprintln!(
+                    "warning: automatic title generation failed for session {}: {}",
+                    session_id, error
+                );
+            }
             end_title_generation(&work_dir, &session_id);
             if result.is_ok() {
                 let _ = tx.send(GuiAgentEvent::SessionTitleGenerated {

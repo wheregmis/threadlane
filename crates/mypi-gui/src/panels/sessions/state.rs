@@ -96,17 +96,23 @@ pub fn title_prompt_for_submission(
 }
 
 pub fn first_existing_user_prompt(tree: &SessionTree) -> Option<String> {
-    tree.get_active_branch_messages()
-        .into_iter()
-        .find_map(|message| {
-            if let AgentMessage::User { content } = message {
-                (!content.trim().is_empty()).then_some(content)
-            } else if let AgentMessage::UserWithImages { content, .. } = message {
-                (!content.trim().is_empty()).then_some(content)
-            } else {
-                None
-            }
-        })
+    // Metadata-bearing sessions are current sessions and retain active-branch
+    // semantics. Legacy node-only files have no durable branch marker, so use
+    // their deterministic persisted insertion order across every branch.
+    let messages = if tree.metadata_present || tree.file_path.is_none() {
+        tree.get_active_branch_messages()
+    } else {
+        tree.get_persisted_messages()
+    };
+    messages.into_iter().find_map(|message| {
+        if let AgentMessage::User { content } = message {
+            (!content.trim().is_empty()).then_some(content)
+        } else if let AgentMessage::UserWithImages { content, .. } = message {
+            (!content.trim().is_empty()).then_some(content)
+        } else {
+            None
+        }
+    })
 }
 
 pub fn begin_title_generation(work_dir: &Path, session_id: &str) -> bool {
@@ -543,6 +549,53 @@ mod tests {
         assert_eq!(
             first_existing_user_prompt(&tree).as_deref(),
             Some("First request")
+        );
+    }
+
+    #[test]
+    fn legacy_title_uses_first_persisted_user_across_inactive_branch() {
+        let dir = unique_test_dir("legacy-title");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("legacy.jsonl");
+        let records = [
+            mypi_agent::SessionNode {
+                id: "root".into(),
+                parent_id: None,
+                timestamp: 1,
+                message: AgentMessage::User {
+                    content: "First persisted request".into(),
+                },
+            },
+            mypi_agent::SessionNode {
+                id: "branch_a".into(),
+                parent_id: Some("root".into()),
+                timestamp: 2,
+                message: AgentMessage::User {
+                    content: "Inactive branch request".into(),
+                },
+            },
+            mypi_agent::SessionNode {
+                id: "branch_b".into(),
+                parent_id: Some("root".into()),
+                timestamp: 3,
+                message: AgentMessage::User {
+                    content: "Active later branch request".into(),
+                },
+            },
+        ];
+        std::fs::write(
+            &path,
+            records
+                .iter()
+                .map(|record| serde_json::to_string(record).unwrap() + "\n")
+                .collect::<String>(),
+        )
+        .unwrap();
+        let mut tree = SessionTree::load_from_file(&path).unwrap();
+        assert!(tree.switch_active_node("branch_b"));
+        assert_eq!(
+            first_existing_user_prompt(&tree).as_deref(),
+            Some("First persisted request")
         );
     }
 
