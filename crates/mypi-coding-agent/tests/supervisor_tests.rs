@@ -26,6 +26,7 @@ async fn test_supervisor_multi_task_isolation() {
         model: "gpt-4o".into(),
         work_dir: proj1_dir.path().to_path_buf(),
         session_file: None,
+        system_prompt: Default::default(),
     };
 
     let opts2 = CodingAgentOptions {
@@ -34,6 +35,7 @@ async fn test_supervisor_multi_task_isolation() {
         model: "gpt-4o".into(),
         work_dir: proj2_dir.path().to_path_buf(),
         session_file: None,
+        system_prompt: Default::default(),
     };
 
     let task1_id = supervisor.create_task(&proj1.id, None, opts1).unwrap();

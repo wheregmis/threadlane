@@ -5,6 +5,7 @@ use crate::extension_broker::{
     BrokerError, BrokerRequest, CapabilityDispatcher, CapabilityHandler, BROKER_API_VERSION,
 };
 use crate::skills::{LoadSkillToolExecutor, SkillManager, SkillRegistry};
+use crate::system_prompt::{build_system_prompt, SystemPromptBuildOptions, SystemPromptConfig};
 use crate::wasi_extension::{WasiExtensionManager, WasiLegacyEffect};
 use async_trait::async_trait;
 use mypi_agent::{
@@ -600,6 +601,7 @@ pub struct CodingAgentOptions {
     pub model: String,
     pub work_dir: PathBuf,
     pub session_file: Option<PathBuf>,
+    pub system_prompt: SystemPromptConfig,
 }
 
 pub struct ExtensionBeforeToolHook {
@@ -960,38 +962,8 @@ impl CodingAgent {
         } else {
             String::new()
         };
-        let tool_policy = Arc::new(tokio::sync::Mutex::new(restored_tool_policy(
-            &wasi_extensions,
-        )));
-
-        let mut system_prompt = format!(
-            "You are mypi, an AI coding agent with tool execution capability in workspace: {}.\n\
-            Always use the provided tools (read_file, write_file, edit_file, list_dir, run_command) \
-            to inspect code, modify files, and run tests. Be precise, concise, and double-check your work.",
-            options.work_dir.display()
-        );
-
-        if loaded_ext_count > 0 {
-            system_prompt.push_str(&format!(
-                "\n\nLoaded {} WASI extensions into sandboxed execution environment.",
-                loaded_ext_count
-            ));
-        }
-        if !skill_catalog.is_empty() {
-            system_prompt.push_str("\n\n");
-            system_prompt.push_str(&skill_catalog);
-        }
-        if !agent_catalog.is_empty() {
-            system_prompt.push_str("\n\n");
-            system_prompt.push_str(&agent_catalog);
-        }
-
-        if !project_context.combined_instructions.is_empty() {
-            system_prompt.push_str("\n\n=== Workspace Instructions ===");
-            system_prompt.push_str(&project_context.combined_instructions);
-        }
-
-        let base_system_prompt = system_prompt.clone();
+        let initial_tool_policy = restored_tool_policy(&wasi_extensions);
+        let tool_policy = Arc::new(tokio::sync::Mutex::new(initial_tool_policy));
         let wasi_extensions = Arc::new(wasi_extensions);
         let agent_work = AgentWorkScheduler::default();
         #[cfg(test)]
@@ -1057,6 +1029,24 @@ impl CodingAgent {
         }
         agent.loop_engine.work_dir = Some(options.work_dir.clone());
 
+        let mut system_prompt_config = options.system_prompt.clone();
+        if initial_tool_policy == ToolPolicy::ReadOnly {
+            system_prompt_config.guidelines.push(
+                "The current workspace tool policy is read-only; do not request file mutations or host commands."
+                    .to_string(),
+            );
+        }
+        let prompt_tools = agent.loop_engine.configured_tool_definitions();
+        let base_system_prompt = build_system_prompt(SystemPromptBuildOptions {
+            config: &system_prompt_config,
+            work_dir: &options.work_dir,
+            tools: &prompt_tools,
+            project_context: &project_context,
+            skill_catalog: Some(&skill_catalog),
+            agent_catalog: Some(&agent_catalog),
+            loaded_extension_count: loaded_ext_count,
+        });
+
         agent.loop_engine.before_tool_call_hook = Some(Arc::new(ExtensionBeforeToolHook {
             tool_policy: tool_policy.clone(),
             extensions: wasi_extensions.clone(),
@@ -1099,6 +1089,10 @@ impl CodingAgent {
         while self.agent_work.run(&mut self.agent).await {
             self.dispatch_assistant_message_hooks().await;
         }
+    }
+
+    pub fn base_system_prompt(&self) -> &str {
+        &self.base_system_prompt
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
@@ -1977,6 +1971,7 @@ mod tests {
             model: "test-model".into(),
             work_dir,
             session_file: None,
+            system_prompt: SystemPromptConfig::default(),
         }
     }
 
@@ -1993,6 +1988,29 @@ mod tests {
                 arguments: arguments.to_string(),
             },
         }
+    }
+
+    #[tokio::test]
+    async fn coding_agent_builds_configurable_structured_system_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "Always add focused tests.").unwrap();
+        let mut options = coding_agent_options(dir.path().to_path_buf());
+        options.system_prompt = SystemPromptConfig {
+            custom_prompt: Some("CUSTOM_BASE".into()),
+            append_prompt: Some("APPENDED_RULE".into()),
+            guidelines: Vec::new(),
+        };
+
+        let coding_agent = CodingAgent::new(options);
+        let state = coding_agent.agent.get_state().await;
+
+        assert!(state
+            .system_prompt
+            .starts_with("CUSTOM_BASE\n\nAPPENDED_RULE"));
+        assert!(state.system_prompt.contains("<project_context>"));
+        assert!(state.system_prompt.contains("Always add focused tests."));
+        assert!(state.system_prompt.contains("Current working directory:"));
+        assert_eq!(coding_agent.base_system_prompt(), state.system_prompt);
     }
 
     #[tokio::test]
@@ -2013,6 +2031,8 @@ mod tests {
             .system_prompt
             .contains("Use for deterministic integration tests"));
         assert!(!state.system_prompt.contains("BODY_SENTINEL"));
+        assert!(state.system_prompt.contains("- read_file:"));
+        assert!(state.system_prompt.contains("- load_skill:"));
 
         let (chat, codex) = coding_agent.agent.loop_engine.build_api_payloads().await;
         assert!(chat["tools"]

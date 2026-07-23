@@ -1322,6 +1322,7 @@ impl MatchEvent for App {
             session_file: initial_entry
                 .as_ref()
                 .map(|entry| entry.session_file.clone()),
+            system_prompt: Default::default(),
         };
 
         let coding_agent = CodingAgent::new(agent_opts);
@@ -2192,6 +2193,7 @@ impl App {
                 model: model.clone(),
                 work_dir: work_dir.clone(),
                 session_file: None,
+                system_prompt: Default::default(),
             });
             self.session_runtimes
                 .insert(key.clone(), SessionRuntime::new(agent, model, effort));
@@ -2222,6 +2224,7 @@ impl App {
                     model: "gpt-5.6-luna".to_string(),
                     work_dir: canonical.clone(),
                     session_file: None,
+                    system_prompt: Default::default(),
                 });
                 let skills = agent
                     .skills
@@ -2534,6 +2537,7 @@ impl App {
                 model: model.clone(),
                 work_dir: entry.work_dir.clone(),
                 session_file: Some(entry.session_file.clone()),
+                system_prompt: Default::default(),
             });
             let messages = agent.session_tree.get_active_branch_messages();
             self.session_runtimes.insert(
@@ -2637,6 +2641,7 @@ impl App {
                 model: model_name.clone(),
                 work_dir: entry.work_dir,
                 session_file: Some(entry.session_file),
+                system_prompt: Default::default(),
             });
             self.session_runtimes.insert(
                 key,
@@ -2655,6 +2660,7 @@ impl App {
                 model: model_name.clone(),
                 work_dir: key.work_dir.clone(),
                 session_file,
+                system_prompt: Default::default(),
             });
             self.session_runtimes.insert(
                 key.clone(),

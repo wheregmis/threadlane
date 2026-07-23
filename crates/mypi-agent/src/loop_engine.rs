@@ -288,6 +288,20 @@ impl AgentLoop {
         self.allowed_tool_names.as_ref()
     }
 
+    /// Returns the core and registered executor schemas in provider order,
+    /// after conflict deduplication and the active allowlist are applied.
+    pub fn configured_tool_definitions(&self) -> Vec<AgentToolDefinition> {
+        let mut definitions = collect_tool_definitions(
+            &[],
+            &self.tool_executors,
+            self.compatibility_executor().as_ref(),
+        );
+        if let Some(allowed_tool_names) = &self.allowed_tool_names {
+            definitions.retain(|definition| allowed_tool_names.contains(&definition.name));
+        }
+        definitions
+    }
+
     pub fn register_tool_executor(
         &mut self,
         executor: Arc<dyn ToolExecutor>,

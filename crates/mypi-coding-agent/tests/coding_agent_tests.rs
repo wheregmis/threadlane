@@ -15,6 +15,9 @@ fn test_project_context_discovery() {
 
     let ctx = ProjectContext::discover(dir.path());
     assert_eq!(ctx.context_files.len(), 1);
+    assert_eq!(ctx.instructions.len(), 1);
+    assert_eq!(ctx.instructions[0].path, agents_file);
+    assert_eq!(ctx.instructions[0].content, "Rule 1: Always write tests.");
     assert!(ctx
         .combined_instructions
         .contains("Rule 1: Always write tests."));
