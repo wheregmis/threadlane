@@ -22,10 +22,11 @@ script_mod! {
             visible: false
 
             draw_bg +: {
-                color: #x1f232b
+                color: #x29231f
                 border_size: 1.0
-                border_color: #x3a424e
-                border_radius: 8.0
+                border_color: #x604a3f
+                border_color_focus: #xb96543
+                border_radius: 9.0
 
                 pixel: fn() {
                     let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -40,7 +41,7 @@ script_mod! {
                         self.border_radius
                         self.border_radius
                     )
-                    sdf.fill(self.border_color)
+                    sdf.fill(mix(self.border_color, self.border_color_focus, self.focus))
 
                     sdf.box_all(
                         self.border_size
@@ -127,7 +128,7 @@ script_mod! {
                         height: Fit
                         text: ""
                         draw_text +: {
-                            color: #x8fb3ff
+                            color: #xd17b50
                             text_style: theme.font_bold { font_size: 12.0 }
                         }
                     }
@@ -141,7 +142,7 @@ script_mod! {
                             height: Fit
                             text: ""
                             draw_text +: {
-                                color: #xdde3ea
+                                color: #xffeee2
                                 text_style: theme.font_code { font_size: 10.5 }
                             }
                         }
@@ -150,7 +151,7 @@ script_mod! {
                             height: Fit
                             text: ""
                             draw_text +: {
-                                color: #x8b93a0
+                                color: #xb39a88
                                 text_style +: { font_size: 9.0 }
                             }
                         }
@@ -263,17 +264,13 @@ impl Widget for MypiCommandTextInput {
                         .set_text(cx, if is_active { "›" } else { "" });
 
                     let color = if is_active {
-                        self.color_focus
+                        vec4(0.349, 0.251, 0.173, 1.0) // #x59402c
                     } else if Some(item_id) == self.pointer_hover_index {
-                        self.color_hover
+                        vec4(0.275, 0.2, 0.165, 1.0) // #x46332a
                     } else {
                         Vec4f::all(0.)
                     };
-                    let name_color = if is_active {
-                        vec4(0.95, 0.97, 1.0, 1.0)
-                    } else {
-                        vec4(0.87, 0.89, 0.92, 1.0)
-                    };
+                    let name_color = vec4(1.0, 0.933, 0.886, 1.0); // #xffeee2
                     let mut name_label = item_widget.label(cx, ids!(cmd_name));
                     script_apply_eval!(cx, name_label, {
                         draw_text +: { color: #(name_color) }
