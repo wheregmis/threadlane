@@ -26,6 +26,10 @@ impl Agent {
         self.loop_engine.tool_execution_mode = mode;
     }
 
+    pub fn set_prompt_cache_key(&mut self, key: Option<String>) {
+        self.loop_engine.set_prompt_cache_key(key);
+    }
+
     pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
         self.loop_engine.subscribe()
     }

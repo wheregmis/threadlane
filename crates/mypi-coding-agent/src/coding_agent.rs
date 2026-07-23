@@ -944,6 +944,8 @@ impl CodingAgent {
             SessionTree::new("draft")
         };
 
+        agent.set_prompt_cache_key(Some(session_tree.session_id.clone()));
+
         let mut wasi_extensions = WasiExtensionManager::for_project_session(
             &options.work_dir,
             session_tree.session_id.clone(),
@@ -1241,6 +1243,8 @@ impl CodingAgent {
                 eprintln!("Failed to restore session extension state: {error}")
             });
         *self.tool_policy.lock().await = restored_tool_policy(&self.wasi_extensions);
+        self.agent
+            .set_prompt_cache_key(Some(session_tree.session_id.clone()));
         self.session_tree = session_tree;
 
         let mut state = self.agent.loop_engine.state.lock().await;
@@ -1739,6 +1743,28 @@ mod tests {
     use crate::extension_broker::CapabilityHandler;
     use std::sync::Mutex;
     use std::time::{Duration as StdDuration, Instant};
+
+    #[tokio::test]
+    async fn switching_sessions_updates_prompt_cache_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut coding_agent = CodingAgent::new(coding_agent_options(dir.path().to_path_buf()));
+        let initial_key = coding_agent.agent.loop_engine.prompt_cache_key.clone();
+        assert_eq!(
+            initial_key.as_deref(),
+            Some(coding_agent.session_tree.session_id.as_str())
+        );
+
+        coding_agent
+            .switch_session_file(dir.path().join("sessions/other.jsonl"))
+            .await;
+
+        let switched_key = coding_agent.agent.loop_engine.prompt_cache_key.clone();
+        assert_eq!(
+            switched_key.as_deref(),
+            Some(coding_agent.session_tree.session_id.as_str())
+        );
+        assert_ne!(switched_key, initial_key);
+    }
 
     #[test]
     fn subagent_ui_events_do_not_override_parent_lifecycle() {

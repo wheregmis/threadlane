@@ -10,15 +10,27 @@ use crate::hooks::{
 use crate::queue::PendingMessageQueue;
 use crate::types::{
     AgentMessage, AgentState, AgentToolCall, AgentToolDefinition, AgentToolResult, QueueMode,
-    ToolExecutionMode,
+    TokenUsage, ToolExecutionMode,
 };
-use mypi_provider::openai::{OpenAIClient, StreamEvent, ToolCall};
+use mypi_provider::openai::{
+    clamp_prompt_cache_key, OpenAIClient, ProviderUsage, StreamEvent, ToolCall,
+};
 use mypi_tools::{execute_tool, execute_tool_in_workspace, get_available_tools, get_codex_tools};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, Mutex};
+
+fn token_usage_from_provider(usage: ProviderUsage) -> TokenUsage {
+    TokenUsage {
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        cache_read_tokens: usage.cache_read_tokens,
+        cache_write_tokens: usage.cache_write_tokens,
+        total_tokens: usage.total_tokens,
+    }
+}
 
 pub fn convert_to_llm(messages: &[AgentMessage]) -> Vec<Value> {
     messages
@@ -207,6 +219,7 @@ pub struct AgentLoop {
     pub state: Arc<Mutex<AgentState>>,
     pub api_key: String,
     pub account_id: Option<String>,
+    pub prompt_cache_key: Option<String>,
     pub tool_execution_mode: ToolExecutionMode,
     allowed_tool_names: Option<HashSet<String>>,
     pub steering_queue: PendingMessageQueue,
@@ -239,6 +252,7 @@ impl AgentLoop {
             state,
             api_key: api_key.into(),
             account_id,
+            prompt_cache_key: None,
             tool_execution_mode: ToolExecutionMode::Parallel,
             allowed_tool_names: None,
             steering_queue: PendingMessageQueue::new(QueueMode::All),
@@ -252,6 +266,12 @@ impl AgentLoop {
             extension_manager: None,
             work_dir: None,
         }
+    }
+
+    pub fn set_prompt_cache_key(&mut self, key: Option<String>) {
+        self.prompt_cache_key = key
+            .map(|key| clamp_prompt_cache_key(&key))
+            .filter(|key| !key.is_empty());
     }
 
     /// Restricts both advertised and executable tools. `None` restores the
@@ -404,7 +424,8 @@ impl AgentLoop {
             "model": state.model,
             "messages": api_msgs,
             "tools": tools,
-            "stream": true
+            "stream": true,
+            "stream_options": { "include_usage": true }
         });
         let mut codex_payload = serde_json::json!({
             "model": state.model,
@@ -414,6 +435,11 @@ impl AgentLoop {
             "stream": true,
             "tools": codex_tools
         });
+
+        if let Some(prompt_cache_key) = &self.prompt_cache_key {
+            chat_payload["prompt_cache_key"] = prompt_cache_key.clone().into();
+            codex_payload["prompt_cache_key"] = prompt_cache_key.clone().into();
+        }
 
         if let Some(effort) = state.reasoning_effort.as_api_str() {
             chat_payload["reasoning_effort"] = effort.into();
@@ -475,6 +501,7 @@ impl AgentLoop {
         let _ = self.event_tx.send(AgentEvent::AgentStart);
         let mut turn_number = 0;
         let mut overflow_recovery_attempted = false;
+        let mut total_usage = TokenUsage::default();
 
         'turn_loop: loop {
             turn_number += 1;
@@ -514,11 +541,12 @@ impl AgentLoop {
             let (stream_tx, mut stream_rx) = mpsc::channel(100);
             let api_key = self.api_key.clone();
             let account_id = self.account_id.clone();
+            let prompt_cache_key = self.prompt_cache_key.clone();
 
             tokio::spawn(async move {
                 let client = OpenAIClient::new(api_key, account_id);
                 client
-                    .stream_chat_completion(api_payload, codex_payload, stream_tx)
+                    .stream_chat_completion(api_payload, codex_payload, prompt_cache_key, stream_tx)
                     .await;
             });
 
@@ -556,8 +584,9 @@ impl AgentLoop {
                         });
                     }
                     StreamEvent::ToolCallArgsDelta { .. } => {}
-                    StreamEvent::Finished { tool_calls } => {
+                    StreamEvent::Finished { tool_calls, usage } => {
                         captured_tool_calls = tool_calls;
+                        total_usage.accumulate(&token_usage_from_provider(usage));
                         break;
                     }
                     StreamEvent::Error(err) => {
@@ -661,9 +690,9 @@ impl AgentLoop {
             }
         }
 
-        let _ = self.event_tx.send(AgentEvent::AgentEnd {
-            usage: Default::default(),
-        });
+        let _ = self
+            .event_tx
+            .send(AgentEvent::AgentEnd { usage: total_usage });
     }
 
     pub async fn execute_tools(&self, tool_calls: &[ToolCall]) -> Vec<AgentToolResult> {

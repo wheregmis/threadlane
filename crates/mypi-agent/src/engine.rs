@@ -65,7 +65,7 @@ impl AgentEngine {
             let handle = get_runtime().spawn(async move {
                 let client = OpenAIClient::new(api_key, account_id);
                 client
-                    .stream_chat_completion(api_payload, codex_payload, event_tx)
+                    .stream_chat_completion(api_payload, codex_payload, None, event_tx)
                     .await;
             });
 
@@ -86,7 +86,10 @@ impl AgentEngine {
                             .await;
                     }
                     StreamEvent::ToolCallArgsDelta { .. } => {}
-                    StreamEvent::Finished { tool_calls } => {
+                    StreamEvent::Finished {
+                        tool_calls,
+                        usage: _,
+                    } => {
                         handle.await.ok();
 
                         let mut sess = self.session.lock().await;

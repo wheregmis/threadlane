@@ -2,7 +2,7 @@ use mypi_agent::{
     compact_messages, AfterToolCallHook, AfterToolCallResult, Agent, AgentLoop, AgentMessage,
     AgentState, AgentToolCall, AgentToolDefinition, AgentToolResult, BeforeToolCallHook,
     BeforeToolCallResult, CompactionOptions, ImageAttachment, ReasoningEffort, SessionTree,
-    ToolExecutionMode, ToolExecutor,
+    TokenUsage, ToolExecutionMode, ToolExecutor,
 };
 use mypi_provider::openai::{ToolCall, ToolCallFunction};
 use std::collections::HashSet;
@@ -461,6 +461,70 @@ fn test_agent_tool_definition_provider_shapes_round_trip() {
     assert_eq!(
         AgentToolDefinition::from_provider_schema(&codex).unwrap(),
         definition
+    );
+}
+
+#[tokio::test]
+async fn test_prompt_cache_key_is_stable_and_added_to_both_payloads() {
+    let mut agent_loop = AgentLoop::new("fake_key", None, "gpt-5.6-luna");
+    agent_loop.set_prompt_cache_key(Some("session-a".into()));
+
+    let (first_chat, first_codex) = agent_loop.build_api_payloads().await;
+    let (second_chat, second_codex) = agent_loop.build_api_payloads().await;
+
+    assert_eq!(first_chat["prompt_cache_key"], "session-a");
+    assert_eq!(first_codex["prompt_cache_key"], "session-a");
+    assert_eq!(second_chat["prompt_cache_key"], "session-a");
+    assert_eq!(second_codex["prompt_cache_key"], "session-a");
+    assert_eq!(first_chat["stream_options"]["include_usage"], true);
+
+    agent_loop.set_prompt_cache_key(Some("session-b".into()));
+    let (other_chat, other_codex) = agent_loop.build_api_payloads().await;
+    assert_eq!(other_chat["prompt_cache_key"], "session-b");
+    assert_eq!(other_codex["prompt_cache_key"], "session-b");
+}
+
+#[tokio::test]
+async fn test_prompt_cache_key_is_clamped_by_unicode_characters() {
+    let mut agent_loop = AgentLoop::new("fake_key", None, "gpt-5.6-luna");
+    agent_loop.set_prompt_cache_key(Some("🦀".repeat(80)));
+
+    let (chat, codex) = agent_loop.build_api_payloads().await;
+
+    assert_eq!(
+        chat["prompt_cache_key"].as_str().unwrap().chars().count(),
+        64
+    );
+    assert_eq!(chat["prompt_cache_key"], codex["prompt_cache_key"]);
+}
+
+#[test]
+fn test_token_usage_accumulates_across_provider_turns() {
+    let mut total = TokenUsage::default();
+    total.accumulate(&TokenUsage {
+        input_tokens: 100,
+        output_tokens: 20,
+        cache_read_tokens: 900,
+        cache_write_tokens: 0,
+        total_tokens: 1020,
+    });
+    total.accumulate(&TokenUsage {
+        input_tokens: 50,
+        output_tokens: 10,
+        cache_read_tokens: 1000,
+        cache_write_tokens: 25,
+        total_tokens: 1085,
+    });
+
+    assert_eq!(
+        total,
+        TokenUsage {
+            input_tokens: 150,
+            output_tokens: 30,
+            cache_read_tokens: 1900,
+            cache_write_tokens: 25,
+            total_tokens: 2105,
+        }
     );
 }
 

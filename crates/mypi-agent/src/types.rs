@@ -259,13 +259,27 @@ impl AgentMessage {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct TokenUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub cache_read_tokens: u32,
     pub cache_write_tokens: u32,
     pub total_tokens: u32,
+}
+
+impl TokenUsage {
+    pub fn accumulate(&mut self, usage: &Self) {
+        self.input_tokens = self.input_tokens.saturating_add(usage.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(usage.output_tokens);
+        self.cache_read_tokens = self
+            .cache_read_tokens
+            .saturating_add(usage.cache_read_tokens);
+        self.cache_write_tokens = self
+            .cache_write_tokens
+            .saturating_add(usage.cache_write_tokens);
+        self.total_tokens = self.total_tokens.saturating_add(usage.total_tokens);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

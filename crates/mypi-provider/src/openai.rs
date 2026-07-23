@@ -19,13 +19,37 @@ pub struct ToolCall {
     pub function: ToolCallFunction,
 }
 
+pub const OPENAI_PROMPT_CACHE_KEY_MAX_CHARS: usize = 64;
+
+pub fn clamp_prompt_cache_key(key: &str) -> String {
+    key.chars()
+        .take(OPENAI_PROMPT_CACHE_KEY_MAX_CHARS)
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProviderUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub cache_read_tokens: u32,
+    pub cache_write_tokens: u32,
+    pub total_tokens: u32,
+}
+
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     ContentToken(String),
     ReasoningToken(String),
-    ToolCallStart { name: String },
-    ToolCallArgsDelta { args_chunk: String },
-    Finished { tool_calls: Vec<ToolCall> },
+    ToolCallStart {
+        name: String,
+    },
+    ToolCallArgsDelta {
+        args_chunk: String,
+    },
+    Finished {
+        tool_calls: Vec<ToolCall>,
+        usage: ProviderUsage,
+    },
     Error(String),
 }
 
@@ -49,6 +73,62 @@ fn parse_responses_text_delta(value: &Value) -> Option<StreamEvent> {
         }
         _ => None,
     }
+}
+
+fn token_count(value: Option<&Value>) -> u32 {
+    value
+        .and_then(Value::as_u64)
+        .unwrap_or_default()
+        .min(u32::MAX as u64) as u32
+}
+
+fn normalized_usage(
+    input_tokens: u32,
+    output_tokens: u32,
+    cache_read_tokens: u32,
+    cache_write_tokens: u32,
+    total_tokens: u32,
+) -> ProviderUsage {
+    ProviderUsage {
+        input_tokens: input_tokens
+            .saturating_sub(cache_read_tokens)
+            .saturating_sub(cache_write_tokens),
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        total_tokens: if total_tokens == 0 {
+            input_tokens.saturating_add(output_tokens)
+        } else {
+            total_tokens
+        },
+    }
+}
+
+fn parse_chat_usage(value: &Value) -> Option<ProviderUsage> {
+    let usage = value.get("usage")?;
+    let prompt_details = usage.get("prompt_tokens_details");
+    Some(normalized_usage(
+        token_count(usage.get("prompt_tokens")),
+        token_count(usage.get("completion_tokens")),
+        token_count(prompt_details.and_then(|details| details.get("cached_tokens"))),
+        token_count(prompt_details.and_then(|details| details.get("cache_write_tokens"))),
+        token_count(usage.get("total_tokens")),
+    ))
+}
+
+fn parse_responses_usage(value: &Value) -> Option<ProviderUsage> {
+    let usage = value
+        .get("response")
+        .and_then(|response| response.get("usage"))
+        .or_else(|| value.get("usage"))?;
+    let input_details = usage.get("input_tokens_details");
+    Some(normalized_usage(
+        token_count(usage.get("input_tokens")),
+        token_count(usage.get("output_tokens")),
+        token_count(input_details.and_then(|details| details.get("cached_tokens"))),
+        token_count(input_details.and_then(|details| details.get("cache_write_tokens"))),
+        token_count(usage.get("total_tokens")),
+    ))
 }
 
 fn api_error_details(value: &Value) -> (String, String) {
@@ -139,6 +219,7 @@ impl OpenAIClient {
         &self,
         api_payload: Value,
         codex_payload: Value,
+        prompt_cache_key: Option<String>,
         event_tx: mpsc::Sender<StreamEvent>,
     ) {
         let is_codex = self.account_id.is_some() || self.api_key.starts_with("ey");
@@ -169,6 +250,17 @@ impl OpenAIClient {
                 .header("originator", "mypi")
                 .header(USER_AGENT, "mypi");
         }
+        if is_codex {
+            if let Some(key) = prompt_cache_key
+                .as_deref()
+                .map(clamp_prompt_cache_key)
+                .filter(|key| !key.is_empty())
+            {
+                req = req
+                    .header("session-id", key.clone())
+                    .header("x-client-request-id", key);
+            }
+        }
 
         let res = match req.json(&payload).send().await {
             Ok(r) => r,
@@ -195,6 +287,7 @@ impl OpenAIClient {
         let mut buffer = String::new();
         let mut active_tool_calls: HashMap<usize, (String, String, String)> = HashMap::new();
         let mut codex_tool_indices: HashMap<String, usize> = HashMap::new();
+        let mut usage = ProviderUsage::default();
 
         while let Some(chunk_result) = stream.next().await {
             let chunk: Bytes = match chunk_result {
@@ -256,6 +349,18 @@ impl OpenAIClient {
                                     .send(StreamEvent::Error(format!("OpenAI API Error: {msg}")))
                                     .await;
                                 return;
+                            }
+
+                            if let Some(parsed_usage) = parse_chat_usage(&v) {
+                                usage = parsed_usage;
+                            }
+                            if matches!(
+                                event_type,
+                                "response.completed" | "response.done" | "response.incomplete"
+                            ) {
+                                if let Some(parsed_usage) = parse_responses_usage(&v) {
+                                    usage = parsed_usage;
+                                }
                             }
 
                             // Codex Responses API emits function calls as output items and
@@ -464,6 +569,7 @@ impl OpenAIClient {
         let _ = event_tx
             .send(StreamEvent::Finished {
                 tool_calls: final_tool_calls,
+                usage,
             })
             .await;
     }
@@ -471,8 +577,73 @@ impl OpenAIClient {
 
 #[cfg(test)]
 mod tests {
-    use super::{api_error_details, parse_responses_text_delta, StreamEvent};
+    use super::{
+        api_error_details, clamp_prompt_cache_key, parse_chat_usage, parse_responses_text_delta,
+        parse_responses_usage, ProviderUsage, StreamEvent, OPENAI_PROMPT_CACHE_KEY_MAX_CHARS,
+    };
     use serde_json::json;
+
+    #[test]
+    fn prompt_cache_key_clamping_is_unicode_safe() {
+        let key = "🦀".repeat(OPENAI_PROMPT_CACHE_KEY_MAX_CHARS + 10);
+        let clamped = clamp_prompt_cache_key(&key);
+
+        assert_eq!(clamped.chars().count(), OPENAI_PROMPT_CACHE_KEY_MAX_CHARS);
+        assert_eq!(clamped, "🦀".repeat(OPENAI_PROMPT_CACHE_KEY_MAX_CHARS));
+        assert_eq!(clamp_prompt_cache_key("session-a"), "session-a");
+    }
+
+    #[test]
+    fn parses_chat_usage_and_normalizes_uncached_input() {
+        let usage = parse_chat_usage(&json!({
+            "usage": {
+                "prompt_tokens": 1200,
+                "completion_tokens": 80,
+                "total_tokens": 1280,
+                "prompt_tokens_details": {
+                    "cached_tokens": 900,
+                    "cache_write_tokens": 100
+                }
+            }
+        }));
+
+        assert_eq!(
+            usage,
+            Some(ProviderUsage {
+                input_tokens: 200,
+                output_tokens: 80,
+                cache_read_tokens: 900,
+                cache_write_tokens: 100,
+                total_tokens: 1280,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_responses_usage_and_normalizes_uncached_input() {
+        let usage = parse_responses_usage(&json!({
+            "type": "response.completed",
+            "response": {
+                "usage": {
+                    "input_tokens": 1000,
+                    "output_tokens": 60,
+                    "total_tokens": 1060,
+                    "input_tokens_details": { "cached_tokens": 768 }
+                }
+            }
+        }));
+
+        assert_eq!(
+            usage,
+            Some(ProviderUsage {
+                input_tokens: 232,
+                output_tokens: 60,
+                cache_read_tokens: 768,
+                cache_write_tokens: 0,
+                total_tokens: 1060,
+            })
+        );
+    }
 
     #[test]
     fn parses_responses_output_text_delta_as_content() {

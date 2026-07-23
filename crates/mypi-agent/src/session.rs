@@ -91,7 +91,8 @@ impl Session {
             "model": self.model,
             "messages": self.messages,
             "tools": tools,
-            "stream": true
+            "stream": true,
+            "stream_options": { "include_usage": true }
         })
     }
 
