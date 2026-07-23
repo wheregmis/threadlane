@@ -4,3 +4,4 @@
 .DS_Store
 .threadlane
 .pi-subagents
+/crates/threadlane/dist/*
