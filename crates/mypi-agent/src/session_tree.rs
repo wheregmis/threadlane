@@ -6,6 +6,51 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
+
+#[cfg(windows)]
+const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+#[cfg(windows)]
+const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn MoveFileExW(existing_file_name: *const u16, new_file_name: *const u16, flags: u32) -> i32;
+}
+
+#[cfg(windows)]
+fn replace_file(temp_path: &Path, destination: &Path) -> std::io::Result<()> {
+    let temp: Vec<u16> = temp_path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+
+    // Unlike std::fs::rename, MoveFileExW can replace an existing destination
+    // on Windows. The replacement remains a same-volume rename and the write
+    // through flag asks Windows to flush the move before returning.
+    if unsafe {
+        MoveFileExW(
+            temp.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    } != 0
+    {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(windows))]
+fn replace_file(temp_path: &Path, destination: &Path) -> std::io::Result<()> {
+    std::fs::rename(temp_path, destination)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionNode {
     pub id: String,
@@ -53,6 +98,7 @@ impl SessionTree {
             ));
         }
 
+        let previous_name = self.name.clone();
         self.name = Some(name);
         if let Some(path) = self.file_path.clone() {
             let directory = path.parent().unwrap_or_else(|| Path::new("."));
@@ -66,9 +112,12 @@ impl SessionTree {
 
             let result = self
                 .save_to_file(&temp_path)
-                .and_then(|_| std::fs::rename(&temp_path, &path));
+                .and_then(|_| replace_file(&temp_path, &path));
             if result.is_err() {
                 let _ = std::fs::remove_file(&temp_path);
+                // A failed rewrite must not make memory claim a title that is
+                // absent from the persisted session.
+                self.name = previous_name;
             }
             result
         } else {
@@ -274,6 +323,20 @@ mod tests {
         let loaded = SessionTree::load_from_file(&path).unwrap();
         assert_eq!(loaded.name.as_deref(), Some("A useful title"));
         assert_eq!(loaded.nodes.len(), 1);
+    }
+
+    #[test]
+    fn set_name_retains_previous_name_when_persistence_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing").join("session.jsonl");
+        let mut tree = SessionTree::new("session");
+        tree.name = Some("Existing title".into());
+        tree.file_path = Some(path);
+
+        let error = tree.set_name("New title".into()).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(tree.name.as_deref(), Some("Existing title"));
     }
 
     #[test]
