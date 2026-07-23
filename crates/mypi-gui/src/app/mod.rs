@@ -3,8 +3,8 @@
 //! Chat, sessions, plan, and command palette panels are modularized under `crate::panels`.
 
 use crate::panels::chat::{
-    accepts_generation_event, concise_status, draft_for_cancellation, ChatList, ComposerState,
-    ComposerStatus, GenerationEvent, ToolFoldHeader,
+    accepts_generation_event, concise_status, draft_for_cancellation, submitted_draft, ChatList,
+    ComposerState, ComposerStatus, GenerationEvent, ToolFoldHeader,
 };
 use crate::panels::command_palette::*;
 use crate::panels::plan::PlanList;
@@ -1586,8 +1586,18 @@ impl App {
 
     fn apply_composer_presentation(&mut self, cx: &mut Cx) {
         let presentation = self.composer_state.presentation();
-        // Keep runtime updates to typed widget APIs. Makepad's script evaluator
-        // cannot safely assign Rust-derived Size/Inset/DrawQuad objects here.
+        // Geometry is updated through the script runtime so the live widget tree
+        // gets the same Makepad layout values as the declarative style. Idle is
+        // compact; any focused, typed, working, or error state gets the full
+        // footer and comfortable surface padding.
+        let footer_height = if presentation.expanded { 30.0 } else { 0.0 };
+        let mut input_bar = self.ui.widget(cx, ids!(input_bar));
+        let mut footer = input_bar.widget(cx, ids!(composer_footer));
+        script_apply_eval!(cx, footer, {
+            height: #(footer_height)
+        });
+        footer.set_visible(cx, presentation.expanded);
+        input_bar.redraw(cx);
         self.ui
             .widget(cx, ids!(composer_status))
             .set_visible(cx, presentation.working || presentation.show_error);
@@ -1606,7 +1616,6 @@ impl App {
         self.ui
             .button(cx, ids!(stop_btn))
             .set_visible(cx, presentation.working && self.active_generation.is_some());
-        self.ui.widget(cx, ids!(input_bar)).redraw(cx);
     }
 
     fn refresh_plan_ui(&mut self, cx: &mut Cx, work_dir: &std::path::Path, session_id: &str) {
@@ -1868,7 +1877,9 @@ impl App {
 
         let Some(tx) = self.tx.clone() else { return };
         let agent_arc = self.agent.as_ref().unwrap().clone();
-        let input_str = input_text.trim().to_string();
+        let Some((submitted_draft, input_str)) = submitted_draft(&input_text) else {
+            return;
+        };
         self.next_generation_id = self.next_generation_id.wrapping_add(1);
         let generation_id = self.next_generation_id;
         self.terminal_generation_id = None;
@@ -1880,7 +1891,6 @@ impl App {
         chat_list.portal_list(cx, ids!(list)).set_tail_range(true);
         cx.redraw_all();
 
-        let submitted_draft = input_str.clone();
         let generation_handle = get_runtime().spawn(async move {
             let mut agent_lock = agent_arc.lock().await;
             if let Some(session_file) = new_session_file {

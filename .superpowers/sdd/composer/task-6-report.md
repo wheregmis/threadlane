@@ -220,3 +220,14 @@ PASS — all unit, integration, extension, and doc tests passed; GUI test result
 cargo run -p mypi-gui (timeout 10s)
 EXIT_CODE=124 (timeout after successful build/startup). Output: studio websocket disabled: empty studio_http. No shader field `focus`, shader `mix` type, or draw_bg/property runtime errors were emitted.
 ```
+
+## Final-review verification (2026-07-22)
+
+- `cargo test -p mypi-gui panels::chat::composer::tests -- --nocapture`: PASS — 12 passed, 0 failed.
+- `cargo test -p mypi-gui -- --nocapture`: PASS — 23 passed, 0 failed.
+- `cargo check -p mypi-gui`: PASS (exit 0), existing warnings only.
+- `cargo fmt --all -- --check`: PASS (exit 0).
+- `cargo test --workspace`: PASS — all workspace tests and doc-tests passed; GUI: 23 passed.
+- GUI launch: `timeout 8s cargo run -p mypi-gui` exited 124 after successful startup/build. Output contained only the expected `studio websocket disabled: empty studio_http`; prior shader/property errors (`focus`, `mix`, `draw_bg`, and padding/property errors) did not appear.
+
+The composer now applies expanded state to live Makepad geometry by updating the footer height (30 expanded, 0 idle) and visibility through `script_apply_eval!`; the input min/max and `submit_on_enter` declarations remain unchanged. Raw submitted drafts are retained exactly while trimmed text is used for validation/chat/agent dispatch. Pure coverage verifies leading/trailing whitespace and multiline preservation.

@@ -44,6 +44,11 @@ pub fn draft_for_cancellation(
         .flatten()
         .map(|(_, draft)| draft.clone())
 }
+pub fn submitted_draft(raw: &str) -> Option<(String, String)> {
+    let trimmed = raw.trim();
+    (!trimmed.is_empty()).then(|| (raw.to_string(), trimmed.to_string()))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ComposerStatus {
     Ready,
@@ -198,6 +203,16 @@ mod tests {
         assert_eq!(concise_status(&error), "first line");
         assert!(concise_status(&"x".repeat(200)).chars().count() <= 161);
     }
+    #[test]
+    fn submitted_draft_preserves_raw_whitespace_and_multiline_text() {
+        let raw = "  first line\nsecond line  ";
+        assert_eq!(
+            submitted_draft(raw),
+            Some((raw.to_string(), "first line\nsecond line".to_string()))
+        );
+        assert_eq!(submitted_draft(" \n\t "), None);
+    }
+
     #[test]
     fn idle_is_compact_and_hides_adaptive_controls() {
         let state = ComposerState::new();
