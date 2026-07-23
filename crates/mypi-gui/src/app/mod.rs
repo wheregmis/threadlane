@@ -987,6 +987,8 @@ pub struct App {
     #[rust]
     agent_events_attached: bool,
     #[rust]
+    active_run: Option<tokio::task::JoinHandle<()>>,
+    #[rust]
     busy: bool,
     #[rust]
     commands: Vec<CommandInfo>,
@@ -1218,6 +1220,15 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(plan_close_btn)).clicked(actions) {
             self.set_plan_drawer_open(false);
             self.ui.widget(cx, ids!(plan_drawer)).set_visible(cx, false);
+            cx.redraw_all();
+        }
+
+        if self.ui.button(cx, ids!(stop_btn)).clicked(actions) {
+            if let Some(run) = self.active_run.take() {
+                run.abort();
+            }
+            self.set_status(cx, UiStatus::Ready, "Stopped");
+            self.push_chat(MsgRole::System, "Generation stopped.");
             cx.redraw_all();
         }
 
@@ -1503,7 +1514,12 @@ impl App {
         self.ui
             .widget(cx, ids!(chat_working_indicator))
             .set_visible(cx, working);
-        self.ui.widget(cx, ids!(session_list)).redraw(cx);
+        self.ui.widget(cx, ids!(stop_btn)).set_visible(cx, working);
+        self.ui.widget(cx, ids!(send_btn)).set_visible(cx, !working);
+        self.ui.label(cx, ids!(composer_status)).set_text(cx, _text);
+        self.ui
+            .label(cx, ids!(composer_status))
+            .set_visible(cx, working || status == UiStatus::Error);
         self.ui.widget(cx, ids!(chat_working_indicator)).redraw(cx);
     }
 
@@ -1770,7 +1786,7 @@ impl App {
         chat_list.portal_list(cx, ids!(list)).set_tail_range(true);
         cx.redraw_all();
 
-        get_runtime().spawn(async move {
+        self.active_run = Some(get_runtime().spawn(async move {
             let mut agent_lock = agent_arc.lock().await;
             if let Some(session_file) = new_session_file {
                 agent_lock.switch_session_file(session_file).await;
@@ -1790,7 +1806,7 @@ impl App {
                 let _ = tx.send(GuiAgentEvent::CommandOutput(out));
                 SignalToUI::set_ui_signal();
             }
-        });
+        }));
     }
 
     fn spawn_model_fetch(&self, api_key: String, account_id: Option<String>) {
