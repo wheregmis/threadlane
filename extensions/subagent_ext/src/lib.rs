@@ -87,7 +87,7 @@ enum InvocationRoute {
 }
 
 #[cfg(target_arch = "wasm32")]
-#[link(wasm_import_module = "mypi_host")]
+#[link(wasm_import_module = "threadlane_host")]
 extern "C" {
     #[link_name = "request"]
     fn broker_request(

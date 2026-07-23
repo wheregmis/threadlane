@@ -1,0 +1,21 @@
+[package]
+name = "threadlane-coding-agent"
+version = "0.1.0"
+edition = "2021"
+description = "Coding agent harness built on top of threadlane-agent and threadlane-tools"
+
+[dependencies]
+threadlane-agent = { path = "../threadlane-agent" }
+threadlane-tools = { path = "../threadlane-tools" }
+threadlane-provider = { path = "../threadlane-provider" }
+tokio = { version = "1.38", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+async-trait = "0.1"
+futures = "0.3"
+wasmi = "0.36"
+md5 = "0.7"
+
+[dev-dependencies]
+tempfile = "3.10"

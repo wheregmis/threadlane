@@ -1,6 +1,6 @@
-# Plan Mode Extension Guide (`mypi` & `mypi-gui`)
+# Plan Mode Extension Guide (`threadlane` & `threadlane-gui`)
 
-Plan Mode is a session-scoped, read-only exploration and structured task-planning mode for `mypi`. It lets the model analyze a codebase and propose step-by-step plans under a `Plan:` header without using the built-in file-writing tools.
+Plan Mode is a session-scoped, read-only exploration and structured task-planning mode for `threadlane`. It lets the model analyze a codebase and propose step-by-step plans under a `Plan:` header without using the built-in file-writing tools.
 
 ---
 
@@ -28,7 +28,7 @@ Plan Mode is a session-scoped, read-only exploration and structured task-plannin
 
 ### 1. Built-In Integration
 Plan Mode is an ordinary API v2 WASI extension loaded by the host in
-`crates/mypi-coding-agent`. Use `/plan` to change the generic `tools.set_policy`
+`crates/threadlane-coding-agent`. Use `/plan` to change the generic `tools.set_policy`
 state for the active session; there is no plan-specific startup flag.
 
 ### 2. WASI WebAssembly Extension Installation
@@ -47,8 +47,8 @@ To build and use Plan Mode as a standalone WASI WebAssembly extension:
    cp target/wasm32-wasip1/release/plan_mode_ext.wasm ./extensions/
    ```
 
-3. **Launch `mypi-gui` or CLI**:
-   `mypi` will automatically discover `./extensions/plan_mode_ext.wasm`, register its tools and commands, and display:
+3. **Launch `threadlane-gui` or CLI**:
+   `threadlane` will automatically discover `./extensions/plan_mode_ext.wasm`, register its tools and commands, and display:
    ```text
    Loaded 1 WASI extensions into sandboxed execution environment.
    ```
@@ -58,7 +58,7 @@ To build and use Plan Mode as a standalone WASI WebAssembly extension:
 ## Usage & Workflow
 
 ### Enabling Plan Mode
-In `mypi-gui` or CLI prompt bar, type:
+In `threadlane-gui` or CLI prompt bar, type:
 ```text
 /plan
 ```
@@ -68,7 +68,7 @@ Output:
 ```
 
 ### Creating a Plan
-Ask `mypi` to analyze a codebase task. In Plan Mode, `mypi` will output a structured plan:
+Ask `threadlane` to analyze a codebase task. In Plan Mode, `threadlane` will output a structured plan:
 ```text
 Plan:
 1. Inspect src/main.rs for entry point configuration

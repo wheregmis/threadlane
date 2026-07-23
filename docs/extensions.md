@@ -1,7 +1,7 @@
 # WASI Extension APIs
 
-`mypi` loads project-local WebAssembly extension packages from
-`./.mypi/extensions/<extension-id>/extension.wasm` (and also accepts deployed
+`threadlane` loads project-local WebAssembly extension packages from
+`./.threadlane/extensions/<extension-id>/extension.wasm` (and also accepts deployed
 `.wasm` files in that directory). Extensions add slash commands and model tools
 without linking into the agent binary. The API version in `extension_info`
 selects the invocation protocol: bundled extensions, including plan mode and
@@ -50,7 +50,7 @@ events:
 A v2 module may import the synchronous broker function exactly as follows:
 
 ```rust
-#[link(wasm_import_module = "mypi_host")]
+#[link(wasm_import_module = "threadlane_host")]
 extern "C" {
     #[link_name = "request"]
     fn broker_request(
@@ -62,7 +62,7 @@ extern "C" {
 }
 ```
 
-The import is `mypi_host.request(i32, i32, i32, i32) -> i32`. The first two
+The import is `threadlane_host.request(i32, i32, i32, i32) -> i32`. The first two
 arguments identify the request JSON in the extension's exported `memory`; the
 last two identify the extension-provided response buffer and its capacity. A
 request has this shape:
@@ -185,7 +185,7 @@ A v1 invocation receives JSON and returns JSON:
 ```
 
 `state` is host-managed, scoped to the active session and extension, and
-persisted under the project's `.mypi/state/extensions/` directory in v1. A
+persisted under the project's `.threadlane/state/extensions/` directory in v1. A
 fresh WASM instance receives the previously returned state on its next
 invocation. `effects` are requests: the host validates and performs them,
 rather than granting the extension direct model or tool-policy access. Supported
@@ -248,14 +248,14 @@ Build and deploy plan mode with the shared script:
 
 ```sh
 cargo build --manifest-path extensions/plan_mode_ext/Cargo.toml --target wasm32-wasip1 --release
-mkdir -p .mypi/extensions/plan_mode_ext
-cp extensions/plan_mode_ext/target/wasm32-wasip1/release/plan_mode_ext.wasm .mypi/extensions/plan_mode_ext/extension.wasm
+mkdir -p .threadlane/extensions/plan_mode_ext
+cp extensions/plan_mode_ext/target/wasm32-wasip1/release/plan_mode_ext.wasm .threadlane/extensions/plan_mode_ext/extension.wasm
 ```
 
 ### Project runtime layout
 
 ```text
-.mypi/
+.threadlane/
   extensions/
     plan_mode_ext/
       extension.wasm
@@ -270,12 +270,12 @@ cp extensions/plan_mode_ext/target/wasm32-wasip1/release/plan_mode_ext.wasm .myp
 ```
 
 The host persists extension state under the active session's
-`.mypi/state/extensions/sessions/<hex-encoded-session-id>/<extension>.json` path.
+`.threadlane/state/extensions/sessions/<hex-encoded-session-id>/<extension>.json` path.
 The session directory is the lowercase hexadecimal encoding of the session ID's
 UTF-8 bytes (for example, `session/one` becomes
 `73657373696f6e2f6f6e65`). State is managed by the host and scoped to both the
 loaded extension and conversation; `CodingAgent` also defaults its session
-history to `.mypi/sessions/default.jsonl`.
+history to `.threadlane/sessions/default.jsonl`.
 The legacy `./extensions/*.wasm` location remains a discovery fallback during
 migration.
 

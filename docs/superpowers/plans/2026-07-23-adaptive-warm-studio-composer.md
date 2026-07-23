@@ -2,18 +2,18 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Give the existing mypi prompt composer a warm-studio visual system and adaptive idle, focused, command, working, and error presentations without changing agent behavior.
+**Goal:** Give the existing threadlane prompt composer a warm-studio visual system and adaptive idle, focused, command, working, and error presentations without changing agent behavior.
 
-**Architecture:** Keep `MypiCommandTextInput` as the owner of editing and slash-command completion. Add a small pure presentation-state model under the chat panel for testable state-to-visibility decisions, and have `App` apply those decisions to the existing Makepad widgets from its current status/event path. Centralize warm colors in reusable primitives and apply the same surface/radius/selection treatment to the command popup.
+**Architecture:** Keep `ThreadlaneCommandTextInput` as the owner of editing and slash-command completion. Add a small pure presentation-state model under the chat panel for testable state-to-visibility decisions, and have `App` apply those decisions to the existing Makepad widgets from its current status/event path. Centralize warm colors in reusable primitives and apply the same surface/radius/selection treatment to the command popup.
 
-**Tech Stack:** Rust 2021, Makepad Widgets DSL, existing `MypiCommandTextInput`, built-in Rust unit tests, Cargo.
+**Tech Stack:** Rust 2021, Makepad Widgets DSL, existing `ThreadlaneCommandTextInput`, built-in Rust unit tests, Cargo.
 
 ## Global Constraints
 
 - This phase is limited to the prompt composer and its slash-command popup.
 - Existing text input, Enter/Shift+Enter behavior, command completion, model selection, plan controls, and stop behavior must remain functional.
 - Do not add agent capabilities, context attachments, permissions management, token counters, or a new composer widget architecture.
-- The current `MypiCommandTextInput` remains responsible for text editing and command completion.
+- The current `ThreadlaneCommandTextInput` remains responsible for text editing and command completion.
 - Use deep warm charcoal, terracotta, amber, warm off-white, tan-gray, and muted coral-red as the composer visual language.
 - Failed requests retain user input and show an error presentation; a new request clears the prior error presentation.
 - Changes must not overwrite or revert unrelated pre-existing worktree modifications.
@@ -22,12 +22,12 @@
 
 ## File Map
 
-- Modify: `crates/mypi-gui/src/panels/chat/mod.rs` — expose the new pure composer presentation module.
-- Create: `crates/mypi-gui/src/panels/chat/composer.rs` — state model and pure transition/visibility helpers with unit tests.
-- Modify: `crates/mypi-gui/src/app/mod.rs` — apply composer layout, colors, labels, visibility, and status transitions to existing widgets.
-- Modify: `crates/mypi-gui/src/components/primitives.rs` — define reusable warm-studio surface and accent values/patterns used by the composer.
-- Modify: `crates/mypi-gui/src/panels/command_palette/view.rs` — restyle popup, command rows, and active selection using the warm-studio treatment.
-- Modify: `crates/mypi-gui/src/panels/command_palette/state.rs` only if the existing completion tests need a pure selection-state assertion; do not change completion semantics.
+- Modify: `crates/threadlane-gui/src/panels/chat/mod.rs` — expose the new pure composer presentation module.
+- Create: `crates/threadlane-gui/src/panels/chat/composer.rs` — state model and pure transition/visibility helpers with unit tests.
+- Modify: `crates/threadlane-gui/src/app/mod.rs` — apply composer layout, colors, labels, visibility, and status transitions to existing widgets.
+- Modify: `crates/threadlane-gui/src/components/primitives.rs` — define reusable warm-studio surface and accent values/patterns used by the composer.
+- Modify: `crates/threadlane-gui/src/panels/command_palette/view.rs` — restyle popup, command rows, and active selection using the warm-studio treatment.
+- Modify: `crates/threadlane-gui/src/panels/command_palette/state.rs` only if the existing completion tests need a pure selection-state assertion; do not change completion semantics.
 
 No new dependencies or persistence files are required.
 
@@ -36,8 +36,8 @@ No new dependencies or persistence files are required.
 ### Task 1: Add a testable composer presentation state
 
 **Files:**
-- Create: `crates/mypi-gui/src/panels/chat/composer.rs`
-- Modify: `crates/mypi-gui/src/panels/chat/mod.rs`
+- Create: `crates/threadlane-gui/src/panels/chat/composer.rs`
+- Modify: `crates/threadlane-gui/src/panels/chat/mod.rs`
 
 **Interfaces:**
 - Produces `ComposerStatus`, `ComposerPresentation`, `ComposerState`, and pure methods used by `App`.
@@ -123,7 +123,7 @@ The final test calls `set_plan_relevant(true)`; define that method in this task 
 Run:
 
 ```bash
-cargo test -p mypi-gui panels::chat::composer::tests -- --nocapture
+cargo test -p threadlane-gui panels::chat::composer::tests -- --nocapture
 ```
 
 Expected: FAIL because `composer.rs` and its state types do not exist yet.
@@ -167,7 +167,7 @@ Set `expanded = focused || has_text || working || show_error`. Set `show_model =
 Run:
 
 ```bash
-cargo test -p mypi-gui panels::chat::composer::tests -- --nocapture
+cargo test -p threadlane-gui panels::chat::composer::tests -- --nocapture
 ```
 
 Expected: PASS for all composer presentation tests.
@@ -175,7 +175,7 @@ Expected: PASS for all composer presentation tests.
 - [ ] **Step 5: Commit the state boundary**
 
 ```bash
-git add crates/mypi-gui/src/panels/chat/composer.rs crates/mypi-gui/src/panels/chat/mod.rs
+git add crates/threadlane-gui/src/panels/chat/composer.rs crates/threadlane-gui/src/panels/chat/mod.rs
 git commit -m "feat: add composer presentation state"
 ```
 
@@ -184,7 +184,7 @@ git commit -m "feat: add composer presentation state"
 ### Task 2: Add shared warm-studio visual primitives
 
 **Files:**
-- Modify: `crates/mypi-gui/src/components/primitives.rs`
+- Modify: `crates/threadlane-gui/src/components/primitives.rs`
 
 **Interfaces:**
 - Produces reusable Makepad components `WarmComposerSurface`, `WarmComposerChip`, and `WarmComposerAction` for `app/mod.rs`.
@@ -251,7 +251,7 @@ Use the project’s existing Makepad syntax and adjust only syntax required by c
 Run:
 
 ```bash
-cargo check -p mypi-gui
+cargo check -p threadlane-gui
 ```
 
 Expected: PASS. If Makepad reports a DSL property incompatibility, retain the same visual values using the closest existing `RoundedView`/`Button` property syntax already used in the file.
@@ -259,7 +259,7 @@ Expected: PASS. If Makepad reports a DSL property incompatibility, retain the sa
 - [ ] **Step 3: Commit shared primitives**
 
 ```bash
-git add crates/mypi-gui/src/components/primitives.rs
+git add crates/threadlane-gui/src/components/primitives.rs
 git commit -m "style: add warm composer primitives"
 ```
 
@@ -268,7 +268,7 @@ git commit -m "style: add warm composer primitives"
 ### Task 3: Restyle the composer shell and adaptive controls
 
 **Files:**
-- Modify: `crates/mypi-gui/src/app/mod.rs` around the `input_bar`, `prompt_input`, `composer_footer`, model picker, and send button declarations.
+- Modify: `crates/threadlane-gui/src/app/mod.rs` around the `input_bar`, `prompt_input`, `composer_footer`, model picker, and send button declarations.
 
 **Interfaces:**
 - Consumes `ComposerPresentation` from Task 1 and warm components from Task 2.
@@ -315,7 +315,7 @@ Replace the current blue/glass-only send presentation with the warm terracotta a
 Run:
 
 ```bash
-cargo check -p mypi-gui
+cargo check -p threadlane-gui
 ```
 
 Expected: PASS, with all widget IDs referenced by the existing Rust code still present.
@@ -323,7 +323,7 @@ Expected: PASS, with all widget IDs referenced by the existing Rust code still p
 - [ ] **Step 6: Commit the layout styling**
 
 ```bash
-git add crates/mypi-gui/src/app/mod.rs
+git add crates/threadlane-gui/src/app/mod.rs
 git commit -m "style: refresh composer warm adaptive layout"
 ```
 
@@ -332,7 +332,7 @@ git commit -m "style: refresh composer warm adaptive layout"
 ### Task 4: Wire presentation state to existing app status and input events
 
 **Files:**
-- Modify: `crates/mypi-gui/src/app/mod.rs`
+- Modify: `crates/threadlane-gui/src/app/mod.rs`
 
 **Interfaces:**
 - Consumes `ComposerState`, `ComposerStatus`, and `ComposerPresentation` from `crate::panels::chat`.
@@ -398,8 +398,8 @@ In `refresh_plan_ui`, after computing `enabled`, call `composer_state.set_plan_r
 Run:
 
 ```bash
-cargo test -p mypi-gui panels::chat::composer::tests -- --nocapture
-cargo check -p mypi-gui
+cargo test -p threadlane-gui panels::chat::composer::tests -- --nocapture
+cargo check -p threadlane-gui
 ```
 
 Expected: all composer state tests PASS and GUI compilation PASS.
@@ -407,7 +407,7 @@ Expected: all composer state tests PASS and GUI compilation PASS.
 - [ ] **Step 7: Commit app wiring**
 
 ```bash
-git add crates/mypi-gui/src/app/mod.rs
+git add crates/threadlane-gui/src/app/mod.rs
 git commit -m "feat: wire adaptive composer states"
 ```
 
@@ -416,7 +416,7 @@ git commit -m "feat: wire adaptive composer states"
 ### Task 5: Apply warm styling to the command popup
 
 **Files:**
-- Modify: `crates/mypi-gui/src/panels/command_palette/view.rs`
+- Modify: `crates/threadlane-gui/src/panels/command_palette/view.rs`
 
 **Interfaces:**
 - Consumes the existing `items`, keyboard focus index, pointer hover index, and popup visibility behavior.
@@ -454,8 +454,8 @@ Keep the current `keyboard_focus_index` and `pointer_hover_index` logic. Do not 
 Run:
 
 ```bash
-cargo test -p mypi-gui panels::command_palette -- --nocapture
-cargo check -p mypi-gui
+cargo test -p threadlane-gui panels::command_palette -- --nocapture
+cargo check -p threadlane-gui
 ```
 
 Expected: existing command palette tests PASS and GUI compilation PASS.
@@ -463,7 +463,7 @@ Expected: existing command palette tests PASS and GUI compilation PASS.
 - [ ] **Step 4: Commit popup styling**
 
 ```bash
-git add crates/mypi-gui/src/panels/command_palette/view.rs
+git add crates/threadlane-gui/src/panels/command_palette/view.rs
  git commit -m "style: warm command palette"
 ```
 
@@ -472,8 +472,8 @@ git add crates/mypi-gui/src/panels/command_palette/view.rs
 ### Task 6: Verify behavior, responsive layout, and regression safety
 
 **Files:**
-- Modify: `crates/mypi-gui/src/panels/chat/composer.rs` only if test corrections are required by actual state behavior.
-- Modify: `crates/mypi-gui/src/app/mod.rs` only for verified layout/state defects found during validation.
+- Modify: `crates/threadlane-gui/src/panels/chat/composer.rs` only if test corrections are required by actual state behavior.
+- Modify: `crates/threadlane-gui/src/app/mod.rs` only for verified layout/state defects found during validation.
 
 **Interfaces:**
 - Validates the complete composer behavior from Tasks 1–5; no new public interfaces.
@@ -483,7 +483,7 @@ git add crates/mypi-gui/src/panels/command_palette/view.rs
 Run:
 
 ```bash
-cargo test -p mypi-gui -- --nocapture
+cargo test -p threadlane-gui -- --nocapture
 ```
 
 Expected: PASS for chat, command palette, workspace, and composer tests.
@@ -494,7 +494,7 @@ Run:
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy -p mypi-gui --all-targets -- -D warnings
+cargo clippy -p threadlane-gui --all-targets -- -D warnings
 ```
 
 Expected: no formatting differences and no new warnings.
@@ -511,7 +511,7 @@ Expected: PASS. Existing unrelated failures must be reported rather than hidden 
 
 - [ ] **Step 4: Perform a manual state checklist**
 
-Launch the GUI with `cargo run -p mypi-gui` using the repository’s normal environment and check at minimum:
+Launch the GUI with `cargo run -p threadlane-gui` using the repository’s normal environment and check at minimum:
 
 1. Idle composer is compact, warm, and shows the hint without a large empty toolbar.
 2. Focusing or typing expands the composer and reveals the model control.
@@ -540,7 +540,7 @@ Confirm that implementation commits touch only the planned GUI files and that un
 Only if Task 6 found and fixed a concrete defect:
 
 ```bash
-git add crates/mypi-gui/src/panels/chat/composer.rs crates/mypi-gui/src/app/mod.rs
+git add crates/threadlane-gui/src/panels/chat/composer.rs crates/threadlane-gui/src/app/mod.rs
 git commit -m "fix: polish composer state transitions"
 ```
 

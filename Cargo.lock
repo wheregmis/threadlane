@@ -1597,81 +1597,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "685a9ac4b61f4e728e1d2c6a7844609c16527aeb5e6c865915c08e619c16410f"
 
 [[package]]
-name = "mypi-agent"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "mypi-provider",
- "mypi-tools",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "mypi-coding-agent"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "md5",
- "mypi-agent",
- "mypi-provider",
- "mypi-tools",
- "serde",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "tokio",
- "wasmi",
-]
-
-[[package]]
-name = "mypi-gui"
-version = "0.1.0"
-dependencies = [
- "arboard",
- "base64",
- "makepad-widgets",
- "mypi-agent",
- "mypi-coding-agent",
- "mypi-provider",
- "mypi-tools",
- "png",
- "rfd",
- "robius-file-picker",
- "serde",
- "serde_json",
- "tokio",
- "unicode-segmentation 1.13.3",
-]
-
-[[package]]
-name = "mypi-provider"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "futures-util",
- "mypi-tools",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tokio-tungstenite",
-]
-
-[[package]]
-name = "mypi-tools"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
 name = "naga"
 version = "27.0.3"
 source = "git+https://github.com/makepad/makepad.git?branch=dev#a4fea8e2590a8697e9b67a1e8f4e230eab7bb87c"
@@ -2793,6 +2718,81 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.2",
+]
+
+[[package]]
+name = "threadlane-agent"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "threadlane-provider",
+ "threadlane-tools",
+ "tokio",
+]
+
+[[package]]
+name = "threadlane-coding-agent"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "md5",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "threadlane-agent",
+ "threadlane-provider",
+ "threadlane-tools",
+ "tokio",
+ "wasmi",
+]
+
+[[package]]
+name = "threadlane-gui"
+version = "0.1.0"
+dependencies = [
+ "arboard",
+ "base64",
+ "makepad-widgets",
+ "png",
+ "rfd",
+ "robius-file-picker",
+ "serde",
+ "serde_json",
+ "threadlane-agent",
+ "threadlane-coding-agent",
+ "threadlane-provider",
+ "threadlane-tools",
+ "tokio",
+ "unicode-segmentation 1.13.3",
+]
+
+[[package]]
+name = "threadlane-provider"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "threadlane-tools",
+ "tokio",
+ "tokio-tungstenite",
+]
+
+[[package]]
+name = "threadlane-tools"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

@@ -18,7 +18,7 @@
 
 ### Task 1: Migrate plan extension to v2 broker calls
 
-**Files:** `extensions/plan_mode_ext/src/lib.rs`, `crates/mypi-coding-agent/tests/wasi_tests.rs`.
+**Files:** `extensions/plan_mode_ext/src/lib.rs`, `crates/threadlane-coding-agent/tests/wasi_tests.rs`.
 
 - Change manifest to API v2 and declare `tools`, `agent`, `session`.
 - Replace `SetToolPolicy` with broker `tools.set_policy`.
@@ -30,7 +30,7 @@
 
 ### Task 2: Migrate subagent extension and generic child-agent operation
 
-**Files:** `extensions/subagent_ext/src/lib.rs`, `crates/mypi-coding-agent/src/coding_agent.rs`, `crates/mypi-coding-agent/src/wasi_extension.rs`, tests.
+**Files:** `extensions/subagent_ext/src/lib.rs`, `crates/threadlane-coding-agent/src/coding_agent.rs`, `crates/threadlane-coding-agent/src/wasi_extension.rs`, tests.
 
 - Change manifest to API v2 and declare `agent`.
 - Replace `RunSubagents` with generic `agent.run` arguments containing validated task list and `parallel`.
@@ -41,7 +41,7 @@
 
 ### Task 3: Remove legacy bundled-extension harness paths
 
-**Files:** `crates/mypi-coding-agent/src/wasi_extension.rs`, `crates/mypi-coding-agent/src/coding_agent.rs`, public exports/tests/docs/scripts as needed.
+**Files:** `crates/threadlane-coding-agent/src/wasi_extension.rs`, `crates/threadlane-coding-agent/src/coding_agent.rs`, public exports/tests/docs/scripts as needed.
 
 - Delete legacy `WasiExtensionEffect` variants and `WasiSubagentTask` only after migrated extensions no longer use them.
 - Remove `enable_plan_mode` startup interpretation, `restored_plan_mode` extension-name lookups, and `run_subagents` special command handling.

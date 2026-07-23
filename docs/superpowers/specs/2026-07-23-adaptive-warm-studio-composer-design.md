@@ -5,7 +5,7 @@
 
 ## Goal
 
-Improve the mypi prompt composer visually and behaviorally without changing the underlying agent workflow: keep it quiet when idle, reveal useful controls while focused, make command mode feel attached to the composer, and communicate working/error states clearly.
+Improve the threadlane prompt composer visually and behaviorally without changing the underlying agent workflow: keep it quiet when idle, reveal useful controls while focused, make command mode feel attached to the composer, and communicate working/error states clearly.
 
 ## Scope
 
@@ -65,14 +65,14 @@ This keeps the composer capable without turning it into a persistent settings to
 
 ## Implementation Boundaries
 
-The current `MypiCommandTextInput` remains responsible for text editing and command completion. It should be styled and coordinated, not duplicated or replaced.
+The current `ThreadlaneCommandTextInput` remains responsible for text editing and command completion. It should be styled and coordinated, not duplicated or replaced.
 
 Expected files:
 
-- `crates/mypi-gui/src/app/mod.rs`: composer layout, warm styling, control visibility, and working/error presentation wiring.
-- `crates/mypi-gui/src/components/primitives.rs`: shared warm-studio surface/button/chip styling if reusable primitives are needed.
-- `crates/mypi-gui/src/panels/command_palette/view.rs`: command popup styling and selection treatment.
-- `crates/mypi-gui/src/panels/chat/state.rs`: only if a small explicit presentation-state model is needed; no agent behavior belongs here.
+- `crates/threadlane-gui/src/app/mod.rs`: composer layout, warm styling, control visibility, and working/error presentation wiring.
+- `crates/threadlane-gui/src/components/primitives.rs`: shared warm-studio surface/button/chip styling if reusable primitives are needed.
+- `crates/threadlane-gui/src/panels/command_palette/view.rs`: command popup styling and selection treatment.
+- `crates/threadlane-gui/src/panels/chat/state.rs`: only if a small explicit presentation-state model is needed; no agent behavior belongs here.
 
 Do not extract a new composer widget during this phase.
 

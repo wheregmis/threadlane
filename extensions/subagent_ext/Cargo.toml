@@ -2,7 +2,7 @@
 name = "subagent-ext"
 version = "0.1.0"
 edition = "2021"
-description = "Subagent WASI extension for mypi"
+description = "Subagent WASI extension for threadlane"
 
 [lib]
 crate-type = ["cdylib"]

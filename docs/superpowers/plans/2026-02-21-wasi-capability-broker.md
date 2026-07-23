@@ -4,9 +4,9 @@
 
 **Goal:** Add a versioned, grant-checked WASI capability broker so future extensions can use host services without extension-specific harness code.
 
-**Architecture:** API v2 extensions import one synchronous `mypi_host.request` ABI. The import validates JSON requests and declared capability grants, writes a JSON response into caller-provided memory, and queues accepted requests on the invocation result. `CodingAgent` owns one generic asynchronous dispatcher that executes queued requests through capability adapters; individual extensions do not appear in that dispatcher. API v1 command, tool, state, and hook behavior remains unchanged.
+**Architecture:** API v2 extensions import one synchronous `threadlane_host.request` ABI. The import validates JSON requests and declared capability grants, writes a JSON response into caller-provided memory, and queues accepted requests on the invocation result. `CodingAgent` owns one generic asynchronous dispatcher that executes queued requests through capability adapters; individual extensions do not appear in that dispatcher. API v1 command, tool, state, and hook behavior remains unchanged.
 
-**Tech Stack:** Rust 2021, `wasmi` 0.36, `serde`/`serde_json`, Tokio, existing `mypi-agent` and `mypi-tools` crates.
+**Tech Stack:** Rust 2021, `wasmi` 0.36, `serde`/`serde_json`, Tokio, existing `threadlane-agent` and `threadlane-tools` crates.
 
 ## Global Constraints
 
@@ -21,11 +21,11 @@
 
 ## File structure
 
-- Modify: `crates/mypi-coding-agent/src/wasi_extension.rs` — v2 manifest/request/response types, WASM store data, host import, grant validation, pending-request extraction, v1 compatibility.
-- Create: `crates/mypi-coding-agent/src/extension_broker.rs` — public broker request/result types, capability policy, capability handler trait, and operation routing independent of individual extensions.
-- Modify: `crates/mypi-coding-agent/src/coding_agent.rs` — generic async broker dispatcher and host adapters for agent/tools/session/fs/process/network/UI/events.
-- Modify: `crates/mypi-coding-agent/src/lib.rs` — expose stable public broker API types.
-- Modify: `crates/mypi-coding-agent/tests/wasi_tests.rs` — manifest, ABI, grant, error, state, and v1 regression coverage.
+- Modify: `crates/threadlane-coding-agent/src/wasi_extension.rs` — v2 manifest/request/response types, WASM store data, host import, grant validation, pending-request extraction, v1 compatibility.
+- Create: `crates/threadlane-coding-agent/src/extension_broker.rs` — public broker request/result types, capability policy, capability handler trait, and operation routing independent of individual extensions.
+- Modify: `crates/threadlane-coding-agent/src/coding_agent.rs` — generic async broker dispatcher and host adapters for agent/tools/session/fs/process/network/UI/events.
+- Modify: `crates/threadlane-coding-agent/src/lib.rs` — expose stable public broker API types.
+- Modify: `crates/threadlane-coding-agent/tests/wasi_tests.rs` — manifest, ABI, grant, error, state, and v1 regression coverage.
 - Create: `extensions/broker_smoke_ext/` — minimal v2 WASI fixture used only to prove the imported ABI and broker envelope.
 - Modify: `docs/extensions.md` — document API v2 manifest, ABI, grants, response/error semantics, and compatibility.
 
@@ -34,7 +34,7 @@
 Use an output buffer supplied by the extension, rather than attempting to invoke extension `alloc` re-entrantly from a host import:
 
 ```rust
-#[link(wasm_import_module = "mypi_host")]
+#[link(wasm_import_module = "threadlane_host")]
 extern "C" {
     // Returns the byte length written. Negative values are ABI errors.
     fn request(request_ptr: i32, request_len: i32, response_ptr: i32, response_capacity: i32) -> i32;
@@ -60,9 +60,9 @@ The JSON request and success/failure response are:
 ### Task 1: Define the broker’s versioned public contract
 
 **Files:**
-- Create: `crates/mypi-coding-agent/src/extension_broker.rs`
-- Modify: `crates/mypi-coding-agent/src/lib.rs`
-- Test: `crates/mypi-coding-agent/tests/wasi_tests.rs`
+- Create: `crates/threadlane-coding-agent/src/extension_broker.rs`
+- Modify: `crates/threadlane-coding-agent/src/lib.rs`
+- Test: `crates/threadlane-coding-agent/tests/wasi_tests.rs`
 
 **Interfaces:**
 - Produces `BrokerRequest { api_version: u32, capability: String, operation: String, arguments: Value }`.
@@ -72,10 +72,10 @@ The JSON request and success/failure response are:
 
 - [ ] **Step 1: Write failing serde and policy tests**
 
-Add to `crates/mypi-coding-agent/tests/wasi_tests.rs`:
+Add to `crates/threadlane-coding-agent/tests/wasi_tests.rs`:
 
 ```rust
-use mypi_coding_agent::{BrokerRequest, BrokerResponse, CapabilityPolicy};
+use threadlane_coding_agent::{BrokerRequest, BrokerResponse, CapabilityPolicy};
 
 #[test]
 fn broker_request_round_trips_and_requires_v2() {
@@ -98,13 +98,13 @@ fn capability_policy_rejects_undeclared_capabilities() {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p mypi-coding-agent --test wasi_tests broker_`
+Run: `cargo test -p threadlane-coding-agent --test wasi_tests broker_`
 
 Expected: compilation fails because `BrokerRequest` and `CapabilityPolicy` do not exist.
 
 - [ ] **Step 3: Implement only the serializable contract and grant check**
 
-Create `crates/mypi-coding-agent/src/extension_broker.rs` with these exact core definitions:
+Create `crates/threadlane-coding-agent/src/extension_broker.rs` with these exact core definitions:
 
 ```rust
 use serde::{Deserialize, Serialize};
@@ -158,26 +158,26 @@ impl CapabilityPolicy {
 }
 ```
 
-Export the types and `BROKER_API_VERSION` from `crates/mypi-coding-agent/src/lib.rs`.
+Export the types and `BROKER_API_VERSION` from `crates/threadlane-coding-agent/src/lib.rs`.
 
 - [ ] **Step 4: Run the focused tests**
 
-Run: `cargo test -p mypi-coding-agent --test wasi_tests broker_`
+Run: `cargo test -p threadlane-coding-agent --test wasi_tests broker_`
 
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/mypi-coding-agent/src/extension_broker.rs crates/mypi-coding-agent/src/lib.rs crates/mypi-coding-agent/tests/wasi_tests.rs
+git add crates/threadlane-coding-agent/src/extension_broker.rs crates/threadlane-coding-agent/src/lib.rs crates/threadlane-coding-agent/tests/wasi_tests.rs
 git commit -m "feat: define WASI broker contract"
 ```
 
 ### Task 2: Add API v2 manifests and strict declared-grant validation
 
 **Files:**
-- Modify: `crates/mypi-coding-agent/src/wasi_extension.rs`
-- Test: `crates/mypi-coding-agent/tests/wasi_tests.rs`
+- Modify: `crates/threadlane-coding-agent/src/wasi_extension.rs`
+- Test: `crates/threadlane-coding-agent/tests/wasi_tests.rs`
 
 **Interfaces:**
 - Consumes `CapabilityPolicy` and `BROKER_API_VERSION` from `extension_broker`.
@@ -209,7 +209,7 @@ fn v2_manifest_preserves_declared_capabilities() {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p mypi-coding-agent --test wasi_tests manifest_`
+Run: `cargo test -p threadlane-coding-agent --test wasi_tests manifest_`
 
 Expected: compilation fails because `capabilities` is not a field.
 
@@ -238,30 +238,30 @@ Update all in-repository struct literals for `WasiExtensionManifest` with `capab
 
 - [ ] **Step 4: Run focused tests and existing v1 tests**
 
-Run: `cargo test -p mypi-coding-agent --test wasi_tests manifest_ test_extension_command_state_is_host_managed`
+Run: `cargo test -p threadlane-coding-agent --test wasi_tests manifest_ test_extension_command_state_is_host_managed`
 
 Expected: PASS; existing v1 plan extension test remains green.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/mypi-coding-agent/src/wasi_extension.rs crates/mypi-coding-agent/tests/wasi_tests.rs
+git add crates/threadlane-coding-agent/src/wasi_extension.rs crates/threadlane-coding-agent/tests/wasi_tests.rs
 git commit -m "feat: add WASI v2 capability declarations"
 ```
 
 ### Task 3: Wire the synchronous WASM broker import and queue accepted requests
 
 **Files:**
-- Modify: `crates/mypi-coding-agent/src/wasi_extension.rs`
+- Modify: `crates/threadlane-coding-agent/src/wasi_extension.rs`
 - Create: `extensions/broker_smoke_ext/Cargo.toml`
 - Create: `extensions/broker_smoke_ext/src/lib.rs`
-- Test: `crates/mypi-coding-agent/tests/wasi_tests.rs`
+- Test: `crates/threadlane-coding-agent/tests/wasi_tests.rs`
 
 **Interfaces:**
 - Consumes `BrokerRequest`, `BrokerResponse`, and `CapabilityPolicy`.
 - `WasiExtension::call_*` returns the extension response plus `Vec<BrokerRequest>` captured during the invocation.
 - Produces `WasiExtensionManager::take_broker_requests()` only as an internal manager helper; public command/tool methods return a result object containing the captured requests.
-- The import is `mypi_host.request(i32, i32, i32, i32) -> i32` and follows the ABI contract above.
+- The import is `threadlane_host.request(i32, i32, i32, i32) -> i32` and follows the ABI contract above.
 
 - [ ] **Step 1: Write the failing smoke-extension test**
 
@@ -278,7 +278,7 @@ Also add a denied-grant variant that loads a fixture declaring only `agent`; ass
 
 - [ ] **Step 2: Run it to verify failure**
 
-Run: `cargo test -p mypi-coding-agent --test wasi_tests broker_import_ -- --nocapture`
+Run: `cargo test -p threadlane-coding-agent --test wasi_tests broker_import_ -- --nocapture`
 
 Expected: FAIL because the fixture/import and broker request result are not implemented.
 
@@ -295,9 +295,9 @@ struct WasiStoreData {
 
 Pass `CapabilityPolicy::default()` while loading a manifest. During command/tool/hook calls, create the store with `extension.capability_policy()`.
 
-- [ ] **Step 4: Define `mypi_host.request` in the linker**
+- [ ] **Step 4: Define `threadlane_host.request` in the linker**
 
-Change `create_linker` to accept `Store<WasiStoreData>`. Define `mypi_host.request` with `Func::wrap` and `Caller<WasiStoreData>`. Its implementation must:
+Change `create_linker` to accept `Store<WasiStoreData>`. Define `threadlane_host.request` with `Func::wrap` and `Caller<WasiStoreData>`. Its implementation must:
 
 1. Reject negative pointers/lengths/capacity with `-1`.
 2. Read exactly `request_len` bytes from the caller’s exported `memory`.
@@ -334,27 +334,27 @@ capabilities: vec!["tools".into()],
 commands: vec![WasiCommandDefinition { name: "broker-smoke".into(), description: "Broker ABI smoke test".into() }],
 ```
 
-Its command allocates a request and a 1024-byte response buffer, calls `mypi_host::request` for `tools.set_policy`, decodes the returned JSON, and returns `"broker accepted tools.set_policy"` only when `ok` is true. Include the existing `memory`, `alloc`, `extension_info`, and `execute_command` exports.
+Its command allocates a request and a 1024-byte response buffer, calls `threadlane_host::request` for `tools.set_policy`, decodes the returned JSON, and returns `"broker accepted tools.set_policy"` only when `ok` is true. Include the existing `memory`, `alloc`, `extension_info`, and `execute_command` exports.
 
 - [ ] **Step 7: Run focused tests**
 
-Run: `cargo test -p mypi-coding-agent --test wasi_tests broker_import_`
+Run: `cargo test -p threadlane-coding-agent --test wasi_tests broker_import_`
 
 Expected: PASS for accepted, denied, malformed-request, and too-small-output-buffer tests.
 
 - [ ] **Step 8: Commit**
 
 ```bash
-git add crates/mypi-coding-agent/src/wasi_extension.rs crates/mypi-coding-agent/tests/wasi_tests.rs extensions/broker_smoke_ext
+git add crates/threadlane-coding-agent/src/wasi_extension.rs crates/threadlane-coding-agent/tests/wasi_tests.rs extensions/broker_smoke_ext
 git commit -m "feat: add WASI capability broker import"
 ```
 
 ### Task 4: Build generic asynchronous capability dispatch
 
 **Files:**
-- Modify: `crates/mypi-coding-agent/src/extension_broker.rs`
-- Modify: `crates/mypi-coding-agent/src/coding_agent.rs`
-- Test: `crates/mypi-coding-agent/tests/wasi_tests.rs`
+- Modify: `crates/threadlane-coding-agent/src/extension_broker.rs`
+- Modify: `crates/threadlane-coding-agent/src/coding_agent.rs`
+- Test: `crates/threadlane-coding-agent/tests/wasi_tests.rs`
 
 **Interfaces:**
 - Consumes broker requests returned by commands, tools, and hooks.
@@ -382,7 +382,7 @@ Add an unknown-operation test asserting error code `unknown_operation`, not a pa
 
 - [ ] **Step 2: Run tests to verify failure**
 
-Run: `cargo test -p mypi-coding-agent --test wasi_tests broker_dispatch_`
+Run: `cargo test -p threadlane-coding-agent --test wasi_tests broker_dispatch_`
 
 Expected: compilation fails because `CapabilityDispatcher` does not exist.
 
@@ -419,23 +419,23 @@ After `execute_command_with_effects` succeeds in `CodingAgent::handle_input`, di
 
 - [ ] **Step 6: Run focused tests**
 
-Run: `cargo test -p mypi-coding-agent --test wasi_tests broker_dispatch_`
+Run: `cargo test -p threadlane-coding-agent --test wasi_tests broker_dispatch_`
 
 Expected: PASS; unknown capability/operation returns a structured error.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add crates/mypi-coding-agent/src/extension_broker.rs crates/mypi-coding-agent/src/coding_agent.rs crates/mypi-coding-agent/tests/wasi_tests.rs
+git add crates/threadlane-coding-agent/src/extension_broker.rs crates/threadlane-coding-agent/src/coding_agent.rs crates/threadlane-coding-agent/tests/wasi_tests.rs
 git commit -m "feat: dispatch generic extension capabilities"
 ```
 
 ### Task 5: Apply broker execution consistently to tools and hooks
 
 **Files:**
-- Modify: `crates/mypi-coding-agent/src/wasi_extension.rs`
-- Modify: `crates/mypi-coding-agent/src/coding_agent.rs`
-- Test: `crates/mypi-coding-agent/tests/wasi_tests.rs`
+- Modify: `crates/threadlane-coding-agent/src/wasi_extension.rs`
+- Modify: `crates/threadlane-coding-agent/src/coding_agent.rs`
+- Test: `crates/threadlane-coding-agent/tests/wasi_tests.rs`
 
 **Interfaces:**
 - Produces `WasiExtensionManager::execute_tool_with_broker_requests(...)` and `execute_hook_with_broker_requests(...)`.
@@ -454,7 +454,7 @@ Test that `before_tool_call` becomes `BeforeToolCallResult { block: true, reason
 
 - [ ] **Step 2: Run tests to verify failure**
 
-Run: `cargo test -p mypi-coding-agent --test wasi_tests structured_hook_`
+Run: `cargo test -p threadlane-coding-agent --test wasi_tests structured_hook_`
 
 Expected: FAIL because `middleware` is not parsed or applied.
 
@@ -474,14 +474,14 @@ Make `ExtensionBeforeToolHook` and `ExtensionAfterToolHook` receive a dispatcher
 
 - [ ] **Step 5: Run hook and v1 regression tests**
 
-Run: `cargo test -p mypi-coding-agent --test wasi_tests structured_hook_ test_extension_command_state_is_host_managed`
+Run: `cargo test -p threadlane-coding-agent --test wasi_tests structured_hook_ test_extension_command_state_is_host_managed`
 
 Expected: PASS.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/mypi-coding-agent/src/wasi_extension.rs crates/mypi-coding-agent/src/coding_agent.rs crates/mypi-coding-agent/tests/wasi_tests.rs
+git add crates/threadlane-coding-agent/src/wasi_extension.rs crates/threadlane-coding-agent/src/coding_agent.rs crates/threadlane-coding-agent/tests/wasi_tests.rs
 git commit -m "feat: support broker-backed extension middleware"
 ```
 
@@ -490,7 +490,7 @@ git commit -m "feat: support broker-backed extension middleware"
 **Files:**
 - Modify: `docs/extensions.md`
 - Modify: `scripts/build_extensions.sh`
-- Test: `crates/mypi-coding-agent/tests/wasi_tests.rs`
+- Test: `crates/threadlane-coding-agent/tests/wasi_tests.rs`
 
 **Interfaces:**
 - Documents the exact v2 manifest, imported ABI, request/response shapes, capabilities/operations, grants, and v1 compatibility.
@@ -502,7 +502,7 @@ Add a test that reads the compiled broker smoke extension and verifies its v2 ma
 
 - [ ] **Step 2: Run it to verify failure if the fixture is not deployed/built**
 
-Run: `cargo test -p mypi-coding-agent --test wasi_tests broker_smoke_manifest_`
+Run: `cargo test -p threadlane-coding-agent --test wasi_tests broker_smoke_manifest_`
 
 Expected: PASS after Task 3; if it fails because the WASM target is absent, report that environmental prerequisite rather than weakening the assertion.
 
@@ -531,7 +531,7 @@ Run:
 
 ```bash
 ./scripts/build_extensions.sh
-cargo test -p mypi-coding-agent --test wasi_tests
+cargo test -p threadlane-coding-agent --test wasi_tests
 ```
 
 Expected: WASI fixtures compile and all `wasi_tests` pass.
@@ -550,7 +550,7 @@ Expected: both commands exit 0.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add docs/extensions.md scripts/build_extensions.sh crates/mypi-coding-agent/tests/wasi_tests.rs
+git add docs/extensions.md scripts/build_extensions.sh crates/threadlane-coding-agent/tests/wasi_tests.rs
 git commit -m "docs: document WASI capability broker"
 ```
 

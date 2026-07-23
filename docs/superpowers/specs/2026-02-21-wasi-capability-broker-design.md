@@ -9,7 +9,7 @@ Make WASI extensions broadly extensible without adding extension-specific logic 
 Extensions remain WebAssembly modules compiled for `wasm32-wasip1`. The host exposes one generic broker import:
 
 ```text
-mypi_host.request(ptr: i32, len: i32) -> u64
+threadlane_host.request(ptr: i32, len: i32) -> u64
 ```
 
 The module sends JSON and receives packed pointer/length JSON using the existing `alloc` and memory contract.

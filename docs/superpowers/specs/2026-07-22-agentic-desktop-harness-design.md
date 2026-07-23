@@ -5,9 +5,9 @@
 
 ## Summary
 
-`mypi` will become a Makepad desktop harness that can run independent coding-agent tasks across multiple projects, keep them working while the user switches views, and manage skills and extensions without requiring manual JSON edits.
+`threadlane` will become a Makepad desktop harness that can run independent coding-agent tasks across multiple projects, keep them working while the user switches views, and manage skills and extensions without requiring manual JSON edits.
 
-The implementation will extend the existing Rust harness. It will not embed Pi or replace `mypi-agent` with another runtime. Pi supplies the resource-management reference model; the Makepad host-launcher proof of concept in `/private/tmp/host_launcher_poc_reference` supplies the persisted registry and in-app manager pattern.
+The implementation will extend the existing Rust harness. It will not embed Pi or replace `threadlane-agent` with another runtime. Pi supplies the resource-management reference model; the Makepad host-launcher proof of concept in `/private/tmp/host_launcher_poc_reference` supplies the persisted registry and in-app manager pattern.
 
 ## Current State
 
@@ -103,7 +103,7 @@ The current process-wide chat, activity, and plan stores become task-keyed store
 Project-owned data remains under the project:
 
 ```text
-<project>/.mypi/
+<project>/.threadlane/
   settings.json
   sessions/*.jsonl
   skills/<skill-id>/SKILL.md
@@ -112,9 +112,9 @@ Project-owned data remains under the project:
   state/extensions/<extension-id>.json
 ```
 
-Global data lives under `~/.mypi/` with the same `skills`, `extensions`, and `packages` directories plus application settings. The project registry stores canonical paths, display names, last-selected task IDs, and recent ordering. All settings and extension-state updates use write-to-temporary-file followed by rename.
+Global data lives under `~/.threadlane/` with the same `skills`, `extensions`, and `packages` directories plus application settings. The project registry stores canonical paths, display names, last-selected task IDs, and recent ordering. All settings and extension-state updates use write-to-temporary-file followed by rename.
 
-At startup, mypi restores registered projects and saved tasks. A task that was running when the app stopped is restored as interrupted, not completed or still running.
+At startup, threadlane restores registered projects and saved tasks. A task that was running when the app stopped is restored as interrupted, not completed or still running.
 
 ## Skills
 
@@ -123,10 +123,10 @@ Skills use the Agent Skills `SKILL.md` format.
 Discovery locations, in increasing precedence, are:
 
 1. `~/.agents/skills/`
-2. `~/.mypi/skills/`
+2. `~/.threadlane/skills/`
 3. enabled global packages
 4. `.agents/skills/` from project root
-5. `<project>/.mypi/skills/`
+5. `<project>/.threadlane/skills/`
 6. enabled project packages
 
 A stable skill ID is its declared name. A later scope overrides an earlier skill with the same ID. Discovery reads only metadata needed for the catalog and system prompt. Full instructions load when the model selects the skill or the user invokes `/skill:<name>`.
@@ -155,7 +155,7 @@ Before first launch, the GUI shows the executable path, package source, requeste
 
 ## Packages
 
-A package is a directory containing `mypi-package.json` plus conventional `skills/` and `extensions/` directories. The manifest contains only what management requires:
+A package is a directory containing `threadlane-package.json` plus conventional `skills/` and `extensions/` directories. The manifest contains only what management requires:
 
 - stable ID, name, and version;
 - source metadata;
@@ -205,7 +205,7 @@ Workspace isolation is enforced in the shared tool execution path, not in indivi
 - extension effects are validated by the host;
 - full-trust execution requires explicit revision-bound approval.
 
-The shell itself retains the user's host authority: restricting its starting directory is not a filesystem sandbox, and the GUI labels it as a full-trust tool. A portable command sandbox is outside this design; one can be added when mypi has a concrete platform backend. File tools and caller-supplied command working directories are contained before concurrent cross-project execution because the current tools accept unrestricted paths and working directories.
+The shell itself retains the user's host authority: restricting its starting directory is not a filesystem sandbox, and the GUI labels it as a full-trust tool. A portable command sandbox is outside this design; one can be added when threadlane has a concrete platform backend. File tools and caller-supplied command working directories are contained before concurrent cross-project execution because the current tools accept unrestricted paths and working directories.
 
 ## Error Handling
 

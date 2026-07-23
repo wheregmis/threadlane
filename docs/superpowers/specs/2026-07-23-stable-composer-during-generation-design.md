@@ -38,7 +38,7 @@ Update composer presentation unit tests to verify:
 - Working state selects the Stop action while Ready and Error select Send.
 - Error state does not reshape the composer.
 
-Run the focused `mypi-gui` tests and the repository's relevant formatting/check commands.
+Run the focused `threadlane-gui` tests and the repository's relevant formatting/check commands.
 
 ## Non-goals
 

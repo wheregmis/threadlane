@@ -1,4 +1,4 @@
-# Subagent Extension for `mypi` Harness
+# Subagent Extension for `threadlane` Harness
 
 The `subagent-ext` WASI extension exposes task delegation both as the `/subagent` slash command and as a model-callable `subagent` tool. Both entry points normalize to the v2 broker operation `agent.run`, using isolated subagent context windows and supporting single, parallel, and sequential workflows.
 

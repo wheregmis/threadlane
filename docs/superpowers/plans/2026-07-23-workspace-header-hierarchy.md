@@ -20,8 +20,8 @@
 ### Task 1: Path and project identity formatting
 
 **Files:**
-- Modify: `crates/mypi-gui/src/app/mod.rs`
-- Test: `crates/mypi-gui/src/app/mod.rs`
+- Modify: `crates/threadlane-gui/src/app/mod.rs`
+- Test: `crates/threadlane-gui/src/app/mod.rs`
 
 **Interfaces:**
 - Consumes: `std::path::{Component, Path, PathBuf}` and optional home directory text from `std::env::var_os("HOME")`
@@ -29,11 +29,11 @@
 
 - [ ] **Step 1: Write failing unit tests**
 
-Add tests asserting that project names come from the final path component, `/` safely falls back to `/`, short home paths become `~/Documents/mypi`, and long paths become `~/Documents/…/exploration/mypi`.
+Add tests asserting that project names come from the final path component, `/` safely falls back to `/`, short home paths become `~/Documents/threadlane`, and long paths become `~/Documents/…/exploration/threadlane`.
 
 - [ ] **Step 2: Run tests to verify failure**
 
-Run: `cargo test -p mypi-gui workspace_header`
+Run: `cargo test -p threadlane-gui workspace_header`
 Expected: compilation failure because the formatting helpers do not exist.
 
 - [ ] **Step 3: Implement minimal pure helpers**
@@ -42,7 +42,7 @@ Implement `project_name` using `file_name()` with a lossy-display fallback. Impl
 
 - [ ] **Step 4: Run focused tests**
 
-Run: `cargo test -p mypi-gui workspace_header`
+Run: `cargo test -p threadlane-gui workspace_header`
 Expected: all workspace header formatting tests pass.
 
 ---
@@ -50,8 +50,8 @@ Expected: all workspace header formatting tests pass.
 ### Task 2: Header presentation and wiring
 
 **Files:**
-- Modify: `crates/mypi-gui/src/app/mod.rs:503-545`
-- Modify: `crates/mypi-gui/src/app/mod.rs:1014-1018`
+- Modify: `crates/threadlane-gui/src/app/mod.rs:503-545`
+- Modify: `crates/threadlane-gui/src/app/mod.rs:1014-1018`
 
 **Interfaces:**
 - Consumes: `project_name(path: &Path) -> String`, `compact_workspace_path(path: &Path, home: Option<&Path>) -> String`
@@ -71,15 +71,15 @@ Set `project_name_label` from `project_name(&work_dir)` and `workspace_label` fr
 
 - [ ] **Step 4: Format and run the GUI crate tests**
 
-Run: `cargo fmt --all -- --check && cargo test -p mypi-gui`
+Run: `cargo fmt --all -- --check && cargo test -p threadlane-gui`
 Expected: formatting check and all GUI tests pass.
 
 - [ ] **Step 5: Compile the GUI crate**
 
-Run: `cargo check -p mypi-gui`
+Run: `cargo check -p threadlane-gui`
 Expected: compilation succeeds with no errors.
 
 - [ ] **Step 6: Review the focused diff**
 
-Run: `git diff --check && git diff -- crates/mypi-gui/src/app/mod.rs`
+Run: `git diff --check && git diff -- crates/threadlane-gui/src/app/mod.rs`
 Expected: no whitespace errors; diff contains only path helpers/tests, header DSL, and startup wiring for this feature.

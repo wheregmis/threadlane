@@ -13,7 +13,7 @@ This enhancement generates one title per session. It does not include manual ren
 
 ## Existing Behavior
 
-`crates/mypi-gui/src/panels/sessions/state.rs` already prefers `SessionTree.name` when populated, then falls back to the first user message truncated to 42 characters. `SessionTree` has a `name` field, but the current JSONL persistence writes only session nodes and does not restore the name.
+`crates/threadlane-gui/src/panels/sessions/state.rs` already prefers `SessionTree.name` when populated, then falls back to the first user message truncated to 42 characters. `SessionTree` has a `name` field, but the current JSONL persistence writes only session nodes and does not restore the name.
 
 ## Architecture
 

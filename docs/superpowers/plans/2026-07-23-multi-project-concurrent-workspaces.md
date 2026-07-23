@@ -15,17 +15,17 @@
 5. Clicking any session switches the visible transcript, draft, attachments, model, effort, project title, and path without stopping work elsewhere.
 6. Running sessions in inactive projects continue receiving events and show a running indicator in the sidebar.
 7. Project context, skills, agents, extensions, tools, and session files always resolve from that session's own project root.
-8. A project can be detached from the sidebar without deleting its `.mypi` data or stopping a running session. Detach is blocked while that project has running sessions.
+8. A project can be detached from the sidebar without deleting its `.threadlane` data or stopping a running session. Detach is blocked while that project has running sessions.
 
 ## Global Constraints
 
 - Canonical project paths are the identity boundary; duplicate aliases and symlink aliases must not create duplicate projects.
 - Switching views must not reconstruct or stop an existing `CodingAgent` runtime.
 - One session serializes its own turns, but different sessions may run concurrently.
-- Session and extension data remain project-local under `<project>/.mypi/`.
-- The attached-project registry is application-global under `~/.mypi/gui/projects.json` and is written atomically.
+- Session and extension data remain project-local under `<project>/.threadlane/`.
+- The attached-project registry is application-global under `~/.threadlane/gui/projects.json` and is written atomically.
 - Attaching or detaching a project never changes the process working directory.
-- Do not weaken workspace containment in `mypi-tools` or allow one runtime to execute against another project's root.
+- Do not weaken workspace containment in `threadlane-tools` or allow one runtime to execute against another project's root.
 - Preserve drafts, attachments, model, effort, transcript, streaming state, and status independently per session.
 - No session files or project files are deleted when a project is detached.
 
@@ -34,10 +34,10 @@
 ## Task 1: Introduce a durable canonical project registry
 
 **Files:**
-- Create: `crates/mypi-gui/src/panels/sessions/project_registry.rs`
-- Modify: `crates/mypi-gui/src/panels/sessions/mod.rs`
-- Modify: `crates/mypi-gui/src/panels/sessions/state.rs`
-- Test: `crates/mypi-gui/src/panels/sessions/project_registry.rs`
+- Create: `crates/threadlane-gui/src/panels/sessions/project_registry.rs`
+- Modify: `crates/threadlane-gui/src/panels/sessions/mod.rs`
+- Modify: `crates/threadlane-gui/src/panels/sessions/state.rs`
+- Test: `crates/threadlane-gui/src/panels/sessions/project_registry.rs`
 
 **Interfaces:**
 
@@ -53,7 +53,7 @@ pub struct AttachedProject {
 pub struct ProjectRegistry { /* global registry path + records */ }
 
 impl ProjectRegistry {
-    pub fn load(global_mypi_dir: &Path) -> Result<Self, ProjectRegistryError>;
+    pub fn load(global_threadlane_dir: &Path) -> Result<Self, ProjectRegistryError>;
     pub fn attach(&mut self, raw_path: &Path) -> Result<AttachedProject, ProjectRegistryError>;
     pub fn detach(&mut self, canonical_path: &Path) -> Result<bool, ProjectRegistryError>;
     pub fn touch(&mut self, canonical_path: &Path) -> Result<(), ProjectRegistryError>;
@@ -67,13 +67,13 @@ Cover canonicalization, duplicate symlink/path aliases, nonexistent paths, files
 
 - [ ] **Step 2: Run the focused tests and confirm failure**
 
-Run: `cargo test -p mypi-gui project_registry`
+Run: `cargo test -p threadlane-gui project_registry`
 
 - [ ] **Step 3: Implement registry loading and atomic persistence**
 
-Store records in `~/.mypi/gui/projects.json`. Resolve the global directory through one helper so tests can inject a temporary directory. Preserve malformed registry files by returning an actionable error instead of silently overwriting them.
+Store records in `~/.threadlane/gui/projects.json`. Resolve the global directory through one helper so tests can inject a temporary directory. Preserve malformed registry files by returning an actionable error instead of silently overwriting them.
 
-- [ ] **Step 4: Replace `.mypi/gui/sidebar_projects.json` loading**
+- [ ] **Step 4: Replace `.threadlane/gui/sidebar_projects.json` loading**
 
 Remove `load_extra_project_dirs(work_dir)`. Change `refresh_sessions` to accept the registry's canonical project list rather than treating process CWD as the owner of all sidebar configuration.
 
@@ -89,17 +89,17 @@ If the active `(work_dir, session_id)` still exists, preserve it. If only the pr
 
 - [ ] **Step 6: Run focused state tests**
 
-Run: `cargo test -p mypi-gui project_registry && cargo test -p mypi-gui sessions`
+Run: `cargo test -p threadlane-gui project_registry && cargo test -p threadlane-gui sessions`
 
 ---
 
 ## Task 2: Add the project attachment UI
 
 **Files:**
-- Modify: `crates/mypi-gui/src/app/mod.rs`
-- Modify: `crates/mypi-gui/src/state.rs`
-- Modify: `crates/mypi-gui/Cargo.toml` only if native folder selection is unavailable through the current picker
-- Test: `crates/mypi-gui/src/app/mod.rs` or a new pure action-state test module
+- Modify: `crates/threadlane-gui/src/app/mod.rs`
+- Modify: `crates/threadlane-gui/src/state.rs`
+- Modify: `crates/threadlane-gui/Cargo.toml` only if native folder selection is unavailable through the current picker
+- Test: `crates/threadlane-gui/src/app/mod.rs` or a new pure action-state test module
 
 **Interfaces:**
 
@@ -127,7 +127,7 @@ Selecting an already attached canonical folder selects that project instead of c
 
 - [ ] **Step 5: Add detach action**
 
-Extend the project-row context/action surface with `Detach Project`. Block detach if `working_sessions` contains any key for that project. Detach only removes the global registry entry and UI runtimes that are idle; it never removes `<project>/.mypi`.
+Extend the project-row context/action surface with `Detach Project`. Block detach if `working_sessions` contains any key for that project. Detach only removes the global registry entry and UI runtimes that are idle; it never removes `<project>/.threadlane`.
 
 - [ ] **Step 6: Test pure attach/detach action transitions**
 
@@ -138,11 +138,11 @@ Cover successful attach, duplicate attach, cancel, picker error, detach-current 
 ## Task 3: Make active project identity first-class
 
 **Files:**
-- Modify: `crates/mypi-gui/src/workspace/mod.rs`
-- Modify: `crates/mypi-gui/src/app/mod.rs`
-- Modify: `crates/mypi-gui/src/panels/sessions/state.rs`
-- Test: `crates/mypi-gui/src/workspace/mod.rs`
-- Test: `crates/mypi-gui/src/app/mod.rs`
+- Modify: `crates/threadlane-gui/src/workspace/mod.rs`
+- Modify: `crates/threadlane-gui/src/app/mod.rs`
+- Modify: `crates/threadlane-gui/src/panels/sessions/state.rs`
+- Test: `crates/threadlane-gui/src/workspace/mod.rs`
+- Test: `crates/threadlane-gui/src/app/mod.rs`
 
 **Interfaces:**
 
@@ -177,17 +177,17 @@ The visible skill/agent count and capability catalog must represent the active p
 
 - [ ] **Step 6: Run workspace tests**
 
-Run: `cargo test -p mypi-gui workspace`
+Run: `cargo test -p threadlane-gui workspace`
 
 ---
 
 ## Task 4: Enable cross-project session activation
 
 **Files:**
-- Modify: `crates/mypi-gui/src/app/mod.rs`
-- Modify: `crates/mypi-gui/src/panels/sessions/state.rs`
-- Test: `crates/mypi-gui/src/app/mod.rs`
-- Test: `crates/mypi-gui/src/workspace/mod.rs`
+- Modify: `crates/threadlane-gui/src/app/mod.rs`
+- Modify: `crates/threadlane-gui/src/panels/sessions/state.rs`
+- Test: `crates/threadlane-gui/src/app/mod.rs`
+- Test: `crates/threadlane-gui/src/workspace/mod.rs`
 
 - [ ] **Step 1: Write a failing cross-project activation test**
 
@@ -214,9 +214,9 @@ Assert switching does not remove, replace, relock, or cancel the runtime stored 
 ## Task 5: Remove process-CWD routing from session creation and commands
 
 **Files:**
-- Modify: `crates/mypi-gui/src/app/mod.rs`
-- Modify: `crates/mypi-gui/src/panels/sessions/state.rs`
-- Test: `crates/mypi-gui/src/app/mod.rs`
+- Modify: `crates/threadlane-gui/src/app/mod.rs`
+- Modify: `crates/threadlane-gui/src/panels/sessions/state.rs`
+- Test: `crates/threadlane-gui/src/app/mod.rs`
 
 - [ ] **Step 1: Inventory every remaining `std::env::current_dir()` call**
 
@@ -224,7 +224,7 @@ Classify each use as startup default only or active-project routing. Startup may
 
 - [ ] **Step 2: Fix first-send session creation**
 
-In `dispatch_input`, create a session under `active_key.work_dir/.mypi/sessions`, not process CWD. If the active key is a project draft, replace it with the newly created session key while preserving draft and attachments.
+In `dispatch_input`, create a session under `active_key.work_dir/.threadlane/sessions`, not process CWD. If the active key is a project draft, replace it with the newly created session key while preserving draft and attachments.
 
 - [ ] **Step 3: Fix refresh and fallback paths**
 
@@ -243,10 +243,10 @@ With process CWD set to project A and active workspace set to project B, verify 
 ## Task 6: Prove concurrent cross-project operation
 
 **Files:**
-- Modify: `crates/mypi-gui/src/app/mod.rs` as needed
-- Modify: `crates/mypi-gui/src/workspace/mod.rs` as needed
-- Test: `crates/mypi-gui/src/workspace/mod.rs`
-- Test: `crates/mypi-gui/tests/multi_project_runtime.rs` (new integration test if GUI internals can be exposed cleanly)
+- Modify: `crates/threadlane-gui/src/app/mod.rs` as needed
+- Modify: `crates/threadlane-gui/src/workspace/mod.rs` as needed
+- Test: `crates/threadlane-gui/src/workspace/mod.rs`
+- Test: `crates/threadlane-gui/tests/multi_project_runtime.rs` (new integration test if GUI internals can be exposed cleanly)
 
 - [ ] **Step 1: Add a two-project runtime harness**
 
@@ -277,9 +277,9 @@ Exercise file and command tools with paths attempting to reach the other tempora
 ## Task 7: Restore attached projects and sessions at startup
 
 **Files:**
-- Modify: `crates/mypi-gui/src/app/mod.rs`
-- Modify: `crates/mypi-gui/src/panels/sessions/project_registry.rs`
-- Modify: `crates/mypi-gui/src/panels/sessions/state.rs`
+- Modify: `crates/threadlane-gui/src/app/mod.rs`
+- Modify: `crates/threadlane-gui/src/panels/sessions/project_registry.rs`
+- Modify: `crates/threadlane-gui/src/panels/sessions/state.rs`
 - Test: corresponding modules
 
 - [ ] **Step 1: Load the global registry before session discovery**
@@ -315,14 +315,14 @@ cargo fmt --all -- --check
 - [ ] Run focused GUI tests:
 
 ```sh
-cargo test -p mypi-gui
+cargo test -p threadlane-gui
 ```
 
 - [ ] Run coding-agent and tool isolation tests:
 
 ```sh
-cargo test -p mypi-coding-agent
-cargo test -p mypi-tools
+cargo test -p threadlane-coding-agent
+cargo test -p threadlane-tools
 ```
 
 - [ ] Run the full workspace tests:
@@ -334,7 +334,7 @@ cargo test
 - [ ] Run diagnostics and compile the GUI:
 
 ```sh
-cargo check -p mypi-gui
+cargo check -p threadlane-gui
 ```
 
 - [ ] Perform manual desktop verification:
@@ -347,7 +347,7 @@ cargo check -p mypi-gui
 6. Change model/effort independently in each session.
 7. Stop A and verify B continues.
 8. Quit and reopen; verify projects and last selection restore.
-9. Detach an idle project; verify its files and `.mypi` directory remain untouched.
+9. Detach an idle project; verify its files and `.threadlane` directory remain untouched.
 10. Reattach it; verify previous sessions reappear.
 
 ## Acceptance Criteria
