@@ -76,3 +76,63 @@ Implemented and committed as `feat: support broker-backed extension middleware`.
   "manualNotes": "Pre-existing GUI worktree changes remain unstaged and are unrelated."
 }
 ```
+
+## Review blocker follow-up
+
+- Invocation envelopes now use the owning manifest API version.
+- Legacy `message.contains("blocked")` matching is restricted to v1; v2 uses typed middleware only.
+- Tool broker requests dispatch before deterministic name-sorted after hooks, and after-tool broker failures are isolated per request.
+- Added coverage for v2 prose non-blocking and ordered/error-isolated tool broker dispatch.
+
+```acceptance-report
+{
+  "criteriaSatisfied": [
+    {
+      "id": "criterion-1",
+      "status": "satisfied",
+      "evidence": "Review blockers were fixed only in extension invocation, tool-hook dispatch, and focused tests; GUI changes were untouched."
+    }
+  ],
+  "changedFiles": [
+    "crates/mypi-coding-agent/src/coding_agent.rs",
+    "crates/mypi-coding-agent/src/wasi_extension.rs",
+    "crates/mypi-coding-agent/tests/wasi_tests.rs",
+    ".superpowers/sdd/task-5-report.md"
+  ],
+  "testsAddedOrUpdated": [
+    "crates/mypi-coding-agent/src/coding_agent.rs",
+    "crates/mypi-coding-agent/tests/wasi_tests.rs"
+  ],
+  "commandsRun": [
+    {
+      "command": "cargo test -p mypi-coding-agent --test wasi_tests --no-fail-fast",
+      "result": "passed",
+      "summary": "26 WASI tests passed."
+    },
+    {
+      "command": "cargo test -p mypi-coding-agent --lib coding_agent::tests --no-fail-fast",
+      "result": "passed",
+      "summary": "4 coding-agent tests passed, including ordered/error-isolated broker dispatch."
+    },
+    {
+      "command": "git diff --check",
+      "result": "passed",
+      "summary": "No whitespace errors."
+    }
+  ],
+  "validationOutput": [
+    "v2 typed middleware blocks with its reason and v2 prose containing blocked does not block.",
+    "v1 prose containing blocked still blocks.",
+    "Tool broker requests preserve order and continue after an isolated broker error."
+  ],
+  "residualRisks": [
+    "After-tool diagnostics remain stderr logs because the agent hook result has no diagnostics field."
+  ],
+  "noStagedFiles": true,
+  "diffSummary": "Corrected manifest API propagation and version-gated hook blocking; made tool broker dispatch deterministic and error-isolated; added focused regression tests.",
+  "reviewFindings": [
+    "no blockers"
+  ],
+  "manualNotes": "Pre-existing GUI worktree changes remain unstaged and were not modified."
+}
+```

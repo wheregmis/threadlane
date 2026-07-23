@@ -3,6 +3,7 @@ use crate::commands::{execute_slash_command, parse_slash_command, CommandAction}
 use crate::context::ProjectContext;
 use crate::extension_broker::{
     BrokerDispatchResult, BrokerError, BrokerRequest, CapabilityDispatcher, CapabilityHandler,
+    BROKER_API_VERSION,
 };
 use crate::wasi_extension::{WasiExtensionManager, WasiSubagentTask};
 use async_trait::async_trait;
@@ -469,21 +470,25 @@ impl BeforeToolCallHook for ExtensionBeforeToolHook {
                     reason: Some(format!("Extension broker error: {}", error.message)),
                 };
             }
+            let api_version = res.api_version;
             let response = res.response;
-            if let Some(middleware) = response.middleware {
-                if middleware.block == Some(true) {
-                    return BeforeToolCallResult {
-                        block: true,
-                        reason: middleware.reason,
-                    };
+            if api_version == BROKER_API_VERSION {
+                if let Some(middleware) = response.middleware {
+                    if middleware.block == Some(true) {
+                        return BeforeToolCallResult {
+                            block: true,
+                            reason: middleware.reason,
+                        };
+                    }
                 }
-            }
-            if let Some(msg) = response.message {
-                if msg.contains("blocked") {
-                    return BeforeToolCallResult {
-                        block: true,
-                        reason: Some(msg),
-                    };
+            } else if api_version == 1 {
+                if let Some(msg) = response.message {
+                    if msg.contains("blocked") {
+                        return BeforeToolCallResult {
+                            block: true,
+                            reason: Some(msg),
+                        };
+                    }
                 }
             }
         }
@@ -511,31 +516,29 @@ impl AfterToolCallHook for ExtensionAfterToolHook {
             "result": result.content,
             "is_error": result.is_error,
         });
+        // Tool requests are queued by ToolExecutor; dispatch them first so the
+        // tool's effects precede the deterministic, name-sorted after hooks.
+        dispatch_hook_requests_isolated(
+            &self.broker_dispatcher,
+            self.extensions.take_pending_broker_requests(),
+            "WASI tool broker error",
+        )
+        .await;
         for response in self
             .extensions
             .execute_hook_with_broker_requests("after_tool_call", &arguments.to_string())
         {
             match response {
                 Ok(response) => {
-                    if let Err(error) = dispatch_hook_requests(
+                    dispatch_hook_requests_isolated(
                         &self.broker_dispatcher,
                         response.host_broker_requests,
+                        "WASI after-tool hook broker error",
                     )
-                    .await
-                    {
-                        eprintln!("WASI after-tool hook broker error: {}", error.message);
-                    }
+                    .await;
                 }
                 Err(error) => eprintln!("WASI after-tool hook error: {error}"),
             }
-        }
-        if let Err(error) = dispatch_hook_requests(
-            &self.broker_dispatcher,
-            self.extensions.take_pending_broker_requests(),
-        )
-        .await
-        {
-            eprintln!("WASI tool broker error: {}", error.message);
         }
         AfterToolCallResult::default()
     }
@@ -598,6 +601,18 @@ async fn dispatch_hook_requests(
             .await?;
     }
     Ok(())
+}
+
+async fn dispatch_hook_requests_isolated(
+    dispatcher: &Arc<tokio::sync::Mutex<CapabilityDispatcher>>,
+    requests: Vec<crate::extension_broker::HostBrokerRequest>,
+    label: &str,
+) {
+    for request in requests {
+        if let Err(error) = dispatch_hook_requests(dispatcher, vec![request]).await {
+            eprintln!("{label}: {}", error.message);
+        }
+    }
 }
 
 fn append_dispatch_message(message: &mut Option<String>, dispatch: BrokerDispatchResult) {
@@ -1211,6 +1226,7 @@ fn format_subagent_results(
 mod tests {
     use super::*;
     use crate::extension_broker::CapabilityHandler;
+    use std::sync::Mutex;
     use std::time::{Duration as StdDuration, Instant};
 
     fn handler(capability: &'static str, work_dir: PathBuf) -> HostCapabilityHandler {
@@ -1238,6 +1254,56 @@ mod tests {
             .handle(&request)
             .unwrap_err();
         assert_eq!(error.code, "invalid_argument");
+    }
+
+    struct RecordingBrokerHandler {
+        operations: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl CapabilityHandler for RecordingBrokerHandler {
+        fn handle(&self, request: &BrokerRequest) -> Result<Value, BrokerError> {
+            self.operations
+                .lock()
+                .unwrap()
+                .push(request.operation.clone());
+            if request.operation == "fail" {
+                Err(BrokerError {
+                    code: "test_error".into(),
+                    message: "expected test failure".into(),
+                })
+            } else {
+                Ok(Value::Null)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_broker_requests_dispatch_in_order_and_isolate_errors() {
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        let mut dispatcher = CapabilityDispatcher::new();
+        dispatcher.register(
+            "tools",
+            Arc::new(RecordingBrokerHandler {
+                operations: operations.clone(),
+            }),
+        );
+        let dispatcher = Arc::new(tokio::sync::Mutex::new(dispatcher));
+        let requests = ["first", "fail", "last"]
+            .into_iter()
+            .map(|operation| crate::extension_broker::HostBrokerRequest {
+                request: BrokerRequest {
+                    api_version: BROKER_API_VERSION,
+                    capability: "tools".into(),
+                    operation: operation.into(),
+                    arguments: Value::Null,
+                },
+                invoking_extension: "tool-ext".into(),
+            })
+            .collect();
+
+        dispatch_hook_requests_isolated(&dispatcher, requests, "test broker error").await;
+
+        assert_eq!(*operations.lock().unwrap(), vec!["first", "fail", "last"]);
     }
 
     #[tokio::test]

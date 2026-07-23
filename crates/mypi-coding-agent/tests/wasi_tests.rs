@@ -537,6 +537,44 @@ async fn structured_hook_middleware_blocks_without_message_matching() {
 }
 
 #[tokio::test]
+async fn structured_hook_v2_message_does_not_block() {
+    let extension = WasiExtension::load_from_bytes(hook_wasm(
+        2,
+        r#"{"message":"blocked prose from v2","state":{},"middleware":{"block":false}}"#,
+    ))
+    .unwrap();
+    let mut manager = WasiExtensionManager::new();
+    manager
+        .extensions
+        .insert(extension.manifest.name.clone(), extension);
+    let hook = ExtensionBeforeToolHook {
+        tool_policy: Arc::new(tokio::sync::Mutex::new(ToolPolicy::FullAccess)),
+        extensions: Arc::new(manager),
+        broker_dispatcher: Arc::new(tokio::sync::Mutex::new(CapabilityDispatcher::new())),
+    };
+    let state = AgentState {
+        system_prompt: String::new(),
+        model: String::new(),
+        tools: vec![],
+        messages: vec![],
+        is_streaming: false,
+        pending_tool_calls: vec![],
+        metadata: HashMap::new(),
+    };
+    let result = hook
+        .before_tool_call(
+            &AgentToolCall {
+                id: "call-1".into(),
+                name: "read_file".into(),
+                arguments: "{}".into(),
+            },
+            &state,
+        )
+        .await;
+    assert!(!result.block);
+}
+
+#[tokio::test]
 async fn structured_hook_v1_message_behavior_is_preserved() {
     let extension =
         WasiExtension::load_from_bytes(hook_wasm(1, r#"{"message":"blocked by v1","state":{}}"#))

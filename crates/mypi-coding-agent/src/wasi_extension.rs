@@ -113,6 +113,7 @@ pub struct WasiExtensionResponse {
 
 #[derive(Debug, Clone, Default)]
 pub struct WasiExtensionInvocationResult {
+    pub api_version: u32,
     pub response: WasiExtensionResponse,
     pub broker_requests: Vec<BrokerRequest>,
     pub host_broker_requests: Vec<HostBrokerRequest>,
@@ -335,6 +336,7 @@ impl WasiExtension {
             .map_err(|e| e.to_string())?;
         let response = read_json_result(&mut store, &instance, result)?;
         Ok(WasiExtensionInvocationResult {
+            api_version: invocation.api_version,
             response,
             broker_requests: std::mem::take(&mut store.data_mut().requests),
             host_broker_requests: Vec::new(),
@@ -798,9 +800,14 @@ impl WasiExtensionManager {
         name: &str,
         args: &str,
     ) -> Vec<Result<WasiExtensionInvocationResult, String>> {
-        self.extensions
+        let mut extensions = self
+            .extensions
             .values()
             .filter(|extension| extension.manifest.hooks.iter().any(|hook| hook == name))
+            .collect::<Vec<_>>();
+        extensions.sort_by(|left, right| left.manifest.name.cmp(&right.manifest.name));
+        extensions
+            .into_iter()
             .map(|extension| self.invoke(extension, "hook", name, args))
             .collect()
     }
@@ -859,7 +866,7 @@ impl WasiExtensionManager {
             serde_json::from_str(args).unwrap_or_else(|_| serde_json::json!({ "raw": args }));
         let events = self.drain_events_for(&extension.manifest.name)?;
         let invocation = WasiExtensionInvocation {
-            api_version: 1,
+            api_version: extension.manifest.api_version,
             kind: kind.into(),
             name: name.into(),
             arguments,
