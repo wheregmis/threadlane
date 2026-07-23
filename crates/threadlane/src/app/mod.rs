@@ -37,11 +37,39 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
+fn user_home_dir() -> Option<PathBuf> {
+    directories::UserDirs::new()
+        .map(|u| u.home_dir().to_path_buf())
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+}
+
 fn global_threadlane_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
+    user_home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".threadlane")
+}
+
+fn resolve_initial_launch_dir() -> PathBuf {
+    let home = user_home_dir();
+    let current = std::env::current_dir()
+        .ok()
+        .and_then(|p| std::fs::canonicalize(p).ok());
+
+    if let Some(dir) = current {
+        let is_root = dir.parent().is_none();
+        let is_app_bundle = dir
+            .components()
+            .any(|c| c.as_os_str().to_string_lossy().ends_with(".app"));
+        let is_writable = std::fs::metadata(&dir)
+            .map(|m| !m.permissions().readonly())
+            .unwrap_or(false);
+
+        if !is_root && !is_app_bundle && is_writable {
+            return dir;
+        }
+    }
+
+    home.unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn project_name(path: &Path) -> String {
@@ -1205,10 +1233,7 @@ impl MatchEvent for App {
         );
         self.set_reasoning_effort_picker(cx, ReasoningEffort::Medium);
 
-        let launch_dir = std::env::current_dir()
-            .ok()
-            .and_then(|path| std::fs::canonicalize(path).ok())
-            .unwrap_or_else(|| PathBuf::from("."));
+        let launch_dir = resolve_initial_launch_dir();
         let mut registry_error = None;
         match ProjectRegistry::load(&global_threadlane_dir()) {
             Ok(mut registry) => {

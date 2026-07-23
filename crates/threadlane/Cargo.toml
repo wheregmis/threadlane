@@ -19,6 +19,7 @@ arboard = { version = "3.6", features = ["image-data"] }
 png = "0.18"
 robius-file-picker = { git = "https://github.com/project-robius/robius.git" }
 rfd = "0.17.2"
+directories = "5.0"
 
 [package.metadata.packager]
 product_name = "Threadlane"

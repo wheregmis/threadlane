@@ -1446,5 +1446,7 @@ fn valid_package_component(component: &str) -> bool {
 }
 
 fn dirs_home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    directories::UserDirs::new()
+        .map(|u| u.home_dir().to_path_buf())
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
 }

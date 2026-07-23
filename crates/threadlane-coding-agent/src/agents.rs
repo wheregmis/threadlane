@@ -283,7 +283,9 @@ pub fn discover_agents(cwd: &Path, scope: AgentScope) -> AgentDiscoveryResult {
 }
 
 fn dirs_home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    directories::UserDirs::new()
+        .map(|u| u.home_dir().to_path_buf())
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
 }
 
 #[cfg(test)]
