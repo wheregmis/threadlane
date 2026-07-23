@@ -168,3 +168,23 @@ running 17 tests
 ...
 test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 ```
+
+## Final Task 3 review fix: clear terminal generation on login abort
+
+- When login aborts and removes an active generation, it now also clears `terminal_generation_id`, ensuring late command output from the prior generation is ignored.
+
+### Exact verification results
+
+`cargo check -p mypi-gui` — **PASS**
+
+```text
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.25s
+```
+
+`cargo test -p mypi-gui` — **PASS**
+
+```text
+running 17 tests
+...
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```

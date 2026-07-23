@@ -1160,6 +1160,7 @@ impl MatchEvent for App {
             if let Some(generation) = self.active_generation.take() {
                 generation.handle.abort();
             }
+            self.terminal_generation_id = None;
             self.push_chat(MsgRole::System, "Initiating ChatGPT device code login...");
             self.set_status(cx, UiStatus::Working, "Connecting to ChatGPT...");
             cx.redraw_all();
