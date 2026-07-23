@@ -4,6 +4,7 @@ mod app;
 mod components;
 mod panels;
 mod state;
+mod updater;
 mod workspace;
 
 use app::App;

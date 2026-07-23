@@ -19,10 +19,12 @@ use crate::state::{
     set_session_context_target, set_session_working, title_prompt_for_submission, truncate_chars,
     CommandInfo, GuiAgentEvent, MsgRole, SessionEntry, ToolStatus,
 };
+use crate::updater::UpdateStatus;
 use crate::workspace::{AppState, SessionKey};
 use base64::Engine as _;
 use makepad_widgets::text::selection::Cursor;
 use makepad_widgets::*;
+use robius_file_picker::FileDialog;
 use threadlane_agent::{get_runtime, AgentEvent, ImageAttachment, ReasoningEffort};
 use threadlane_coding_agent::{
     discover_agents, AgentConfig, AgentScope, CodingAgent, CodingAgentOptions, ProjectContext,
@@ -30,7 +32,6 @@ use threadlane_coding_agent::{
 };
 use threadlane_provider::auth;
 use threadlane_provider::openai::{fetch_available_models, OpenAIClient};
-use robius_file_picker::FileDialog;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -737,6 +738,31 @@ script_mod! {
                                 }
                             }
                             FlexSpacer {}
+                            update_btn := Button {
+                                width: Fit
+                                height: 30
+                                padding: Inset{left: 10 right: 11 top: 5 bottom: 5}
+                                text: "Check for Updates"
+                                draw_bg +: {
+                                    color: #x1e2d24
+                                    color_hover: #x273b2f
+                                    color_focus: #x273b2f
+                                    color_down: #x324d3e
+                                    border_color: #x396348
+                                    border_color_hover: #x4d8a63
+                                    border_color_focus: #x4d8a63
+                                    border_color_down: #x6bc08b
+                                    border_radius: 7.0
+                                    border_size: 1.0
+                                }
+                                draw_text +: {
+                                    color: #x6bc08b
+                                    color_hover: #x8fa9c7
+                                    color_focus: #x8fa9c7
+                                    color_down: #xffffff
+                                    text_style: theme.font_bold { font_size: 9.5 }
+                                }
+                            }
                             caps_btn := Button {
                                 width: Fit
                                 height: 30
@@ -1207,6 +1233,10 @@ pub struct App {
     project_registry: Option<ProjectRegistry>,
     #[rust]
     capability_cache: HashMap<PathBuf, ProjectCapabilities>,
+    #[rust]
+    update_status: UpdateStatus,
+    #[rust]
+    update_rx: Option<Arc<Mutex<Receiver<UpdateStatus>>>>,
 }
 
 impl ScriptHook for App {}
@@ -1515,6 +1545,23 @@ impl MatchEvent for App {
             cx.redraw_all();
         }
 
+        if self.ui.button(cx, ids!(update_btn)).clicked(actions) {
+            match self.update_status.clone() {
+                crate::updater::UpdateStatus::Idle
+                | crate::updater::UpdateStatus::UpToDate
+                | crate::updater::UpdateStatus::Error(_) => {
+                    self.trigger_update_check(cx);
+                }
+                crate::updater::UpdateStatus::Available(info) => {
+                    self.trigger_update_download(cx, info);
+                }
+                crate::updater::UpdateStatus::ReadyToInstall { info, bytes } => {
+                    self.trigger_update_install(cx, info, bytes);
+                }
+                _ => {}
+            }
+        }
+
         if self.ui.button(cx, ids!(stop_btn)).clicked(actions) {
             let active_key = self.workspace_state.active_key().cloned();
             if let Some(key) = active_key {
@@ -1652,7 +1699,9 @@ impl MatchEvent for App {
             self.remove_attachment(cx, 3);
         }
 
-        let cti = self.ui.threadlane_command_text_input(cx, ids!(prompt_input));
+        let cti = self
+            .ui
+            .threadlane_command_text_input(cx, ids!(prompt_input));
         if cti.should_build_items(actions) {
             self.build_cmd_items(cx);
         }
@@ -1730,6 +1779,7 @@ impl AppMain for App {
         }
         self.match_event(cx, event);
         self.poll_agent_events(cx);
+        self.poll_update_status(cx);
         let mut scope = Scope::with_data(&mut self.workspace_state);
         self.ui.handle_event(cx, event, &mut scope);
     }
@@ -2016,6 +2066,127 @@ impl App {
             );
             cx.redraw_all();
         }
+    }
+
+    fn poll_update_status(&mut self, cx: &mut Cx) {
+        let mut new_status = None;
+        if let Some(rx) = &self.update_rx {
+            if let Ok(rx_guard) = rx.lock() {
+                while let Ok(status) = rx_guard.try_recv() {
+                    new_status = Some(status);
+                }
+            }
+        }
+        if let Some(status) = new_status {
+            if let crate::updater::UpdateStatus::Available(info) = &status {
+                if !info.notes.trim().is_empty() {
+                    self.push_chat(
+                        MsgRole::System,
+                        format!("Threadlane v{} is available:\n{}", info.version, info.notes),
+                    );
+                }
+            }
+            self.update_status = status;
+            self.sync_update_button(cx);
+        }
+    }
+
+    fn sync_update_button(&mut self, cx: &mut Cx) {
+        let btn = self.ui.button(cx, ids!(update_btn));
+        match &self.update_status {
+            crate::updater::UpdateStatus::Idle => {
+                btn.set_text(cx, "Check for Updates");
+            }
+            crate::updater::UpdateStatus::Checking => {
+                btn.set_text(cx, "Checking...");
+            }
+            crate::updater::UpdateStatus::Available(info) => {
+                btn.set_text(cx, &format!("Update to v{}", info.version));
+            }
+            crate::updater::UpdateStatus::UpToDate => {
+                btn.set_text(cx, "Up to date ✓");
+            }
+            crate::updater::UpdateStatus::Downloading { progress } => {
+                let pct = (progress * 100.0) as u32;
+                btn.set_text(cx, &format!("Downloading... {pct}%"));
+            }
+            crate::updater::UpdateStatus::ReadyToInstall { .. } => {
+                btn.set_text(cx, "Install & Relaunch 🚀");
+            }
+            crate::updater::UpdateStatus::Installing => {
+                btn.set_text(cx, "Installing...");
+            }
+            crate::updater::UpdateStatus::Error(err) => {
+                btn.set_text(cx, "Check for Updates");
+                eprintln!("[Threadlane Updater] Error: {err}");
+            }
+        }
+        cx.redraw_all();
+    }
+
+    fn trigger_update_check(&mut self, cx: &mut Cx) {
+        self.update_status = crate::updater::UpdateStatus::Checking;
+        self.sync_update_button(cx);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.update_rx = Some(Arc::new(Mutex::new(rx)));
+
+        get_runtime().spawn_blocking(move || {
+            let status = match crate::updater::check_for_update() {
+                Ok(Some(info)) => crate::updater::UpdateStatus::Available(info),
+                Ok(None) => crate::updater::UpdateStatus::UpToDate,
+                Err(err) => crate::updater::UpdateStatus::Error(err),
+            };
+            let _ = tx.send(status);
+            SignalToUI::set_ui_signal();
+        });
+    }
+
+    fn trigger_update_download(&mut self, cx: &mut Cx, info: crate::updater::UpdateReleaseInfo) {
+        self.update_status = crate::updater::UpdateStatus::Downloading { progress: 0.0 };
+        self.sync_update_button(cx);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.update_rx = Some(Arc::new(Mutex::new(rx)));
+
+        get_runtime().spawn_blocking(move || {
+            let progress_tx = tx.clone();
+            let result = crate::updater::download_update(&info, move |progress| {
+                let _ = progress_tx.send(crate::updater::UpdateStatus::Downloading { progress });
+                SignalToUI::set_ui_signal();
+            });
+
+            let status = match result {
+                Ok(bytes) => crate::updater::UpdateStatus::ReadyToInstall {
+                    info,
+                    bytes: Arc::new(bytes),
+                },
+                Err(err) => crate::updater::UpdateStatus::Error(err),
+            };
+            let _ = tx.send(status);
+            SignalToUI::set_ui_signal();
+        });
+    }
+
+    fn trigger_update_install(
+        &mut self,
+        cx: &mut Cx,
+        info: crate::updater::UpdateReleaseInfo,
+        bytes: Arc<Vec<u8>>,
+    ) {
+        self.update_status = crate::updater::UpdateStatus::Installing;
+        self.sync_update_button(cx);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.update_rx = Some(Arc::new(Mutex::new(rx)));
+
+        get_runtime().spawn_blocking(move || {
+            let bytes = Arc::try_unwrap(bytes).unwrap_or_else(|bytes| (*bytes).clone());
+            if let Err(err) = crate::updater::install_and_relaunch(info, bytes) {
+                let _ = tx.send(crate::updater::UpdateStatus::Error(err));
+                SignalToUI::set_ui_signal();
+            }
+        });
     }
 
     fn registered_project_dirs_or(&self, fallback: &Path) -> Vec<PathBuf> {
@@ -2583,7 +2754,9 @@ impl App {
     }
 
     fn build_cmd_items(&mut self, cx: &mut Cx) {
-        let cti = self.ui.threadlane_command_text_input(cx, ids!(prompt_input));
+        let cti = self
+            .ui
+            .threadlane_command_text_input(cx, ids!(prompt_input));
         let search = cti.search_text(cx).to_lowercase();
         let commands = self
             .commands
@@ -3276,7 +3449,10 @@ mod workspace_header_tests {
 
     #[test]
     fn workspace_header_uses_final_directory_as_project_name() {
-        assert_eq!(project_name(Path::new("/Users/alex/code/threadlane")), "threadlane");
+        assert_eq!(
+            project_name(Path::new("/Users/alex/code/threadlane")),
+            "threadlane"
+        );
     }
 
     #[test]

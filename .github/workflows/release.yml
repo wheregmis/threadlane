@@ -3,16 +3,22 @@ name: Release (macOS)
 on:
   push:
     tags:
-      - 'v*'
+      - 'v*.*.*'
   workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build-and-package-macos:
     name: Build & Package (macOS)
-    runs-on: macos-latest
+    # Pin the runner so changes to macos-latest do not break create-dmg.
+    # macos-14 is the Apple Silicon runner also used by Robrix.
+    runs-on: macos-14
 
     steps:
       - name: Checkout repository
@@ -23,13 +29,34 @@ jobs:
         with:
           targets: wasm32-wasip1
 
+      - name: Verify release tag matches the app version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          APP_VERSION=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "threadlane") | .version')
+          if [[ -z "$APP_VERSION" || "$APP_VERSION" == "null" ]]; then
+            echo "::error::Could not resolve the threadlane package version"
+            exit 1
+          fi
+          if [[ "$RELEASE_TAG" != "v$APP_VERSION" ]]; then
+            echo "::error::Tag $RELEASE_TAG does not match threadlane version v$APP_VERSION"
+            exit 1
+          fi
+
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
 
       - name: Install Packaging Tooling
         run: |
-          cargo install --locked cargo-packager --version 0.10.1 || cargo install --locked cargo-packager
+          # cargo-packager 0.10.1 can report a stale errno (such as EEXIST)
+          # instead of the real create-dmg subprocess failure.
+          cargo install --locked cargo-packager --version 0.11.8
           cargo install --locked --git https://github.com/project-robius/robius-packaging-commands.git
+          cargo packager --version
+          sw_vers
 
       - name: Build WASI Extensions
         shell: bash
@@ -37,20 +64,105 @@ jobs:
           chmod +x ./scripts/build_extensions.sh
           ./scripts/build_extensions.sh
 
-      - name: Build Threadlane Binary (Release)
-        run: cargo build --release --bin threadlane
+      - name: Test updater
+        run: cargo test -p threadlane updater::tests
 
-      - name: Package Threadlane Desktop App (.dmg)
+      - name: Build Threadlane Binary (Release)
+        env:
+          THREADLANE_UPDATER_PUBLIC_KEY: ${{ vars.THREADLANE_UPDATER_PUBLIC_KEY }}
+        run: |
+          if [[ -z "$THREADLANE_UPDATER_PUBLIC_KEY" ]]; then
+            echo "::error::Repository variable THREADLANE_UPDATER_PUBLIC_KEY is not configured"
+            exit 1
+          fi
+          cargo build --release --bin threadlane
+
+      - name: Package and sign Threadlane updates
         shell: bash
+        env:
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY: ${{ secrets.CARGO_PACKAGER_SIGN_PRIVATE_KEY }}
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD: ${{ secrets.CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if [[ -z "$CARGO_PACKAGER_SIGN_PRIVATE_KEY" ]]; then
+            echo "::error::Secret CARGO_PACKAGER_SIGN_PRIVATE_KEY is not configured"
+            exit 1
+          fi
+          if [[ -z "$CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD" ]]; then
+            echo "::error::Secret CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD is not configured"
+            exit 1
+          fi
+
+          cd crates/threadlane
+          rm -rf \
+            dist/*.dmg \
+            dist/*.dmg.sig \
+            dist/*.app.tar.gz \
+            dist/*.app.tar.gz.sig \
+            dist/rw.*.dmg \
+            dist/.cargo-packager
+          cargo packager --release --formats app,dmg --verbose
+
+          shopt -s nullglob
+          dmgs=(dist/*.dmg)
+          archives=(dist/*.app.tar.gz)
+          signatures=(dist/*.app.tar.gz.sig)
+          if (( ${#dmgs[@]} != 1 || ${#archives[@]} != 1 || ${#signatures[@]} != 1 )); then
+            echo "::error::Expected one DMG, one app archive, and one app signature"
+            printf 'DMGs: %s\n' "${dmgs[@]}"
+            printf 'Archives: %s\n' "${archives[@]}"
+            printf 'Signatures: %s\n' "${signatures[@]}"
+            exit 1
+          fi
+
+      - name: Generate signed update manifest
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           cd crates/threadlane
-          rm -rf dist/*.dmg dist/rw.*.dmg dist/.cargo-packager
-          cargo packager --release
+          ARCHIVE_PATH=$(find dist -maxdepth 1 -name '*.app.tar.gz' -print -quit)
+          ARCHIVE_NAME=$(basename "$ARCHIVE_PATH")
+          SIGNATURE=$(cat "${ARCHIVE_PATH}.sig")
+          VERSION="${RELEASE_TAG#v}"
+          DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${ARCHIVE_NAME}"
+          PUBLISHED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+
+          jq -n \
+            --arg version "$VERSION" \
+            --arg notes "Threadlane $RELEASE_TAG" \
+            --arg pub_date "$PUBLISHED_AT" \
+            --arg url "$DOWNLOAD_URL" \
+            --arg signature "$SIGNATURE" \
+            '{
+              version: $version,
+              notes: $notes,
+              pub_date: $pub_date,
+              platforms: {
+                "macos-aarch64": {
+                  url: $url,
+                  signature: $signature,
+                  format: "app"
+                }
+              }
+            }' > dist/latest.json
+
+          jq -e \
+            '.version and
+             .platforms["macos-aarch64"].url and
+             .platforms["macos-aarch64"].signature and
+             (.platforms["macos-aarch64"].format == "app")' \
+            dist/latest.json
 
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
-          files: crates/threadlane/dist/*.dmg
+          files: |
+            crates/threadlane/dist/*.dmg
+            crates/threadlane/dist/*.app.tar.gz
+            crates/threadlane/dist/*.app.tar.gz.sig
+            crates/threadlane/dist/latest.json
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

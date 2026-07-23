@@ -61,9 +61,37 @@ Threadlane leverages [`cargo-packager`](https://github.com/crabnebula-dev/cargo-
    ```
    The generated desktop packages will be placed in `crates/threadlane/dist/`.
 
+### Signed Application Updates
+
+Threadlane uses [`cargo-packager-updater`](https://crates.io/crates/cargo-packager-updater) to download, verify, install, and relaunch signed macOS application updates. Generate the updater key pair once and keep using the same key for every release:
+
+```bash
+cargo install --locked cargo-packager --version 0.11.8
+cargo packager signer generate \
+  --path threadlane-updater.key \
+  --password 'a-strong-password'
+```
+
+The generated key files are ignored by Git. Configure GitHub Actions without committing them:
+
+```bash
+gh variable set THREADLANE_UPDATER_PUBLIC_KEY < threadlane-updater.key.pub
+gh secret set CARGO_PACKAGER_SIGN_PRIVATE_KEY < threadlane-updater.key
+gh secret set CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD
+```
+
+The release binary embeds `THREADLANE_UPDATER_PUBLIC_KEY`. The private key is available only to the release workflow and signs `Threadlane.app.tar.gz`; existing installations reject updates whose signatures do not match the embedded public key. Do not rotate or lose the private key without providing an explicit updater-key migration path.
+
 ### Automated Release Workflow
 
-Threadlane uses GitHub Actions (`.github/workflows/release.yml`) for automated macOS builds. Pushing a release tag (e.g., `git tag v0.1.0 && git push origin v0.1.0`) automatically builds the macOS `.dmg` app bundle and attaches it to the GitHub Release.
+Threadlane uses GitHub Actions (`.github/workflows/release.yml`) for automated macOS builds. The release tag must exactly match the version in `crates/threadlane/Cargo.toml`. For example:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+A tagged build publishes the user-facing `.dmg`, the signed `.app.tar.gz` updater bundle, its `.sig`, and `latest.json` to the GitHub Release.
 
 ---
 
