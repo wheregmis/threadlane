@@ -27,24 +27,9 @@ Plan Mode is a session-scoped, read-only exploration and structured task-plannin
 ## Installation & Setup
 
 ### 1. Built-In Integration
-Plan Mode is provided by the WASI extension host in `crates/mypi-coding-agent`.
-
-To enable Plan Mode on startup in your Rust code:
-```rust
-use mypi_agent::{CodingAgent, CodingAgentOptions};
-use std::path::PathBuf;
-
-let options = CodingAgentOptions {
-    api_key: std::env::var("OPENAI_API_KEY").unwrap_or_default(),
-    account_id: None,
-    model: "gpt-4o".to_string(),
-    work_dir: PathBuf::from("."),
-    session_file: None,
-    enable_plan_mode: true, // Enable Plan Mode at startup
-};
-
-let mut agent = CodingAgent::new(options);
-```
+Plan Mode is an ordinary API v2 WASI extension loaded by the host in
+`crates/mypi-coding-agent`. Use `/plan` to change the generic `tools.set_policy`
+state for the active session; there is no plan-specific startup flag.
 
 ### 2. WASI WebAssembly Extension Installation
 To build and use Plan Mode as a standalone WASI WebAssembly extension:

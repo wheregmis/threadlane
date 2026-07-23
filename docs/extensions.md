@@ -4,8 +4,9 @@
 `./.mypi/extensions/<extension-id>/extension.wasm` (and also accepts deployed
 `.wasm` files in that directory). Extensions add slash commands and model tools
 without linking into the agent binary. The API version in `extension_info`
-selects the invocation protocol: v2 extensions use the capability broker below;
-v1 extensions retain the effects protocol documented at the end of this page.
+selects the invocation protocol: bundled extensions, including plan mode and
+subagents, are ordinary v2 modules using the capability broker below; v1
+extensions retain the compatibility protocol documented at the end of this page.
 
 ## API v2: capability broker
 
@@ -235,14 +236,15 @@ Hook responses can update extension state. Hook effects are currently ignored to
 prevent background hooks from unexpectedly changing policy or triggering model
 turns.
 
-### v1 reference extension
+### Bundled v2 extensions
 
-[`extensions/plan_mode_ext`](../extensions/plan_mode_ext) is the v1 reference
-implementation. It demonstrates host-managed state across fresh WASM instances
-through `/plan` and `/todos`, then uses the `assistant_message` hook to parse the
-model's `Plan:` block into extension-owned todos.
+[`extensions/plan_mode_ext`](../extensions/plan_mode_ext) and
+[`extensions/subagent_ext`](../extensions/subagent_ext) are ordinary v2 modules.
+Plan mode uses `tools.set_policy` and session state through the broker; subagents
+use `agent.run`. Their command names and persisted state are not special-cased by
+the host.
 
-Build and deploy it:
+Build and deploy plan mode with the shared script:
 
 ```sh
 cargo build --manifest-path extensions/plan_mode_ext/Cargo.toml --target wasm32-wasip1 --release
@@ -267,7 +269,7 @@ cp extensions/plan_mode_ext/target/wasm32-wasip1/release/plan_mode_ext.wasm .myp
     default.jsonl
 ```
 
-The host persists returned extension state under the active session's
+The host persists extension state under the active session's
 `.mypi/state/extensions/sessions/<hex-encoded-session-id>/<extension>.json` path.
 The session directory is the lowercase hexadecimal encoding of the session ID's
 UTF-8 bytes (for example, `session/one` becomes

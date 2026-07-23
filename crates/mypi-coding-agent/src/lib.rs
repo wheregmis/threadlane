@@ -30,8 +30,8 @@ pub use prompt_templates::{
 pub use skills::{SkillManager, SkillMetadata, SkillScope};
 pub use supervisor::{HarnessSupervisor, ProjectRecord, TaskAgentEvent, TaskRecord, TaskStatus};
 pub use wasi_extension::{
-    WasiCommandDefinition, WasiExtension, WasiExtensionCommandResult, WasiExtensionEffect,
-    WasiExtensionEvent, WasiExtensionInvocation, WasiExtensionInvocationResult,
-    WasiExtensionManager, WasiExtensionManifest, WasiExtensionResponse, WasiHookMiddleware,
+    WasiCommandDefinition, WasiExtension, WasiExtensionCommandResult, WasiExtensionEvent,
+    WasiExtensionInvocation, WasiExtensionInvocationResult, WasiExtensionManager,
+    WasiExtensionManifest, WasiExtensionResponse, WasiHookMiddleware, WasiLegacyEffect,
     WasiToolDefinition,
 };

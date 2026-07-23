@@ -1040,7 +1040,6 @@ impl MatchEvent for App {
             model: "gpt-5.6-luna".to_string(),
             work_dir: work_dir.clone(),
             session_file: active_session_entry().map(|e| e.session_file),
-            enable_plan_mode: false,
         };
 
         let coding_agent = CodingAgent::new(agent_opts);
@@ -1619,7 +1618,6 @@ impl App {
                 model: model_name,
                 work_dir: work_dir.clone(),
                 session_file: active_session_entry().map(|e| e.session_file),
-                enable_plan_mode: false,
             };
             self.agent = Some(Arc::new(tokio::sync::Mutex::new(CodingAgent::new(
                 agent_opts,

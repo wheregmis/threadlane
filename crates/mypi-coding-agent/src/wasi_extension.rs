@@ -64,26 +64,13 @@ pub struct WasiExtensionInvocation {
     pub events: Vec<WasiExtensionEvent>,
 }
 
+/// Effects retained for API v1 compatibility. Bundled v2 extensions use
+/// broker requests instead of this legacy response channel.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum WasiExtensionEffect {
-    SetToolPolicy {
-        policy: String,
-    },
-    RequestModelTurn {
-        prompt: String,
-    },
-    RunSubagents {
-        tasks: Vec<WasiSubagentTask>,
-        #[serde(default)]
-        parallel: bool,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WasiSubagentTask {
-    pub agent: String,
-    pub task: String,
+pub enum WasiLegacyEffect {
+    SetToolPolicy { policy: String },
+    RequestModelTurn { prompt: String },
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -107,7 +94,7 @@ pub struct WasiExtensionResponse {
     #[serde(default)]
     pub state: Option<Value>,
     #[serde(default)]
-    pub effects: Vec<WasiExtensionEffect>,
+    pub effects: Vec<WasiLegacyEffect>,
     #[serde(default)]
     pub middleware: Option<WasiHookMiddleware>,
 }
@@ -125,8 +112,9 @@ pub struct WasiExtensionInvocationResult {
 
 #[derive(Debug, Clone, Default)]
 pub struct WasiExtensionCommandResult {
+    pub api_version: u32,
     pub message: String,
-    pub effects: Vec<WasiExtensionEffect>,
+    pub effects: Vec<WasiLegacyEffect>,
     pub broker_requests: Vec<BrokerRequest>,
     pub host_broker_requests: Vec<HostBrokerRequest>,
     pub events: Vec<WasiExtensionEvent>,
@@ -811,6 +799,7 @@ impl WasiExtensionManager {
                         .collect(),
                 );
                 WasiExtensionCommandResult {
+                    api_version: result.api_version,
                     message: result.response.message.unwrap_or_default(),
                     effects: result.response.effects,
                     broker_requests,

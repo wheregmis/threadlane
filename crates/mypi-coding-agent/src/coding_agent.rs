@@ -4,7 +4,7 @@ use crate::context::ProjectContext;
 use crate::extension_broker::{
     BrokerError, BrokerRequest, CapabilityDispatcher, CapabilityHandler, BROKER_API_VERSION,
 };
-use crate::wasi_extension::{WasiExtensionManager, WasiSubagentTask};
+use crate::wasi_extension::{WasiExtensionManager, WasiLegacyEffect};
 use async_trait::async_trait;
 use mypi_agent::{
     AfterToolCallHook, AfterToolCallResult, Agent, AgentEvent, AgentMessage, AgentState,
@@ -26,10 +26,7 @@ const CAPABILITY_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_CAPABILITY_BUFFER_BYTES: usize = 64 * 1024;
 
 type AgentRunner = Arc<
-    dyn Fn(
-            Vec<WasiSubagentTask>,
-            bool,
-        ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + Send>>
+    dyn Fn(Vec<AgentRunTask>, bool) -> Pin<Box<dyn Future<Output = Result<Value, String>> + Send>>
         + Send
         + Sync,
 >;
@@ -46,6 +43,12 @@ pub enum ToolPolicy {
 enum AgentWork {
     RequestTurn(String),
     QueueMessage(String),
+}
+
+#[derive(Debug, Clone)]
+struct AgentRunTask {
+    agent: String,
+    task: String,
 }
 
 #[derive(Clone, Default)]
@@ -224,7 +227,7 @@ impl HostCapabilityHandler {
                     .map(str::trim)
                     .filter(|task| !task.is_empty())
                     .ok_or_else(|| invalid_argument("each task requires a non-empty `task`"))?;
-                Ok(WasiSubagentTask {
+                Ok(AgentRunTask {
                     agent: agent.into(),
                     task: task.into(),
                 })
@@ -574,7 +577,6 @@ pub struct CodingAgentOptions {
     pub model: String,
     pub work_dir: PathBuf,
     pub session_file: Option<PathBuf>,
-    pub enable_plan_mode: bool,
 }
 
 pub struct ExtensionBeforeToolHook {
@@ -821,17 +823,7 @@ impl CodingAgent {
             session_tree.session_id.clone(),
         );
         let loaded_ext_count = wasi_extensions.discover_and_load(&options.work_dir);
-        let restored_plan_mode = wasi_extensions
-            .extension_state("plan_mode_ext")
-            .and_then(|state| state.get("enabled").and_then(serde_json::Value::as_bool))
-            .unwrap_or(false);
-        let tool_policy = Arc::new(tokio::sync::Mutex::new(
-            if options.enable_plan_mode || restored_plan_mode {
-                ToolPolicy::ReadOnly
-            } else {
-                ToolPolicy::FullAccess
-            },
-        ));
+        let tool_policy = Arc::new(tokio::sync::Mutex::new(ToolPolicy::FullAccess));
 
         let mut system_prompt = format!(
             "You are mypi, an AI coding agent with tool execution capability in workspace: {}.\n\
@@ -944,75 +936,6 @@ impl CodingAgent {
 
     pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
         self.agent.subscribe()
-    }
-
-    async fn run_subagent(&self, task: &WasiSubagentTask) -> Result<SubagentResult, String> {
-        let config = discover_agents(&self.work_dir, AgentScope::Both)
-            .agents
-            .into_iter()
-            .find(|candidate| candidate.name == task.agent)
-            .ok_or_else(|| {
-                format!(
-                    "Unknown subagent '{}'. Add it to .mypi/agents or ~/.mypi/agents.",
-                    task.agent
-                )
-            })?;
-        let scheduler_observer = {
-            #[cfg(test)]
-            {
-                self.subagent_work_observer
-                    .lock()
-                    .ok()
-                    .and_then(|observer| observer.clone())
-            }
-            #[cfg(not(test))]
-            {
-                None
-            }
-        };
-        run_subagent_task(
-            config,
-            task.task.clone(),
-            self.agent.loop_engine.api_key.clone(),
-            self.agent.loop_engine.account_id.clone(),
-            self.agent.get_state().await.model,
-            self.work_dir.clone(),
-            self.wasi_extensions.clone(),
-            self.agent.loop_engine.event_tx.clone(),
-            scheduler_observer,
-        )
-        .await
-    }
-
-    async fn run_subagents(&mut self, tasks: Vec<WasiSubagentTask>, parallel: bool) -> String {
-        let results = if parallel {
-            let futures = tasks.iter().map(|task| self.run_subagent(task));
-            futures::future::join_all(futures).await
-        } else {
-            let mut previous = String::new();
-            let mut results = Vec::with_capacity(tasks.len());
-            for task in &tasks {
-                let task = WasiSubagentTask {
-                    agent: task.agent.clone(),
-                    task: task.task.replace("{previous}", &previous),
-                };
-                let result = self.run_subagent(&task).await;
-                if let Ok(result) = &result {
-                    previous = result.output.clone();
-                }
-                results.push(result);
-            }
-            results
-        };
-
-        for result in &results {
-            if let Ok(result) = result {
-                for thinking in &result.thinking {
-                    self.session_tree.add_message(thinking.clone());
-                }
-            }
-        }
-        format_subagent_results(tasks, results)
     }
 
     async fn dispatch_assistant_message_hooks(&mut self) {
@@ -1134,16 +1057,7 @@ impl CodingAgent {
             .unwrap_or_else(|error| {
                 eprintln!("Failed to restore session extension state: {error}")
             });
-        let restored_plan_mode = self
-            .wasi_extensions
-            .extension_state("plan_mode_ext")
-            .and_then(|state| state.get("enabled").and_then(serde_json::Value::as_bool))
-            .unwrap_or(false);
-        *self.tool_policy.lock().await = if restored_plan_mode {
-            ToolPolicy::ReadOnly
-        } else {
-            ToolPolicy::FullAccess
-        };
+        *self.tool_policy.lock().await = ToolPolicy::FullAccess;
         self.session_tree = session_tree;
 
         let mut state = self.agent.loop_engine.state.lock().await;
@@ -1277,34 +1191,21 @@ impl CodingAgent {
                         self.wasi_extensions
                             .enqueue_broker_results(dispatch.operation_results);
                         self.run_scheduled_agent_work().await;
-                        for effect in result.effects {
-                            match effect {
-                                crate::wasi_extension::WasiExtensionEffect::SetToolPolicy {
-                                    policy,
-                                } => {
-                                    let mut pol = self.tool_policy.lock().await;
-                                    match policy.as_str() {
-                                        "read_only" => *pol = ToolPolicy::ReadOnly,
-                                        "full" => *pol = ToolPolicy::FullAccess,
-                                        _ => continue,
+                        if result.api_version == 1 {
+                            for effect in result.effects {
+                                match effect {
+                                    WasiLegacyEffect::SetToolPolicy { policy } => {
+                                        let mut pol = self.tool_policy.lock().await;
+                                        match policy.as_str() {
+                                            "read_only" => *pol = ToolPolicy::ReadOnly,
+                                            "full" => *pol = ToolPolicy::FullAccess,
+                                            _ => continue,
+                                        }
                                     }
-                                }
-                                crate::wasi_extension::WasiExtensionEffect::RequestModelTurn {
-                                    prompt,
-                                } => {
-                                    self.agent.prompt(&prompt).await;
-                                    self.dispatch_assistant_message_hooks().await;
-                                }
-                                crate::wasi_extension::WasiExtensionEffect::RunSubagents {
-                                    tasks,
-                                    parallel,
-                                } => {
-                                    let output = self.run_subagents(tasks, parallel).await;
-                                    self.session_tree.add_message(AgentMessage::Assistant {
-                                        content: Some(output.clone()),
-                                        tool_calls: None,
-                                    });
-                                    return Some(output);
+                                    WasiLegacyEffect::RequestModelTurn { prompt } => {
+                                        self.agent.prompt(&prompt).await;
+                                        self.dispatch_assistant_message_hooks().await;
+                                    }
                                 }
                             }
                         }
@@ -1338,7 +1239,7 @@ impl CodingAgent {
 }
 
 async fn run_subagents_with_context(
-    tasks: Vec<WasiSubagentTask>,
+    tasks: Vec<AgentRunTask>,
     parallel: bool,
     api_key: String,
     account_id: Option<String>,
@@ -1348,7 +1249,7 @@ async fn run_subagents_with_context(
     parent_event_tx: broadcast::Sender<AgentEvent>,
     scheduler_observer: Option<Arc<std::sync::Mutex<Vec<AgentWork>>>>,
 ) -> Result<(String, Vec<AgentMessage>), String> {
-    let run_one = |task: WasiSubagentTask| {
+    let run_one = |task: AgentRunTask| {
         let config = discover_agents(&work_dir, AgentScope::Both)
             .agents
             .into_iter()
@@ -1381,7 +1282,7 @@ async fn run_subagents_with_context(
         let mut previous = String::new();
         let mut results = Vec::with_capacity(tasks.len());
         for task in tasks.iter().cloned() {
-            let task = WasiSubagentTask {
+            let task = AgentRunTask {
                 agent: task.agent,
                 task: task.task.replace("{previous}", &previous),
             };
@@ -1543,7 +1444,7 @@ struct SubagentResult {
 }
 
 fn format_subagent_results(
-    tasks: Vec<WasiSubagentTask>,
+    tasks: Vec<AgentRunTask>,
     results: Vec<Result<SubagentResult, String>>,
 ) -> String {
     tasks
@@ -1735,7 +1636,6 @@ mod tests {
             model: "test-model".into(),
             work_dir,
             session_file: None,
-            enable_plan_mode: false,
         }
     }
 
