@@ -665,7 +665,7 @@ script_mod! {
                                 }
                             }
 
-                            input_bar := RoundedView {
+                            input_bar := mod.components.WarmComposerSurface {
                                 width: Fill
                                 height: Fit
                                 flow: Down
@@ -673,10 +673,15 @@ script_mod! {
                                 padding: Inset{left: 9 top: 7 right: 7 bottom: 7}
                                 new_batch: true
                                 draw_bg +: {
-                                    color: #x1d2128
-                                    border_color: #x343b46
+                                    color: #x29231f
+                                    color_hover: #x2f2823
+                                    color_focus: #x342a24
+                                    border_color: #x51443d
+                                    border_color_focus: #xb96543
+                                    border_color_down: #xd49a52
+                                    border_color_error: #xb85c55
                                     border_size: 1.0
-                                    border_radius: 9.0
+                                    border_radius: 11.0
                                 }
 
                                 prompt_input := mod.components.MypiCommandTextInput {
@@ -684,8 +689,8 @@ script_mod! {
                                     height: Fit
                                     trigger: "/"
                                     inline_search: true
-                                    color_focus: #x2f3a4d
-                                    color_hover: #x262c37
+                                    color_focus: #x342a24
+                                    color_hover: #x302722
 
                                     persistent +: {
                                         width: Fill
@@ -715,12 +720,12 @@ script_mod! {
                                                     border_size: 0.0
                                                 }
                                                 draw_text +: {
-                                                    color: #xd9dfe8
-                                                    color_hover: #xe8edf4
-                                                    color_focus: #xf0f4fa
-                                                    color_empty: #x717b89
-                                                    color_empty_hover: #x8792a1
-                                                    color_empty_focus: #x8792a1
+                                                    color: #xffeee2
+                                                    color_hover: #xfffff5
+                                                    color_focus: #xfffff5
+                                                    color_empty: #x9f8879
+                                                    color_empty_hover: #xb39a88
+                                                    color_empty_focus: #xb39a88
                                                     text_style +: {
                                                         font_size: 10.5
                                                         line_spacing: 1.35
@@ -744,16 +749,40 @@ script_mod! {
                                         visible: false
                                         text: "Plan · 0 steps"
                                         draw_bg +: {
-                                            color: #x252b34
-                                            color_hover: #x303844
-                                            color_down: #x394453
-                                            border_color: #x3a424e
+                                            color: #x332a25
+                                            color_hover: #x46332a
+                                            color_down: #x59402c
+                                            border_color: #x604a3f
+                                            border_color_hover: #xa86a4c
                                             border_size: 1.0
                                             border_radius: 6.0
                                         }
                                         draw_text +: {
-                                            color: #x9eabc0
+                                            color: #xd8c0ad
                                             text_style +: { font_size: 9.0 }
+                                        }
+                                    }
+
+                                    composer_status := Label {
+                                        width: Fit
+                                        height: Fit
+                                        visible: false
+                                        text: ""
+                                        draw_text +: {
+                                            color: #xb39a88
+                                            text_style +: { font_size: 8.5 }
+                                        }
+                                    }
+
+                                    stop_btn := mod.components.WarmComposerAction {
+                                        width: Fit
+                                        height: 28
+                                        visible: false
+                                        text: "Stop"
+                                        draw_bg +: {
+                                            color: #xb85c55
+                                            color_hover: #xd4775f
+                                            color_down: #e39a5d
                                         }
                                     }
 
@@ -762,7 +791,7 @@ script_mod! {
                                         height: Fit
                                         text: "Enter to send · Shift+Enter for newline"
                                         draw_text +: {
-                                            color: #x687382
+                                            color: #xb39a88
                                             text_style +: { font_size: 8.5 }
                                         }
                                     }
@@ -772,6 +801,7 @@ script_mod! {
                                     model_picker := View {
                                         width: 158
                                         height: 28
+                                        visible: false
                                         flow: Overlay
                                         clip_x: false
                                         clip_y: false
@@ -837,19 +867,19 @@ script_mod! {
                                             align: Align{x: 0.0 y: 0.5}
                                             padding: Inset{left: 10 right: 24}
                                             draw_bg +: {
-                                                color: #x232831
-                                                color_hover: #x2b323d
-                                                color_down: #x313a47
-                                                border_color: #x353d49
-                                                border_color_hover: #x4a5666
-                                                border_color_down: #x536174
+                                                color: #x332a25
+                                                color_hover: #x46332a
+                                                color_down: #x59402c
+                                                border_color: #x604a3f
+                                                border_color_hover: #xa86a4c
+                                                border_color_down: #xb96543
                                                 border_size: 1.0
                                                 border_radius: 6.0
                                             }
                                             draw_text +: {
-                                                color: #xb8c1ce
-                                                color_hover: #xdde3ea
-                                                color_down: #xffffff
+                                                color: #xd8c0ad
+                                                color_hover: #xf0d7c1
+                                                color_down: #xffe4ca
                                                 text_style +: { font_size: 9.5 }
                                             }
                                         }
@@ -871,17 +901,14 @@ script_mod! {
                                         }
                                     }
 
-                                    send_btn := glass.GlassButtonProminent {
+                                    send_btn := mod.components.WarmComposerAction {
                                         width: 34
                                         height: 30
                                         padding: 0
                                         text: "↑"
                                         draw_text +: {
-                                            color: #xffffff
+                                            color: #xfff5ea
                                             text_style: theme.font_bold { font_size: 12.0 }
-                                        }
-                                        draw_glass +: {
-                                            corner_radius: 6.0
                                         }
                                     }
                                 }
@@ -1294,7 +1321,7 @@ impl MatchEvent for App {
             }
         }
 
-        let submit_prompt = self.ui.glass_button(cx, ids!(send_btn)).clicked(actions)
+        let submit_prompt = self.ui.button(cx, ids!(send_btn)).clicked(actions)
             || cti.text_input_ref(cx).returned(actions).is_some();
         if submit_prompt && !self.busy {
             let input_text = cti.text_input_ref(cx).text();
