@@ -14,6 +14,7 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::time::{timeout, Duration};
@@ -214,7 +215,11 @@ impl HostCapabilityHandler {
             .and_then(Value::as_array)
             .ok_or_else(|| invalid_argument("missing argument `args`"))?;
         let mut command = tokio::process::Command::new(program);
-        command.current_dir(&self.work_dir).kill_on_drop(true);
+        command
+            .current_dir(&self.work_dir)
+            .kill_on_drop(true)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         for arg in args {
             command.arg(
                 arg.as_str()
@@ -296,7 +301,9 @@ impl HostCapabilityHandler {
         match request.operation.as_str() {
             "subscribe" => {
                 if invoking_extension.is_empty() {
-                    return Err(invalid_argument("events subscription requires host extension identity"));
+                    return Err(invalid_argument(
+                        "events subscription requires host extension identity",
+                    ));
                 }
                 self.extensions
                     .subscribe_event(invoking_extension, topic.to_string())
@@ -411,6 +418,7 @@ pub struct CodingAgentOptions {
 pub struct ExtensionBeforeToolHook {
     pub tool_policy: Arc<tokio::sync::Mutex<ToolPolicy>>,
     pub extensions: Arc<WasiExtensionManager>,
+    pub broker_dispatcher: Arc<tokio::sync::Mutex<CapabilityDispatcher>>,
 }
 
 #[async_trait]
@@ -442,9 +450,11 @@ impl BeforeToolCallHook for ExtensionBeforeToolHook {
         });
         let hook_responses = self
             .extensions
-            .execute_hook("before_tool_call", &arguments.to_string());
+            .execute_hook_with_effects("before_tool_call", &arguments.to_string());
         for resp in hook_responses {
             if let Ok(res) = resp {
+                dispatch_hook_requests(&self.broker_dispatcher, res.host_broker_requests).await;
+                let res = res.response;
                 if let Some(msg) = res.message {
                     if msg.contains("blocked") {
                         return BeforeToolCallResult {
@@ -462,6 +472,7 @@ impl BeforeToolCallHook for ExtensionBeforeToolHook {
 
 pub struct ExtensionAfterToolHook {
     pub extensions: Arc<WasiExtensionManager>,
+    pub broker_dispatcher: Arc<tokio::sync::Mutex<CapabilityDispatcher>>,
 }
 
 #[async_trait]
@@ -478,9 +489,20 @@ impl AfterToolCallHook for ExtensionAfterToolHook {
             "result": result.content,
             "is_error": result.is_error,
         });
-        let _ = self
+        for response in self
             .extensions
-            .execute_hook("after_tool_call", &arguments.to_string());
+            .execute_hook_with_effects("after_tool_call", &arguments.to_string())
+        {
+            if let Ok(response) = response {
+                dispatch_hook_requests(&self.broker_dispatcher, response.host_broker_requests)
+                    .await;
+            }
+        }
+        dispatch_hook_requests(
+            &self.broker_dispatcher,
+            self.extensions.take_pending_broker_requests(),
+        )
+        .await;
         AfterToolCallResult::default()
     }
 }
@@ -492,7 +514,7 @@ pub struct CodingAgent {
     pub wasi_extensions: Arc<WasiExtensionManager>,
     pub tool_policy: Arc<tokio::sync::Mutex<ToolPolicy>>,
     pub work_dir: PathBuf,
-    broker_dispatcher: CapabilityDispatcher,
+    broker_dispatcher: Arc<tokio::sync::Mutex<CapabilityDispatcher>>,
     base_system_prompt: String,
 }
 
@@ -501,7 +523,7 @@ fn build_broker_dispatcher(
     extensions: Arc<WasiExtensionManager>,
     work_dir: PathBuf,
     event_tx: tokio::sync::broadcast::Sender<AgentEvent>,
-) -> CapabilityDispatcher {
+) -> Arc<tokio::sync::Mutex<CapabilityDispatcher>> {
     let allowed_hosts: Arc<HashSet<String>> = Arc::new(
         std::env::var("MYPI_NETWORK_ALLOW_HOSTS")
             .unwrap_or_default()
@@ -527,7 +549,20 @@ fn build_broker_dispatcher(
             }),
         );
     }
-    dispatcher
+    Arc::new(tokio::sync::Mutex::new(dispatcher))
+}
+
+async fn dispatch_hook_requests(
+    dispatcher: &Arc<tokio::sync::Mutex<CapabilityDispatcher>>,
+    requests: Vec<crate::extension_broker::HostBrokerRequest>,
+) {
+    for request in requests {
+        let _ = dispatcher
+            .lock()
+            .await
+            .dispatch_envelopes(vec![request])
+            .await;
+    }
 }
 
 fn append_dispatch_message(message: &mut Option<String>, dispatch: BrokerDispatchResult) {
@@ -616,9 +651,11 @@ impl CodingAgent {
         agent.loop_engine.before_tool_call_hook = Some(Arc::new(ExtensionBeforeToolHook {
             tool_policy: tool_policy.clone(),
             extensions: wasi_extensions.clone(),
+            broker_dispatcher: broker_dispatcher.clone(),
         }));
         agent.loop_engine.after_tool_call_hook = Some(Arc::new(ExtensionAfterToolHook {
             extensions: wasi_extensions.clone(),
+            broker_dispatcher: broker_dispatcher.clone(),
         }));
 
         {
@@ -768,9 +805,23 @@ impl CodingAgent {
                     "content": content,
                     "tool_calls": tool_calls,
                 });
-                let _ = self
+                for response in self
                     .wasi_extensions
-                    .execute_hook("assistant_message", &arguments.to_string());
+                    .execute_hook_with_effects("assistant_message", &arguments.to_string())
+                {
+                    if let Ok(response) = response {
+                        dispatch_hook_requests(
+                            &self.broker_dispatcher,
+                            response.host_broker_requests,
+                        )
+                        .await;
+                    }
+                }
+                dispatch_hook_requests(
+                    &self.broker_dispatcher,
+                    self.wasi_extensions.take_pending_broker_requests(),
+                )
+                .await;
             }
             self.session_tree.add_message(message);
         }
@@ -894,6 +945,8 @@ impl CodingAgent {
                     Ok(result) => {
                         let dispatch = match self
                             .broker_dispatcher
+                            .lock()
+                            .await
                             .dispatch_envelopes(result.host_broker_requests)
                             .await
                         {
@@ -989,7 +1042,7 @@ async fn run_subagent_task(
         work_dir.display(),
     );
     agent.set_system_prompt(system_prompt).await;
-    agent.loop_engine.work_dir = Some(work_dir);
+    agent.loop_engine.work_dir = Some(work_dir.clone());
     agent.loop_engine.extension_manager = Some(extensions.clone());
 
     let policy = Arc::new(tokio::sync::Mutex::new(
@@ -1003,11 +1056,21 @@ async fn run_subagent_task(
             ToolPolicy::FullAccess
         },
     ));
+    let broker_dispatcher = build_broker_dispatcher(
+        policy.clone(),
+        extensions.clone(),
+        work_dir.clone(),
+        agent.loop_engine.event_tx.clone(),
+    );
     agent.loop_engine.before_tool_call_hook = Some(Arc::new(ExtensionBeforeToolHook {
         tool_policy: policy,
         extensions: extensions.clone(),
+        broker_dispatcher: broker_dispatcher.clone(),
     }));
-    agent.loop_engine.after_tool_call_hook = Some(Arc::new(ExtensionAfterToolHook { extensions }));
+    agent.loop_engine.after_tool_call_hook = Some(Arc::new(ExtensionAfterToolHook {
+        extensions,
+        broker_dispatcher,
+    }));
 
     // The GUI subscribes only to the parent agent. Relay child lifecycle,
     // reasoning, and tool events so users can see subagent progress live.
@@ -1136,20 +1199,34 @@ mod tests {
             operation: "read_text".into(),
             arguments: serde_json::json!({"path": "../outside"}),
         };
-        let error = handler("fs", dir.path().to_path_buf()).handle(&request).unwrap_err();
+        let error = handler("fs", dir.path().to_path_buf())
+            .handle(&request)
+            .unwrap_err();
         assert_eq!(error.code, "invalid_argument");
     }
 
     #[tokio::test]
-    async fn process_timeout_and_network_denial_are_structured_errors() {
+    async fn process_pipes_output_and_timeout_is_bounded() {
         let dir = tempfile::tempdir().unwrap();
         let process = handler("process", dir.path().to_path_buf());
-        let request = BrokerRequest {
+        let mut request = BrokerRequest {
             api_version: 2,
             capability: "process".into(),
             operation: "run".into(),
-            arguments: serde_json::json!({"program": "sh", "args": ["-c", "sleep 10"]}),
+            arguments: serde_json::json!({
+                "program": "sh",
+                "args": ["-c", "printf stdout; printf stderr >&2"]
+            }),
         };
+        let output = process
+            .handle_for_extension_async(&request, "ext")
+            .await
+            .unwrap();
+        let output: Value = serde_json::from_str(output["message"].as_str().unwrap()).unwrap();
+        assert_eq!(output["stdout"], "stdout");
+        assert_eq!(output["stderr"], "stderr");
+
+        request.arguments = serde_json::json!({"program": "sh", "args": ["-c", "sleep 10"]});
         let started = Instant::now();
         let error = process
             .handle_for_extension_async(&request, "ext")
@@ -1157,18 +1234,39 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, "timeout");
         assert!(started.elapsed() < StdDuration::from_secs(4));
+    }
 
-        let network = handler("network", dir.path().to_path_buf());
+    #[tokio::test]
+    async fn network_io_timeout_is_bounded_after_connect() {
+        let dir = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        });
+        let network = HostCapabilityHandler {
+            allowed_hosts: Arc::new(HashSet::from(["127.0.0.1".to_string()])),
+            ..handler("network", dir.path().to_path_buf())
+        };
         let request = BrokerRequest {
             api_version: 2,
             capability: "network".into(),
             operation: "http".into(),
-            arguments: serde_json::json!({"url": "http://not-allowed/", "method": "GET", "body": ""}),
+            arguments: serde_json::json!({
+                "url": format!("http://127.0.0.1:{port}/"),
+                "method": "GET",
+                "body": ""
+            }),
         };
+        let started = Instant::now();
         let error = network
             .handle_for_extension_async(&request, "ext")
             .await
             .unwrap_err();
-        assert_eq!(error.code, "host_denied");
+        assert_eq!(error.code, "timeout");
+        assert!(started.elapsed() < StdDuration::from_secs(4));
     }
 }

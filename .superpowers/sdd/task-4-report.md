@@ -138,3 +138,11 @@ Implemented and committed as `feat: dispatch generic extension capabilities`.
   "manualNotes": "Pre-existing unstaged GUI files were not touched."
 }
 ```
+
+## Remaining blocker evidence
+
+- `process.run` now explicitly uses piped stdout/stderr and returns both streams in its JSON result while retaining `kill_on_drop` and the two-second Tokio timeout.
+- Tool invocations enqueue host envelopes for the async after-tool hook; before/after/assistant hooks dispatch their own envelopes independently, ignoring broker failures so existing block/error isolation semantics remain unchanged.
+- Added an actual WASM command invocation test proving a subscribed extension receives a queued event, plus a stalled localhost network I/O test proving timeout after connect is bounded.
+- Focused validation: `cargo test -p mypi-coding-agent coding_agent::tests --no-fail-fast` (3 passed) and `cargo test -p mypi-coding-agent --test wasi_tests --no-fail-fast` (23 passed).
+- GUI worktree changes remain untouched and unstaged.

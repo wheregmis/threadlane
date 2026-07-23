@@ -99,6 +99,9 @@ pub struct WasiExtensionResponse {
 pub struct WasiExtensionInvocationResult {
     pub response: WasiExtensionResponse,
     pub broker_requests: Vec<BrokerRequest>,
+    pub host_broker_requests: Vec<HostBrokerRequest>,
+    /// Events supplied to this concrete WASM invocation.
+    pub events: Vec<WasiExtensionEvent>,
     invoking_extension: String,
 }
 
@@ -108,6 +111,7 @@ pub struct WasiExtensionCommandResult {
     pub effects: Vec<WasiExtensionEffect>,
     pub broker_requests: Vec<BrokerRequest>,
     pub host_broker_requests: Vec<HostBrokerRequest>,
+    pub events: Vec<WasiExtensionEvent>,
 }
 
 #[derive(Default)]
@@ -317,6 +321,8 @@ impl WasiExtension {
         Ok(WasiExtensionInvocationResult {
             response,
             broker_requests: std::mem::take(&mut store.data_mut().requests),
+            host_broker_requests: Vec::new(),
+            events: invocation.events.clone(),
             invoking_extension: String::new(),
         })
     }
@@ -447,6 +453,7 @@ pub struct WasiExtensionManager {
     states: Mutex<HashMap<String, Value>>,
     subscriptions: Mutex<HashMap<String, HashSet<String>>>,
     pending_events: Mutex<HashMap<String, Vec<WasiExtensionEvent>>>,
+    pending_broker_requests: Mutex<Vec<HostBrokerRequest>>,
     state_dir: Option<PathBuf>,
     /// Stateful conversational extensions are isolated by the active session.
     /// `None` retains the project-wide scope for callers that explicitly need it.
@@ -533,14 +540,20 @@ impl WasiExtensionManager {
             .subscriptions
             .lock()
             .map_err(|_| "Extension subscription lock poisoned".to_string())?;
-        let event = WasiExtensionEvent { topic: topic.clone(), payload };
+        let event = WasiExtensionEvent {
+            topic: topic.clone(),
+            payload,
+        };
         let mut pending = self
             .pending_events
             .lock()
             .map_err(|_| "Extension event lock poisoned".to_string())?;
         for (extension, topics) in subscribers.iter() {
             if topics.contains(&topic) {
-                pending.entry(extension.clone()).or_default().push(event.clone());
+                pending
+                    .entry(extension.clone())
+                    .or_default()
+                    .push(event.clone());
             }
         }
         Ok(())
@@ -558,7 +571,10 @@ impl WasiExtensionManager {
     }
 
     /// Removes events queued for one extension, matching the next-invocation delivery path.
-    pub fn drain_events_for(&self, extension_name: &str) -> Result<Vec<WasiExtensionEvent>, String> {
+    pub fn drain_events_for(
+        &self,
+        extension_name: &str,
+    ) -> Result<Vec<WasiExtensionEvent>, String> {
         Ok(self
             .pending_events
             .lock()
@@ -680,6 +696,14 @@ impl WasiExtensionManager {
         self.execute("tool", name, args)
     }
 
+    pub fn execute_tool_with_effects(
+        &self,
+        name: &str,
+        args: &str,
+    ) -> Option<Result<WasiExtensionInvocationResult, String>> {
+        self.execute_response("tool", name, args)
+    }
+
     pub fn execute_command(&self, name: &str, args: &str) -> Option<Result<String, String>> {
         self.execute_command_with_effects(name, args)
             .map(|result| result.map(|result| result.message))
@@ -706,6 +730,7 @@ impl WasiExtensionManager {
                     effects: result.response.effects,
                     broker_requests,
                     host_broker_requests,
+                    events: result.events,
                 }
             })
         })
@@ -714,10 +739,23 @@ impl WasiExtensionManager {
     fn execute(&self, kind: &str, name: &str, args: &str) -> Option<Result<String, String>> {
         self.execute_response(kind, name, args).map(|result| {
             result.map(|mut result| {
-                self.take_broker_requests(&mut result);
+                self.enqueue_broker_requests(std::mem::take(&mut result.host_broker_requests));
                 result.response.message.unwrap_or_default()
             })
         })
+    }
+
+    pub fn take_pending_broker_requests(&self) -> Vec<HostBrokerRequest> {
+        self.pending_broker_requests
+            .lock()
+            .map(|mut requests| std::mem::take(&mut *requests))
+            .unwrap_or_default()
+    }
+
+    fn enqueue_broker_requests(&self, requests: Vec<HostBrokerRequest>) {
+        if let Ok(mut pending) = self.pending_broker_requests.lock() {
+            pending.extend(requests);
+        }
     }
 
     pub fn execute_hook(
@@ -725,13 +763,21 @@ impl WasiExtensionManager {
         name: &str,
         args: &str,
     ) -> Vec<Result<WasiExtensionResponse, String>> {
+        self.execute_hook_with_effects(name, args)
+            .into_iter()
+            .map(|result| result.map(|result| result.response))
+            .collect()
+    }
+
+    pub fn execute_hook_with_effects(
+        &self,
+        name: &str,
+        args: &str,
+    ) -> Vec<Result<WasiExtensionInvocationResult, String>> {
         self.extensions
             .values()
             .filter(|extension| extension.manifest.hooks.iter().any(|hook| hook == name))
-            .map(|extension| {
-                self.invoke(extension, "hook", name, args)
-                    .map(|result| result.response)
-            })
+            .map(|extension| self.invoke(extension, "hook", name, args))
             .collect()
     }
 
@@ -802,6 +848,15 @@ impl WasiExtensionManager {
         }
         let mut result = result;
         result.invoking_extension = extension.manifest.name.clone();
+        result.host_broker_requests = result
+            .broker_requests
+            .iter()
+            .cloned()
+            .map(|request| HostBrokerRequest {
+                request,
+                invoking_extension: result.invoking_extension.clone(),
+            })
+            .collect();
         Ok(result)
     }
 }

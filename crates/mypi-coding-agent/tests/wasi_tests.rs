@@ -254,9 +254,15 @@ fn broker_request_round_trips_and_requires_v2() {
 #[test]
 fn events_are_topic_filtered_and_queued_for_next_invocation() {
     let manager = WasiExtensionManager::new();
-    manager.subscribe_event("listener", "updates".into()).unwrap();
-    manager.publish_event("ignored".into(), serde_json::json!(1)).unwrap();
-    manager.publish_event("updates".into(), serde_json::json!({"ok":true})).unwrap();
+    manager
+        .subscribe_event("listener", "updates".into())
+        .unwrap();
+    manager
+        .publish_event("ignored".into(), serde_json::json!(1))
+        .unwrap();
+    manager
+        .publish_event("updates".into(), serde_json::json!({"ok":true}))
+        .unwrap();
     assert_eq!(
         manager.drain_events_for("listener").unwrap(),
         vec![WasiExtensionEvent {
@@ -268,12 +274,41 @@ fn events_are_topic_filtered_and_queued_for_next_invocation() {
 }
 
 #[test]
+fn actual_extension_invocation_receives_queued_subscribed_events() {
+    let extension = WasiExtension::load_from_file(&build_broker_smoke_extension(false)).unwrap();
+    let extension_name = extension.manifest.name.clone();
+    let mut manager = WasiExtensionManager::new();
+    manager.extensions.insert(extension_name.clone(), extension);
+    manager
+        .subscribe_event(&extension_name, "updates".into())
+        .unwrap();
+    manager
+        .publish_event("updates".into(), serde_json::json!({"value": 7}))
+        .unwrap();
+
+    let result = manager
+        .execute_command_with_effects("broker-smoke", "")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        result.events,
+        vec![WasiExtensionEvent {
+            topic: "updates".into(),
+            payload: serde_json::json!({"value": 7}),
+        }]
+    );
+}
+
+#[test]
 fn extension_state_is_owned_by_identity() {
     let manager = WasiExtensionManager::new();
     manager
         .set_extension_state("one", serde_json::json!({"secret": 1}))
         .unwrap();
-    assert_eq!(manager.extension_state("one"), Some(serde_json::json!({"secret": 1})));
+    assert_eq!(
+        manager.extension_state("one"),
+        Some(serde_json::json!({"secret": 1}))
+    );
     assert_eq!(manager.extension_state("two"), None);
 }
 
