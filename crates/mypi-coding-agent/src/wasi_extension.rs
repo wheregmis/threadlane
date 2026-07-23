@@ -1,11 +1,13 @@
-use crate::extension_broker::{CapabilityPolicy, BROKER_API_VERSION};
+use crate::extension_broker::{
+    BrokerRequest, BrokerResponse, CapabilityPolicy, BROKER_API_VERSION,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use wasmi::{Engine, Func, Linker, Module, Store};
+use wasmi::{Caller, Engine, Extern, Func, Linker, Memory, Module, Store};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WasiToolDefinition {
@@ -84,9 +86,22 @@ pub struct WasiExtensionResponse {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct WasiExtensionInvocationResult {
+    pub response: WasiExtensionResponse,
+    pub broker_requests: Vec<BrokerRequest>,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct WasiExtensionCommandResult {
     pub message: String,
     pub effects: Vec<WasiExtensionEffect>,
+    pub broker_requests: Vec<BrokerRequest>,
+}
+
+#[derive(Default)]
+struct WasiStoreData {
+    policy: CapabilityPolicy,
+    requests: Vec<BrokerRequest>,
 }
 
 pub struct WasiExtension {
@@ -97,7 +112,7 @@ pub struct WasiExtension {
 }
 
 impl WasiExtension {
-    fn create_linker(engine: &Engine, store: &mut Store<()>) -> Linker<()> {
+    fn create_linker(engine: &Engine, store: &mut Store<WasiStoreData>) -> Linker<WasiStoreData> {
         let mut linker = Linker::new(engine);
         let _ = linker.define(
             "wasi_snapshot_preview1",
@@ -144,6 +159,26 @@ impl WasiExtension {
             "clock_time_get",
             Func::wrap(&mut *store, |_: i32, _: i64, _: i32| -> i32 { 0 }),
         );
+        let _ = linker.define(
+            "mypi_host",
+            "request",
+            Func::wrap(
+                &mut *store,
+                |mut caller: Caller<WasiStoreData>,
+                 request_ptr: i32,
+                 request_len: i32,
+                 response_ptr: i32,
+                 response_capacity: i32| {
+                    broker_request(
+                        &mut caller,
+                        request_ptr,
+                        request_len,
+                        response_ptr,
+                        response_capacity,
+                    )
+                },
+            ),
+        );
         linker
     }
 
@@ -151,7 +186,7 @@ impl WasiExtension {
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes[..])
             .map_err(|e| format!("Failed to parse WASM module: {e}"))?;
-        let mut store = Store::new(&engine, ());
+        let mut store = Store::new(&engine, WasiStoreData::default());
         let linker = Self::create_linker(&engine, &mut store);
         let instance = linker
             .instantiate(&mut store, &module)
@@ -210,21 +245,21 @@ impl WasiExtension {
     pub fn call_tool(
         &self,
         invocation: &WasiExtensionInvocation,
-    ) -> Result<WasiExtensionResponse, String> {
+    ) -> Result<WasiExtensionInvocationResult, String> {
         self.call("execute_tool", invocation)
     }
 
     pub fn call_command(
         &self,
         invocation: &WasiExtensionInvocation,
-    ) -> Result<WasiExtensionResponse, String> {
+    ) -> Result<WasiExtensionInvocationResult, String> {
         self.call("execute_command", invocation)
     }
 
     pub fn call_hook(
         &self,
         invocation: &WasiExtensionInvocation,
-    ) -> Result<WasiExtensionResponse, String> {
+    ) -> Result<WasiExtensionInvocationResult, String> {
         self.call("handle_hook", invocation)
     }
 
@@ -232,9 +267,15 @@ impl WasiExtension {
         &self,
         export: &str,
         invocation: &WasiExtensionInvocation,
-    ) -> Result<WasiExtensionResponse, String> {
+    ) -> Result<WasiExtensionInvocationResult, String> {
         let module = Module::new(&self.engine, &self.wasm_bytes[..]).map_err(|e| e.to_string())?;
-        let mut store = Store::new(&self.engine, ());
+        let mut store = Store::new(
+            &self.engine,
+            WasiStoreData {
+                policy: self.capability_policy(),
+                requests: vec![],
+            },
+        );
         let linker = Self::create_linker(&self.engine, &mut store);
         let instance = linker
             .instantiate(&mut store, &module)
@@ -260,12 +301,16 @@ impl WasiExtension {
         let result = function
             .call(&mut store, (ptr, input.len() as i32))
             .map_err(|e| e.to_string())?;
-        read_json_result(&mut store, &instance, result)
+        let response = read_json_result(&mut store, &instance, result)?;
+        Ok(WasiExtensionInvocationResult {
+            response,
+            broker_requests: std::mem::take(&mut store.data_mut().requests),
+        })
     }
 }
 
-fn read_json_result<T: for<'de> Deserialize<'de>>(
-    store: &mut Store<()>,
+fn read_json_result<T: for<'de> Deserialize<'de>, D>(
+    store: &mut Store<D>,
     instance: &wasmi::Instance,
     result: u64,
 ) -> Result<T, String> {
@@ -277,6 +322,83 @@ fn read_json_result<T: for<'de> Deserialize<'de>>(
         .read(&*store, ptr, &mut buffer)
         .map_err(|e| e.to_string())?;
     serde_json::from_slice(&buffer).map_err(|e| e.to_string())
+}
+
+fn broker_request(
+    caller: &mut Caller<WasiStoreData>,
+    request_ptr: i32,
+    request_len: i32,
+    response_ptr: i32,
+    response_capacity: i32,
+) -> i32 {
+    if request_ptr < 0 || request_len < 0 || response_ptr < 0 || response_capacity < 0 {
+        return -1;
+    }
+    let request = match read_memory(caller, request_ptr, request_len) {
+        Ok(request) => request,
+        Err(()) => return -1,
+    };
+    let response = match serde_json::from_slice::<BrokerRequest>(&request) {
+        Ok(request) if request.api_version == BROKER_API_VERSION => {
+            if caller.data().policy.allows(&request.capability) {
+                caller.data_mut().requests.push(request);
+                BrokerResponse::ok(Value::Null)
+            } else {
+                caller.data().policy.denied_response(&request.capability)
+            }
+        }
+        Ok(request) => BrokerResponse::error(
+            "invalid_request",
+            format!("Unsupported broker API version: {}", request.api_version),
+        ),
+        Err(error) => BrokerResponse::error("invalid_request", error.to_string()),
+    };
+    write_broker_response(caller, response_ptr, response_capacity, &response)
+}
+
+fn read_memory(caller: &Caller<WasiStoreData>, ptr: i32, len: i32) -> Result<Vec<u8>, ()> {
+    let memory = exported_memory(caller)?;
+    let mut bytes = vec![0; len as usize];
+    memory
+        .read(caller, ptr as usize, &mut bytes)
+        .map_err(|_| ())?;
+    Ok(bytes)
+}
+
+fn write_memory(caller: &mut Caller<WasiStoreData>, ptr: i32, bytes: &[u8]) -> Result<(), ()> {
+    exported_memory(caller)?
+        .write(caller, ptr as usize, bytes)
+        .map_err(|_| ())
+}
+
+fn exported_memory(caller: &Caller<WasiStoreData>) -> Result<Memory, ()> {
+    caller
+        .get_export("memory")
+        .and_then(Extern::into_memory)
+        .ok_or(())
+}
+
+fn write_broker_response(
+    caller: &mut Caller<WasiStoreData>,
+    response_ptr: i32,
+    response_capacity: i32,
+    response: &BrokerResponse,
+) -> i32 {
+    let bytes = match serde_json::to_vec(response) {
+        Ok(bytes) => bytes,
+        Err(_) => return -1,
+    };
+    let len = match i32::try_from(bytes.len()) {
+        Ok(len) => len,
+        Err(_) => return -1,
+    };
+    if len > response_capacity {
+        return -len;
+    }
+    if write_memory(caller, response_ptr, &bytes).is_err() {
+        return -1;
+    }
+    len
 }
 
 /// Produces a filesystem-safe, collision-free directory name for a session ID.
@@ -474,16 +596,24 @@ impl WasiExtensionManager {
         args: &str,
     ) -> Option<Result<WasiExtensionCommandResult, String>> {
         self.execute_response("command", name, args).map(|result| {
-            result.map(|response| WasiExtensionCommandResult {
-                message: response.message.unwrap_or_default(),
-                effects: response.effects,
+            result.map(|mut result| {
+                let broker_requests = self.take_broker_requests(&mut result);
+                WasiExtensionCommandResult {
+                    message: result.response.message.unwrap_or_default(),
+                    effects: result.response.effects,
+                    broker_requests,
+                }
             })
         })
     }
 
     fn execute(&self, kind: &str, name: &str, args: &str) -> Option<Result<String, String>> {
-        self.execute_response(kind, name, args)
-            .map(|result| result.map(|response| response.message.unwrap_or_default()))
+        self.execute_response(kind, name, args).map(|result| {
+            result.map(|mut result| {
+                self.take_broker_requests(&mut result);
+                result.response.message.unwrap_or_default()
+            })
+        })
     }
 
     pub fn execute_hook(
@@ -494,7 +624,10 @@ impl WasiExtensionManager {
         self.extensions
             .values()
             .filter(|extension| extension.manifest.hooks.iter().any(|hook| hook == name))
-            .map(|extension| self.invoke(extension, "hook", name, args))
+            .map(|extension| {
+                self.invoke(extension, "hook", name, args)
+                    .map(|result| result.response)
+            })
             .collect()
     }
 
@@ -503,7 +636,7 @@ impl WasiExtensionManager {
         kind: &str,
         name: &str,
         args: &str,
-    ) -> Option<Result<WasiExtensionResponse, String>> {
+    ) -> Option<Result<WasiExtensionInvocationResult, String>> {
         let extension = self.extensions.values().find(|extension| {
             let contributions = if kind == "tool" {
                 &extension.manifest.tools
@@ -519,13 +652,20 @@ impl WasiExtensionManager {
         Some(self.invoke(extension, kind, name, args))
     }
 
+    fn take_broker_requests(
+        &self,
+        result: &mut WasiExtensionInvocationResult,
+    ) -> Vec<BrokerRequest> {
+        std::mem::take(&mut result.broker_requests)
+    }
+
     fn invoke(
         &self,
         extension: &WasiExtension,
         kind: &str,
         name: &str,
         args: &str,
-    ) -> Result<WasiExtensionResponse, String> {
+    ) -> Result<WasiExtensionInvocationResult, String> {
         let state = self
             .states
             .lock()
@@ -542,19 +682,19 @@ impl WasiExtensionManager {
             arguments,
             state,
         };
-        let response = match kind {
+        let result = match kind {
             "tool" => extension.call_tool(&invocation),
             "hook" => extension.call_hook(&invocation),
             _ => extension.call_command(&invocation),
         }?;
-        if let Some(state) = response.state.clone() {
+        if let Some(state) = result.response.state.clone() {
             self.states
                 .lock()
                 .map_err(|_| "Extension state lock poisoned".to_string())?
                 .insert(extension.manifest.name.clone(), state.clone());
             self.persist_state(&extension.manifest.name, &state)?;
         }
-        Ok(response)
+        Ok(result)
     }
 }
 

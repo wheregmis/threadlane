@@ -3,7 +3,78 @@ use mypi_coding_agent::{
     WasiExtensionManifest, WasiToolDefinition,
 };
 use std::path::PathBuf;
+use std::process::Command;
 use tempfile::tempdir;
+
+fn build_broker_smoke_extension(agent_only: bool) -> PathBuf {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let target_dir = root.join(if agent_only {
+        "target/broker-smoke-agent"
+    } else {
+        "target/broker-smoke-tools"
+    });
+    let mut command = Command::new("cargo");
+    command
+        .current_dir(&root)
+        .args([
+            "build",
+            "--manifest-path",
+            "extensions/broker_smoke_ext/Cargo.toml",
+            "--target",
+            "wasm32-wasip1",
+            "--target-dir",
+        ])
+        .arg(&target_dir);
+    if agent_only {
+        command.args(["--features", "agent-only"]);
+    }
+    assert!(command.status().unwrap().success());
+    target_dir.join("wasm32-wasip1/debug/broker_smoke_ext.wasm")
+}
+
+#[test]
+fn broker_import_queues_accepted_requests_and_returns_denials_to_the_extension() {
+    let extension = WasiExtension::load_from_file(&build_broker_smoke_extension(false)).unwrap();
+    let mut manager = WasiExtensionManager::new();
+    manager
+        .extensions
+        .insert(extension.manifest.name.clone(), extension);
+
+    let result = manager
+        .execute_command_with_effects("broker-smoke", "")
+        .unwrap()
+        .unwrap();
+    assert!(result.message.contains("broker accepted tools.set_policy"));
+    assert_eq!(result.broker_requests.len(), 1);
+    assert_eq!(result.broker_requests[0].capability, "tools");
+    assert_eq!(result.broker_requests[0].operation, "set_policy");
+
+    let malformed = manager
+        .execute_command_with_effects("broker-smoke", r#"{"mode":"malformed"}"#)
+        .unwrap()
+        .unwrap();
+    assert!(malformed.message.contains("invalid_request"));
+    assert!(malformed.broker_requests.is_empty());
+
+    let too_small = manager
+        .execute_command_with_effects("broker-smoke", r#"{"mode":"small-output"}"#)
+        .unwrap()
+        .unwrap();
+    assert!(too_small.message.contains("broker response too large"));
+    assert_eq!(too_small.broker_requests.len(), 1);
+
+    let denied = WasiExtension::load_from_file(&build_broker_smoke_extension(true)).unwrap();
+    let mut manager = WasiExtensionManager::new();
+    manager
+        .extensions
+        .insert(denied.manifest.name.clone(), denied);
+    let result = manager
+        .execute_command_with_effects("broker-smoke", "")
+        .unwrap()
+        .unwrap();
+    assert!(result.message.contains("capability_denied"));
+    assert!(result.broker_requests.is_empty());
+}
 
 fn push_unsigned_leb(mut value: u32, bytes: &mut Vec<u8>) {
     loop {
