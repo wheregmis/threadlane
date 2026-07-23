@@ -1,5 +1,5 @@
 [package]
-name = "threadlane-gui"
+name = "threadlane"
 version = "0.1.0"
 edition = "2021"
 description = "GPU Desktop UI application for threadlane agent using Makepad"

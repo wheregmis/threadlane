@@ -454,7 +454,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        std::env::temp_dir().join(format!("threadlane-gui-{name}-{}-{nonce}", std::process::id()))
+        std::env::temp_dir().join(format!("threadlane-{name}-{}-{nonce}", std::process::id()))
     }
 
     #[test]
