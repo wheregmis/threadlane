@@ -1,4 +1,7 @@
-use crate::compaction::{compact_messages, CompactionOptions};
+use crate::compaction::{
+    compact_messages, compact_messages_to_token_budget, should_auto_compact, CompactionOptions,
+    AUTO_COMPACTION_KEEP_RECENT_TOKENS,
+};
 use crate::events::AgentEvent;
 use crate::loop_engine::AgentLoop;
 use crate::types::{AgentMessage, AgentState, ReasoningEffort, ToolExecutionMode};
@@ -74,9 +77,36 @@ impl Agent {
         st.clone()
     }
 
-    pub async fn compact_history(&self, options: Option<CompactionOptions>) {
-        let opts = options.unwrap_or_default();
+    pub async fn compact_history(&self, options: Option<CompactionOptions>) -> bool {
         let mut st = self.loop_engine.state.lock().await;
-        st.messages = compact_messages(&st.messages, &opts);
+        let compacted = match options {
+            Some(options) => compact_messages(&st.messages, &options),
+            None => {
+                let by_tokens = compact_messages_to_token_budget(
+                    &st.messages,
+                    AUTO_COMPACTION_KEEP_RECENT_TOKENS,
+                );
+                if by_tokens.len() == st.messages.len() {
+                    compact_messages(&st.messages, &CompactionOptions::default())
+                } else {
+                    by_tokens
+                }
+            }
+        };
+        let changed = compacted.len() != st.messages.len();
+        st.messages = compacted;
+        changed
+    }
+
+    pub async fn auto_compact_history(&self) -> bool {
+        let mut st = self.loop_engine.state.lock().await;
+        if !should_auto_compact(&st.messages) {
+            return false;
+        }
+        let compacted =
+            compact_messages_to_token_budget(&st.messages, AUTO_COMPACTION_KEEP_RECENT_TOKENS);
+        let changed = compacted.len() != st.messages.len();
+        st.messages = compacted;
+        changed
     }
 }

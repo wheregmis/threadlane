@@ -59,8 +59,13 @@ pub async fn execute_slash_command(
             }
         }
         CommandAction::Compact => {
-            agent.compact_history(None).await;
-            "Context compacted successfully.".to_string()
+            if !agent.compact_history(None).await {
+                "Nothing to compact yet.".to_string()
+            } else {
+                let state = agent.get_state().await;
+                session_tree.replace_active_branch(state.messages);
+                "Context compacted in the current session.".to_string()
+            }
         }
         CommandAction::ShowSession => {
             let st = agent.get_state().await;

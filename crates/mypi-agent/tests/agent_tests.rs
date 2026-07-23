@@ -207,6 +207,52 @@ fn test_multimodal_provider_payloads() {
 }
 
 #[test]
+fn compaction_summary_is_visible_to_both_provider_payloads() {
+    use mypi_agent::loop_engine::{convert_to_codex_llm, convert_to_llm};
+
+    let summary = AgentMessage::Custom {
+        custom_type: "compaction_summary".into(),
+        payload: serde_json::json!({ "summary": "Keep the current session context." }),
+    };
+
+    assert!(convert_to_llm(std::slice::from_ref(&summary))[0]["content"]
+        .as_str()
+        .unwrap()
+        .contains("Keep the current session context."));
+    assert!(convert_to_codex_llm(&[summary]).1[0]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("Keep the current session context."));
+}
+
+#[test]
+fn replacing_active_branch_persists_compacted_context() {
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("compacted.jsonl");
+    let mut tree = SessionTree::new("same_session");
+    tree.file_path = Some(file_path.clone());
+    tree.add_message(AgentMessage::User {
+        content: "old context".into(),
+    });
+
+    tree.replace_active_branch(vec![
+        AgentMessage::Custom {
+            custom_type: "compaction_summary".into(),
+            payload: serde_json::json!({ "summary": "checkpoint" }),
+        },
+        AgentMessage::User {
+            content: "recent context".into(),
+        },
+    ]);
+
+    assert_eq!(tree.session_id, "same_session");
+    let loaded = SessionTree::load_from_file(&file_path).unwrap();
+    let branch = loaded.get_active_branch_messages();
+    assert_eq!(branch.len(), 2);
+    assert!(mypi_agent::compaction_summary_text(&branch[0]).is_some());
+}
+
+#[test]
 fn test_session_tree_persists_images_and_loads_legacy_users() {
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("multimodal.jsonl");

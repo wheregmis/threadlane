@@ -81,19 +81,20 @@ impl ComposerState {
     pub fn set_status(&mut self, status: ComposerStatus, message: impl Into<String>) {
         self.status = status;
         self.status_text = match status {
-            ComposerStatus::Ready => String::new(),
-            ComposerStatus::Working | ComposerStatus::Error => message.into(),
+            ComposerStatus::Working => message.into(),
+            // Errors are already rendered in the chat transcript. Keeping the
+            // footer empty prevents long provider errors from crowding out the
+            // editable input and model controls.
+            ComposerStatus::Ready | ComposerStatus::Error => String::new(),
         };
     }
 
     pub fn presentation(&self) -> ComposerPresentation {
         let working = self.status == ComposerStatus::Working;
-        let show_error = self.status == ComposerStatus::Error;
-
         ComposerPresentation {
             show_model: !working,
             working,
-            show_error,
+            show_error: false,
             status_text: self.status_text.clone(),
         }
     }
@@ -216,12 +217,13 @@ mod tests {
     }
 
     #[test]
-    fn error_keeps_input_available_and_exposes_message() {
+    fn error_keeps_input_and_model_controls_clear() {
         let mut state = ComposerState::new();
         state.set_status(ComposerStatus::Error, "Provider unavailable");
         let presentation = state.presentation();
         assert!(!presentation.working);
-        assert!(presentation.show_error);
-        assert_eq!(presentation.status_text, "Provider unavailable");
+        assert!(presentation.show_model);
+        assert!(!presentation.show_error);
+        assert!(presentation.status_text.is_empty());
     }
 }

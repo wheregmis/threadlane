@@ -34,7 +34,14 @@ impl SessionTree {
     }
 
     pub fn add_message(&mut self, message: AgentMessage) -> String {
-        let node_id = format!("node_{}", self.nodes.len() + 1);
+        let mut next_id = self.nodes.len() + 1;
+        let node_id = loop {
+            let candidate = format!("node_{next_id}");
+            if !self.nodes.contains_key(&candidate) {
+                break candidate;
+            }
+            next_id += 1;
+        };
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -55,6 +62,17 @@ impl SessionTree {
         }
 
         node_id
+    }
+
+    /// Replaces the active context with a new root branch while retaining old
+    /// nodes as navigable history. New nodes are appended to the same session file.
+    pub fn replace_active_branch(&mut self, messages: Vec<AgentMessage>) {
+        self.active_node_id = None;
+        for message in messages {
+            if !matches!(message, AgentMessage::System { .. }) {
+                self.add_message(message);
+            }
+        }
     }
 
     pub fn get_active_branch_messages(&self) -> Vec<AgentMessage> {

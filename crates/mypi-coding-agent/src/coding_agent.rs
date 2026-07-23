@@ -1103,6 +1103,39 @@ impl CodingAgent {
         self.agent.subscribe()
     }
 
+    async fn dispatch_assistant_hook(&self, message: &AgentMessage) {
+        let AgentMessage::Assistant {
+            content,
+            tool_calls,
+        } = message
+        else {
+            return;
+        };
+        let arguments = serde_json::json!({
+            "content": content,
+            "tool_calls": tool_calls,
+        });
+        for response in self
+            .wasi_extensions
+            .execute_hook_with_effects("assistant_message", &arguments.to_string())
+        {
+            if let Ok(response) = response {
+                let _ = dispatch_hook_requests(
+                    &self.broker_dispatcher,
+                    &self.wasi_extensions,
+                    response.host_broker_requests,
+                )
+                .await;
+            }
+        }
+        let _ = dispatch_hook_requests(
+            &self.broker_dispatcher,
+            &self.wasi_extensions,
+            self.wasi_extensions.take_pending_broker_requests(),
+        )
+        .await;
+    }
+
     async fn dispatch_assistant_message_hooks(&mut self) {
         let state = self.agent.get_state().await;
 
@@ -1148,6 +1181,21 @@ impl CodingAgent {
             // the model with a different, generated user message. Keep that
             // generated message so the restored provider history is exact.
             common_prefix
+        } else if state_messages
+            .iter()
+            .any(|message| mypi_agent::compaction_summary_text(message).is_some())
+        {
+            // Auto-compaction creates a new active root branch. Persist that
+            // branch in-place instead of treating it as a new session.
+            let current_turn_start = state_messages
+                .iter()
+                .rposition(AgentMessage::is_user)
+                .unwrap_or(state_messages.len());
+            for message in state_messages.iter().skip(current_turn_start + 1) {
+                self.dispatch_assistant_hook(message).await;
+            }
+            self.session_tree.replace_active_branch(state_messages);
+            return;
         } else {
             // A non-prefix means the session was changed independently. Do
             // not append a second, potentially duplicated conversation.
@@ -1155,35 +1203,7 @@ impl CodingAgent {
         };
 
         for message in state_messages.into_iter().skip(start_index) {
-            if let AgentMessage::Assistant {
-                content,
-                tool_calls,
-            } = &message
-            {
-                let arguments = serde_json::json!({
-                    "content": content,
-                    "tool_calls": tool_calls,
-                });
-                for response in self
-                    .wasi_extensions
-                    .execute_hook_with_effects("assistant_message", &arguments.to_string())
-                {
-                    if let Ok(response) = response {
-                        let _ = dispatch_hook_requests(
-                            &self.broker_dispatcher,
-                            &self.wasi_extensions,
-                            response.host_broker_requests,
-                        )
-                        .await;
-                    }
-                }
-                let _ = dispatch_hook_requests(
-                    &self.broker_dispatcher,
-                    &self.wasi_extensions,
-                    self.wasi_extensions.take_pending_broker_requests(),
-                )
-                .await;
-            }
+            self.dispatch_assistant_hook(&message).await;
             self.session_tree.add_message(message);
         }
     }
@@ -1406,6 +1426,11 @@ impl CodingAgent {
                         .await;
                 return Some(output);
             }
+        }
+
+        if self.agent.auto_compact_history().await {
+            let state = self.agent.get_state().await;
+            self.session_tree.replace_active_branch(state.messages);
         }
 
         let msg = AgentMessage::user(effective_input, images);

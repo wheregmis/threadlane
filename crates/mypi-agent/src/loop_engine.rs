@@ -1,3 +1,7 @@
+use crate::compaction::{
+    compact_messages_to_token_budget, compaction_summary_text, is_context_overflow_error,
+    should_auto_compact, AUTO_COMPACTION_KEEP_RECENT_TOKENS,
+};
 use crate::events::AgentEvent;
 use crate::hooks::{
     AfterToolCallHook, BeforeToolCallHook, ShouldStopAfterTurnHook, ToolExecutor,
@@ -85,7 +89,12 @@ pub fn convert_to_llm(messages: &[AgentMessage]) -> Vec<Value> {
                     "content": content
                 }))
             }
-            AgentMessage::Custom { .. } => None,
+            AgentMessage::Custom { .. } => compaction_summary_text(msg).map(|summary| {
+                serde_json::json!({
+                    "role": "user",
+                    "content": format!("<context-checkpoint>\n{summary}\n</context-checkpoint>")
+                })
+            }),
         })
         .collect()
 }
@@ -170,7 +179,18 @@ pub fn convert_to_codex_llm(messages: &[AgentMessage]) -> (String, Vec<Value>) {
                     "output": content
                 }));
             }
-            AgentMessage::Custom { .. } => {}
+            AgentMessage::Custom { .. } => {
+                if let Some(summary) = compaction_summary_text(msg) {
+                    items.push(serde_json::json!({
+                        "type": "message",
+                        "role": "user",
+                        "content": [{
+                            "type": "input_text",
+                            "text": format!("<context-checkpoint>\n{summary}\n</context-checkpoint>")
+                        }]
+                    }));
+                }
+            }
         }
     }
 
@@ -454,8 +474,9 @@ impl AgentLoop {
     async fn run_queued_turns(&mut self) {
         let _ = self.event_tx.send(AgentEvent::AgentStart);
         let mut turn_number = 0;
+        let mut overflow_recovery_attempted = false;
 
-        loop {
+        'turn_loop: loop {
             turn_number += 1;
 
             // Drain steering queue items
@@ -474,6 +495,16 @@ impl AgentLoop {
                 let transformed = hook.transform_context(msgs).await;
                 let mut state = self.state.lock().await;
                 state.messages = transformed;
+            }
+
+            {
+                let mut state = self.state.lock().await;
+                if should_auto_compact(&state.messages) {
+                    state.messages = compact_messages_to_token_budget(
+                        &state.messages,
+                        AUTO_COMPACTION_KEEP_RECENT_TOKENS,
+                    );
+                }
             }
 
             let _ = self.event_tx.send(AgentEvent::TurnStart { turn_number });
@@ -530,6 +561,19 @@ impl AgentLoop {
                         break;
                     }
                     StreamEvent::Error(err) => {
+                        if !overflow_recovery_attempted && is_context_overflow_error(&err) {
+                            let mut state = self.state.lock().await;
+                            let compacted = compact_messages_to_token_budget(
+                                &state.messages,
+                                AUTO_COMPACTION_KEEP_RECENT_TOKENS,
+                            );
+                            if compacted.len() < state.messages.len() {
+                                state.messages = compacted;
+                                overflow_recovery_attempted = true;
+                                drop(state);
+                                continue 'turn_loop;
+                            }
+                        }
                         let _ = self
                             .event_tx
                             .send(AgentEvent::AgentError { error: err.clone() });

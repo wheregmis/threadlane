@@ -33,6 +33,56 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
+fn project_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn compact_workspace_path(path: &Path, home: Option<&Path>) -> String {
+    let (prefix, display_path) = match (path.is_absolute(), home) {
+        (true, Some(home)) => match path.strip_prefix(home).ok() {
+            Some(relative) => ("~", relative),
+            None => ("", path),
+        },
+        _ if path.is_absolute() => ("", path),
+        _ => ("", path),
+    };
+    let components: Vec<_> = display_path
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => Some(value.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+
+    if components.is_empty() {
+        return if prefix == "~" {
+            "~".to_string()
+        } else {
+            path.display().to_string()
+        };
+    }
+
+    let compacted = if components.len() > 3 {
+        format!(
+            "{}/…/{}/{}",
+            components[0],
+            components[components.len() - 2],
+            components[components.len() - 1]
+        )
+    } else {
+        components.join("/")
+    };
+
+    match prefix {
+        "~" => format!("~/{compacted}"),
+        _ if path.is_absolute() => format!("/{compacted}"),
+        _ => compacted,
+    }
+}
+
 script_mod! {
     use mod.prelude.widgets.*
     use mod.components.*
@@ -502,38 +552,73 @@ script_mod! {
 
                         header := PanelHeader {
                             spacing: 10
-                            padding: Inset{left: 2 top: 0 right: 2 bottom: 2}
+                            padding: Inset{left: 4 top: 1 right: 2 bottom: 3}
 
-                            Label {
-                                text: "mypi"
-                                draw_text +: {
-                                    color: #xdde3ea
-                                    text_style: theme.font_bold { font_size: 14.0 }
+                            project_icon := Icon {
+                                width: 18
+                                height: 18
+                                icon_walk: Walk{width: 16 height: 16}
+                                draw_icon +: {
+                                    svg: crate_resource("self:resources/icons/folder.svg")
+                                    color: #x8fb9e8
                                 }
                             }
-                            workspace_label := Label {
-                                text: ""
-                                draw_text +: {
-                                    color: #x6f7a88
-                                    text_style +: { font_size: 10.0 }
+                            project_identity := View {
+                                width: Fit
+                                height: Fit
+                                flow: Down
+                                spacing: 1
+
+                                project_name_label := Label {
+                                    width: Fit
+                                    height: Fit
+                                    text: ""
+                                    draw_text +: {
+                                        color: #xf0f4fa
+                                        text_style: theme.font_bold { font_size: 14.0 }
+                                    }
+                                }
+                                workspace_label := Label {
+                                    width: Fit
+                                    height: Fit
+                                    text: ""
+                                    draw_text +: {
+                                        color: #x7f8b9a
+                                        text_style +: { font_size: 9.0 }
+                                    }
                                 }
                             }
                             FlexSpacer {}
                             caps_btn := Button {
                                 width: Fit
-                                height: 28
-                                text: "Capabilities"
+                                height: 30
+                                padding: Inset{left: 10 right: 11 top: 5 bottom: 5}
+                                text: "Capabilities  ›"
+                                icon_walk: Walk{width: 13 height: 13 margin: Inset{right: 2}}
+                                draw_icon +: {
+                                    svg: crate_resource("self:resources/icons/skill.svg")
+                                    color: #x8fb9e8
+                                    color_hover: #xb9d7fa
+                                    color_down: #xffffff
+                                }
                                 draw_bg +: {
                                     color: #x232830
-                                    color_hover: #x2a313c
-                                    color_down: #x3a424e
-                                    border_color: #x3a424e
-                                    border_radius: 6.0
+                                    color_hover: #x2d3642
+                                    color_focus: #x2d3642
+                                    color_down: #x36475c
+                                    border_color: #x3f4a59
+                                    border_color_hover: #x6184ac
+                                    border_color_focus: #x6184ac
+                                    border_color_down: #x7eb4f2
+                                    border_radius: 7.0
                                     border_size: 1.0
                                 }
                                 draw_text +: {
-                                    color: #xc7cdd6
-                                    text_style +: { font_size: 10.0 }
+                                    color: #xcbd3dd
+                                    color_hover: #xe8edf4
+                                    color_focus: #xe8edf4
+                                    color_down: #xffffff
+                                    text_style: theme.font_bold { font_size: 9.5 }
                                 }
                             }
 
@@ -1012,9 +1097,13 @@ impl MatchEvent for App {
             self.set_status(cx, UiStatus::Error, "Not signed in");
         }
 
+        let home_dir = std::env::var_os("HOME").map(PathBuf::from);
+        self.ui
+            .label(cx, ids!(project_name_label))
+            .set_text(cx, &project_name(&work_dir));
         self.ui
             .label(cx, ids!(workspace_label))
-            .set_text(cx, &work_dir.display().to_string());
+            .set_text(cx, &compact_workspace_path(&work_dir, home_dir.as_deref()));
         refresh_sessions(&work_dir);
         let context = ProjectContext::discover(&work_dir);
 
@@ -1058,7 +1147,7 @@ impl MatchEvent for App {
         self.ui.button(cx, ids!(caps_btn)).set_text(
             cx,
             &format!(
-                "{} skills · {} agents",
+                "{} skills · {} agents  ›",
                 discovered_skills.len(),
                 discovered_agents.len()
             ),
@@ -2005,6 +2094,18 @@ impl App {
                 .unwrap_or_default();
         let work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
+        if show_in_chat
+            && active_session_entry().is_none()
+            && input_text.trim_start().starts_with('/')
+        {
+            self.push_chat(
+                MsgRole::System,
+                "Select an existing session before running a session command.",
+            );
+            cx.redraw_all();
+            return;
+        }
+
         if show_in_chat && active_session_entry().is_none() {
             let Some(entry) = create_new_session(&work_dir) else {
                 self.push_chat(MsgRole::System, "Could not create a new session file.");
@@ -2523,5 +2624,75 @@ impl App {
         }
 
         cx.redraw_all();
+    }
+}
+
+#[cfg(test)]
+mod workspace_header_tests {
+    use super::{compact_workspace_path, project_name};
+    use std::path::Path;
+
+    #[test]
+    fn workspace_header_uses_final_directory_as_project_name() {
+        assert_eq!(project_name(Path::new("/Users/alex/code/mypi")), "mypi");
+    }
+
+    #[test]
+    fn workspace_header_uses_display_path_when_project_has_no_final_directory() {
+        assert_eq!(project_name(Path::new("/")), "/");
+    }
+
+    #[test]
+    fn workspace_header_shortens_paths_below_home() {
+        assert_eq!(
+            compact_workspace_path(
+                Path::new("/Users/alex/Documents/mypi"),
+                Some(Path::new("/Users/alex")),
+            ),
+            "~/Documents/mypi"
+        );
+    }
+
+    #[test]
+    fn workspace_header_preserves_home_path_when_nothing_would_be_omitted() {
+        assert_eq!(
+            compact_workspace_path(
+                Path::new("/Users/alex/Documents/exploration/mypi"),
+                Some(Path::new("/Users/alex")),
+            ),
+            "~/Documents/exploration/mypi"
+        );
+    }
+
+    #[test]
+    fn workspace_header_compacts_the_middle_of_long_paths() {
+        assert_eq!(
+            compact_workspace_path(
+                Path::new("/Users/alex/Documents/code/client/exploration/mypi"),
+                Some(Path::new("/Users/alex")),
+            ),
+            "~/Documents/…/exploration/mypi"
+        );
+    }
+
+    #[test]
+    fn workspace_header_preserves_short_absolute_paths() {
+        assert_eq!(
+            compact_workspace_path(Path::new("/work/mypi"), None),
+            "/work/mypi"
+        );
+    }
+
+    #[test]
+    fn workspace_header_does_not_expand_relative_paths_to_home() {
+        assert_eq!(
+            compact_workspace_path(Path::new("home/project"), Some(Path::new("home"))),
+            "home/project"
+        );
+    }
+
+    #[test]
+    fn workspace_header_preserves_root() {
+        assert_eq!(compact_workspace_path(Path::new("/"), None), "/");
     }
 }
