@@ -28,6 +28,7 @@ pub enum GuiAgentEvent {
     DeviceLoginSuccess,
     DeviceLoginError(String),
     AvailableModelsLoaded(Vec<String>),
+    ProjectFolderPicked(Result<Option<PathBuf>, String>),
     CommandOutput {
         generation_id: u64,
         work_dir: PathBuf,

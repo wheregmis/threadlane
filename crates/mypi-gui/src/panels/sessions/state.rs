@@ -21,6 +21,7 @@ pub struct ProjectGroup {
     pub name: String,
     pub work_dir: PathBuf,
     pub sessions: Vec<SessionEntry>,
+    pub available: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -158,76 +159,47 @@ fn rebuild_session_rows(projects: &[ProjectGroup]) -> Vec<SessionListRow> {
     rows
 }
 
-fn load_extra_project_dirs(work_dir: &Path) -> Vec<PathBuf> {
-    let path = work_dir.join(".mypi/gui/sidebar_projects.json");
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return Vec::new();
-    };
-    let Ok(list) = serde_json::from_str::<Vec<String>>(&text) else {
-        return Vec::new();
-    };
-    let mut dirs = Vec::new();
-    for item in list {
-        let p = PathBuf::from(item);
-        let resolved = if p.is_absolute() { p } else { work_dir.join(p) };
-        if resolved != work_dir && resolved.is_dir() {
-            dirs.push(resolved);
-        }
-    }
-    dirs
-}
-
-pub fn refresh_sessions(work_dir: &Path) -> Vec<SessionListRow> {
+pub fn refresh_sessions(project_dirs: &[PathBuf]) -> Vec<SessionListRow> {
     let mut projects = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
-    let mut push_project = |dir: PathBuf| {
+    for raw_dir in project_dirs {
+        let dir = std::fs::canonicalize(raw_dir).unwrap_or_else(|_| raw_dir.clone());
         if !seen.insert(dir.clone()) {
-            return;
+            continue;
         }
-        let sessions = discover_sessions_in_project(&dir);
         projects.push(ProjectGroup {
             name: project_display_name(&dir),
+            sessions: discover_sessions_in_project(&dir),
+            available: dir.is_dir(),
             work_dir: dir,
-            sessions,
         });
-    };
-
-    push_project(work_dir.to_path_buf());
-    for extra in load_extra_project_dirs(work_dir) {
-        push_project(extra);
     }
 
     let rows = rebuild_session_rows(&projects);
-
     let mut data = SESSIONS_DATA.write().unwrap();
     let prev_id = data.active_session_id.clone();
     let prev_dir = data.active_work_dir.clone();
-
-    let still_active = prev_id.is_none()
-        || projects.iter().any(|p| {
-            p.work_dir == prev_dir && p.sessions.iter().any(|s| Some(&s.id) == prev_id.as_ref())
-        });
-
-    if !still_active {
-        if let Some(session) = projects
+    let project_still_attached = projects.iter().any(|p| p.work_dir == prev_dir);
+    let session_still_exists = prev_id.as_ref().is_some_and(|id| {
+        projects
             .iter()
-            .find(|p| p.work_dir == work_dir)
-            .and_then(|p| p.sessions.first())
-        {
-            data.active_session_id = Some(session.id.clone());
-            data.active_work_dir = session.work_dir.clone();
-        } else {
-            data.active_session_id = None;
-            data.active_work_dir = work_dir.to_path_buf();
-        }
+            .find(|p| p.work_dir == prev_dir)
+            .is_some_and(|p| p.sessions.iter().any(|session| &session.id == id))
+    });
+
+    if !project_still_attached {
+        data.active_work_dir = projects
+            .first()
+            .map(|project| project.work_dir.clone())
+            .unwrap_or_default();
+        data.active_session_id = None;
+    } else if prev_id.is_some() && !session_still_exists {
+        data.active_session_id = None;
     }
 
     data.projects = projects;
     data.rows = rows.clone();
-    if data.active_work_dir.as_os_str().is_empty() {
-        data.active_work_dir = work_dir.to_path_buf();
-    }
     rows
 }
 
@@ -266,8 +238,26 @@ pub fn set_session_context_target(entry: Option<&SessionEntry>) {
 
 pub fn set_active_session(work_dir: &Path, session_id: &str) {
     let mut data = SESSIONS_DATA.write().unwrap();
-    data.active_work_dir = work_dir.to_path_buf();
+    data.active_work_dir =
+        std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
     data.active_session_id = Some(session_id.to_string());
+}
+
+pub fn set_active_project(work_dir: &Path) {
+    let mut data = SESSIONS_DATA.write().unwrap();
+    data.active_work_dir =
+        std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
+    data.active_session_id = None;
+}
+
+pub fn is_project_working(work_dir: &Path) -> bool {
+    let normalized_dir = std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
+    SESSIONS_DATA
+        .read()
+        .unwrap()
+        .working_sessions
+        .iter()
+        .any(|(dir, _)| dir == &normalized_dir)
 }
 
 pub fn active_session_entry() -> Option<SessionEntry> {
@@ -336,7 +326,6 @@ pub fn create_new_session(work_dir: &Path) -> Option<SessionEntry> {
         session_file: path,
         updated_at: now.as_secs(),
     };
-    refresh_sessions(work_dir);
     Some(entry)
 }
 
@@ -413,6 +402,26 @@ mod tests {
         assert!(first.session_file.exists());
         assert!(second.session_file.exists());
 
+        let _ = std::fs::remove_dir_all(work_dir);
+    }
+
+    #[test]
+    fn refresh_preserves_a_project_draft_and_canonicalizes_duplicates() {
+        let work_dir = unique_test_dir("refresh-draft");
+        std::fs::create_dir_all(&work_dir).unwrap();
+        set_active_project(&work_dir);
+
+        let alias = work_dir.join("..").join(work_dir.file_name().unwrap());
+        refresh_sessions(&[work_dir.clone(), alias]);
+
+        let data = SESSIONS_DATA.read().unwrap();
+        assert_eq!(data.projects.len(), 1);
+        assert_eq!(
+            data.active_work_dir,
+            std::fs::canonicalize(&work_dir).unwrap()
+        );
+        assert!(data.active_session_id.is_none());
+        drop(data);
         let _ = std::fs::remove_dir_all(work_dir);
     }
 }

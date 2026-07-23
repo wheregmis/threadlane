@@ -34,9 +34,15 @@ impl Widget for SessionList {
                             let name = data
                                 .projects
                                 .get(*project_idx)
-                                .map(|p| p.name.as_str())
-                                .unwrap_or("project");
-                            item_widget.label(cx, ids!(name_lbl)).set_text(cx, name);
+                                .map(|project| {
+                                    if project.available {
+                                        project.name.clone()
+                                    } else {
+                                        format!("{} · Missing", project.name)
+                                    }
+                                })
+                                .unwrap_or_else(|| "project".to_string());
+                            item_widget.label(cx, ids!(name_lbl)).set_text(cx, &name);
                             item_widget.draw_all_unscoped(cx);
                         }
                         Some(SessionListRow::EmptyProject) => {

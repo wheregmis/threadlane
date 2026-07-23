@@ -8,12 +8,15 @@ use crate::panels::chat::{
 };
 use crate::panels::command_palette::*;
 
-use crate::panels::sessions::{SessionContextMenu, SessionContextMenuAction, SessionList};
+use crate::panels::sessions::{
+    ProjectRegistry, SessionContextMenu, SessionContextMenuAction, SessionList,
+};
 use crate::state::{
     active_session_entry, archive_session, builtin_commands, create_new_session, delete_session,
-    is_session_working, project_work_dir_at_row, refresh_sessions, session_entry_at_row,
-    set_active_session, set_session_context_target, set_session_working, truncate_chars,
-    CommandInfo, GuiAgentEvent, MsgRole, SessionEntry, ToolStatus,
+    is_project_working, is_session_working, project_work_dir_at_row, refresh_sessions,
+    session_entry_at_row, set_active_project, set_active_session, set_session_context_target,
+    set_session_working, truncate_chars, CommandInfo, GuiAgentEvent, MsgRole, SessionEntry,
+    ToolStatus,
 };
 use crate::workspace::{AppState, SessionKey};
 use base64::Engine as _;
@@ -32,6 +35,13 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
+
+fn global_mypi_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".mypi")
+}
 
 fn project_name(path: &Path) -> String {
     path.file_name()
@@ -375,6 +385,20 @@ script_mod! {
                         text_style: theme.font_bold { font_size: 9.75 }
                     }
                 }
+                detach_project_btn := Button {
+                    width: 26
+                    height: 24
+                    margin: 0
+                    padding: 0
+                    text: "×"
+                    draw_text +: { color: #x8f98a6 text_style +: { font_size: 13.0 } }
+                    draw_bg +: {
+                        color: #x00000000
+                        color_hover: #x3a2930
+                        border_color: #x00000000
+                        border_radius: 6.0
+                    }
+                }
                 new_project_session_btn := Button {
                     width: 26
                     height: 24
@@ -539,6 +563,29 @@ script_mod! {
                             spacing: 2
                             padding: Inset{left: 8 top: 10 right: 8 bottom: 10}
 
+                            projects_header := View {
+                                width: Fill
+                                height: 32
+                                flow: Right
+                                align: Align{y: 0.5}
+                                padding: Inset{left: 8 right: 4}
+                                projects_label := Label {
+                                    width: Fill
+                                    height: Fit
+                                    text: "Projects"
+                                    draw_text +: {
+                                        color: #xcbd3dd
+                                        text_style: theme.font_bold { font_size: 11.0 }
+                                    }
+                                }
+                                add_project_btn := Button {
+                                    width: 88
+                                    height: 26
+                                    text: "Add Project"
+                                    padding: Inset{left: 7 right: 7 top: 4 bottom: 4}
+                                    draw_text +: { text_style +: { font_size: 9.5 } }
+                                }
+                            }
                             session_context_menu := SessionContextMenu {}
                             session_list := SessionList { height: Fill }
                         }
@@ -1004,6 +1051,13 @@ struct SessionRuntime {
     reasoning_effort: ReasoningEffort,
 }
 
+#[derive(Clone)]
+struct ProjectCapabilities {
+    summary: String,
+    button_text: String,
+    commands: Vec<CommandInfo>,
+}
+
 impl SessionRuntime {
     fn new(agent: CodingAgent, model: String, reasoning_effort: ReasoningEffort) -> Self {
         Self {
@@ -1048,6 +1102,10 @@ pub struct App {
     session_context_entry: Option<SessionEntry>,
     #[rust]
     auth_workspace: Option<SessionKey>,
+    #[rust]
+    project_registry: Option<ProjectRegistry>,
+    #[rust]
+    capability_cache: HashMap<PathBuf, ProjectCapabilities>,
 }
 
 impl ScriptHook for App {}
@@ -1074,8 +1132,66 @@ impl MatchEvent for App {
         );
         self.set_reasoning_effort_picker(cx, ReasoningEffort::Medium);
 
-        let work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        self.select_workspace(work_dir.clone(), "draft");
+        let launch_dir = std::env::current_dir()
+            .ok()
+            .and_then(|path| std::fs::canonicalize(path).ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let mut registry_error = None;
+        match ProjectRegistry::load(&global_mypi_dir()) {
+            Ok(mut registry) => {
+                if let Err(error) = registry.attach(&launch_dir) {
+                    registry_error = Some(error.to_string());
+                }
+                self.project_registry = Some(registry);
+            }
+            Err(error) => registry_error = Some(error.to_string()),
+        }
+        let project_dirs = self.registered_project_dirs_or(&launch_dir);
+        refresh_sessions(&project_dirs);
+        let selected_project = self
+            .project_registry
+            .as_ref()
+            .and_then(|registry| {
+                registry
+                    .projects()
+                    .iter()
+                    .filter(|project| project.path.is_dir())
+                    .max_by_key(|project| project.last_opened_at)
+            })
+            .cloned();
+        let work_dir = selected_project
+            .as_ref()
+            .map(|project| project.path.clone())
+            .unwrap_or_else(|| launch_dir.clone());
+        let initial_entry = {
+            let data = crate::panels::sessions::state::SESSIONS_DATA
+                .read()
+                .unwrap();
+            data.projects
+                .iter()
+                .find(|project| project.work_dir == work_dir)
+                .and_then(|project| {
+                    selected_project
+                        .as_ref()
+                        .and_then(|selected| selected.last_session_id.as_deref())
+                        .and_then(|session_id| {
+                            project
+                                .sessions
+                                .iter()
+                                .find(|session| session.id == session_id)
+                        })
+                        .or_else(|| project.sessions.first())
+                })
+                .cloned()
+        };
+        if let Some(entry) = initial_entry.as_ref() {
+            set_active_session(&entry.work_dir, &entry.id);
+            self.select_workspace(entry.work_dir.clone(), entry.id.clone());
+        } else {
+            set_active_project(&work_dir);
+            self.workspace_state
+                .select(SessionKey::project_draft(work_dir.clone()));
+        }
 
         let mut key_opt = None;
         let mut account_id_opt = None;
@@ -1104,8 +1220,13 @@ impl MatchEvent for App {
         self.ui
             .label(cx, ids!(workspace_label))
             .set_text(cx, &compact_workspace_path(&work_dir, home_dir.as_deref()));
-        refresh_sessions(&work_dir);
         let context = ProjectContext::discover(&work_dir);
+        if let Some(error) = registry_error {
+            self.push_chat(
+                MsgRole::System,
+                format!("Could not load the attached-project registry: {error}"),
+            );
+        }
 
         if !context.context_files.is_empty() {
             self.push_chat(
@@ -1126,7 +1247,9 @@ impl MatchEvent for App {
             account_id: account_id_opt.clone(),
             model: "gpt-5.6-luna".to_string(),
             work_dir: work_dir.clone(),
-            session_file: active_session_entry().map(|e| e.session_file),
+            session_file: initial_entry
+                .as_ref()
+                .map(|entry| entry.session_file.clone()),
         };
 
         let coding_agent = CodingAgent::new(agent_opts);
@@ -1194,9 +1317,20 @@ impl MatchEvent for App {
             "Type / in the input bar to browse slash commands.",
         );
 
-        let draft_key = SessionKey::new(work_dir, "draft");
+        let initial_key = self
+            .workspace_state
+            .active_key()
+            .cloned()
+            .unwrap_or_else(|| SessionKey::project_draft(work_dir));
+        if let Some(entry) = initial_entry {
+            let messages = coding_agent.session_tree.get_active_branch_messages();
+            self.workspace_state
+                .workspace_mut(SessionKey::new(entry.work_dir, entry.id))
+                .chat
+                .replace_from_agent_messages(&messages);
+        }
         self.session_runtimes.insert(
-            draft_key,
+            initial_key,
             SessionRuntime::new(
                 coding_agent,
                 "gpt-5.6-luna".to_string(),
@@ -1268,6 +1402,10 @@ impl MatchEvent for App {
                     }
                 });
             }
+        }
+
+        if self.ui.button(cx, ids!(add_project_btn)).clicked(actions) {
+            self.open_project_picker();
         }
 
         if self.ui.button(cx, ids!(caps_btn)).clicked(actions) {
@@ -1342,6 +1480,12 @@ impl MatchEvent for App {
         }
         let session_list = self.ui.portal_list(cx, ids!(session_list.list));
         for (item_id, item) in session_list.items_with_actions(actions) {
+            if item.button(cx, ids!(detach_project_btn)).clicked(actions) {
+                if let Some(work_dir) = project_work_dir_at_row(item_id) {
+                    self.detach_project(cx, work_dir);
+                }
+                continue;
+            }
             if item
                 .button(cx, ids!(new_project_session_btn))
                 .clicked(actions)
@@ -1352,6 +1496,12 @@ impl MatchEvent for App {
                 continue;
             }
             if let Some(fe) = item.as_view().finger_up(actions) {
+                if let Some(work_dir) = project_work_dir_at_row(item_id) {
+                    if fe.is_over && fe.is_primary_hit() && fe.was_tap() {
+                        self.select_project_draft(cx, work_dir);
+                    }
+                    continue;
+                }
                 let Some(entry) = session_entry_at_row(item_id) else {
                     continue;
                 };
@@ -1767,6 +1917,150 @@ impl App {
         }
     }
 
+    fn registered_project_dirs_or(&self, fallback: &Path) -> Vec<PathBuf> {
+        let dirs = self
+            .project_registry
+            .as_ref()
+            .map(|registry| {
+                registry
+                    .projects()
+                    .iter()
+                    .map(|project| project.path.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if dirs.is_empty() {
+            vec![fallback.to_path_buf()]
+        } else {
+            dirs
+        }
+    }
+
+    fn registered_project_dirs(&self) -> Vec<PathBuf> {
+        self.project_registry
+            .as_ref()
+            .map(|registry| {
+                registry
+                    .projects()
+                    .iter()
+                    .map(|project| project.path.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn refresh_registered_sessions(&self) {
+        refresh_sessions(&self.registered_project_dirs());
+    }
+
+    fn active_work_dir(&self) -> Option<&Path> {
+        self.workspace_state
+            .active_key()
+            .map(|key| key.work_dir.as_path())
+    }
+
+    fn is_attached_project(&self, work_dir: &Path) -> bool {
+        if let Some(registry) = self.project_registry.as_ref() {
+            return registry
+                .projects()
+                .iter()
+                .any(|project| project.path == work_dir && project.path.is_dir());
+        }
+        crate::panels::sessions::state::SESSIONS_DATA
+            .read()
+            .unwrap()
+            .projects
+            .iter()
+            .any(|project| project.work_dir == work_dir && project.available)
+    }
+
+    fn open_project_picker(&self) {
+        // rfd's macOS backend must be invoked from the application main thread.
+        // Makepad action handlers run there, so do not move this call to a worker.
+        let picked = rfd::FileDialog::new()
+            .set_title("Attach a project folder")
+            .pick_folder();
+        if let Some(tx) = self.tx.as_ref() {
+            let _ = tx.send(GuiAgentEvent::ProjectFolderPicked(Ok(picked)));
+            SignalToUI::set_ui_signal();
+        }
+    }
+
+    fn apply_project_folder_result(
+        &mut self,
+        cx: &mut Cx,
+        result: Result<Option<PathBuf>, String>,
+    ) {
+        let raw_path = match result {
+            Ok(Some(path)) => path,
+            Ok(None) => return,
+            Err(error) => {
+                self.push_chat(MsgRole::System, format!("Project picker failed: {error}"));
+                return;
+            }
+        };
+        let Some(registry) = self.project_registry.as_mut() else {
+            self.push_chat(MsgRole::System, "The project registry is unavailable.");
+            return;
+        };
+        match registry.attach(&raw_path) {
+            Ok(project) => {
+                self.refresh_registered_sessions();
+                self.select_project_draft(cx, project.path);
+                self.ui
+                    .mypi_command_text_input(cx, ids!(prompt_input))
+                    .text_input_ref(cx)
+                    .set_key_focus(cx);
+            }
+            Err(error) => self.push_chat(
+                MsgRole::System,
+                format!("Could not attach project: {error}"),
+            ),
+        }
+    }
+
+    fn detach_project(&mut self, cx: &mut Cx, work_dir: PathBuf) {
+        if is_project_working(&work_dir) {
+            self.push_chat(
+                MsgRole::System,
+                format!(
+                    "Stop all running sessions in `{}` before detaching it.",
+                    project_name(&work_dir)
+                ),
+            );
+            return;
+        }
+        let Some(registry) = self.project_registry.as_mut() else {
+            return;
+        };
+        match registry.detach(&work_dir) {
+            Ok(true) => {
+                let was_active = self.active_work_dir() == Some(work_dir.as_path());
+                self.session_runtimes
+                    .retain(|key, _| key.work_dir != work_dir);
+                let keys = self
+                    .workspace_state
+                    .keys_for_project(&work_dir)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for key in keys {
+                    self.workspace_state.remove(&key);
+                }
+                self.refresh_registered_sessions();
+                if was_active {
+                    if let Some(fallback) = self.registered_project_dirs().into_iter().next() {
+                        self.select_project_draft(cx, fallback);
+                    }
+                }
+            }
+            Ok(false) => {}
+            Err(error) => self.push_chat(
+                MsgRole::System,
+                format!("Could not detach project: {error}"),
+            ),
+        }
+    }
+
     fn current_credentials(&self, cx: &Cx) -> (String, Option<String>) {
         let mut api_key = self.ui.text_input(cx, ids!(api_key_input)).text();
         let mut account_id = None;
@@ -1789,6 +2083,119 @@ impl App {
             .select(SessionKey::new(work_dir, session_id));
     }
 
+    fn select_project_draft(&mut self, cx: &mut Cx, work_dir: PathBuf) {
+        if !work_dir.is_dir() {
+            self.push_chat(
+                MsgRole::System,
+                format!("Project folder `{}` is missing.", work_dir.display()),
+            );
+            return;
+        }
+        set_active_project(&work_dir);
+        if let Some(registry) = self.project_registry.as_mut() {
+            if let Err(error) = registry.remember_selection(&work_dir, None) {
+                self.push_chat(
+                    MsgRole::System,
+                    format!("Could not update recent-project state: {error}"),
+                );
+            }
+        }
+        self.select_workspace_ui(cx, work_dir.clone(), "draft".to_string());
+        let key = SessionKey::project_draft(work_dir.clone());
+        if !self.session_runtimes.contains_key(&key) {
+            let (api_key, account_id) = self.current_credentials(cx);
+            let model = self.ui.drop_down(cx, ids!(model_drop)).selected_label();
+            let model = if model.is_empty() {
+                "gpt-5.6-luna".to_string()
+            } else {
+                model
+            };
+            let effort = ReasoningEffort::from_label(
+                &self.ui.drop_down(cx, ids!(effort_drop)).selected_label(),
+            )
+            .unwrap_or_default();
+            let agent = CodingAgent::new(CodingAgentOptions {
+                api_key,
+                account_id,
+                model: model.clone(),
+                work_dir: work_dir.clone(),
+                session_file: None,
+            });
+            self.session_runtimes
+                .insert(key.clone(), SessionRuntime::new(agent, model, effort));
+        }
+        if let Some((model, effort)) = self
+            .session_runtimes
+            .get(&key)
+            .map(|runtime| (runtime.model.clone(), runtime.reasoning_effort))
+        {
+            self.set_model_dropup_options(cx, self.available_models.clone(), &model);
+            self.set_reasoning_effort_picker(cx, effort);
+        }
+        self.refresh_project_capabilities(cx, &work_dir);
+        self.restore_active_status(cx);
+        cx.redraw_all();
+    }
+
+    fn refresh_project_capabilities(&mut self, cx: &mut Cx, work_dir: &Path) {
+        let canonical = std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
+        let capabilities =
+            if let Some(cached) = self.capability_cache.get(&canonical) {
+                cached.clone()
+            } else {
+                let (api_key, account_id) = self.current_credentials(cx);
+                let agent = CodingAgent::new(CodingAgentOptions {
+                    api_key,
+                    account_id,
+                    model: "gpt-5.6-luna".to_string(),
+                    work_dir: canonical.clone(),
+                    session_file: None,
+                });
+                let skills = agent
+                    .skills
+                    .list_skills()
+                    .into_iter()
+                    .filter(|skill| skill.enabled && skill.is_valid)
+                    .collect::<Vec<_>>();
+                let agents = discover_agents(&canonical, AgentScope::Both).agents;
+                let subagent_enabled = agent
+                    .wasi_extensions
+                    .get_tools()
+                    .iter()
+                    .any(|tool| tool["function"]["name"] == "subagent");
+                let mut commands = builtin_commands();
+                commands.extend(skills.iter().map(|skill| CommandInfo {
+                    name: format!("skill {}", skill.id),
+                    description: format!(
+                        "{} · {}",
+                        skill.scope.display_name(),
+                        truncate_chars(&normalize_catalog_text(&skill.description), 120)
+                    ),
+                }));
+                for extension in agent.wasi_extensions.extensions.values() {
+                    commands.extend(extension.manifest.commands.iter().map(|command| {
+                        CommandInfo {
+                            name: command.name.clone(),
+                            description: command.description.clone(),
+                        }
+                    }));
+                }
+                let capabilities = ProjectCapabilities {
+                    summary: format_capabilities_summary(&skills, &agents, subagent_enabled),
+                    button_text: format!("{} skills · {} agents  ›", skills.len(), agents.len()),
+                    commands,
+                };
+                self.capability_cache
+                    .insert(canonical.clone(), capabilities.clone());
+                capabilities
+            };
+        self.capabilities_summary = capabilities.summary;
+        self.commands = capabilities.commands;
+        self.ui
+            .button(cx, ids!(caps_btn))
+            .set_text(cx, &capabilities.button_text);
+    }
+
     fn save_active_draft(&mut self, cx: &Cx) {
         let draft = self
             .ui
@@ -1803,6 +2210,16 @@ impl App {
     fn select_workspace_ui(&mut self, cx: &mut Cx, work_dir: PathBuf, session_id: String) {
         self.save_active_draft(cx);
         self.select_workspace(work_dir, session_id);
+        if let Some(key) = self.workspace_state.active_key() {
+            let home_dir = std::env::var_os("HOME").map(PathBuf::from);
+            self.ui
+                .label(cx, ids!(project_name_label))
+                .set_text(cx, &project_name(&key.work_dir));
+            self.ui.label(cx, ids!(workspace_label)).set_text(
+                cx,
+                &compact_workspace_path(&key.work_dir, home_dir.as_deref()),
+            );
+        }
         let draft = self
             .workspace_state
             .active_workspace()
@@ -1958,20 +2375,29 @@ impl App {
             cx.redraw_all();
             return;
         }
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let was_active = active_session_entry()
             .is_some_and(|active| active.id == entry.id && active.work_dir == entry.work_dir);
         let removed_key = SessionKey::new(entry.work_dir.clone(), entry.id.clone());
         self.workspace_state.remove(&removed_key);
         self.session_runtimes.remove(&removed_key);
-        refresh_sessions(&cwd);
+        self.refresh_registered_sessions();
 
         if was_active {
-            if let Some(fallback) = active_session_entry() {
+            let fallback = {
+                let data = crate::panels::sessions::state::SESSIONS_DATA
+                    .read()
+                    .unwrap();
+                data.projects
+                    .iter()
+                    .find(|project| project.work_dir == entry.work_dir)
+                    .and_then(|project| project.sessions.first())
+                    .cloned()
+            };
+            if let Some(fallback) = fallback {
                 self.activate_session(cx, fallback);
                 return;
             }
-            self.select_workspace_ui(cx, cwd, "draft".to_string());
+            self.select_project_draft(cx, entry.work_dir.clone());
         }
         self.push_chat(
             MsgRole::System,
@@ -1986,18 +2412,18 @@ impl App {
             cx.redraw_all();
             return;
         };
+        self.refresh_registered_sessions();
         self.activate_session(cx, entry);
     }
 
-    fn activate_session(&mut self, cx: &mut Cx, entry: SessionEntry) {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        if entry.work_dir != cwd {
+    fn activate_session(&mut self, cx: &mut Cx, mut entry: SessionEntry) {
+        entry.work_dir =
+            std::fs::canonicalize(&entry.work_dir).unwrap_or_else(|_| entry.work_dir.clone());
+        if !self.is_attached_project(&entry.work_dir) {
             self.push_chat(
                 MsgRole::System,
                 format!(
-                    "Session `{}` belongs to another project ({}). \
-                     Cross-project agent switch is not wired yet — open that folder to use it.",
-                    entry.title,
+                    "Attach `{}` before opening its sessions.",
                     entry.work_dir.display()
                 ),
             );
@@ -2008,6 +2434,15 @@ impl App {
         let key = SessionKey::new(entry.work_dir.clone(), entry.id.clone());
         self.select_workspace_ui(cx, entry.work_dir.clone(), entry.id.clone());
         set_active_session(&entry.work_dir, &entry.id);
+        if let Some(registry) = self.project_registry.as_mut() {
+            if let Err(error) = registry.remember_selection(&entry.work_dir, Some(&entry.id)) {
+                self.push_chat_to(
+                    key.clone(),
+                    MsgRole::System,
+                    format!("Could not update recent-project state: {error}"),
+                );
+            }
+        }
 
         if !self.session_runtimes.contains_key(&key) {
             let (api_key, account_id) = self.current_credentials(cx);
@@ -2048,6 +2483,7 @@ impl App {
             self.set_reasoning_effort_picker(cx, reasoning_effort);
         }
 
+        self.refresh_project_capabilities(cx, &entry.work_dir);
         self.restore_active_status(cx);
         cx.redraw_all();
     }
@@ -2092,7 +2528,10 @@ impl App {
         let reasoning_effort =
             ReasoningEffort::from_label(&self.ui.drop_down(cx, ids!(effort_drop)).selected_label())
                 .unwrap_or_default();
-        let work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let Some(active_key) = self.workspace_state.active_key().cloned() else {
+            return;
+        };
+        let work_dir = active_key.work_dir.clone();
 
         if show_in_chat
             && active_session_entry().is_none()
@@ -2106,15 +2545,20 @@ impl App {
             return;
         }
 
-        if show_in_chat && active_session_entry().is_none() {
+        if show_in_chat && active_key.is_draft() {
+            self.save_active_draft(cx);
             let Some(entry) = create_new_session(&work_dir) else {
                 self.push_chat(MsgRole::System, "Could not create a new session file.");
                 cx.redraw_all();
                 return;
             };
+            self.refresh_registered_sessions();
             set_active_session(&entry.work_dir, &entry.id);
-            self.select_workspace_ui(cx, entry.work_dir.clone(), entry.id.clone());
             let key = SessionKey::new(entry.work_dir.clone(), entry.id);
+            self.workspace_state
+                .move_workspace(&active_key, key.clone());
+            self.select_workspace_ui(cx, entry.work_dir.clone(), key.session_id.clone());
+            self.session_runtimes.remove(&active_key);
             let agent = CodingAgent::new(CodingAgentOptions {
                 api_key: api_key.clone(),
                 account_id: account_id.clone(),
@@ -2537,13 +2981,15 @@ impl App {
                         .flush_streaming();
                     self.set_session_status(cx, &key, UiStatus::Ready, "Ready");
 
-                    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                    refresh_sessions(&cwd);
+                    self.refresh_registered_sessions();
                 }
 
                 GuiAgentEvent::AvailableModelsLoaded(models) => {
                     let selected_model = self.ui.drop_down(cx, ids!(model_drop)).selected_label();
                     self.set_model_dropup_options(cx, models, &selected_model);
+                }
+                GuiAgentEvent::ProjectFolderPicked(result) => {
+                    self.apply_project_folder_result(cx, result);
                 }
                 GuiAgentEvent::DeviceCodePrompt { user_code, url } => {
                     if let Some(key) = self.auth_workspace.clone() {

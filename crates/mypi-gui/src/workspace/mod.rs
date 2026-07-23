@@ -10,11 +10,21 @@ pub struct SessionKey {
 }
 
 impl SessionKey {
+    const DRAFT_ID: &'static str = "draft";
+
     pub fn new(work_dir: PathBuf, session_id: impl Into<String>) -> Self {
         Self {
             work_dir: std::fs::canonicalize(&work_dir).unwrap_or(work_dir),
             session_id: session_id.into(),
         }
+    }
+
+    pub fn project_draft(work_dir: PathBuf) -> Self {
+        Self::new(work_dir, Self::DRAFT_ID)
+    }
+
+    pub fn is_draft(&self) -> bool {
+        self.session_id == Self::DRAFT_ID
     }
 }
 
@@ -80,6 +90,23 @@ impl AppState {
     pub fn active_workspace_mut(&mut self) -> Option<&mut SessionWorkspace> {
         let key = self.active.clone()?;
         self.workspaces.get_mut(&key)
+    }
+
+    pub fn keys_for_project<'a>(
+        &'a self,
+        work_dir: &'a std::path::Path,
+    ) -> impl Iterator<Item = &'a SessionKey> {
+        self.workspaces
+            .keys()
+            .filter(move |key| key.work_dir == work_dir)
+    }
+
+    pub fn move_workspace(&mut self, from: &SessionKey, to: SessionKey) {
+        let workspace = self.workspaces.remove(from).unwrap_or_default();
+        self.workspaces.insert(to.clone(), workspace);
+        if self.active.as_ref() == Some(from) {
+            self.active = Some(to);
+        }
     }
 
     pub fn remove(&mut self, key: &SessionKey) {
@@ -170,6 +197,63 @@ mod tests {
 
         let active = state.active_workspace().unwrap();
         assert!(active.chat.streaming_text.is_empty());
+    }
+
+    #[test]
+    fn interleaved_cross_project_events_stay_in_their_workspaces() {
+        let first = SessionKey::new(PathBuf::from("/one"), "session-a");
+        let second = SessionKey::new(PathBuf::from("/two"), "session-b");
+        let mut state = AppState::default();
+        state.select(second.clone());
+
+        state
+            .workspace_mut(first.clone())
+            .chat
+            .push_stream_delta(crate::state::StreamingKind::Assistant, "from-a");
+        state.workspace_mut(second.clone()).chat.push_tool(
+            "tool-b".into(),
+            "read_file".into(),
+            r#"{"path":"b.txt"}"#.into(),
+        );
+        state.workspace_mut(first.clone()).chat.flush_streaming();
+        state
+            .workspace_mut(second.clone())
+            .chat
+            .push_stream_delta(crate::state::StreamingKind::Assistant, "from-b");
+
+        let first_chat = &state.workspace(&first).unwrap().chat;
+        let second_chat = &state.workspace(&second).unwrap().chat;
+        assert_eq!(first_chat.messages.len(), 1);
+        assert!(first_chat.streaming_text.is_empty());
+        assert_eq!(second_chat.messages.len(), 1);
+        assert_eq!(second_chat.streaming_text, "from-b");
+        assert!(
+            matches!(first_chat.messages[0], ChatMessage::Text { ref text, .. } if text == "from-a")
+        );
+        assert!(
+            matches!(second_chat.messages[0], ChatMessage::Tool { ref id, .. } if id == "tool-b")
+        );
+        assert_eq!(state.active_key(), Some(&second));
+    }
+
+    #[test]
+    fn project_drafts_are_isolated_and_can_move_to_real_sessions() {
+        let first = SessionKey::project_draft(PathBuf::from("/one"));
+        let second = SessionKey::project_draft(PathBuf::from("/two"));
+        assert!(first.is_draft());
+        assert_ne!(first, second);
+
+        let mut state = AppState::default();
+        state.select(first.clone());
+        state.workspace_mut(first.clone()).ui.draft = "one draft".into();
+        state.select(second.clone());
+        state.workspace_mut(second.clone()).ui.draft = "two draft".into();
+
+        let real = SessionKey::new(PathBuf::from("/two"), "session-2");
+        state.move_workspace(&second, real.clone());
+        assert_eq!(state.workspace(&first).unwrap().ui.draft, "one draft");
+        assert_eq!(state.workspace(&real).unwrap().ui.draft, "two draft");
+        assert_eq!(state.active_key(), Some(&real));
     }
 
     #[test]

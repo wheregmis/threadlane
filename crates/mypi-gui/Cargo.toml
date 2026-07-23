@@ -18,3 +18,4 @@ base64 = "0.22"
 arboard = { version = "3.6", features = ["image-data"] }
 png = "0.18"
 robius-file-picker = { git = "https://github.com/project-robius/robius.git" }
+rfd = "0.17.2"
