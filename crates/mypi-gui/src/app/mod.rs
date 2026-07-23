@@ -13,10 +13,10 @@ use crate::panels::sessions::{
 };
 use crate::state::{
     active_session_entry, archive_session, begin_title_generation, builtin_commands,
-    create_new_session, delete_session, end_title_generation, first_existing_user_prompt,
-    is_project_working, is_session_working, normalize_session_title, project_work_dir_at_row,
-    refresh_sessions, session_entry_at_row, session_title_eligible, set_active_project,
-    set_active_session, set_session_context_target, set_session_working, truncate_chars,
+    create_new_session, delete_session, end_title_generation, is_project_working,
+    is_session_working, normalize_session_title, project_work_dir_at_row, refresh_sessions,
+    session_entry_at_row, session_title_eligible, set_active_project, set_active_session,
+    set_session_context_target, set_session_working, title_prompt_for_submission, truncate_chars,
     CommandInfo, GuiAgentEvent, MsgRole, SessionEntry, ToolStatus,
 };
 use crate::workspace::{AppState, SessionKey};
@@ -2397,7 +2397,6 @@ impl App {
             .widget(cx, ids!(model_picker))
             .set_visible(cx, presentation.show_model);
 
-        self.ui.button(cx, ids!(attach_btn)).set_visible(cx, true);
         self.ui
             .button(cx, ids!(send_btn))
             .set_visible(cx, !presentation.working);
@@ -2807,11 +2806,20 @@ impl App {
         let work_dir = entry.work_dir.clone();
         let session_id = entry.id.clone();
         let path = entry.session_file.clone();
-        let Ok(tree) = mypi_agent::SessionTree::load_from_file(&path) else {
+        let Ok(mut tree) = mypi_agent::SessionTree::load_from_file(&path) else {
             return;
         };
-        let title_prompt = first_existing_user_prompt(&tree).unwrap_or(prompt);
-        if !session_title_eligible(&tree) || !begin_title_generation(&work_dir, &session_id) {
+        let title_prompt = title_prompt_for_submission(&tree, Some(&prompt));
+        if !session_title_eligible(&tree, Some(&prompt)) {
+            return;
+        }
+        let Some(title_prompt) = title_prompt else {
+            return;
+        };
+        // The durable marker is written before the detached provider task is spawned.
+        if !tree.mark_title_attempted().unwrap_or(false)
+            || !begin_title_generation(&work_dir, &session_id)
+        {
             return;
         }
         let Some(tx) = self.tx.clone() else {

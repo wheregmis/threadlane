@@ -76,8 +76,23 @@ pub fn normalize_session_title(value: &str) -> String {
     title.chars().take(42).collect()
 }
 
-pub fn session_title_eligible(tree: &SessionTree) -> bool {
-    !tree.has_name() && first_existing_user_prompt(tree).is_some()
+pub fn session_title_eligible(tree: &SessionTree, submitted_prompt: Option<&str>) -> bool {
+    !tree.has_name()
+        && (first_existing_user_prompt(tree).is_some()
+            || submitted_prompt.is_some_and(|prompt| !prompt.trim().is_empty()))
+}
+
+/// Select the first persisted prompt for legacy sessions, or the prompt being
+/// submitted when this is the first turn of a fresh session.
+pub fn title_prompt_for_submission(
+    tree: &SessionTree,
+    submitted_prompt: Option<&str>,
+) -> Option<String> {
+    first_existing_user_prompt(tree).or_else(|| {
+        submitted_prompt
+            .filter(|prompt| !prompt.trim().is_empty())
+            .map(str::to_owned)
+    })
 }
 
 pub fn first_existing_user_prompt(tree: &SessionTree) -> Option<String> {
@@ -493,12 +508,12 @@ mod tests {
     fn named_sessions_are_not_title_eligible() {
         let mut named = SessionTree::new("named");
         named.name = Some("Already named".into());
-        assert!(!session_title_eligible(&named));
+        assert!(!session_title_eligible(&named, None));
         let mut unnamed = SessionTree::new("unnamed");
         unnamed.add_message(AgentMessage::User {
             content: "first turn".into(),
         });
-        assert!(session_title_eligible(&unnamed));
+        assert!(session_title_eligible(&unnamed, None));
     }
 
     #[test]
@@ -532,6 +547,26 @@ mod tests {
     }
 
     #[test]
+    fn fresh_unnamed_session_uses_submitted_prompt_for_title_trigger() {
+        let tree = SessionTree::new("fresh");
+        let submitted = "  Explain the authentication flow  ";
+
+        assert!(session_title_eligible(&tree, Some(submitted)));
+        assert_eq!(
+            title_prompt_for_submission(&tree, Some(submitted)).as_deref(),
+            Some(submitted)
+        );
+    }
+
+    #[test]
+    fn attachment_only_submission_is_not_a_title_trigger() {
+        let tree = SessionTree::new("fresh-attachment");
+
+        assert!(!session_title_eligible(&tree, Some(" \n\t ")));
+        assert_eq!(title_prompt_for_submission(&tree, Some(" \n\t ")), None);
+    }
+
+    #[test]
     fn attachment_only_message_has_no_title_prompt() {
         let mut tree = SessionTree::new("image");
         tree.add_message(AgentMessage::UserWithImages {
@@ -539,7 +574,7 @@ mod tests {
             images: Vec::new(),
         });
         assert!(first_existing_user_prompt(&tree).is_none());
-        assert!(!session_title_eligible(&tree));
+        assert!(!session_title_eligible(&tree, None));
     }
 
     #[test]
