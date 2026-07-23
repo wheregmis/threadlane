@@ -141,9 +141,12 @@ script_mod! {
                 }
                 header: ActivityHeader {
                     icon_tile +: {
-                        icon_lbl +: {
-                            text: "⋯"
-                            draw_text +: { color: #x8d8aa3 }
+                        icon_stack +: {
+                            icon_generic +: { visible: false }
+                            icon_thinking +: {
+                                visible: true
+                                icon +: { draw_icon +: { color: #x8d8aa3 } }
+                            }
                         }
                     }
                     title_lbl +: {
@@ -343,20 +346,13 @@ script_mod! {
                 spacing: 7
                 align: Align{y: 0.5}
                 padding: Inset{left: 10 top: 3 right: 5 bottom: 3}
-                View {
-                    width: 14
-                    height: 12
-                    show_bg: true
-                    draw_bg +: {
-                        color: uniform(#x8090a3)
-                        pixel: fn() {
-                            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                            sdf.box(2.0, 1.0, 5.5, 4.0, 1.0)
-                            sdf.fill_keep(self.color)
-                            sdf.box(1.0, 3.0, 12.0, 8.0, 1.5)
-                            sdf.stroke(self.color, 1.0)
-                            return sdf.result
-                        }
+                Icon {
+                    width: 15
+                    height: 15
+                    icon_walk: Walk{width: 15 height: 15}
+                    draw_icon +: {
+                        svg: crate_resource("self:resources/icons/folder.svg")
+                        color: #x8090a3
                     }
                 }
                 name_lbl := Label {
@@ -368,17 +364,29 @@ script_mod! {
                         text_style: theme.font_bold { font_size: 9.75 }
                     }
                 }
-                new_project_session_btn := glass.GlassButton {
-                    width: 24
-                    height: 22
+                new_project_session_btn := Button {
+                    width: 26
+                    height: 24
+                    margin: 0
                     padding: 0
-                    text: "+"
-                    draw_text +: {
-                        color: #xeef2f7
-                        text_style: theme.font_bold { font_size: 10.5 }
+                    text: ""
+                    align: Align{x: 0.5 y: 0.5}
+                    icon_walk: Walk{width: 12 height: 12}
+                    draw_icon +: {
+                        svg: crate_resource("self:resources/icons/plus.svg")
+                        color: #xaeb8c5
                     }
-                    draw_glass +: {
-                        corner_radius: 5.0
+                    draw_bg +: {
+                        color: #x00000000
+                        color_hover: #x2a313c
+                        color_focus: #x2a313c
+                        color_down: #x354153
+                        border_color: #x00000000
+                        border_color_hover: #x4a5564
+                        border_color_focus: #x4a5564
+                        border_color_down: #x6fa8ff
+                        border_size: 1.0
+                        border_radius: 6.0
                     }
                 }
             }
@@ -389,6 +397,9 @@ script_mod! {
                 draw_bg +: {
                     color: #x3a424e
                     color_hover: #x46505d
+                }
+                session_icon +: {
+                    draw_icon +: { color: #x9fc3ef }
                 }
                 title_lbl +: {
                     draw_text +: {
@@ -414,6 +425,9 @@ script_mod! {
                     border_color: #x4f82bd
                     border_size: 1.0
                     border_radius: 6.0
+                }
+                session_icon +: {
+                    draw_icon +: { color: #x8fb9e8 }
                 }
                 title_lbl +: {
                     draw_text +: {
@@ -668,7 +682,7 @@ script_mod! {
                                 }
                             }
 
-                            input_bar := mod.components.WarmComposerSurface {
+                            input_bar := mod.components.ComposerSurface {
                                 width: Fill
                                 height: Fit
                                 flow: Down
@@ -676,12 +690,12 @@ script_mod! {
                                 padding: Inset{left: 9 top: 7 right: 7 bottom: 7}
                                 new_batch: true
                                 draw_bg +: {
-                                    color: #x29231f
-                                    color_hover: #x2f2823
-                                    color_focus: #x342a24
-                                    border_color: #x51443d
-                                    border_color_focus: #xb96543
-                                    border_color_down: #xd49a52
+                                    color: #x1f232b
+                                    color_hover: #x232830
+                                    color_focus: #x252b35
+                                    border_color: #x3a424e
+                                    border_color_focus: #x4a6f9e
+                                    border_color_down: #x6fa8ff
                                     border_color_error: #xb85c55
                                     border_size: 1.0
                                     border_radius: 11.0
@@ -692,8 +706,8 @@ script_mod! {
                                     height: Fit
                                     trigger: "/"
                                     inline_search: true
-                                    color_focus: #x342a24
-                                    color_hover: #x302722
+                                    color_focus: #x252b35
+                                    color_hover: #x232830
 
                                     persistent +: {
                                         width: Fill
@@ -723,12 +737,12 @@ script_mod! {
                                                     border_size: 0.0
                                                 }
                                                 draw_text +: {
-                                                    color: #xffeee2
-                                                    color_hover: #xfffff5
-                                                    color_focus: #xfffff5
-                                                    color_empty: #x9f8879
-                                                    color_empty_hover: #xb39a88
-                                                    color_empty_focus: #xb39a88
+                                                    color: #xdde3ea
+                                                    color_hover: #xffffff
+                                                    color_focus: #xffffff
+                                                    color_empty: #x7f8b9a
+                                                    color_empty_hover: #x9aa5b3
+                                                    color_empty_focus: #x9aa5b3
                                                     text_style +: {
                                                         font_size: 10.5
                                                         line_spacing: 1.35
@@ -752,16 +766,16 @@ script_mod! {
                                         visible: false
                                         text: "Plan · 0 steps"
                                         draw_bg +: {
-                                            color: #x332a25
-                                            color_hover: #x46332a
-                                            color_down: #x59402c
-                                            border_color: #x604a3f
-                                            border_color_hover: #xa86a4c
+                                            color: #x232830
+                                            color_hover: #x2a313c
+                                            color_down: #x354153
+                                            border_color: #x3a424e
+                                            border_color_hover: #x4a5564
                                             border_size: 1.0
                                             border_radius: 6.0
                                         }
                                         draw_text +: {
-                                            color: #xd8c0ad
+                                            color: #xc7cdd6
                                             text_style +: { font_size: 9.0 }
                                         }
                                     }
@@ -772,12 +786,12 @@ script_mod! {
                                         visible: false
                                         text: ""
                                         draw_text +: {
-                                            color: #xb39a88
+                                            color: #x9aa5b3
                                             text_style +: { font_size: 8.5 }
                                         }
                                     }
 
-                                    stop_btn := mod.components.WarmComposerAction {
+                                    stop_btn := mod.components.ComposerAction {
                                         width: Fit
                                         height: 28
                                         visible: false
@@ -794,7 +808,7 @@ script_mod! {
                                         height: Fit
                                         text: "Enter to send · Shift+Enter for newline"
                                         draw_text +: {
-                                            color: #xb39a88
+                                            color: #x7f8b9a
                                             text_style +: { font_size: 8.5 }
                                         }
                                     }
@@ -805,16 +819,15 @@ script_mod! {
                                         width: 158
                                         height: 28
                                         visible: false
-                                        flow: Overlay
+                                        flow: Down
                                         clip_x: false
                                         clip_y: false
-                                        align: Align{x: 0.0 y: 1.0}
 
                                         model_drop := DropDown {
-                                            width: 158
-                                            height: 1
-                                            margin: Inset{bottom: 58}
-                                            padding: 0
+                                            width: Fill
+                                            height: Fill
+                                            margin: 0
+                                            padding: Inset{left: 10 right: 24}
                                             labels: [
                                                 "gpt-5.6-luna",
                                                 "gpt-5.4",
@@ -827,15 +840,27 @@ script_mod! {
                                                 "gpt-4o-mini"
                                             ]
                                             draw_bg +: {
-                                                pixel: fn() {
-                                                    return vec4(0.0, 0.0, 0.0, 0.0)
-                                                }
+                                                color: #x232830
+                                                color_hover: #x2a313c
+                                                color_focus: #x2f3a4d
+                                                color_down: #x354153
+                                                border_color: #x3a424e
+                                                border_color_hover: #x4a5564
+                                                border_color_focus: #x6fa8ff
+                                                border_color_down: #x6fa8ff
+                                                border_size: 1.0
+                                                border_radius: 6.0
+                                                arrow_color: #x7f8b9a
+                                                arrow_color_hover: #xc7cdd6
+                                                arrow_color_focus: #xc7cdd6
+                                                arrow_color_down: #xffffff
                                             }
                                             draw_text +: {
-                                                color: #x00000000
-                                                color_hover: #x00000000
-                                                color_focus: #x00000000
-                                                color_down: #x00000000
+                                                color: #xc7cdd6
+                                                color_hover: #xdde3ea
+                                                color_focus: #xdde3ea
+                                                color_down: #xffffff
+                                                text_style +: { font_size: 9.5 }
                                             }
                                             popup_menu: PopupMenuFlat {
                                                 width: 220
@@ -863,55 +888,19 @@ script_mod! {
                                             }
                                         }
 
-                                        model_picker_btn := Button {
-                                            width: Fill
-                                            height: Fill
-                                            text: "gpt-5.6-luna"
-                                            align: Align{x: 0.0 y: 0.5}
-                                            padding: Inset{left: 10 right: 24}
-                                            draw_bg +: {
-                                                color: #x332a25
-                                                color_hover: #x46332a
-                                                color_down: #x59402c
-                                                border_color: #x604a3f
-                                                border_color_hover: #xa86a4c
-                                                border_color_down: #xb96543
-                                                border_size: 1.0
-                                                border_radius: 6.0
-                                            }
-                                            draw_text +: {
-                                                color: #xd8c0ad
-                                                color_hover: #xf0d7c1
-                                                color_down: #xffe4ca
-                                                text_style +: { font_size: 9.5 }
-                                            }
-                                        }
-
-                                        View {
-                                            width: Fill
-                                            height: Fill
-                                            align: Align{x: 1.0 y: 0.5}
-                                            padding: Inset{right: 9}
-                                            Label {
-                                                width: Fit
-                                                height: Fit
-                                                text: "⌃"
-                                                draw_text +: {
-                                                    color: #x7f8b9a
-                                                    text_style +: { font_size: 8.5 }
-                                                }
-                                            }
-                                        }
                                     }
 
-                                    send_btn := mod.components.WarmComposerAction {
+                                    send_btn := mod.components.ComposerAction {
                                         width: 34
                                         height: 30
+                                        margin: 0
                                         padding: 0
-                                        text: "↑"
-                                        draw_text +: {
-                                            color: #xfff5ea
-                                            text_style: theme.font_bold { font_size: 12.0 }
+                                        text: ""
+                                        align: Align{x: 0.5 y: 0.5}
+                                        icon_walk: Walk{width: 15 height: 15}
+                                        draw_icon +: {
+                                            svg: crate_resource("self:resources/icons/send.svg")
+                                            color: #xffffff
                                         }
                                     }
                                 }
@@ -1255,7 +1244,6 @@ impl MatchEvent for App {
                         .mypi_command_text_input(cx, ids!(prompt_input))
                         .text_input_ref(cx)
                         .set_text(cx, &draft);
-                    self.composer_state.set_has_text(!draft.trim().is_empty());
                 }
                 self.submitted_draft = None;
                 self.set_status(cx, UiStatus::Ready, "Stopped");
@@ -1279,7 +1267,7 @@ impl MatchEvent for App {
         let session_list = self.ui.portal_list(cx, ids!(session_list.list));
         for (item_id, item) in session_list.items_with_actions(actions) {
             if item
-                .glass_button(cx, ids!(new_project_session_btn))
+                .button(cx, ids!(new_project_session_btn))
                 .clicked(actions)
                 && !self.busy
             {
@@ -1338,38 +1326,6 @@ impl MatchEvent for App {
                 },
                 false,
             );
-        }
-
-        // Keep the presentation state synchronized with the input's actual actions;
-        // this also preserves the command popup's own focus handling.
-        let prompt_uid = cti.text_input_ref(cx).widget_uid();
-        for action in actions
-            .iter()
-            .filter_map(|action| action.as_widget_action())
-        {
-            if action.widget_uid != prompt_uid {
-                continue;
-            }
-            match action.cast::<TextInputAction>() {
-                TextInputAction::KeyFocus => self.composer_state.set_focused(true),
-                TextInputAction::KeyFocusLost => self.composer_state.set_focused(false),
-                TextInputAction::Changed(_) => {}
-                _ => continue,
-            }
-            let draft = cti.text_input_ref(cx).text();
-            self.composer_state.set_has_text(!draft.trim().is_empty());
-            self.apply_composer_presentation(cx);
-        }
-
-        if self.ui.button(cx, ids!(model_picker_btn)).clicked(actions) {
-            if let Some(mut model_drop) = self
-                .ui
-                .widget(cx, ids!(model_drop))
-                .borrow_mut::<DropDown>()
-            {
-                model_drop.set_key_focus(cx);
-                model_drop.set_active(cx);
-            }
         }
 
         if self
@@ -1509,9 +1465,6 @@ impl App {
         let model_drop = self.ui.drop_down(cx, ids!(model_drop));
         model_drop.set_labels(cx, ordered);
         model_drop.set_selected_item(cx, selected_item);
-        self.ui
-            .button(cx, ids!(model_picker_btn))
-            .set_text(cx, &self.available_models[selected_item]);
     }
 
     fn select_workspace(&mut self, work_dir: PathBuf, session_id: impl Into<String>) {
@@ -1586,18 +1539,6 @@ impl App {
 
     fn apply_composer_presentation(&mut self, cx: &mut Cx) {
         let presentation = self.composer_state.presentation();
-        // Geometry is updated through the script runtime so the live widget tree
-        // gets the same Makepad layout values as the declarative style. Idle is
-        // compact; any focused, typed, working, or error state gets the full
-        // footer and comfortable surface padding.
-        let footer_height = if presentation.expanded { 30.0 } else { 0.0 };
-        let mut input_bar = self.ui.widget(cx, ids!(input_bar));
-        let mut footer = input_bar.widget(cx, ids!(composer_footer));
-        script_apply_eval!(cx, footer, {
-            height: #(footer_height)
-        });
-        footer.set_visible(cx, presentation.expanded);
-        input_bar.redraw(cx);
         self.ui
             .widget(cx, ids!(composer_status))
             .set_visible(cx, presentation.working || presentation.show_error);
@@ -2089,7 +2030,6 @@ impl App {
                                 .mypi_command_text_input(cx, ids!(prompt_input))
                                 .text_input_ref(cx)
                                 .set_text(cx, &draft);
-                            self.composer_state.set_has_text(true);
                         }
                     }
                 }

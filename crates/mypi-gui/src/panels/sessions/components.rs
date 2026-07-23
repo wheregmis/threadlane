@@ -344,7 +344,7 @@ script_mod! {
         spacing: 7
         align: Align{y: 0.5}
         margin: Inset{left: 6 right: 6 top: 1 bottom: 1}
-        padding: Inset{left: 30 top: 5 right: 9 bottom: 5}
+        padding: Inset{left: 12 top: 5 right: 9 bottom: 5}
         draw_bg +: {
             hover: instance(0.0)
             color: #x00000000
@@ -378,6 +378,15 @@ script_mod! {
                     from: {all: Forward {duration: 0.08}}
                     apply: {draw_bg: {hover: snap(1.0)}}
                 }
+            }
+        }
+        session_icon := Icon {
+            width: 13
+            height: 13
+            icon_walk: Walk{width: 13 height: 13}
+            draw_icon +: {
+                svg: crate_resource("self:resources/icons/conversation.svg")
+                color: #x657181
             }
         }
         title_lbl := Label {

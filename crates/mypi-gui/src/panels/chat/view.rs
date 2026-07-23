@@ -1,8 +1,27 @@
 //! Chat panel main view & transcript list widget.
 
-use super::state::{truncate_chars, ChatMessage, MsgRole, StreamingKind};
+use super::state::{truncate_chars, ChatMessage, MsgRole, StreamingKind, ToolIcon};
 use crate::workspace::AppState;
 use makepad_widgets::*;
+
+fn show_tool_icon(cx: &mut Cx, item: &WidgetRef, selected: ToolIcon) {
+    item.widget(cx, ids!(icon_generic))
+        .set_visible(cx, selected == ToolIcon::Generic);
+    item.widget(cx, ids!(icon_read_file))
+        .set_visible(cx, selected == ToolIcon::ReadFile);
+    item.widget(cx, ids!(icon_write_file))
+        .set_visible(cx, selected == ToolIcon::WriteFile);
+    item.widget(cx, ids!(icon_edit_file))
+        .set_visible(cx, selected == ToolIcon::EditFile);
+    item.widget(cx, ids!(icon_list_directory))
+        .set_visible(cx, selected == ToolIcon::ListDirectory);
+    item.widget(cx, ids!(icon_terminal))
+        .set_visible(cx, selected == ToolIcon::Terminal);
+    item.widget(cx, ids!(icon_skill))
+        .set_visible(cx, selected == ToolIcon::Skill);
+    item.widget(cx, ids!(icon_subagent))
+        .set_visible(cx, selected == ToolIcon::Subagent);
+}
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct ChatList {
@@ -83,9 +102,7 @@ impl Widget for ChatList {
                                 ..
                             } => {
                                 let item_widget = list.item(cx, item_id, id!(ToolMsg));
-                                item_widget
-                                    .label(cx, ids!(icon_lbl))
-                                    .set_text(cx, &presentation.icon);
+                                show_tool_icon(cx, &item_widget, presentation.icon);
                                 item_widget
                                     .label(cx, ids!(title_lbl))
                                     .set_text(cx, &presentation.title);

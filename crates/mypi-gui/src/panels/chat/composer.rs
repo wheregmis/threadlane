@@ -58,7 +58,6 @@ pub enum ComposerStatus {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ComposerPresentation {
-    pub expanded: bool,
     pub show_model: bool,
     pub show_plan: bool,
     pub working: bool,
@@ -70,8 +69,6 @@ pub struct ComposerPresentation {
 pub struct ComposerState {
     status: ComposerStatus,
     status_text: String,
-    focused: bool,
-    has_text: bool,
     plan_relevant: bool,
 }
 
@@ -80,8 +77,6 @@ impl ComposerState {
         Self {
             status: ComposerStatus::Ready,
             status_text: String::new(),
-            focused: false,
-            has_text: false,
             plan_relevant: false,
         }
     }
@@ -94,14 +89,6 @@ impl ComposerState {
         };
     }
 
-    pub fn set_focused(&mut self, focused: bool) {
-        self.focused = focused;
-    }
-
-    pub fn set_has_text(&mut self, has_text: bool) {
-        self.has_text = has_text;
-    }
-
     pub fn set_plan_relevant(&mut self, plan_relevant: bool) {
         self.plan_relevant = plan_relevant;
     }
@@ -109,12 +96,10 @@ impl ComposerState {
     pub fn presentation(&self) -> ComposerPresentation {
         let working = self.status == ComposerStatus::Working;
         let show_error = self.status == ComposerStatus::Error;
-        let expanded = self.focused || self.has_text || working || show_error;
 
         ComposerPresentation {
-            expanded,
-            show_model: expanded && !working,
-            show_plan: expanded && self.plan_relevant && !working,
+            show_model: !working,
+            show_plan: self.plan_relevant && !working,
             working,
             show_error,
             status_text: self.status_text.clone(),
@@ -214,37 +199,18 @@ mod tests {
     }
 
     #[test]
-    fn idle_is_compact_and_hides_adaptive_controls() {
+    fn idle_keeps_composer_controls_available() {
         let state = ComposerState::new();
         assert_eq!(
             state.presentation(),
             ComposerPresentation {
-                expanded: false,
-                show_model: false,
+                show_model: true,
                 show_plan: false,
                 working: false,
                 show_error: false,
                 status_text: String::new(),
             }
         );
-    }
-
-    #[test]
-    fn focus_expands_and_reveals_model_without_forcing_plan() {
-        let mut state = ComposerState::new();
-        state.set_focused(true);
-        let presentation = state.presentation();
-        assert!(presentation.expanded);
-        assert!(presentation.show_model);
-        assert!(!presentation.show_plan);
-    }
-
-    #[test]
-    fn typing_expands_composer() {
-        let mut state = ComposerState::new();
-        state.set_has_text(true);
-        assert!(state.presentation().expanded);
-        assert!(state.presentation().show_model);
     }
 
     #[test]
@@ -269,13 +235,11 @@ mod tests {
     }
 
     #[test]
-    fn plan_visibility_is_independent_and_requires_relevant_plan() {
+    fn plan_visibility_requires_a_relevant_plan() {
         let mut state = ComposerState::new();
-        state.set_focused(true);
         state.set_plan_relevant(true);
         assert!(state.presentation().show_plan);
-        state.set_focused(false);
-        state.set_has_text(false);
+        state.set_plan_relevant(false);
         assert!(!state.presentation().show_plan);
     }
 }

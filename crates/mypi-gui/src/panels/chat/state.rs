@@ -28,9 +28,21 @@ impl ToolStatus {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolIcon {
+    ReadFile,
+    WriteFile,
+    EditFile,
+    ListDirectory,
+    Terminal,
+    Skill,
+    Subagent,
+    Generic,
+}
+
 #[derive(Clone, Debug)]
 pub struct ToolPresentation {
-    pub icon: String,
+    pub icon: ToolIcon,
     pub title: String,
     pub primary: String,
     pub metadata: String,
@@ -276,16 +288,16 @@ fn flush_streaming_locked(data: &mut ChatData) {
     }
 }
 
-pub fn tool_icon(name: &str) -> &'static str {
+pub fn tool_icon(name: &str) -> ToolIcon {
     match name {
-        "read_file" => "⌕",
-        "write_file" => "+",
-        "edit_file" => "✎",
-        "list_dir" => "□",
-        "run_command" => "›_",
-        "load_skill" => "◇",
-        "subagent" => "↗",
-        _ => "•",
+        "read_file" => ToolIcon::ReadFile,
+        "write_file" => ToolIcon::WriteFile,
+        "edit_file" => ToolIcon::EditFile,
+        "list_dir" => ToolIcon::ListDirectory,
+        "run_command" => ToolIcon::Terminal,
+        "load_skill" => ToolIcon::Skill,
+        "subagent" => ToolIcon::Subagent,
+        _ => ToolIcon::Generic,
     }
 }
 
@@ -387,7 +399,7 @@ pub fn tool_presentation(name: &str, arguments: &str) -> ToolPresentation {
     };
 
     ToolPresentation {
-        icon: tool_icon(name).into(),
+        icon: tool_icon(name),
         title: tool_title(name),
         primary,
         metadata,
@@ -637,7 +649,7 @@ mod tests {
     fn load_skill_has_a_compact_markdown_presentation() {
         let presentation = tool_presentation("load_skill", r#"{"name":"rust-review"}"#);
 
-        assert_eq!(presentation.icon, "◇");
+        assert_eq!(presentation.icon, ToolIcon::Skill);
         assert_eq!(presentation.title, "Load skill");
         assert_eq!(presentation.primary, "rust-review");
         assert_eq!(presentation.metadata, "skill instructions");
@@ -657,7 +669,7 @@ mod tests {
         .to_string();
         let presentation = tool_presentation("subagent", &arguments);
 
-        assert_eq!(presentation.icon, "↗");
+        assert_eq!(presentation.icon, ToolIcon::Subagent);
         assert_eq!(presentation.title, "Delegate");
         assert_eq!(presentation.primary, "2 tasks");
         assert_eq!(presentation.metadata, "parallel · scout, reviewer");

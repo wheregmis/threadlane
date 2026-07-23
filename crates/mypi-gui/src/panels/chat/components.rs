@@ -159,6 +159,18 @@ impl ToolFoldHeader {
 script_mod! {
     use mod.prelude.widgets.*
 
+    mod.components.ActivitySvgIcon = View {
+        width: 14
+        height: 14
+        visible: false
+        icon := Icon {
+            width: Fill
+            height: Fill
+            icon_walk: Walk{width: 14 height: 14}
+            draw_icon +: { color: #x7f8b9a }
+        }
+    }
+
     mod.components.ActivityHeader = RoundedView {
         width: Fit
         height: 28
@@ -176,13 +188,37 @@ script_mod! {
             width: 20
             height: 20
             align: Align{x: 0.5 y: 0.5}
-            icon_lbl := Label {
-                width: Fit
-                height: Fit
-                text: "•"
-                draw_text +: {
-                    color: #x7f8b9a
-                    text_style: theme.font_bold { font_size: 9.5 }
+            icon_stack := View {
+                width: 14
+                height: 14
+                flow: Overlay
+                icon_generic := mod.components.ActivitySvgIcon {
+                    visible: true
+                    icon +: { draw_icon +: { svg: crate_resource("self:resources/icons/tool.svg") } }
+                }
+                icon_thinking := mod.components.ActivitySvgIcon {
+                    icon +: { draw_icon +: { svg: crate_resource("self:resources/icons/thinking.svg") } }
+                }
+                icon_read_file := mod.components.ActivitySvgIcon {
+                    icon +: { draw_icon +: { svg: crate_resource("self:resources/icons/read-file.svg") } }
+                }
+                icon_write_file := mod.components.ActivitySvgIcon {
+                    icon +: { draw_icon +: { svg: crate_resource("self:resources/icons/write-file.svg") } }
+                }
+                icon_edit_file := mod.components.ActivitySvgIcon {
+                    icon +: { draw_icon +: { svg: crate_resource("self:resources/icons/edit-file.svg") } }
+                }
+                icon_list_directory := mod.components.ActivitySvgIcon {
+                    icon +: { draw_icon +: { svg: crate_resource("self:resources/icons/list-directory.svg") } }
+                }
+                icon_terminal := mod.components.ActivitySvgIcon {
+                    icon +: { draw_icon +: { svg: crate_resource("self:resources/icons/terminal.svg") } }
+                }
+                icon_skill := mod.components.ActivitySvgIcon {
+                    icon +: { draw_icon +: { svg: crate_resource("self:resources/icons/skill.svg") } }
+                }
+                icon_subagent := mod.components.ActivitySvgIcon {
+                    icon +: { draw_icon +: { svg: crate_resource("self:resources/icons/subagent.svg") } }
                 }
             }
         }

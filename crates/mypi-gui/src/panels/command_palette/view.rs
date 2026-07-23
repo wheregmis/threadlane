@@ -4,16 +4,16 @@ use super::state::CommandInfo;
 use makepad_widgets::text::selection::Cursor;
 use makepad_widgets::*;
 use unicode_segmentation::UnicodeSegmentation;
-fn warm_active_row() -> Vec4f {
-    vec4(0.349, 0.251, 0.173, 1.0)
+fn active_row_color() -> Vec4f {
+    vec4(0.208, 0.255, 0.325, 1.0)
 }
 
-fn warm_hover_row() -> Vec4f {
-    vec4(0.275, 0.2, 0.165, 1.0)
+fn hover_row_color() -> Vec4f {
+    vec4(0.188, 0.22, 0.267, 1.0)
 }
 
-fn warm_command_name() -> Vec4f {
-    vec4(1.0, 0.933, 0.886, 1.0)
+fn command_name_color() -> Vec4f {
+    vec4(0.867, 0.89, 0.918, 1.0)
 }
 
 script_mod! {
@@ -33,10 +33,10 @@ script_mod! {
             visible: false
 
             draw_bg +: {
-                color: #x29231f
+                color: #x1f232b
                 border_size: 1.0
-                border_color: #x604a3f
-                border_color_focus: #xb96543
+                border_color: #x3a424e
+                border_color_focus: #x6fa8ff
                 border_radius: 9.0
 
                 pixel: fn() {
@@ -139,7 +139,7 @@ script_mod! {
                         height: Fit
                         text: ""
                         draw_text +: {
-                            color: #xd17b50
+                            color: #x6fa8ff
                             text_style: theme.font_bold { font_size: 12.0 }
                         }
                     }
@@ -153,7 +153,7 @@ script_mod! {
                             height: Fit
                             text: ""
                             draw_text +: {
-                                color: #xffeee2
+                                color: #xdde3ea
                                 text_style: theme.font_code { font_size: 10.5 }
                             }
                         }
@@ -162,7 +162,7 @@ script_mod! {
                             height: Fit
                             text: ""
                             draw_text +: {
-                                color: #xb39a88
+                                color: #x7f8b9a
                                 text_style +: { font_size: 9.0 }
                             }
                         }
@@ -275,13 +275,13 @@ impl Widget for MypiCommandTextInput {
                         .set_text(cx, if is_active { "›" } else { "" });
 
                     let color = if is_active {
-                        warm_active_row()
+                        active_row_color()
                     } else if Some(item_id) == self.pointer_hover_index {
-                        warm_hover_row()
+                        hover_row_color()
                     } else {
                         Vec4f::all(0.)
                     };
-                    let name_color = warm_command_name();
+                    let name_color = command_name_color();
                     let mut name_label = item_widget.label(cx, ids!(cmd_name));
                     script_apply_eval!(cx, name_label, {
                         draw_text +: { color: #(name_color) }
