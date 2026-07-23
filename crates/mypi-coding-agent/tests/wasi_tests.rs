@@ -106,6 +106,37 @@ fn broker_import_queues_accepted_requests_and_returns_denials_to_the_extension()
     assert!(result.broker_requests.is_empty());
 }
 
+#[tokio::test]
+async fn wasm_extension_receives_broker_response_on_next_invocation() {
+    let extension = WasiExtension::load_from_file(&build_broker_smoke_extension(false)).unwrap();
+    let name = extension.manifest.name.clone();
+    let mut manager = WasiExtensionManager::new();
+    manager.extensions.insert(name, extension);
+
+    let initial = manager
+        .execute_command_with_effects("broker-smoke", r#"{"mode":"result-event"}"#)
+        .unwrap()
+        .unwrap();
+    let mut dispatcher = CapabilityDispatcher::new();
+    dispatcher.register(
+        "tools",
+        Arc::new(RecordingCapabilityHandler {
+            recorded: Arc::new(Mutex::new(Vec::new())),
+        }),
+    );
+    let dispatch = dispatcher
+        .dispatch_envelopes(initial.host_broker_requests)
+        .await
+        .unwrap();
+    manager.enqueue_broker_results(dispatch.operation_results);
+
+    let next = manager
+        .execute_command_with_effects("broker-smoke", "")
+        .unwrap()
+        .unwrap();
+    assert!(next.message.contains("received broker_response event"));
+}
+
 #[test]
 fn restrictive_host_grant_denies_declared_capability() {
     let extension = WasiExtension::load_from_file(&build_broker_smoke_extension(false)).unwrap();

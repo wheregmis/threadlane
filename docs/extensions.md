@@ -127,7 +127,7 @@ JSON in the broker response.
 | Capability | Operations | Contract |
 | --- | --- | --- |
 | `tools` | `set_policy`, `get_policy` | Set policy to `read_only` or `full`, or read the current policy. |
-| `agent` | `request_turn`, `queue_message` | Queue a non-empty model prompt or message for the agent. |
+| `agent` | `request_turn`, `queue_message` | `request_turn` schedules a non-empty prompt for a host-managed agent turn; `queue_message` queues a non-empty user message for the agent's follow-up queue. Both return an asynchronous acknowledgement/result event after scheduling. |
 | `session` | `get_extension_state`, `set_extension_state` | Read or update only the invoking extension's persisted state. |
 | `fs` | `read_text`, `write_text`, `list` | Read, write, or list UTF-8 workspace files. |
 | `process` | `run` | Run a program with string arguments in the workspace directory; returns exit code, stdout, and stderr. |
@@ -183,12 +183,13 @@ A v1 invocation receives JSON and returns JSON:
 }
 ```
 
-`state` is scoped to the loaded extension for the lifetime of the agent process
-in v1. `effects` are requests: the host validates and performs them, rather
-than granting the extension direct model or tool-policy access. Supported
+`state` is host-managed, scoped to the active session and extension, and
+persisted under the project's `.mypi/state/extensions/` directory in v1. A
+fresh WASM instance receives the previously returned state on its next
+invocation. `effects` are requests: the host validates and performs them,
+rather than granting the extension direct model or tool-policy access. Supported
 effects are `set_tool_policy` (`read_only` or `full`) and
-`request_model_turn`. Session-file persistence and lifecycle hooks were
-intentionally deferred from v1.
+`request_model_turn`; lifecycle hooks remain the documented v1 hooks.
 
 ### Required exports
 
@@ -264,10 +265,12 @@ cp extensions/plan_mode_ext/target/wasm32-wasip1/release/plan_mode_ext.wasm .myp
     default.jsonl
 ```
 
-The extension manager persists returned extension state under
-`.mypi/state/extensions/`. `CodingAgent` also defaults its session history to
-`.mypi/sessions/default.jsonl`. The legacy `./extensions/*.wasm` location
-remains a discovery fallback during migration.
+The host persists returned extension state under the active session's
+`.mypi/state/extensions/sessions/<session-id>/<extension>.json` path. State is
+managed by the host and scoped to both the loaded extension and conversation;
+`CodingAgent` also defaults its session history to `.mypi/sessions/default.jsonl`.
+The legacy `./extensions/*.wasm` location remains a discovery fallback during
+migration.
 
 ### v1 boundaries
 

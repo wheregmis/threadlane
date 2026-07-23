@@ -104,3 +104,15 @@ Implemented the underlying host grant and asynchronous result semantics identifi
 - `WasiExtensionManager` applies the host grant as an intersection with each v2 manifest, rechecks requests at queue insertion/drain, and exposes testable policy configuration.
 - Broker imports acknowledge queue acceptance only. Successful operation outputs are delivered as `broker_response` events on a later extension invocation; they are no longer appended to the initiating command response or used to synchronously trigger agent turns.
 - Added focused restrictive-grant and future-event result tests in `crates/mypi-coding-agent/tests/wasi_tests.rs`.
+
+## Final review blocker fixes
+
+- `agent.request_turn` now schedules a real prompt through the generic capability dispatcher; `agent.queue_message` schedules a real follow-up user message. The host drains scheduled work after dispatch without extension-name branches.
+- Agent operation acknowledgements remain queued as asynchronous broker results and are delivered as `broker_response` events.
+- Corrected v1 documentation to describe host-managed, session-scoped persisted state.
+- Strengthened the WASM smoke test to dispatch a broker result, invoke the extension again, and assert that the extension receives `broker_response` in its invocation events.
+- GUI changes remain untouched.
+
+Validation for this follow-up: `cargo test -p mypi-coding-agent --test wasi_tests` passed (30 tests), including `wasm_extension_receives_broker_response_on_next_invocation`; `cargo test --workspace` also passed. Changed Rust/WASM sources pass targeted rustfmt checks, while repository-wide formatting remains red only on pre-existing unrelated files.
+
+Commit: `54ef910 fix: schedule v2 agent broker work`.

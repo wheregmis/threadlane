@@ -27,6 +27,32 @@ pub enum ToolPolicy {
     ReadOnly,
 }
 
+#[derive(Debug, Clone)]
+enum AgentWork {
+    RequestTurn(String),
+    QueueMessage(String),
+}
+
+#[derive(Clone, Default)]
+struct AgentWorkScheduler {
+    pending: Arc<std::sync::Mutex<Vec<AgentWork>>>,
+}
+
+impl AgentWorkScheduler {
+    fn schedule(&self, work: AgentWork) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.push(work);
+        }
+    }
+
+    fn drain(&self) -> Vec<AgentWork> {
+        self.pending
+            .lock()
+            .map(|mut pending| std::mem::take(&mut *pending))
+            .unwrap_or_default()
+    }
+}
+
 struct HostCapabilityHandler {
     capability: &'static str,
     tool_policy: Option<Arc<tokio::sync::Mutex<ToolPolicy>>>,
@@ -34,6 +60,7 @@ struct HostCapabilityHandler {
     work_dir: PathBuf,
     event_tx: tokio::sync::broadcast::Sender<AgentEvent>,
     allowed_hosts: Arc<HashSet<String>>,
+    agent_work: AgentWorkScheduler,
 }
 
 impl HostCapabilityHandler {
@@ -125,15 +152,17 @@ impl HostCapabilityHandler {
     }
 
     fn handle_agent(&self, request: &BrokerRequest) -> Result<Value, BrokerError> {
-        match request.operation.as_str() {
-            "request_turn" => Ok(serde_json::json!({
-                "follow_up_prompt": string_argument(&request.arguments, "prompt")?
-            })),
-            "queue_message" => Ok(serde_json::json!({
-                "queued_agent_prompt": string_argument(&request.arguments, "content")?
-            })),
-            _ => unknown_operation(self.capability, &request.operation),
-        }
+        let work = match request.operation.as_str() {
+            "request_turn" => {
+                AgentWork::RequestTurn(string_argument(&request.arguments, "prompt")?.to_string())
+            }
+            "queue_message" => {
+                AgentWork::QueueMessage(string_argument(&request.arguments, "content")?.to_string())
+            }
+            _ => return unknown_operation(self.capability, &request.operation),
+        };
+        self.agent_work.schedule(work);
+        Ok(serde_json::json!({"queued": true}))
     }
 
     fn handle_session(
@@ -557,6 +586,7 @@ pub struct CodingAgent {
     pub tool_policy: Arc<tokio::sync::Mutex<ToolPolicy>>,
     pub work_dir: PathBuf,
     broker_dispatcher: Arc<tokio::sync::Mutex<CapabilityDispatcher>>,
+    agent_work: AgentWorkScheduler,
     base_system_prompt: String,
 }
 
@@ -565,6 +595,7 @@ fn build_broker_dispatcher(
     extensions: Arc<WasiExtensionManager>,
     work_dir: PathBuf,
     event_tx: tokio::sync::broadcast::Sender<AgentEvent>,
+    agent_work: AgentWorkScheduler,
 ) -> Arc<tokio::sync::Mutex<CapabilityDispatcher>> {
     let allowed_hosts: Arc<HashSet<String>> = Arc::new(
         std::env::var("MYPI_NETWORK_ALLOW_HOSTS")
@@ -588,6 +619,7 @@ fn build_broker_dispatcher(
                 work_dir: work_dir.clone(),
                 event_tx: event_tx.clone(),
                 allowed_hosts: allowed_hosts.clone(),
+                agent_work: agent_work.clone(),
             }),
         );
     }
@@ -685,11 +717,13 @@ impl CodingAgent {
 
         let base_system_prompt = system_prompt.clone();
         let wasi_extensions = Arc::new(wasi_extensions);
+        let agent_work = AgentWorkScheduler::default();
         let broker_dispatcher = build_broker_dispatcher(
             tool_policy.clone(),
             wasi_extensions.clone(),
             options.work_dir.clone(),
             agent.loop_engine.event_tx.clone(),
+            agent_work.clone(),
         );
         agent.loop_engine.extension_manager = Some(wasi_extensions.clone());
         agent.loop_engine.work_dir = Some(options.work_dir.clone());
@@ -725,7 +759,28 @@ impl CodingAgent {
             tool_policy,
             work_dir: options.work_dir,
             broker_dispatcher,
+            agent_work,
             base_system_prompt,
+        }
+    }
+
+    async fn run_scheduled_agent_work(&mut self) {
+        loop {
+            let pending = self.agent_work.drain();
+            if pending.is_empty() {
+                break;
+            }
+            for work in pending {
+                match work {
+                    AgentWork::RequestTurn(prompt) => {
+                        self.agent.prompt(&prompt).await;
+                        self.dispatch_assistant_message_hooks().await;
+                    }
+                    AgentWork::QueueMessage(content) => {
+                        self.agent.follow_up(AgentMessage::User { content });
+                    }
+                }
+            }
         }
     }
 
@@ -976,6 +1031,7 @@ impl CodingAgent {
                         });
                         self.agent.prompt(&prompt).await;
                         self.dispatch_assistant_message_hooks().await;
+                        self.run_scheduled_agent_work().await;
                         return Some(format!("Loaded skill '{}'", skill_name));
                     }
                     Err(err) => return Some(format!("Skill Error: {}", err)),
@@ -1010,6 +1066,7 @@ impl CodingAgent {
                         };
                         self.wasi_extensions
                             .enqueue_broker_results(dispatch.operation_results);
+                        self.run_scheduled_agent_work().await;
                         for effect in result.effects {
                             match effect {
                                 crate::wasi_extension::WasiExtensionEffect::SetToolPolicy {
@@ -1064,6 +1121,7 @@ impl CodingAgent {
         self.session_tree.add_message(msg);
         self.agent.prompt(effective_input).await;
         self.dispatch_assistant_message_hooks().await;
+        self.run_scheduled_agent_work().await;
 
         None
     }
@@ -1106,6 +1164,7 @@ async fn run_subagent_task(
         extensions.clone(),
         work_dir.clone(),
         agent.loop_engine.event_tx.clone(),
+        AgentWorkScheduler::default(),
     );
     agent.loop_engine.before_tool_call_hook = Some(Arc::new(ExtensionBeforeToolHook {
         tool_policy: policy,
@@ -1233,6 +1292,7 @@ mod tests {
             work_dir,
             event_tx,
             allowed_hosts: Arc::new(HashSet::new()),
+            agent_work: AgentWorkScheduler::default(),
         }
     }
 

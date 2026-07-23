@@ -21,6 +21,13 @@ struct Invocation {
     name: String,
     #[serde(default)]
     arguments: serde_json::Value,
+    #[serde(default)]
+    events: Vec<ExtensionEvent>,
+}
+
+#[derive(Deserialize)]
+struct ExtensionEvent {
+    topic: String,
 }
 
 #[derive(Serialize)]
@@ -94,12 +101,20 @@ pub extern "C" fn extension_info() -> u64 {
 pub extern "C" fn execute_command(ptr: i32, len: i32) -> u64 {
     let invocation = parse_invocation(ptr, len);
     let message = if invocation.name == "broker-smoke" {
-        request_broker(
-            invocation
-                .arguments
-                .get("mode")
-                .and_then(|mode| mode.as_str()),
-        )
+        if invocation
+            .events
+            .iter()
+            .any(|event| event.topic == "broker_response")
+        {
+            "received broker_response event".into()
+        } else {
+            request_broker(
+                invocation
+                    .arguments
+                    .get("mode")
+                    .and_then(|mode| mode.as_str()),
+            )
+        }
     } else {
         "unknown command".into()
     };
@@ -113,8 +128,17 @@ fn request_broker(mode: Option<&str>) -> String {
         serde_json::to_vec(&BrokerRequest {
             api_version: 2,
             capability: "tools".into(),
-            operation: "set_policy".into(),
-            arguments: serde_json::Value::Null,
+            operation: if mode == Some("result-event") {
+                "get_policy"
+            } else {
+                "set_policy"
+            }
+            .into(),
+            arguments: if mode == Some("result-event") {
+                serde_json::Value::Null
+            } else {
+                serde_json::json!({"policy": "read_only"})
+            },
         })
         .expect("broker request serializes")
     };
@@ -167,6 +191,7 @@ fn parse_invocation(ptr: i32, len: i32) -> Invocation {
     serde_json::from_slice(input).unwrap_or(Invocation {
         name: String::new(),
         arguments: serde_json::Value::Null,
+        events: Vec::new(),
     })
 }
 
