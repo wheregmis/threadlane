@@ -863,7 +863,7 @@ impl CodingAgent {
         let runner_observer: Option<SubagentObserverState> = None;
         let runner_api_key = agent.loop_engine.api_key.clone();
         let runner_account_id = agent.loop_engine.account_id.clone();
-        let runner_model = options.model.clone();
+        let runner_state = agent.loop_engine.state.clone();
         let runner_work_dir = options.work_dir.clone();
         let runner_extensions = wasi_extensions.clone();
         let runner_event_tx = agent.loop_engine.event_tx.clone();
@@ -871,11 +871,12 @@ impl CodingAgent {
             let observer = runner_observer.clone();
             let api_key = runner_api_key.clone();
             let account_id = runner_account_id.clone();
-            let model = runner_model.clone();
+            let state = runner_state.clone();
             let work_dir = runner_work_dir.clone();
             let extensions = runner_extensions.clone();
             let event_tx = runner_event_tx.clone();
             Box::pin(async move {
+                let model = state.lock().await.model.clone();
                 let observer = observer
                     .and_then(|observer| observer.lock().ok().and_then(|value| value.clone()));
                 let (output, thinking) = run_subagents_with_context(
@@ -1417,10 +1418,11 @@ async fn run_subagent_task(
         let scheduler = AgentWorkScheduler::default();
         scheduler.set_test_observer(observer.clone());
         scheduler.schedule(AgentWork::QueueMessage("test subagent follow-up".into()));
+        let observed_model = model.clone();
         let mut agent = Agent::new(api_key, account_id, model);
         let _ = scheduler.run(&mut agent).await;
         return Ok(SubagentResult {
-            output: "test subagent result".into(),
+            output: format!("test subagent result ({observed_model})"),
             thinking: Vec::new(),
         });
     }
@@ -1759,7 +1761,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subagent_command_runs_scheduler_at_run_subagent_task_boundary() {
+    async fn generic_agent_run_inherits_parent_current_model_for_tasks_without_model() {
         let dir = tempfile::tempdir().unwrap();
         let agents_dir = dir.path().join(".mypi/agents");
         std::fs::create_dir_all(&agents_dir).unwrap();
@@ -1776,12 +1778,15 @@ mod tests {
         let mut coding_agent = CodingAgent::new(coding_agent_options(dir.path().to_path_buf()));
         let observed = Arc::new(Mutex::new(Vec::new()));
         coding_agent.set_subagent_work_observer(observed.clone());
+        coding_agent.agent.loop_engine.state.lock().await.model = "changed-model".into();
 
         let output = coding_agent
             .handle_input("/subagent inspect the project")
             .await;
 
-        assert!(output.unwrap().contains("test subagent result"));
+        assert!(output
+            .unwrap()
+            .contains("test subagent result (changed-model)"));
         assert_eq!(
             *observed.lock().unwrap(),
             vec![AgentWork::QueueMessage("test subagent follow-up".into())]
