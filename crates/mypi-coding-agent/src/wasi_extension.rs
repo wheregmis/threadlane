@@ -467,6 +467,7 @@ fn encode_state_component(component: &str) -> String {
 pub struct WasiExtensionManager {
     pub extensions: HashMap<String, WasiExtension>,
     states: Mutex<HashMap<String, Value>>,
+    host_state: Mutex<HashMap<String, Value>>,
     subscriptions: Mutex<HashMap<String, HashSet<String>>>,
     pending_events: Mutex<HashMap<Option<String>, HashMap<String, Vec<WasiExtensionEvent>>>>,
     pending_broker_requests: Mutex<HashMap<Option<String>, Vec<HostBrokerRequest>>>,
@@ -554,6 +555,10 @@ impl WasiExtensionManager {
             .lock()
             .map_err(|_| "Extension state lock poisoned".to_string())?;
         states.clear();
+        self.host_state
+            .lock()
+            .map_err(|_| "Host state lock poisoned".to_string())?
+            .clear();
         for name in self.extensions.keys() {
             if let Some(state) = self.load_state(name) {
                 states.insert(name.clone(), state);
@@ -574,6 +579,31 @@ impl WasiExtensionManager {
             .map_err(|_| "Extension state lock poisoned".to_string())?
             .insert(extension_name.to_string(), state.clone());
         self.persist_state(extension_name, &state)
+    }
+
+    /// Returns host-owned state in the active session scope without relying on
+    /// any extension identity or schema.
+    pub fn host_state(&self, key: &str) -> Option<Value> {
+        if let Ok(state) = self.host_state.lock() {
+            if let Some(value) = state.get(key) {
+                return Some(value.clone());
+            }
+        }
+        let value = self.load_host_state(key)?;
+        self.host_state
+            .lock()
+            .ok()?
+            .insert(key.to_string(), value.clone());
+        Some(value)
+    }
+
+    /// Persists host-owned state in the active session scope.
+    pub fn set_host_state(&self, key: &str, value: Value) -> Result<(), String> {
+        self.host_state
+            .lock()
+            .map_err(|_| "Host state lock poisoned".to_string())?
+            .insert(key.to_string(), value.clone());
+        self.persist_host_state(key, &value)
     }
 
     /// Subscribe an extension to a topic. Delivery is queued until its next invocation.
@@ -731,10 +761,30 @@ impl WasiExtensionManager {
         let Some(path) = self.state_path(extension_name) else {
             return Ok(());
         };
-        let parent = path.parent().ok_or("Extension state path has no parent")?;
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-        let bytes = serde_json::to_vec_pretty(state).map_err(|error| error.to_string())?;
-        fs::write(path, bytes).map_err(|error| error.to_string())
+        persist_json_state(&path, state)
+    }
+
+    fn host_state_path(&self, key: &str) -> Option<PathBuf> {
+        let directory = self.state_dir.as_ref()?;
+        let session_id = self.session_id.lock().ok()?.clone();
+        Some(match session_id {
+            Some(session_id) => {
+                Self::session_state_path_from_dir(directory, &session_id, &format!(".host.{key}"))
+            }
+            None => directory.join(format!(".host.{key}.json")),
+        })
+    }
+
+    fn load_host_state(&self, key: &str) -> Option<Value> {
+        let path = self.host_state_path(key)?;
+        serde_json::from_slice(&fs::read(path).ok()?).ok()
+    }
+
+    fn persist_host_state(&self, key: &str, value: &Value) -> Result<(), String> {
+        let Some(path) = self.host_state_path(key) else {
+            return Ok(());
+        };
+        persist_json_state(&path, value)
     }
 
     pub fn has_command(&self, name: &str) -> bool {
@@ -1041,6 +1091,13 @@ impl WasiExtensionManager {
                 .cloned(),
         ))
     }
+}
+
+fn persist_json_state(path: &Path, state: &Value) -> Result<(), String> {
+    let parent = path.parent().ok_or("Extension state path has no parent")?;
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let bytes = serde_json::to_vec_pretty(state).map_err(|error| error.to_string())?;
+    fs::write(path, bytes).map_err(|error| error.to_string())
 }
 
 impl mypi_agent::ToolExecutor for WasiExtensionManager {

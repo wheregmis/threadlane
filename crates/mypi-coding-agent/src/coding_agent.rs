@@ -115,6 +115,7 @@ struct HostCapabilityHandler {
     allowed_hosts: Arc<HashSet<String>>,
     agent_work: AgentWorkScheduler,
     agent_runner: Option<AgentRunner>,
+    persist_tool_policy: bool,
 }
 
 impl HostCapabilityHandler {
@@ -191,6 +192,11 @@ impl HostCapabilityHandler {
                     "full" => ToolPolicy::FullAccess,
                     _ => return Err(invalid_argument("policy must be `read_only` or `full`")),
                 };
+                if self.persist_tool_policy {
+                    self.extensions
+                        .set_host_state("tools.policy", Value::String(value.into()))
+                        .map_err(host_error)?;
+                }
                 Ok(Value::Null)
             }
             "get_policy" => {
@@ -727,9 +733,21 @@ pub struct CodingAgent {
     subagent_work_observer: Arc<std::sync::Mutex<Option<Arc<std::sync::Mutex<Vec<AgentWork>>>>>>,
 }
 
+fn restored_tool_policy(extensions: &WasiExtensionManager) -> ToolPolicy {
+    match extensions
+        .host_state("tools.policy")
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .as_deref()
+    {
+        Some("read_only") => ToolPolicy::ReadOnly,
+        _ => ToolPolicy::FullAccess,
+    }
+}
+
 fn build_broker_dispatcher(
     tool_policy: Arc<tokio::sync::Mutex<ToolPolicy>>,
     extensions: Arc<WasiExtensionManager>,
+    persist_tool_policy: bool,
     work_dir: PathBuf,
     event_tx: tokio::sync::broadcast::Sender<AgentEvent>,
     agent_work: AgentWorkScheduler,
@@ -759,6 +777,7 @@ fn build_broker_dispatcher(
                 allowed_hosts: allowed_hosts.clone(),
                 agent_work: agent_work.clone(),
                 agent_runner: agent_runner.clone(),
+                persist_tool_policy,
             }),
         );
     }
@@ -823,7 +842,9 @@ impl CodingAgent {
             session_tree.session_id.clone(),
         );
         let loaded_ext_count = wasi_extensions.discover_and_load(&options.work_dir);
-        let tool_policy = Arc::new(tokio::sync::Mutex::new(ToolPolicy::FullAccess));
+        let tool_policy = Arc::new(tokio::sync::Mutex::new(restored_tool_policy(
+            &wasi_extensions,
+        )));
 
         let mut system_prompt = format!(
             "You are mypi, an AI coding agent with tool execution capability in workspace: {}.\n\
@@ -882,6 +903,7 @@ impl CodingAgent {
         let broker_dispatcher = build_broker_dispatcher(
             tool_policy.clone(),
             wasi_extensions.clone(),
+            true,
             options.work_dir.clone(),
             agent.loop_engine.event_tx.clone(),
             agent_work.clone(),
@@ -1057,7 +1079,7 @@ impl CodingAgent {
             .unwrap_or_else(|error| {
                 eprintln!("Failed to restore session extension state: {error}")
             });
-        *self.tool_policy.lock().await = ToolPolicy::FullAccess;
+        *self.tool_policy.lock().await = restored_tool_policy(&self.wasi_extensions);
         self.session_tree = session_tree;
 
         let mut state = self.agent.loop_engine.state.lock().await;
@@ -1352,6 +1374,7 @@ async fn run_subagent_task(
     let broker_dispatcher = build_broker_dispatcher(
         policy.clone(),
         extensions.clone(),
+        false,
         work_dir.clone(),
         agent.loop_engine.event_tx.clone(),
         agent_work.clone(),
@@ -1495,6 +1518,7 @@ mod tests {
             allowed_hosts: Arc::new(HashSet::new()),
             agent_work,
             agent_runner: None,
+            persist_tool_policy: false,
         }
     }
 
@@ -1690,6 +1714,21 @@ mod tests {
         assert_eq!(
             *observed.lock().unwrap(),
             vec![AgentWork::QueueMessage("test subagent follow-up".into())]
+        );
+    }
+
+    #[test]
+    fn generic_tool_policy_state_restores_by_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = WasiExtensionManager::for_project_session(dir.path(), "session-a");
+        manager
+            .set_host_state("tools.policy", Value::String("read_only".into()))
+            .unwrap();
+
+        let restored = WasiExtensionManager::for_project_session(dir.path(), "session-a");
+        assert_eq!(
+            restored.host_state("tools.policy"),
+            Some(Value::String("read_only".into()))
         );
     }
 
