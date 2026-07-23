@@ -42,7 +42,7 @@ fn title_payload(model: &str, prompt: &str, is_codex: bool) -> Value {
                 "content": [{"type": "input_text", "text": prompt}]
             }],
             "store": false,
-            "stream": false
+            "stream": true
         })
     } else {
         serde_json::json!({
@@ -101,6 +101,47 @@ fn title_response_text(value: &Value) -> Result<String, String> {
     } else {
         Ok(text)
     }
+}
+
+fn title_stream_text(body: &str) -> Result<String, String> {
+    let mut streamed_text = String::new();
+    let mut terminal_text = None;
+
+    for block in body.split("\n\n") {
+        let data = block
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("data:"))
+            .map(str::trim)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if data.is_empty() || data == "[DONE]" {
+            continue;
+        }
+        let value: Value = serde_json::from_str(&data)
+            .map_err(|error| format!("Failed to parse OpenAI title stream ({error}): {data}"))?;
+        let event_type = value.get("type").and_then(Value::as_str).unwrap_or("");
+        if event_type == "error" || event_type == "response.failed" || value.get("error").is_some()
+        {
+            let (code, message) = api_error_details(&value);
+            return Err(format!("OpenAI title stream failed [{code}]: {message}"));
+        }
+        if event_type == "response.output_text.delta" {
+            if let Some(delta) = value.get("delta").and_then(Value::as_str) {
+                streamed_text.push_str(delta);
+            }
+        }
+        if matches!(
+            event_type,
+            "response.completed" | "response.done" | "response.incomplete"
+        ) {
+            let response = value.get("response").unwrap_or(&value);
+            terminal_text = title_response_text(response).ok();
+        }
+    }
+
+    terminal_text
+        .or_else(|| (!streamed_text.trim().is_empty()).then_some(streamed_text))
+        .ok_or_else(|| "OpenAI title stream did not contain text".to_string())
 }
 
 static CLIENT_SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -751,7 +792,7 @@ impl OpenAIClient {
                 .header("OpenAI-Beta", "responses=experimental")
                 .header("originator", "mypi")
                 .header(USER_AGENT, "mypi")
-                .header(ACCEPT, "application/json");
+                .header(ACCEPT, "text/event-stream");
         }
 
         let response = request
@@ -767,9 +808,14 @@ impl OpenAIClient {
         if !status.is_success() {
             return Err(format!("OpenAI title request failed ({status}): {body}"));
         }
-        let value: Value = serde_json::from_str(&body)
-            .map_err(|error| format!("Failed to parse OpenAI title response ({error}): {body}"))?;
-        title_response_text(&value)
+        if is_codex {
+            title_stream_text(&body)
+        } else {
+            let value: Value = serde_json::from_str(&body).map_err(|error| {
+                format!("Failed to parse OpenAI title response ({error}): {body}")
+            })?;
+            title_response_text(&value)
+        }
     }
     pub async fn stream_chat_completion(
         &self,
@@ -1219,7 +1265,7 @@ mod tests {
     use super::{
         api_error_details, clamp_prompt_cache_key, continuation_payload, parse_chat_usage,
         parse_responses_text_delta, parse_responses_usage, title_payload, title_response_text,
-        CodexWsState, Continuation, OpenAIClient, ProviderUsage, StreamEvent,
+        title_stream_text, CodexWsState, Continuation, OpenAIClient, ProviderUsage, StreamEvent,
         OPENAI_PROMPT_CACHE_KEY_MAX_CHARS,
     };
     use serde_json::json;
@@ -1272,7 +1318,30 @@ mod tests {
             "Summarize this session"
         );
         assert!(payload.get("tools").is_none());
-        assert_eq!(payload["stream"], false);
+        assert_eq!(payload["stream"], true);
+    }
+
+    #[test]
+    fn extracts_codex_title_from_stream_deltas_and_terminal_response() {
+        let deltas = concat!(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Fix \"}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"login\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\"}}\n\n"
+        );
+        assert_eq!(title_stream_text(deltas).unwrap(), "Fix login");
+
+        let terminal = concat!(
+            "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"Terminal title\"}]}]}}\n\n"
+        );
+        assert_eq!(title_stream_text(terminal).unwrap(), "Terminal title");
+    }
+
+    #[test]
+    fn surfaces_codex_title_stream_errors() {
+        let body = "data: {\"type\":\"error\",\"error\":{\"code\":\"invalid_request\",\"message\":\"bad title request\"}}\n\n";
+        let error = title_stream_text(body).unwrap_err();
+        assert!(error.contains("invalid_request"));
+        assert!(error.contains("bad title request"));
     }
 
     #[test]

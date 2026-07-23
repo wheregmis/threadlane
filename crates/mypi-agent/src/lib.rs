@@ -18,7 +18,7 @@ pub use compaction::{
 pub use engine::{get_runtime, AgentEngine, AgentUIEvent};
 pub use events::AgentEvent;
 pub use hooks::*;
-pub use loop_engine::AgentLoop;
+pub use loop_engine::{repair_interrupted_tool_turn, AgentLoop};
 pub use queue::PendingMessageQueue;
 pub use session::{Message, Role, Session};
 pub use session_tree::{SessionNode, SessionTree};

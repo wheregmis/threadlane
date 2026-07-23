@@ -9,9 +9,10 @@ use crate::system_prompt::{build_system_prompt, SystemPromptBuildOptions, System
 use crate::wasi_extension::{WasiExtensionManager, WasiLegacyEffect};
 use async_trait::async_trait;
 use mypi_agent::{
-    AfterToolCallHook, AfterToolCallResult, Agent, AgentEvent, AgentMessage, AgentState,
-    AgentToolCall, AgentToolDefinition, AgentToolResult, BeforeToolCallHook, BeforeToolCallResult,
-    ImageAttachment, ReasoningEffort, SessionTree, ToolExecutor,
+    repair_interrupted_tool_turn, AfterToolCallHook, AfterToolCallResult, Agent, AgentEvent,
+    AgentMessage, AgentState, AgentToolCall, AgentToolDefinition, AgentToolResult,
+    BeforeToolCallHook, BeforeToolCallResult, ImageAttachment, ReasoningEffort, SessionTree,
+    ToolExecutor,
 };
 use serde_json::Value;
 use std::collections::HashSet;
@@ -1268,6 +1269,29 @@ impl CodingAgent {
         }
     }
 
+    async fn repair_interrupted_history(&mut self) -> bool {
+        let repaired_branch = {
+            let mut state = self.agent.loop_engine.state.lock().await;
+            if !repair_interrupted_tool_turn(&mut state.messages) {
+                return false;
+            }
+            state
+                .messages
+                .iter()
+                .filter(|message| !matches!(message, AgentMessage::System { .. }))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+
+        let persisted_branch = self.session_tree.get_active_branch_messages();
+        if serde_json::to_value(&persisted_branch).ok()
+            != serde_json::to_value(&repaired_branch).ok()
+        {
+            self.session_tree.replace_active_branch(repaired_branch);
+        }
+        true
+    }
+
     pub async fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {
         self.agent.set_reasoning_effort(effort).await;
     }
@@ -1281,6 +1305,7 @@ impl CodingAgent {
         input: &str,
         images: Vec<ImageAttachment>,
     ) -> Option<String> {
+        self.repair_interrupted_history().await;
         let trimmed = input.trim();
 
         // 1. Expand prompt templates (e.g. /review, /component Button) if match
@@ -1737,6 +1762,50 @@ mod tests {
     use crate::extension_broker::CapabilityHandler;
     use std::sync::Mutex;
     use std::time::{Duration as StdDuration, Instant};
+
+    #[tokio::test]
+    async fn model_switch_repairs_tool_call_interrupted_by_cancellation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut coding_agent = CodingAgent::new(coding_agent_options(dir.path().to_path_buf()));
+        let user = AgentMessage::User {
+            content: "inspect the repository".into(),
+        };
+        coding_agent.session_tree.add_message(user.clone());
+        {
+            let mut state = coding_agent.agent.loop_engine.state.lock().await;
+            state.messages.push(user);
+            state.messages.push(AgentMessage::Custom {
+                custom_type: "thinking".into(),
+                payload: serde_json::json!({"text": "planning"}),
+            });
+            state.messages.push(AgentMessage::Assistant {
+                content: None,
+                tool_calls: Some(vec![provider_tool_call(
+                    "call-interrupted",
+                    "read_file",
+                    serde_json::json!({"path": "src/main.rs"}),
+                )]),
+            });
+        }
+
+        let output = coding_agent.handle_input("/model next-model").await;
+
+        assert_eq!(output.as_deref(), Some("Switched model to: next-model"));
+        let state = coding_agent.agent.get_state().await;
+        assert_eq!(state.model, "next-model");
+        assert_eq!(state.messages.len(), 2);
+        assert!(matches!(state.messages[1], AgentMessage::User { .. }));
+        assert_eq!(
+            coding_agent.session_tree.get_active_branch_messages().len(),
+            1
+        );
+        let (_, codex) = coding_agent.agent.loop_engine.build_api_payloads().await;
+        assert!(codex["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["type"] != "function_call"));
+    }
 
     #[tokio::test]
     async fn switching_sessions_updates_prompt_cache_identity() {

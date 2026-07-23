@@ -22,6 +22,62 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, Mutex};
 
+/// Removes an assistant tool-call turn that was interrupted before every call
+/// received a tool result. Provider APIs reject replaying such incomplete turns.
+pub fn repair_interrupted_tool_turn(messages: &mut Vec<AgentMessage>) -> bool {
+    let mut index = 0;
+    while index < messages.len() {
+        let AgentMessage::Assistant {
+            tool_calls: Some(tool_calls),
+            ..
+        } = &messages[index]
+        else {
+            index += 1;
+            continue;
+        };
+        if tool_calls.is_empty() {
+            index += 1;
+            continue;
+        }
+
+        let expected_ids: HashSet<&str> = tool_calls
+            .iter()
+            .map(|call| {
+                if call.id.is_empty() {
+                    "call_0"
+                } else {
+                    call.id.as_str()
+                }
+            })
+            .collect();
+        let mut completed_ids = HashSet::new();
+        let mut next = index + 1;
+        while let Some(AgentMessage::Tool { tool_call_id, .. }) = messages.get(next) {
+            completed_ids.insert(if tool_call_id.is_empty() {
+                "call_0"
+            } else {
+                tool_call_id.as_str()
+            });
+            next += 1;
+        }
+
+        if expected_ids.is_subset(&completed_ids) {
+            index = next;
+            continue;
+        }
+
+        let truncate_at = index.checked_sub(1).filter(|previous| {
+            matches!(
+                &messages[*previous],
+                AgentMessage::Custom { custom_type, .. } if custom_type == "thinking"
+            )
+        });
+        messages.truncate(truncate_at.unwrap_or(index));
+        return true;
+    }
+    false
+}
+
 fn token_usage_from_provider(usage: ProviderUsage) -> TokenUsage {
     TokenUsage {
         input_tokens: usage.input_tokens,
@@ -418,7 +474,8 @@ impl AgentLoop {
 
     /// Builds both provider payloads without making a network request.
     pub async fn build_api_payloads(&self) -> (Value, Value) {
-        let state = self.state.lock().await.clone();
+        let mut state = self.state.lock().await.clone();
+        repair_interrupted_tool_turn(&mut state.messages);
         let api_msgs = convert_to_llm(&state.messages);
         let (instructions, codex_msgs) = convert_to_codex_llm(&state.messages);
         let mut definitions = collect_tool_definitions(
@@ -496,6 +553,7 @@ impl AgentLoop {
         assert!(message.is_user(), "prompt message must have a user role");
         {
             let mut state = self.state.lock().await;
+            repair_interrupted_tool_turn(&mut state.messages);
             state.messages.push(message);
         }
         self.run_queued_turns().await;
@@ -510,6 +568,7 @@ impl AgentLoop {
         }
         let items = self.follow_up_queue.drain();
         let mut state = self.state.lock().await;
+        repair_interrupted_tool_turn(&mut state.messages);
         state.messages.extend(items);
         drop(state);
         self.run_queued_turns().await;

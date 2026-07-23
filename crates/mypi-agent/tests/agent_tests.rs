@@ -1,8 +1,8 @@
 use mypi_agent::{
-    compact_messages, AfterToolCallHook, AfterToolCallResult, Agent, AgentLoop, AgentMessage,
-    AgentState, AgentToolCall, AgentToolDefinition, AgentToolResult, BeforeToolCallHook,
-    BeforeToolCallResult, CompactionOptions, ImageAttachment, ReasoningEffort, SessionTree,
-    TokenUsage, ToolExecutionMode, ToolExecutor,
+    compact_messages, repair_interrupted_tool_turn, AfterToolCallHook, AfterToolCallResult, Agent,
+    AgentLoop, AgentMessage, AgentState, AgentToolCall, AgentToolDefinition, AgentToolResult,
+    BeforeToolCallHook, BeforeToolCallResult, CompactionOptions, ImageAttachment, ReasoningEffort,
+    SessionTree, TokenUsage, ToolExecutionMode, ToolExecutor,
 };
 use mypi_provider::openai::{ToolCall, ToolCallFunction};
 use std::collections::HashSet;
@@ -310,6 +310,79 @@ fn test_multimodal_user_equality_includes_images() {
     assert!(!first.same_user_message(&AgentMessage::User {
         content: "inspect".to_string(),
     }));
+}
+
+#[test]
+fn interrupted_tool_turn_is_removed_before_provider_replay() {
+    let mut messages = vec![
+        AgentMessage::System {
+            content: "system".into(),
+        },
+        AgentMessage::User {
+            content: "inspect".into(),
+        },
+        AgentMessage::Custom {
+            custom_type: "thinking".into(),
+            payload: serde_json::json!({"text": "working"}),
+        },
+        AgentMessage::Assistant {
+            content: None,
+            tool_calls: Some(vec![
+                ToolCall {
+                    id: "call-a".into(),
+                    r#type: "function".into(),
+                    function: ToolCallFunction {
+                        name: "read_file".into(),
+                        arguments: "{}".into(),
+                    },
+                },
+                ToolCall {
+                    id: "call-b".into(),
+                    r#type: "function".into(),
+                    function: ToolCallFunction {
+                        name: "read_file".into(),
+                        arguments: "{}".into(),
+                    },
+                },
+            ]),
+        },
+        AgentMessage::Tool {
+            tool_call_id: "call-a".into(),
+            name: "read_file".into(),
+            content: "partial".into(),
+            is_error: false,
+        },
+    ];
+
+    assert!(repair_interrupted_tool_turn(&mut messages));
+    assert_eq!(messages.len(), 2);
+    assert!(matches!(messages.last(), Some(AgentMessage::User { .. })));
+}
+
+#[test]
+fn completed_tool_turn_is_preserved_for_provider_replay() {
+    let mut messages = vec![
+        AgentMessage::Assistant {
+            content: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "call-a".into(),
+                r#type: "function".into(),
+                function: ToolCallFunction {
+                    name: "read_file".into(),
+                    arguments: "{}".into(),
+                },
+            }]),
+        },
+        AgentMessage::Tool {
+            tool_call_id: "call-a".into(),
+            name: "read_file".into(),
+            content: "done".into(),
+            is_error: false,
+        },
+    ];
+
+    assert!(!repair_interrupted_tool_turn(&mut messages));
+    assert_eq!(messages.len(), 2);
 }
 
 #[test]

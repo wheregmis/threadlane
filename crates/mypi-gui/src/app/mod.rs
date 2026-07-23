@@ -2374,22 +2374,12 @@ impl App {
             .widget(cx, ids!(stop_btn))
             .set_visible(cx, working && has_generation);
         self.ui.widget(cx, ids!(send_btn)).set_visible(cx, !working);
-        self.ui.label(cx, ids!(composer_status)).set_text(cx, text);
-        self.ui
-            .label(cx, ids!(composer_status))
-            .set_visible(cx, working || status == UiStatus::Error);
         self.ui.widget(cx, ids!(chat_working_indicator)).redraw(cx);
         self.apply_composer_presentation(cx);
     }
 
     fn apply_composer_presentation(&mut self, cx: &mut Cx) {
         let presentation = self.composer_state.presentation();
-        self.ui
-            .widget(cx, ids!(composer_status))
-            .set_visible(cx, presentation.working || presentation.show_error);
-        self.ui
-            .label(cx, ids!(composer_status))
-            .set_text(cx, &presentation.status_text);
         self.ui
             .widget(cx, ids!(effort_picker))
             .set_visible(cx, presentation.show_model);

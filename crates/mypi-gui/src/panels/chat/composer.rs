@@ -60,42 +60,28 @@ pub enum ComposerStatus {
 pub struct ComposerPresentation {
     pub show_model: bool,
     pub working: bool,
-    pub show_error: bool,
-    pub status_text: String,
 }
 
 #[derive(Clone, Debug)]
 pub struct ComposerState {
     status: ComposerStatus,
-    status_text: String,
 }
 
 impl ComposerState {
     pub fn new() -> Self {
         Self {
             status: ComposerStatus::Ready,
-            status_text: String::new(),
         }
     }
 
-    pub fn set_status(&mut self, status: ComposerStatus, message: impl Into<String>) {
+    pub fn set_status(&mut self, status: ComposerStatus, _message: impl Into<String>) {
         self.status = status;
-        self.status_text = match status {
-            ComposerStatus::Working => message.into(),
-            // Errors are already rendered in the chat transcript. Keeping the
-            // footer empty prevents long provider errors from crowding out the
-            // editable input and model controls.
-            ComposerStatus::Ready | ComposerStatus::Error => String::new(),
-        };
     }
 
     pub fn presentation(&self) -> ComposerPresentation {
-        let working = self.status == ComposerStatus::Working;
         ComposerPresentation {
-            show_model: !working,
-            working,
-            show_error: false,
-            status_text: self.status_text.clone(),
+            show_model: true,
+            working: self.status == ComposerStatus::Working,
         }
     }
 }
@@ -199,21 +185,17 @@ mod tests {
             ComposerPresentation {
                 show_model: true,
                 working: false,
-                show_error: false,
-                status_text: String::new(),
             }
         );
     }
 
     #[test]
-    fn working_replaces_send_state_and_clears_old_error() {
+    fn working_keeps_all_normal_controls_and_uses_working_action() {
         let mut state = ComposerState::new();
-        state.set_status(ComposerStatus::Error, "Provider unavailable");
         state.set_status(ComposerStatus::Working, "Working...");
         let presentation = state.presentation();
         assert!(presentation.working);
-        assert!(!presentation.show_error);
-        assert_eq!(presentation.status_text, "Working...");
+        assert!(presentation.show_model);
     }
 
     #[test]
@@ -223,7 +205,5 @@ mod tests {
         let presentation = state.presentation();
         assert!(!presentation.working);
         assert!(presentation.show_model);
-        assert!(!presentation.show_error);
-        assert!(presentation.status_text.is_empty());
     }
 }
