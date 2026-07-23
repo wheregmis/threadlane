@@ -41,6 +41,32 @@
 
 ---
 
+## Packaging & Releases
+
+Threadlane leverages [`cargo-packager`](https://github.com/crabnebula-dev/cargo-packager) and [`robius-packaging-commands`](https://github.com/project-robius/robius-packaging-commands) to bundle native desktop installers (`.dmg` on macOS, `.exe`/NSIS on Windows, and `.deb` on Linux).
+
+### Packaging Locally
+
+1. **Install Packaging Tooling**:
+   ```bash
+   cargo install --locked cargo-packager
+   cargo install --locked --git https://github.com/project-robius/robius-packaging-commands.git
+   ```
+
+2. **Build Release Extensions & App Bundle**:
+   ```bash
+   ./scripts/build_extensions.sh
+   cd crates/threadlane
+   cargo packager --release
+   ```
+   The generated desktop packages will be placed in `crates/threadlane/dist/`.
+
+### Automated Release Workflow
+
+Threadlane uses GitHub Actions (`.github/workflows/release.yml`) for automated macOS builds. Pushing a release tag (e.g., `git tag v0.1.0 && git push origin v0.1.0`) automatically builds the macOS `.dmg` app bundle and attaches it to the GitHub Release.
+
+---
+
 ## Workspace Architecture
 
 Threadlane is structured as a modular Cargo workspace:

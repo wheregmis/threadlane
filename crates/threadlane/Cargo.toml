@@ -19,3 +19,40 @@ arboard = { version = "3.6", features = ["image-data"] }
 png = "0.18"
 robius-file-picker = { git = "https://github.com/project-robius/robius.git" }
 rfd = "0.17.2"
+
+[package.metadata.packager]
+product_name = "Threadlane"
+identifier = "dev.threadlane.app"
+category = "DeveloperTool"
+authors = ["Threadlane Team"]
+publisher = "Threadlane"
+copyright = "Copyright 2026, Threadlane Team"
+
+long_description = """
+Threadlane is a high-performance, GPU-accelerated desktop AI coding assistant
+built in Rust using Makepad, with support for WASI capability extensions,
+background subagents, multi-project workspaces, and instant tool execution.
+"""
+
+out_dir = "./dist"
+
+before-each-package-command = """
+robius-packaging-commands before-each-package \
+    --force-makepad \
+    --binary-name threadlane \
+    --path-to-binary ./target/release/threadlane
+"""
+
+[package.metadata.packager.macos]
+minimum_system_version = "11.0"
+
+[package.metadata.packager.dmg]
+window_size = { width = 960, height = 540 }
+app_position = { x = 200, y = 250 }
+application_folder_position = { x = 760, y = 250 }
+
+[package.metadata.packager.nsis]
+appdata_paths = [
+    "$APPDATA/$PUBLISHER/$PRODUCTNAME",
+    "$LOCALAPPDATA/$PRODUCTNAME",
+]

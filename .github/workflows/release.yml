@@ -1,0 +1,55 @@
+name: Release (macOS)
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-package-macos:
+    name: Build & Package (macOS)
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Packaging Tooling
+        run: |
+          cargo install --locked cargo-packager --version 0.10.1 || cargo install --locked cargo-packager
+          cargo install --locked --git https://github.com/project-robius/robius-packaging-commands.git
+
+      - name: Build WASI Extensions
+        shell: bash
+        run: |
+          chmod +x ./scripts/build_extensions.sh
+          ./scripts/build_extensions.sh
+
+      - name: Build Threadlane Binary (Release)
+        run: cargo build --release --bin threadlane
+
+      - name: Package Threadlane Desktop App (.dmg)
+        shell: bash
+        run: |
+          cd crates/threadlane
+          cargo packager --release
+
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: crates/threadlane/dist/*.dmg
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
