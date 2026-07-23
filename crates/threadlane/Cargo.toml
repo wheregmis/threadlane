@@ -45,6 +45,11 @@ icons = [
     "../../resources/icon_512.png",
 ]
 
+resources = [
+    { src = "./dist/resources/makepad_widgets", target = "makepad_widgets" },
+    { src = "./dist/resources/threadlane", target = "threadlane" },
+]
+
 before-each-package-command = """
 robius-packaging-commands before-each-package \
     --force-makepad \
