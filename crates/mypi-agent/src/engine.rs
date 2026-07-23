@@ -30,16 +30,14 @@ pub enum AgentUIEvent {
 
 pub struct AgentEngine {
     pub session: Arc<Mutex<Session>>,
-    api_key: String,
-    account_id: Option<String>,
+    client: OpenAIClient,
 }
 
 impl AgentEngine {
     pub fn new(api_key: String, account_id: Option<String>, model: &str) -> Self {
         Self {
             session: Arc::new(Mutex::new(Session::new(model))),
-            api_key,
-            account_id,
+            client: OpenAIClient::new(api_key, account_id),
         }
     }
 
@@ -59,11 +57,9 @@ impl AgentEngine {
             };
 
             let (event_tx, mut event_rx) = mpsc::channel(100);
-            let api_key = self.api_key.clone();
-            let account_id = self.account_id.clone();
+            let client = self.client.clone();
 
             let handle = get_runtime().spawn(async move {
-                let client = OpenAIClient::new(api_key, account_id);
                 client
                     .stream_chat_completion(api_payload, codex_payload, None, event_tx)
                     .await;

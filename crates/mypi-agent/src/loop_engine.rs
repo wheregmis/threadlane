@@ -219,6 +219,7 @@ pub struct AgentLoop {
     pub state: Arc<Mutex<AgentState>>,
     pub api_key: String,
     pub account_id: Option<String>,
+    provider_client: OpenAIClient,
     pub prompt_cache_key: Option<String>,
     pub tool_execution_mode: ToolExecutionMode,
     allowed_tool_names: Option<HashSet<String>>,
@@ -247,11 +248,14 @@ impl AgentLoop {
             model,
             "You are mypi AI coding agent.",
         )));
+        let api_key = api_key.into();
+        let provider_client = OpenAIClient::new(api_key.clone(), account_id.clone());
 
         Self {
             state,
-            api_key: api_key.into(),
+            api_key,
             account_id,
+            provider_client,
             prompt_cache_key: None,
             tool_execution_mode: ToolExecutionMode::Parallel,
             allowed_tool_names: None,
@@ -539,12 +543,10 @@ impl AgentLoop {
             let (api_payload, codex_payload) = self.build_api_payloads().await;
 
             let (stream_tx, mut stream_rx) = mpsc::channel(100);
-            let api_key = self.api_key.clone();
-            let account_id = self.account_id.clone();
+            let client = self.provider_client.clone();
             let prompt_cache_key = self.prompt_cache_key.clone();
 
             tokio::spawn(async move {
-                let client = OpenAIClient::new(api_key, account_id);
                 client
                     .stream_chat_completion(api_payload, codex_payload, prompt_cache_key, stream_tx)
                     .await;
