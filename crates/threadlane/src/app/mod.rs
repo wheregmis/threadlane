@@ -427,103 +427,6 @@ script_mod! {
 
 
     // -------------------------------------------------------------------
-    // Sessions sidebar: project folders + session rows
-    // -------------------------------------------------------------------
-    let ProjectHeaderBase = RoundedView {
-        width: Fill
-        height: 34
-        cursor: MouseCursor.Hand
-        flow: Right
-        spacing: 8
-        align: Align{y: 0.5}
-        margin: Inset{left: 3 right: 3 top: 7 bottom: 2}
-        padding: Inset{left: 8 top: 4 right: 4 bottom: 4}
-        draw_bg +: {
-            hover: instance(0.0)
-            tree_color: uniform(#x3b4552)
-            color: #x00000000
-            color_hover: #x222831
-            border_radius: 8.0
-
-            pixel: fn() {
-                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                sdf.box(
-                    self.border_size
-                    self.border_size
-                    self.rect_size.x - self.border_size * 2.0
-                    self.rect_size.y - self.border_size * 2.0
-                    max(1.0 self.border_radius)
-                )
-                sdf.fill_keep(mix(self.color, self.color_hover, self.hover))
-                sdf.stroke(self.border_color, self.border_size)
-
-                let tree_x = 16.0
-                let tree_start = self.rect_size.y * 0.5 + 8.0
-                sdf.rect(tree_x, tree_start, 1.0, max(0.0, self.rect_size.y - tree_start))
-                sdf.fill(self.tree_color)
-                return sdf.result
-            }
-        }
-        animator +: {
-            hover: {
-                default: @off
-                off: AnimatorState {
-                    from: {all: Forward {duration: 0.12}}
-                    apply: {draw_bg: {hover: 0.0}}
-                }
-                on: AnimatorState {
-                    from: {all: Forward {duration: 0.08}}
-                    apply: {draw_bg: {hover: snap(1.0)}}
-                }
-            }
-        }
-        folder_icon := Icon {
-            width: 16
-            height: 16
-            icon_walk: Walk{width: 16 height: 16}
-            draw_icon +: {
-                svg: crate_resource("self:resources/icons/folder.svg")
-                color: #x8291a5
-            }
-        }
-        name_lbl := Label {
-            width: Fill
-            height: 18
-            text: ""
-            draw_text +: {
-                color: #xc2cad5
-                text_style: theme.font_bold { font_size: 9.75 }
-            }
-        }
-        detach_project_btn := Button {
-            width: 22
-            height: 22
-            visible: false
-            margin: 0
-            padding: 0
-            text: "×"
-            draw_text +: {
-                color: #x626d7d
-                color_hover: #xd08a92
-                color_down: #xf2a0aa
-                text_style +: { font_size: 11.0 }
-            }
-            draw_bg +: {
-                color: #x00000000
-                color_hover: #x36272d
-                color_focus: #x36272d
-                color_down: #x482c34
-                border_color: #x00000000
-                border_color_hover: #x00000000
-                border_color_focus: #x00000000
-                border_color_down: #x00000000
-                border_size: 0.0
-                border_radius: 6.0
-            }
-        }
-        new_project_session_btn := mod.components.SidebarComposeButton {}
-    }
-
     let SessionList = #(SessionList::register_widget(vm)) {
         width: Fill
         height: Fill
@@ -534,9 +437,9 @@ script_mod! {
             flow: Down
             drag_scrolling: true
 
-            ProjectHeader := ProjectHeaderBase {}
+            ProjectHeader := mod.components.ProjectHeaderBase {}
 
-            ProjectHeaderActive := ProjectHeaderBase {
+            ProjectHeaderActive := mod.components.ProjectHeaderBase {
                 draw_bg +: {
                     color: #x222c38
                     color_hover: #x283543
@@ -758,23 +661,8 @@ script_mod! {
                                 }
                             }
 
-                            projects_header := View {
-                                width: Fill
-                                height: 34
-                                cursor: MouseCursor.Arrow
-                                flow: Right
-                                spacing: 8
-                                align: Align{y: 0.5}
-                                padding: Inset{left: 7 right: 4 bottom: 4}
-                                projects_label := Label {
-                                    width: Fill
-                                    height: Fit
-                                    text: "PROJECTS"
-                                    draw_text +: {
-                                        color: #x7f8b9b
-                                        text_style: theme.font_bold { font_size: 8.5 }
-                                    }
-                                }
+                            projects_header := mod.components.SectionHeader {
+                                section_label +: { text: "PROJECTS" }
                                 add_project_btn := mod.components.SidebarComposeButton {}
                             }
                             session_context_menu := SessionContextMenu {}
@@ -900,23 +788,7 @@ script_mod! {
                             status_pill := StatusPill {}
                         }
 
-                        update_notice := RoundedView {
-                            width: Fill
-                            height: 38
-                            visible: false
-                            flow: Right
-                            spacing: 8
-                            align: Align{y: 0.5}
-                            padding: Inset{left: 10 right: 11}
-                            margin: Inset{left: 2 right: 2}
-                            show_bg: true
-                            draw_bg +: {
-                                color: #x1b232dc8
-                                border_color: #x354353
-                                border_size: 1.0
-                                border_radius: 8.0
-                            }
-
+                        update_notice := mod.components.NoticeBanner {
                             update_notice_visual := View {
                                 width: 18
                                 height: 18
@@ -927,23 +799,14 @@ script_mod! {
                                     visible: false
                                     draw_bg +: { dot_radius: 1.05 speed: 3.0 }
                                 }
-                                update_notice_available_dot := RoundedView {
-                                    width: 7
-                                    height: 7
-                                    visible: false
-                                    draw_bg +: { color: #x78aef0 border_radius: 3.5 }
+                                update_notice_available_dot := mod.components.StatusDot {
+                                    draw_bg +: { color: #x78aef0 }
                                 }
-                                update_notice_ready_dot := RoundedView {
-                                    width: 7
-                                    height: 7
-                                    visible: false
-                                    draw_bg +: { color: #x67c58b border_radius: 3.5 }
+                                update_notice_ready_dot := mod.components.StatusDot {
+                                    draw_bg +: { color: #x67c58b }
                                 }
-                                update_notice_error_dot := RoundedView {
-                                    width: 7
-                                    height: 7
-                                    visible: false
-                                    draw_bg +: { color: #xe86a64 border_radius: 3.5 }
+                                update_notice_error_dot := mod.components.StatusDot {
+                                    draw_bg +: { color: #xe86a64 }
                                 }
                             }
 
@@ -1126,19 +989,24 @@ script_mod! {
                                         }
                                     }
 
-                                    attach_btn := mod.components.ComposerChip {
+                                    attach_btn := mod.components.IconButton {
                                         width: 30
                                         height: 28
-                                        padding: 0
-                                        spacing: 0
-                                        text: ""
-                                        align: Align{x: 0.5 y: 0.5}
                                         icon_walk: Walk{width: 14 height: 14}
                                         draw_icon +: {
                                             svg: crate_resource("self:resources/icons/attach.svg")
                                             color: #x9aa5b3
                                             color_hover: #xdde3ea
                                             color_down: #xffffff
+                                        }
+                                        draw_bg +: {
+                                            color: #x232830
+                                            color_hover: #x2a313c
+                                            color_down: #x354153
+                                            border_color: #x3a424e
+                                            border_color_hover: #x4a5564
+                                            border_size: 1.0
+                                            border_radius: 6.0
                                         }
                                     }
 

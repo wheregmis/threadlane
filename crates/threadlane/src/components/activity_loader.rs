@@ -73,10 +73,9 @@ script_mod! {
                 speed: 3.6
             }
         }
-        status_done_indicator := RoundedView {
+        status_done_indicator := mod.components.StatusDot {
             width: 5
             height: 5
-            visible: false
             draw_bg +: {
                 color: #x68a982
                 border_radius: 2.5
