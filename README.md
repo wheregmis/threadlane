@@ -247,7 +247,7 @@ Release builds embed `THREADLANE_UPDATER_PUBLIC_KEY`. The private key is availab
 
 #### Test the Updater UI
 
-A development run automatically checks the published manifest on launch and can exercise signature verification, downloads, and the complete updater UI:
+A development run automatically checks the published manifest on launch and can exercise the updater UI through checking, downloading, and signature verification. Installation and relaunch require a packaged `.app`, as described below.
 
 ```bash
 THREADLANE_UPDATER_PUBLIC_KEY="$(cat threadlane-updater.key.pub)" \
