@@ -240,13 +240,7 @@ script_mod! {
                         color: #x00000000
                         border_size: 0.0
                     }
-                    md := Markdown {
-                        width: Fill
-                        height: Fit
-                        selectable: true
-                        use_code_block_widget: false
-                        body: ""
-                    }
+                    md := mod.components.ChatMarkdown {}
                 }
             }
 
@@ -293,13 +287,7 @@ script_mod! {
                         color: #x00000000
                         border_size: 0.0
                     }
-                    md := Markdown {
-                        width: Fill
-                        height: Fit
-                        selectable: true
-                        use_code_block_widget: false
-                        body: ""
-                    }
+                    md := mod.components.ChatMarkdown {}
                 }
             }
 
@@ -690,12 +678,8 @@ script_mod! {
                                 spacing: 1
                                 clip_x: true
 
-                                project_name_label := Label {
-                                    width: Fill
+                                project_name_label := mod.components.ClippedLabel {
                                     height: 17
-                                    max_lines: 1
-                                    text_overflow: Ellipsis
-                                    text: ""
                                     draw_text +: {
                                         color: #xf0f4fa
                                         text_style: theme.font_bold { font_size: 14.0 }
@@ -921,11 +905,9 @@ script_mod! {
                                     align: Align{y: 0.5}
                                     clip_x: true
 
-                                    composer_status := Label {
+                                    composer_status := mod.components.ClippedLabel {
                                         width: Fit
-                                        height: Fit
                                         visible: false
-                                        text: ""
                                         draw_text +: {
                                             color: #x9aa5b3
                                             text_style +: { font_size: 8.5 }
@@ -1556,11 +1538,7 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(stop_btn)).clicked(actions) {
             let active_key = self.workspace_state.active_key().cloned();
             if let Some(key) = active_key {
-                let current_draft = self
-                    .ui
-                    .threadlane_command_text_input(cx, ids!(prompt_input))
-                    .text_input_ref(cx)
-                    .text();
+                let current_draft = self.prompt_text(cx);
                 let (restored_draft, restored_attachments) = self
                     .session_runtimes
                     .get_mut(&key)
@@ -1578,13 +1556,12 @@ impl MatchEvent for App {
                             .submitted_attachments
                             .as_ref()
                             .filter(|(id, _)| *id == generation_id)
-                            .map(|(_, attachments)| attachments.clone())
-                            .unwrap_or_default();
+                            .map(|(_, att)| att.clone());
                         runtime.submitted_draft = None;
                         runtime.submitted_attachments = None;
                         Some((draft, attachments))
                     })
-                    .unwrap_or_default();
+                    .unwrap_or((None, None));
                 let draft = if current_draft.trim().is_empty() {
                     restored_draft.unwrap_or_default()
                 } else {
@@ -1592,12 +1569,9 @@ impl MatchEvent for App {
                 };
                 if let Some(workspace) = self.workspace_state.active_workspace_mut() {
                     workspace.ui.draft = draft.clone();
-                    workspace.ui.attachments = restored_attachments;
+                    workspace.ui.attachments = restored_attachments.unwrap_or_default();
                 }
-                self.ui
-                    .threadlane_command_text_input(cx, ids!(prompt_input))
-                    .text_input_ref(cx)
-                    .set_text(cx, &draft);
+                self.set_prompt_text(cx, &draft);
                 self.refresh_attachment_ui(cx);
                 self.set_session_status(cx, &key, UiStatus::Ready, "Stopped");
                 self.push_chat(MsgRole::System, "Generation stopped.");
@@ -1677,17 +1651,18 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(attach_btn)).clicked(actions) && !self.busy {
             self.open_image_picker(cx);
         }
-        if self.ui.button(cx, ids!(attachment_chip_0)).clicked(actions) {
-            self.remove_attachment(cx, 0);
-        }
-        if self.ui.button(cx, ids!(attachment_chip_1)).clicked(actions) {
-            self.remove_attachment(cx, 1);
-        }
-        if self.ui.button(cx, ids!(attachment_chip_2)).clicked(actions) {
-            self.remove_attachment(cx, 2);
-        }
-        if self.ui.button(cx, ids!(attachment_chip_3)).clicked(actions) {
-            self.remove_attachment(cx, 3);
+        for (idx, chip_id) in [
+            ids!(attachment_chip_0),
+            ids!(attachment_chip_1),
+            ids!(attachment_chip_2),
+            ids!(attachment_chip_3),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if self.ui.button(cx, chip_id).clicked(actions) {
+                self.remove_attachment(cx, idx);
+            }
         }
 
         let cti = self
@@ -2295,17 +2270,7 @@ impl App {
     }
 
     fn registered_project_dirs_or(&self, fallback: &Path) -> Vec<PathBuf> {
-        let dirs = self
-            .project_registry
-            .as_ref()
-            .map(|registry| {
-                registry
-                    .projects()
-                    .iter()
-                    .map(|project| project.path.clone())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        let dirs = self.registered_project_dirs();
         if dirs.is_empty() {
             vec![fallback.to_path_buf()]
         } else {
@@ -2328,6 +2293,20 @@ impl App {
 
     fn refresh_registered_sessions(&self) {
         refresh_sessions(&self.registered_project_dirs());
+    }
+
+    fn prompt_text(&self, cx: &Cx) -> String {
+        self.ui
+            .threadlane_command_text_input(cx, ids!(prompt_input))
+            .text_input_ref(cx)
+            .text()
+    }
+
+    fn set_prompt_text(&self, cx: &mut Cx, text: &str) {
+        self.ui
+            .threadlane_command_text_input(cx, ids!(prompt_input))
+            .text_input_ref(cx)
+            .set_text(cx, text);
     }
 
     fn active_work_dir(&self) -> Option<&Path> {

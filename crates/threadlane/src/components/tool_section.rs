@@ -33,13 +33,7 @@ script_mod! {
             width: Fill
             height: Fit
             visible: false
-            content_md := Markdown {
-                width: Fill
-                height: Fit
-                selectable: true
-                use_code_block_widget: false
-                body: ""
-            }
+            content_md := mod.components.ChatMarkdown {}
         }
     }
 }

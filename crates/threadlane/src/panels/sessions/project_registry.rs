@@ -158,17 +158,15 @@ impl ProjectRegistry {
         Ok(true)
     }
 
-    pub fn touch(&mut self, canonical_path: &Path) -> Result<(), ProjectRegistryError> {
-        let Some(index) = self
-            .projects
+    fn project_index(&self, canonical_path: &Path) -> Result<usize, ProjectRegistryError> {
+        self.projects
             .iter()
             .position(|project| project.path == canonical_path)
-        else {
-            return Err(ProjectRegistryError::ProjectNotAttached(
-                canonical_path.to_path_buf(),
-            ));
-        };
+            .ok_or_else(|| ProjectRegistryError::ProjectNotAttached(canonical_path.to_path_buf()))
+    }
 
+    pub fn touch(&mut self, canonical_path: &Path) -> Result<(), ProjectRegistryError> {
+        let index = self.project_index(canonical_path)?;
         let previous = self.projects[index].last_opened_at;
         self.projects[index].last_opened_at = unix_timestamp().max(previous.saturating_add(1));
         if let Err(error) = self.persist() {
@@ -183,15 +181,7 @@ impl ProjectRegistry {
         canonical_path: &Path,
         session_id: Option<&str>,
     ) -> Result<(), ProjectRegistryError> {
-        let Some(index) = self
-            .projects
-            .iter()
-            .position(|project| project.path == canonical_path)
-        else {
-            return Err(ProjectRegistryError::ProjectNotAttached(
-                canonical_path.to_path_buf(),
-            ));
-        };
+        let index = self.project_index(canonical_path)?;
         let previous_time = self.projects[index].last_opened_at;
         let previous_session = self.projects[index].last_session_id.clone();
         self.projects[index].last_opened_at = unix_timestamp().max(previous_time.saturating_add(1));

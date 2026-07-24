@@ -1,6 +1,6 @@
 //! Sessions panel state: projects, session discovery, file operations, and active selection.
 
-use crate::panels::chat::truncate_chars;
+use crate::path_utils::{canonicalize_path, truncate_chars};
 use threadlane_agent::{AgentMessage, SessionTree};
 
 use std::path::{Path, PathBuf};
@@ -44,6 +44,16 @@ pub struct SessionsData {
     pub context_session_id: Option<String>,
     pub context_work_dir: PathBuf,
     pub rows: Vec<SessionListRow>,
+}
+
+impl SessionsData {
+    pub fn is_active(&self, work_dir: &Path, session_id: &str) -> bool {
+        self.active_session_id.as_deref() == Some(session_id) && self.active_work_dir == work_dir
+    }
+
+    pub fn is_context_target(&self, work_dir: &Path, session_id: &str) -> bool {
+        self.context_session_id.as_deref() == Some(session_id) && self.context_work_dir == work_dir
+    }
 }
 
 pub static TITLE_ATTEMPTED: LazyLock<RwLock<std::collections::HashSet<(PathBuf, String)>>> =
@@ -117,7 +127,7 @@ pub fn first_existing_user_prompt(tree: &SessionTree) -> Option<String> {
 
 pub fn begin_title_generation(work_dir: &Path, session_id: &str) -> bool {
     let key = (
-        std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf()),
+        canonicalize_path(work_dir),
         session_id.to_string(),
     );
     // This is deliberately a lifetime attempt marker, not an in-flight guard.
@@ -247,7 +257,7 @@ pub fn refresh_sessions(project_dirs: &[PathBuf]) -> Vec<SessionListRow> {
     let mut seen = std::collections::HashSet::new();
 
     for raw_dir in project_dirs {
-        let dir = std::fs::canonicalize(raw_dir).unwrap_or_else(|_| raw_dir.clone());
+        let dir = canonicalize_path(raw_dir);
         if !seen.insert(dir.clone()) {
             continue;
         }
@@ -288,7 +298,7 @@ pub fn refresh_sessions(project_dirs: &[PathBuf]) -> Vec<SessionListRow> {
 
 pub fn set_session_working(work_dir: &Path, session_id: &str, is_working: bool) {
     let mut data = SESSIONS_DATA.write().unwrap();
-    let normalized_dir = std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
+    let normalized_dir = canonicalize_path(work_dir);
     let key = (normalized_dir, session_id.to_string());
     if is_working {
         if !data.working_sessions.contains(&key) {
@@ -300,7 +310,7 @@ pub fn set_session_working(work_dir: &Path, session_id: &str, is_working: bool) 
 }
 
 pub fn is_session_working(work_dir: &Path, session_id: &str) -> bool {
-    let normalized_dir = std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
+    let normalized_dir = canonicalize_path(work_dir);
     SESSIONS_DATA
         .read()
         .unwrap()
@@ -321,20 +331,18 @@ pub fn set_session_context_target(entry: Option<&SessionEntry>) {
 
 pub fn set_active_session(work_dir: &Path, session_id: &str) {
     let mut data = SESSIONS_DATA.write().unwrap();
-    data.active_work_dir =
-        std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
+    data.active_work_dir = canonicalize_path(work_dir);
     data.active_session_id = Some(session_id.to_string());
 }
 
 pub fn set_active_project(work_dir: &Path) {
     let mut data = SESSIONS_DATA.write().unwrap();
-    data.active_work_dir =
-        std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
+    data.active_work_dir = canonicalize_path(work_dir);
     data.active_session_id = None;
 }
 
 pub fn is_project_working(work_dir: &Path) -> bool {
-    let normalized_dir = std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
+    let normalized_dir = canonicalize_path(work_dir);
     SESSIONS_DATA
         .read()
         .unwrap()

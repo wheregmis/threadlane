@@ -175,10 +175,8 @@ script_mod! {
                 color: #x8291a5
             }
         }
-        name_lbl := Label {
-            width: Fill
+        name_lbl := mod.components.ClippedLabel {
             height: 18
-            text: ""
             draw_text +: {
                 color: #xc2cad5
                 text_style: theme.font_bold { font_size: 9.75 }

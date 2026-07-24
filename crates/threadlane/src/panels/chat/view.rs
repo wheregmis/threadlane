@@ -69,6 +69,21 @@ struct ActivityCounts {
     other: usize,
 }
 
+impl ActivityCounts {
+    fn add(&mut self, kind: ActivityKind) {
+        match kind {
+            ActivityKind::ExploredFile => self.explored_files += 1,
+            ActivityKind::ExploredFolder => self.explored_folders += 1,
+            ActivityKind::Search => self.searches += 1,
+            ActivityKind::Edited => self.edited += 1,
+            ActivityKind::Command => self.commands += 1,
+            ActivityKind::Skill => self.skills += 1,
+            ActivityKind::Delegated => self.delegated += 1,
+            ActivityKind::Other => self.other += 1,
+        }
+    }
+}
+
 fn is_activity(message: &ChatMessage) -> bool {
     matches!(
         message,
@@ -259,6 +274,12 @@ fn activity_line(
     line
 }
 
+fn draw_markdown_item(list: &mut PortalList, cx: &mut Cx2d, item_id: usize, template: LiveId, text: &str) {
+    let item_widget = list.item(cx, item_id, template);
+    item_widget.markdown(cx, ids!(md)).set_text(cx, text);
+    item_widget.draw_all_unscoped(cx);
+}
+
 #[derive(Script, ScriptHook, Widget)]
 pub struct ChatList {
     #[deref]
@@ -285,13 +306,10 @@ impl Widget for ChatList {
                     let Some(row) = rows.get(item_id).copied() else {
                         continue;
                     };
+
                     match row {
                         DisplayRow::StreamingAssistant => {
-                            let item_widget = list.item(cx, item_id, id!(AssistantMsg));
-                            item_widget
-                                .markdown(cx, ids!(md))
-                                .set_text(cx, &data.streaming_text);
-                            item_widget.draw_all_unscoped(cx);
+                            draw_markdown_item(&mut list, cx, item_id, id!(AssistantMsg), &data.streaming_text);
                         }
                         DisplayRow::ActivityGroup {
                             start,
@@ -318,20 +336,7 @@ impl Widget for ChatList {
                                         ..
                                     } => {
                                         let kind = activity_kind(name, presentation.icon);
-                                        match kind {
-                                            ActivityKind::ExploredFile => {
-                                                counts.explored_files += 1
-                                            }
-                                            ActivityKind::ExploredFolder => {
-                                                counts.explored_folders += 1
-                                            }
-                                            ActivityKind::Search => counts.searches += 1,
-                                            ActivityKind::Edited => counts.edited += 1,
-                                            ActivityKind::Command => counts.commands += 1,
-                                            ActivityKind::Skill => counts.skills += 1,
-                                            ActivityKind::Delegated => counts.delegated += 1,
-                                            ActivityKind::Other => counts.other += 1,
-                                        }
+                                        counts.add(kind);
                                         running |= *status == ToolStatus::Running;
                                         has_error |= *status == ToolStatus::Error;
                                         if let Some(icon) = first_icon {
@@ -385,14 +390,10 @@ impl Widget for ChatList {
                             match message {
                                 ChatMessage::Text { role, text } => match role {
                                     MsgRole::User => {
-                                        let item_widget = list.item(cx, item_id, id!(UserMsg));
-                                        item_widget.markdown(cx, ids!(md)).set_text(cx, text);
-                                        item_widget.draw_all_unscoped(cx);
+                                        draw_markdown_item(&mut list, cx, item_id, id!(UserMsg), text);
                                     }
                                     MsgRole::Assistant => {
-                                        let item_widget = list.item(cx, item_id, id!(AssistantMsg));
-                                        item_widget.markdown(cx, ids!(md)).set_text(cx, text);
-                                        item_widget.draw_all_unscoped(cx);
+                                        draw_markdown_item(&mut list, cx, item_id, id!(AssistantMsg), text);
                                     }
                                     MsgRole::System => {
                                         let item_widget = list.item(cx, item_id, id!(SystemMsg));

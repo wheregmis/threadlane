@@ -301,17 +301,23 @@ fn flush_streaming_locked(data: &mut ChatData) {
     }
 }
 
-pub fn tool_icon(name: &str) -> ToolIcon {
-    match name {
-        "read_file" => ToolIcon::ReadFile,
-        "write_file" => ToolIcon::WriteFile,
-        "edit_file" => ToolIcon::EditFile,
-        "list_dir" | "list_directory" => ToolIcon::ListDirectory,
-        "run_command" => ToolIcon::Terminal,
-        "load_skill" => ToolIcon::Skill,
-        "subagent" => ToolIcon::Subagent,
-        _ => ToolIcon::Generic,
+impl ToolIcon {
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "read_file" => ToolIcon::ReadFile,
+            "write_file" => ToolIcon::WriteFile,
+            "edit_file" => ToolIcon::EditFile,
+            "list_dir" | "list_directory" => ToolIcon::ListDirectory,
+            "run_command" => ToolIcon::Terminal,
+            "load_skill" => ToolIcon::Skill,
+            "subagent" => ToolIcon::Subagent,
+            _ => ToolIcon::Generic,
+        }
     }
+}
+
+pub fn tool_icon(name: &str) -> ToolIcon {
+    ToolIcon::from_name(name)
 }
 
 pub fn tool_title(name: &str) -> String {

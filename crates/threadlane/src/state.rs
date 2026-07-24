@@ -10,7 +10,7 @@ pub use crate::panels::chat::*;
 pub use crate::panels::command_palette::*;
 
 pub use crate::panels::sessions::*;
-pub use crate::path_utils::{compact_workspace_path, truncate_chars};
+pub use crate::path_utils::{canonicalize_path, compact_workspace_path, truncate_chars};
 
 /// Events sent from background tokio tasks to the UI thread.
 pub enum GuiAgentEvent {

@@ -63,6 +63,11 @@ pub fn truncate_chars(s: &str, max_len: usize) -> String {
     }
 }
 
+/// Canonicalize a path, returning the original path if canonicalization fails.
+pub fn canonicalize_path(path: &Path) -> std::path::PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
