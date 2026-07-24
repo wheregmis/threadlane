@@ -214,6 +214,7 @@ If changing ordering, row height, popup padding, or selected-item behavior, upda
 ## Documentation
 
 - Update `README.md` when changing build, updater, packaging, or local-testing workflows.
+- Store README screenshots under `docs/images/` with descriptive filenames and alt text; use repository-relative links so they render on GitHub and in local Markdown previews.
 - Keep command examples runnable from the repository root unless the text explicitly changes directories.
 - Explain limitations that matter to users, especially compile-time updater configuration and packaged-app-only installation.
 
