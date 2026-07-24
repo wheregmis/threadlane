@@ -4,6 +4,14 @@ use super::state::{relative_time_label, SessionListRow, SESSIONS_DATA};
 use crate::panels::chat::truncate_chars;
 use makepad_widgets::*;
 
+fn draw_empty_session_row(cx: &mut Cx2d, list: &mut PortalList, item_id: usize) {
+    let item_widget = list.item(cx, item_id, id!(EmptyRow));
+    item_widget
+        .label(cx, ids!(lbl))
+        .set_text(cx, "No sessions yet");
+    item_widget.draw_all_unscoped(cx);
+}
+
 #[derive(Script, ScriptHook, Widget)]
 pub struct SessionList {
     #[deref]
@@ -21,11 +29,7 @@ impl Widget for SessionList {
 
                 while let Some(item_id) = list.next_visible_item(cx) {
                     if data.rows.is_empty() {
-                        let item_widget = list.item(cx, item_id, id!(EmptyRow));
-                        item_widget
-                            .label(cx, ids!(lbl))
-                            .set_text(cx, "No sessions yet");
-                        item_widget.draw_all_unscoped(cx);
+                        draw_empty_session_row(cx, &mut list, item_id);
                         continue;
                     }
 
@@ -55,11 +59,7 @@ impl Widget for SessionList {
                             item_widget.draw_all_unscoped(cx);
                         }
                         Some(SessionListRow::EmptyProject) => {
-                            let item_widget = list.item(cx, item_id, id!(EmptyRow));
-                            item_widget
-                                .label(cx, ids!(lbl))
-                                .set_text(cx, "No sessions yet");
-                            item_widget.draw_all_unscoped(cx);
+                            draw_empty_session_row(cx, &mut list, item_id);
                         }
                         Some(SessionListRow::Session {
                             project_idx,

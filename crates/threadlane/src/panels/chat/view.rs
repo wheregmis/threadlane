@@ -4,23 +4,21 @@ use super::state::{ChatMessage, MsgRole, StreamingKind, ToolIcon, ToolStatus};
 use crate::workspace::AppState;
 use makepad_widgets::*;
 
+const TOOL_ICON_MAP: [(ToolIcon, &[LiveId; 1]); 8] = [
+    (ToolIcon::Generic, ids!(icon_generic)),
+    (ToolIcon::ReadFile, ids!(icon_read_file)),
+    (ToolIcon::WriteFile, ids!(icon_write_file)),
+    (ToolIcon::EditFile, ids!(icon_edit_file)),
+    (ToolIcon::ListDirectory, ids!(icon_list_directory)),
+    (ToolIcon::Terminal, ids!(icon_terminal)),
+    (ToolIcon::Skill, ids!(icon_skill)),
+    (ToolIcon::Subagent, ids!(icon_subagent)),
+];
+
 fn show_tool_icon(cx: &mut Cx, item: &WidgetRef, selected: ToolIcon) {
-    item.widget(cx, ids!(icon_generic))
-        .set_visible(cx, selected == ToolIcon::Generic);
-    item.widget(cx, ids!(icon_read_file))
-        .set_visible(cx, selected == ToolIcon::ReadFile);
-    item.widget(cx, ids!(icon_write_file))
-        .set_visible(cx, selected == ToolIcon::WriteFile);
-    item.widget(cx, ids!(icon_edit_file))
-        .set_visible(cx, selected == ToolIcon::EditFile);
-    item.widget(cx, ids!(icon_list_directory))
-        .set_visible(cx, selected == ToolIcon::ListDirectory);
-    item.widget(cx, ids!(icon_terminal))
-        .set_visible(cx, selected == ToolIcon::Terminal);
-    item.widget(cx, ids!(icon_skill))
-        .set_visible(cx, selected == ToolIcon::Skill);
-    item.widget(cx, ids!(icon_subagent))
-        .set_visible(cx, selected == ToolIcon::Subagent);
+    for (icon, id) in TOOL_ICON_MAP {
+        item.widget(cx, id).set_visible(cx, selected == icon);
+    }
 }
 
 fn update_activity_status(cx: &mut Cx, item_widget: &WidgetRef, running: bool, error: bool) {
