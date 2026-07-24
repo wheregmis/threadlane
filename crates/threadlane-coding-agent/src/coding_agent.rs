@@ -43,11 +43,7 @@ type AgentRunner = Arc<
 
 type SubagentObserverState = Arc<std::sync::Mutex<Option<Arc<std::sync::Mutex<Vec<AgentWork>>>>>>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolPolicy {
-    FullAccess,
-    ReadOnly,
-}
+use crate::policy::ToolPolicy;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AgentWork {

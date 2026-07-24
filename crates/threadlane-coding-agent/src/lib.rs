@@ -9,13 +9,15 @@ pub mod full_trust_extension;
 pub mod packages;
 pub mod prompt_templates;
 pub mod skills;
+pub mod policy;
 pub mod supervisor;
 pub mod system_prompt;
 pub mod wasi_extension;
 
 pub use agents::{discover_agents, AgentConfig, AgentDiscoveryResult, AgentScope, AgentSource};
 pub use capabilities::{CapabilityCatalog, ExtensionMetadata};
-pub use coding_agent::{CodingAgent, CodingAgentOptions, ExtensionBeforeToolHook, ToolPolicy};
+pub use coding_agent::{CodingAgent, CodingAgentOptions, ExtensionBeforeToolHook};
+pub use policy::ToolPolicy;
 pub use commands::{execute_slash_command, parse_slash_command, CommandAction};
 pub use context::{ProjectContext, ProjectInstruction};
 pub use extension_broker::{
