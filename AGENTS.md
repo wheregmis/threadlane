@@ -182,13 +182,19 @@ If changing ordering, row height, popup padding, or selected-item behavior, upda
 - Follow existing `#xRRGGBB` and `#xRRGGBBAA` color syntax.
 - Keep custom SDF shaders simple and ensure dimensions cannot become negative; use `max(0.0, ...)` for computed sizes where appropriate.
 - Shader uniforms and instance fields must be declared consistently with how they are animated or updated.
+- `Sdf2d.fill_keep(...)` retains the current shape. Consume it with `stroke(...)` before constructing unrelated geometry, even when the stroke width is zero, or a later fill can repaint the retained shape.
 - Compilation does not replace visual testing for shader geometry.
 - Prefer subtle borders and state changes consistent with the existing dark interface. Avoid heavy glow, large shadows, or highly saturated surfaces unless requested.
 - Do not rely on emoji or uncommon glyphs for critical status indicators; the current UI font may render them incorrectly. Prefer text, SVG resources, or simple drawn indicators.
 
 ## Session and Context-Menu Behavior
 
+- The sidebar keeps secondary actions quiet: the project attach button appears while hovering the `PROJECTS` header, and per-project detach/new-session buttons appear while hovering that project row.
+- Hover-revealed sidebar actions are synchronized from the retained pointer position and actual widget bounds in `App::sync_sidebar_action_visibility`. Run this after every `self.ui.handle_event(...)`, not only pointer events, because Makepad updates hit-routing and recycled `PortalList` rows while traversing the UI. Clear the retained pointer on `MouseLeave`. Do not rely only on one-shot hover-enter/leave actions for recycled rows; redraws can otherwise leave child visibility stale.
+- A hidden child has no drawable area to invalidate. When changing a hover-revealed child from hidden to visible, explicitly redraw its owning header or list row; otherwise it may not appear until an unrelated click triggers a broader redraw.
 - Session rows are rendered by a `PortalList`; templates are selected from shared session state during draw.
+- Session titles use the clipped `SessionTitle` marquee component. On title hover, only overflowing text scrolls to its measured end, pauses, resets to the beginning, and repeats; leaving the title immediately restores the starting position.
+- The sidebar presents projects and sessions as a tree: project headers draw the parent stem, session rows draw child connectors, and the final session uses a terminating connector template. Session hover and active states use accent underlines across the bounded, ellipsized title column rather than filled pills so they never cover the tree; both states share identical geometry, with the active color taking precedence, and a filled row surface is reserved for the context target. Selecting a session highlights only that session; reserve the active project-header treatment for a project draft with no active session.
 - The context-target state is distinct from the active-session state.
 - Opening a session context menu sets the context target; closing it must always clear that target.
 - Archive and delete actions should flow through `SessionContextMenuAction` and the app’s existing action handler.

@@ -32,8 +32,10 @@ impl Widget for SessionList {
                     match data.rows.get(item_id) {
                         Some(SessionListRow::ProjectHeader { project_idx }) => {
                             let project = data.projects.get(*project_idx);
-                            let active = project
-                                .is_some_and(|project| project.work_dir == data.active_work_dir);
+                            let active = data.active_session_id.is_none()
+                                && project.is_some_and(|project| {
+                                    project.work_dir == data.active_work_dir
+                                });
                             let template = if active {
                                 id!(ProjectHeaderActive)
                             } else {
@@ -75,12 +77,14 @@ impl Widget for SessionList {
                             let context_target = data.context_session_id.as_deref()
                                 == Some(session.id.as_str())
                                 && data.context_work_dir == session.work_dir;
-                            let template = if context_target {
-                                id!(SessionRowContext)
-                            } else if active {
-                                id!(SessionRowActive)
-                            } else {
-                                id!(SessionRow)
+                            let last = *session_idx + 1 == project.sessions.len();
+                            let template = match (context_target, active, last) {
+                                (true, _, true) => id!(SessionRowContextLast),
+                                (true, _, false) => id!(SessionRowContext),
+                                (false, true, true) => id!(SessionRowActiveLast),
+                                (false, true, false) => id!(SessionRowActive),
+                                (false, false, true) => id!(SessionRowLast),
+                                (false, false, false) => id!(SessionRow),
                             };
                             let item_widget = list.item(cx, item_id, template);
                             item_widget
