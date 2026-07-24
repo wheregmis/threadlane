@@ -11,12 +11,6 @@ pub enum SessionContextMenuAction {
     None,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum ContextMenuItem {
-    Archive,
-    Delete,
-}
-
 #[derive(Script, Widget)]
 pub struct SessionContextMenu {
     #[source]
@@ -31,10 +25,6 @@ pub struct SessionContextMenu {
     menu_pos: Vec2d,
     #[rust]
     menu_rect: Rect,
-    #[rust]
-    hovered_item: Option<ContextMenuItem>,
-    #[rust]
-    pressed_item: Option<ContextMenuItem>,
 }
 
 impl ScriptHook for SessionContextMenu {
@@ -63,45 +53,38 @@ impl Widget for SessionContextMenu {
             return;
         }
 
+        self.view.handle_event(cx, event, scope);
+
+        if let Event::Actions(actions) = event {
+            if self
+                .view
+                .button(cx, ids!(archive_session_btn))
+                .clicked(actions)
+            {
+                cx.widget_action(self.widget_uid(), SessionContextMenuAction::Archive);
+                self.close(cx);
+                return;
+            }
+            if self
+                .view
+                .button(cx, ids!(delete_session_btn))
+                .clicked(actions)
+            {
+                cx.widget_action(self.widget_uid(), SessionContextMenuAction::Delete);
+                self.close(cx);
+                return;
+            }
+        }
+
         match event {
-            Event::MouseMove(event) => {
-                let item = self.item_at(event.abs);
-                self.set_hovered_item(cx, item);
-                if item.is_some() {
-                    cx.set_cursor(MouseCursor::Hand);
-                }
-            }
-            Event::MouseDown(event) if event.button.is_primary() => {
-                self.pressed_item = self.item_at(event.abs);
-                if let Some(item) = self.pressed_item {
-                    self.set_pressed_item(cx, item);
-                } else {
-                    self.close(cx);
-                }
-            }
-            Event::MouseUp(event) if event.button.is_primary() => {
-                let released_item = self.item_at(event.abs);
-                let selected_item = self
-                    .pressed_item
-                    .take()
-                    .filter(|pressed| Some(*pressed) == released_item);
-                if let Some(item) = selected_item {
-                    cx.widget_action(
-                        self.widget_uid(),
-                        match item {
-                            ContextMenuItem::Archive => SessionContextMenuAction::Archive,
-                            ContextMenuItem::Delete => SessionContextMenuAction::Delete,
-                        },
-                    );
-                    self.close(cx);
-                } else {
-                    self.set_hovered_item(cx, released_item);
-                }
+            Event::MouseDown(event)
+                if event.button.is_primary() && !self.menu_rect.contains(event.abs) =>
+            {
+                self.close(cx)
             }
             Event::KeyDown(event) if event.key_code == KeyCode::Escape => self.close(cx),
             Event::BackPressed { .. } => self.close(cx),
-            Event::MouseLeave(_) => self.set_hovered_item(cx, None),
-            _ => self.view.handle_event(cx, event, scope),
+            _ => {}
         }
     }
 
@@ -113,8 +96,8 @@ impl Widget for SessionContextMenu {
         cx.begin_root_turtle(pass_size, Layout::flow_down());
 
         if self.opened {
-            const MENU_WIDTH: f64 = 156.0;
-            const MENU_HEIGHT: f64 = 57.0;
+            const MENU_WIDTH: f64 = 168.0;
+            const MENU_HEIGHT: f64 = 64.0;
             const EDGE_GAP: f64 = 6.0;
             const POINTER_GAP: f64 = 2.0;
 
@@ -146,63 +129,9 @@ impl Widget for SessionContextMenu {
 }
 
 impl SessionContextMenu {
-    fn item_at(&self, position: Vec2d) -> Option<ContextMenuItem> {
-        if !self.menu_rect.contains(position) {
-            return None;
-        }
-        let local_y = position.y - self.menu_rect.pos.y;
-        if local_y < 28.5 {
-            Some(ContextMenuItem::Archive)
-        } else if local_y >= 28.5 {
-            Some(ContextMenuItem::Delete)
-        } else {
-            None
-        }
-    }
-
-    fn set_hovered_item(&mut self, cx: &mut Cx, item: Option<ContextMenuItem>) {
-        if self.hovered_item == item {
-            return;
-        }
-        self.hovered_item = item;
-        self.set_menu_item_state(
-            cx,
-            match item {
-                Some(ContextMenuItem::Archive) => 1.0,
-                Some(ContextMenuItem::Delete) => 2.0,
-                None => 0.0,
-            },
-        );
-    }
-
-    fn set_pressed_item(&mut self, cx: &mut Cx, item: ContextMenuItem) {
-        self.hovered_item = Some(item);
-        self.set_menu_item_state(
-            cx,
-            match item {
-                ContextMenuItem::Archive => 3.0,
-                ContextMenuItem::Delete => 4.0,
-            },
-        );
-    }
-
-    fn set_menu_item_state(&mut self, cx: &mut Cx, item_state: f64) {
-        let mut surface = self.view.widget(cx, ids!(menu_surface));
-        script_apply_eval!(cx, surface, {
-            draw_bg +: { item_state: #(item_state) }
-        });
-        surface.redraw(cx);
-        if let Some(draw_list) = &self.draw_list {
-            draw_list.redraw(cx);
-        }
-    }
-
     pub fn open(&mut self, cx: &mut Cx, position: Vec2d) {
         self.menu_pos = position;
         self.opened = true;
-        self.hovered_item = None;
-        self.pressed_item = None;
-        self.set_menu_item_state(cx, 0.0);
         if let Some(draw_list) = &self.draw_list {
             draw_list.redraw(cx);
         }
@@ -210,8 +139,6 @@ impl SessionContextMenu {
 
     pub fn close(&mut self, cx: &mut Cx) {
         self.opened = false;
-        self.pressed_item = None;
-        self.set_hovered_item(cx, None);
         set_session_context_target(None);
         if let Some(draw_list) = &self.draw_list {
             draw_list.redraw(cx);
@@ -224,7 +151,7 @@ script_mod! {
     use mod.prelude.widgets.*
 
     mod.components.SessionContextMenu = #(SessionContextMenu::register_widget(vm)) {
-        width: 156
+        width: 168
         height: Fit
         flow: Down
 
@@ -233,104 +160,67 @@ script_mod! {
             height: Fit
             flow: Down
             new_batch: true
-            padding: Inset{left: 3 top: 3 right: 3 bottom: 3}
+            padding: Inset{left: 4 top: 4 right: 4 bottom: 4}
             draw_bg +: {
-                item_state: instance(0.0)
-                color: #x252a32
-                border_color: #x434b58
+                color: #x20252d
+                border_color: #x3c4654
                 border_size: 1.0
-                border_radius: 7.0
-                archive_hover_color: uniform(#x343b46)
-                archive_down_color: uniform(#x3b4451)
-                delete_hover_color: uniform(#x402d33)
-                delete_down_color: uniform(#x503138)
-
-                pixel: fn() {
-                    let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                    sdf.box(
-                        self.border_size
-                        self.border_size
-                        self.rect_size.x - self.border_size * 2.0
-                        self.rect_size.y - self.border_size * 2.0
-                        self.border_radius
-                    )
-                    sdf.fill_keep(self.color)
-                    sdf.stroke(self.border_color, self.border_size)
-
-                    if self.item_state > 0.5 {
-                        let pressed = self.item_state > 2.5
-                        let pressed_mix = if pressed {1.0} else {0.0}
-                        let item = if pressed {
-                            self.item_state - 2.0
-                        } else {
-                            self.item_state
-                        }
-                        let is_delete = item > 1.5
-                        let item_y = if is_delete {30.0} else {3.0}
-                        let hover_color = if is_delete {
-                            self.delete_hover_color
-                        } else {
-                            self.archive_hover_color
-                        }
-                        let down_color = if is_delete {
-                            self.delete_down_color
-                        } else {
-                            self.archive_down_color
-                        }
-                        sdf.box(3.0, item_y, self.rect_size.x - 6.0, 24.0, 4.0)
-                        sdf.fill(mix(hover_color, down_color, pressed_mix))
-                    }
-                    return sdf.result
-                }
+                border_radius: 9.0
             }
 
             archive_session_btn := Button {
                 width: Fill
-                height: 24
+                height: 28
+                margin: 0
                 text: "Archive Session"
                 align: Align{x: 0.0 y: 0.5}
-                padding: Inset{left: 9 right: 8}
+                padding: Inset{left: 11 right: 10}
                 draw_bg +: {
                     color: #x00000000
-                    color_hover: #x00000000
-                    color_down: #x00000000
+                    color_hover: #x2c3541
+                    color_focus: #x2c3541
+                    color_down: #x344150
+                    border_color: #x00000000
+                    border_color_hover: #x00000000
+                    border_color_focus: #x00000000
+                    border_color_down: #x00000000
                     border_size: 0.0
-                    border_radius: 4.0
+                    border_radius: 5.0
                 }
                 draw_text +: {
-                    color: #xd3d9e2
-                    color_hover: #xffffff
+                    color: #xd6dce5
+                    color_hover: #xf4f7fb
+                    color_focus: #xf4f7fb
                     color_down: #xffffff
-                    text_style +: { font_size: 9.25 }
+                    text_style +: { font_size: 9.5 }
                 }
-            }
-
-            View {
-                width: Fill
-                height: 1
-                margin: Inset{left: 7 right: 7 top: 1 bottom: 1}
-                show_bg: true
-                draw_bg +: { color: #x353c47 }
             }
 
             delete_session_btn := Button {
                 width: Fill
-                height: 24
+                height: 28
+                margin: 0
                 text: "Delete Session"
                 align: Align{x: 0.0 y: 0.5}
-                padding: Inset{left: 9 right: 8}
+                padding: Inset{left: 11 right: 10}
                 draw_bg +: {
                     color: #x00000000
-                    color_hover: #x00000000
-                    color_down: #x00000000
+                    color_hover: #x3b2b31
+                    color_focus: #x3b2b31
+                    color_down: #x4a2e36
+                    border_color: #x00000000
+                    border_color_hover: #x00000000
+                    border_color_focus: #x00000000
+                    border_color_down: #x00000000
                     border_size: 0.0
-                    border_radius: 4.0
+                    border_radius: 5.0
                 }
                 draw_text +: {
-                    color: #xe87982
-                    color_hover: #xff9aa2
+                    color: #xe67f87
+                    color_hover: #xffa0a7
+                    color_focus: #xffa0a7
                     color_down: #xffffff
-                    text_style +: { font_size: 9.25 }
+                    text_style +: { font_size: 9.5 }
                 }
             }
         }
