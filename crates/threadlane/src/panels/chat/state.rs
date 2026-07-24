@@ -1,8 +1,8 @@
 //! Chat panel state: chat messages, tool call presentations, and streaming status.
 
-use threadlane_agent::AgentMessage;
 use std::path::Path;
 use std::time::{Duration, Instant};
+use threadlane_agent::AgentMessage;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum MsgRole {
@@ -306,7 +306,7 @@ pub fn tool_icon(name: &str) -> ToolIcon {
         "read_file" => ToolIcon::ReadFile,
         "write_file" => ToolIcon::WriteFile,
         "edit_file" => ToolIcon::EditFile,
-        "list_dir" => ToolIcon::ListDirectory,
+        "list_dir" | "list_directory" => ToolIcon::ListDirectory,
         "run_command" => ToolIcon::Terminal,
         "load_skill" => ToolIcon::Skill,
         "subagent" => ToolIcon::Subagent,
@@ -320,7 +320,9 @@ pub fn tool_title(name: &str) -> String {
         "read_file" => "Read file".into(),
         "write_file" => "Write file".into(),
         "edit_file" => "Edit file".into(),
-        "list_dir" => "List directory".into(),
+        "list_dir" | "list_directory" => "List directory".into(),
+        "grep" => "Search".into(),
+        "find_path" => "Find files".into(),
         "load_skill" => "Load skill".into(),
         "subagent" => "Delegate".into(),
         _ => name.replace('_', " "),
@@ -371,22 +373,53 @@ pub fn tool_presentation(name: &str, arguments: &str) -> ToolPresentation {
             )
         }
         "edit_file" => {
-            let old = get_str("target").unwrap_or_default();
-            let new = get_str("replacement").unwrap_or_default();
+            let (removed, added) = args
+                .and_then(|value| value.get("edits"))
+                .and_then(serde_json::Value::as_array)
+                .map(|edits| {
+                    edits.iter().fold((0, 0), |(removed, added), edit| {
+                        let old = edit
+                            .get("old_text")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default();
+                        let new = edit
+                            .get("new_text")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default();
+                        (removed + line_count(old), added + line_count(new))
+                    })
+                })
+                .unwrap_or_else(|| {
+                    let old = get_str("target").unwrap_or_default();
+                    let new = get_str("replacement").unwrap_or_default();
+                    (line_count(old), line_count(new))
+                });
             (
                 path.clone(),
-                format!("−{} +{} lines", line_count(old), line_count(new)),
+                format!("+{added} −{removed} lines"),
                 pretty_arguments.clone(),
                 false,
             )
         }
-        "list_dir" => (
+        "list_dir" | "list_directory" => (
             if path.is_empty() {
                 ".".into()
             } else {
                 path.clone()
             },
             String::new(),
+            pretty_arguments.clone(),
+            false,
+        ),
+        "grep" => (
+            truncate_chars(get_str("regex").unwrap_or_default(), 96),
+            get_str("include_pattern").unwrap_or("project").to_string(),
+            pretty_arguments.clone(),
+            false,
+        ),
+        "find_path" => (
+            truncate_chars(get_str("glob").unwrap_or_default(), 96),
+            "project files".into(),
             pretty_arguments.clone(),
             false,
         ),
@@ -507,6 +540,114 @@ fn normalize_whitespace_bounded(text: &str, max_chars: usize) -> String {
         .join(" ")
 }
 
+pub fn collapsed_thinking_preview(text: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+
+    let source_budget = max_chars.saturating_mul(4).saturating_add(64);
+    let mut plain = String::with_capacity(source_budget.min(text.len()));
+    let mut source_chars = 0;
+    for line in text.lines() {
+        let line = strip_markdown_line_prefix(line);
+        if line.is_empty() {
+            continue;
+        }
+        if !plain.is_empty() {
+            plain.push(' ');
+        }
+        for character in line.chars() {
+            if source_chars >= source_budget {
+                break;
+            }
+            plain.push(character);
+            source_chars += 1;
+        }
+        if source_chars >= source_budget {
+            break;
+        }
+    }
+
+    let remove_backticks = plain.matches('`').count() >= 2;
+    let plain = plain.replace("**", "").replace("~~", "");
+    let chars: Vec<_> = plain.chars().collect();
+    let mut plain_text = String::with_capacity(plain.len());
+    for (index, character) in chars.iter().copied().enumerate() {
+        let remove = match character {
+            '`' => remove_backticks,
+            '_' => {
+                let previous_is_alphanumeric = index
+                    .checked_sub(1)
+                    .and_then(|previous| chars.get(previous))
+                    .is_some_and(|character| character.is_alphanumeric());
+                let next_is_alphanumeric = chars
+                    .get(index + 1)
+                    .is_some_and(|character| character.is_alphanumeric());
+                !(previous_is_alphanumeric && next_is_alphanumeric)
+            }
+            _ => false,
+        };
+        if !remove {
+            plain_text.push(character);
+        }
+    }
+    let normalized = plain_text.split_whitespace().collect::<Vec<_>>().join(" ");
+    truncate_chars(&normalized, max_chars)
+}
+
+fn strip_markdown_line_prefix(line: &str) -> &str {
+    let mut line = line.trim();
+    loop {
+        let previous = line;
+        if let Some(rest) = line.strip_prefix('>') {
+            line = rest.trim_start();
+        } else {
+            let heading_end = line
+                .chars()
+                .take_while(|character| *character == '#')
+                .count();
+            if heading_end > 0
+                && line
+                    .chars()
+                    .nth(heading_end)
+                    .is_some_and(char::is_whitespace)
+            {
+                line = line[heading_end..].trim_start();
+            } else if let Some(rest) = line
+                .strip_prefix("- ")
+                .or_else(|| line.strip_prefix("* "))
+                .or_else(|| line.strip_prefix("+ "))
+            {
+                line = rest.trim_start();
+            } else if let Some(marker_end) = ordered_list_marker_end(line) {
+                line = line[marker_end..].trim_start();
+            }
+        }
+        if line == previous {
+            return line;
+        }
+    }
+}
+
+fn ordered_list_marker_end(line: &str) -> Option<usize> {
+    let digits_end = line
+        .char_indices()
+        .take_while(|(_, character)| character.is_ascii_digit())
+        .map(|(index, character)| index + character.len_utf8())
+        .last()?;
+    let rest = &line[digits_end..];
+    let marker = rest.chars().next()?;
+    if !matches!(marker, '.' | ')') {
+        return None;
+    }
+    let marker_end = digits_end + marker.len_utf8();
+    rest[marker.len_utf8()..]
+        .chars()
+        .next()
+        .is_some_and(char::is_whitespace)
+        .then_some(marker_end)
+}
+
 pub fn tool_preview(name: &str, arguments: &str) -> String {
     let presentation = tool_presentation(name, arguments);
     if presentation.metadata.is_empty() {
@@ -575,16 +716,41 @@ pub fn tool_result_preview(output: &str, max_chars: usize) -> String {
     if trimmed.is_empty() {
         return "(empty output)".into();
     }
-    let first_line = trimmed.lines().next().unwrap_or(trimmed);
-    truncate_chars(first_line, max_chars)
+    collapsed_thinking_preview(trimmed, max_chars)
 }
 
 pub fn tool_result_detail(output: &str, max_chars: usize) -> String {
+    const MAX_DETAIL_LINES: usize = 20;
+
     let trimmed = output.trim();
     if trimmed.is_empty() {
         return "(empty output)".into();
     }
-    truncate_chars(trimmed, max_chars)
+
+    let lines: Vec<_> = trimmed.lines().collect();
+    let original_fits = lines.len() <= MAX_DETAIL_LINES && trimmed.chars().count() <= max_chars;
+    if original_fits {
+        return trimmed.to_string();
+    }
+
+    let content_line_limit = MAX_DETAIL_LINES - 1;
+    let visible_lines = lines.len().min(content_line_limit);
+    let body = lines[..visible_lines].join("\n");
+    let omitted_lines = lines.len().saturating_sub(visible_lines);
+    let notice = match (trimmed.chars().count() > max_chars, omitted_lines) {
+        (true, 0) => "… output truncated".to_string(),
+        (true, 1) => "… output truncated; 1 line omitted".to_string(),
+        (true, count) => format!("… output truncated; {count} lines omitted"),
+        (false, 1) => "… 1 line omitted".to_string(),
+        (false, count) => format!("… {count} lines omitted"),
+    };
+    if notice.chars().count() >= max_chars {
+        return truncate_chars(&notice, max_chars);
+    }
+
+    let body_budget = max_chars - notice.chars().count() - 1;
+    let body = truncate_chars(&body, body_budget);
+    format!("{body}\n{notice}")
 }
 
 pub fn result_metadata_for(output: &str, status: ToolStatus, duration: Duration) -> String {
@@ -610,17 +776,23 @@ fn result_metadata_for_tool(
         ToolStatus::Done if name == "subagent" => format!("Completed · {time_label}"),
         ToolStatus::Done => {
             let lines = line_count(output);
+            let line_label = if lines == 1 { "line" } else { "lines" };
             let bytes = output.len();
-            format!("{lines} lines · {} · {time_label}", byte_size_label(bytes))
+            format!(
+                "{lines} {line_label} · {} · {time_label}",
+                byte_size_label(bytes)
+            )
         }
     }
 }
 
 pub fn truncate_chars(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
+    if max_chars == 0 {
+        String::new()
+    } else if s.chars().count() <= max_chars {
         s.to_string()
     } else {
-        let truncated: String = s.chars().take(max_chars.saturating_sub(1)).collect();
+        let truncated: String = s.chars().take(max_chars - 1).collect();
         format!("{truncated}…")
     }
 }
@@ -671,6 +843,38 @@ mod tests {
     }
 
     #[test]
+    fn edit_file_presentation_summarizes_current_edit_payload() {
+        let arguments = serde_json::json!({
+            "path": "src/app.rs",
+            "edits": [
+                {"old_text": "old\nlines", "new_text": "new\nlines\nhere"},
+                {"old_text": "", "new_text": "added"}
+            ]
+        })
+        .to_string();
+        let presentation = tool_presentation("edit_file", &arguments);
+
+        assert_eq!(presentation.icon, ToolIcon::EditFile);
+        assert_eq!(presentation.primary, "src/app.rs");
+        assert_eq!(presentation.metadata, "+4 −2 lines");
+    }
+
+    #[test]
+    fn search_tools_have_compact_presentations() {
+        let grep = tool_presentation(
+            "grep",
+            r#"{"regex":"ActivityGroup","include_pattern":"src/**/*.rs"}"#,
+        );
+        let find = tool_presentation("find_path", r#"{"glob":"src/**/*.rs"}"#);
+
+        assert_eq!(grep.title, "Search");
+        assert_eq!(grep.primary, "ActivityGroup");
+        assert_eq!(grep.metadata, "src/**/*.rs");
+        assert_eq!(find.title, "Find files");
+        assert_eq!(find.primary, "src/**/*.rs");
+    }
+
+    #[test]
     fn subagent_presentation_summarizes_parallel_tasks() {
         let arguments = serde_json::json!({
             "tasks": [
@@ -694,6 +898,70 @@ mod tests {
     }
 
     #[test]
+    fn collapsed_thinking_preview_removes_common_markdown_syntax() {
+        let preview = collapsed_thinking_preview(
+            "# **Plan**\n- Inspect `state.rs`\n2. Keep _snake_case_ and ~~finish~~",
+            200,
+        );
+
+        assert_eq!(preview, "Plan Inspect state.rs Keep snake_case and finish");
+    }
+
+    #[test]
+    fn collapsed_thinking_preview_normalizes_then_truncates() {
+        assert_eq!(
+            collapsed_thinking_preview("  **One**\n\n  `two`   three  ", 11),
+            "One two th…"
+        );
+        assert_eq!(collapsed_thinking_preview("anything", 0), "");
+    }
+
+    #[test]
+    fn collapsed_thinking_preview_preserves_literal_shell_and_math_punctuation() {
+        assert_eq!(
+            collapsed_thinking_preview("Inspect ~/bin and calculate a*b", 80),
+            "Inspect ~/bin and calculate a*b"
+        );
+    }
+
+    #[test]
+    fn tool_result_preview_uses_readable_text_from_multiple_lines() {
+        assert_eq!(
+            tool_result_preview("## Result\n- **Three** files changed", 80),
+            "Result Three files changed"
+        );
+        assert_eq!(tool_result_preview(" \n\t", 80), "(empty output)");
+    }
+
+    #[test]
+    fn tool_result_detail_caps_lines_and_reports_omissions() {
+        let output = (1..=25)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let detail = tool_result_detail(&output, 1_000);
+
+        assert_eq!(detail.lines().count(), 20);
+        assert!(detail.starts_with("line 1\n"));
+        assert!(detail.contains("line 19\n"));
+        assert!(detail.ends_with("… 6 lines omitted"));
+    }
+
+    #[test]
+    fn tool_result_detail_honors_character_bound_and_preserves_notice() {
+        let detail = tool_result_detail(&"x".repeat(100), 40);
+
+        assert!(detail.chars().count() <= 40);
+        assert!(detail.ends_with("… output truncated"));
+        assert_eq!(detail.lines().count(), 2);
+    }
+
+    #[test]
+    fn tool_result_detail_preserves_empty_output_behavior() {
+        assert_eq!(tool_result_detail(" \n\t", 100), "(empty output)");
+    }
+
+    #[test]
     fn specialized_tool_completion_metadata_is_action_oriented() {
         assert_eq!(
             result_metadata_for_tool(
@@ -712,6 +980,10 @@ mod tests {
                 Duration::from_secs(3)
             ),
             "Completed · 3.0s"
+        );
+        assert_eq!(
+            result_metadata_for("one line", ToolStatus::Done, Duration::from_secs(1)),
+            "1 line · 8 B · 1.0s"
         );
     }
 }

@@ -156,6 +156,14 @@ Drawing in an overlay does not automatically stop widgets underneath from receiv
 - Makepad `PortalList::smooth_scroll_to` stops when a target row’s top edge is visible, even if the row is not fully revealed. When wrapping from the first command to the final command, use `scroll_to_end` so the selection and viewport reach the actual bottom.
 - Keep keyboard focus and pointer hover as separate states; keyboard movement should clear pointer hover before redrawing.
 
+### Chat Activity Groups
+
+- Consecutive thinking and tool messages are grouped into one collapsible `Working`/`Worked` display row by `panels/chat/view.rs`.
+- Grouping is presentation-only: preserve the underlying `ChatMessage` entries so tool output and persisted session history remain intact.
+- Streaming thinking merges into the trailing activity group; streaming assistant text remains a normal assistant message.
+- Keep summary categories concise and action-oriented (`Explored`, `Edited`, `Ran`, `Loaded`, `Delegated`) and bound expanded output rather than restoring every raw payload to the top-level transcript.
+- The chat `PortalList` range is based on display rows, not raw message count. If changing grouping, preserve stable ordering, auto-tail behavior, and non-reused fold widget state.
+
 ### Composer Drop-Ups
 
 The pinned Makepad `PopupMenuPosition` currently supports only `OnSelected` and `BelowInput`; it has no native `AboveInput` variant.
@@ -198,9 +206,10 @@ If changing ordering, row height, popup padding, or selected-item behavior, upda
 - `THREADLANE_UPDATER_PUBLIC_KEY` and `THREADLANE_UPDATER_ENDPOINT` are compile-time environment values through `option_env!`.
 - Never hardcode private updater keys or passwords.
 - Update checks and downloads may run from `cargo run`; installation must remain restricted to a packaged app bundle.
+- Trigger an update check in the background on every application launch. Keep the sidebar update action hidden while idle, checking, up to date, or after a silent automatic-check error; reveal it only for an available or active update flow.
 - Keep updater lifecycle states explicit: idle, checking, available, up to date, downloading, ready to install, installing, and error.
 - Preserve target-version context during download progress.
-- Updater status belongs in the dedicated header/notice UI, not as repeated system messages in the conversation.
+- The update action belongs in the Projects sidebar. Download/install progress belongs in the dedicated notice UI, not as repeated system messages in the conversation.
 - Keep status copy concise and truncate unbounded release notes or errors before placing them in compact UI.
 
 ## WASI Extensions
