@@ -3,6 +3,7 @@
 use crate::path_utils::{canonicalize_path, truncate_chars};
 use threadlane_agent::{AgentMessage, SessionTree};
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -38,7 +39,8 @@ pub enum SessionListRow {
 
 pub struct SessionsData {
     pub projects: Vec<ProjectGroup>,
-    pub working_sessions: Vec<(PathBuf, String)>,
+    /// O(1) lookup for spinner visibility per row in draw_walk.
+    pub working_sessions: HashSet<(PathBuf, String)>,
     pub active_session_id: Option<String>,
     pub active_work_dir: PathBuf,
     pub context_session_id: Option<String>,
@@ -66,24 +68,38 @@ pub fn normalize_session_title(value: &str) -> String {
     // either order until neither is present.
     loop {
         let before = title.clone();
-        let prefix: String = title.chars().take(6).collect();
-        if prefix.eq_ignore_ascii_case("title:") {
-            title = title.chars().skip(6).collect::<String>().trim().to_string();
+        if title.get(..6).is_some_and(|p| p.eq_ignore_ascii_case("title:")) {
+            title = title[6..].trim().to_string();
         }
-        let chars: Vec<char> = title.chars().collect();
-        if chars.len() >= 2
-            && ((chars[0] == '"' && chars[chars.len() - 1] == '"')
-                || (chars[0] == '\'' && chars[chars.len() - 1] == '\''))
-        {
-            title = chars[1..chars.len() - 1].iter().collect::<String>();
-            title = title.trim().to_string();
+        let is_double_quoted = title.starts_with('"') && title.ends_with('"') && title.len() >= 2;
+        let is_single_quoted =
+            title.starts_with('\'') && title.ends_with('\'') && title.len() >= 2;
+        if is_double_quoted || is_single_quoted {
+            // Safe: both delimiters are ASCII (1 byte each).
+            title = title[1..title.len() - 1].trim().to_string();
         }
         if title == before {
             break;
         }
     }
-    title = title.split_whitespace().collect::<Vec<_>>().join(" ");
-    title.chars().take(42).collect()
+    // Collapse runs of whitespace without allocating a Vec.
+    let mut collapsed = String::with_capacity(title.len());
+    let mut prev_space = true;
+    for ch in title.chars() {
+        if ch.is_whitespace() {
+            if !prev_space {
+                collapsed.push(' ');
+                prev_space = true;
+            }
+        } else {
+            collapsed.push(ch);
+            prev_space = false;
+        }
+    }
+    if collapsed.ends_with(' ') {
+        collapsed.pop();
+    }
+    collapsed.chars().take(42).collect()
 }
 
 pub fn session_title_eligible(tree: &SessionTree, submitted_prompt: Option<&str>) -> bool {
@@ -139,14 +155,16 @@ pub fn end_title_generation(_work_dir: &Path, _session_id: &str) {
     // the marker: one attempt is allowed per session per application lifetime.
 }
 
-pub static SESSIONS_DATA: RwLock<SessionsData> = RwLock::new(SessionsData {
-    projects: Vec::new(),
-    working_sessions: Vec::new(),
-    active_session_id: None,
-    active_work_dir: PathBuf::new(),
-    context_session_id: None,
-    context_work_dir: PathBuf::new(),
-    rows: Vec::new(),
+pub static SESSIONS_DATA: LazyLock<RwLock<SessionsData>> = LazyLock::new(|| {
+    RwLock::new(SessionsData {
+        projects: Vec::new(),
+        working_sessions: HashSet::new(),
+        active_session_id: None,
+        active_work_dir: PathBuf::new(),
+        context_session_id: None,
+        context_work_dir: PathBuf::new(),
+        rows: Vec::new(),
+    })
 });
 
 fn project_display_name(work_dir: &Path) -> String {
@@ -225,7 +243,8 @@ fn discover_sessions_in_project(work_dir: &Path) -> Vec<SessionEntry> {
         sessions.push(SessionEntry {
             id: id.clone(),
             title: session_title_from_tree(&tree, &id),
-            work_dir: work_dir.to_path_buf(),
+            // Store the canonical path once so draw_walk never needs a syscall.
+            work_dir: canonicalize_path(work_dir),
             session_file: path.clone(),
             updated_at: session_updated_at(&tree, &path),
         });
@@ -292,8 +311,8 @@ pub fn refresh_sessions(project_dirs: &[PathBuf]) -> Vec<SessionListRow> {
     }
 
     data.projects = projects;
-    data.rows = rows.clone();
-    rows
+    data.rows = rows;
+    data.rows.clone()
 }
 
 pub fn set_session_working(work_dir: &Path, session_id: &str, is_working: bool) {
@@ -301,11 +320,9 @@ pub fn set_session_working(work_dir: &Path, session_id: &str, is_working: bool) 
     let normalized_dir = canonicalize_path(work_dir);
     let key = (normalized_dir, session_id.to_string());
     if is_working {
-        if !data.working_sessions.contains(&key) {
-            data.working_sessions.push(key);
-        }
+        data.working_sessions.insert(key);
     } else {
-        data.working_sessions.retain(|working| working != &key);
+        data.working_sessions.remove(&key);
     }
 }
 

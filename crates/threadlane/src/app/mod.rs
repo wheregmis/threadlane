@@ -1520,7 +1520,7 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(caps_btn)).clicked(actions) {
             let summary = self.capabilities_summary.clone();
             self.push_chat(MsgRole::System, summary);
-            cx.redraw_all();
+            self.ui.widget(cx, ids!(chat_list)).redraw(cx);
         }
 
         if self.ui.button(cx, ids!(update_btn)).clicked(actions) {
@@ -1575,7 +1575,7 @@ impl MatchEvent for App {
                 self.refresh_attachment_ui(cx);
                 self.set_session_status(cx, &key, UiStatus::Ready, "Stopped");
                 self.push_chat(MsgRole::System, "Generation stopped.");
-                cx.redraw_all();
+                self.ui.widget(cx, ids!(chat_list)).redraw(cx);
             }
         }
 
@@ -2977,11 +2977,16 @@ impl App {
         let generation_id = self.next_generation_id;
 
         if show_in_chat {
-            let attachment_names = attachments
-                .iter()
-                .map(|attachment| attachment.display_name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
+            let attachment_names = attachments.iter().enumerate().fold(
+                String::new(),
+                |mut acc, (i, attachment)| {
+                    if i > 0 {
+                        acc.push_str(", ");
+                    }
+                    acc.push_str(&attachment.display_name);
+                    acc
+                },
+            );
             let visible_input = if attachment_names.is_empty() {
                 input_str.clone()
             } else if input_str.is_empty() {

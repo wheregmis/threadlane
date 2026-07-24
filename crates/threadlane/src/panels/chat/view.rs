@@ -284,6 +284,15 @@ fn draw_markdown_item(list: &mut PortalList, cx: &mut Cx2d, item_id: usize, temp
 pub struct ChatList {
     #[deref]
     view: View,
+    /// Cached display rows; rebuilt only when message count or streaming kind changes.
+    #[rust]
+    cached_rows: Vec<DisplayRow>,
+    #[rust]
+    cached_msg_count: usize,
+    #[rust]
+    cached_streaming_kind: Option<StreamingKind>,
+    #[rust]
+    cached_streaming_text_len: usize,
 }
 
 impl Widget for ChatList {
@@ -296,7 +305,21 @@ impl Widget for ChatList {
         else {
             return DrawStep::done();
         };
-        let rows = display_rows(&data.messages, data.streaming_kind, &data.streaming_text);
+
+        // Rebuild display rows only when the message list or streaming state changes.
+        let msg_count = data.messages.len();
+        let streaming_text_len = data.streaming_text.len();
+        if msg_count != self.cached_msg_count
+            || data.streaming_kind != self.cached_streaming_kind
+            || streaming_text_len != self.cached_streaming_text_len
+        {
+            self.cached_rows =
+                display_rows(&data.messages, data.streaming_kind, &data.streaming_text);
+            self.cached_msg_count = msg_count;
+            self.cached_streaming_kind = data.streaming_kind;
+            self.cached_streaming_text_len = streaming_text_len;
+        }
+        let rows = &self.cached_rows;
 
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = item.as_portal_list().borrow_mut() {

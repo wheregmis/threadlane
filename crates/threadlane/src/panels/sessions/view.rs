@@ -1,7 +1,7 @@
 //! Sessions panel main view & sidebar list widget.
 
 use super::state::{relative_time_label, SessionListRow, SESSIONS_DATA};
-use crate::path_utils::{canonicalize_path, truncate_chars};
+use crate::path_utils::truncate_chars;
 use makepad_widgets::*;
 
 fn draw_empty_session_row(cx: &mut Cx2d, list: &mut PortalList, item_id: usize) {
@@ -89,10 +89,9 @@ impl Widget for SessionList {
                             item_widget
                                 .label(cx, ids!(time_lbl))
                                 .set_text(cx, &relative_time_label(session.updated_at));
-                            let normalized_dir = canonicalize_path(&session.work_dir);
                             let working = data
                                 .working_sessions
-                                .contains(&(normalized_dir, session.id.clone()));
+                                .contains(&(session.work_dir.clone(), session.id.clone()));
                             item_widget
                                 .widget(cx, ids!(session_row_spinner))
                                 .set_visible(cx, working);
