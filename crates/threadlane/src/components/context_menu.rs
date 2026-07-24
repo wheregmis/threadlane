@@ -150,6 +150,33 @@ impl SessionContextMenu {
 script_mod! {
     use mod.prelude.widgets.*
 
+    mod.components.ContextMenuItem = Button {
+        width: Fill
+        height: 28
+        margin: 0
+        align: Align{x: 0.0 y: 0.5}
+        padding: Inset{left: 11 right: 10}
+        draw_bg +: {
+            color: #x00000000
+            color_hover: #x2c3541
+            color_focus: #x2c3541
+            color_down: #x344150
+            border_color: #x00000000
+            border_color_hover: #x00000000
+            border_color_focus: #x00000000
+            border_color_down: #x00000000
+            border_size: 0.0
+            border_radius: 5.0
+        }
+        draw_text +: {
+            color: #xd6dce5
+            color_hover: #xf4f7fb
+            color_focus: #xf4f7fb
+            color_down: #xffffff
+            text_style +: { font_size: 9.5 }
+        }
+    }
+
     mod.components.SessionContextMenu = #(SessionContextMenu::register_widget(vm)) {
         width: 168
         height: Fit
@@ -168,59 +195,21 @@ script_mod! {
                 border_radius: 9.0
             }
 
-            archive_session_btn := Button {
-                width: Fill
-                height: 28
-                margin: 0
+            archive_session_btn := mod.components.ContextMenuItem {
                 text: "Archive Session"
-                align: Align{x: 0.0 y: 0.5}
-                padding: Inset{left: 11 right: 10}
-                draw_bg +: {
-                    color: #x00000000
-                    color_hover: #x2c3541
-                    color_focus: #x2c3541
-                    color_down: #x344150
-                    border_color: #x00000000
-                    border_color_hover: #x00000000
-                    border_color_focus: #x00000000
-                    border_color_down: #x00000000
-                    border_size: 0.0
-                    border_radius: 5.0
-                }
-                draw_text +: {
-                    color: #xd6dce5
-                    color_hover: #xf4f7fb
-                    color_focus: #xf4f7fb
-                    color_down: #xffffff
-                    text_style +: { font_size: 9.5 }
-                }
             }
 
-            delete_session_btn := Button {
-                width: Fill
-                height: 28
-                margin: 0
+            delete_session_btn := mod.components.ContextMenuItem {
                 text: "Delete Session"
-                align: Align{x: 0.0 y: 0.5}
-                padding: Inset{left: 11 right: 10}
                 draw_bg +: {
-                    color: #x00000000
                     color_hover: #x3b2b31
                     color_focus: #x3b2b31
                     color_down: #x4a2e36
-                    border_color: #x00000000
-                    border_color_hover: #x00000000
-                    border_color_focus: #x00000000
-                    border_color_down: #x00000000
-                    border_size: 0.0
-                    border_radius: 5.0
                 }
                 draw_text +: {
                     color: #xe67f87
                     color_hover: #xffa0a7
                     color_focus: #xffa0a7
-                    color_down: #xffffff
-                    text_style +: { font_size: 9.5 }
                 }
             }
         }

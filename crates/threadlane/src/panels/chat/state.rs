@@ -301,17 +301,23 @@ fn flush_streaming_locked(data: &mut ChatData) {
     }
 }
 
-pub fn tool_icon(name: &str) -> ToolIcon {
-    match name {
-        "read_file" => ToolIcon::ReadFile,
-        "write_file" => ToolIcon::WriteFile,
-        "edit_file" => ToolIcon::EditFile,
-        "list_dir" | "list_directory" => ToolIcon::ListDirectory,
-        "run_command" => ToolIcon::Terminal,
-        "load_skill" => ToolIcon::Skill,
-        "subagent" => ToolIcon::Subagent,
-        _ => ToolIcon::Generic,
+impl ToolIcon {
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "read_file" => ToolIcon::ReadFile,
+            "write_file" => ToolIcon::WriteFile,
+            "edit_file" => ToolIcon::EditFile,
+            "list_dir" | "list_directory" => ToolIcon::ListDirectory,
+            "run_command" => ToolIcon::Terminal,
+            "load_skill" => ToolIcon::Skill,
+            "subagent" => ToolIcon::Subagent,
+            _ => ToolIcon::Generic,
+        }
     }
+}
+
+pub fn tool_icon(name: &str) -> ToolIcon {
+    ToolIcon::from_name(name)
 }
 
 pub fn tool_title(name: &str) -> String {
@@ -786,16 +792,7 @@ fn result_metadata_for_tool(
     }
 }
 
-pub fn truncate_chars(s: &str, max_chars: usize) -> String {
-    if max_chars == 0 {
-        String::new()
-    } else if s.chars().count() <= max_chars {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max_chars - 1).collect();
-        format!("{truncated}…")
-    }
-}
+pub use crate::path_utils::truncate_chars;
 
 #[cfg(test)]
 mod tests {

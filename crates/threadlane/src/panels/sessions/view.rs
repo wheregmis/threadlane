@@ -1,8 +1,16 @@
 //! Sessions panel main view & sidebar list widget.
 
 use super::state::{relative_time_label, SessionListRow, SESSIONS_DATA};
-use crate::panels::chat::truncate_chars;
+use crate::path_utils::truncate_chars;
 use makepad_widgets::*;
+
+fn draw_empty_session_row(cx: &mut Cx2d, list: &mut PortalList, item_id: usize) {
+    let item_widget = list.item(cx, item_id, id!(EmptyRow));
+    item_widget
+        .label(cx, ids!(lbl))
+        .set_text(cx, "No sessions yet");
+    item_widget.draw_all_unscoped(cx);
+}
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct SessionList {
@@ -21,11 +29,7 @@ impl Widget for SessionList {
 
                 while let Some(item_id) = list.next_visible_item(cx) {
                     if data.rows.is_empty() {
-                        let item_widget = list.item(cx, item_id, id!(EmptyRow));
-                        item_widget
-                            .label(cx, ids!(lbl))
-                            .set_text(cx, "No sessions yet");
-                        item_widget.draw_all_unscoped(cx);
+                        draw_empty_session_row(cx, &mut list, item_id);
                         continue;
                     }
 
@@ -55,11 +59,7 @@ impl Widget for SessionList {
                             item_widget.draw_all_unscoped(cx);
                         }
                         Some(SessionListRow::EmptyProject) => {
-                            let item_widget = list.item(cx, item_id, id!(EmptyRow));
-                            item_widget
-                                .label(cx, ids!(lbl))
-                                .set_text(cx, "No sessions yet");
-                            item_widget.draw_all_unscoped(cx);
+                            draw_empty_session_row(cx, &mut list, item_id);
                         }
                         Some(SessionListRow::Session {
                             project_idx,
@@ -71,12 +71,8 @@ impl Widget for SessionList {
                             let Some(session) = project.sessions.get(*session_idx) else {
                                 continue;
                             };
-                            let active = data.active_session_id.as_deref()
-                                == Some(session.id.as_str())
-                                && data.active_work_dir == session.work_dir;
-                            let context_target = data.context_session_id.as_deref()
-                                == Some(session.id.as_str())
-                                && data.context_work_dir == session.work_dir;
+                            let active = data.is_active(&session.work_dir, &session.id);
+                            let context_target = data.is_context_target(&session.work_dir, &session.id);
                             let last = *session_idx + 1 == project.sessions.len();
                             let template = match (context_target, active, last) {
                                 (true, _, true) => id!(SessionRowContextLast),
@@ -93,11 +89,9 @@ impl Widget for SessionList {
                             item_widget
                                 .label(cx, ids!(time_lbl))
                                 .set_text(cx, &relative_time_label(session.updated_at));
-                            let normalized_dir = std::fs::canonicalize(&session.work_dir)
-                                .unwrap_or_else(|_| session.work_dir.clone());
                             let working = data
                                 .working_sessions
-                                .contains(&(normalized_dir, session.id.clone()));
+                                .contains(&(session.work_dir.clone(), session.id.clone()));
                             item_widget
                                 .widget(cx, ids!(session_row_spinner))
                                 .set_visible(cx, working);

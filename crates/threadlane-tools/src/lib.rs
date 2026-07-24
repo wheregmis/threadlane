@@ -3,91 +3,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub fn get_available_tools() -> Vec<Value> {
+fn tool_definitions() -> Vec<Value> {
     vec![
         json!({
-            "type": "function",
-            "function": {
-                "name": "read_file",
-                "description": "Read content of a file, optionally specifying start and end lines (1-indexed).",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "Absolute or relative path to the file" },
-                        "start_line": { "type": "integer", "description": "Optional starting line number (1-based)" },
-                        "end_line": { "type": "integer", "description": "Optional ending line number (1-based)" }
-                    },
-                    "required": ["path"]
-                }
-            }
-        }),
-        json!({
-            "type": "function",
-            "function": {
-                "name": "write_file",
-                "description": "Write or overwrite content to a file.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "Path to file to write" },
-                        "content": { "type": "string", "description": "Content to write into the file" }
-                    },
-                    "required": ["path", "content"]
-                }
-            }
-        }),
-        json!({
-            "type": "function",
-            "function": {
-                "name": "edit_file",
-                "description": "Replace exact target string with replacement string in a file.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "Path to the file" },
-                        "target": { "type": "string", "description": "Exact text substring to be replaced" },
-                        "replacement": { "type": "string", "description": "New text to substitute in place of target" }
-                    },
-                    "required": ["path", "target", "replacement"]
-                }
-            }
-        }),
-        json!({
-            "type": "function",
-            "function": {
-                "name": "list_dir",
-                "description": "List files and subdirectories in a directory.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "Directory path to list" }
-                    },
-                    "required": ["path"]
-                }
-            }
-        }),
-        json!({
-            "type": "function",
-            "function": {
-                "name": "run_command",
-                "description": "Run a shell command on the host system and return stdout/stderr.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "command": { "type": "string", "description": "Shell command to run" },
-                        "cwd": { "type": "string", "description": "Working directory for the command" }
-                    },
-                    "required": ["command"]
-                }
-            }
-        }),
-    ]
-}
-
-pub fn get_codex_tools() -> Vec<Value> {
-    vec![
-        json!({
-            "type": "function",
             "name": "read_file",
             "description": "Read content of a file, optionally specifying start and end lines (1-indexed).",
             "parameters": {
@@ -101,7 +19,6 @@ pub fn get_codex_tools() -> Vec<Value> {
             }
         }),
         json!({
-            "type": "function",
             "name": "write_file",
             "description": "Write or overwrite content to a file.",
             "parameters": {
@@ -114,7 +31,6 @@ pub fn get_codex_tools() -> Vec<Value> {
             }
         }),
         json!({
-            "type": "function",
             "name": "edit_file",
             "description": "Replace exact target string with replacement string in a file.",
             "parameters": {
@@ -128,7 +44,6 @@ pub fn get_codex_tools() -> Vec<Value> {
             }
         }),
         json!({
-            "type": "function",
             "name": "list_dir",
             "description": "List files and subdirectories in a directory.",
             "parameters": {
@@ -140,7 +55,6 @@ pub fn get_codex_tools() -> Vec<Value> {
             }
         }),
         json!({
-            "type": "function",
             "name": "run_command",
             "description": "Run a shell command on the host system and return stdout/stderr.",
             "parameters": {
@@ -153,6 +67,35 @@ pub fn get_codex_tools() -> Vec<Value> {
             }
         }),
     ]
+}
+
+pub fn get_available_tools() -> Vec<Value> {
+    tool_definitions()
+        .into_iter()
+        .map(|def| {
+            json!({
+                "type": "function",
+                "function": def
+            })
+        })
+        .collect()
+}
+
+pub fn get_codex_tools() -> Vec<Value> {
+    tool_definitions()
+        .into_iter()
+        .map(|def| {
+            let mut obj = json!({
+                "type": "function"
+            });
+            if let Some(map) = obj.as_object_mut() {
+                if let Value::Object(def_map) = def {
+                    map.extend(def_map);
+                }
+            }
+            obj
+        })
+        .collect()
 }
 
 pub fn validate_path_in_workspace(

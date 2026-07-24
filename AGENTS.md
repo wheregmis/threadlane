@@ -98,6 +98,7 @@ Reusable script components are registered through `crates/threadlane/src/compone
 - Add every new component module to both the Rust module list and the `script_mod(vm)` registration sequence.
 - Use `mod.components.Name` for reusable templates.
 - Use `:=` IDs for widgets that Rust code must retrieve with `ids!(...)`.
+- **DSL inheritance**: `:= SomeName { ... }` creates an ID-bound widget instance, **not** a named prototype. An ID-bound instance cannot be used as a parent in another `:= SomeName { ... }` definition. Only `mod.components.Name` template names (defined with `=`, not `:=`) are valid prototype parents. Attempting to write `Child := ParentId { ... }` where `ParentId` was defined with `:=` will fail at runtime with "variable ParentId not found in scope".
 
 ### Layout
 

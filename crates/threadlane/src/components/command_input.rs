@@ -155,30 +155,19 @@ script_mod! {
                                 text_style: theme.font_code { font_size: 10.0 }
                             }
                         }
-                        cmd_name := Label {
+                        cmd_name := mod.components.CodeLabel {
                             width: 180
-                            height: 18
-                            align: Align{x: 0.0 y: 0.5}
-                            padding: 0
                             max_lines: 1
                             text_overflow: Ellipsis
-                            text: ""
                             draw_text +: {
                                 color: #xdde3ea
-                                text_style: theme.font_code { font_size: 10.0 }
+                                text_style +: { font_size: 10.0 }
                             }
                         }
-                        cmd_desc := Label {
-                            width: Fill
-                            height: 18
-                            align: Align{x: 0.0 y: 0.5}
-                            padding: 0
-                            max_lines: 1
-                            text_overflow: Ellipsis
-                            text: ""
+                        cmd_desc := mod.components.ClippedLabel {
                             draw_text +: {
                                 color: #x7f8b9a
-                                text_style +: { font_size: 8.5 }
+                                text_style +: { font_size: 9.0 }
                             }
                         }
                     }

@@ -23,11 +23,10 @@ script_mod! {
             visible: false
             draw_bg +: { color: #x6f7a88 }
         }
-        error_dot := RoundedView {
+        error_dot := mod.components.StatusDot {
             width: 5
             height: 5
-            visible: false
-            draw_bg +: { color: #xe5534b border_radius: 2.5 }
+            draw_bg +: { color: #xe5534b, border_radius: 2.5 }
         }
     }
 }

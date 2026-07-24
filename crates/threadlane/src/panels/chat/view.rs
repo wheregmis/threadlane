@@ -4,23 +4,34 @@ use super::state::{ChatMessage, MsgRole, StreamingKind, ToolIcon, ToolStatus};
 use crate::workspace::AppState;
 use makepad_widgets::*;
 
+const TOOL_ICON_MAP: [(ToolIcon, &[LiveId; 1]); 8] = [
+    (ToolIcon::Generic, ids!(icon_generic)),
+    (ToolIcon::ReadFile, ids!(icon_read_file)),
+    (ToolIcon::WriteFile, ids!(icon_write_file)),
+    (ToolIcon::EditFile, ids!(icon_edit_file)),
+    (ToolIcon::ListDirectory, ids!(icon_list_directory)),
+    (ToolIcon::Terminal, ids!(icon_terminal)),
+    (ToolIcon::Skill, ids!(icon_skill)),
+    (ToolIcon::Subagent, ids!(icon_subagent)),
+];
+
 fn show_tool_icon(cx: &mut Cx, item: &WidgetRef, selected: ToolIcon) {
-    item.widget(cx, ids!(icon_generic))
-        .set_visible(cx, selected == ToolIcon::Generic);
-    item.widget(cx, ids!(icon_read_file))
-        .set_visible(cx, selected == ToolIcon::ReadFile);
-    item.widget(cx, ids!(icon_write_file))
-        .set_visible(cx, selected == ToolIcon::WriteFile);
-    item.widget(cx, ids!(icon_edit_file))
-        .set_visible(cx, selected == ToolIcon::EditFile);
-    item.widget(cx, ids!(icon_list_directory))
-        .set_visible(cx, selected == ToolIcon::ListDirectory);
-    item.widget(cx, ids!(icon_terminal))
-        .set_visible(cx, selected == ToolIcon::Terminal);
-    item.widget(cx, ids!(icon_skill))
-        .set_visible(cx, selected == ToolIcon::Skill);
-    item.widget(cx, ids!(icon_subagent))
-        .set_visible(cx, selected == ToolIcon::Subagent);
+    for (icon, id) in TOOL_ICON_MAP {
+        item.widget(cx, id).set_visible(cx, selected == icon);
+    }
+}
+
+fn update_activity_status(cx: &mut Cx, item_widget: &WidgetRef, running: bool, error: bool) {
+    let indicator = item_widget.widget(cx, ids!(status_indicator));
+    indicator
+        .widget(cx, ids!(status_running_indicator))
+        .set_visible(cx, running);
+    indicator
+        .widget(cx, ids!(status_done_indicator))
+        .set_visible(cx, !running && !error);
+    indicator
+        .widget(cx, ids!(status_error_lbl))
+        .set_visible(cx, !running && error);
 }
 
 #[derive(Clone, Copy)]
@@ -56,6 +67,21 @@ struct ActivityCounts {
     skills: usize,
     delegated: usize,
     other: usize,
+}
+
+impl ActivityCounts {
+    fn add(&mut self, kind: ActivityKind) {
+        match kind {
+            ActivityKind::ExploredFile => self.explored_files += 1,
+            ActivityKind::ExploredFolder => self.explored_folders += 1,
+            ActivityKind::Search => self.searches += 1,
+            ActivityKind::Edited => self.edited += 1,
+            ActivityKind::Command => self.commands += 1,
+            ActivityKind::Skill => self.skills += 1,
+            ActivityKind::Delegated => self.delegated += 1,
+            ActivityKind::Other => self.other += 1,
+        }
+    }
 }
 
 fn is_activity(message: &ChatMessage) -> bool {
@@ -248,10 +274,25 @@ fn activity_line(
     line
 }
 
+fn draw_markdown_item(list: &mut PortalList, cx: &mut Cx2d, item_id: usize, template: LiveId, text: &str) {
+    let item_widget = list.item(cx, item_id, template);
+    item_widget.markdown(cx, ids!(md)).set_text(cx, text);
+    item_widget.draw_all_unscoped(cx);
+}
+
 #[derive(Script, ScriptHook, Widget)]
 pub struct ChatList {
     #[deref]
     view: View,
+    /// Cached display rows; rebuilt only when message count or streaming kind changes.
+    #[rust]
+    cached_rows: Vec<DisplayRow>,
+    #[rust]
+    cached_msg_count: usize,
+    #[rust]
+    cached_streaming_kind: Option<StreamingKind>,
+    #[rust]
+    cached_streaming_text_len: usize,
 }
 
 impl Widget for ChatList {
@@ -264,7 +305,21 @@ impl Widget for ChatList {
         else {
             return DrawStep::done();
         };
-        let rows = display_rows(&data.messages, data.streaming_kind, &data.streaming_text);
+
+        // Rebuild display rows only when the message list or streaming state changes.
+        let msg_count = data.messages.len();
+        let streaming_text_len = data.streaming_text.len();
+        if msg_count != self.cached_msg_count
+            || data.streaming_kind != self.cached_streaming_kind
+            || streaming_text_len != self.cached_streaming_text_len
+        {
+            self.cached_rows =
+                display_rows(&data.messages, data.streaming_kind, &data.streaming_text);
+            self.cached_msg_count = msg_count;
+            self.cached_streaming_kind = data.streaming_kind;
+            self.cached_streaming_text_len = streaming_text_len;
+        }
+        let rows = &self.cached_rows;
 
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
@@ -274,13 +329,10 @@ impl Widget for ChatList {
                     let Some(row) = rows.get(item_id).copied() else {
                         continue;
                     };
+
                     match row {
                         DisplayRow::StreamingAssistant => {
-                            let item_widget = list.item(cx, item_id, id!(AssistantMsg));
-                            item_widget
-                                .markdown(cx, ids!(md))
-                                .set_text(cx, &data.streaming_text);
-                            item_widget.draw_all_unscoped(cx);
+                            draw_markdown_item(&mut list, cx, item_id, id!(AssistantMsg), &data.streaming_text);
                         }
                         DisplayRow::ActivityGroup {
                             start,
@@ -307,20 +359,7 @@ impl Widget for ChatList {
                                         ..
                                     } => {
                                         let kind = activity_kind(name, presentation.icon);
-                                        match kind {
-                                            ActivityKind::ExploredFile => {
-                                                counts.explored_files += 1
-                                            }
-                                            ActivityKind::ExploredFolder => {
-                                                counts.explored_folders += 1
-                                            }
-                                            ActivityKind::Search => counts.searches += 1,
-                                            ActivityKind::Edited => counts.edited += 1,
-                                            ActivityKind::Command => counts.commands += 1,
-                                            ActivityKind::Skill => counts.skills += 1,
-                                            ActivityKind::Delegated => counts.delegated += 1,
-                                            ActivityKind::Other => counts.other += 1,
-                                        }
+                                        counts.add(kind);
                                         running |= *status == ToolStatus::Running;
                                         has_error |= *status == ToolStatus::Error;
                                         if let Some(icon) = first_icon {
@@ -361,15 +400,7 @@ impl Widget for ChatList {
                             item_widget
                                 .label(cx, ids!(preview_lbl))
                                 .set_text(cx, &activity_preview(&counts, has_thinking));
-                            item_widget
-                                .widget(cx, ids!(status_running_indicator))
-                                .set_visible(cx, running);
-                            item_widget
-                                .widget(cx, ids!(status_done_indicator))
-                                .set_visible(cx, !running && !has_error);
-                            item_widget
-                                .widget(cx, ids!(status_error_lbl))
-                                .set_visible(cx, !running && has_error);
+                            update_activity_status(cx, &item_widget, running, has_error);
                             item_widget
                                 .markdown(cx, ids!(md))
                                 .set_text(cx, &lines.join("\n"));
@@ -382,14 +413,10 @@ impl Widget for ChatList {
                             match message {
                                 ChatMessage::Text { role, text } => match role {
                                     MsgRole::User => {
-                                        let item_widget = list.item(cx, item_id, id!(UserMsg));
-                                        item_widget.markdown(cx, ids!(md)).set_text(cx, text);
-                                        item_widget.draw_all_unscoped(cx);
+                                        draw_markdown_item(&mut list, cx, item_id, id!(UserMsg), text);
                                     }
                                     MsgRole::Assistant => {
-                                        let item_widget = list.item(cx, item_id, id!(AssistantMsg));
-                                        item_widget.markdown(cx, ids!(md)).set_text(cx, text);
-                                        item_widget.draw_all_unscoped(cx);
+                                        draw_markdown_item(&mut list, cx, item_id, id!(AssistantMsg), text);
                                     }
                                     MsgRole::System => {
                                         let item_widget = list.item(cx, item_id, id!(SystemMsg));
@@ -454,15 +481,12 @@ impl Widget for ChatList {
                                             cx,
                                             has_completed_result && !result_metadata.is_empty(),
                                         );
-                                    item_widget
-                                        .widget(cx, ids!(status_running_indicator))
-                                        .set_visible(cx, *status == ToolStatus::Running);
-                                    item_widget
-                                        .widget(cx, ids!(status_done_indicator))
-                                        .set_visible(cx, *status == ToolStatus::Done);
-                                    item_widget
-                                        .widget(cx, ids!(status_error_lbl))
-                                        .set_visible(cx, *status == ToolStatus::Error);
+                                    update_activity_status(
+                                        cx,
+                                        &item_widget,
+                                        *status == ToolStatus::Running,
+                                        *status == ToolStatus::Error,
+                                    );
                                     item_widget
                                         .widget(cx, ids!(args_section))
                                         .label(cx, ids!(content_lbl))

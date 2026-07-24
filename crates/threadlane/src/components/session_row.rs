@@ -119,6 +119,88 @@ script_mod! {
             draw_text +: { color: #x667180 text_style +: { font_size: 8.5 } }
         }
     }
+
+    mod.components.ProjectHeaderBase = RoundedView {
+        width: Fill
+        height: 34
+        cursor: MouseCursor.Hand
+        flow: Right
+        spacing: 8
+        align: Align{y: 0.5}
+        margin: Inset{left: 3 right: 3 top: 7 bottom: 2}
+        padding: Inset{left: 8 top: 4 right: 4 bottom: 4}
+        draw_bg +: {
+            hover: instance(0.0)
+            tree_color: uniform(#x3b4552)
+            color: #x00000000
+            color_hover: #x222831
+            border_radius: 8.0
+
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.box(
+                    self.border_size
+                    self.border_size
+                    self.rect_size.x - self.border_size * 2.0
+                    self.rect_size.y - self.border_size * 2.0
+                    max(1.0 self.border_radius)
+                )
+                sdf.fill_keep(mix(self.color, self.color_hover, self.hover))
+                sdf.stroke(self.border_color, self.border_size)
+
+                let tree_x = 16.0
+                let tree_start = self.rect_size.y * 0.5 + 8.0
+                sdf.rect(tree_x, tree_start, 1.0, max(0.0, self.rect_size.y - tree_start))
+                sdf.fill(self.tree_color)
+                return sdf.result
+            }
+        }
+        animator +: {
+            hover: {
+                default: @off
+                off: AnimatorState {
+                    apply: {draw_bg: {hover: 0.0}}
+                }
+                on: AnimatorState {
+                    apply: {draw_bg: {hover: 1.0}}
+                }
+            }
+        }
+        folder_icon := Icon {
+            width: 16
+            height: 16
+            icon_walk: Walk{width: 16 height: 16}
+            draw_icon +: {
+                svg: crate_resource("self:resources/icons/folder.svg")
+                color: #x8291a5
+            }
+        }
+        name_lbl := mod.components.ClippedLabel {
+            height: 18
+            draw_text +: {
+                color: #xc2cad5
+                text_style: theme.font_bold { font_size: 9.75 }
+            }
+        }
+        detach_project_btn := mod.components.IconButton {
+            width: 22
+            height: 22
+            visible: false
+            text: "×"
+            draw_text +: {
+                color: #x626d7d
+                color_hover: #xd08a92
+                color_down: #xf2a0aa
+                text_style +: { font_size: 11.0 }
+            }
+            draw_bg +: {
+                color_hover: #x36272d
+                color_focus: #x36272d
+                color_down: #x482c34
+            }
+        }
+        new_project_session_btn := mod.components.SidebarComposeButton {}
+    }
 }
 
 #[derive(Script, ScriptHook, Widget)]

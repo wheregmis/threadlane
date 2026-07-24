@@ -8,10 +8,7 @@ script_mod! {
     mod.components.EmptyRowBase = View {
         width: Fill
         height: Fit
-        lbl := Label {
-            width: Fill
-            height: Fit
-            text: ""
+        lbl := mod.components.ClippedLabel {
             draw_text +: { color: #x6f7a88 text_style +: { font_size: 10.0 } }
         }
     }

@@ -58,4 +58,38 @@ script_mod! {
             }
         }
     }
+
+    mod.components.ActivityStatusIndicator = View {
+        width: Fit
+        height: Fit
+        flow: Right
+        align: Align{y: 0.5}
+        status_running_indicator := mod.components.ActivityLoader {
+            width: 18
+            height: 10
+            visible: false
+            draw_bg +: {
+                dot_radius: 1.0
+                speed: 3.6
+            }
+        }
+        status_done_indicator := mod.components.StatusDot {
+            width: 5
+            height: 5
+            draw_bg +: {
+                color: #x68a982
+                border_radius: 2.5
+            }
+        }
+        status_error_lbl := Label {
+            width: Fit
+            height: Fit
+            visible: false
+            text: "!"
+            draw_text +: {
+                color: #xe06c75
+                text_style: theme.font_bold { font_size: 8.0 }
+            }
+        }
+    }
 }

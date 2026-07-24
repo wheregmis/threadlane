@@ -80,48 +80,7 @@ fn project_name(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-fn compact_workspace_path(path: &Path, home: Option<&Path>) -> String {
-    let (prefix, display_path) = match (path.is_absolute(), home) {
-        (true, Some(home)) => match path.strip_prefix(home).ok() {
-            Some(relative) => ("~", relative),
-            None => ("", path),
-        },
-        _ if path.is_absolute() => ("", path),
-        _ => ("", path),
-    };
-    let components: Vec<_> = display_path
-        .components()
-        .filter_map(|component| match component {
-            std::path::Component::Normal(value) => Some(value.to_string_lossy().into_owned()),
-            _ => None,
-        })
-        .collect();
-
-    if components.is_empty() {
-        return if prefix == "~" {
-            "~".to_string()
-        } else {
-            path.display().to_string()
-        };
-    }
-
-    let compacted = if components.len() > 3 {
-        format!(
-            "{}/…/{}/{}",
-            components[0],
-            components[components.len() - 2],
-            components[components.len() - 1]
-        )
-    } else {
-        components.join("/")
-    };
-
-    match prefix {
-        "~" => format!("~/{compacted}"),
-        _ if path.is_absolute() => format!("/{compacted}"),
-        _ => compacted,
-    }
-}
+use crate::path_utils::compact_workspace_path;
 
 script_mod! {
     use mod.prelude.widgets.*
@@ -267,45 +226,10 @@ script_mod! {
                         spacing: 7
                         align: Align{y: 0.5}
                         clip_x: true
-                        preview_lbl := Label {
-                            width: Fill
-                            height: 18
-                            max_lines: 1
-                            text_overflow: Ellipsis
-                            text: ""
-                            draw_text +: {
-                                color: #x9ba7b6
-                                text_style +: { font_size: 9.0 }
-                            }
+                        preview_lbl := mod.components.ClippedLabel {
+                            draw_text +: { color: #x9ba7b6 }
                         }
-                        status_running_indicator := ActivityLoader {
-                            width: 18
-                            height: 10
-                            visible: false
-                            draw_bg +: {
-                                dot_radius: 1.0
-                                speed: 3.6
-                            }
-                        }
-                        status_done_indicator := RoundedView {
-                            width: 5
-                            height: 5
-                            visible: false
-                            draw_bg +: {
-                                color: #x68a982
-                                border_radius: 2.5
-                            }
-                        }
-                        status_error_lbl := Label {
-                            width: Fit
-                            height: Fit
-                            visible: false
-                            text: "!"
-                            draw_text +: {
-                                color: #xe06c75
-                                text_style: theme.font_bold { font_size: 8.0 }
-                            }
-                        }
+                        status_indicator := ActivityStatusIndicator {}
                     }
                 }
                 body: RoundedView {
@@ -316,13 +240,7 @@ script_mod! {
                         color: #x00000000
                         border_size: 0.0
                     }
-                    md := Markdown {
-                        width: Fill
-                        height: Fit
-                        selectable: true
-                        use_code_block_widget: false
-                        body: ""
-                    }
+                    md := mod.components.ChatMarkdown {}
                 }
             }
 
@@ -356,16 +274,8 @@ script_mod! {
                         height: 20
                         align: Align{y: 0.5}
                         clip_x: true
-                        preview_lbl := Label {
-                            width: Fill
-                            height: 18
-                            max_lines: 1
-                            text_overflow: Ellipsis
-                            text: ""
-                            draw_text +: {
-                                color: #x8f98a6
-                                text_style +: { font_size: 9.0 }
-                            }
+                        preview_lbl := mod.components.ClippedLabel {
+                            draw_text +: { color: #x8f98a6 }
                         }
                     }
                 }
@@ -377,13 +287,7 @@ script_mod! {
                         color: #x00000000
                         border_size: 0.0
                     }
-                    md := Markdown {
-                        width: Fill
-                        height: Fit
-                        selectable: true
-                        use_code_block_widget: false
-                        body: ""
-                    }
+                    md := mod.components.ChatMarkdown {}
                 }
             }
 
@@ -408,71 +312,32 @@ script_mod! {
                         spacing: 7
                         align: Align{y: 0.5}
                         clip_x: true
-                        preview_lbl := Label {
+                        preview_lbl := mod.components.CodeLabel {
                             width: Fit{max: FitBound.Abs(180)}
-                            height: 18
                             max_lines: 1
                             text_overflow: Ellipsis
-                            text: ""
                             draw_text +: {
                                 color: #xc7d0dc
-                                text_style: theme.font_code { font_size: 9.0 }
+                                text_style +: { font_size: 9.0 }
                             }
                         }
-                        result_preview_lbl := Label {
+                        result_preview_lbl := mod.components.CodeLabel {
                             width: Fill
-                            height: 18
                             visible: false
                             max_lines: 1
                             text_overflow: Ellipsis
-                            text: ""
-                            draw_text +: {
-                                color: #x8794a3
-                                text_style: theme.font_code { font_size: 8.5 }
-                            }
+                            draw_text +: { color: #x8794a3 }
                         }
-                        result_meta_header_lbl := Label {
+                        result_meta_header_lbl := mod.components.ClippedLabel {
                             width: Fit
-                            height: 18
                             visible: false
-                            max_lines: 1
-                            text: ""
                             draw_text +: {
                                 color: #x708197
                                 text_style +: { font_size: 8.0 }
                             }
                         }
 
-                        status_running_indicator := ActivityLoader {
-                            width: 18
-                            height: 10
-                            visible: false
-                            draw_bg +: {
-                                dot_radius: 1.0
-                                speed: 3.6
-                            }
-                        }
-
-                        status_done_indicator := RoundedView {
-                            width: 5
-                            height: 5
-                            visible: false
-                            draw_bg +: {
-                                color: #x68a982
-                                border_radius: 2.5
-                            }
-                        }
-
-                        status_error_lbl := Label {
-                            width: Fit
-                            height: Fit
-                            visible: false
-                            text: "!"
-                            draw_text +: {
-                                color: #xe06c75
-                                text_style: theme.font_bold { font_size: 8.0 }
-                            }
-                        }
+                        status_indicator := ActivityStatusIndicator {}
                     }
                 }
                 body: RoundedView {
@@ -490,23 +355,11 @@ script_mod! {
                         height: Fit
                         flow: Right
                         spacing: 8
-                        meta_lbl := Label {
-                            width: Fit
-                            height: Fit
-                            text: ""
-                            draw_text +: {
-                                color: #x8494a8
-                                text_style: theme.font_code { font_size: 8.5 }
-                            }
+                        meta_lbl := mod.components.CodeLabel {
+                            draw_text +: { color: #x8494a8 }
                         }
-                        result_meta_lbl := Label {
-                            width: Fit
-                            height: Fit
-                            text: ""
-                            draw_text +: {
-                                color: #x768292
-                                text_style +: { font_size: 8.5 }
-                            }
+                        result_meta_lbl := mod.components.CodeLabel {
+                            draw_text +: { color: #x768292 }
                         }
                     }
                     args_section := ToolSection {
@@ -524,103 +377,6 @@ script_mod! {
 
 
     // -------------------------------------------------------------------
-    // Sessions sidebar: project folders + session rows
-    // -------------------------------------------------------------------
-    let ProjectHeaderBase = RoundedView {
-        width: Fill
-        height: 34
-        cursor: MouseCursor.Hand
-        flow: Right
-        spacing: 8
-        align: Align{y: 0.5}
-        margin: Inset{left: 3 right: 3 top: 7 bottom: 2}
-        padding: Inset{left: 8 top: 4 right: 4 bottom: 4}
-        draw_bg +: {
-            hover: instance(0.0)
-            tree_color: uniform(#x3b4552)
-            color: #x00000000
-            color_hover: #x222831
-            border_radius: 8.0
-
-            pixel: fn() {
-                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                sdf.box(
-                    self.border_size
-                    self.border_size
-                    self.rect_size.x - self.border_size * 2.0
-                    self.rect_size.y - self.border_size * 2.0
-                    max(1.0 self.border_radius)
-                )
-                sdf.fill_keep(mix(self.color, self.color_hover, self.hover))
-                sdf.stroke(self.border_color, self.border_size)
-
-                let tree_x = 16.0
-                let tree_start = self.rect_size.y * 0.5 + 8.0
-                sdf.rect(tree_x, tree_start, 1.0, max(0.0, self.rect_size.y - tree_start))
-                sdf.fill(self.tree_color)
-                return sdf.result
-            }
-        }
-        animator +: {
-            hover: {
-                default: @off
-                off: AnimatorState {
-                    from: {all: Forward {duration: 0.12}}
-                    apply: {draw_bg: {hover: 0.0}}
-                }
-                on: AnimatorState {
-                    from: {all: Forward {duration: 0.08}}
-                    apply: {draw_bg: {hover: snap(1.0)}}
-                }
-            }
-        }
-        folder_icon := Icon {
-            width: 16
-            height: 16
-            icon_walk: Walk{width: 16 height: 16}
-            draw_icon +: {
-                svg: crate_resource("self:resources/icons/folder.svg")
-                color: #x8291a5
-            }
-        }
-        name_lbl := Label {
-            width: Fill
-            height: 18
-            text: ""
-            draw_text +: {
-                color: #xc2cad5
-                text_style: theme.font_bold { font_size: 9.75 }
-            }
-        }
-        detach_project_btn := Button {
-            width: 22
-            height: 22
-            visible: false
-            margin: 0
-            padding: 0
-            text: "×"
-            draw_text +: {
-                color: #x626d7d
-                color_hover: #xd08a92
-                color_down: #xf2a0aa
-                text_style +: { font_size: 11.0 }
-            }
-            draw_bg +: {
-                color: #x00000000
-                color_hover: #x36272d
-                color_focus: #x36272d
-                color_down: #x482c34
-                border_color: #x00000000
-                border_color_hover: #x00000000
-                border_color_focus: #x00000000
-                border_color_down: #x00000000
-                border_size: 0.0
-                border_radius: 6.0
-            }
-        }
-        new_project_session_btn := mod.components.SidebarComposeButton {}
-    }
-
     let SessionList = #(SessionList::register_widget(vm)) {
         width: Fill
         height: Fill
@@ -631,9 +387,9 @@ script_mod! {
             flow: Down
             drag_scrolling: true
 
-            ProjectHeader := ProjectHeaderBase {}
+            ProjectHeader := mod.components.ProjectHeaderBase {}
 
-            ProjectHeaderActive := ProjectHeaderBase {
+            ProjectHeaderActive := mod.components.ProjectHeaderBase {
                 draw_bg +: {
                     color: #x222c38
                     color_hover: #x283543
@@ -855,23 +611,8 @@ script_mod! {
                                 }
                             }
 
-                            projects_header := View {
-                                width: Fill
-                                height: 34
-                                cursor: MouseCursor.Arrow
-                                flow: Right
-                                spacing: 8
-                                align: Align{y: 0.5}
-                                padding: Inset{left: 7 right: 4 bottom: 4}
-                                projects_label := Label {
-                                    width: Fill
-                                    height: Fit
-                                    text: "PROJECTS"
-                                    draw_text +: {
-                                        color: #x7f8b9b
-                                        text_style: theme.font_bold { font_size: 8.5 }
-                                    }
-                                }
+                            projects_header := mod.components.SectionHeader {
+                                section_label +: { text: "PROJECTS" }
                                 add_project_btn := mod.components.SidebarComposeButton {}
                             }
                             session_context_menu := SessionContextMenu {}
@@ -937,23 +678,15 @@ script_mod! {
                                 spacing: 1
                                 clip_x: true
 
-                                project_name_label := Label {
-                                    width: Fill
+                                project_name_label := mod.components.ClippedLabel {
                                     height: 17
-                                    max_lines: 1
-                                    text_overflow: Ellipsis
-                                    text: ""
                                     draw_text +: {
                                         color: #xf0f4fa
                                         text_style: theme.font_bold { font_size: 14.0 }
                                     }
                                 }
-                                workspace_label := Label {
-                                    width: Fill
+                                workspace_label := mod.components.ClippedLabel {
                                     height: 13
-                                    max_lines: 1
-                                    text_overflow: Ellipsis
-                                    text: ""
                                     draw_text +: {
                                         color: #x7f8b9a
                                         text_style +: { font_size: 9.0 }
@@ -997,23 +730,7 @@ script_mod! {
                             status_pill := StatusPill {}
                         }
 
-                        update_notice := RoundedView {
-                            width: Fill
-                            height: 38
-                            visible: false
-                            flow: Right
-                            spacing: 8
-                            align: Align{y: 0.5}
-                            padding: Inset{left: 10 right: 11}
-                            margin: Inset{left: 2 right: 2}
-                            show_bg: true
-                            draw_bg +: {
-                                color: #x1b232dc8
-                                border_color: #x354353
-                                border_size: 1.0
-                                border_radius: 8.0
-                            }
-
+                        update_notice := mod.components.NoticeBanner {
                             update_notice_visual := View {
                                 width: 18
                                 height: 18
@@ -1024,23 +741,14 @@ script_mod! {
                                     visible: false
                                     draw_bg +: { dot_radius: 1.05 speed: 3.0 }
                                 }
-                                update_notice_available_dot := RoundedView {
-                                    width: 7
-                                    height: 7
-                                    visible: false
-                                    draw_bg +: { color: #x78aef0 border_radius: 3.5 }
+                                update_notice_available_dot := mod.components.StatusDot {
+                                    draw_bg +: { color: #x78aef0 }
                                 }
-                                update_notice_ready_dot := RoundedView {
-                                    width: 7
-                                    height: 7
-                                    visible: false
-                                    draw_bg +: { color: #x67c58b border_radius: 3.5 }
+                                update_notice_ready_dot := mod.components.StatusDot {
+                                    draw_bg +: { color: #x67c58b }
                                 }
-                                update_notice_error_dot := RoundedView {
-                                    width: 7
-                                    height: 7
-                                    visible: false
-                                    draw_bg +: { color: #xe86a64 border_radius: 3.5 }
+                                update_notice_error_dot := mod.components.StatusDot {
+                                    draw_bg +: { color: #xe86a64 }
                                 }
                             }
 
@@ -1053,10 +761,7 @@ script_mod! {
                                     text_style: theme.font_bold { font_size: 9.5 }
                                 }
                             }
-                            update_notice_detail := Label {
-                                width: Fill
-                                height: Fit
-                                text: ""
+                            update_notice_detail := mod.components.ClippedLabel {
                                 draw_text +: {
                                     color: #x8493a5
                                     text_style +: { font_size: 8.5 }
@@ -1200,11 +905,9 @@ script_mod! {
                                     align: Align{y: 0.5}
                                     clip_x: true
 
-                                    composer_status := Label {
+                                    composer_status := mod.components.ClippedLabel {
                                         width: Fit
-                                        height: Fit
                                         visible: false
-                                        text: ""
                                         draw_text +: {
                                             color: #x9aa5b3
                                             text_style +: { font_size: 8.5 }
@@ -1223,13 +926,9 @@ script_mod! {
                                         }
                                     }
 
-                                    attach_btn := mod.components.ComposerChip {
+                                    attach_btn := mod.components.IconButton {
                                         width: 30
                                         height: 28
-                                        padding: 0
-                                        spacing: 0
-                                        text: ""
-                                        align: Align{x: 0.5 y: 0.5}
                                         icon_walk: Walk{width: 14 height: 14}
                                         draw_icon +: {
                                             svg: crate_resource("self:resources/icons/attach.svg")
@@ -1237,13 +936,18 @@ script_mod! {
                                             color_hover: #xdde3ea
                                             color_down: #xffffff
                                         }
+                                        draw_bg +: {
+                                            color: #x232830
+                                            color_hover: #x2a313c
+                                            color_down: #x354153
+                                            border_color: #x3a424e
+                                            border_color_hover: #x4a5564
+                                            border_size: 1.0
+                                            border_radius: 6.0
+                                        }
                                     }
 
-                                    composer_hint := Label {
-                                        width: Fill
-                                        height: 18
-                                        max_lines: 1
-                                        text_overflow: Ellipsis
+                                    composer_hint := mod.components.ClippedLabel {
                                         text: "Enter sends · Shift+Enter adds a line"
                                         draw_text +: {
                                             color: #x7f8b9a
@@ -1816,7 +1520,7 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(caps_btn)).clicked(actions) {
             let summary = self.capabilities_summary.clone();
             self.push_chat(MsgRole::System, summary);
-            cx.redraw_all();
+            self.ui.widget(cx, ids!(chat_list)).redraw(cx);
         }
 
         if self.ui.button(cx, ids!(update_btn)).clicked(actions) {
@@ -1834,11 +1538,7 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(stop_btn)).clicked(actions) {
             let active_key = self.workspace_state.active_key().cloned();
             if let Some(key) = active_key {
-                let current_draft = self
-                    .ui
-                    .threadlane_command_text_input(cx, ids!(prompt_input))
-                    .text_input_ref(cx)
-                    .text();
+                let current_draft = self.prompt_text(cx);
                 let (restored_draft, restored_attachments) = self
                     .session_runtimes
                     .get_mut(&key)
@@ -1856,13 +1556,12 @@ impl MatchEvent for App {
                             .submitted_attachments
                             .as_ref()
                             .filter(|(id, _)| *id == generation_id)
-                            .map(|(_, attachments)| attachments.clone())
-                            .unwrap_or_default();
+                            .map(|(_, att)| att.clone());
                         runtime.submitted_draft = None;
                         runtime.submitted_attachments = None;
                         Some((draft, attachments))
                     })
-                    .unwrap_or_default();
+                    .unwrap_or((None, None));
                 let draft = if current_draft.trim().is_empty() {
                     restored_draft.unwrap_or_default()
                 } else {
@@ -1870,16 +1569,13 @@ impl MatchEvent for App {
                 };
                 if let Some(workspace) = self.workspace_state.active_workspace_mut() {
                     workspace.ui.draft = draft.clone();
-                    workspace.ui.attachments = restored_attachments;
+                    workspace.ui.attachments = restored_attachments.unwrap_or_default();
                 }
-                self.ui
-                    .threadlane_command_text_input(cx, ids!(prompt_input))
-                    .text_input_ref(cx)
-                    .set_text(cx, &draft);
+                self.set_prompt_text(cx, &draft);
                 self.refresh_attachment_ui(cx);
                 self.set_session_status(cx, &key, UiStatus::Ready, "Stopped");
                 self.push_chat(MsgRole::System, "Generation stopped.");
-                cx.redraw_all();
+                self.ui.widget(cx, ids!(chat_list)).redraw(cx);
             }
         }
 
@@ -1955,17 +1651,18 @@ impl MatchEvent for App {
         if self.ui.button(cx, ids!(attach_btn)).clicked(actions) && !self.busy {
             self.open_image_picker(cx);
         }
-        if self.ui.button(cx, ids!(attachment_chip_0)).clicked(actions) {
-            self.remove_attachment(cx, 0);
-        }
-        if self.ui.button(cx, ids!(attachment_chip_1)).clicked(actions) {
-            self.remove_attachment(cx, 1);
-        }
-        if self.ui.button(cx, ids!(attachment_chip_2)).clicked(actions) {
-            self.remove_attachment(cx, 2);
-        }
-        if self.ui.button(cx, ids!(attachment_chip_3)).clicked(actions) {
-            self.remove_attachment(cx, 3);
+        for (idx, chip_id) in [
+            ids!(attachment_chip_0),
+            ids!(attachment_chip_1),
+            ids!(attachment_chip_2),
+            ids!(attachment_chip_3),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if self.ui.button(cx, chip_id).clicked(actions) {
+                self.remove_attachment(cx, idx);
+            }
         }
 
         let cti = self
@@ -2573,17 +2270,7 @@ impl App {
     }
 
     fn registered_project_dirs_or(&self, fallback: &Path) -> Vec<PathBuf> {
-        let dirs = self
-            .project_registry
-            .as_ref()
-            .map(|registry| {
-                registry
-                    .projects()
-                    .iter()
-                    .map(|project| project.path.clone())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        let dirs = self.registered_project_dirs();
         if dirs.is_empty() {
             vec![fallback.to_path_buf()]
         } else {
@@ -2606,6 +2293,20 @@ impl App {
 
     fn refresh_registered_sessions(&self) {
         refresh_sessions(&self.registered_project_dirs());
+    }
+
+    fn prompt_text(&self, cx: &Cx) -> String {
+        self.ui
+            .threadlane_command_text_input(cx, ids!(prompt_input))
+            .text_input_ref(cx)
+            .text()
+    }
+
+    fn set_prompt_text(&self, cx: &mut Cx, text: &str) {
+        self.ui
+            .threadlane_command_text_input(cx, ids!(prompt_input))
+            .text_input_ref(cx)
+            .set_text(cx, text);
     }
 
     fn active_work_dir(&self) -> Option<&Path> {
@@ -3276,11 +2977,16 @@ impl App {
         let generation_id = self.next_generation_id;
 
         if show_in_chat {
-            let attachment_names = attachments
-                .iter()
-                .map(|attachment| attachment.display_name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
+            let attachment_names = attachments.iter().enumerate().fold(
+                String::new(),
+                |mut acc, (i, attachment)| {
+                    if i > 0 {
+                        acc.push_str(", ");
+                    }
+                    acc.push_str(&attachment.display_name);
+                    acc
+                },
+            );
             let visible_input = if attachment_names.is_empty() {
                 input_str.clone()
             } else if input_str.is_empty() {

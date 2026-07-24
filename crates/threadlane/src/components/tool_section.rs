@@ -26,26 +26,14 @@ script_mod! {
                 text_style: theme.font_bold { font_size: 7.5 }
             }
         }
-        content_lbl := Label {
+        content_lbl := mod.components.CodeLabel {
             width: Fill
-            height: Fit
-            text: ""
-            draw_text +: {
-                color: #xaeb7c4
-                text_style: theme.font_code { font_size: 8.5 }
-            }
         }
         content_md_wrap := View {
             width: Fill
             height: Fit
             visible: false
-            content_md := Markdown {
-                width: Fill
-                height: Fit
-                selectable: true
-                use_code_block_widget: false
-                body: ""
-            }
+            content_md := mod.components.ChatMarkdown {}
         }
     }
 }
