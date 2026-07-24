@@ -428,6 +428,7 @@ script_mod! {
         detach_project_btn := Button {
             width: 22
             height: 22
+            visible: false
             margin: 0
             padding: 0
             text: "×"
@@ -453,6 +454,7 @@ script_mod! {
         new_project_session_btn := Button {
             width: 22
             height: 22
+            visible: false
             margin: 0
             padding: 0
             spacing: 0
@@ -643,9 +645,27 @@ script_mod! {
                             spacing: 0
                             padding: Inset{left: 8 top: 8 right: 8 bottom: 10}
 
-                            projects_header := View {
+                            sidebar_brand := View {
                                 width: Fill
                                 height: 38
+                                flow: Right
+                                align: Align{y: 0.5}
+                                padding: Inset{left: 7 right: 5}
+                                sidebar_brand_label := Label {
+                                    width: Fill
+                                    height: Fit
+                                    text: "Threadlane"
+                                    draw_text +: {
+                                        color: #xe7ebf0
+                                        text_style: theme.font_bold { font_size: 14.0 }
+                                    }
+                                }
+                            }
+
+                            projects_header := View {
+                                width: Fill
+                                height: 34
+                                cursor: MouseCursor.Arrow
                                 flow: Right
                                 spacing: 8
                                 align: Align{y: 0.5}
@@ -660,11 +680,14 @@ script_mod! {
                                     }
                                 }
                                 add_project_btn := Button {
-                                    width: 62
+                                    width: 24
                                     height: 24
-                                    text: "Add"
-                                    padding: Inset{left: 7 right: 8 top: 4 bottom: 4}
-                                    icon_walk: Walk{width: 10 height: 10 margin: Inset{right: 3}}
+                                    visible: false
+                                    text: ""
+                                    padding: 0
+                                    spacing: 0
+                                    align: Align{x: 0.5 y: 0.5}
+                                    icon_walk: Walk{width: 10 height: 10}
                                     draw_icon +: {
                                         svg: crate_resource("self:resources/icons/plus.svg")
                                         color: #x9fc3ef
@@ -682,11 +705,7 @@ script_mod! {
                                         border_size: 1.0
                                         border_radius: 7.0
                                     }
-                                    draw_text +: {
-                                        color: #xb9c5d3
-                                        color_hover: #xe4ebf3
-                                        text_style +: { font_size: 9.0 }
-                                    }
+
                                 }
                             }
                             session_context_menu := SessionContextMenu {}
@@ -1850,8 +1869,11 @@ impl AppMain for App {
         self.match_event(cx, event);
         self.poll_agent_events(cx);
         self.poll_update_status(cx);
-        let mut scope = Scope::with_data(&mut self.workspace_state);
-        self.ui.handle_event(cx, event, &mut scope);
+        {
+            let mut scope = Scope::with_data(&mut self.workspace_state);
+            self.ui.handle_event(cx, event, &mut scope);
+        }
+        self.sync_sidebar_action_visibility(cx, event);
     }
 }
 
@@ -1926,6 +1948,60 @@ fn format_capabilities_summary(
 }
 
 impl App {
+    fn sync_sidebar_action_visibility(&self, cx: &mut Cx, event: &Event) {
+        let pointer = match event {
+            Event::MouseMove(event) => Some(event.abs),
+            Event::MouseLeave(_) => None,
+            _ => return,
+        };
+
+        let (project_rows, context_menu_open) = {
+            let data = crate::panels::sessions::state::SESSIONS_DATA
+                .read()
+                .unwrap();
+            let project_rows = data
+                .rows
+                .iter()
+                .enumerate()
+                .filter_map(|(row_id, row)| {
+                    matches!(
+                        row,
+                        crate::panels::sessions::state::SessionListRow::ProjectHeader { .. }
+                    )
+                    .then_some(row_id)
+                })
+                .collect::<Vec<_>>();
+            (project_rows, data.context_session_id.is_some())
+        };
+
+        let projects_header = self.ui.view(cx, ids!(projects_header));
+        let add_project_visible = !context_menu_open
+            && pointer.is_some_and(|position| projects_header.area().rect(cx).contains(position));
+        let add_project_btn = self.ui.widget(cx, ids!(add_project_btn));
+        if add_project_btn.visible() != add_project_visible {
+            add_project_btn.set_visible(cx, add_project_visible);
+            projects_header.redraw(cx);
+        }
+
+        let session_list = self.ui.portal_list(cx, ids!(session_list.list));
+        for row_id in project_rows {
+            let Some((_, item)) = session_list.get_item(row_id) else {
+                continue;
+            };
+            let actions_visible = !context_menu_open
+                && pointer.is_some_and(|position| item.area().rect(cx).contains(position));
+            let detach_btn = item.widget(cx, ids!(detach_project_btn));
+            let new_session_btn = item.widget(cx, ids!(new_project_session_btn));
+            if detach_btn.visible() != actions_visible
+                || new_session_btn.visible() != actions_visible
+            {
+                detach_btn.set_visible(cx, actions_visible);
+                new_session_btn.set_visible(cx, actions_visible);
+                item.redraw(cx);
+            }
+        }
+    }
+
     fn set_model_dropup_options(&mut self, cx: &mut Cx, models: Vec<String>, selected_model: &str) {
         let mut ordered = Vec::new();
         for model in models {

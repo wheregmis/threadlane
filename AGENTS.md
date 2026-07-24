@@ -180,6 +180,9 @@ If changing ordering, row height, popup padding, or selected-item behavior, upda
 
 ## Session and Context-Menu Behavior
 
+- The sidebar keeps secondary actions quiet: the project attach button appears while hovering the `PROJECTS` header, and per-project detach/new-session buttons appear while hovering that project row.
+- Hover-revealed sidebar actions are synchronized from the current pointer position and actual widget bounds in `App::sync_sidebar_action_visibility`. Run this after `self.ui.handle_event(...)`, because Makepad updates hit-routing state while traversing the UI. Do not rely only on one-shot hover-enter/leave actions for recycled `PortalList` rows; redraws can otherwise leave child visibility stale.
+- A hidden child has no drawable area to invalidate. When changing a hover-revealed child from hidden to visible, explicitly redraw its owning header or list row; otherwise it may not appear until an unrelated click triggers a broader redraw.
 - Session rows are rendered by a `PortalList`; templates are selected from shared session state during draw.
 - The context-target state is distinct from the active-session state.
 - Opening a session context menu sets the context target; closing it must always clear that target.
