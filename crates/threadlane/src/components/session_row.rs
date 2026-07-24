@@ -44,10 +44,15 @@ script_mod! {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 let tree_x = 9.0
                 let surface_x = 14.0
+                let surface_left = surface_x + self.border_size
+                let surface_width = max(
+                    0.0
+                    self.rect_size.x - surface_x - self.border_size * 2.0
+                )
                 sdf.box(
-                    surface_x + self.border_size
+                    surface_left
                     self.border_size
-                    max(0.0, self.rect_size.x - surface_x - self.border_size * 2.0)
+                    surface_width
                     self.rect_size.y - self.border_size * 2.0
                     max(1.0 self.border_radius)
                 )
@@ -67,10 +72,11 @@ script_mod! {
                         self.active_line_color
                         self.is_active
                     )
+                    let underline_padding = surface_x - tree_x
                     sdf.rect(
-                        42.0
+                        surface_left + underline_padding
                         max(0.0, self.rect_size.y - 2.5)
-                        max(0.0, self.rect_size.x - 90.0)
+                        max(0.0, surface_width - underline_padding * 2.0)
                         2.0
                     )
                     sdf.fill(mix(#x00000000, line_color, line_amount))
