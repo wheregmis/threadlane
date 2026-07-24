@@ -225,7 +225,7 @@ Generated packages are placed in `crates/threadlane/dist/`.
 
 ### Signed Application Updates
 
-Threadlane uses [`cargo-packager-updater`](https://crates.io/crates/cargo-packager-updater) to check, download, verify, install, and relaunch signed macOS updates.
+Threadlane uses [`cargo-packager-updater`](https://crates.io/crates/cargo-packager-updater) to check, download, verify, install, and relaunch signed macOS updates. It checks automatically in the background on every launch. The Projects sidebar remains unchanged when the application is current or the check cannot complete; an update action appears only when a newer signed release is available.
 
 Generate the updater key pair once and retain the same key for future releases:
 
@@ -247,7 +247,7 @@ Release builds embed `THREADLANE_UPDATER_PUBLIC_KEY`. The private key is availab
 
 #### Test the Updater UI
 
-A development run can exercise update checks, signature verification, downloads, and the complete updater UI against the published manifest:
+A development run automatically checks the published manifest on launch and can exercise signature verification, downloads, and the complete updater UI:
 
 ```bash
 THREADLANE_UPDATER_PUBLIC_KEY="$(cat threadlane-updater.key.pub)" \

@@ -18,12 +18,12 @@ script_mod! {
     }
 
     mod.components.ActivityHeader = RoundedView {
-        width: Fit
+        width: Fill
         height: 28
         cursor: MouseCursor.Hand
-        padding: Inset{left: 3 top: 2 right: 3 bottom: 2}
+        padding: Inset{left: 3 top: 2 right: 4 bottom: 2}
         flow: Right
-        spacing: 7
+        spacing: 6
         align: Align{y: 0.5}
         draw_bg +: {
             color: #x00000000
@@ -78,14 +78,14 @@ script_mod! {
             }
         }
         summary := View {
-            width: Fit
+            width: Fill
             height: Fit
             flow: Right
             spacing: 8
             align: Align{y: 0.5}
         }
         fold_slot := View {
-            width: 18
+            width: 20
             height: 20
             align: Align{x: 0.5 y: 0.5}
             fold_button := FoldButton {

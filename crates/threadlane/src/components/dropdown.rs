@@ -106,10 +106,10 @@ script_mod! {
     }
 
     mod.components.EffortDropDown = mod.components.ComposerDropDown {
-        popup_menu: mod.components.ComposerPopupMenu { width: 130 }
+        popup_menu: mod.components.ComposerPopupMenu { width: 116 }
     }
 
     mod.components.ModelDropDown = mod.components.ComposerDropDown {
-        popup_menu: mod.components.ComposerPopupMenu { width: 158 }
+        popup_menu: mod.components.ComposerPopupMenu { width: 142 }
     }
 }

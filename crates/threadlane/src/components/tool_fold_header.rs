@@ -3,6 +3,14 @@
 use makepad_widgets::fold_button::{FoldButton, FoldButtonAction};
 use makepad_widgets::*;
 
+fn activity_header_hover_color() -> Vec4f {
+    vec4(0.145, 0.173, 0.208, 0.28)
+}
+
+fn activity_header_pressed_color() -> Vec4f {
+    vec4(0.176, 0.216, 0.267, 0.42)
+}
+
 #[derive(Script, ScriptHook, Widget, Animator)]
 pub struct ToolFoldHeader {
     #[uid]
@@ -51,10 +59,25 @@ impl Widget for ToolFoldHeader {
         if let Event::Actions(actions) = event {
             let header_view = self.header.as_view();
             if header_view.finger_hover_in(actions).is_some() {
+                self.set_header_background(cx, activity_header_hover_color());
                 self.set_disclosure_fade(cx, 1.0);
             }
             if header_view.finger_hover_out(actions).is_some() {
+                self.set_header_background(cx, Vec4f::all(0.0));
                 self.set_disclosure_fade(cx, 0.0);
+            }
+            if header_view.finger_down(actions).is_some() {
+                self.set_header_background(cx, activity_header_pressed_color());
+            }
+            if let Some(finger_up) = header_view.finger_up(actions) {
+                self.set_header_background(
+                    cx,
+                    if finger_up.is_over {
+                        activity_header_hover_color()
+                    } else {
+                        Vec4f::all(0.0)
+                    },
+                );
             }
 
             let fold_button_uid = self.header.widget(cx, ids!(fold_button)).widget_uid();
@@ -124,6 +147,14 @@ impl Widget for ToolFoldHeader {
 }
 
 impl ToolFoldHeader {
+    fn set_header_background(&mut self, cx: &mut Cx, color: Vec4f) {
+        let mut header = self.header.clone();
+        script_apply_eval!(cx, header, {
+            draw_bg +: { color: #(color) }
+        });
+        self.area.redraw(cx);
+    }
+
     fn set_disclosure_fade(&mut self, cx: &mut Cx, fade: f64) {
         let mut fold_button = self.header.widget(cx, ids!(fold_button));
         script_apply_eval!(cx, fold_button, {

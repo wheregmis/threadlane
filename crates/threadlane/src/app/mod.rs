@@ -144,21 +144,42 @@ script_mod! {
             selectable: true
             reuse_items: false
 
-            UserMsg := ChatBubble {
-                margin: Inset{top: 6 bottom: 6 left: 50 right: 8}
-                draw_bg +: {
-                    color: #x2a3547
-                    border_radius: 10.0
+            UserMsg := View {
+                width: Fill
+                height: Fit
+                align: Align{x: 1.0}
+                margin: Inset{top: 5 bottom: 5 left: 28 right: 20}
+
+                user_bubble := ChatBubble {
+                    width: Fit{max: FitBound.Abs(680)}
+                    padding: Inset{left: 13 top: 8 right: 13 bottom: 8}
+                    md +: {
+                        width: Fit{max: FitBound.Abs(654)}
+                    }
+                    draw_bg +: {
+                        color: #x2a3547
+                        border_radius: 9.0
+                    }
                 }
             }
 
-            AssistantMsg := ChatBubble {
-                margin: Inset{top: 6 bottom: 6 left: 8 right: 40}
-                draw_bg +: {
-                    color: #x20252d
-                    border_radius: 10.0
-                    border_size: 1.0
-                    border_color: #x2d3540
+            AssistantMsg := View {
+                width: Fill
+                height: Fit
+                align: Align{x: 0.0}
+                margin: Inset{top: 5 bottom: 7 left: 20 right: 52}
+
+                assistant_bubble := ChatBubble {
+                    width: Fit{max: FitBound.Abs(960)}
+                    md +: {
+                        width: Fit{max: FitBound.Abs(934)}
+                    }
+                    draw_bg +: {
+                        color: #x20252d
+                        border_radius: 10.0
+                        border_size: 1.0
+                        border_color: #x2d3540
+                    }
                 }
             }
 
@@ -210,7 +231,7 @@ script_mod! {
             SystemMsg := View {
                 width: Fill
                 height: Fit
-                margin: Inset{top: 3 bottom: 3 left: 12 right: 12}
+                margin: Inset{top: 3 bottom: 3 left: 20 right: 24}
                 lbl := Label {
                     width: Fill
                     height: Fit
@@ -222,12 +243,95 @@ script_mod! {
                 }
             }
 
+            ActivityGroupMsg := #(ToolFoldHeader::register_widget(vm)) {
+                width: Fill
+                height: Fit
+                flow: Down
+                body_walk: Walk{width: Fill, height: Fit}
+                margin: Inset{top: 1 bottom: 1 left: 20 right: 24}
+                opened: 0.0
+                animator +: {
+                    active: { default: @off }
+                }
+                header: ActivityHeader {
+                    width: Fill
+                    height: 28
+                    title_lbl +: {
+                        width: 62
+                        text: "Worked"
+                    }
+                    summary := View {
+                        width: Fill
+                        height: 20
+                        flow: Right
+                        spacing: 7
+                        align: Align{y: 0.5}
+                        clip_x: true
+                        preview_lbl := Label {
+                            width: Fill
+                            height: 18
+                            max_lines: 1
+                            text_overflow: Ellipsis
+                            text: ""
+                            draw_text +: {
+                                color: #x9ba7b6
+                                text_style +: { font_size: 9.0 }
+                            }
+                        }
+                        status_running_indicator := ActivityLoader {
+                            width: 18
+                            height: 10
+                            visible: false
+                            draw_bg +: {
+                                dot_radius: 1.0
+                                speed: 3.6
+                            }
+                        }
+                        status_done_indicator := RoundedView {
+                            width: 5
+                            height: 5
+                            visible: false
+                            draw_bg +: {
+                                color: #x68a982
+                                border_radius: 2.5
+                            }
+                        }
+                        status_error_lbl := Label {
+                            width: Fit
+                            height: Fit
+                            visible: false
+                            text: "!"
+                            draw_text +: {
+                                color: #xe06c75
+                                text_style: theme.font_bold { font_size: 8.0 }
+                            }
+                        }
+                    }
+                }
+                body: RoundedView {
+                    width: Fill
+                    height: Fit
+                    padding: Inset{left: 30 top: 3 right: 18 bottom: 7}
+                    draw_bg +: {
+                        color: #x00000000
+                        border_size: 0.0
+                    }
+                    md := Markdown {
+                        width: Fill
+                        height: Fit
+                        selectable: true
+                        use_code_block_widget: false
+                        body: ""
+                    }
+                }
+            }
+
             ThinkingMsg := #(ToolFoldHeader::register_widget(vm)) {
                 width: Fill
                 height: Fit
                 flow: Down
                 body_walk: Walk{width: Fill, height: Fit}
-                margin: Inset{top: 1 bottom: 1 left: 12 right: 12}
+                margin: Inset{top: 1 bottom: 1 left: 20 right: 24}
                 opened: 0.0
                 animator +: {
                     active: { default: @off }
@@ -248,12 +352,15 @@ script_mod! {
                         draw_text +: { color: #xbcb8cf }
                     }
                     summary := View {
-                        width: Fit
-                        height: Fit
+                        width: Fill
+                        height: 20
                         align: Align{y: 0.5}
+                        clip_x: true
                         preview_lbl := Label {
-                            width: Fit
-                            height: Fit
+                            width: Fill
+                            height: 18
+                            max_lines: 1
+                            text_overflow: Ellipsis
                             text: ""
                             draw_text +: {
                                 color: #x8f98a6
@@ -285,25 +392,54 @@ script_mod! {
                 height: Fit
                 flow: Down
                 body_walk: Walk{width: Fill, height: Fit}
-                margin: Inset{top: 1 bottom: 1 left: 12 right: 12}
+                margin: Inset{top: 1 bottom: 1 left: 20 right: 24}
                 opened: 0.0
                 animator +: {
                     active: { default: @off }
                 }
                 header: ActivityHeader {
+                    width: Fill
+                    height: 26
+                    title_lbl +: { width: 86 }
                     summary := View {
-                        width: Fit
-                        height: Fit
+                        width: Fill
+                        height: 20
                         flow: Right
-                        spacing: 9
+                        spacing: 7
                         align: Align{y: 0.5}
+                        clip_x: true
                         preview_lbl := Label {
-                            width: Fit
-                            height: Fit
+                            width: Fit{max: FitBound.Abs(180)}
+                            height: 18
+                            max_lines: 1
+                            text_overflow: Ellipsis
                             text: ""
                             draw_text +: {
                                 color: #xc7d0dc
                                 text_style: theme.font_code { font_size: 9.0 }
+                            }
+                        }
+                        result_preview_lbl := Label {
+                            width: Fill
+                            height: 18
+                            visible: false
+                            max_lines: 1
+                            text_overflow: Ellipsis
+                            text: ""
+                            draw_text +: {
+                                color: #x8794a3
+                                text_style: theme.font_code { font_size: 8.5 }
+                            }
+                        }
+                        result_meta_header_lbl := Label {
+                            width: Fit
+                            height: 18
+                            visible: false
+                            max_lines: 1
+                            text: ""
+                            draw_text +: {
+                                color: #x708197
+                                text_style +: { font_size: 8.0 }
                             }
                         }
 
@@ -314,6 +450,16 @@ script_mod! {
                             draw_bg +: {
                                 dot_radius: 1.0
                                 speed: 3.6
+                            }
+                        }
+
+                        status_done_indicator := RoundedView {
+                            width: 5
+                            height: 5
+                            visible: false
+                            draw_bg +: {
+                                color: #x68a982
+                                border_radius: 2.5
                             }
                         }
 
@@ -332,9 +478,9 @@ script_mod! {
                 body: RoundedView {
                     width: Fill
                     height: Fit
-                    padding: Inset{left: 30 top: 4 right: 18 bottom: 7}
+                    padding: Inset{left: 30 top: 2 right: 18 bottom: 6}
                     flow: Down
-                    spacing: 5
+                    spacing: 4
                     draw_bg +: {
                         color: #x00000000
                         border_size: 0.0
@@ -659,6 +805,7 @@ script_mod! {
                                         text_style: theme.font_bold { font_size: 8.5 }
                                     }
                                 }
+
                                 add_project_btn := Button {
                                     width: 62
                                     height: 24
@@ -691,18 +838,50 @@ script_mod! {
                             }
                             session_context_menu := SessionContextMenu {}
                             session_list := SessionList { height: Fill }
+                            update_action_row := View {
+                                width: Fill
+                                height: Fit
+                                visible: false
+                                margin: Inset{left: 3 top: 8 right: 3}
+
+                                update_btn := Button {
+                                    width: Fill
+                                    height: 34
+                                    padding: Inset{left: 10 right: 10 top: 6 bottom: 6}
+                                    text: "Update Threadlane"
+                                    draw_bg +: {
+                                        color: #x1d2822
+                                        color_hover: #x25342b
+                                        color_focus: #x25342b
+                                        color_down: #x2c4034
+                                        border_color: #x344b3c
+                                        border_color_hover: #x466853
+                                        border_color_focus: #x466853
+                                        border_color_down: #x5c8b6d
+                                        border_radius: 8.0
+                                        border_size: 1.0
+                                    }
+                                    draw_text +: {
+                                        color: #x8eb89d
+                                        color_hover: #xb5d4be
+                                        color_focus: #xb5d4be
+                                        color_down: #xe7f5eb
+                                        text_style: theme.font_bold { font_size: 9.0 }
+                                    }
+                                }
+                            }
                         }
 
                         WorkspaceDock := View {
                             width: Fill
                             height: Fill
                             flow: Down
-                            spacing: 8
-                            padding: Inset{left: 10 top: 10 right: 12 bottom: 10}
+                            spacing: 7
+                            padding: Inset{left: 10 top: 8 right: 12 bottom: 10}
 
                         header := PanelHeader {
-                            spacing: 10
-                            padding: Inset{left: 4 top: 1 right: 2 bottom: 3}
+                            spacing: 7
+                            padding: Inset{left: 4 top: 1 right: 2 bottom: 2}
 
                             project_icon := Icon {
                                 width: 18
@@ -714,14 +893,17 @@ script_mod! {
                                 }
                             }
                             project_identity := View {
-                                width: Fit
+                                width: Fill
                                 height: Fit
                                 flow: Down
                                 spacing: 1
+                                clip_x: true
 
                                 project_name_label := Label {
-                                    width: Fit
-                                    height: Fit
+                                    width: Fill
+                                    height: 17
+                                    max_lines: 1
+                                    text_overflow: Ellipsis
                                     text: ""
                                     draw_text +: {
                                         color: #xf0f4fa
@@ -729,8 +911,10 @@ script_mod! {
                                     }
                                 }
                                 workspace_label := Label {
-                                    width: Fit
-                                    height: Fit
+                                    width: Fill
+                                    height: 13
+                                    max_lines: 1
+                                    text_overflow: Ellipsis
                                     text: ""
                                     draw_text +: {
                                         color: #x7f8b9a
@@ -738,37 +922,12 @@ script_mod! {
                                     }
                                 }
                             }
-                            FlexSpacer {}
-                            update_btn := Button {
-                                width: Fit
-                                height: 28
-                                padding: Inset{left: 9 right: 10 top: 4 bottom: 4}
-                                text: "Check updates"
-                                draw_bg +: {
-                                    color: #x1d2822
-                                    color_hover: #x25342b
-                                    color_focus: #x25342b
-                                    color_down: #x2c4034
-                                    border_color: #x344b3c
-                                    border_color_hover: #x466853
-                                    border_color_focus: #x466853
-                                    border_color_down: #x5c8b6d
-                                    border_radius: 7.0
-                                    border_size: 1.0
-                                }
-                                draw_text +: {
-                                    color: #x8eb89d
-                                    color_hover: #xb5d4be
-                                    color_focus: #xb5d4be
-                                    color_down: #xe7f5eb
-                                    text_style: theme.font_bold { font_size: 9.0 }
-                                }
-                            }
+
                             caps_btn := Button {
                                 width: Fit
-                                height: 30
-                                padding: Inset{left: 10 right: 11 top: 5 bottom: 5}
-                                text: "Capabilities  ›"
+                                height: 28
+                                padding: Inset{left: 8 right: 9 top: 4 bottom: 4}
+                                text: "Tools"
                                 icon_walk: Walk{width: 13 height: 13 margin: Inset{right: 2}}
                                 draw_icon +: {
                                     svg: crate_resource("self:resources/icons/skill.svg")
@@ -882,13 +1041,18 @@ script_mod! {
                                 spacing: 8
 
                             chat_panel := PanelSurface {
+                                width: Fill
+                                height: Fill
                                 flow: Down
                                 padding: Inset{left: 4 top: 6 right: 4 bottom: 6}
                                 draw_bg +: {
                                     color: #x1c1f26
                                     border_radius: 10.0
                                 }
-                                chat_list := ChatList { height: Fill }
+                                chat_list := ChatList {
+                                    width: Fill
+                                    height: Fill
+                                }
                                 chat_working_indicator := View {
                                     width: Fill
                                     height: 18
@@ -994,10 +1158,9 @@ script_mod! {
                                     width: Fill
                                     height: 30
                                     flow: Right
-                                    spacing: 8
+                                    spacing: 6
                                     align: Align{y: 0.5}
-
-
+                                    clip_x: true
 
                                     composer_status := Label {
                                         width: Fit
@@ -1039,19 +1202,19 @@ script_mod! {
                                     }
 
                                     composer_hint := Label {
-                                        width: Fit
-                                        height: Fit
-                                        text: "Enter to send · Shift+Enter for newline"
+                                        width: Fill
+                                        height: 18
+                                        max_lines: 1
+                                        text_overflow: Ellipsis
+                                        text: "Enter sends · Shift+Enter adds a line"
                                         draw_text +: {
                                             color: #x7f8b9a
                                             text_style +: { font_size: 8.5 }
                                         }
                                     }
 
-                                    FlexSpacer {}
-
                                     effort_picker := View {
-                                        width: 130
+                                        width: 116
                                         height: 28
                                         visible: false
                                         flow: Down
@@ -1072,7 +1235,7 @@ script_mod! {
                                     }
 
                                     model_picker := View {
-                                        width: 158
+                                        width: 142
                                         height: 28
                                         visible: false
                                         flow: Down
@@ -1471,7 +1634,7 @@ impl MatchEvent for App {
         self.ui.button(cx, ids!(caps_btn)).set_text(
             cx,
             &format!(
-                "{} skills · {} agents  ›",
+                "{} skills · {} agents",
                 discovered_skills.len(),
                 discovered_agents.len()
             ),
@@ -1540,6 +1703,7 @@ impl MatchEvent for App {
         );
 
         self.spawn_model_fetch(api_key, account_id_opt);
+        self.trigger_update_check(cx);
 
         cx.redraw_all();
     }
@@ -1617,11 +1781,6 @@ impl MatchEvent for App {
 
         if self.ui.button(cx, ids!(update_btn)).clicked(actions) {
             match self.update_status.clone() {
-                crate::updater::UpdateStatus::Idle
-                | crate::updater::UpdateStatus::UpToDate
-                | crate::updater::UpdateStatus::Error(_) => {
-                    self.trigger_update_check(cx);
-                }
                 crate::updater::UpdateStatus::Available(info) => {
                     self.trigger_update_download(cx, info);
                 }
@@ -2155,6 +2314,7 @@ impl App {
 
     fn sync_update_button(&mut self, cx: &mut Cx) {
         let btn = self.ui.button(cx, ids!(update_btn));
+        let action_row = self.ui.widget(cx, ids!(update_action_row));
         let notice = self.ui.widget(cx, ids!(update_notice));
         let loader = self.ui.widget(cx, ids!(update_notice_loader));
         let available_dot = self.ui.widget(cx, ids!(update_notice_available_dot));
@@ -2163,11 +2323,22 @@ impl App {
         let title = self.ui.label(cx, ids!(update_notice_title));
         let detail = self.ui.label(cx, ids!(update_notice_detail));
 
+        let show_action = matches!(
+            self.update_status,
+            crate::updater::UpdateStatus::Available(_)
+                | crate::updater::UpdateStatus::Downloading { .. }
+                | crate::updater::UpdateStatus::ReadyToInstall { .. }
+                | crate::updater::UpdateStatus::Installing
+        );
+        action_row.set_visible(cx, show_action);
+        btn.set_visible(cx, show_action);
         notice.set_visible(
             cx,
-            !matches!(
+            matches!(
                 self.update_status,
-                crate::updater::UpdateStatus::Idle | crate::updater::UpdateStatus::UpToDate
+                crate::updater::UpdateStatus::Downloading { .. }
+                    | crate::updater::UpdateStatus::ReadyToInstall { .. }
+                    | crate::updater::UpdateStatus::Installing
             ),
         );
         loader.set_visible(cx, false);
@@ -2176,9 +2347,7 @@ impl App {
         error_dot.set_visible(cx, false);
 
         match &self.update_status {
-            crate::updater::UpdateStatus::Idle => {
-                btn.set_text(cx, "Check updates");
-            }
+            crate::updater::UpdateStatus::Idle => {}
             crate::updater::UpdateStatus::Checking => {
                 btn.set_text(cx, "Checking…");
                 loader.set_visible(cx, true);
@@ -2186,7 +2355,7 @@ impl App {
                 detail.set_text(cx, "Looking for the latest signed release");
             }
             crate::updater::UpdateStatus::Available(info) => {
-                btn.set_text(cx, &format!("Update to v{}", info.version));
+                btn.set_text(cx, &format!("Update Threadlane · v{}", info.version));
                 available_dot.set_visible(cx, true);
                 title.set_text(cx, &format!("Threadlane v{} is available", info.version));
                 let release_detail = if info.notes.trim().is_empty() {
@@ -2199,12 +2368,10 @@ impl App {
                 };
                 detail.set_text(cx, &release_detail);
             }
-            crate::updater::UpdateStatus::UpToDate => {
-                btn.set_text(cx, "Up to date");
-            }
+            crate::updater::UpdateStatus::UpToDate => {}
             crate::updater::UpdateStatus::Downloading { version, progress } => {
                 let pct = (progress.clamp(0.0, 1.0) * 100.0).round() as u32;
-                btn.set_text(cx, &format!("Downloading · {pct}%"));
+                btn.set_text(cx, &format!("{pct}% downloaded"));
                 loader.set_visible(cx, true);
                 title.set_text(cx, &format!("Downloading Threadlane v{version}"));
                 detail.set_text(
@@ -2213,7 +2380,7 @@ impl App {
                 );
             }
             crate::updater::UpdateStatus::ReadyToInstall { info, .. } => {
-                btn.set_text(cx, "Install & relaunch");
+                btn.set_text(cx, "Install");
                 ready_dot.set_visible(cx, true);
                 title.set_text(cx, &format!("Threadlane v{} is ready", info.version));
                 detail.set_text(cx, "Verified · Relaunch to finish installation");
@@ -2225,7 +2392,7 @@ impl App {
                 detail.set_text(cx, "Threadlane will relaunch automatically");
             }
             crate::updater::UpdateStatus::Error(err) => {
-                btn.set_text(cx, "Retry update check");
+                btn.set_text(cx, "Retry");
                 error_dot.set_visible(cx, true);
                 title.set_text(cx, "Couldn’t update Threadlane");
                 detail.set_text(cx, &truncate_chars(&normalize_catalog_text(err), 100));
@@ -2574,7 +2741,7 @@ impl App {
                 }
                 let capabilities = ProjectCapabilities {
                     summary: format_capabilities_summary(&skills, &agents, subagent_enabled),
-                    button_text: format!("{} skills · {} agents  ›", skills.len(), agents.len()),
+                    button_text: format!("{} skills · {} agents", skills.len(), agents.len()),
                     commands,
                 };
                 self.capability_cache

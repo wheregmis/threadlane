@@ -9,19 +9,20 @@ script_mod! {
         width: Fill
         height: Fit
         flow: Down
-        spacing: 5
-        padding: Inset{left: 8 top: 6 right: 8 bottom: 7}
+        spacing: 4
+        padding: Inset{left: 8 top: 5 right: 8 bottom: 6}
         draw_bg +: {
             color: #x1c2027
+            border_color: #x29313b
             border_radius: 4.0
-            border_size: 0.0
+            border_size: 1.0
         }
         section_label := Label {
             width: Fill
             height: Fit
             text: "SECTION"
             draw_text +: {
-                color: #x748397
+                color: #x8190a3
                 text_style: theme.font_bold { font_size: 7.5 }
             }
         }
