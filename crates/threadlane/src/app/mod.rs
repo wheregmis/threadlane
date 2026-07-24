@@ -1367,6 +1367,8 @@ pub struct App {
     #[rust]
     session_context_entry: Option<SessionEntry>,
     #[rust]
+    sidebar_pointer: Option<Vec2d>,
+    #[rust]
     auth_workspace: Option<SessionKey>,
     #[rust]
     project_registry: Option<ProjectRegistry>,
@@ -1998,12 +2000,13 @@ fn format_capabilities_summary(
 }
 
 impl App {
-    fn sync_sidebar_action_visibility(&self, cx: &mut Cx, event: &Event) {
-        let pointer = match event {
-            Event::MouseMove(event) => Some(event.abs),
-            Event::MouseLeave(_) => None,
-            _ => return,
-        };
+    fn sync_sidebar_action_visibility(&mut self, cx: &mut Cx, event: &Event) {
+        match event {
+            Event::MouseMove(event) => self.sidebar_pointer = Some(event.abs),
+            Event::MouseLeave(_) => self.sidebar_pointer = None,
+            _ => {}
+        }
+        let pointer = self.sidebar_pointer;
 
         let (project_rows, context_menu_open) = {
             let data = crate::panels::sessions::state::SESSIONS_DATA
