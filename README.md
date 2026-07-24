@@ -1,5 +1,5 @@
 <h1 align="center">
-  <img src="resources/icon_128.png" width="40" align="middle" style="vertical-align: middle;" alt="Threadlane application icon">&nbsp;<span style="vertical-align: middle;">Threadlane</span>
+  <img src="resources/icon_128.png" width="40" align="top" style="vertical-align: top;" alt="Threadlane application icon">&nbsp;Threadlane
 </h1>
 
 <p align="center">
