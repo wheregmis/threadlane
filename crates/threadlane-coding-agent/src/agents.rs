@@ -54,70 +54,49 @@ pub struct AgentDiscoveryResult {
     pub project_agents_dir: Option<PathBuf>,
 }
 
-#[derive(Debug, Default)]
-struct ParsedFrontmatter {
+#[derive(Debug, Default, Clone)]
+struct AgentFrontmatterMeta {
     name: String,
     description: String,
     tools: Option<Vec<String>>,
     model: Option<String>,
 }
 
-fn parse_agent_frontmatter(content: &str) -> (ParsedFrontmatter, Option<String>, String) {
-    let mut meta = ParsedFrontmatter::default();
-    let trimmed = content.trim_start();
-    if !trimmed.starts_with("---") {
+fn parse_agent_frontmatter(content: &str) -> (AgentFrontmatterMeta, Option<String>, String) {
+    let parsed = crate::frontmatter::parse_frontmatter(content);
+    let mut meta = AgentFrontmatterMeta::default();
+
+    if let Some(err) = parsed.parse_error {
+        return (meta, Some(err), parsed.body);
+    }
+    if parsed.metadata.is_empty() {
         return (
             meta,
             Some("Missing frontmatter delimiter '---'".into()),
-            content.to_string(),
+            parsed.body,
         );
     }
 
-    let rest = &trimmed[3..];
-    let end_idx = match rest.find("---") {
-        Some(idx) => idx,
-        None => {
-            return (
-                meta,
-                Some("Unclosed frontmatter delimiter '---'".into()),
-                content.to_string(),
-            )
-        }
-    };
-
-    let yaml_block = &rest[..end_idx];
-    let body = rest[end_idx + 3..].trim().to_string();
-
-    for line in yaml_block.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-
-        if let Some((key, value)) = line.split_once(':') {
-            let k = key.trim();
-            let v = value.trim().trim_matches('"').trim_matches('\'');
-            match k {
-                "name" => meta.name = v.to_string(),
-                "description" => meta.description = v.to_string(),
-                "model" => {
-                    meta.model = if v.is_empty() {
-                        None
-                    } else {
-                        Some(v.to_string())
-                    }
-                }
-                "tools" => {
-                    let tools: Vec<String> = v
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                    meta.tools = if tools.is_empty() { None } else { Some(tools) };
-                }
-                _ => {}
-            }
-        }
+    if let Some(name) = parsed.get("name") {
+        meta.name = name.to_string();
+    }
+    if let Some(desc) = parsed.get("description") {
+        meta.description = desc.to_string();
+    }
+    if let Some(model) = parsed.get("model") {
+        meta.model = if model.is_empty() {
+            None
+        } else {
+            Some(model.to_string())
+        };
+    }
+    if let Some(tools_str) = parsed.get("tools") {
+        let tools: Vec<String> = tools_str
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        meta.tools = if tools.is_empty() { None } else { Some(tools) };
     }
 
     let mut err = None;
@@ -127,7 +106,7 @@ fn parse_agent_frontmatter(content: &str) -> (ParsedFrontmatter, Option<String>,
         err = Some("Missing 'description' field in frontmatter".into());
     }
 
-    (meta, err, body)
+    (meta, err, parsed.body)
 }
 
 fn load_agents_from_dir(dir: &Path, source: AgentSource) -> Vec<AgentConfig> {

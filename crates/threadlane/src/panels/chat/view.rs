@@ -23,6 +23,19 @@ fn show_tool_icon(cx: &mut Cx, item: &WidgetRef, selected: ToolIcon) {
         .set_visible(cx, selected == ToolIcon::Subagent);
 }
 
+fn update_activity_status(cx: &mut Cx, item_widget: &WidgetRef, running: bool, error: bool) {
+    let indicator = item_widget.widget(cx, ids!(status_indicator));
+    indicator
+        .widget(cx, ids!(status_running_indicator))
+        .set_visible(cx, running);
+    indicator
+        .widget(cx, ids!(status_done_indicator))
+        .set_visible(cx, !running && !error);
+    indicator
+        .widget(cx, ids!(status_error_lbl))
+        .set_visible(cx, !running && error);
+}
+
 #[derive(Clone, Copy)]
 enum DisplayRow {
     Message(usize),
@@ -361,15 +374,7 @@ impl Widget for ChatList {
                             item_widget
                                 .label(cx, ids!(preview_lbl))
                                 .set_text(cx, &activity_preview(&counts, has_thinking));
-                            item_widget
-                                .widget(cx, ids!(status_running_indicator))
-                                .set_visible(cx, running);
-                            item_widget
-                                .widget(cx, ids!(status_done_indicator))
-                                .set_visible(cx, !running && !has_error);
-                            item_widget
-                                .widget(cx, ids!(status_error_lbl))
-                                .set_visible(cx, !running && has_error);
+                            update_activity_status(cx, &item_widget, running, has_error);
                             item_widget
                                 .markdown(cx, ids!(md))
                                 .set_text(cx, &lines.join("\n"));
@@ -454,15 +459,12 @@ impl Widget for ChatList {
                                             cx,
                                             has_completed_result && !result_metadata.is_empty(),
                                         );
-                                    item_widget
-                                        .widget(cx, ids!(status_running_indicator))
-                                        .set_visible(cx, *status == ToolStatus::Running);
-                                    item_widget
-                                        .widget(cx, ids!(status_done_indicator))
-                                        .set_visible(cx, *status == ToolStatus::Done);
-                                    item_widget
-                                        .widget(cx, ids!(status_error_lbl))
-                                        .set_visible(cx, *status == ToolStatus::Error);
+                                    update_activity_status(
+                                        cx,
+                                        &item_widget,
+                                        *status == ToolStatus::Running,
+                                        *status == ToolStatus::Error,
+                                    );
                                     item_widget
                                         .widget(cx, ids!(args_section))
                                         .label(cx, ids!(content_lbl))

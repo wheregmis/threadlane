@@ -173,36 +173,10 @@ fn eval_braced_expr(expr: &str, args: &[String], all_args: &str) -> String {
 
 /// Parse frontmatter metadata from markdown file content.
 pub fn parse_frontmatter(content: &str) -> (Option<String>, Option<String>, String) {
-    let trimmed = content.trim_start();
-    if !trimmed.starts_with("---") {
-        return (None, None, content.to_string());
-    }
-
-    let rest = &trimmed[3..];
-    if let Some(end_idx) = rest.find("\n---") {
-        let frontmatter_block = &rest[..end_idx];
-        let body = rest[end_idx + 4..].trim().to_string();
-
-        let mut description = None;
-        let mut argument_hint = None;
-
-        for line in frontmatter_block.lines() {
-            let line = line.trim();
-            if let Some((key, val)) = line.split_once(':') {
-                let key = key.trim();
-                let val = val.trim().trim_matches('"').trim_matches('\'').to_string();
-                match key {
-                    "description" => description = Some(val),
-                    "argument-hint" => argument_hint = Some(val),
-                    _ => {}
-                }
-            }
-        }
-
-        (description, argument_hint, body)
-    } else {
-        (None, None, content.to_string())
-    }
+    let parsed = crate::frontmatter::parse_frontmatter(content);
+    let description = parsed.get("description").map(ToString::to_string);
+    let argument_hint = parsed.get("argument-hint").map(ToString::to_string);
+    (description, argument_hint, parsed.body)
 }
 
 /// Load prompt templates from a directory (non-recursive).

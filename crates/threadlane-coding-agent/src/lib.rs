@@ -1,3 +1,4 @@
+pub mod frontmatter;
 pub mod agents;
 pub mod capabilities;
 pub mod coding_agent;

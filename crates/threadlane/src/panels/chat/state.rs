@@ -786,16 +786,7 @@ fn result_metadata_for_tool(
     }
 }
 
-pub fn truncate_chars(s: &str, max_chars: usize) -> String {
-    if max_chars == 0 {
-        String::new()
-    } else if s.chars().count() <= max_chars {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max_chars - 1).collect();
-        format!("{truncated}…")
-    }
-}
+pub use crate::path_utils::truncate_chars;
 
 #[cfg(test)]
 mod tests {

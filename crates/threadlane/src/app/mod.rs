@@ -80,48 +80,7 @@ fn project_name(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-fn compact_workspace_path(path: &Path, home: Option<&Path>) -> String {
-    let (prefix, display_path) = match (path.is_absolute(), home) {
-        (true, Some(home)) => match path.strip_prefix(home).ok() {
-            Some(relative) => ("~", relative),
-            None => ("", path),
-        },
-        _ if path.is_absolute() => ("", path),
-        _ => ("", path),
-    };
-    let components: Vec<_> = display_path
-        .components()
-        .filter_map(|component| match component {
-            std::path::Component::Normal(value) => Some(value.to_string_lossy().into_owned()),
-            _ => None,
-        })
-        .collect();
-
-    if components.is_empty() {
-        return if prefix == "~" {
-            "~".to_string()
-        } else {
-            path.display().to_string()
-        };
-    }
-
-    let compacted = if components.len() > 3 {
-        format!(
-            "{}/…/{}/{}",
-            components[0],
-            components[components.len() - 2],
-            components[components.len() - 1]
-        )
-    } else {
-        components.join("/")
-    };
-
-    match prefix {
-        "~" => format!("~/{compacted}"),
-        _ if path.is_absolute() => format!("/{compacted}"),
-        _ => compacted,
-    }
-}
+use crate::path_utils::compact_workspace_path;
 
 script_mod! {
     use mod.prelude.widgets.*
@@ -278,34 +237,7 @@ script_mod! {
                                 text_style +: { font_size: 9.0 }
                             }
                         }
-                        status_running_indicator := ActivityLoader {
-                            width: 18
-                            height: 10
-                            visible: false
-                            draw_bg +: {
-                                dot_radius: 1.0
-                                speed: 3.6
-                            }
-                        }
-                        status_done_indicator := RoundedView {
-                            width: 5
-                            height: 5
-                            visible: false
-                            draw_bg +: {
-                                color: #x68a982
-                                border_radius: 2.5
-                            }
-                        }
-                        status_error_lbl := Label {
-                            width: Fit
-                            height: Fit
-                            visible: false
-                            text: "!"
-                            draw_text +: {
-                                color: #xe06c75
-                                text_style: theme.font_bold { font_size: 8.0 }
-                            }
-                        }
+                        status_indicator := ActivityStatusIndicator {}
                     }
                 }
                 body: RoundedView {
@@ -443,36 +375,7 @@ script_mod! {
                             }
                         }
 
-                        status_running_indicator := ActivityLoader {
-                            width: 18
-                            height: 10
-                            visible: false
-                            draw_bg +: {
-                                dot_radius: 1.0
-                                speed: 3.6
-                            }
-                        }
-
-                        status_done_indicator := RoundedView {
-                            width: 5
-                            height: 5
-                            visible: false
-                            draw_bg +: {
-                                color: #x68a982
-                                border_radius: 2.5
-                            }
-                        }
-
-                        status_error_lbl := Label {
-                            width: Fit
-                            height: Fit
-                            visible: false
-                            text: "!"
-                            draw_text +: {
-                                color: #xe06c75
-                                text_style: theme.font_bold { font_size: 8.0 }
-                            }
-                        }
+                        status_indicator := ActivityStatusIndicator {}
                     }
                 }
                 body: RoundedView {
