@@ -17,6 +17,7 @@ pub mod init;
 pub mod panel_header;
 pub mod panel_surface;
 pub mod session_row;
+pub mod sidebar_compose_button;
 pub mod status_pill;
 pub mod tool_fold_header;
 pub mod tool_section;
@@ -37,6 +38,7 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     panel_header::script_mod(vm);
     panel_surface::script_mod(vm);
     session_row::script_mod(vm);
+    sidebar_compose_button::script_mod(vm);
     status_pill::script_mod(vm);
     tool_section::script_mod(vm)
 }

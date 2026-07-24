@@ -390,20 +390,41 @@ script_mod! {
         margin: Inset{left: 3 right: 3 top: 7 bottom: 2}
         padding: Inset{left: 8 top: 4 right: 4 bottom: 4}
         draw_bg +: {
+            hover: instance(0.0)
+            tree_color: uniform(#x3b4552)
             color: #x00000000
             color_hover: #x222831
             border_radius: 8.0
+
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.box(
+                    self.border_size
+                    self.border_size
+                    self.rect_size.x - self.border_size * 2.0
+                    self.rect_size.y - self.border_size * 2.0
+                    max(1.0 self.border_radius)
+                )
+                sdf.fill_keep(mix(self.color, self.color_hover, self.hover))
+                sdf.stroke(self.border_color, self.border_size)
+
+                let tree_x = 16.0
+                let tree_start = self.rect_size.y * 0.5 + 8.0
+                sdf.rect(tree_x, tree_start, 1.0, max(0.0, self.rect_size.y - tree_start))
+                sdf.fill(self.tree_color)
+                return sdf.result
+            }
         }
         animator +: {
             hover: {
                 default: @off
                 off: AnimatorState {
                     from: {all: Forward {duration: 0.12}}
-                    apply: {draw_bg: {color: #x00000000}}
+                    apply: {draw_bg: {hover: 0.0}}
                 }
                 on: AnimatorState {
                     from: {all: Forward {duration: 0.08}}
-                    apply: {draw_bg: {color: #x222831}}
+                    apply: {draw_bg: {hover: snap(1.0)}}
                 }
             }
         }
@@ -428,6 +449,7 @@ script_mod! {
         detach_project_btn := Button {
             width: 22
             height: 22
+            visible: false
             margin: 0
             padding: 0
             text: "×"
@@ -450,34 +472,7 @@ script_mod! {
                 border_radius: 6.0
             }
         }
-        new_project_session_btn := Button {
-            width: 22
-            height: 22
-            margin: 0
-            padding: 0
-            spacing: 0
-            text: ""
-            align: Align{x: 0.5 y: 0.5}
-            icon_walk: Walk{width: 11 height: 11}
-            draw_icon +: {
-                svg: crate_resource("self:resources/icons/plus.svg")
-                color: #x758294
-                color_hover: #xb8d5f5
-                color_down: #xffffff
-            }
-            draw_bg +: {
-                color: #x00000000
-                color_hover: #x283544
-                color_focus: #x283544
-                color_down: #x30445b
-                border_color: #x00000000
-                border_color_hover: #x00000000
-                border_color_focus: #x00000000
-                border_color_down: #x00000000
-                border_size: 0.0
-                border_radius: 6.0
-            }
-        }
+        new_project_session_btn := mod.components.SidebarComposeButton {}
     }
 
     let SessionList = #(SessionList::register_widget(vm)) {
@@ -505,21 +500,51 @@ script_mod! {
 
             SessionRow := SessionRowBase {}
 
+            SessionRowLast := SessionRowBase {
+                draw_bg +: { tree_last: 1.0 }
+            }
+
             SessionRowActive := SessionRowBase {
                 draw_bg +: {
-                    color: #x263445
-                    color_hover: #x2d3e52
-                    border_color: #x344b65
-                    border_size: 1.0
+                    is_active: 1.0
+                    color: #x00000000
+                    color_hover: #x00000000
+                    border_color: #x00000000
+                    border_size: 0.0
                     border_radius: 7.0
+                }
+                title_surface +: {
+                    title_lbl +: {
+                        draw_text +: { color: #xe8edf4 }
+                    }
                 }
                 session_icon +: {
                     draw_icon +: { color: #x9fc3ef }
                 }
-                title_lbl +: {
+                time_lbl +: {
                     draw_text +: {
-                        color: #xe8edf4
+                        color: #xaeb6c2
                     }
+                }
+            }
+
+            SessionRowActiveLast := SessionRowBase {
+                draw_bg +: {
+                    tree_last: 1.0
+                    is_active: 1.0
+                    color: #x00000000
+                    color_hover: #x00000000
+                    border_color: #x00000000
+                    border_size: 0.0
+                    border_radius: 7.0
+                }
+                title_surface +: {
+                    title_lbl +: {
+                        draw_text +: { color: #xe8edf4 }
+                    }
+                }
+                session_icon +: {
+                    draw_icon +: { color: #x9fc3ef }
                 }
                 time_lbl +: {
                     draw_text +: {
@@ -539,9 +564,33 @@ script_mod! {
                 session_icon +: {
                     draw_icon +: { color: #x8fb9e8 }
                 }
-                title_lbl +: {
+                title_surface +: {
+                    title_lbl +: {
+                        draw_text +: { color: #xf0f4fa }
+                    }
+                }
+                time_lbl +: {
                     draw_text +: {
-                        color: #xf0f4fa
+                        color: #xb7c5d8
+                    }
+                }
+            }
+
+            SessionRowContextLast := SessionRowBase {
+                draw_bg +: {
+                    tree_last: 1.0
+                    color: #x273344
+                    color_hover: #x30425a
+                    border_color: #x4f82bd
+                    border_size: 1.0
+                    border_radius: 6.0
+                }
+                session_icon +: {
+                    draw_icon +: { color: #x8fb9e8 }
+                }
+                title_surface +: {
+                    title_lbl +: {
+                        draw_text +: { color: #xf0f4fa }
                     }
                 }
                 time_lbl +: {
@@ -643,9 +692,27 @@ script_mod! {
                             spacing: 0
                             padding: Inset{left: 8 top: 8 right: 8 bottom: 10}
 
-                            projects_header := View {
+                            sidebar_brand := View {
                                 width: Fill
                                 height: 38
+                                flow: Right
+                                align: Align{y: 0.5}
+                                padding: Inset{left: 7 right: 5}
+                                sidebar_brand_label := Label {
+                                    width: Fill
+                                    height: Fit
+                                    text: "Threadlane"
+                                    draw_text +: {
+                                        color: #xe7ebf0
+                                        text_style: theme.font_bold { font_size: 14.0 }
+                                    }
+                                }
+                            }
+
+                            projects_header := View {
+                                width: Fill
+                                height: 34
+                                cursor: MouseCursor.Arrow
                                 flow: Right
                                 spacing: 8
                                 align: Align{y: 0.5}
@@ -659,35 +726,7 @@ script_mod! {
                                         text_style: theme.font_bold { font_size: 8.5 }
                                     }
                                 }
-                                add_project_btn := Button {
-                                    width: 62
-                                    height: 24
-                                    text: "Add"
-                                    padding: Inset{left: 7 right: 8 top: 4 bottom: 4}
-                                    icon_walk: Walk{width: 10 height: 10 margin: Inset{right: 3}}
-                                    draw_icon +: {
-                                        svg: crate_resource("self:resources/icons/plus.svg")
-                                        color: #x9fc3ef
-                                        color_hover: #xd3e8ff
-                                    }
-                                    draw_bg +: {
-                                        color: #x232a33
-                                        color_hover: #x2a3542
-                                        color_focus: #x2a3542
-                                        color_down: #x314257
-                                        border_color: #x384452
-                                        border_color_hover: #x526a84
-                                        border_color_focus: #x526a84
-                                        border_color_down: #x6fa8ff
-                                        border_size: 1.0
-                                        border_radius: 7.0
-                                    }
-                                    draw_text +: {
-                                        color: #xb9c5d3
-                                        color_hover: #xe4ebf3
-                                        text_style +: { font_size: 9.0 }
-                                    }
-                                }
+                                add_project_btn := mod.components.SidebarComposeButton {}
                             }
                             session_context_menu := SessionContextMenu {}
                             session_list := SessionList { height: Fill }
@@ -1298,6 +1337,8 @@ pub struct App {
     #[rust]
     session_context_entry: Option<SessionEntry>,
     #[rust]
+    sidebar_pointer: Option<Vec2d>,
+    #[rust]
     auth_workspace: Option<SessionKey>,
     #[rust]
     project_registry: Option<ProjectRegistry>,
@@ -1850,8 +1891,11 @@ impl AppMain for App {
         self.match_event(cx, event);
         self.poll_agent_events(cx);
         self.poll_update_status(cx);
-        let mut scope = Scope::with_data(&mut self.workspace_state);
-        self.ui.handle_event(cx, event, &mut scope);
+        {
+            let mut scope = Scope::with_data(&mut self.workspace_state);
+            self.ui.handle_event(cx, event, &mut scope);
+        }
+        self.sync_sidebar_action_visibility(cx, event);
     }
 }
 
@@ -1926,6 +1970,61 @@ fn format_capabilities_summary(
 }
 
 impl App {
+    fn sync_sidebar_action_visibility(&mut self, cx: &mut Cx, event: &Event) {
+        match event {
+            Event::MouseMove(event) => self.sidebar_pointer = Some(event.abs),
+            Event::MouseLeave(_) => self.sidebar_pointer = None,
+            _ => {}
+        }
+        let pointer = self.sidebar_pointer;
+
+        let (project_rows, context_menu_open) = {
+            let data = crate::panels::sessions::state::SESSIONS_DATA
+                .read()
+                .unwrap();
+            let project_rows = data
+                .rows
+                .iter()
+                .enumerate()
+                .filter_map(|(row_id, row)| {
+                    matches!(
+                        row,
+                        crate::panels::sessions::state::SessionListRow::ProjectHeader { .. }
+                    )
+                    .then_some(row_id)
+                })
+                .collect::<Vec<_>>();
+            (project_rows, data.context_session_id.is_some())
+        };
+
+        let projects_header = self.ui.view(cx, ids!(projects_header));
+        let add_project_visible = !context_menu_open
+            && pointer.is_some_and(|position| projects_header.area().rect(cx).contains(position));
+        let add_project_btn = self.ui.widget(cx, ids!(add_project_btn));
+        if add_project_btn.visible() != add_project_visible {
+            add_project_btn.set_visible(cx, add_project_visible);
+            projects_header.redraw(cx);
+        }
+
+        let session_list = self.ui.portal_list(cx, ids!(session_list.list));
+        for row_id in project_rows {
+            let Some((_, item)) = session_list.get_item(row_id) else {
+                continue;
+            };
+            let actions_visible = !context_menu_open
+                && pointer.is_some_and(|position| item.area().rect(cx).contains(position));
+            let detach_btn = item.widget(cx, ids!(detach_project_btn));
+            let new_session_btn = item.widget(cx, ids!(new_project_session_btn));
+            if detach_btn.visible() != actions_visible
+                || new_session_btn.visible() != actions_visible
+            {
+                detach_btn.set_visible(cx, actions_visible);
+                new_session_btn.set_visible(cx, actions_visible);
+                item.redraw(cx);
+            }
+        }
+    }
+
     fn set_model_dropup_options(&mut self, cx: &mut Cx, models: Vec<String>, selected_model: &str) {
         let mut ordered = Vec::new();
         for model in models {
