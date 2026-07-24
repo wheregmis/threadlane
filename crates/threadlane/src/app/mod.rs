@@ -226,16 +226,8 @@ script_mod! {
                         spacing: 7
                         align: Align{y: 0.5}
                         clip_x: true
-                        preview_lbl := Label {
-                            width: Fill
-                            height: 18
-                            max_lines: 1
-                            text_overflow: Ellipsis
-                            text: ""
-                            draw_text +: {
-                                color: #x9ba7b6
-                                text_style +: { font_size: 9.0 }
-                            }
+                        preview_lbl := mod.components.ClippedLabel {
+                            draw_text +: { color: #x9ba7b6 }
                         }
                         status_indicator := ActivityStatusIndicator {}
                     }
@@ -288,16 +280,8 @@ script_mod! {
                         height: 20
                         align: Align{y: 0.5}
                         clip_x: true
-                        preview_lbl := Label {
-                            width: Fill
-                            height: 18
-                            max_lines: 1
-                            text_overflow: Ellipsis
-                            text: ""
-                            draw_text +: {
-                                color: #x8f98a6
-                                text_style +: { font_size: 9.0 }
-                            }
+                        preview_lbl := mod.components.ClippedLabel {
+                            draw_text +: { color: #x8f98a6 }
                         }
                     }
                 }
@@ -340,35 +324,25 @@ script_mod! {
                         spacing: 7
                         align: Align{y: 0.5}
                         clip_x: true
-                        preview_lbl := Label {
+                        preview_lbl := mod.components.CodeLabel {
                             width: Fit{max: FitBound.Abs(180)}
-                            height: 18
                             max_lines: 1
                             text_overflow: Ellipsis
-                            text: ""
                             draw_text +: {
                                 color: #xc7d0dc
-                                text_style: theme.font_code { font_size: 9.0 }
+                                text_style +: { font_size: 9.0 }
                             }
                         }
-                        result_preview_lbl := Label {
+                        result_preview_lbl := mod.components.CodeLabel {
                             width: Fill
-                            height: 18
                             visible: false
                             max_lines: 1
                             text_overflow: Ellipsis
-                            text: ""
-                            draw_text +: {
-                                color: #x8794a3
-                                text_style: theme.font_code { font_size: 8.5 }
-                            }
+                            draw_text +: { color: #x8794a3 }
                         }
-                        result_meta_header_lbl := Label {
+                        result_meta_header_lbl := mod.components.ClippedLabel {
                             width: Fit
-                            height: 18
                             visible: false
-                            max_lines: 1
-                            text: ""
                             draw_text +: {
                                 color: #x708197
                                 text_style +: { font_size: 8.0 }
@@ -393,23 +367,11 @@ script_mod! {
                         height: Fit
                         flow: Right
                         spacing: 8
-                        meta_lbl := Label {
-                            width: Fit
-                            height: Fit
-                            text: ""
-                            draw_text +: {
-                                color: #x8494a8
-                                text_style: theme.font_code { font_size: 8.5 }
-                            }
+                        meta_lbl := mod.components.CodeLabel {
+                            draw_text +: { color: #x8494a8 }
                         }
-                        result_meta_lbl := Label {
-                            width: Fit
-                            height: Fit
-                            text: ""
-                            draw_text +: {
-                                color: #x768292
-                                text_style +: { font_size: 8.5 }
-                            }
+                        result_meta_lbl := mod.components.CodeLabel {
+                            draw_text +: { color: #x768292 }
                         }
                     }
                     args_section := ToolSection {
@@ -739,12 +701,8 @@ script_mod! {
                                         text_style: theme.font_bold { font_size: 14.0 }
                                     }
                                 }
-                                workspace_label := Label {
-                                    width: Fill
+                                workspace_label := mod.components.ClippedLabel {
                                     height: 13
-                                    max_lines: 1
-                                    text_overflow: Ellipsis
-                                    text: ""
                                     draw_text +: {
                                         color: #x7f8b9a
                                         text_style +: { font_size: 9.0 }
@@ -819,10 +777,7 @@ script_mod! {
                                     text_style: theme.font_bold { font_size: 9.5 }
                                 }
                             }
-                            update_notice_detail := Label {
-                                width: Fill
-                                height: Fit
-                                text: ""
+                            update_notice_detail := mod.components.ClippedLabel {
                                 draw_text +: {
                                     color: #x8493a5
                                     text_style +: { font_size: 8.5 }
@@ -1010,11 +965,7 @@ script_mod! {
                                         }
                                     }
 
-                                    composer_hint := Label {
-                                        width: Fill
-                                        height: 18
-                                        max_lines: 1
-                                        text_overflow: Ellipsis
+                                    composer_hint := mod.components.ClippedLabel {
                                         text: "Enter sends · Shift+Enter adds a line"
                                         draw_text +: {
                                             color: #x7f8b9a
