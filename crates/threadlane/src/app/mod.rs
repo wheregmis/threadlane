@@ -420,20 +420,41 @@ script_mod! {
         margin: Inset{left: 3 right: 3 top: 7 bottom: 2}
         padding: Inset{left: 8 top: 4 right: 4 bottom: 4}
         draw_bg +: {
+            hover: instance(0.0)
+            tree_color: uniform(#x3b4552)
             color: #x00000000
             color_hover: #x222831
             border_radius: 8.0
+
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.box(
+                    self.border_size
+                    self.border_size
+                    self.rect_size.x - self.border_size * 2.0
+                    self.rect_size.y - self.border_size * 2.0
+                    max(1.0 self.border_radius)
+                )
+                sdf.fill_keep(mix(self.color, self.color_hover, self.hover))
+                sdf.stroke(self.border_color, self.border_size)
+
+                let tree_x = 16.0
+                let tree_start = self.rect_size.y * 0.5 + 8.0
+                sdf.rect(tree_x, tree_start, 1.0, max(0.0, self.rect_size.y - tree_start))
+                sdf.fill(self.tree_color)
+                return sdf.result
+            }
         }
         animator +: {
             hover: {
                 default: @off
                 off: AnimatorState {
                     from: {all: Forward {duration: 0.12}}
-                    apply: {draw_bg: {color: #x00000000}}
+                    apply: {draw_bg: {hover: 0.0}}
                 }
                 on: AnimatorState {
                     from: {all: Forward {duration: 0.08}}
-                    apply: {draw_bg: {color: #x222831}}
+                    apply: {draw_bg: {hover: snap(1.0)}}
                 }
             }
         }
@@ -509,21 +530,51 @@ script_mod! {
 
             SessionRow := SessionRowBase {}
 
+            SessionRowLast := SessionRowBase {
+                draw_bg +: { tree_last: 1.0 }
+            }
+
             SessionRowActive := SessionRowBase {
                 draw_bg +: {
-                    color: #x263445
-                    color_hover: #x2d3e52
-                    border_color: #x344b65
-                    border_size: 1.0
+                    is_active: 1.0
+                    color: #x00000000
+                    color_hover: #x00000000
+                    border_color: #x00000000
+                    border_size: 0.0
                     border_radius: 7.0
+                }
+                title_surface +: {
+                    title_lbl +: {
+                        draw_text +: { color: #xe8edf4 }
+                    }
                 }
                 session_icon +: {
                     draw_icon +: { color: #x9fc3ef }
                 }
-                title_lbl +: {
+                time_lbl +: {
                     draw_text +: {
-                        color: #xe8edf4
+                        color: #xaeb6c2
                     }
+                }
+            }
+
+            SessionRowActiveLast := SessionRowBase {
+                draw_bg +: {
+                    tree_last: 1.0
+                    is_active: 1.0
+                    color: #x00000000
+                    color_hover: #x00000000
+                    border_color: #x00000000
+                    border_size: 0.0
+                    border_radius: 7.0
+                }
+                title_surface +: {
+                    title_lbl +: {
+                        draw_text +: { color: #xe8edf4 }
+                    }
+                }
+                session_icon +: {
+                    draw_icon +: { color: #x9fc3ef }
                 }
                 time_lbl +: {
                     draw_text +: {
@@ -543,9 +594,33 @@ script_mod! {
                 session_icon +: {
                     draw_icon +: { color: #x8fb9e8 }
                 }
-                title_lbl +: {
+                title_surface +: {
+                    title_lbl +: {
+                        draw_text +: { color: #xf0f4fa }
+                    }
+                }
+                time_lbl +: {
                     draw_text +: {
-                        color: #xf0f4fa
+                        color: #xb7c5d8
+                    }
+                }
+            }
+
+            SessionRowContextLast := SessionRowBase {
+                draw_bg +: {
+                    tree_last: 1.0
+                    color: #x273344
+                    color_hover: #x30425a
+                    border_color: #x4f82bd
+                    border_size: 1.0
+                    border_radius: 6.0
+                }
+                session_icon +: {
+                    draw_icon +: { color: #x8fb9e8 }
+                }
+                title_surface +: {
+                    title_lbl +: {
+                        draw_text +: { color: #xf0f4fa }
                     }
                 }
                 time_lbl +: {

@@ -13,25 +13,52 @@ script_mod! {
         spacing: 8
         align: Align{y: 0.5}
         margin: Inset{left: 10 right: 4 top: 1 bottom: 1}
-        padding: Inset{left: 11 top: 4 right: 9 bottom: 4}
+        padding: Inset{left: 20 top: 4 right: 9 bottom: 4}
         draw_bg +: {
             hover: instance(0.0)
+            tree_last: instance(0.0)
+            is_active: instance(0.0)
             color: #x00000000
-            color_hover: uniform(#x252b34)
+            color_hover: uniform(#x00000000)
+            tree_color: uniform(#x3b4552)
+            hover_line_color: uniform(#x61748b)
+            active_line_color: uniform(#x8fb9e8)
             border_radius: 7.0
 
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let tree_x = 9.0
+                let surface_x = 14.0
                 sdf.box(
+                    surface_x + self.border_size
                     self.border_size
-                    self.border_size
-                    self.rect_size.x - self.border_size * 2.0
+                    max(0.0, self.rect_size.x - surface_x - self.border_size * 2.0)
                     self.rect_size.y - self.border_size * 2.0
                     max(1.0 self.border_radius)
                 )
                 sdf.fill_keep(mix(self.color, self.color_hover, self.hover))
-                if self.border_size > 0.0 {
-                    sdf.stroke(self.border_color, self.border_size)
+                sdf.stroke(self.border_color, self.border_size)
+
+                let tree_mid = self.rect_size.y * 0.5
+                let tree_height = mix(self.rect_size.y, tree_mid, self.tree_last)
+                sdf.rect(tree_x, 0.0, 1.0, max(0.0, tree_height))
+                sdf.fill(self.tree_color)
+                sdf.rect(tree_x, tree_mid, surface_x - tree_x + 1.0, 1.0)
+                sdf.fill(self.tree_color)
+                let line_amount = max(self.hover, self.is_active)
+                if line_amount > 0.0 {
+                    let line_color = mix(
+                        self.hover_line_color
+                        self.active_line_color
+                        self.is_active
+                    )
+                    sdf.rect(
+                        42.0
+                        max(0.0, self.rect_size.y - 2.5)
+                        max(0.0, self.rect_size.x - 90.0)
+                        2.0
+                    )
+                    sdf.fill(mix(#x00000000, line_color, line_amount))
                 }
                 return sdf.result
             }
@@ -58,11 +85,19 @@ script_mod! {
                 color: #x667386
             }
         }
-        title_lbl := Label {
+        title_surface := View {
             width: Fill
             height: 18
-            text: ""
-            draw_text +: { color: #xaab3c0 text_style +: { font_size: 9.5 } }
+            flow: Right
+            padding: 0
+            title_lbl := Label {
+                width: Fill
+                height: 18
+                max_lines: 1
+                text_overflow: Ellipsis
+                text: ""
+                draw_text +: { color: #xaab3c0 text_style +: { font_size: 9.5 } }
+            }
         }
         session_row_spinner := mod.components.ActivityLoader {
             width: 18
