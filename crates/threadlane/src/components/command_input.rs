@@ -17,6 +17,9 @@ fn command_name_color() -> Vec4f {
     vec4(0.867, 0.89, 0.918, 1.0)
 }
 
+const COMMAND_ROW_HEIGHT: f64 = 30.0;
+const MAX_VISIBLE_COMMAND_ROWS: usize = 5;
+
 script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
@@ -117,17 +120,17 @@ script_mod! {
 
             list := PortalList{
                 width: Fill
-                height: 208
+                height: 30
                 flow: Down
                 drag_scrolling: true
 
                 CommandItem := View {
                     width: Fill
-                    height: Fit
+                    height: 30
                     flow: Right
                     spacing: 7
                     align: Align{y: 0.5}
-                    padding: Inset{left: 10 top: 6 right: 12 bottom: 6}
+                    padding: Inset{left: 10 top: 3 right: 12 bottom: 3}
                     cursor: MouseCursor.Hand
                     show_bg: true
                     draw_bg +: {
@@ -135,36 +138,47 @@ script_mod! {
                         border_size: 0.0
                         border_radius: 5.0
                     }
-                    active_marker := Label {
-                        width: 10
-                        height: Fit
-                        text: ""
-                        draw_text +: {
-                            color: #x6fa8ff
-                            text_style: theme.font_bold { font_size: 12.0 }
-                        }
-                    }
                     command_content := View {
                         width: Fill
-                        height: Fit
-                        flow: Down
-                        spacing: 1
+                        height: 18
+                        flow: Right
+                        spacing: 7
+                        align: Align{y: 0.5}
+                        active_marker := Label {
+                            width: 10
+                            height: 18
+                            align: Align{x: 0.5 y: 0.5}
+                            padding: 0
+                            text: ""
+                            draw_text +: {
+                                color: #x6fa8ff
+                                text_style: theme.font_code { font_size: 10.0 }
+                            }
+                        }
                         cmd_name := Label {
-                            width: Fill
-                            height: Fit
+                            width: 180
+                            height: 18
+                            align: Align{x: 0.0 y: 0.5}
+                            padding: 0
+                            max_lines: 1
+                            text_overflow: Ellipsis
                             text: ""
                             draw_text +: {
                                 color: #xdde3ea
-                                text_style: theme.font_code { font_size: 10.5 }
+                                text_style: theme.font_code { font_size: 10.0 }
                             }
                         }
                         cmd_desc := Label {
                             width: Fill
-                            height: Fit
+                            height: 18
+                            align: Align{x: 0.0 y: 0.5}
+                            padding: 0
+                            max_lines: 1
+                            text_overflow: Ellipsis
                             text: ""
                             draw_text +: {
                                 color: #x7f8b9a
-                                text_style +: { font_size: 9.0 }
+                                text_style +: { font_size: 8.5 }
                             }
                         }
                     }
@@ -445,7 +459,16 @@ impl ThreadlaneCommandTextInput {
         self.items = items;
         self.keyboard_focus_index = (!self.items.is_empty()).then_some(0);
         self.pointer_hover_index = None;
-        self.portal_list(cx, ids!(list)).set_first_id(0);
+
+        let visible_rows = self.items.len().clamp(1, MAX_VISIBLE_COMMAND_ROWS) as f64;
+        let list_height = visible_rows * COMMAND_ROW_HEIGHT;
+        let mut list_widget = self.deref.widget(cx, ids!(list));
+        script_apply_eval!(cx, list_widget, {
+            height: #(list_height)
+        });
+
+        self.portal_list(cx, ids!(list))
+            .set_first_id_and_scroll(0, 0.0);
         self.redraw(cx);
     }
 
@@ -574,7 +597,8 @@ impl ThreadlaneCommandTextInput {
         self.items.clear();
         self.keyboard_focus_index = None;
         self.pointer_hover_index = None;
-        self.portal_list(cx, ids!(list)).set_first_id(0);
+        self.portal_list(cx, ids!(list))
+            .set_first_id_and_scroll(0, 0.0);
         self.redraw(cx);
     }
 
@@ -703,18 +727,17 @@ impl ThreadlaneCommandTextInput {
             return;
         }
 
-        let selected = match self.keyboard_focus_index {
-            Some(idx) => idx
-                .saturating_add_signed(delta as isize)
-                .clamp(0, self.items.len() - 1),
-            None if delta > 0 => 0,
-            None => self.items.len() - 1,
-        };
+        let previous = self.keyboard_focus_index;
+        let selected = wrapped_selection_index(previous, self.items.len(), delta);
         self.keyboard_focus_index = Some(selected);
         self.pointer_hover_index = None;
 
-        self.portal_list(cx, ids!(list))
-            .smooth_scroll_to(cx, selected, 12.0, Some(4), 4.0);
+        let list = self.portal_list(cx, ids!(list));
+        if previous == Some(0) && delta < 0 {
+            list.scroll_to_end(cx);
+        } else {
+            list.smooth_scroll_to(cx, selected, 12.0, Some(MAX_VISIBLE_COMMAND_ROWS), 4.0);
+        }
         self.redraw(cx);
     }
 
@@ -771,12 +794,40 @@ impl ThreadlaneCommandTextInputRef {
     }
 }
 
+fn wrapped_selection_index(current: Option<usize>, item_count: usize, delta: i32) -> usize {
+    debug_assert!(item_count > 0);
+    match current {
+        Some(index) => (index as isize + delta as isize).rem_euclid(item_count as isize) as usize,
+        None if delta > 0 => 0,
+        None => item_count - 1,
+    }
+}
+
 fn graphemes(text: &str) -> impl DoubleEndedIterator<Item = &str> {
     text.graphemes(true)
 }
 
 fn get_head(text_input: &TextInputRef) -> usize {
     text_input.borrow().map_or(0, |p| p.cursor().index)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wrapped_selection_index;
+
+    #[test]
+    fn keyboard_selection_wraps_at_both_ends() {
+        assert_eq!(wrapped_selection_index(Some(0), 5, -1), 4);
+        assert_eq!(wrapped_selection_index(Some(4), 5, 1), 0);
+        assert_eq!(wrapped_selection_index(Some(2), 5, -1), 1);
+        assert_eq!(wrapped_selection_index(Some(2), 5, 1), 3);
+    }
+
+    #[test]
+    fn keyboard_selection_starts_in_navigation_direction() {
+        assert_eq!(wrapped_selection_index(None, 5, 1), 0);
+        assert_eq!(wrapped_selection_index(None, 5, -1), 4);
+    }
 }
 
 fn is_whitespace(grapheme: &str) -> bool {

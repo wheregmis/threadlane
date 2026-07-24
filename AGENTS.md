@@ -147,6 +147,15 @@ Drawing in an overlay does not automatically stop widgets underneath from receiv
 - Outside-click dismissal, Escape, and back navigation should all close overlays and clear associated state.
 - Clamp popup coordinates to the pass bounds and keep a small edge gap.
 
+### Command Completion Popup
+
+- Command rows use a fixed height and the `PortalList` viewport height is derived from the number of visible results, capped at a small maximum. Do not restore a large fixed viewport that leaves empty popup space.
+- Keep the active marker, command name, and description in one fixed-height row. The marker and command name must share matching font metrics and vertical alignment; use a bounded, ellipsized command-name column and let the description consume the remaining width.
+- Keyboard Up/Down navigation wraps at both ends.
+- When rebuilding or clearing filtered results, reset both the first item and its pixel offset with `set_first_id_and_scroll(0, 0.0)`. `set_first_id(0)` alone preserves stale `first_scroll` and can vertically offset a short result list.
+- Makepad `PortalList::smooth_scroll_to` stops when a target row’s top edge is visible, even if the row is not fully revealed. When wrapping from the first command to the final command, use `scroll_to_end` so the selection and viewport reach the actual bottom.
+- Keep keyboard focus and pointer hover as separate states; keyboard movement should clear pointer hover before redrawing.
+
 ### Composer Drop-Ups
 
 The pinned Makepad `PopupMenuPosition` currently supports only `OnSelected` and `BelowInput`; it has no native `AboveInput` variant.
