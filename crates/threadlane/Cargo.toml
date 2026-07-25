@@ -5,7 +5,7 @@ edition = "2021"
 description = "GPU Desktop UI application for threadlane agent using Makepad"
 
 [dependencies]
-makepad-widgets = { git = "https://github.com/makepad/makepad.git", branch = "dev" }
+makepad-widgets = { git = "https://github.com/sunil-thapa99/makepad.git", branch = "fix/area-clipped-rect-oob" }
 unicode-segmentation = "1.12.0"
 threadlane-agent = { path = "../threadlane-agent" }
 threadlane-coding-agent = { path = "../threadlane-coding-agent" }
