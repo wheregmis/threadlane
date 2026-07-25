@@ -3473,15 +3473,20 @@ impl App {
     }
 
     fn open_project_picker(&self) {
-        // rfd's macOS backend must be invoked from the application main thread.
-        // Makepad action handlers run there, so do not move this call to a worker.
-        let picked = rfd::FileDialog::new()
-            .set_title("Attach a project folder")
-            .pick_folder();
-        if let Some(tx) = self.tx.as_ref() {
+        // rfd's sync FileDialog::pick_folder() blocks via a nested NSApp
+        // run loop on macOS, which can reenter Makepad's event handling
+        // and crash it. AsyncFileDialog uses a non-blocking sheet instead,
+        // so it's spawned like any other async op in this app.
+        let Some(tx) = self.tx.clone() else { return };
+        get_runtime().spawn(async move {
+            let picked = rfd::AsyncFileDialog::new()
+                .set_title("Attach a project folder")
+                .pick_folder()
+                .await
+                .map(|handle| handle.path().to_path_buf());
             let _ = tx.send(GuiAgentEvent::ProjectFolderPicked(Ok(picked)));
             SignalToUI::set_ui_signal();
-        }
+        });
     }
 
     fn apply_project_folder_result(
