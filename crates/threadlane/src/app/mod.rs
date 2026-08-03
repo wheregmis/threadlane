@@ -964,31 +964,6 @@ script_mod! {
         }
     }
 
-    let SettingsActionButton = Button {
-        width: Fit
-        height: 28
-        padding: Inset{left: 10 right: 10 top: 4 bottom: 4}
-        draw_bg +: {
-            color: theme.color_card
-            color_hover: theme.color_secondary
-            color_focus: theme.color_secondary
-            color_down: theme.color_input
-            border_color: theme.color_secondary
-            border_color_hover: theme.color_primary
-            border_color_focus: theme.color_primary
-            border_color_down: theme.color_primary
-            border_size: 1.0
-            border_radius: 6.0
-        }
-        draw_text +: {
-            color: theme.color_card_foreground
-            color_hover: theme.color_foreground
-            color_focus: theme.color_primary_foreground
-            color_down: theme.color_primary_foreground
-            text_style +: { font_size: 9.0 }
-        }
-    }
-
     let ProvidersModal = #(ProviderSettingsModal::register_widget(vm)) {
         width: Fill
         height: Fill
@@ -1298,12 +1273,12 @@ script_mod! {
                                 text_style +: { font_size: 8.75 }
                             }
                         }
-                        capability_scope_global_btn := SettingsActionButton {
+                        capability_scope_global_btn := mod.components.SettingsActionButton {
                             height: 24
                             padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
                             text: "Global"
                         }
-                        capability_scope_project_btn := SettingsActionButton {
+                        capability_scope_project_btn := mod.components.SettingsActionButton {
                             height: 24
                             padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
                             text: "Project"
@@ -1460,12 +1435,12 @@ script_mod! {
                             }
                         }
 
-                        mcp_scope_global_btn := SettingsActionButton {
+                        mcp_scope_global_btn := mod.components.SettingsActionButton {
                             height: 24
                             padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
                             text: "Global"
                         }
-                        mcp_scope_project_btn := SettingsActionButton {
+                        mcp_scope_project_btn := mod.components.SettingsActionButton {
                             height: 24
                             padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
                             text: "Project"
@@ -1560,7 +1535,7 @@ script_mod! {
                                 }
                             }
 
-                            mcp_submit_add_btn := SettingsActionButton {
+                            mcp_submit_add_btn := mod.components.SettingsActionButton {
                                 height: 28
                                 padding: Inset{left: 12 right: 12 top: 4 bottom: 4}
                                 text: "Add"

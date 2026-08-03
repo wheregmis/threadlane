@@ -32,6 +32,7 @@ pub mod provider_card;
 pub mod search_input;
 pub mod section_header;
 pub mod session_row;
+pub mod settings_action_button;
 pub mod sidebar_compose_button;
 pub mod status_dot;
 pub mod status_pill;
@@ -74,6 +75,7 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     provider_card::script_mod(vm);
     sidebar_compose_button::script_mod(vm);
     session_row::script_mod(vm);
+    settings_action_button::script_mod(vm);
     status_pill::script_mod(vm);
     starter_prompt_card::script_mod(vm);
     task_sidebar::script_mod(vm);
