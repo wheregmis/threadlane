@@ -6,11 +6,51 @@ use threadlane_coding_agent::prompt_templates::{
 
 #[test]
 fn test_parse_command_args() {
+    // Happy paths
     let args1 = parse_command_args("Button \"click handler\" 'disabled state'");
     assert_eq!(args1, vec!["Button", "click handler", "disabled state"]);
 
     let args2 = parse_command_args("  foo   bar   baz ");
     assert_eq!(args2, vec!["foo", "bar", "baz"]);
+
+    // Empty and whitespace strings
+    let args_empty = parse_command_args("");
+    assert!(args_empty.is_empty(), "Empty string should return empty vec");
+
+    let args_whitespace = parse_command_args("   \t\n  ");
+    assert!(args_whitespace.is_empty(), "Whitespace string should return empty vec");
+
+    // Unclosed quotes (should collect everything until EOF)
+    let args_unclosed_double = parse_command_args("unclosed \"quote string");
+    assert_eq!(args_unclosed_double, vec!["unclosed", "quote string"]);
+
+    let args_unclosed_single = parse_command_args("'unclosed single");
+    assert_eq!(args_unclosed_single, vec!["unclosed single"]);
+
+    // Mixed quotes (quotes inside other quotes)
+    let args_mixed1 = parse_command_args("\"'single inside double'\"");
+    assert_eq!(args_mixed1, vec!["'single inside double'"]);
+
+    let args_mixed2 = parse_command_args("'\"double inside single\"'");
+    assert_eq!(args_mixed2, vec!["\"double inside single\""]);
+
+    // Quotes concatenated without spaces
+    let args_concat = parse_command_args("foo\"bar\"baz");
+    assert_eq!(args_concat, vec!["foobarbaz"]);
+
+    let args_adjacent = parse_command_args("\"foo\"'bar'");
+    assert_eq!(args_adjacent, vec!["foobar"]);
+
+    // Empty quotes - currently `parse_command_args` ignores completely empty quotes
+    // because `current.is_empty()` returns true when only whitespace follows.
+    // If empty arguments are desired, `parse_command_args` would need an `is_explicit` flag.
+    // Let's assert its current actual behavior.
+    let args_empty_quotes = parse_command_args("\"\" ''");
+    assert!(args_empty_quotes.is_empty(), "Empty quotes are currently ignored by parse_command_args");
+
+    // Non-ascii characters
+    let args_unicode = parse_command_args("\"こんにちは\" '世界'");
+    assert_eq!(args_unicode, vec!["こんにちは", "世界"]);
 }
 
 #[test]
