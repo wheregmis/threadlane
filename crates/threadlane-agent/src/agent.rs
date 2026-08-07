@@ -38,6 +38,10 @@ impl Agent {
         self.loop_engine.steer(message);
     }
 
+    pub async fn run_steer(&mut self) {
+        self.loop_engine.run_steer().await;
+    }
+
     pub fn follow_up(&mut self, message: AgentMessage) {
         self.loop_engine.follow_up(message);
     }
@@ -53,6 +57,22 @@ impl Agent {
 
     pub async fn run_follow_up(&mut self) {
         self.loop_engine.run_follow_up().await;
+    }
+
+    pub async fn resume_pending_turn(&mut self) {
+        self.loop_engine.resume_pending_turn().await;
+    }
+
+    pub async fn fetch_deferred(
+        &self,
+        model: &str,
+        handle_id: &str,
+    ) -> Result<threadlane_provider::DeferredResponse, String> {
+        self.loop_engine.fetch_deferred(model, handle_id).await
+    }
+
+    pub async fn cancel_deferred(&self, model: &str, handle_id: &str) -> Result<(), String> {
+        self.loop_engine.cancel_deferred(model, handle_id).await
     }
 
     /// Updates both the cached prompt and the system message sent to the provider.

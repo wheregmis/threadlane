@@ -146,7 +146,9 @@ pub(crate) fn parse_command(input: &str) -> Result<Command, CommandError> {
 
     match (command, argument) {
         (MODEL_COMMAND_NAME, None) => Ok(Command::ShowModel),
-        (MODEL_COMMAND_NAME, Some(model)) if !model.is_empty() => Ok(Command::SetModel(model.into())),
+        (MODEL_COMMAND_NAME, Some(model)) if !model.is_empty() => {
+            Ok(Command::SetModel(model.into()))
+        }
         (MODELS_COMMAND_NAME, None) => Ok(Command::Models),
         (REASONING_COMMAND_NAME, None) => Ok(Command::ShowReasoning),
         (REASONING_COMMAND_NAME, Some(level)) => ReasoningEffort::from_label(level)
@@ -226,7 +228,9 @@ pub(crate) async fn execute_command(
     }
 
     match command {
-        Command::ShowModel => CommandResult::Message(format!("Current model: {}", context.state.model)),
+        Command::ShowModel => {
+            CommandResult::Message(format!("Current model: {}", context.state.model))
+        }
         Command::SetModel(model) => match context.agent.set_model(model.clone()).await {
             Ok(()) => {
                 context.state.model = model.clone();
@@ -262,7 +266,9 @@ pub(crate) async fn execute_command(
             context.state.reasoning_effort.label()
         )),
         Command::Login => CommandResult::OpenLogin,
-        Command::Help => CommandResult::Message(format!("Commands: {}", command_usages().join(", "))),
+        Command::Help => {
+            CommandResult::Message(format!("Commands: {}", command_usages().join(", ")))
+        }
         Command::Quit => CommandResult::Quit,
     }
 }

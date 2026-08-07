@@ -46,7 +46,7 @@ cargo test --workspace
 # Build and deploy WASI extensions
 ./scripts/build_extensions.sh
 
-# Run the desktop app
+# Run the desktop app directly only for non-visual debugging
 cargo run -p threadlane
 
 # Check patch whitespace
@@ -62,6 +62,45 @@ cargo run -p threadlane
 ```
 
 A normal `cargo run` may be unsuitable for testing installation: update installation and relaunch are intentionally restricted to a packaged `.app`.
+
+### Makepad Studio runtime debugging
+
+Use Makepad Studio for Threadlane UI/runtime verification. The repository root
+contains `makepad.splash`, which exposes the `threadlane` Cargo package as a
+Studio runnable item.
+
+Install and start Studio once on a machine with a working Metal device:
+
+```bash
+cargo install --git https://github.com/makepad/makepad makepad-studio --locked
+makepad-studio --mounts=makepad:$PWD
+```
+
+In a second terminal, start the localhost bridge and keep it running for the
+whole interaction:
+
+```bash
+cargo-makepad studio --studio=127.0.0.1:8001
+```
+
+Send newline-delimited JSON requests to the bridge. For a fresh visual run:
+
+1. Send `{"ListBuilds":[]}` and clear any existing Threadlane build with
+   `{"ClearBuild":{"build_id":[N]}}`.
+2. Launch the current source with
+   `{"RunItem":{"mount":"makepad","name":"threadlane"}}`.
+3. Wait for `BuildStarted` and application startup before inspecting the app.
+4. Use `{"WidgetTreeDump":{"build_id":[N]}}` for widget IDs and coordinates,
+   `{"Screenshot":{"build_id":[N]}}` for visual evidence, and `Click`,
+   `TypeText`, and `Return` for interaction checks.
+5. After every UI/runtime edit, clear the old build and start a new Studio run;
+   never validate a stale build. Inspect Studio build logs for script type-check
+   errors because Makepad DSL failures can occur after Rust compilation.
+
+Keep the bridge and Studio bound to localhost. Do not use `ObserveMount` or
+bind Studio to `0.0.0.0` for ordinary debugging. Studio may create a local
+`.makepad/` state directory; it is generated runtime state and must not be
+edited or committed.
 
 ## Validation Expectations
 

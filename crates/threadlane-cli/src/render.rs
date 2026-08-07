@@ -132,7 +132,9 @@ fn popup_height(area: Rect, state: &AppState, has_activity: bool, has_plan: bool
 
 fn login_popup_height(login: &LoginState) -> u16 {
     let rows = match login.mode {
-        LoginMode::ProviderPicker => LoginProvider::ALL.len() + usize::from(login.status().is_some()),
+        LoginMode::ProviderPicker => {
+            LoginProvider::ALL.len() + usize::from(login.status().is_some())
+        }
         LoginMode::OpenAiKey => 1 + usize::from(login.status().is_some()),
     };
     section_height(rows.max(1), 8)
@@ -384,7 +386,12 @@ fn render_completion(frame: &mut Frame, state: &AppState, area: Rect) {
         .iter()
         .enumerate()
         .map(|(index, candidate)| {
-            completion_line(state, index, candidate, area.width.saturating_sub(2) as usize)
+            completion_line(
+                state,
+                index,
+                candidate,
+                area.width.saturating_sub(2) as usize,
+            )
         })
         .collect::<Vec<_>>();
     frame.render_widget(
@@ -463,7 +470,10 @@ fn truncate_spans(spans: Vec<(String, Style)>, max_width: usize) -> Vec<Span<'st
         return Vec::new();
     }
 
-    let total_width = spans.iter().map(|(text, _)| text_width(text)).sum::<usize>();
+    let total_width = spans
+        .iter()
+        .map(|(text, _)| text_width(text))
+        .sum::<usize>();
     if total_width <= max_width {
         return spans
             .into_iter()
@@ -589,8 +599,8 @@ fn render_footer(frame: &mut Frame, area: Rect) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::state::CompletionMode;
+    use super::*;
     use crate::login::LoginProvider;
     use ratatui::{backend::TestBackend, Terminal};
 
@@ -765,11 +775,7 @@ mod tests {
             })
             .collect();
         state.open_login();
-        state
-            .login
-            .as_mut()
-            .unwrap()
-            .select_next_provider();
+        state.login.as_mut().unwrap().select_next_provider();
 
         let sections = layout_sections(Rect::new(0, 0, 100, 30), &state);
         assert!(sections.popup.height > 0);

@@ -9,3 +9,6 @@
 /threadlane-updater.key.pub
 theadline_private_key_password
 .tokensave
+.makepad
+
+.worktrees/

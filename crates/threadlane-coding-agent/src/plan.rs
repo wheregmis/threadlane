@@ -3,8 +3,8 @@ use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use threadlane_agent::{
-    AgentEvent, AgentToolDefinition, PlanItem, PlanItemStatus, SessionPlan, SessionTree,
-    ToolExecutor,
+    harness::JsonlStore, AgentEvent, AgentToolDefinition, PlanItem, PlanItemStatus, SessionPlan,
+    SessionTree, ToolExecutor,
 };
 use tokio::sync::broadcast;
 
@@ -93,8 +93,16 @@ impl SessionPlanStore {
             .lock()
             .map_err(|_| "Session plan state is unavailable".to_string())?;
         if let Some(path) = &state.session_file {
-            SessionTree::append_plan_to_file(path, &plan)
-                .map_err(|error| format!("Failed to persist session plan: {error}"))?;
+            if path.exists() {
+                let mut store = JsonlStore::open(path)
+                    .map_err(|error| format!("Failed to open session for plan update: {error}"))?;
+                store
+                    .append_plan(&plan)
+                    .map_err(|error| format!("Failed to persist session plan: {error}"))?;
+            } else {
+                SessionTree::append_plan_to_file(path, &plan)
+                    .map_err(|error| format!("Failed to persist session plan: {error}"))?;
+            }
         }
         state.plan = plan;
         Ok(())

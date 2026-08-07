@@ -1179,8 +1179,104 @@ impl crate::traits::ModelProvider for OpenAIClient {
             crate::router::PayloadFormat::ChatCompletions
         };
         let payload = payload_source.resolve(format).await;
-        self.stream_chat_completion(payload, prompt_cache_key, event_tx).await;
+        self.stream_chat_completion(payload, prompt_cache_key, event_tx)
+            .await;
     }
+
+    async fn fetch_deferred(
+        &self,
+        handle_id: &str,
+    ) -> Result<crate::traits::DeferredResponse, String> {
+        let base = if self.is_codex() {
+            "https://chatgpt.com/backend-api/codex/responses"
+        } else {
+            "https://api.openai.com/v1/responses"
+        };
+        let response = self
+            .client
+            .get(format!("{base}/{handle_id}"))
+            .timeout(Duration::from_secs(30))
+            .header(AUTHORIZATION, format!("Bearer {}", self.api_key))
+            .header(CONTENT_TYPE, "application/json")
+            .send()
+            .await
+            .map_err(|error| format!("deferred response fetch failed: {error}"))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|error| format!("deferred response body failed: {error}"))?;
+        let value: Value = serde_json::from_str(&body)
+            .map_err(|error| format!("invalid deferred response ({error}): {body}"))?;
+        if !status.is_success() {
+            let (_, error_message) = api_error_details(&value);
+            return Ok(crate::traits::DeferredResponse::Error {
+                message: if error_message.is_empty() {
+                    format!("HTTP {status}")
+                } else {
+                    error_message
+                },
+            });
+        }
+        match value
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("pending")
+        {
+            "completed" | "succeeded" => extract_deferred_text(&value)
+                .map(|content| crate::traits::DeferredResponse::Ready { content })
+                .ok_or_else(|| "deferred response completed without text".to_string()),
+            "failed" | "cancelled" | "canceled" => Ok(crate::traits::DeferredResponse::Error {
+                message: value
+                    .get("error")
+                    .and_then(|error| error.get("message"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("deferred response failed")
+                    .to_owned(),
+            }),
+            _ => Ok(crate::traits::DeferredResponse::Pending),
+        }
+    }
+
+    async fn cancel_deferred(&self, handle_id: &str) -> Result<(), String> {
+        let base = if self.is_codex() {
+            "https://chatgpt.com/backend-api/codex/responses"
+        } else {
+            "https://api.openai.com/v1/responses"
+        };
+        let response = self
+            .client
+            .post(format!("{base}/{handle_id}/cancel"))
+            .timeout(Duration::from_secs(30))
+            .header(AUTHORIZATION, format!("Bearer {}", self.api_key))
+            .header(CONTENT_TYPE, "application/json")
+            .send()
+            .await
+            .map_err(|error| format!("deferred response cancellation failed: {error}"))?;
+        if response.status().is_success() || response.status().as_u16() == 404 {
+            Ok(())
+        } else {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            Err(format!(
+                "deferred response cancellation failed ({status}): {body}"
+            ))
+        }
+    }
+}
+
+fn extract_deferred_text(value: &Value) -> Option<String> {
+    if let Some(text) = value.get("output_text").and_then(Value::as_str) {
+        return Some(text.to_owned());
+    }
+    value
+        .get("output")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("content").and_then(Value::as_array))
+        .flatten()
+        .find_map(|part| part.get("text").and_then(Value::as_str).map(str::to_owned))
 }
 
 #[cfg(test)]
@@ -1210,6 +1306,20 @@ mod tests {
                 "content":[{"type":"output_text","text":"answer"}]
             })],
         }
+    }
+
+    #[test]
+    fn extracts_deferred_response_text_from_both_response_shapes() {
+        assert_eq!(
+            super::extract_deferred_text(&json!({"output_text": "ready"})),
+            Some("ready".into())
+        );
+        assert_eq!(
+            super::extract_deferred_text(&json!({
+                "output": [{"content": [{"type": "output_text", "text": "nested"}]}]
+            })),
+            Some("nested".into())
+        );
     }
 
     #[test]

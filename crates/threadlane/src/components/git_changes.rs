@@ -291,8 +291,10 @@ impl Widget for GitChanges {
                             };
                             let row = list.item(cx, row_index, id!(File));
                             let is_selected = self.selected.contains(&file.path);
-                            row.button(cx, ids!(select_checked_btn)).set_visible(cx, is_selected);
-                            row.button(cx, ids!(select_unchecked_btn)).set_visible(cx, !is_selected);
+                            row.button(cx, ids!(select_checked_btn))
+                                .set_visible(cx, is_selected);
+                            row.button(cx, ids!(select_unchecked_btn))
+                                .set_visible(cx, !is_selected);
 
                             let is_image = file.path.ends_with(".svg")
                                 || file.path.ends_with(".png")
@@ -301,18 +303,24 @@ impl Widget for GitChanges {
                                 || file.path.ends_with(".ico")
                                 || file.path.ends_with(".webp");
 
-                            row.view(cx, ids!(file_code_icon)).set_visible(cx, !is_image);
-                            row.view(cx, ids!(file_image_icon)).set_visible(cx, is_image);
+                            row.view(cx, ids!(file_code_icon))
+                                .set_visible(cx, !is_image);
+                            row.view(cx, ids!(file_image_icon))
+                                .set_visible(cx, is_image);
 
                             let status = file.status_char();
                             let is_added = status == 'A' || status == '?';
                             let is_deleted = status == 'D';
                             let is_modified = !is_added && !is_deleted;
 
-                            row.view(cx, ids!(status_modified_icon)).set_visible(cx, is_modified);
-                            row.view(cx, ids!(status_untracked_icon)).set_visible(cx, false);
-                            row.view(cx, ids!(status_added_icon)).set_visible(cx, is_added);
-                            row.view(cx, ids!(status_deleted_icon)).set_visible(cx, is_deleted);
+                            row.view(cx, ids!(status_modified_icon))
+                                .set_visible(cx, is_modified);
+                            row.view(cx, ids!(status_untracked_icon))
+                                .set_visible(cx, false);
+                            row.view(cx, ids!(status_added_icon))
+                                .set_visible(cx, is_added);
+                            row.view(cx, ids!(status_deleted_icon))
+                                .set_visible(cx, is_deleted);
 
                             let formatted_path = format_file_path(&file.path);
                             let path_btn = row.button(cx, ids!(path_btn));

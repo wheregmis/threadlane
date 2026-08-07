@@ -467,7 +467,9 @@ impl AuthProvider for OpenAiAuthProvider {
         load_credentials()
             .filter(|creds| is_own_source(&creds.source))
             .map(|creds| creds.access_token)
-            .ok_or_else(|| "No stored OpenAI credentials found. Please run /login openai".to_string())
+            .ok_or_else(|| {
+                "No stored OpenAI credentials found. Please run /login openai".to_string()
+            })
     }
 
     fn clear_credentials(&self) -> Result<(), String> {
@@ -478,8 +480,8 @@ impl AuthProvider for OpenAiAuthProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
     use std::ffi::OsString;
+    use std::fs;
     use std::path::PathBuf;
 
     fn temp_home(name: &str) -> PathBuf {
@@ -561,7 +563,11 @@ mod tests {
         save_openai_api_key("sk-test-123").unwrap();
 
         assert_eq!(load_openai_api_key().as_deref(), Some("sk-test-123"));
-        assert!(env.home().join(".threadlane").join("openai_api_key").exists());
+        assert!(env
+            .home()
+            .join(".threadlane")
+            .join("openai_api_key")
+            .exists());
     }
 
     #[cfg(unix)]
@@ -632,10 +638,7 @@ mod tests {
         save_openai_api_key("sk-second").unwrap();
 
         let key_path = env.home().join(".threadlane").join("openai_api_key");
-        let backup_path = env
-            .home()
-            .join(".threadlane")
-            .join("openai_api_key.bak");
+        let backup_path = env.home().join(".threadlane").join("openai_api_key.bak");
 
         assert_eq!(fs::read_to_string(&key_path).unwrap(), "sk-second");
         assert!(!backup_path.exists());
@@ -649,11 +652,12 @@ mod tests {
 
         let key_path = env.home().join(".threadlane").join("openai_api_key");
         let backup_path = key_path.with_extension("bak");
-        let err = write_secure_text_file_with_replacer(
-            &key_path,
-            "sk-second",
-            |_, _| Err(std::io::Error::new(std::io::ErrorKind::Other, "forced failure")),
-        )
+        let err = write_secure_text_file_with_replacer(&key_path, "sk-second", |_, _| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "forced failure",
+            ))
+        })
         .unwrap_err();
 
         assert!(err.contains("forced failure"));

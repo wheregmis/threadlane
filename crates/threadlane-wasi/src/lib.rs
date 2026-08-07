@@ -2,7 +2,10 @@ pub mod broker;
 pub mod packages;
 
 pub use broker::*;
-pub use packages::{default_global_threadlane_dir, validate_extension_id, ExtensionManager, ExtensionRecord, ExtensionScope};
+pub use packages::{
+    default_global_threadlane_dir, validate_extension_id, ExtensionManager, ExtensionRecord,
+    ExtensionScope,
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

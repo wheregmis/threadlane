@@ -1,0 +1,6 @@
+{"id":"node_1","parent_id":null,"timestamp":1,"seq":1,"message":{"role":"user_with_images","content":"inspect this","images":[{"display_name":"diagram.png","data_url":"data:image/png;base64,AA=="}]}}
+{"id":"node_2","parent_id":"node_1","timestamp":2,"seq":2,"message":{"role":"assistant","content":"done","stop_reason":"stop"}}
+{"id":"node_3","parent_id":"node_1","timestamp":3,"seq":3,"message":{"role":"assistant","content":"passive result","stop_reason":"stop"}}
+{"type":"session_metadata","name":"Fixture","title_attempted":true,"active_node_id":"node_2","model":"antigravity/test-model"}
+{"type":"global_fact","key":"provider","value":"antigravity"}
+{"type":"session_plan","explanation":"fixture plan","items":[{"step":"verify","status":"in_progress"}]}

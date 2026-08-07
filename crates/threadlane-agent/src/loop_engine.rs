@@ -33,7 +33,9 @@ struct AbortOnDrop<T> {
 
 impl<T> AbortOnDrop<T> {
     fn new(handle: tokio::task::JoinHandle<T>) -> Self {
-        Self { handle: Some(handle) }
+        Self {
+            handle: Some(handle),
+        }
     }
 
     async fn join(mut self) -> Result<T, tokio::task::JoinError> {
@@ -116,6 +118,49 @@ fn token_usage_from_provider(usage: ProviderUsage) -> TokenUsage {
         cache_read_tokens: usage.cache_read_tokens,
         cache_write_tokens: usage.cache_write_tokens,
         total_tokens: usage.total_tokens,
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ProviderStepResult {
+    pub text: String,
+    pub reasoning: String,
+    pub tool_calls: Vec<ToolCall>,
+    pub usage: TokenUsage,
+}
+
+#[derive(Default)]
+pub struct ProviderStepAccumulator {
+    text: String,
+    reasoning: String,
+    result: Option<ProviderStepResult>,
+}
+
+impl ProviderStepAccumulator {
+    pub fn push(&mut self, event: &StreamEvent) -> Result<Option<ProviderStepResult>, String> {
+        match event {
+            StreamEvent::ContentToken(token) => self.text.push_str(token),
+            StreamEvent::ReasoningToken(token) => self.reasoning.push_str(token),
+            StreamEvent::ToolCallStart { .. } | StreamEvent::ToolCallArgsDelta { .. } => {}
+            StreamEvent::Finished { tool_calls, usage } => {
+                let result = ProviderStepResult {
+                    text: self.text.clone(),
+                    reasoning: self.reasoning.clone(),
+                    tool_calls: tool_calls.clone(),
+                    usage: token_usage_from_provider(*usage),
+                };
+                self.result = Some(result.clone());
+                return Ok(Some(result));
+            }
+            StreamEvent::Error(error) => return Err(error.clone()),
+        }
+        Ok(None)
+    }
+
+    pub fn finish(&self) -> Result<ProviderStepResult, String> {
+        self.result
+            .clone()
+            .ok_or_else(|| "provider stream ended without a final response".into())
     }
 }
 
@@ -329,6 +374,7 @@ fn normalize_tool_call_ids(messages: &[AgentMessage]) -> Vec<AgentMessage> {
                 name,
                 content,
                 is_error,
+                terminate,
             } => {
                 let normalized = normalized_tool_call_id(tool_call_id, tool_index);
                 tool_index += 1;
@@ -337,6 +383,7 @@ fn normalize_tool_call_ids(messages: &[AgentMessage]) -> Vec<AgentMessage> {
                     name: name.clone(),
                     content: content.clone(),
                     is_error: *is_error,
+                    terminate: *terminate,
                 }
             }
             other => {
@@ -359,6 +406,49 @@ pub type ToolIntentRecorder = Arc<
         + Sync,
 >;
 
+pub type ToolCompletionRecorder = Arc<
+    dyn Fn(&str, bool) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync,
+>;
+
+pub type ProviderUsageRecorder = Arc<
+    dyn Fn(TokenUsage) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync,
+>;
+
+pub type ProviderDiscardedUsageRecorder = ProviderUsageRecorder;
+
+pub type StreamingStateRecorder = Arc<
+    dyn Fn(
+            crate::harness::StreamingState,
+        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>
+        + Send
+        + Sync,
+>;
+
+pub type ProviderHookRecorder = Arc<
+    dyn Fn(
+            crate::harness::HookKind,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, String>> + Send>>
+        + Send
+        + Sync,
+>;
+
+pub type AssistantMessageRecorder = Arc<
+    dyn Fn(AgentMessage) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync,
+>;
+
+async fn run_provider_hook(
+    recorder: Option<&ProviderHookRecorder>,
+    kind: crate::harness::HookKind,
+) -> Result<(), String> {
+    let Some(recorder) = recorder else {
+        return Ok(());
+    };
+    for failure in recorder(kind).await? {
+        eprintln!("provider {:?} hook failed: {failure}", kind);
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 struct ToolRunContext {
     before_hook: Option<Arc<dyn BeforeToolCallHook>>,
@@ -369,6 +459,14 @@ struct ToolRunContext {
     tool_routes: Vec<ToolExecutorRoute>,
     allowed_tool_names: Option<HashSet<String>>,
     work_dir: Option<PathBuf>,
+    skip_before_hook: bool,
+}
+
+struct PreparedToolCall {
+    tc: ToolCall,
+    arguments: String,
+    agent_tool_call: AgentToolCall,
+    context: ToolRunContext,
 }
 
 pub struct AgentLoop {
@@ -384,6 +482,13 @@ pub struct AgentLoop {
     pub before_tool_call_hook: Option<Arc<dyn BeforeToolCallHook>>,
     pub after_tool_call_hook: Option<Arc<dyn AfterToolCallHook>>,
     pub tool_intent_recorder: Option<ToolIntentRecorder>,
+    pub tool_completion_recorder: Option<ToolCompletionRecorder>,
+    pub provider_usage_recorder: Option<ProviderUsageRecorder>,
+    pub provider_discarded_usage_recorder: Option<ProviderDiscardedUsageRecorder>,
+    pub streaming_state_recorder: Option<StreamingStateRecorder>,
+    pub provider_hook_recorder: Option<ProviderHookRecorder>,
+    pub assistant_message_recorder: Option<AssistantMessageRecorder>,
+    pub tool_message_recorder: Option<AssistantMessageRecorder>,
     transform_context_hook: Option<Arc<dyn TransformContextHook>>,
     should_stop_hook: Option<Arc<dyn ShouldStopAfterTurnHook>>,
     pub event_tx: broadcast::Sender<AgentEvent>,
@@ -422,6 +527,13 @@ impl AgentLoop {
             before_tool_call_hook: None,
             after_tool_call_hook: None,
             tool_intent_recorder: None,
+            tool_completion_recorder: None,
+            provider_usage_recorder: None,
+            provider_discarded_usage_recorder: None,
+            streaming_state_recorder: None,
+            provider_hook_recorder: None,
+            assistant_message_recorder: None,
+            tool_message_recorder: None,
             transform_context_hook: None,
             should_stop_hook: None,
             event_tx,
@@ -454,11 +566,7 @@ impl AgentLoop {
     pub fn set_stream_rules(&mut self, rules: Vec<crate::rules::StreamRule>) {
         self.stream_rules = rules
             .into_iter()
-            .filter_map(|rule| {
-                regex::Regex::new(&rule.pattern)
-                    .ok()
-                    .map(|re| (rule, re))
-            })
+            .filter_map(|rule| regex::Regex::new(&rule.pattern).ok().map(|re| (rule, re)))
             .collect();
     }
 
@@ -736,6 +844,18 @@ impl AgentLoop {
         self.run_queued_turns().await;
     }
 
+    pub(crate) async fn run_steer(&mut self) {
+        if !self.steering_queue.has_items() {
+            return;
+        }
+        let items = self.steering_queue.drain();
+        let mut state = self.state.lock().await;
+        repair_interrupted_tool_turn(&mut state.messages);
+        state.messages.extend(items);
+        drop(state);
+        self.run_queued_turns().await;
+    }
+
     async fn run_queued_turns(&mut self) {
         let _ = self.event_tx.send(AgentEvent::AgentStart);
         let mut turn_number = 0;
@@ -750,6 +870,16 @@ impl AgentLoop {
                 let items = self.steering_queue.drain();
                 let mut state = self.state.lock().await;
                 state.messages.extend(items);
+            }
+
+            if let Err(error) = run_provider_hook(
+                self.provider_hook_recorder.as_ref(),
+                crate::harness::HookKind::BeforeContext,
+            )
+            .await
+            {
+                let _ = self.event_tx.send(AgentEvent::AgentError { error });
+                return;
             }
 
             // Apply context transformation hook if set
@@ -785,6 +915,7 @@ impl AgentLoop {
             let allowed_tool_names = self.allowed_tool_names.clone();
             let compatibility_executor = self.compatibility_executor();
             let pc_key = self.prompt_cache_key.clone();
+            let provider_hook_recorder = self.provider_hook_recorder.clone();
 
             let payload_source = PayloadSource::lazy(model, move |format| {
                 let state = state.clone();
@@ -792,8 +923,17 @@ impl AgentLoop {
                 let allowed_tool_names = allowed_tool_names.clone();
                 let compatibility_executor = compatibility_executor.clone();
                 let pc_key = pc_key.clone();
+                let provider_hook_recorder = provider_hook_recorder.clone();
                 Box::pin(async move {
-                    Self::build_payload_helper(
+                    if let Err(error) = run_provider_hook(
+                        provider_hook_recorder.as_ref(),
+                        crate::harness::HookKind::BeforePayload,
+                    )
+                    .await
+                    {
+                        eprintln!("provider payload hook failed: {error}");
+                    }
+                    let payload = Self::build_payload_helper(
                         &state,
                         &tool_executors,
                         allowed_tool_names.as_ref(),
@@ -801,7 +941,16 @@ impl AgentLoop {
                         pc_key.as_deref(),
                         format,
                     )
+                    .await;
+                    if let Err(error) = run_provider_hook(
+                        provider_hook_recorder.as_ref(),
+                        crate::harness::HookKind::AfterPayload,
+                    )
                     .await
+                    {
+                        eprintln!("provider payload hook failed: {error}");
+                    }
+                    payload
                 })
             });
 
@@ -809,25 +958,54 @@ impl AgentLoop {
             let client = self.provider_client.clone();
             let prompt_cache_key = self.prompt_cache_key.clone();
 
+            if let Err(error) = run_provider_hook(
+                self.provider_hook_recorder.as_ref(),
+                crate::harness::HookKind::BeforeRequest,
+            )
+            .await
+            {
+                let _ = self.event_tx.send(AgentEvent::AgentError { error });
+                return;
+            }
+
             let _stream_task = AbortOnDrop::new(tokio::spawn(async move {
                 client
                     .stream_chat_completion(payload_source, prompt_cache_key, stream_tx)
                     .await;
             }));
 
+            if let Err(error) = run_provider_hook(
+                self.provider_hook_recorder.as_ref(),
+                crate::harness::HookKind::BeforeResponse,
+            )
+            .await
+            {
+                let _ = self.event_tx.send(AgentEvent::AgentError { error });
+                return;
+            }
+
             let _ = self.event_tx.send(AgentEvent::MessageStart {
                 role: "assistant".into(),
             });
 
+            if let Some(recorder) = &self.streaming_state_recorder {
+                if let Err(error) = recorder(crate::harness::StreamingState::default()).await {
+                    let _ = self.event_tx.send(AgentEvent::AgentError { error });
+                    return;
+                }
+            }
+
             let mut current_turn_text = String::new();
             let mut current_turn_reasoning = String::new();
             let mut captured_tool_calls: Vec<ToolCall> = Vec::new();
+            let mut provider_step = ProviderStepAccumulator::default();
 
             let mut stream_monitor =
                 crate::rules::StreamRuleMonitor::new(self.stream_rules.clone());
             let mut rule_triggered = None;
 
             while let Some(evt) = stream_rx.recv().await {
+                let accumulated = provider_step.push(&evt);
                 match evt {
                     StreamEvent::ContentToken(token) => {
                         current_turn_text.push_str(&token);
@@ -840,6 +1018,18 @@ impl AgentLoop {
                             reasoning_delta: None,
                             tool_call_name: None,
                         });
+                        if let Some(recorder) = &self.streaming_state_recorder {
+                            if let Err(error) = recorder(crate::harness::StreamingState {
+                                assistant_text: current_turn_text.clone(),
+                                reasoning: current_turn_reasoning.clone(),
+                                ..Default::default()
+                            })
+                            .await
+                            {
+                                let _ = self.event_tx.send(AgentEvent::AgentError { error });
+                                return;
+                            }
+                        }
                     }
                     StreamEvent::ReasoningToken(token) => {
                         current_turn_reasoning.push_str(&token);
@@ -848,6 +1038,18 @@ impl AgentLoop {
                             reasoning_delta: Some(token),
                             tool_call_name: None,
                         });
+                        if let Some(recorder) = &self.streaming_state_recorder {
+                            if let Err(error) = recorder(crate::harness::StreamingState {
+                                assistant_text: current_turn_text.clone(),
+                                reasoning: current_turn_reasoning.clone(),
+                                ..Default::default()
+                            })
+                            .await
+                            {
+                                let _ = self.event_tx.send(AgentEvent::AgentError { error });
+                                return;
+                            }
+                        }
                     }
                     StreamEvent::ToolCallStart { name, .. } => {
                         let _ = self.event_tx.send(AgentEvent::MessageUpdate {
@@ -857,12 +1059,60 @@ impl AgentLoop {
                         });
                     }
                     StreamEvent::ToolCallArgsDelta { .. } => {}
-                    StreamEvent::Finished { tool_calls, usage } => {
-                        captured_tool_calls = tool_calls;
-                        total_usage.accumulate(&token_usage_from_provider(usage));
+                    StreamEvent::Finished { .. } => {
+                        let Some(step) = accumulated.ok().flatten() else {
+                            let _ = self.event_tx.send(AgentEvent::AgentError {
+                                error: "provider step did not produce a final response".into(),
+                            });
+                            return;
+                        };
+                        let usage = step.usage.clone();
+                        if let Some(recorder) = &self.provider_usage_recorder {
+                            if let Err(error) = recorder(usage.clone()).await {
+                                let _ = self.event_tx.send(AgentEvent::AgentError { error });
+                                return;
+                            }
+                        }
+                        if let Some(hook) = &self.provider_hook_recorder {
+                            match hook(crate::harness::HookKind::AfterResponse).await {
+                                Ok(failures) => {
+                                    for failure in failures {
+                                        eprintln!("provider after-response hook failed: {failure}");
+                                    }
+                                }
+                                Err(error) => {
+                                    let _ = self.event_tx.send(AgentEvent::AgentError { error });
+                                    return;
+                                }
+                            }
+                        }
+                        captured_tool_calls = step.tool_calls;
+                        if let Some(recorder) = &self.streaming_state_recorder {
+                            if let Err(error) = recorder(crate::harness::StreamingState {
+                                assistant_text: current_turn_text.clone(),
+                                reasoning: current_turn_reasoning.clone(),
+                                tool_call_ids: captured_tool_calls
+                                    .iter()
+                                    .map(|call| call.id.clone())
+                                    .collect(),
+                                ..Default::default()
+                            })
+                            .await
+                            {
+                                let _ = self.event_tx.send(AgentEvent::AgentError { error });
+                                return;
+                            }
+                        }
+                        total_usage.accumulate(&usage);
                         break;
                     }
                     StreamEvent::Error(err) => {
+                        if let Some(recorder) = &self.provider_discarded_usage_recorder {
+                            if let Err(error) = recorder(TokenUsage::default()).await {
+                                let _ = self.event_tx.send(AgentEvent::AgentError { error });
+                                return;
+                            }
+                        }
                         if !overflow_recovery_attempted && is_context_overflow_error(&err) {
                             let mut state = self.state.lock().await;
                             let compacted = compact_messages_to_token_budget(
@@ -882,6 +1132,23 @@ impl AgentLoop {
                         return;
                     }
                 }
+            }
+
+            if let Err(error) = run_provider_hook(
+                self.provider_hook_recorder.as_ref(),
+                crate::harness::HookKind::AfterRequest,
+            )
+            .await
+            {
+                let _ = self.event_tx.send(AgentEvent::AgentError { error });
+                return;
+            }
+
+            if rule_triggered.is_none() && provider_step.finish().is_err() {
+                let _ = self.event_tx.send(AgentEvent::AgentError {
+                    error: "provider stream ended without a final response".into(),
+                });
+                return;
             }
 
             if let Some(rule_match) = rule_triggered {
@@ -921,15 +1188,26 @@ impl AgentLoop {
                 deferred_handle: None,
             };
 
-            {
-                let mut state = self.state.lock().await;
-                if !current_turn_reasoning.trim().is_empty() {
-                    state.messages.push(AgentMessage::Custom {
-                        custom_type: "thinking".into(),
-                        payload: serde_json::json!({ "text": current_turn_reasoning }),
-                    });
+            if !current_turn_reasoning.trim().is_empty() {
+                let thinking = AgentMessage::Custom {
+                    custom_type: "thinking".into(),
+                    payload: serde_json::json!({ "text": current_turn_reasoning }),
+                };
+                if let Some(recorder) = &self.assistant_message_recorder {
+                    if let Err(error) = recorder(thinking.clone()).await {
+                        let _ = self.event_tx.send(AgentEvent::AgentError { error });
+                        return;
+                    }
                 }
-                state.messages.push(assistant_msg.clone());
+                self.state.lock().await.messages.push(thinking);
+            }
+            self.state.lock().await.messages.push(assistant_msg.clone());
+
+            if let Some(recorder) = &self.assistant_message_recorder {
+                if let Err(error) = recorder(assistant_msg.clone()).await {
+                    let _ = self.event_tx.send(AgentEvent::AgentError { error });
+                    return;
+                }
             }
 
             let _ = self.event_tx.send(AgentEvent::MessageEnd {
@@ -937,6 +1215,12 @@ impl AgentLoop {
             });
 
             if captured_tool_calls.is_empty() {
+                if let Some(recorder) = &self.streaming_state_recorder {
+                    if let Err(error) = recorder(crate::harness::StreamingState::default()).await {
+                        let _ = self.event_tx.send(AgentEvent::AgentError { error });
+                        return;
+                    }
+                }
                 let _ = self.event_tx.send(AgentEvent::TurnEnd {
                     turn_number,
                     tool_results: Vec::new(),
@@ -963,9 +1247,33 @@ impl AgentLoop {
                     name: r.name.clone(),
                     content: r.content.clone(),
                     is_error: r.is_error,
+                    terminate: r.terminate,
                 });
             }
             drop(state);
+
+            if let Some(recorder) = &self.tool_message_recorder {
+                for result in &tool_results {
+                    let message = AgentMessage::Tool {
+                        tool_call_id: result.tool_call_id.clone(),
+                        name: result.name.clone(),
+                        content: result.content.clone(),
+                        is_error: result.is_error,
+                        terminate: result.terminate,
+                    };
+                    if let Err(error) = recorder(message).await {
+                        let _ = self.event_tx.send(AgentEvent::AgentError { error });
+                        return;
+                    }
+                }
+            }
+
+            if let Some(recorder) = &self.streaming_state_recorder {
+                if let Err(error) = recorder(crate::harness::StreamingState::default()).await {
+                    let _ = self.event_tx.send(AgentEvent::AgentError { error });
+                    return;
+                }
+            }
 
             let _ = self.event_tx.send(AgentEvent::TurnEnd {
                 turn_number,
@@ -992,8 +1300,24 @@ impl AgentLoop {
             .send(AgentEvent::AgentEnd { usage: total_usage });
     }
 
+    pub(crate) async fn resume_pending_turn(&mut self) {
+        self.run_queued_turns().await;
+    }
+
+    pub async fn fetch_deferred(
+        &self,
+        model: &str,
+        handle_id: &str,
+    ) -> Result<threadlane_provider::DeferredResponse, String> {
+        self.provider_client.fetch_deferred(model, handle_id).await
+    }
+
+    pub async fn cancel_deferred(&self, model: &str, handle_id: &str) -> Result<(), String> {
+        self.provider_client.cancel_deferred(model, handle_id).await
+    }
+
     pub async fn execute_tools(&self, tool_calls: &[ToolCall]) -> Vec<AgentToolResult> {
-        self.execute_tools_with_intent_recorder(tool_calls, self.tool_intent_recorder.clone())
+        self.execute_tools_with_options(tool_calls, self.tool_intent_recorder.clone(), false)
             .await
     }
 
@@ -1001,14 +1325,22 @@ impl AgentLoop {
         &self,
         tool_calls: &[ToolCall],
     ) -> Vec<AgentToolResult> {
-        self.execute_tools_with_intent_recorder(tool_calls, None)
+        self.execute_tools_with_options(tool_calls, None, false)
             .await
     }
 
-    async fn execute_tools_with_intent_recorder(
+    /// Replays already-intended safe tools. The before hook is intentionally
+    /// not rerun: the durable ToolStarted record is the clearance boundary.
+    pub async fn execute_tools_for_replay(&self, tool_calls: &[ToolCall]) -> Vec<AgentToolResult> {
+        self.execute_tools_with_options(tool_calls, None, true)
+            .await
+    }
+
+    async fn execute_tools_with_options(
         &self,
         tool_calls: &[ToolCall],
         intent_recorder: Option<ToolIntentRecorder>,
+        skip_before_hook: bool,
     ) -> Vec<AgentToolResult> {
         let mut results = Vec::new();
         let tool_routes = self.tool_execution_routes().await;
@@ -1022,15 +1354,17 @@ impl AgentLoop {
                         tool_routes.clone(),
                         allowed_tool_names.clone(),
                         intent_recorder.clone(),
+                        skip_before_hook,
                     )
                     .await;
                 results.push(res);
             }
         } else {
-            // Parallel execution
-            let mut handles = Vec::new();
-            for tc in tool_calls {
-                let tc_clone = tc.clone();
+            // Prepare and persist every intent in source order. Only the
+            // external execution phase is parallel.
+            let mut slots: Vec<Option<AgentToolResult>> = vec![None; tool_calls.len()];
+            let mut prepared = Vec::new();
+            for (index, tc) in tool_calls.iter().enumerate() {
                 let context = ToolRunContext {
                     before_hook: self.before_tool_call_hook.clone(),
                     after_hook: self.after_tool_call_hook.clone(),
@@ -1040,18 +1374,28 @@ impl AgentLoop {
                     tool_routes: tool_routes.clone(),
                     allowed_tool_names: allowed_tool_names.clone(),
                     work_dir: self.work_dir.clone(),
+                    skip_before_hook,
                 };
-
-                let handle_tool_call = tc.clone();
-                let handle = AbortOnDrop::new(
-                    tokio::spawn(async move { Self::run_tool_with_hooks(tc_clone, context).await }),
-                );
-                handles.push((handle_tool_call, handle));
+                match Self::prepare_tool_call(tc.clone(), context).await {
+                    Ok(call) => prepared.push((index, call)),
+                    Err(result) => slots[index] = Some(result),
+                }
             }
 
-            for (tool_call, handle) in handles {
+            let mut handles = Vec::new();
+            let mut executed_indices = Vec::new();
+            for (index, call) in prepared {
+                let fallback_call = call.tc.clone();
+                let handle = AbortOnDrop::new(tokio::spawn(async move {
+                    Self::execute_prepared_tool(call).await
+                }));
+                handles.push((index, fallback_call, handle));
+                executed_indices.push(index);
+            }
+
+            for (index, tool_call, handle) in handles {
                 match handle.join().await {
-                    Ok(result) => results.push(result),
+                    Ok(result) => slots[index] = Some(result),
                     Err(error) => {
                         let result = AgentToolResult {
                             tool_call_id: tool_call.id.clone(),
@@ -1060,15 +1404,31 @@ impl AgentLoop {
                             is_error: true,
                             terminate: false,
                         };
-                        let _ = self.event_tx.send(AgentEvent::ToolExecutionEnd {
-                            tool_call_id: tool_call.id,
-                            name: tool_call.function.name,
-                            result: result.clone(),
-                        });
-                        results.push(result);
+                        slots[index] = Some(result);
                     }
                 }
             }
+            if let Some(recorder) = &self.tool_completion_recorder {
+                for &index in &executed_indices {
+                    let Some(result) = slots[index].as_mut() else {
+                        continue;
+                    };
+                    if let Err(error) = recorder(&result.tool_call_id, result.terminate).await {
+                        result.content = error;
+                        result.is_error = true;
+                    }
+                }
+            }
+            for index in executed_indices {
+                if let Some(result) = &slots[index] {
+                    let _ = self.event_tx.send(AgentEvent::ToolExecutionEnd {
+                        tool_call_id: result.tool_call_id.clone(),
+                        name: result.name.clone(),
+                        result: result.clone(),
+                    });
+                }
+            }
+            results.extend(slots.into_iter().flatten());
         }
 
         results
@@ -1080,6 +1440,7 @@ impl AgentLoop {
         tool_routes: Vec<ToolExecutorRoute>,
         allowed_tool_names: Option<HashSet<String>>,
         intent_recorder: Option<ToolIntentRecorder>,
+        skip_before_hook: bool,
     ) -> AgentToolResult {
         let result = AssertUnwindSafe(Self::run_tool_with_hooks(
             tc.clone(),
@@ -1092,13 +1453,27 @@ impl AgentLoop {
                 tool_routes,
                 allowed_tool_names,
                 work_dir: self.work_dir.clone(),
+                skip_before_hook,
             },
         ))
         .catch_unwind()
         .await;
 
         match result {
-            Ok(result) => result,
+            Ok(mut result) => {
+                if let Some(recorder) = &self.tool_completion_recorder {
+                    if let Err(error) = recorder(&result.tool_call_id, result.terminate).await {
+                        result.content = error;
+                        result.is_error = true;
+                    }
+                }
+                let _ = self.event_tx.send(AgentEvent::ToolExecutionEnd {
+                    tool_call_id: result.tool_call_id.clone(),
+                    name: result.name.clone(),
+                    result: result.clone(),
+                });
+                result
+            }
             Err(_) => {
                 // A tool is untrusted session work. A panic must become a tool
                 // result so the model can see the failure and retry or choose
@@ -1121,6 +1496,16 @@ impl AgentLoop {
     }
 
     async fn run_tool_with_hooks(tc: ToolCall, context: ToolRunContext) -> AgentToolResult {
+        match Self::prepare_tool_call(tc, context).await {
+            Ok(call) => Self::execute_prepared_tool(call).await,
+            Err(result) => result,
+        }
+    }
+
+    async fn prepare_tool_call(
+        tc: ToolCall,
+        context: ToolRunContext,
+    ) -> Result<PreparedToolCall, AgentToolResult> {
         let arguments = normalize_tool_arguments(
             &tc.function.name,
             &tc.function.arguments,
@@ -1152,30 +1537,32 @@ impl AgentLoop {
                 name: tc.function.name,
                 result: result.clone(),
             });
-            return result;
+            return Err(result);
         }
 
-        if let Some(ref hook) = context.before_hook {
-            let state_snapshot = context.state.lock().await.clone();
-            let check = hook
-                .before_tool_call(&agent_tool_call, &state_snapshot)
-                .await;
-            if check.block {
-                let res = AgentToolResult {
-                    tool_call_id: tc.id.clone(),
-                    name: tc.function.name.clone(),
-                    content: check
-                        .reason
-                        .unwrap_or_else(|| "Tool execution blocked by hook".into()),
-                    is_error: true,
-                    terminate: false,
-                };
-                let _ = context.event_tx.send(AgentEvent::ToolExecutionEnd {
-                    tool_call_id: tc.id.clone(),
-                    name: tc.function.name.clone(),
-                    result: res.clone(),
-                });
-                return res;
+        if !context.skip_before_hook {
+            if let Some(ref hook) = context.before_hook {
+                let state_snapshot = context.state.lock().await.clone();
+                let check = hook
+                    .before_tool_call(&agent_tool_call, &state_snapshot)
+                    .await;
+                if check.block {
+                    let res = AgentToolResult {
+                        tool_call_id: tc.id.clone(),
+                        name: tc.function.name.clone(),
+                        content: check
+                            .reason
+                            .unwrap_or_else(|| "Tool execution blocked by hook".into()),
+                        is_error: true,
+                        terminate: false,
+                    };
+                    let _ = context.event_tx.send(AgentEvent::ToolExecutionEnd {
+                        tool_call_id: tc.id.clone(),
+                        name: tc.function.name.clone(),
+                        result: res.clone(),
+                    });
+                    return Err(res);
+                }
             }
         }
 
@@ -1193,10 +1580,25 @@ impl AgentLoop {
                     name: tc.function.name,
                     result: result.clone(),
                 });
-                return result;
+                return Err(result);
             }
         }
 
+        Ok(PreparedToolCall {
+            tc,
+            arguments,
+            agent_tool_call,
+            context,
+        })
+    }
+
+    async fn execute_prepared_tool(call: PreparedToolCall) -> AgentToolResult {
+        let PreparedToolCall {
+            tc,
+            arguments,
+            agent_tool_call,
+            context,
+        } = call;
         let _ = context.event_tx.send(AgentEvent::ToolExecutionStart {
             tool_call_id: tc.id.clone(),
             name: tc.function.name.clone(),
@@ -1210,7 +1612,7 @@ impl AgentLoop {
             }
             if let Some(result) = route
                 .executor
-                .execute_tool(&tc.function.name, &arguments)
+                .execute_tool_with_call(&agent_tool_call, &arguments)
                 .await
             {
                 execution_result = Some(result);
@@ -1250,12 +1652,6 @@ impl AgentLoop {
                 final_result.terminate = term;
             }
         }
-
-        let _ = context.event_tx.send(AgentEvent::ToolExecutionEnd {
-            tool_call_id: tc.id.clone(),
-            name: tc.function.name.clone(),
-            result: final_result.clone(),
-        });
 
         final_result
     }
@@ -1343,8 +1739,91 @@ fn normalize_tool_arguments(
 #[cfg(test)]
 mod normalize_tool_arguments_tests {
     use super::*;
+    use crate::types::{AfterToolCallResult, AgentState, AgentToolCall, BeforeToolCallResult};
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex as StdMutex;
     use threadlane_provider::openai::{ToolCall, ToolCallFunction};
+
+    struct CountingBeforeHook(Arc<AtomicUsize>);
+
+    #[async_trait]
+    impl BeforeToolCallHook for CountingBeforeHook {
+        async fn before_tool_call(
+            &self,
+            _tool_call: &AgentToolCall,
+            _state: &AgentState,
+        ) -> BeforeToolCallResult {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            BeforeToolCallResult::default()
+        }
+    }
+
+    struct CountingAfterHook(Arc<AtomicUsize>);
+
+    #[async_trait]
+    impl AfterToolCallHook for CountingAfterHook {
+        async fn after_tool_call(
+            &self,
+            _tool_call: &AgentToolCall,
+            _result: &AgentToolResult,
+            _state: &AgentState,
+        ) -> AfterToolCallResult {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            AfterToolCallResult::default()
+        }
+    }
+
+    #[test]
+    fn provider_step_accumulator_returns_one_stateless_result() {
+        let mut step = ProviderStepAccumulator::default();
+        step.push(&StreamEvent::ContentToken("answer".into()))
+            .unwrap();
+        step.push(&StreamEvent::ReasoningToken("thought".into()))
+            .unwrap();
+        let result = step
+            .push(&StreamEvent::Finished {
+                tool_calls: Vec::new(),
+                usage: ProviderUsage {
+                    input_tokens: 2,
+                    output_tokens: 3,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
+                    total_tokens: 5,
+                },
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.text, "answer");
+        assert_eq!(result.reasoning, "thought");
+        assert_eq!(result.usage.total_tokens, 5);
+        let finished = step.finish().unwrap();
+        assert_eq!(finished.text, result.text);
+        assert_eq!(finished.reasoning, result.reasoning);
+        assert_eq!(finished.usage, result.usage);
+    }
+
+    #[test]
+    fn provider_step_accumulator_preserves_stream_errors() {
+        let mut step = ProviderStepAccumulator::default();
+        assert_eq!(
+            step.push(&StreamEvent::Error("temporary failure".into()))
+                .unwrap_err(),
+            "temporary failure"
+        );
+        assert!(step.finish().is_err());
+    }
+
+    #[test]
+    fn provider_step_accumulator_rejects_incomplete_streams() {
+        let mut step = ProviderStepAccumulator::default();
+        step.push(&StreamEvent::ContentToken("partial".into()))
+            .unwrap();
+        assert_eq!(
+            step.finish().unwrap_err(),
+            "provider stream ended without a final response"
+        );
+    }
 
     #[test]
     fn fills_missing_file_paths_from_the_workspace() {
@@ -1387,12 +1866,14 @@ mod normalize_tool_arguments_tests {
                 name: "read_file".into(),
                 content: "one".into(),
                 is_error: false,
+                terminate: false,
             },
             AgentMessage::Tool {
                 tool_call_id: String::new(),
                 name: "list_dir".into(),
                 content: "two".into(),
                 is_error: false,
+                terminate: false,
             },
         ];
 
@@ -1438,12 +1919,14 @@ mod normalize_tool_arguments_tests {
                 name: "read_file".into(),
                 content: "one".into(),
                 is_error: false,
+                terminate: false,
             },
             AgentMessage::Tool {
                 tool_call_id: String::new(),
                 name: "list_dir".into(),
                 content: "two".into(),
                 is_error: false,
+                terminate: false,
             },
         ];
 
@@ -1517,6 +2000,101 @@ mod normalize_tool_arguments_tests {
             Ok(AgentEvent::ToolExecutionEnd { .. })
         ));
         assert!(events.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn safe_replay_skips_before_tool_hook() {
+        let mut agent = AgentLoop::new("", None, "test");
+        let before_calls = Arc::new(AtomicUsize::new(0));
+        let after_calls = Arc::new(AtomicUsize::new(0));
+        agent.before_tool_call_hook = Some(Arc::new(CountingBeforeHook(before_calls.clone())));
+        agent.after_tool_call_hook = Some(Arc::new(CountingAfterHook(after_calls.clone())));
+        let call = ToolCall {
+            id: "call-1".into(),
+            r#type: "function".into(),
+            function: ToolCallFunction {
+                name: "list_dir".into(),
+                arguments: "{}".into(),
+            },
+            thought_signature: None,
+        };
+
+        let normal = agent.execute_tools(std::slice::from_ref(&call)).await;
+        assert!(!normal[0].is_error);
+        assert_eq!(before_calls.load(Ordering::SeqCst), 1);
+
+        let replay = agent.execute_tools_for_replay(&[call]).await;
+        assert!(!replay[0].is_error);
+        assert_eq!(before_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(after_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn parallel_tool_intents_are_recorded_in_source_order() {
+        let mut agent = AgentLoop::new("", None, "test");
+        let recorded = Arc::new(StdMutex::new(Vec::new()));
+        let recorded_for_callback = recorded.clone();
+        agent.tool_intent_recorder = Some(Arc::new(move |id, _, _| {
+            let id = id.to_owned();
+            let recorded = recorded_for_callback.clone();
+            Box::pin(async move {
+                if id == "call-1" {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                recorded.lock().unwrap().push(id);
+                Ok(())
+            })
+        }));
+
+        let calls = ["call-1", "call-2"]
+            .into_iter()
+            .map(|id| ToolCall {
+                id: id.into(),
+                r#type: "function".into(),
+                function: ToolCallFunction {
+                    name: "list_dir".into(),
+                    arguments: "{}".into(),
+                },
+                thought_signature: None,
+            })
+            .collect::<Vec<_>>();
+        let results = agent.execute_tools(&calls).await;
+
+        assert!(results.iter().all(|result| !result.is_error));
+        assert_eq!(recorded.lock().unwrap().as_slice(), ["call-1", "call-2"]);
+    }
+
+    #[tokio::test]
+    async fn tool_completion_recorder_runs_after_execution() {
+        let mut agent = AgentLoop::new("", None, "test");
+        let completed = Arc::new(StdMutex::new(Vec::new()));
+        let completed_for_callback = completed.clone();
+        agent.tool_completion_recorder = Some(Arc::new(move |id, terminate| {
+            let completed = completed_for_callback.clone();
+            let id = id.to_owned();
+            Box::pin(async move {
+                completed.lock().unwrap().push((id, terminate));
+                Ok(())
+            })
+        }));
+
+        let results = agent
+            .execute_tools(&[ToolCall {
+                id: "call-1".into(),
+                r#type: "function".into(),
+                function: ToolCallFunction {
+                    name: "list_dir".into(),
+                    arguments: "{}".into(),
+                },
+                thought_signature: None,
+            }])
+            .await;
+
+        assert!(!results[0].is_error);
+        assert_eq!(
+            completed.lock().unwrap().as_slice(),
+            [("call-1".into(), false)]
+        );
     }
 
     #[test]

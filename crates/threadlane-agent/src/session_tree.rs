@@ -1,8 +1,8 @@
 use crate::types::{AgentMessage, PlanItem, SessionPlan};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -62,6 +62,8 @@ pub struct SessionNode {
     pub id: String,
     pub parent_id: Option<String>,
     pub timestamp: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
     pub message: AgentMessage,
 }
 
@@ -86,6 +88,8 @@ enum SessionLine {
 enum SessionRecord {
     #[serde(rename = "session_metadata")]
     Metadata {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
         name: Option<String>,
         #[serde(default)]
         title_attempted: bool,
@@ -93,6 +97,8 @@ enum SessionRecord {
         active_node_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_session_id: Option<String>,
     },
     #[serde(rename = "session_plan")]
     Plan {
@@ -111,6 +117,7 @@ pub struct SessionTree {
     pub name: Option<String>,
     title_attempted: bool,
     pub model: Option<String>,
+    pub parent_session_id: Option<String>,
     plan: SessionPlan,
     pub global_facts: HashMap<String, String>,
     pub nodes: HashMap<String, SessionNode>,
@@ -122,15 +129,58 @@ pub struct SessionTree {
     /// Whether a session metadata record was present on disk. Legacy files
     /// have no metadata and retain their historical all-branches lookup rules.
     pub metadata_present: bool,
+    /// V2 harness lines are retained verbatim so legacy metadata rewrites do
+    /// not discard records that the legacy tree does not model.
+    v2_lines: Vec<String>,
+    v2_entry_ids: HashSet<String>,
 }
 
 impl SessionTree {
+    fn next_persisted_seq(&self) -> u64 {
+        let mut max_seq = self
+            .node_order
+            .iter()
+            .enumerate()
+            .filter_map(|(index, id)| {
+                self.nodes
+                    .get(id)
+                    .map(|node| node.seq.unwrap_or(index as u64 + 1))
+            })
+            .max()
+            .unwrap_or(0);
+        if let Some(path) = &self.file_path {
+            for suffix in ["harness.jsonl", "oplog.jsonl"] {
+                let sidecar = path.with_extension(suffix);
+                if let Ok(contents) = std::fs::read_to_string(sidecar) {
+                    for line in contents.lines() {
+                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+                            let seq = value
+                                .get("seq")
+                                .and_then(serde_json::Value::as_u64)
+                                .or_else(|| {
+                                    value
+                                        .as_object()
+                                        .and_then(|object| object.values().next())
+                                        .and_then(|record| record.get("seq"))
+                                        .and_then(serde_json::Value::as_u64)
+                                })
+                                .unwrap_or(0);
+                            max_seq = max_seq.max(seq);
+                        }
+                    }
+                }
+            }
+        }
+        max_seq + 1
+    }
+
     pub fn new(session_id: impl Into<String>) -> Self {
         Self {
             session_id: session_id.into(),
             name: None,
             title_attempted: false,
             model: None,
+            parent_session_id: None,
             plan: SessionPlan::default(),
             global_facts: HashMap::new(),
             nodes: HashMap::new(),
@@ -138,6 +188,8 @@ impl SessionTree {
             active_node_id: None,
             file_path: None,
             metadata_present: false,
+            v2_lines: Vec::new(),
+            v2_entry_ids: HashSet::new(),
         }
     }
 
@@ -162,7 +214,9 @@ impl SessionTree {
         let value = value.into();
 
         if let Some(ref path) = self.file_path {
-            let _guard = session_file_lock().lock().unwrap_or_else(|e| e.into_inner());
+            let _guard = session_file_lock()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             let mut file = OpenOptions::new().create(true).append(true).open(path)?;
             let record = SessionRecord::GlobalFact {
                 key: key.clone(),
@@ -173,6 +227,10 @@ impl SessionTree {
 
         self.global_facts.insert(key, value);
         Ok(())
+    }
+
+    pub fn set_fact_in_memory(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.global_facts.insert(key.into(), value.into());
     }
 
     pub fn plan(&self) -> &SessionPlan {
@@ -189,7 +247,9 @@ impl SessionTree {
     }
 
     pub fn append_plan_to_file(path: &Path, plan: &SessionPlan) -> std::io::Result<()> {
-        let _guard = session_file_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = session_file_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut file = OpenOptions::new().create(true).append(true).open(path)?;
         let record = SessionRecord::Plan {
             explanation: plan.explanation.clone(),
@@ -213,7 +273,9 @@ impl SessionTree {
             // Reload while holding the same process-wide lock used by node
             // appends. This closes the read/replace window: nodes appended by
             // the normal agent turn are included in the title rewrite.
-            let _guard = session_file_lock().lock().unwrap_or_else(|e| e.into_inner());
+            let _guard = session_file_lock()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             let mut latest = match Self::load_from_file(&path) {
                 Ok(tree) => tree,
                 Err(error) => {
@@ -250,7 +312,9 @@ impl SessionTree {
             return Ok(());
         };
 
-        let _guard = session_file_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = session_file_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut latest = if path.exists() {
             match Self::load_from_file(&path) {
                 Ok(tree) => tree,
@@ -273,6 +337,32 @@ impl SessionTree {
         result
     }
 
+    /// Update the compatibility view when V2 persists the model as a lane
+    /// fact. This deliberately does not rewrite the session file.
+    pub fn set_model_in_memory(&mut self, model: String) -> std::io::Result<()> {
+        let model = model.trim();
+        if model.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "session model cannot be empty",
+            ));
+        }
+        self.model = Some(model.to_owned());
+        self.metadata_present = true;
+        Ok(())
+    }
+
+    pub fn set_name_in_memory(&mut self, name: String) -> std::io::Result<()> {
+        if name.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "session name cannot be empty",
+            ));
+        }
+        self.name = Some(name);
+        Ok(())
+    }
+
     /// Persist the one-shot automatic title attempt before the provider is spawned.
     pub fn mark_title_attempted(&mut self) -> std::io::Result<bool> {
         let Some(path) = self.file_path.clone() else {
@@ -282,7 +372,9 @@ impl SessionTree {
             self.title_attempted = true;
             return Ok(true);
         };
-        let _guard = session_file_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = session_file_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut latest = Self::load_from_file(&path)?;
         if latest.title_attempted {
             self.title_attempted = true;
@@ -317,6 +409,16 @@ impl SessionTree {
         self.add_message_at_leaf(leaf_id.as_deref(), message)
     }
 
+    /// Update the compatibility tree without writing a second durable copy.
+    /// V2's JsonlStore owns persistence; this keeps the in-memory UI tree in
+    /// sync until the next reload.
+    pub fn add_message_in_memory(&mut self, message: AgentMessage) -> String {
+        let path = self.file_path.take();
+        let node_id = self.add_message(message);
+        self.file_path = path;
+        node_id
+    }
+
     /// Appends a message to the passive tree anchored at a specific leaf ID.
     /// Updates active_node_id if the leaf matches the current active node.
     pub fn add_message_at_leaf(&mut self, leaf_id: Option<&str>, message: AgentMessage) -> String {
@@ -338,6 +440,7 @@ impl SessionTree {
             id: node_id.clone(),
             parent_id,
             timestamp: now,
+            seq: Some(self.next_persisted_seq()),
             message,
         };
 
@@ -350,7 +453,9 @@ impl SessionTree {
         }
 
         if let Some(ref path) = self.file_path {
-            let _guard = session_file_lock().lock().unwrap_or_else(|e| e.into_inner());
+            let _guard = session_file_lock()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if self.append_node_and_metadata_to_file(path, &node).is_err() {
                 self.nodes.remove(&node_id);
                 self.node_order.pop();
@@ -394,6 +499,7 @@ impl SessionTree {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs(),
+                seq: Some(next.next_persisted_seq()),
                 message,
             };
             next.nodes.insert(node_id.clone(), node);
@@ -404,12 +510,22 @@ impl SessionTree {
         next.active_node_id = active_node_id;
 
         if let Some(path) = next.file_path.clone() {
-            let _guard = session_file_lock().lock().unwrap_or_else(|e| e.into_inner());
             next.save_transactionally(&path)
                 .map_err(|error| format!("Failed to persist passive branch: {error}"))?;
         }
         *self = next;
         Ok(created)
+    }
+
+    pub fn append_passive_branch_in_memory(
+        &mut self,
+        parent_leaf_id: Option<&str>,
+        messages: Vec<AgentMessage>,
+    ) -> Result<Vec<String>, String> {
+        let path = self.file_path.take();
+        let result = self.append_passive_branch(parent_leaf_id, messages);
+        self.file_path = path;
+        result
     }
 
     /// Replaces the active context with a new root branch while retaining old
@@ -421,6 +537,13 @@ impl SessionTree {
                 self.add_message(message);
             }
         }
+    }
+
+    /// Rebuild the compatibility view without rewriting a V2-owned session.
+    pub fn replace_active_branch_in_memory(&mut self, messages: Vec<AgentMessage>) {
+        let path = self.file_path.take();
+        self.replace_active_branch(messages);
+        self.file_path = path;
     }
 
     pub fn get_active_branch_messages(&self) -> Vec<AgentMessage> {
@@ -462,16 +585,23 @@ impl SessionTree {
         is_error: bool,
     ) -> bool {
         if let Some(path) = self.file_path.clone() {
-            let _guard = session_file_lock().lock().unwrap_or_else(|e| e.into_inner());
+            let _guard = session_file_lock()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             let Ok(mut latest) = Self::load_from_file(&path) else {
                 return false;
             };
-            let Some(node_id) = latest.node_order.iter().find(|node_id| {
-                matches!(
-                    latest.nodes.get(*node_id).map(|node| &node.message),
-                    Some(AgentMessage::Tool { tool_call_id: id, .. }) if id == tool_call_id
-                )
-            }).cloned() else {
+            let Some(node_id) = latest
+                .node_order
+                .iter()
+                .find(|node_id| {
+                    matches!(
+                        latest.nodes.get(*node_id).map(|node| &node.message),
+                        Some(AgentMessage::Tool { tool_call_id: id, .. }) if id == tool_call_id
+                    )
+                })
+                .cloned()
+            else {
                 return false;
             };
             let Some(node) = latest.nodes.get_mut(&node_id) else {
@@ -492,12 +622,17 @@ impl SessionTree {
             *self = latest;
             return true;
         }
-        let Some(node_id) = self.node_order.iter().find(|node_id| {
-            matches!(
-                self.nodes.get(*node_id).map(|node| &node.message),
-                Some(AgentMessage::Tool { tool_call_id: id, .. }) if id == tool_call_id
-            )
-        }).cloned() else {
+        let Some(node_id) = self
+            .node_order
+            .iter()
+            .find(|node_id| {
+                matches!(
+                    self.nodes.get(*node_id).map(|node| &node.message),
+                    Some(AgentMessage::Tool { tool_call_id: id, .. }) if id == tool_call_id
+                )
+            })
+            .cloned()
+        else {
             return false;
         };
         let previous = self
@@ -531,7 +666,9 @@ impl SessionTree {
             return false;
         }
         if let Some(path) = self.file_path.clone() {
-            let _guard = session_file_lock().lock().unwrap_or_else(|e| e.into_inner());
+            let _guard = session_file_lock()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             let old_active = self.active_node_id.clone();
             self.active_node_id = Some(node_id.to_string());
             if self.append_metadata_to_file(&path).is_err() {
@@ -549,9 +686,24 @@ impl SessionTree {
             return None;
         }
 
-        let new_id = format!("{}_fork", self.session_id);
+        let suffix = node_id
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                    character
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>();
+        let new_id = format!("{}_fork_{}", self.session_id, suffix);
         let mut forked = SessionTree::new(new_id);
+        forked.parent_session_id = Some(self.session_id.clone());
+        forked.name = self.name.clone();
+        forked.title_attempted = self.title_attempted;
         forked.model = self.model.clone();
+        forked.plan = self.plan.clone();
+        forked.global_facts = self.global_facts.clone();
 
         let mut curr = Some(node_id.to_string());
         let mut path_nodes = Vec::new();
@@ -581,6 +733,9 @@ impl SessionTree {
             .chain(self.nodes.keys().filter(|id| !self.node_order.contains(id)))
         {
             if let Some(node) = self.nodes.get(node_id) {
+                if self.v2_entry_ids.contains(node_id) {
+                    continue;
+                }
                 writeln!(file, "{}", serde_json::to_string(node)?)?;
             }
         }
@@ -588,12 +743,15 @@ impl SessionTree {
             || self.title_attempted
             || self.active_node_id.is_some()
             || self.model.is_some()
+            || self.parent_session_id.is_some()
         {
             let metadata = SessionRecord::Metadata {
+                session_id: Some(self.session_id.clone()),
                 name: self.name.clone(),
                 title_attempted: self.title_attempted,
                 active_node_id: self.active_node_id.clone(),
                 model: self.model.clone(),
+                parent_session_id: self.parent_session_id.clone(),
             };
             writeln!(file, "{}", serde_json::to_string(&metadata)?)?;
         }
@@ -609,15 +767,20 @@ impl SessionTree {
             items: self.plan.items.clone(),
         };
         writeln!(file, "{}", serde_json::to_string(&plan)?)?;
+        for line in &self.v2_lines {
+            writeln!(file, "{line}")?;
+        }
         Ok(())
     }
     fn append_metadata_to_file(&self, path: &Path) -> std::io::Result<()> {
         let mut file = OpenOptions::new().create(true).append(true).open(path)?;
         let metadata = SessionRecord::Metadata {
+            session_id: Some(self.session_id.clone()),
             name: self.name.clone(),
             title_attempted: self.title_attempted,
             active_node_id: self.active_node_id.clone(),
             model: self.model.clone(),
+            parent_session_id: self.parent_session_id.clone(),
         };
         writeln!(file, "{}", serde_json::to_string(&metadata)?)?;
         Ok(())
@@ -631,18 +794,19 @@ impl SessionTree {
         let mut file = OpenOptions::new().create(true).append(true).open(path)?;
         writeln!(file, "{}", serde_json::to_string(node)?)?;
         let metadata = SessionRecord::Metadata {
+            session_id: Some(self.session_id.clone()),
             name: self.name.clone(),
             title_attempted: self.title_attempted,
             active_node_id: self.active_node_id.clone(),
             model: self.model.clone(),
+            parent_session_id: self.parent_session_id.clone(),
         };
         writeln!(file, "{}", serde_json::to_string(&metadata)?)?;
         Ok(())
     }
 
     pub fn load_from_file(path: &Path) -> std::io::Result<Self> {
-        let file = File::open(path)?;
-        let reader = BufReader::new(file);
+        let data = std::fs::read_to_string(path)?;
 
         let session_id = path
             .file_stem()
@@ -653,23 +817,69 @@ impl SessionTree {
         tree.file_path = Some(path.to_path_buf());
 
         let mut explicit_active = false;
-        for line in reader.lines() {
-            let l = line?;
+        let mut v2_main_leaf = None;
+        let line_count = data.split('\n').count();
+        for (line_number, l) in data.split('\n').enumerate() {
             if l.trim().is_empty() {
                 continue;
+            }
+            let torn_tail = line_number + 1 == line_count && !data.ends_with('\n');
+            let value = match serde_json::from_str::<serde_json::Value>(&l) {
+                Ok(value) => value,
+                Err(_error) if torn_tail => break,
+                Err(error) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Failed to parse session line {}: {error}", line_number + 1),
+                    ));
+                }
+            };
+            if serde_json::from_value::<crate::harness::Record>(value.clone()).is_ok() {
+                tree.v2_lines.push(l.to_owned());
+                continue;
+            }
+            if value.get("lane").is_some() {
+                match serde_json::from_value::<crate::harness::Entry>(value.clone()) {
+                    Ok(entry) => {
+                        if entry.lane == "main" {
+                            v2_main_leaf = Some(entry.id.clone());
+                        }
+                        tree.node_order.push(entry.id.clone());
+                        tree.v2_entry_ids.insert(entry.id.clone());
+                        tree.nodes.insert(
+                            entry.id.clone(),
+                            SessionNode {
+                                id: entry.id,
+                                parent_id: entry.parent_id,
+                                timestamp: entry.timestamp,
+                                seq: Some(entry.seq),
+                                message: entry.message,
+                            },
+                        );
+                        tree.v2_lines.push(l.to_owned());
+                        continue;
+                    }
+                    Err(_) => {}
+                }
             }
             match serde_json::from_str::<SessionLine>(&l) {
                 Ok(SessionLine::Record(record)) => match record {
                     SessionRecord::Metadata {
+                        session_id,
                         name,
                         title_attempted,
                         active_node_id,
                         model,
+                        parent_session_id,
                     } => {
                         tree.metadata_present = true;
+                        if let Some(session_id) = session_id {
+                            tree.session_id = session_id;
+                        }
                         tree.name = name;
                         tree.title_attempted = title_attempted;
                         tree.model = model;
+                        tree.parent_session_id = parent_session_id;
                         if active_node_id.is_some() {
                             explicit_active = true;
                         }
@@ -689,7 +899,61 @@ impl SessionTree {
                     tree.node_order.push(node.id.clone());
                     tree.nodes.insert(node.id.clone(), node);
                 }
-                Err(_) => {}
+                Err(_error) if torn_tail => break,
+                Err(error) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Failed to parse session line {}: {error}", line_number + 1),
+                    ));
+                }
+            }
+        }
+
+        if let Some(leaf_id) = v2_main_leaf {
+            tree.active_node_id = Some(leaf_id);
+        }
+
+        let harness_path = path.with_extension("harness.jsonl");
+        if harness_path.exists() {
+            let harness_data = std::fs::read_to_string(&harness_path)?;
+            let line_count = harness_data.split('\n').count();
+            for (line_number, line) in harness_data.split('\n').enumerate() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let torn_tail = line_number + 1 == line_count && !harness_data.ends_with('\n');
+                let value = match serde_json::from_str::<serde_json::Value>(line) {
+                    Ok(value) => value,
+                    Err(_error) if torn_tail => break,
+                    Err(error) => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("Failed to parse harness line {}: {error}", line_number + 1),
+                        ));
+                    }
+                };
+                match serde_json::from_value::<crate::harness::Record>(value) {
+                    Ok(crate::harness::Record::FactSet {
+                        run_id: None,
+                        key,
+                        value,
+                        ..
+                    }) => {
+                        tree.global_facts.insert(key.clone(), value.clone());
+                        match key.as_str() {
+                            "model" => tree.model = Some(value),
+                            "name" => tree.name = Some(value),
+                            _ => {}
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("Failed to parse harness line {}: {error}", line_number + 1),
+                        ));
+                    }
+                }
             }
         }
 
@@ -700,6 +964,7 @@ impl SessionTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::SessionStore;
     use crate::types::{PlanItem, PlanItemStatus, SessionPlan};
 
     fn test_plan(status: PlanItemStatus) -> SessionPlan {
@@ -791,6 +1056,65 @@ mod tests {
     }
 
     #[test]
+    fn v2_compatibility_updates_do_not_rewrite_the_session_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut tree = SessionTree::new("session");
+        tree.file_path = Some(path.clone());
+        tree.add_message(AgentMessage::user("hello", vec![]));
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        tree.set_model_in_memory("gpt-test".into()).unwrap();
+        tree.add_message_in_memory(AgentMessage::Assistant {
+            content: Some("done".into()),
+            tool_calls: None,
+            stop_reason: Some("stop".into()),
+            deferred_handle: None,
+        });
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        assert_eq!(tree.model.as_deref(), Some("gpt-test"));
+        assert_eq!(tree.get_active_branch_messages().len(), 2);
+    }
+
+    #[test]
+    fn direct_load_applies_v2_model_and_name_facts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut tree = SessionTree::new("session");
+        tree.file_path = Some(path.clone());
+        tree.add_message(AgentMessage::user("hello", vec![]));
+        let mut store = crate::harness::JsonlStore::open(&path).unwrap();
+        store
+            .append_record(crate::harness::Record::FactSet {
+                id: "fact-model".into(),
+                seq: store.next_sequence(),
+                lane: "main".into(),
+                timestamp: 1,
+                run_id: None,
+                key: "model".into(),
+                value: "antigravity/provider-model".into(),
+            })
+            .unwrap();
+        store
+            .append_record(crate::harness::Record::FactSet {
+                id: "fact-name".into(),
+                seq: store.next_sequence(),
+                lane: "main".into(),
+                timestamp: 2,
+                run_id: None,
+                key: "name".into(),
+                value: "Durable title".into(),
+            })
+            .unwrap();
+
+        let loaded = SessionTree::load_from_file(&path).unwrap();
+        assert_eq!(loaded.model.as_deref(), Some("antigravity/provider-model"));
+        assert_eq!(loaded.name.as_deref(), Some("Durable title"));
+        assert_eq!(loaded.get_fact("model"), Some("antigravity/provider-model"));
+    }
+
+    #[test]
     fn selected_model_round_trips_with_other_metadata_updates() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.jsonl");
@@ -838,6 +1162,61 @@ mod tests {
         let loaded = SessionTree::load_from_file(&path).unwrap();
         assert!(loaded.name.is_none());
         assert_eq!(loaded.nodes.len(), 1);
+    }
+
+    #[test]
+    fn legacy_metadata_rewrites_preserve_v2_entries_and_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut tree = SessionTree::new("session");
+        tree.file_path = Some(path.clone());
+        let root = tree.add_message(AgentMessage::user("Help", Vec::new()));
+        tree.set_name("Before V2".into()).unwrap();
+
+        let mut store = crate::harness::JsonlStore::open(&path).unwrap();
+        store
+            .append_entry(crate::harness::Entry {
+                id: "v2-entry".into(),
+                parent_id: Some(root),
+                lane: "main".into(),
+                seq: 2,
+                timestamp: 2,
+                message: AgentMessage::Assistant {
+                    content: Some("durable".into()),
+                    tool_calls: None,
+                    stop_reason: Some("stop".into()),
+                    deferred_handle: None,
+                },
+                terminate: false,
+            })
+            .unwrap();
+        store
+            .append_record(crate::harness::Record::OperationStarted {
+                id: "run-v2".into(),
+                seq: 3,
+                lane: "main".into(),
+                timestamp: 3,
+                source_leaf_id: Some("v2-entry".into()),
+                intent: crate::harness::OperationIntent::Run,
+            })
+            .unwrap();
+        drop(store);
+
+        let mut loaded = SessionTree::load_from_file(&path).unwrap();
+        assert_eq!(loaded.nodes.len(), 2);
+        assert!(loaded.nodes.contains_key("v2-entry"));
+        assert_eq!(loaded.active_node_id(), Some("v2-entry"));
+        loaded.set_name("Preserved".into()).unwrap();
+
+        let reopened = crate::harness::JsonlStore::open(&path).unwrap();
+        assert!(reopened
+            .entries()
+            .iter()
+            .any(|entry| entry.id == "v2-entry"));
+        assert!(reopened
+            .records()
+            .iter()
+            .any(|record| record.id() == "run-v2"));
     }
 
     #[test]
@@ -1093,6 +1472,7 @@ mod tests {
             name: "read_file".into(),
             content: "[Recovered tool result]".into(),
             is_error: false,
+            terminate: false,
         });
 
         assert!(tree.replace_tool_result("call-1", "actual output".into(), false));

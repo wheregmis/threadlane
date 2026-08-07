@@ -33,21 +33,21 @@ pub use agents::{discover_agents, AgentConfig, AgentDiscoveryResult, AgentScope,
 pub use capabilities::CapabilityCatalog;
 pub use coding_agent::{
     cancel_open_subagent_operations, CodingAgent, CodingAgentCancellation, CodingAgentOptions,
-    CodingAgentWorkHandle, ExtensionBeforeToolHook,
+    CodingAgentWorkHandle, ExtensionBeforeToolHook, HarnessWatch,
 };
 pub use commands::{execute_slash_command, parse_slash_command, CommandAction};
 pub use context::{ProjectContext, ProjectInstruction};
-pub use threadlane_wasi::broker::*;
-pub use threadlane_mcp::*;
-pub use threadlane_wasi::packages::*;
 pub use policy::ToolPolicy;
 pub use prompt_templates::{
     expand_prompt_template, load_prompt_templates, parse_command_args, substitute_args,
     PromptTemplate,
 };
-pub use threadlane_skills::*;
 pub use supervisor::{
     HarnessSupervisor, ProjectRecord, TaskAgentEvent, TaskKind, TaskRecord, TaskStatus,
 };
 pub use system_prompt::SystemPromptConfig;
+pub use threadlane_mcp::*;
+pub use threadlane_skills::*;
+pub use threadlane_wasi::broker::*;
+pub use threadlane_wasi::packages::*;
 pub use threadlane_wasi::*;

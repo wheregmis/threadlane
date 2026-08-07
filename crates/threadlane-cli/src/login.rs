@@ -138,7 +138,8 @@ impl LoginState {
     pub fn push_paste(&mut self, text: &str) {
         if !self.pending && matches!(self.mode, LoginMode::OpenAiKey) {
             self.openai_key.push_str(text);
-            self.masked_key.extend(std::iter::repeat_n('*', text.chars().count()));
+            self.masked_key
+                .extend(std::iter::repeat_n('*', text.chars().count()));
         }
     }
 
@@ -187,7 +188,6 @@ impl LoginState {
         self.masked_key.clear();
         self.openai_key.clear();
     }
-
 }
 
 #[derive(Debug)]
@@ -238,12 +238,14 @@ async fn run_codex_login(attempt_id: u64, tx: UnboundedSender<LoginEvent>) {
                 url: response.verification_uri.clone(),
             });
             loop {
-                tokio::time::sleep(tokio::time::Duration::from_secs(response.interval.max(3))).await;
+                tokio::time::sleep(tokio::time::Duration::from_secs(response.interval.max(3)))
+                    .await;
                 match threadlane_auth::poll_device_token_without_saving(
                     &response.device_auth_id,
                     &response.user_code,
                 )
-                .await {
+                .await
+                {
                     Ok(tokens) => {
                         let _ = tx.send(LoginEvent::CodexTokens {
                             attempt_id,
@@ -251,9 +253,7 @@ async fn run_codex_login(attempt_id: u64, tx: UnboundedSender<LoginEvent>) {
                         });
                         break;
                     }
-                    Err(error)
-                        if error == "authorization_pending" || error.contains("pending") =>
-                    {
+                    Err(error) if error == "authorization_pending" || error.contains("pending") => {
                         continue;
                     }
                     Err(error) => {
@@ -285,22 +285,22 @@ async fn run_antigravity_login(attempt_id: u64, tx: UnboundedSender<LoginEvent>)
     });
 
     match threadlane_auth::listen_for_oauth_callback(state).await {
-        Ok(code) => match threadlane_auth::exchange_code_for_tokens_without_saving(&code, &verifier)
-            .await
-        {
-            Ok(credentials) => {
-                let _ = tx.send(LoginEvent::AntigravityCredentials {
-                    attempt_id,
-                    credentials: Box::new(credentials),
-                });
+        Ok(code) => {
+            match threadlane_auth::exchange_code_for_tokens_without_saving(&code, &verifier).await {
+                Ok(credentials) => {
+                    let _ = tx.send(LoginEvent::AntigravityCredentials {
+                        attempt_id,
+                        credentials: Box::new(credentials),
+                    });
+                }
+                Err(error) => {
+                    let _ = tx.send(LoginEvent::Failed {
+                        attempt_id,
+                        message: error,
+                    });
+                }
             }
-            Err(error) => {
-                let _ = tx.send(LoginEvent::Failed {
-                    attempt_id,
-                    message: error,
-                });
-            }
-        },
+        }
         Err(error) => {
             let _ = tx.send(LoginEvent::Failed {
                 attempt_id,
@@ -328,5 +328,4 @@ mod tests {
         assert_eq!(state.masked_key(), "***********");
         assert!(state.openai_key.starts_with("sk-"));
     }
-
 }

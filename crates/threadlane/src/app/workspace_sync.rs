@@ -7,7 +7,12 @@ impl App {
             .select(SessionKey::new(work_dir, session_id));
     }
 
-    pub(super) fn select_workspace_ui(&mut self, cx: &mut Cx, work_dir: PathBuf, session_id: String) {
+    pub(super) fn select_workspace_ui(
+        &mut self,
+        cx: &mut Cx,
+        work_dir: PathBuf,
+        session_id: String,
+    ) {
         self.save_active_draft(cx);
         self.git_operation_pending = false;
         self.git_pr_pending = false;

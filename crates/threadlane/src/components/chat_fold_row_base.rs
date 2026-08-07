@@ -1,7 +1,7 @@
 //! ChatFoldRowBase component primitive for collapsible chat message fold headers.
 
-use makepad_widgets::*;
 use super::tool_fold_header::ToolFoldHeader;
+use makepad_widgets::*;
 
 script_mod! {
     use mod.prelude.widgets.*

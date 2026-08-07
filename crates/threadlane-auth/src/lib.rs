@@ -67,9 +67,7 @@ mod tests {
             "antigravity"
         );
         assert_eq!(
-            resolve_auth_provider("opencode-go")
-                .unwrap()
-                .provider_id(),
+            resolve_auth_provider("opencode-go").unwrap().provider_id(),
             "opencode-go"
         );
         assert_eq!(

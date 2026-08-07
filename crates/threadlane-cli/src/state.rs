@@ -1,5 +1,5 @@
-use threadlane_agent::{AgentEvent, AgentMessage, ReasoningEffort, SessionPlan};
 use crate::login::LoginState;
+use threadlane_agent::{AgentEvent, AgentMessage, ReasoningEffort, SessionPlan};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompletionMode {
@@ -568,10 +568,7 @@ mod tests {
     #[test]
     fn closing_completion_clears_candidates_and_mode() {
         let mut state = AppState::test_state();
-        state.show_completion(
-            CompletionMode::Model,
-            vec!["gpt-4o".into(), "gpt-5".into()],
-        );
+        state.show_completion(CompletionMode::Model, vec!["gpt-4o".into(), "gpt-5".into()]);
 
         state.close_completion();
 

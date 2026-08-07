@@ -78,10 +78,7 @@ pub fn parse_anchor(anchor: &str) -> Result<(usize, String), String> {
 }
 
 /// Apply a series of hash-anchored edits to a multi-line document.
-pub fn apply_hashline_edits(
-    content: &str,
-    edits: &[HashlineEdit],
-) -> Result<String, String> {
+pub fn apply_hashline_edits(content: &str, edits: &[HashlineEdit]) -> Result<String, String> {
     if edits.is_empty() {
         return Ok(content.to_string());
     }

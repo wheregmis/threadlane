@@ -1,10 +1,6 @@
-use crate::session_tree::{session_file_lock, SessionTree};
 use crate::types::AgentMessage;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::fs::OpenOptions;
-use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -44,6 +40,13 @@ pub enum OpRecord {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         system_prompt_override: Option<String>,
     },
+    AbortRequested {
+        id: String,
+        seq: u64,
+        lane: String,
+        timestamp: u64,
+        run_id: String,
+    },
     TaskAttempt {
         id: String,
         seq: u64,
@@ -66,6 +69,16 @@ pub enum OpRecord {
         effective_args: serde_json::Value,
         result_entry_id: String,
         replay: ToolReplaySafety,
+    },
+    ToolFinished {
+        id: String,
+        seq: u64,
+        lane: String,
+        timestamp: u64,
+        run_id: String,
+        tool_call_id: String,
+        result_entry_id: String,
+        terminate: bool,
     },
     QueueEnqueued {
         id: String,
@@ -110,11 +123,19 @@ pub enum OpRecord {
 }
 
 impl OpRecord {
+    pub fn with_seq(self, seq: u64) -> Self {
+        let mut value = serde_json::to_value(self).expect("operation records serialize");
+        value["seq"] = serde_json::json!(seq);
+        serde_json::from_value(value).expect("operation records deserialize")
+    }
+
     pub fn id(&self) -> &str {
         match self {
             Self::OperationStarted { id, .. }
+            | Self::AbortRequested { id, .. }
             | Self::TaskAttempt { id, .. }
             | Self::ToolStarted { id, .. }
+            | Self::ToolFinished { id, .. }
             | Self::QueueEnqueued { id, .. }
             | Self::WriteDeferred { id, .. }
             | Self::Navigation { id, .. }
@@ -125,8 +146,10 @@ impl OpRecord {
     pub fn seq(&self) -> u64 {
         match self {
             Self::OperationStarted { seq, .. }
+            | Self::AbortRequested { seq, .. }
             | Self::TaskAttempt { seq, .. }
             | Self::ToolStarted { seq, .. }
+            | Self::ToolFinished { seq, .. }
             | Self::QueueEnqueued { seq, .. }
             | Self::WriteDeferred { seq, .. }
             | Self::Navigation { seq, .. }
@@ -137,8 +160,10 @@ impl OpRecord {
     pub fn lane(&self) -> &str {
         match self {
             Self::OperationStarted { lane, .. }
+            | Self::AbortRequested { lane, .. }
             | Self::TaskAttempt { lane, .. }
             | Self::ToolStarted { lane, .. }
+            | Self::ToolFinished { lane, .. }
             | Self::QueueEnqueued { lane, .. }
             | Self::WriteDeferred { lane, .. }
             | Self::Navigation { lane, .. }
@@ -231,53 +256,11 @@ impl LaneQueue {
     }
 }
 
-/// Appends a single operation record to a sidecar `.oplog.jsonl` file under session file lock.
-pub fn append_op_record_to_file(path: &Path, record: &OpRecord) -> std::io::Result<()> {
-    let _guard = session_file_lock()
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    let line = serde_json::to_string(record)?;
-    writeln!(file, "{}", line)?;
-    file.flush()?;
-    file.sync_data()?;
-    Ok(())
-}
-
-/// Reads all operation records from a sidecar `.oplog.jsonl` file under session file lock.
-pub fn load_op_records_from_file(path: &Path) -> std::io::Result<Vec<OpRecord>> {
-    let _guard = session_file_lock()
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let file = std::fs::File::open(path)?;
-    let reader = BufReader::new(file);
-    let mut records = Vec::new();
-
-    for (line_number, line) in reader.lines().enumerate() {
-        let line = line?;
-        let line_trimmed = line.trim();
-        if line_trimmed.is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<OpRecord>(line_trimmed) {
-            Ok(rec) => records.push(rec),
-            Err(error) => eprintln!(
-                "Failed to parse session oplog line {}: {error}",
-                line_number + 1
-            ),
-        }
-    }
-
-    Ok(records)
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct RecoveryResult {
     pub recovered_open_operations: usize,
     pub open_operation_ids: Vec<String>,
+    pub abort_requested_operation_ids: Vec<String>,
     pub unreplayable_tools: usize,
     pub safe_tools_to_replay: Vec<OpRecord>,
 }
@@ -305,6 +288,7 @@ pub fn interrupted_subagent_lanes(records: &[OpRecord]) -> Vec<InterruptedSubage
         task_attempted: bool,
         messages: Vec<(u64, AgentMessage)>,
         tools: Vec<OpRecord>,
+        completed_tools: HashSet<String>,
         active: bool,
     }
 
@@ -333,9 +317,13 @@ pub fn interrupted_subagent_lanes(records: &[OpRecord]) -> Vec<InterruptedSubage
                     task_attempted: false,
                     messages: Vec::new(),
                     tools: Vec::new(),
+                    completed_tools: HashSet::new(),
                     active: true,
                 });
-                active.entry((lane.clone(), id.clone())).or_default().push(index);
+                active
+                    .entry((lane.clone(), id.clone()))
+                    .or_default()
+                    .push(index);
             }
             OpRecord::TaskAttempt {
                 lane, run_id, task, ..
@@ -370,6 +358,21 @@ pub fn interrupted_subagent_lanes(records: &[OpRecord]) -> Vec<InterruptedSubage
                     occurrences[*index].tools.push(record.clone());
                 }
             }
+            OpRecord::ToolFinished {
+                lane,
+                run_id,
+                tool_call_id,
+                ..
+            } => {
+                if let Some(index) = active
+                    .get(&(lane.clone(), run_id.clone()))
+                    .and_then(|occurrences| occurrences.last())
+                {
+                    occurrences[*index]
+                        .completed_tools
+                        .insert(tool_call_id.clone());
+                }
+            }
             OpRecord::OperationFinished { lane, run_id, .. } => {
                 let key = (lane.clone(), run_id.clone());
                 let remove_key = if let Some(occurrences_for_run) = active.get_mut(&key) {
@@ -389,20 +392,26 @@ pub fn interrupted_subagent_lanes(records: &[OpRecord]) -> Vec<InterruptedSubage
     }
 
     let mut lanes = Vec::new();
-    for occurrence in occurrences.into_iter().filter(|occurrence| occurrence.active) {
+    for occurrence in occurrences
+        .into_iter()
+        .filter(|occurrence| occurrence.active)
+    {
         let mut messages = occurrence.messages;
-        let completed_tool_calls: HashSet<String> = messages
+        let mut completed_tool_calls: HashSet<String> = messages
             .iter()
             .filter_map(|(_, message)| match message {
                 AgentMessage::Tool { tool_call_id, .. } => Some(tool_call_id.clone()),
                 _ => None,
             })
             .collect();
+        completed_tool_calls.extend(occurrence.completed_tools);
         let mut tools: HashMap<String, (Option<OpRecord>, Option<OpRecord>)> = HashMap::new();
 
         for record in occurrence.tools {
             let OpRecord::ToolStarted {
-                tool_call_id, replay, ..
+                tool_call_id,
+                replay,
+                ..
             } = &record
             else {
                 continue;
@@ -438,6 +447,7 @@ pub fn interrupted_subagent_lanes(records: &[OpRecord]) -> Vec<InterruptedSubage
                                 "[Interrupted tool execution for '{tool_name}' automatically recovered]"
                             ),
                             is_error: true,
+                            terminate: false,
                         },
                     ));
                 }
@@ -472,107 +482,6 @@ pub fn interrupted_subagent_lanes(records: &[OpRecord]) -> Vec<InterruptedSubage
             .then_with(|| left.run_id.cmp(&right.run_id))
     });
     lanes.into_iter().map(|(_, lane)| lane).collect()
-}
-
-/// Reconciles open operations and interrupted tool turns from operation records.
-/// Returns RecoveryResult detailing recovered open operations and safe tools to replay.
-pub fn reconcile_op_log_recovery(
-    session_tree: &mut SessionTree,
-    records: &[OpRecord],
-) -> RecoveryResult {
-    let mut open_operations: HashSet<String> = HashSet::new();
-    let mut tool_intents: Vec<&OpRecord> = Vec::new();
-
-    for record in records {
-        if record.lane().starts_with("subagent-") {
-            continue;
-        }
-        match record {
-            OpRecord::OperationStarted { id, .. } => {
-                open_operations.insert(id.clone());
-            }
-            OpRecord::OperationFinished { run_id, .. } => {
-                open_operations.remove(run_id);
-            }
-            rec @ OpRecord::ToolStarted { .. } => {
-                tool_intents.push(rec);
-            }
-            _ => {}
-        }
-    }
-
-    if open_operations.is_empty() {
-        return RecoveryResult::default();
-    }
-
-    let mut open_operation_ids: Vec<String> = open_operations.iter().cloned().collect();
-    open_operation_ids.sort();
-
-    // Check for ToolStarted records belonging to open operations that have no matching result entry
-    let existing_tool_ids: HashSet<String> = session_tree
-        .nodes
-        .values()
-        .filter_map(|node| match &node.message {
-            AgentMessage::Tool { tool_call_id, .. } => Some(tool_call_id.clone()),
-            _ => None,
-        })
-        .collect();
-
-    let mut safe_tools_to_replay = Vec::new();
-    let mut unreplayable_tools = 0;
-
-    for intent in tool_intents {
-        if let OpRecord::ToolStarted {
-            run_id,
-            assistant_entry_id,
-            tool_call_id,
-            tool_name,
-            replay,
-            ..
-        } = intent
-        {
-            if open_operations.contains(run_id) && !existing_tool_ids.contains(tool_call_id) {
-                if replay == &ToolReplaySafety::Never {
-                    unreplayable_tools += 1;
-                    let synthetic_msg = AgentMessage::Tool {
-                        tool_call_id: tool_call_id.clone(),
-                        name: tool_name.clone(),
-                        content: format!("[Interrupted tool execution for '{tool_name}' automatically recovered]"),
-                        is_error: true,
-                    };
-                    let anchor = if session_tree.nodes.contains_key(assistant_entry_id) {
-                        Some(assistant_entry_id.clone())
-                    } else {
-                        session_tree.active_node_id().map(String::from)
-                    };
-                    session_tree.add_message_at_leaf(anchor.as_deref(), synthetic_msg);
-                } else if replay == &ToolReplaySafety::Safe {
-                    let synthetic_msg = AgentMessage::Tool {
-                        tool_call_id: tool_call_id.clone(),
-                        name: tool_name.clone(),
-                        content: format!(
-                            "[Recovered tool result for read-only operation '{tool_name}']"
-                        ),
-                        is_error: false,
-                    };
-                    let anchor = if session_tree.nodes.contains_key(assistant_entry_id) {
-                        Some(assistant_entry_id.clone())
-                    } else {
-                        session_tree.active_node_id().map(String::from)
-                    };
-                    session_tree.add_message_at_leaf(anchor.as_deref(), synthetic_msg);
-                    safe_tools_to_replay.push((*intent).clone());
-                }
-            }
-        }
-    }
-
-    RecoveryResult {
-        recovered_open_operations: open_operations.len(),
-        open_operation_ids,
-        unreplayable_tools,
-        safe_tools_to_replay,
-    }
 }
 
 #[cfg(test)]
@@ -718,6 +627,7 @@ mod tests {
                     name: "read_file".into(),
                     content: "done".into(),
                     is_error: false,
+                    terminate: false,
                 },
             },
             OpRecord::ToolStarted {
@@ -879,13 +789,7 @@ mod tests {
                 ToolReplaySafety::Never,
                 3,
             ),
-            subagent_tool(
-                "subagent-1:0",
-                "run-1",
-                "call-1",
-                ToolReplaySafety::Safe,
-                4,
-            ),
+            subagent_tool("subagent-1:0", "run-1", "call-1", ToolReplaySafety::Safe, 4),
         ];
 
         let lanes = interrupted_subagent_lanes(&records);
@@ -938,79 +842,29 @@ mod tests {
 
         let lanes = interrupted_subagent_lanes(&records);
 
-        assert_eq!(lanes.iter().map(|lane| lane.lane.as_str()).collect::<Vec<_>>(), ["subagent-early", "subagent-late"]);
-        assert_eq!(lanes[1].safe_tools.iter().map(OpRecord::seq).collect::<Vec<_>>(), [22, 24]);
-        assert_eq!(lanes[1].unsafe_tools.iter().map(OpRecord::seq).collect::<Vec<_>>(), [23, 25]);
-    }
-
-    #[test]
-    fn reconcile_op_log_recovery_repairs_interrupted_never_replay_tools() {
-        let mut tree = SessionTree::new("test_session");
-        let assistant_id = tree.add_message(AgentMessage::Assistant {
-            content: Some("Calling tool".into()),
-            tool_calls: None,
-            stop_reason: None,
-            deferred_handle: None,
-        });
-
-        let records = vec![
-            OpRecord::OperationStarted {
-                id: "run-1".into(),
-                seq: 1,
-                lane: "main".into(),
-                timestamp: 100,
-                source_leaf_id: None,
-                kind: "run".into(),
-                system_prompt_override: None,
-            },
-            OpRecord::ToolStarted {
-                id: "tool-rec-1".into(),
-                seq: 2,
-                lane: "main".into(),
-                timestamp: 105,
-                run_id: "run-1".into(),
-                assistant_entry_id: assistant_id.clone(),
-                tool_index: 0,
-                tool_call_id: "call_123".into(),
-                tool_name: "run_command".into(),
-                effective_args: serde_json::json!({"command": "cargo test"}),
-                result_entry_id: "res-1".into(),
-                replay: ToolReplaySafety::Never,
-            },
-        ];
-
-        let recovered = reconcile_op_log_recovery(&mut tree, &records);
-        assert_eq!(recovered.recovered_open_operations, 1);
-        assert_eq!(recovered.open_operation_ids, vec!["run-1"]);
-        assert_eq!(recovered.unreplayable_tools, 1);
-
-        let branch = tree.get_active_branch_messages();
-        assert_eq!(branch.len(), 2);
-        assert!(matches!(
-            &branch[1],
-            AgentMessage::Tool { tool_call_id, is_error, .. } if tool_call_id == "call_123" && *is_error
-        ));
-    }
-
-    #[test]
-    fn oplog_file_round_trip_under_lock() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("session.oplog.jsonl");
-
-        let rec = OpRecord::OperationStarted {
-            id: "run-99".into(),
-            seq: 1,
-            lane: "main".into(),
-            timestamp: 200,
-            source_leaf_id: None,
-            kind: "run".into(),
-            system_prompt_override: None,
-        };
-
-        append_op_record_to_file(&path, &rec).unwrap();
-        let loaded = load_op_records_from_file(&path).unwrap();
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].id(), "run-99");
+        assert_eq!(
+            lanes
+                .iter()
+                .map(|lane| lane.lane.as_str())
+                .collect::<Vec<_>>(),
+            ["subagent-early", "subagent-late"]
+        );
+        assert_eq!(
+            lanes[1]
+                .safe_tools
+                .iter()
+                .map(OpRecord::seq)
+                .collect::<Vec<_>>(),
+            [22, 24]
+        );
+        assert_eq!(
+            lanes[1]
+                .unsafe_tools
+                .iter()
+                .map(OpRecord::seq)
+                .collect::<Vec<_>>(),
+            [23, 25]
+        );
     }
 
     #[test]

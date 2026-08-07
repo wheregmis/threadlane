@@ -3,7 +3,10 @@
 //! Panel-specific state slices live in `crate::panels::<panel>::state`.
 
 use std::path::PathBuf;
-use threadlane_agent::AgentEvent;
+use threadlane_agent::{
+    harness::{HarnessEvent, Snapshot},
+    AgentEvent,
+};
 use threadlane_coding_agent::{
     CapabilityCatalog, ExtensionRecord, ExtensionScope, SkillManager, TaskAgentEvent,
 };
@@ -235,6 +238,23 @@ pub enum GuiAgentEvent {
         generation_id: u64,
         work_dir: PathBuf,
         session_id: String,
+    },
+    HarnessEvent {
+        generation_id: u64,
+        work_dir: PathBuf,
+        session_id: String,
+        event: HarnessEvent,
+    },
+    HarnessSnapshot {
+        generation_id: u64,
+        work_dir: PathBuf,
+        session_id: String,
+        snapshot: Snapshot,
+    },
+    HarnessResumeFinished {
+        work_dir: PathBuf,
+        session_id: String,
+        result: Result<bool, String>,
     },
     AntigravityLoginSuccess {
         email: Option<String>,

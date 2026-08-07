@@ -59,4 +59,12 @@ pub trait ToolExecutor: Send + Sync {
     }
 
     async fn execute_tool(&self, name: &str, args: &str) -> Option<Result<String, String>>;
+
+    async fn execute_tool_with_call(
+        &self,
+        call: &AgentToolCall,
+        args: &str,
+    ) -> Option<Result<String, String>> {
+        self.execute_tool(&call.name, args).await
+    }
 }

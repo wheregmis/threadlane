@@ -117,6 +117,8 @@ fn test_session_tree_persistence_and_branching() {
 
     let forked = tree.fork_branch(&n1).unwrap();
     assert_eq!(forked.nodes.len(), 1);
+    assert_eq!(forked.parent_session_id.as_deref(), Some("sess_1"));
+    assert!(forked.session_id.starts_with("sess_1_fork_"));
 }
 
 #[test]
@@ -355,6 +357,7 @@ fn interrupted_tool_turn_is_removed_before_provider_replay() {
             name: "read_file".into(),
             content: "partial".into(),
             is_error: false,
+            terminate: false,
         },
     ];
 
@@ -385,6 +388,7 @@ fn completed_tool_turn_is_preserved_for_provider_replay() {
             name: "read_file".into(),
             content: "done".into(),
             is_error: false,
+            terminate: false,
         },
     ];
 
@@ -422,6 +426,7 @@ fn test_convert_to_codex_llm_structure() {
             name: "list_dir".to_string(),
             content: "file1.txt\nfile2.txt".to_string(),
             is_error: false,
+            terminate: false,
         },
     ];
 

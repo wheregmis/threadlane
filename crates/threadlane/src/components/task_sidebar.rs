@@ -100,6 +100,19 @@ script_mod! {
                 color_down: theme.color_primary_foreground
             }
         }
+
+        resume_btn := mod.components.IconButton {
+            width: 22
+            height: 22
+            visible: false
+            icon_walk: Walk{width: 9 height: 9}
+            draw_icon +: {
+                svg: crate_resource("self:resources/icons/refresh.svg")
+                color: theme.color_muted_foreground
+                color_hover: theme.color_primary
+                color_down: theme.color_primary_foreground
+            }
+        }
     }
 
     mod.components.PlanSidebarRowBase = View {
@@ -273,6 +286,7 @@ pub struct TaskSidebarItem {
     pub activity: String,
     pub status: TaskStatus,
     pub cancellable: bool,
+    pub resumable: bool,
     pub started_at_ms: u128,
     pub finished_at_ms: Option<u128>,
 }
@@ -285,6 +299,7 @@ pub enum TaskSidebarAction {
         session_file: Option<PathBuf>,
     },
     Cancel(String),
+    Resume(String),
     ToggleSession(String),
     ToggleTask(String),
     #[default]
@@ -381,12 +396,7 @@ fn sidebar_rows(
     items: &[TaskSidebarItem],
     current_session_id: Option<&str>,
 ) -> Vec<TaskSidebarRow> {
-    sidebar_rows_filtered(
-        plan,
-        items,
-        current_session_id,
-        &HashMap::new(),
-    )
+    sidebar_rows_filtered(plan, items, current_session_id, &HashMap::new())
 }
 
 fn sidebar_rows_filtered(
@@ -655,6 +665,8 @@ impl Widget for TaskSidebar {
                             row.label(cx, ids!(activity_lbl)).set_text(cx, &activity);
                             row.button(cx, ids!(cancel_btn))
                                 .set_visible(cx, task.cancellable);
+                            row.button(cx, ids!(resume_btn))
+                                .set_visible(cx, task.resumable);
                             row.draw_all_unscoped(cx);
                         }
                         TaskSidebarRow::TaskDetail(item_index) => {
@@ -733,6 +745,13 @@ impl Widget for TaskSidebar {
                 );
                 continue;
             }
+            if row.button(cx, ids!(resume_btn)).clicked(actions) {
+                cx.widget_action(
+                    self.widget_uid(),
+                    TaskSidebarAction::Resume(task.id.clone()),
+                );
+                continue;
+            }
             if let Some(finger_up) = row.as_view().finger_up(actions) {
                 if finger_up.is_over && finger_up.is_primary_hit() && finger_up.was_tap() {
                     cx.widget_action(
@@ -769,6 +788,7 @@ mod tests {
             activity: String::new(),
             status,
             cancellable: false,
+            resumable: false,
             started_at_ms,
             finished_at_ms: None,
         }

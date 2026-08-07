@@ -2,7 +2,6 @@
 
 use makepad_widgets::*;
 
-
 script_mod! {
     use mod.prelude.widgets.*
 
@@ -155,10 +154,11 @@ impl SessionRow {
             .draw_bg
             .draw_vars
             .set_dyn_instance(cx, id!(is_active), &[active as u8 as f32]);
-        self.view
-            .draw_bg
-            .draw_vars
-            .set_dyn_instance(cx, id!(is_context), &[context_target as u8 as f32]);
+        self.view.draw_bg.draw_vars.set_dyn_instance(
+            cx,
+            id!(is_context),
+            &[context_target as u8 as f32],
+        );
         self.view.draw_bg.redraw(cx);
     }
 

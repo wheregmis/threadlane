@@ -13,4 +13,6 @@ pub use composer::{
 #[cfg(test)]
 pub use state::ChatMessage;
 pub use state::{ChatData, MsgRole, StreamingKind, ToolStatus};
-pub use view::{ChatList, ChatListWidgetRefExt, StarterPromptAction, SubagentRail};
+pub use view::{
+    ChatList, ChatListWidgetRefExt, StarterPromptAction, SubagentRail, SubagentRailAction,
+};

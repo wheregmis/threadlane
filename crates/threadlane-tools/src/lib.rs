@@ -871,7 +871,8 @@ mod tests {
 
         let existing =
             validate_path_in_workspace(&root.join("exists.txt").to_string_lossy(), root).unwrap();
-        let new = validate_path_in_workspace(&root.join("new.txt").to_string_lossy(), root).unwrap();
+        let new =
+            validate_path_in_workspace(&root.join("new.txt").to_string_lossy(), root).unwrap();
 
         assert_eq!(existing.parent(), new.parent());
     }
@@ -884,8 +885,10 @@ mod tests {
         let relative = validate_path_in_workspace("../escaped.txt", dir.path());
         assert!(relative.is_err(), "got: {relative:?}");
 
-        let absolute =
-            validate_path_in_workspace(&outside.path().join("new.txt").to_string_lossy(), dir.path());
+        let absolute = validate_path_in_workspace(
+            &outside.path().join("new.txt").to_string_lossy(),
+            dir.path(),
+        );
         assert!(absolute.is_err(), "got: {absolute:?}");
     }
 

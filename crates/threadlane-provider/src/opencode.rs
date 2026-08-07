@@ -301,7 +301,10 @@ mod tests {
             strip_opencode_prefix("opencode-go/deepseek-v4-flash"),
             "deepseek-v4-flash"
         );
-        assert_eq!(strip_opencode_prefix("deepseek-v4-flash"), "deepseek-v4-flash");
+        assert_eq!(
+            strip_opencode_prefix("deepseek-v4-flash"),
+            "deepseek-v4-flash"
+        );
     }
 
     #[test]

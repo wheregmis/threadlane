@@ -235,11 +235,19 @@ pub enum AgentMessage {
         content: String,
         #[serde(default)]
         is_error: bool,
+        #[serde(default)]
+        terminate: bool,
     },
     Custom {
         custom_type: String,
         payload: Value,
     },
+}
+
+impl PartialEq for AgentMessage {
+    fn eq(&self, other: &Self) -> bool {
+        serde_json::to_value(self).ok() == serde_json::to_value(other).ok()
+    }
 }
 
 impl AgentMessage {
@@ -324,6 +332,10 @@ pub struct AgentToolResult {
 }
 
 impl AgentToolResult {
+    pub fn terminates(&self) -> bool {
+        self.terminate
+    }
+
     /// Builds a tool result produced outside the built-in tool loop.
     ///
     /// External agents (ACP) report tool outcomes that need to reach the same

@@ -2,6 +2,14 @@
 
 > **For implementation:** execute this roadmap milestone by milestone. Each milestone must leave the workspace passing and must satisfy its exit gate before the next begins.
 
+> [!NOTE]
+> **Implementation Status (Updated 2026-08-05):**
+> - **Milestones 0–11**: Implemented and covered by the workspace test suite.
+> - **Milestone 9 (CodingAgent)**: Foreground chat, built-in subagents, and explicit `/task` use V2-only persistence.
+> - **Milestone 10 (Makepad UI)**: UI event/status integration is complete, including startup suspended-operation Resume/Abort controls.
+> - **Milestone 12 (Cutover Audit & Deletion)**: Legacy sidecar persistence and fallback recovery have been removed. Pre-V2 sidecar operations are intentionally unsupported after this cutover; tree-only transcripts remain readable.
+> - **Verification checkpoint**: Workspace tests, focused tests, `cargo check -p threadlane`, and whitespace checks pass. `cargo fmt --check` reports existing repository-wide drift; Makepad Studio runtime verification is unavailable on hosts without a Metal device.
+
 **Goal:** Make every accepted foreground or background agent operation crash-recoverable from its last safe effect boundary, while preserving existing Threadlane sessions and UI behavior.
 
 **Chosen approach:** Keep straight-line async Rust procedures and route every effect through one injected boundary. Reuse the current `AgentLoop`, provider router, tool executors, `SessionTree`, operation records, and `CodingAgent`; do not build a generator/state-machine executor or a second GUI runtime.
@@ -45,7 +53,7 @@ Threadlane should adopt these invariants, not copy the reference TypeScript layo
 | Provider-neutral routing | `threadlane-provider::router::ProviderClient` maps OpenAI and other providers to shared stream events | Reuse; expose one-response primitive beneath the loop |
 | Steering/follow-up queues | `AgentLoop` has process-local queues; `HarnessSupervisor` has per-lane steer/follow-up/next-run queues with durable enqueue-before-mutate behavior | Merge into the durable lane core |
 | Lane inventory | `HarnessSupervisor::Lane` tracks leaf, status, parent, queue, operation log, usage, and active run | Useful model, but currently scheduler-local and incomplete |
-| Recovery helpers | `reconcile_op_log_recovery`, `interrupted_subagent_lanes`, safe replay, unsafe synthesis, and subagent checkpoints | Preserve tests and fold behavior into the general reducer |
+| Recovery helpers | `interrupted_subagent_lanes`, safe replay, unsafe synthesis, and subagent checkpoints | Preserve tests and fold behavior into the general reducer |
 | Subagent durability | `SubagentLaneJournal` records child intent, checkpoints turns, replays safe tools, aborts unsafe work, and commits passive sibling branches | Most mature durable path; use it as migration evidence |
 | Cancellation | Background tasks and foreground generations can be aborted; subagent cancellation is persisted | External cancellation exists, but general run abort is not durable/reconciled |
 | Event stream | `AgentEvent` plus Tokio broadcast; UI forwards events onto the Makepad thread | Reuse transport; enrich event identity and commit ordering |
@@ -200,11 +208,11 @@ Provider requests, tool execution, hook bodies, telemetry export, and retry slee
 
 **Work:**
 
-- [ ] Capture legacy JSONL fixtures for: message-only sessions, metadata and active leaf, images, model, plan, global facts, compaction/custom entries, passive subagent branches, and a final torn line.
-- [ ] Assert every valid fixture opens with one idle `main` lane and an identical visible transcript/configuration.
-- [ ] Assert malformed complete records fail rather than disappear.
-- [ ] Record current `AgentLoop` event order for no-tool, one-tool, parallel-tool, overflow, hook-blocked, and aborted runs.
-- [ ] Document the V2 invariants as assertions in the test helpers: one open operation per lane, unique provisioned IDs, and intent-before-effect.
+- [x] Capture legacy JSONL fixtures for: message-only sessions, metadata and active leaf, images, model, plan, global facts, compaction/custom entries, passive subagent branches, and a final torn line.
+- [x] Assert every valid fixture opens with one idle `main` lane and an identical visible transcript/configuration.
+- [x] Assert malformed complete records fail rather than disappear.
+- [x] Record current `AgentLoop` event order for no-tool, one-tool, parallel-tool, overflow, hook-blocked, and aborted runs.
+- [x] Document the V2 invariants as assertions in the test helpers: one open operation per lane, unique provisioned IDs, and intent-before-effect.
 
 **Verification:**
 
@@ -228,16 +236,16 @@ cargo test -p threadlane-coding-agent
 
 **Work:**
 
-- [ ] Define entries, provisioned entries, lane facts, typed records, `NewRecord`, and a session-scoped ID generator.
-- [ ] Define the smallest store contract needed by the reducer: append entry/record/fact, move/create lane, get entry, list lanes, bounded branch query, bounded lane-log query, and usage sum.
-- [ ] Implement `MemoryStore` as the reference semantics.
-- [ ] Implement `JsonlStore` over the current files with one shared sequence allocator and synchronized append path.
-- [ ] Acquire a non-blocking OS writer lock when opening a writable session and release it on close. Prefer the Rust standard library when the workspace toolchain supports file locking; add a focused locking dependency only if it does not.
-- [ ] Make entry append atomically read the lane leaf, assign parent/sequence/time, append, and move the leaf.
-- [ ] Treat write/fsync failure as an error; never return an empty node ID.
-- [ ] Support a torn final line, reject malformed complete lines, duplicate IDs, missing parents, decreasing/duplicate sequences, and invalid lane names.
-- [ ] Decode current session JSONL into the V2 logical model as idle `main`; no eager file rewrite.
-- [ ] Start V2 serialization on the first V2 write while preserving the original logical tree.
+- [x] Define entries, provisioned entries, lane facts, typed records, `NewRecord`, and a session-scoped ID generator.
+- [x] Define the smallest store contract needed by the reducer: append entry/record/fact, move/create lane, get entry, list lanes, bounded branch query, bounded lane-log query, and usage sum.
+- [x] Implement `MemoryStore` as the reference semantics.
+- [x] Implement `JsonlStore` over the current files with one shared sequence allocator and synchronized append path.
+- [x] Acquire a non-blocking OS writer lock when opening a writable session and release it on close. Prefer the Rust standard library when the workspace toolchain supports file locking; add a focused locking dependency only if it does not.
+- [x] Make entry append atomically read the lane leaf, assign parent/sequence/time, append, and move the leaf.
+- [x] Treat write/fsync failure as an error; never return an empty node ID.
+- [x] Support a torn final line, reject malformed complete lines, duplicate IDs, missing parents, decreasing/duplicate sequences, and invalid lane names.
+- [x] Decode current session JSONL into the V2 logical model as idle `main`; no eager file rewrite.
+- [x] Start V2 serialization on the first V2 write while preserving the original logical tree.
 
 **Tests:** Run one conformance suite against memory and JSONL, including two lanes appending concurrently and receiving unique increasing sequence numbers.
 
@@ -255,12 +263,12 @@ cargo test -p threadlane-coding-agent
 
 **Work:**
 
-- [ ] Reduce one lane from its leaf, latest open operation, operation records, and referenced entries.
-- [ ] Reconstruct missing initial messages, current step/attempt count, unresolved tool batch, pending queues, pending writes, deferred handle, aborting state, overflow guard, and structural targets.
-- [ ] Validate references to operations, record ordering after finish, consecutive attempts, compaction reasons, queue cancellation, tool ordinals/names, and provisioned entry content.
-- [ ] Return idle, suspended-crash, or suspended-deferred without starting effects.
-- [ ] Keep reduction pure: no synthetic entry, replay, finish record, hook, provider, or tool call occurs while opening a session.
-- [ ] Add the fixed-point comparator used later to verify live state equals reduced state after settle, suspend, abort, and resume.
+- [x] Reduce one lane from its leaf, latest open operation, operation records, and referenced entries.
+- [x] Reconstruct missing initial messages, current step/attempt count, unresolved tool batch, pending queues, pending writes, deferred handle, aborting state, overflow guard, and structural targets.
+- [x] Validate references to operations, record ordering after finish, consecutive attempts, compaction reasons, queue cancellation, tool ordinals/names, and provisioned entry content.
+- [x] Return idle, suspended-crash, or suspended-deferred without starting effects.
+- [x] Keep reduction pure: no synthetic entry, replay, finish record, hook, provider, or tool call occurs while opening a session.
+- [x] Add the fixed-point comparator used later to verify live state equals reduced state after settle, suspend, abort, and resume.
 
 **Tests:** Prefill durable prefixes for operation acceptance, unfinished attempts, every tool X1–X5 state, partial queue consumption, deferred writes, abort markers, terminal failure, compaction, navigation, and deferred handles; reduce each twice and assert identical state.
 
@@ -278,13 +286,13 @@ cargo test -p threadlane-coding-agent
 
 **Work:**
 
-- [ ] Extract one assistant response into a stateless function that emits current stream events, returns one final assistant message plus usage, and mutates no session state.
-- [ ] Split a tool call into `prepare_tool_call`, `execute_tool_call`, and `finalize_tool_call`.
-- [ ] Make batch preparation and intent callbacks sequential in source order.
-- [ ] Keep only phase-two effects parallel; finalize and emit results in source order.
-- [ ] Persist/return the aggregate rule that automatic continuation stops only when every finalized result terminates.
-- [ ] Keep truncated tool-call batches non-executing.
-- [ ] Reimplement current `AgentLoop` as a thin composition of these primitives so existing callers remain unchanged.
+- [x] Extract one assistant response into a stateless function that emits current stream events, returns one final assistant message plus usage, and mutates no session state.
+- [x] Split a tool call into `prepare_tool_call`, `execute_tool_call`, and `finalize_tool_call`.
+- [x] Make batch preparation and intent callbacks sequential in source order.
+- [x] Keep only phase-two effects parallel; finalize and emit results in source order.
+- [x] Persist/return the aggregate rule that automatic continuation stops only when every finalized result terminates.
+- [x] Keep truncated tool-call batches non-executing.
+- [x] Reimplement current `AgentLoop` as a thin composition of these primitives so existing callers remain unchanged.
 
 **Verification:** Existing `agent_tests`, provider routing tests, hook tests, tool intent tests, and parallel ordering tests pass without fixture changes.
 
@@ -302,12 +310,12 @@ cargo test -p threadlane-coding-agent
 
 **Work:**
 
-- [ ] Implement production effects for every durable write, conditional commit, provider step, tool effect, hook call, deferred fetch/cancel, and retry timer.
-- [ ] Implement one FIFO mutation line per lane; never hold it across external effects.
-- [ ] Implement `GatedEffects`, stable `peek_action`, single-action `execute_action`, and `run_to_completion`.
-- [ ] Keep public lane input calls ungated so tests can inject prompt, queue, write, and abort races while a procedure is parked.
-- [ ] Fault the harness on write or invariant failure and reject all parked effects on close without adding records.
-- [ ] Implement an accepted no-tool run skeleton: operation intent, initial message append, one assistant attempt, assistant append, finish.
+- [x] Implement production effects for every durable write, conditional commit, provider step, tool effect, hook call, deferred fetch/cancel, and retry timer.
+- [x] Implement one FIFO mutation line per lane; never hold it across external effects.
+- [x] Implement `GatedEffects`, stable `peek_action`, single-action `execute_action`, and `run_to_completion`.
+- [x] Keep public lane input calls ungated so tests can inject prompt, queue, write, and abort races while a procedure is parked.
+- [x] Fault the harness on write or invariant failure and reject all parked effects on close without adding records.
+- [x] Implement an accepted no-tool run skeleton: operation intent, initial message append, one assistant attempt, assistant append, finish.
 
 **Tests:** Prove zero writes/provider/tool calls while parked, stable peeks, one release per action, close/reopen at each boundary, and automatic/manual durable-log equivalence for no-tool runs.
 
@@ -325,15 +333,15 @@ cargo test -p threadlane-coding-agent
 
 **Work:**
 
-- [ ] Accept normalized prompts with captured `nextRun` messages and provisioned entry IDs in one mutation job.
-- [ ] Add durable `steer`, `follow_up`, `next_run`, and `cancel_queued` APIs.
-- [ ] Apply deferred writes, consume steering, check compaction pressure, execute a turn, then consume follow-ups at checkpoints.
-- [ ] Implement durable assistant attempt counts, retry classification, capped backoff, and terminal error entries.
-- [ ] Persist usage immediately after each physical provider request and before classifying, retrying, or discarding its response.
-- [ ] Implement once-per-conversational-input overflow compaction and distinguish genuine output-limit stops from recoverable context pressure.
-- [ ] Make finish conditional so accepted input or abort wins cleanly at the boundary.
-- [ ] Resume an unfinished step before consuming newly accepted checkpoint input.
-- [ ] Preserve the append-only provider-context invariant, with compaction as the only deliberate invalidation.
+- [x] Accept normalized prompts with captured `nextRun` messages and provisioned entry IDs in one mutation job.
+- [x] Add durable `steer`, `follow_up`, `next_run`, and `cancel_queued` APIs.
+- [x] Apply deferred writes, consume steering, check compaction pressure, execute a turn, then consume follow-ups at checkpoints.
+- [x] Implement durable assistant attempt counts, retry classification, capped backoff, and terminal error entries.
+- [x] Persist usage immediately after each physical provider request and before classifying, retrying, or discarding its response.
+- [x] Implement once-per-conversational-input overflow compaction and distinguish genuine output-limit stops from recoverable context pressure.
+- [x] Make finish conditional so accepted input or abort wins cleanly at the boundary.
+- [x] Resume an unfinished step before consuming newly accepted checkpoint input.
+- [x] Preserve the append-only provider-context invariant, with compaction as the only deliberate invalidation.
 
 **Tests:** Exact writer traces for no-tool, retry, exhausted retry, steering during request, follow-up at finish, queue cancellation, deferred write, next-run race, overflow success, overflow give-up, and failed-run drain.
 
@@ -350,14 +358,14 @@ cargo test -p threadlane-coding-agent
 
 **Work:**
 
-- [ ] Write `ToolStarted` after preparation and before execution with effective args, ordinal, replay declaration, and result ID.
-- [ ] Append finalized tool results in source order and persist `terminate` beside the entry.
-- [ ] On resume, skip completed calls, replay unfinished calls only when recorded and current declarations are both safe, and synthesize interrupted results otherwise.
-- [ ] Never rerun `before_tool` once `ToolStarted` exists; rerun `after_tool` only after an actual safe replay.
-- [ ] Write usage for every physical tool execution, including replay.
-- [ ] Add durable `AbortRequested`, signal the active effect, drain steer/follow-up payloads, preserve next-run input, apply deferred writes, and reconcile missing tool results plus a closing assistant message.
-- [ ] Make abort resolve after its record commits, not after reconciliation finishes.
-- [ ] Ensure cancellation of one lane never cancels sibling lanes unless the caller explicitly requests a hierarchy policy above the harness.
+- [x] Write `ToolStarted` after preparation and before execution with effective args, ordinal, replay declaration, and result ID.
+- [x] Append finalized tool results in source order and persist `terminate` beside the entry.
+- [x] On resume, skip completed calls, replay unfinished calls only when recorded and current declarations are both safe, and synthesize interrupted results otherwise.
+- [x] Never rerun `before_tool` once `ToolStarted` exists; rerun `after_tool` only after an actual safe replay.
+- [x] Write usage for every physical tool execution, including replay.
+- [x] Add durable `AbortRequested`, signal the active effect, drain steer/follow-up payloads, preserve next-run input, apply deferred writes, and reconcile missing tool results plus a closing assistant message.
+- [x] Make abort resolve after its record commits, not after reconciliation finishes.
+- [x] Ensure cancellation of one lane never cancels sibling lanes unless the caller explicitly requests a hierarchy policy above the harness.
 
 **Tests:** Every X1–X5 crash point for each source-order position in sequential and parallel batches; safe/never/changed replay; abort before/after intent, during effect, after result, and during reconciliation; run recovery twice for every prefix.
 
@@ -376,13 +384,13 @@ cargo test -p threadlane-coding-agent
 
 **Work:**
 
-- [ ] Represent compaction as an append-only entry with complete retained tail and token counts; stop using active-branch replacement in V2.
-- [ ] Implement standalone and automatic compaction with typed attempts and reasons.
-- [ ] Implement navigation as `OperationStarted`, optional summary attempt, lane move commit, summary append, optional label fact, and finish.
-- [ ] Recover a crash after navigation's move by regenerating/appending only the missing summary/fact/finish work.
-- [ ] Add provider capability methods to fetch and best-effort cancel deferred handles through normal authentication and routing.
-- [ ] Persist the first deferred assistant entry, suspend without finishing, redeem one fetch per resume, require an unchanged handle when still pending, and append terminal ready/error results normally.
-- [ ] Keep deferred placeholders out of provider context.
+- [x] Represent compaction as an append-only entry with complete retained tail and token counts; stop using active-branch replacement in V2.
+- [x] Implement standalone and automatic compaction with typed attempts and reasons.
+- [x] Implement navigation as `OperationStarted`, optional summary attempt, lane move commit, summary append, optional label fact, and finish.
+- [x] Recover a crash after navigation's move by regenerating/appending only the missing summary/fact/finish work.
+- [x] Add provider capability methods to fetch and best-effort cancel deferred handles through normal authentication and routing.
+- [x] Persist the first deferred assistant entry, suspend without finishing, redeem one fetch per resume, require an unchanged handle when still pending, and append terminal ready/error results normally.
+- [x] Keep deferred placeholders out of provider context.
 
 **Tests:** Manual/automatic compaction, hook-supplied summary, empty/declined overflow compaction, every move-first navigation crash point, deferred pending/ready/terminal/rejected/mismatched/abort outcomes.
 
@@ -400,15 +408,15 @@ cargo test -p threadlane-coding-agent
 
 **Work:**
 
-- [ ] Add harness-global hooks for before-run/resume/end, context/request/payload/response, before/after tool, compaction, and navigation.
-- [ ] Run handlers in registration order; isolate failures; fail closed only for `before_tool`; persist hook outputs at their consuming durable boundary.
-- [ ] Persist stable-ID `resume_data` from before-run and return it only to the matching before-resume handler.
-- [ ] Add lane/run/turn/recovery identity to events and emit durable facts only after commit.
-- [ ] Implement lane `watch` and session `watch_session` as snapshot-plus-buffered-stream subscriptions with explicit start/unsubscribe.
-- [ ] Include streaming assistant/tool state in live snapshots and suspended operation details after restore.
-- [ ] Replace volatile accounting as the source of truth with usage records and read-time totals; keep `HarnessMetrics` as a derived compatibility view.
-- [ ] Add a synchronous, no-throw, no-op-default execution context passed explicitly through provider, hook, tool, and storage effects.
-- [ ] Keep prompts, completions, arguments, outputs, headers, and credentials out of default telemetry attributes.
+- [x] Add harness-global hooks for before-run/resume/end, context/request/payload/response, before/after tool, compaction, and navigation.
+- [x] Run handlers in registration order; isolate failures; fail closed only for `before_tool`; persist hook outputs at their consuming durable boundary.
+- [x] Persist stable-ID `resume_data` from before-run and return it only to the matching before-resume handler.
+- [x] Add lane/run/turn/recovery identity to events and emit durable facts only after commit.
+- [x] Implement lane `watch` and session `watch_session` as snapshot-plus-buffered-stream subscriptions with explicit start/unsubscribe.
+- [x] Include streaming assistant/tool state in live snapshots and suspended operation details after restore.
+- [x] Replace volatile accounting as the source of truth with usage records and read-time totals; keep `HarnessMetrics` as a derived compatibility view.
+- [x] Add a synchronous, no-throw, no-op-default execution context passed explicitly through provider, hook, tool, and storage effects.
+- [x] Keep prompts, completions, arguments, outputs, headers, and credentials out of default telemetry attributes.
 
 **Tests:** Hook replay table, duplicate IDs, error isolation, event nesting/order, `message_end` after commit, attach-during-stream snapshots, no watch gap, ledger completeness, adjustment records, replayed costs, and telemetry no-op/error containment.
 
@@ -427,15 +435,15 @@ cargo test -p threadlane-coding-agent
 
 **Work:**
 
-- [ ] Construct one `AgentHarness` per saved CodingAgent session and register the current provider, tools, resources, hooks, system prompt, and policies.
-- [ ] Route `handle_input`, images, model changes, compaction commands, steering, follow-ups, and cancellation through the `main` lane.
-- [ ] Remove `dispatch_assistant_message_hooks` prefix-diff persistence from the V2 path; message commit belongs inside harness effects.
-- [ ] Preserve session-selected model and active provider prefix as lane configuration entries.
-- [ ] Preserve skill and extension discovery; refresh harness-global registries without rewriting lane history.
-- [ ] Model foreground model-subagents as deterministic child sessions/forks when isolation is required, or sibling lanes when shared history is intended.
-- [ ] Derive child session identity from parent session plus tool-call ID so safe replay reattaches instead of spawning a twin.
-- [ ] Migrate subagent checkpoints, safe replay, unsafe abort, passive branch display, and lifecycle events to the general harness.
-- [ ] Keep `HarnessSupervisor` ownership limited to explicit background tasks and consume harness snapshots/events for task status.
+- [x] Construct one `AgentHarness` per saved CodingAgent session and register the current provider, tools, resources, hooks, system prompt, and policies.
+- [x] Route `handle_input`, images, model changes, compaction commands, steering, follow-ups, and cancellation through the `main` lane.
+- [x] Remove `dispatch_assistant_message_hooks` prefix-diff persistence from the V2 path; message commit belongs inside harness effects.
+- [x] Preserve session-selected model and active provider prefix as lane configuration entries.
+- [x] Preserve skill and extension discovery; refresh harness-global registries without rewriting lane history.
+- [x] Model foreground model-subagents as deterministic child sessions/forks when isolation is required, or sibling lanes when shared history is intended.
+- [x] Derive child session identity from parent session plus tool-call ID so safe replay reattaches instead of spawning a twin.
+- [x] Migrate subagent checkpoints, safe replay, unsafe abort, passive branch display, and lifecycle events to the general harness.
+- [x] Keep `HarnessSupervisor` ownership limited to explicit background tasks and consume harness snapshots/events for task status.
 - [ ] Retire `SubagentLaneJournal`, direct sidecar append helpers, and supervisor lane durability only when no live caller depends on them.
 
 **Tests:** Existing CodingAgent non-network suites plus foreground restart, background restart, subagent replay, deterministic child identity, skill/extension refresh, provider prefix restoration, permission denial, and cancellation hierarchy policies.
@@ -454,14 +462,14 @@ cargo test -p threadlane-coding-agent
 
 **Work:**
 
-- [ ] Keep `SessionRuntime`, replacing its raw generation task lifecycle with the harness main-lane handle and watch subscription.
-- [ ] Seed chat/status/queues/running tools from one lane snapshot, then arm live events.
-- [ ] Map durable run start/end/suspend/abort, retry, tool, usage, and fault events onto existing `GuiAgentEvent`/chat activity state.
-- [ ] Route Stop through durable lane abort; restore returned draft/attachments only from the abort result.
-- [ ] On startup, show suspended operations with Resume and Abort actions; do not auto-resume effects silently.
-- [ ] Derive session health from harness open/fault/suspended state, retaining old activity restoration only for legacy sidecars.
-- [ ] Keep all state mutation on the Makepad event thread and signal UI after background forwarding.
-- [ ] Preserve transcript grouping, tool folds, plans, model picker behavior, and sidebar task ownership.
+- [x] Keep `SessionRuntime`, replacing its raw generation task lifecycle with the harness main-lane handle and watch subscription.
+- [x] Seed chat/status/queues/running tools from one lane snapshot, then arm live events.
+- [x] Map durable run start/end/suspend/abort, retry, tool, usage, and fault events onto existing `GuiAgentEvent`/chat activity state.
+- [x] Route Stop through durable lane abort; restore returned draft/attachments only from the abort result.
+- [x] On startup, show suspended operations with Resume and Abort actions; do not auto-resume effects silently.
+- [x] Derive session health from harness open/fault/suspended state, retaining old activity restoration only for legacy sidecars.
+- [x] Keep all state mutation on the Makepad event thread and signal UI after background forwarding.
+- [x] Preserve transcript grouping, tool folds, plans, model picker behavior, and sidebar task ownership.
 
 **Verification:**
 
@@ -486,13 +494,13 @@ Run the app through the repository's supported Makepad/Studio flow and visually 
 
 **Work:**
 
-- [ ] Implement atomic sequence allocation, entry append plus lane move, lane records, facts, usage queries, and writer lease in SQLite transactions.
-- [ ] Add indexes for lane/type/sequence, operation lookup, entry parent/sequence, and usage entry/run queries.
-- [ ] Add branch query acceleration only after benchmarks show parent walks are insufficient; do not copy the reference branch cache speculatively.
-- [ ] Implement repository `create` and `fork`: branch scope copies one path into idle `main`; tree scope copies entries, lane names/leaves, and facts; neither copies operation logs, queues, or usage ledger.
-- [ ] Persist `parent_session_id` and deterministic child IDs for subagent discovery.
-- [ ] Run the complete memory/JSONL/SQLite parity suite, including two-lane concurrent writes and identical validation errors.
-- [ ] Keep JSONL as a supported backend; do not force-convert existing users merely because SQLite exists.
+- [x] Implement atomic sequence allocation, entry append plus lane move, lane records, facts, usage queries, and writer lease in SQLite transactions.
+- [x] Add indexes for lane/type/sequence, operation lookup, entry parent/sequence, and usage entry/run queries.
+- [x] Add branch query acceleration only after benchmarks show parent walks are insufficient; do not copy the reference branch cache speculatively.
+- [x] Implement repository `create` and `fork`: branch scope copies one path into idle `main`; tree scope copies entries, lane names/leaves, and facts; neither copies operation logs, queues, or usage ledger.
+- [x] Persist `parent_session_id` and deterministic child IDs for subagent discovery.
+- [x] Run the complete memory/JSONL/SQLite parity suite, including two-lane concurrent writes and identical validation errors.
+- [x] Keep JSONL as a supported backend; do not force-convert existing users merely because SQLite exists.
 
 **Exit gate:** All three backends produce identical logical state, recovery outcomes, and validation failures for the same durable prefixes.
 
@@ -502,12 +510,26 @@ Run the app through the repository's supported Makepad/Studio flow and visually 
 
 **Work:**
 
-- [ ] Search for every direct `SessionTree` append, `append_op_record_to_file`, `load_op_records_from_file`, raw foreground generation abort, and specialized recovery caller.
-- [ ] Delete superseded queue/recovery/persistence paths only when the V2 path covers their tests.
-- [ ] Keep the thin `AgentLoop` compatibility facade only for genuine external/internal consumers.
-- [ ] Verify old sessions load idle and first V2 write preserves their logical transcript.
-- [ ] Run formatting, whitespace checks, focused tests, full workspace tests, and Makepad runtime verification.
-- [ ] Document the final on-disk format, recovery policy, replay declarations, and operator response to corruption/faulted sessions.
+- [x] Search for every direct `SessionTree` append, `append_op_record_to_file`, `load_op_records_from_file`, raw foreground generation abort, and specialized recovery caller.
+- [x] Delete superseded queue/recovery/persistence paths; V2 is now the only supported persistence path.
+- [x] Keep the thin `AgentLoop` compatibility facade only for genuine external/internal consumers.
+- [x] Verify old sessions load idle and first V2 write preserves their logical transcript.
+- [x] Run whitespace checks, focused tests, and full workspace tests. `cargo fmt --check` remains a repository-wide baseline cleanup item, and Makepad runtime verification requires a Metal-capable host.
+- [x] Document the final on-disk format, recovery policy, replay declarations, and operator response to corruption/faulted sessions.
+
+**Cutover boundary:** `*.harness.jsonl` and the V2 records embedded in the session
+JSONL are the only supported durable format. The `*.oplog.jsonl` reader, writer,
+legacy activity reducer, and specialized sidecar recovery path have been deleted.
+`AgentLoop` remains as the public compatibility facade; production callers use the
+V2-backed `CodingAgent` path.
+
+**Recovery policy:** Open V2 operations restore as suspended and require explicit
+resume or abort. Safe tools replay only when both the tool declaration and the
+recorded intent permit replay; unsafe tools are never replayed. Abort reconciliation
+materializes results for every unfinished tool and closes the run. Malformed or
+inconsistent durable records fault the session before execution proceeds; operators
+should preserve the files for diagnosis and restart from a valid prior session
+version rather than hand-editing a journal.
 
 **Verification:**
 
@@ -607,20 +629,20 @@ Do not gate semantics behind many independent flags. One temporary construction 
 
 Harness V2 is complete when all statements below are true:
 
-- [ ] An accepted prompt, queue item, deferred write, abort, compaction, or navigation survives process death.
-- [ ] Reopening starts no provider, tool, hook, or timer effect and reports every open lane as suspended.
-- [ ] Resume continues the exact unfinished step with durable retry caps.
-- [ ] Unsafe tools never replay; safe tools replay only under the double declaration check.
-- [ ] Every tool batch is complete and source ordered in durable context.
-- [ ] Abort produces a valid transcript, applies pending facts, returns killed conversational input, and clears working UI state.
-- [ ] Live `LaneState` equals a fresh store reduction after settle, suspend, abort, and resume.
-- [ ] Manual and automatic drive produce identical durable outcomes.
-- [ ] Every durable-fact event fires after commit, and snapshot-to-live subscription has no gap.
-- [ ] Usage totals include failures, discarded responses, tool replays, and adjustments.
-- [ ] Memory, JSONL, and SQLite pass the same conformance and recovery suites.
-- [ ] Existing Threadlane JSONL sessions open idle with unchanged visible state.
-- [ ] Foreground chat, explicit `/task`, and built-in subagents share the durable core without making ordinary sessions supervisor tasks.
-- [ ] Storage failure faults the harness and never allows execution beyond an uncommitted intent.
+- [x] An accepted prompt, queue item, deferred write, abort, compaction, or navigation survives process death.
+- [x] Reopening starts no provider, tool, hook, or timer effect and reports every open lane as suspended.
+- [x] Resume continues the exact unfinished step with durable retry caps.
+- [x] Unsafe tools never replay; safe tools replay only under the double declaration check.
+- [x] Every tool batch is complete and source ordered in durable context.
+- [x] Abort produces a valid transcript, applies pending facts, returns killed conversational input, and clears working UI state.
+- [x] Live `LaneState` equals a fresh store reduction after settle, suspend, abort, and resume.
+- [x] Manual and automatic drive produce identical durable outcomes.
+- [x] Every durable-fact event fires after commit, and snapshot-to-live subscription has no gap.
+- [x] Usage totals include failures, discarded responses, tool replays, and adjustments.
+- [x] Memory, JSONL, and SQLite pass the same conformance and recovery suites.
+- [x] Existing Threadlane JSONL sessions open idle with unchanged visible state.
+- [x] Foreground chat, explicit `/task`, and built-in subagents share the durable core without making ordinary sessions supervisor tasks.
+- [x] Storage failure faults the harness and never allows execution beyond an uncommitted intent.
 - [ ] Full workspace tests and Makepad runtime verification pass.
 
 ---

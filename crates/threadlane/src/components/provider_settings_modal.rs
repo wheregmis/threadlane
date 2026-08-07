@@ -304,7 +304,10 @@ impl Widget for ProviderSettingsModal {
             let capability_list = self.view.portal_list(cx, ids!(capability_list));
             for (row, item) in capability_list.items_with_actions(actions) {
                 if let Some(enabled) = item.check_box(cx, ids!(enabled_toggle)).changed(actions) {
-                    cx.widget_action(uid, ProviderSettingsModalAction::SetEnabled { row, enabled });
+                    cx.widget_action(
+                        uid,
+                        ProviderSettingsModalAction::SetEnabled { row, enabled },
+                    );
                 }
                 if item.button(cx, ids!(remove_btn)).clicked(actions) {
                     cx.widget_action(uid, ProviderSettingsModalAction::Remove(row));
@@ -313,13 +316,19 @@ impl Widget for ProviderSettingsModal {
             let skill_list = self.view.portal_list(cx, ids!(skill_list));
             for (row, item) in skill_list.items_with_actions(actions) {
                 if let Some(enabled) = item.check_box(cx, ids!(enabled_toggle)).changed(actions) {
-                    cx.widget_action(uid, ProviderSettingsModalAction::SetSkillEnabled { row, enabled });
+                    cx.widget_action(
+                        uid,
+                        ProviderSettingsModalAction::SetSkillEnabled { row, enabled },
+                    );
                 }
             }
             let mcp_list = self.view.portal_list(cx, ids!(mcp_list));
             for (row, item) in mcp_list.items_with_actions(actions) {
                 if let Some(enabled) = item.check_box(cx, ids!(enabled_toggle)).changed(actions) {
-                    cx.widget_action(uid, ProviderSettingsModalAction::SetMcpEnabled { row, enabled });
+                    cx.widget_action(
+                        uid,
+                        ProviderSettingsModalAction::SetMcpEnabled { row, enabled },
+                    );
                 }
                 if item.button(cx, ids!(remove_btn)).clicked(actions) {
                     cx.widget_action(uid, ProviderSettingsModalAction::RemoveMcpServer(row));
@@ -328,7 +337,10 @@ impl Widget for ProviderSettingsModal {
             let acp_list = self.view.portal_list(cx, ids!(acp_list));
             for (row, item) in acp_list.items_with_actions(actions) {
                 if let Some(enabled) = item.check_box(cx, ids!(enabled_toggle)).changed(actions) {
-                    cx.widget_action(uid, ProviderSettingsModalAction::SetAcpEnabled { row, enabled });
+                    cx.widget_action(
+                        uid,
+                        ProviderSettingsModalAction::SetAcpEnabled { row, enabled },
+                    );
                 }
                 if item.button(cx, ids!(remove_btn)).clicked(actions) {
                     cx.widget_action(uid, ProviderSettingsModalAction::RemoveAcpAgent(row));

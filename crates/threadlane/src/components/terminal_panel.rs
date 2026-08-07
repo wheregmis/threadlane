@@ -393,11 +393,7 @@ impl ProjectTerminal {
             // ScrollYView can still report its pre-layout 1x1 area on the
             // frame where the panel is reopened. The content/body already
             // have the real panel bounds, so use them for the first PTY size.
-            let content_rect = self
-                .view
-                .view(cx, ids!(terminal_content))
-                .area()
-                .rect(cx);
+            let content_rect = self.view.view(cx, ids!(terminal_content)).area().rect(cx);
             if content_rect.size.x > 1.0 && content_rect.size.y > 1.0 {
                 content_rect
             } else {
@@ -495,9 +491,7 @@ impl ProjectTerminalRef {
         }
     }
     pub fn is_open(&self) -> bool {
-        self.borrow()
-            .map(|inner| inner.expanded)
-            .unwrap_or(false)
+        self.borrow().map(|inner| inner.expanded).unwrap_or(false)
     }
 
     pub fn dimensions(&self, cx: &Cx) -> Option<(usize, usize)> {

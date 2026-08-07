@@ -1,11 +1,7 @@
 use super::*;
 
 impl App {
-    pub(super) fn handle_provider_settings_action(
-        &mut self,
-        cx: &mut Cx,
-        actions: &Actions,
-    ) {
+    pub(super) fn handle_provider_settings_action(&mut self, cx: &mut Cx, actions: &Actions) {
         let providers_modal_uid = self.ui.widget(cx, ids!(providers_modal)).widget_uid();
         if let Some(action) = actions.find_widget_action(providers_modal_uid) {
             match action.cast::<ProviderSettingsModalAction>() {

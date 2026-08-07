@@ -1,0 +1,23 @@
+use mod.std.*
+use mod.hub;
+
+let RunItem = {
+    on_run: nil,
+    name: ""
+    package_name: ""
+    in_studio: true
+}
+
+let RunRelease = RunItem{
+    on_run: fn(id){
+        hub.run(
+            {"STUDIO_HOST": hub.studio_local_host() "STUDIO_BUILD": id.to_string() "STUDIO_CRATE": self.name},
+            "cargo",
+            ["run" "-p" self.name "--release" "--message-format=json" "--" "--message-format=json"],
+        )
+    }
+}
+
+hub.set_run_items([
+    RunRelease{name: "threadlane"}
+])

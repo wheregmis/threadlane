@@ -111,6 +111,8 @@ pub struct SessionList {
     search_query: String,
     #[rust]
     fixed_tree_top: bool,
+    #[rust]
+    last_row_count: usize,
 }
 
 impl SessionList {
@@ -272,6 +274,10 @@ impl Widget for SessionList {
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
                 let rows = data.rows.len().max(1);
+                if self.last_row_count != rows {
+                    self.last_row_count = rows;
+                    list.set_first_id_and_scroll(0, 0.0);
+                }
                 list.set_item_range(cx, 0, rows);
 
                 while let Some(item_id) = list.next_visible_item(cx) {
@@ -518,7 +524,10 @@ mod tests {
         assert_eq!(session_row_template(true, true, false), id!(SessionRow));
         assert_eq!(session_row_template(true, false, false), id!(SessionRow));
         assert_eq!(session_row_template(false, true, false), id!(SessionRow));
-        assert_eq!(session_row_template(false, false, true), id!(SessionRowLast));
+        assert_eq!(
+            session_row_template(false, false, true),
+            id!(SessionRowLast)
+        );
         assert_eq!(session_row_template(false, false, false), id!(SessionRow));
     }
 

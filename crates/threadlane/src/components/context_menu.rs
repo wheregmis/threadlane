@@ -1,8 +1,8 @@
 //! SessionContextMenu widget and menu popup component.
 
+use super::overlay_popup_base::is_overlay_dismissal_event;
 use crate::panels::sessions::state::set_session_context_target;
 use makepad_widgets::*;
-use super::overlay_popup_base::is_overlay_dismissal_event;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub enum SessionContextMenuAction {
@@ -78,7 +78,9 @@ impl Widget for SessionContextMenu {
             }
         }
 
-        if is_overlay_dismissal_event(event, self.menu_rect) || matches!(event, Event::BackPressed { .. }) {
+        if is_overlay_dismissal_event(event, self.menu_rect)
+            || matches!(event, Event::BackPressed { .. })
+        {
             self.close(cx);
         }
     }

@@ -244,6 +244,7 @@ pub fn prune_historical_tool_outputs(
                 name,
                 content,
                 is_error,
+                terminate,
             } => {
                 if keep_full[i] || content.len() <= INLINE_TOOL_OUTPUT_LIMIT {
                     result.push(msg.clone());
@@ -257,6 +258,7 @@ pub fn prune_historical_tool_outputs(
                         name: name.clone(),
                         content: pruned_content,
                         is_error: *is_error,
+                        terminate: *terminate,
                     });
                 }
             }
@@ -431,6 +433,7 @@ mod tests {
             name: "read_file".into(),
             content: "x".repeat(1_000),
             is_error: false,
+            terminate: false,
         });
 
         let compacted = compact_messages_to_token_budget(&msgs, 1);
@@ -454,6 +457,7 @@ mod tests {
                 name: "run_command".into(),
                 content: "running cargo test ... finished cleanly".into(),
                 is_error: false,
+                terminate: false,
             },
             AgentMessage::Assistant {
                 content: Some("Makepad theme tokens must be used.".into()),
@@ -518,6 +522,7 @@ mod tests {
                 name: "view_file".into(),
                 content: "a".repeat(5_000),
                 is_error: false,
+                terminate: false,
             });
         }
 

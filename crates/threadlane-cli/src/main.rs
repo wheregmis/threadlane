@@ -15,8 +15,8 @@ use std::path::PathBuf;
 #[cfg(test)]
 use std::sync::{Mutex, OnceLock};
 use threadlane_agent::AgentEvent;
-use threadlane_coding_agent::{CodingAgent, CodingAgentOptions};
 use threadlane_auth::{load_credentials, load_openai_api_key};
+use threadlane_coding_agent::{CodingAgent, CodingAgentOptions};
 #[cfg(test)]
 use ui::{AppState, RunStatus};
 
@@ -109,7 +109,10 @@ pub(crate) fn resolve_credentials() -> (String, Option<String>) {
         return (api_key, None);
     }
     if let Some(credentials) = load_credentials() {
-        return (credentials.access_token, credentials.account_id.or(account_id));
+        return (
+            credentials.access_token,
+            credentials.account_id.or(account_id),
+        );
     }
     (String::new(), account_id)
 }

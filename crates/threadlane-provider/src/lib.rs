@@ -11,4 +11,4 @@ pub use router::{
     is_antigravity_model, is_opencode_model, PayloadFormat, PayloadSource, ProviderClient,
 };
 pub use threadlane_auth::opencode_auth;
-pub use traits::ModelProvider;
+pub use traits::{DeferredResponse, ModelProvider};

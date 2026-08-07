@@ -373,12 +373,14 @@ fn display_rows_with_harness(
             }
         }
         for item in row.rail_items.iter_mut().filter(|item| item.key.is_none()) {
-            let Some((index, activity)) = activities.iter().enumerate().find(|(index, activity)| {
-                !matched[*index]
-                    && item.task
-                        == super::state::normalize_whitespace_bounded(&activity.task, 160)
-                    && item.agent == activity.agent
-            }) else {
+            let Some((index, activity)) =
+                activities.iter().enumerate().find(|(index, activity)| {
+                    !matched[*index]
+                        && item.task
+                            == super::state::normalize_whitespace_bounded(&activity.task, 160)
+                        && item.agent == activity.agent
+                })
+            else {
                 continue;
             };
             item.key = Some(activity.key.clone());
@@ -391,18 +393,15 @@ fn display_rows_with_harness(
         }
     }
 
-    for (index, activity) in activities.iter().enumerate() {
-        if !matched[index] {
-            let mut rail_items = Vec::new();
-            super::state::merge_harness_activities(
-                &mut rail_items,
-                std::slice::from_ref(activity),
-            );
-            rows.push(DisplayRow::SubagentTool(CachedSubagentTool {
-                rail_items,
-                preview: harness_activity_preview(std::slice::from_ref(activity)),
-            }));
-        }
+    let unmatched = activities
+        .iter()
+        .enumerate()
+        .filter_map(|(index, activity)| (!matched[index]).then_some(activity))
+        .collect::<Vec<_>>();
+    if !unmatched.is_empty() {
+        rows.push(DisplayRow::ActivityGroup(harness_activity_group(
+            &unmatched,
+        )));
     }
 
     rows
@@ -411,6 +410,7 @@ fn display_rows_with_harness(
 fn harness_activity_preview(activities: &[HarnessActivity]) -> String {
     let status = [
         HarnessActivityStatus::Aborted,
+        HarnessActivityStatus::Faulted,
         HarnessActivityStatus::Retrying,
         HarnessActivityStatus::Recovering,
         HarnessActivityStatus::Working,
@@ -428,7 +428,59 @@ fn harness_activity_preview(activities: &[HarnessActivity]) -> String {
             .expect("selected harness activity status"),
     );
     let count = activities.len();
-    format!("{label} · {count} {}", if count == 1 { "task" } else { "tasks" })
+    format!(
+        "{label} · {count} {}",
+        if count == 1 { "task" } else { "tasks" }
+    )
+}
+
+fn harness_activity_group(activities: &[&HarnessActivity]) -> CachedActivityGroup {
+    let running = activities.iter().any(|activity| {
+        matches!(
+            activity.status,
+            HarnessActivityStatus::Queued
+                | HarnessActivityStatus::Working
+                | HarnessActivityStatus::Recovering
+                | HarnessActivityStatus::Retrying
+        )
+    });
+    let has_error = activities.iter().any(|activity| {
+        matches!(
+            activity.status,
+            HarnessActivityStatus::Aborted
+                | HarnessActivityStatus::Faulted
+                | HarnessActivityStatus::Retrying
+        )
+    });
+    let has_cancelled = activities
+        .iter()
+        .any(|activity| activity.status == HarnessActivityStatus::Cancelled);
+    let detail = activities
+        .iter()
+        .map(|activity| {
+            format!(
+                "- {} — {}",
+                super::state::normalize_whitespace_bounded(&activity.task, 240),
+                super::state::harness_activity_detail(activity)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    CachedActivityGroup {
+        detail,
+        preview: harness_activity_preview(
+            &activities
+                .iter()
+                .map(|activity| (*activity).clone())
+                .collect::<Vec<_>>(),
+        ),
+        title: if running { "Working" } else { "Worked" },
+        tool_icon: ToolIcon::Generic,
+        running,
+        has_error,
+        has_cancelled,
+    }
 }
 
 fn activity_kind(name: &str, icon: ToolIcon) -> ActivityKind {
@@ -743,10 +795,35 @@ pub struct SubagentRail {
     pub items: Vec<SubagentRailItem>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SubagentRailAction {
+    Resume(String),
+    Abort(String),
+}
+
 impl Widget for SubagentRail {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         for row in self.rows.values_mut() {
             row.handle_event(cx, event, scope);
+        }
+        if let Event::Actions(actions) = event {
+            for (index, item) in self.items.iter().enumerate() {
+                if item.status != "Recovering" {
+                    continue;
+                }
+                let row_id = LiveId::from_num(1, index as u64);
+                let Some(row) = self.rows.get_mut(&row_id) else {
+                    continue;
+                };
+                let Some(key) = item.key.as_ref() else {
+                    continue;
+                };
+                if row.button(cx, ids!(resume_btn)).clicked(actions) {
+                    cx.widget_action(self.uid, SubagentRailAction::Resume(key.clone()));
+                } else if row.button(cx, ids!(abort_btn)).clicked(actions) {
+                    cx.widget_action(self.uid, SubagentRailAction::Abort(key.clone()));
+                }
+            }
         }
     }
 
@@ -792,6 +869,10 @@ impl Widget for SubagentRail {
                 cx,
                 item.status == "Working" && item.detail.trim().is_empty(),
             );
+            row.button(cx, ids!(resume_btn))
+                .set_visible(cx, item.status == "Recovering");
+            row.button(cx, ids!(abort_btn))
+                .set_visible(cx, item.status == "Recovering");
             update_activity_status(
                 cx,
                 row,
@@ -826,12 +907,8 @@ impl Widget for ChatList {
             || data.revision != self.cached_revision
         {
             if msg_count != self.cached_msg_count || data.revision != self.cached_base_revision {
-                self.cached_base_rows = display_rows_with_harness(
-                    &data.messages,
-                    None,
-                    "",
-                    &data.harness_activities,
-                );
+                self.cached_base_rows =
+                    display_rows_with_harness(&data.messages, None, "", &data.harness_activities);
                 self.cached_base_revision = data.revision;
             }
 
@@ -1121,7 +1198,6 @@ impl Widget for ChatList {
                 let jump_hint = self.view.widget(cx, ids!(jump_to_latest_hint));
                 jump_hint.set_visible(cx, can_jump_to_latest && self.hovered_jump_to_latest);
                 jump_hint.redraw(cx);
-
             }
         }
         DrawStep::done()
@@ -1220,10 +1296,22 @@ impl Widget for ChatList {
 impl ChatList {
     fn focused_starter_action(&self, cx: &Cx) -> Option<StarterPromptAction> {
         [
-            (ids!(empty_state.cards_row.explore_card.btn), StarterPromptAction::Explore),
-            (ids!(empty_state.cards_row.build_card.btn), StarterPromptAction::Build),
-            (ids!(empty_state.cards_row.review_card.btn), StarterPromptAction::Review),
-            (ids!(empty_state.cards_row.fix_card.btn), StarterPromptAction::Fix),
+            (
+                ids!(empty_state.cards_row.explore_card.btn),
+                StarterPromptAction::Explore,
+            ),
+            (
+                ids!(empty_state.cards_row.build_card.btn),
+                StarterPromptAction::Build,
+            ),
+            (
+                ids!(empty_state.cards_row.review_card.btn),
+                StarterPromptAction::Review,
+            ),
+            (
+                ids!(empty_state.cards_row.fix_card.btn),
+                StarterPromptAction::Fix,
+            ),
         ]
         .into_iter()
         .find_map(|(path, action)| {
@@ -1378,7 +1466,7 @@ mod tests {
     }
 
     #[test]
-    fn harness_activity_uses_one_existing_subagent_rail_row() {
+    fn standalone_harness_activity_uses_the_worked_activity_group() {
         let activities = vec![super::super::state::HarnessActivity {
             key: "lane-a".into(),
             task: "Recover interrupted work".into(),
@@ -1390,12 +1478,12 @@ mod tests {
         let rows = display_rows_with_harness(&[], None, "", &activities);
 
         assert_eq!(rows.len(), 1);
-        let DisplayRow::SubagentTool(row) = &rows[0] else {
-            panic!("expected a subagent rail row");
+        let DisplayRow::ActivityGroup(row) = &rows[0] else {
+            panic!("expected a worked activity group");
         };
-        assert_eq!(row.rail_items.len(), 1);
-        assert_eq!(row.rail_items[0].key.as_deref(), Some("lane-a"));
-        assert_eq!(row.rail_items[0].status, "Recovering");
+        assert_eq!(row.title, "Working");
+        assert_eq!(row.preview, "Recovering · 1 task");
+        assert!(row.detail.contains("Recover interrupted work"));
     }
 
     #[test]
@@ -1444,8 +1532,7 @@ mod tests {
         let rows = display_rows_with_harness(&messages, None, "", &activities);
 
         assert_eq!(rows.len(), 2);
-        let [DisplayRow::SubagentTool(first), DisplayRow::SubagentTool(second)] = &rows[..]
-        else {
+        let [DisplayRow::SubagentTool(first), DisplayRow::SubagentTool(second)] = &rows[..] else {
             panic!("expected two delegation rows");
         };
         assert_eq!(first.rail_items[0].key.as_deref(), Some("lane-a"));

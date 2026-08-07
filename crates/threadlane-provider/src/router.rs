@@ -136,6 +136,32 @@ impl ProviderClient {
             .await;
     }
 
+    pub async fn fetch_deferred(
+        &self,
+        model: &str,
+        handle_id: &str,
+    ) -> Result<crate::traits::DeferredResponse, String> {
+        let provider: Arc<dyn crate::traits::ModelProvider> = if is_antigravity_model(model) {
+            Arc::new(self.antigravity.clone())
+        } else if is_opencode_model(model) {
+            Arc::new(self.opencode.clone())
+        } else {
+            Arc::new(self.openai.clone())
+        };
+        provider.fetch_deferred(handle_id).await
+    }
+
+    pub async fn cancel_deferred(&self, model: &str, handle_id: &str) -> Result<(), String> {
+        let provider: Arc<dyn crate::traits::ModelProvider> = if is_antigravity_model(model) {
+            Arc::new(self.antigravity.clone())
+        } else if is_opencode_model(model) {
+            Arc::new(self.opencode.clone())
+        } else {
+            Arc::new(self.openai.clone())
+        };
+        provider.cancel_deferred(handle_id).await
+    }
+
     /// Generate a short session title using the provider selected by the model id.
     pub async fn generate_title(&self, model: &str, prompt: &str) -> Result<String, String> {
         if !is_opencode_model(model) {
