@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.1.5](https://github.com/wheregmis/threadlane/compare/v0.1.4...v0.1.5) (2026-08-18)
+
+
+### Features
+
+* add session plans and grouped tool activity display ([f4a646a](https://github.com/wheregmis/threadlane/commit/f4a646ab4eacb41b893e0876db44f5fbeb8c2aba))
+* **gpui:** add branch, effort, and command composer controls ([639c8b0](https://github.com/wheregmis/threadlane/commit/639c8b08366d81e77eca2ec2f4c5d75af35a1b23))
+* **gpui:** format context-window tooltip token counts readably ([236c90f](https://github.com/wheregmis/threadlane/commit/236c90f70696d7943b29fdee3d9670ccd33ee2ad))
+* Roadmap ([223ae03](https://github.com/wheregmis/threadlane/commit/223ae030549b610ed4ac02d815fab3a82fda07aa))
+
+
+### Bug Fixes
+
+* **coding-agent:** correct ${@:-default} prompt-template parsing ([322649d](https://github.com/wheregmis/threadlane/commit/322649dd4b79f609eb3f1b9606b314a015ad1e4f))
+
 ## [0.1.4](https://github.com/wheregmis/threadlane/compare/v0.1.3...v0.1.4) (2026-08-15)
 
 
