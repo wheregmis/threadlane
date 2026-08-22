@@ -1,26 +1,42 @@
 use crate::types::AgentToolDefinition;
 use std::collections::HashSet;
 
-/// Optional local shortlist stage. The provider remains authoritative.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct LocalToolRouter {
+pub const NEEDLE_TOP_K: usize = 5;
+
+pub fn render_needle_candidate(definition: &AgentToolDefinition) -> String {
+    format!(
+        "{}\n{}\n{}",
+        definition.name,
+        definition.description.as_deref().unwrap_or_default(),
+        serde_json::to_string(&definition.parameters).unwrap_or_else(|_| "null".into())
+    )
+}
+
+#[cfg_attr(not(feature = "needle"), allow(dead_code))]
+fn definitions_for_ranks(
+    ranked: &[(usize, f32)],
+    definitions: &[AgentToolDefinition],
     max_tools: usize,
+) -> Option<Vec<AgentToolDefinition>> {
+    let mut seen = HashSet::new();
+    let mut selected = Vec::new();
+    for (index, _) in ranked {
+        let definition = definitions.get(*index)?;
+        if seen.insert(*index) {
+            selected.push(definition.clone());
+        }
+        if selected.len() == max_tools {
+            break;
+        }
+    }
+    (!selected.is_empty()).then_some(selected)
 }
 
-impl LocalToolRouter {
-    pub fn new(max_tools: usize) -> Self {
-        Self { max_tools }
-    }
-
-    pub fn shortlist(
-        &self,
-        selected_names: impl IntoIterator<Item = String>,
-        definitions: &[AgentToolDefinition],
-    ) -> Vec<AgentToolDefinition> {
-        let selected: HashSet<String> = selected_names.into_iter().collect();
-        filter_tool_definitions(&selected, definitions, self.max_tools)
-    }
-}
+#[cfg(feature = "needle")]
+static ENGINE: std::sync::OnceLock<Option<std::sync::Arc<needle_infer::v2_engine::V2Engine>>> =
+    std::sync::OnceLock::new();
+#[cfg(feature = "needle")]
+static IN_FLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(feature = "needle")]
 pub async fn shortlist_from_environment(
@@ -31,74 +47,42 @@ pub async fn shortlist_from_environment(
     if !enabled {
         return definitions.to_vec();
     }
-    tracing::debug!(target: "threadlane_runtime::needle", "local Needle routing enabled");
-    use std::sync::OnceLock;
-    static ENGINE: OnceLock<Option<std::sync::Arc<needle_infer::v2_engine::V2Engine>>> =
-        OnceLock::new();
-    static IN_FLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    let Some(engine) = ENGINE
-        .get_or_init(|| {
-            let path = std::env::var("THREADLANE_NEEDLE_WEIGHTS")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|_| default_model_path());
-            match needle_infer::v2_engine::V2Engine::load(&path) {
-                Ok(engine) => {
-                    tracing::info!(target: "threadlane_runtime::needle", path = %path.display(), "Needle model loaded");
-                    Some(std::sync::Arc::new(engine))
-                }
-                Err(error) => {
-                    tracing::warn!(target: "threadlane_runtime::needle", path = %path.display(), %error, "Needle model unavailable; using full tool list");
-                    None
-                }
-            }
-        })
-        .as_ref()
-    else {
+    if definitions.len() <= NEEDLE_TOP_K {
+        return definitions.to_vec();
+    };
+    let Ok(engine) = needle_engine() else {
         return definitions.to_vec();
     };
     if IN_FLIGHT.swap(true, std::sync::atomic::Ordering::AcqRel) {
         tracing::debug!(target: "threadlane_runtime::needle", "Needle inference already running; using full tool list");
         return definitions.to_vec();
     }
-    let engine = std::sync::Arc::clone(engine);
     let query = query.to_owned();
     let definitions = definitions.to_vec();
     let fallback = definitions.clone();
+    let started = std::time::Instant::now();
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         tokio::task::spawn_blocking(move || {
-            let tools = serde_json::to_string(&definitions).unwrap_or_default();
-            let result = engine.generate(
-                &query,
-                &tools,
-                &needle_infer::v2_engine::GenerateOptions {
-                    max_new_tokens: 64,
-                    constrain: true,
-                    ..Default::default()
-                },
-                |_, _| {},
-            );
+            let rendered = definitions
+                .iter()
+                .map(render_needle_candidate)
+                .collect::<Vec<_>>();
+            let descriptions = rendered.iter().map(String::as_str).collect::<Vec<_>>();
+            let ranked = engine.retrieve_tools(&query, &descriptions, NEEDLE_TOP_K);
             IN_FLIGHT.store(false, std::sync::atomic::Ordering::Release);
-            let selected = result
-                .tool_call
-                .as_deref()
-                .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
-                .and_then(|value| {
-                    value
-                        .as_array()
-                        .and_then(|calls| calls.first())
-                        .or_else(|| value.as_object().map(|_| &value))
-                        .and_then(|call| call.get("name"))
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_owned)
-                });
-            LocalToolRouter::new(8).shortlist(selected.into_iter(), &definitions)
+            definitions_for_ranks(&ranked, &definitions, NEEDLE_TOP_K)
+                .unwrap_or_else(|| definitions.clone())
         }),
     )
     .await;
     match result {
         Ok(Ok(routed)) => {
-            tracing::debug!(target: "threadlane_runtime::needle", selected_tools = routed.len(), "Needle routing completed");
+            let selected_names = routed
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>();
+            tracing::debug!(target: "threadlane_runtime::needle", selected_tools = routed.len(), ?selected_names, duration_ms = started.elapsed().as_millis() as u64, "Needle routing completed");
             routed
         }
         Ok(Err(error)) => {
@@ -113,8 +97,40 @@ pub async fn shortlist_from_environment(
 }
 
 #[cfg(feature = "needle")]
-fn default_model_path() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../needle/needle2.cact")
+pub(crate) fn needle_model_path() -> std::path::PathBuf {
+    std::env::var("THREADLANE_NEEDLE_WEIGHTS")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../needle/needle2.cact")
+        })
+}
+
+#[cfg(feature = "needle")]
+pub(crate) fn needle_engine() -> Result<std::sync::Arc<needle_infer::v2_engine::V2Engine>, String> {
+    let path = needle_model_path();
+    if !path.is_file() {
+        return Err("Needle model weights are unavailable.".into());
+    }
+    ENGINE
+        .get_or_init(|| match needle_infer::v2_engine::V2Engine::load(&path) {
+            Ok(engine) => Some(std::sync::Arc::new(engine)),
+            Err(error) => {
+                tracing::warn!(target: "threadlane_runtime::needle", %error, "Needle model unavailable");
+                None
+            }
+        })
+        .clone()
+        .ok_or_else(|| "Needle model weights could not be loaded.".into())
+}
+
+#[cfg(feature = "needle")]
+pub fn validate_needle_model() -> Result<(), String> {
+    needle_engine().map(|_| ())
+}
+
+#[cfg(not(feature = "needle"))]
+pub fn validate_needle_model() -> Result<(), String> {
+    Err("Needle support is not compiled into this build.".into())
 }
 
 #[cfg(not(feature = "needle"))]
@@ -124,27 +140,6 @@ pub async fn shortlist_from_environment(
     _enabled: bool,
 ) -> Vec<AgentToolDefinition> {
     definitions.to_vec()
-}
-
-pub fn filter_tool_definitions(
-    selected_names: &HashSet<String>,
-    definitions: &[AgentToolDefinition],
-    max_tools: usize,
-) -> Vec<AgentToolDefinition> {
-    if selected_names.is_empty() || max_tools == 0 {
-        return definitions.to_vec();
-    }
-    let filtered: Vec<_> = definitions
-        .iter()
-        .filter(|definition| selected_names.contains(&definition.name))
-        .take(max_tools)
-        .cloned()
-        .collect();
-    if filtered.is_empty() {
-        definitions.to_vec()
-    } else {
-        filtered
-    }
 }
 
 #[cfg(test)]
@@ -157,32 +152,40 @@ mod tests {
     }
 
     #[test]
-    fn filters_to_valid_selected_names() {
+    fn maps_ranked_indexes_in_retrieval_order() {
         let definitions = vec![tool("alpha"), tool("beta"), tool("gamma")];
-        let selected = HashSet::from(["gamma".to_string(), "missing".to_string()]);
         assert_eq!(
-            filter_tool_definitions(&selected, &definitions, 5),
-            vec![tool("gamma")]
+            definitions_for_ranks(&[(2, 0.9), (0, 0.8), (2, 0.7)], &definitions, 5),
+            Some(vec![tool("gamma"), tool("alpha")])
         );
     }
 
     #[test]
-    fn falls_back_for_empty_or_invalid_selection() {
+    fn rejects_any_out_of_range_rank() {
         let definitions = vec![tool("alpha"), tool("beta")];
         assert_eq!(
-            filter_tool_definitions(&HashSet::new(), &definitions, 5),
-            definitions
+            definitions_for_ranks(&[(0, 1.0), (9, 0.5)], &definitions, 5),
+            None
         );
+    }
+
+    #[test]
+    fn renders_name_description_and_compact_parameters() {
+        let rendered = render_needle_candidate(&AgentToolDefinition::new(
+            "search_code",
+            "Search workspace code.",
+            json!({"type": "object", "properties": {"query": {"type": "string"}}}),
+        ));
         assert_eq!(
-            filter_tool_definitions(&HashSet::from(["missing".to_string()]), &definitions, 5),
-            definitions
+            rendered,
+            "search_code\nSearch workspace code.\n{\"properties\":{\"query\":{\"type\":\"string\"}},\"type\":\"object\"}"
         );
     }
 
     #[cfg(feature = "needle")]
     #[tokio::test]
     #[ignore = "loads the local 14 MB Needle model"]
-    async fn needle_v2_selects_a_registered_tool() {
+    async fn needle_v2_retrieves_weather_in_top_five() {
         let definitions = vec![
             AgentToolDefinition::new(
                 "get_weather",
@@ -194,31 +197,23 @@ mod tests {
                 "Control the lights in a room.",
                 json!({"type": "object", "properties": {"room": {"type": "string"}, "state": {"type": "string"}}}),
             ),
+            tool("search_code"),
+            tool("read_file"),
+            tool("write_file"),
+            tool("list_directory"),
         ];
-        let engine = needle_infer::v2_engine::V2Engine::load(default_model_path()).unwrap();
-        let result = engine.generate(
+        let engine = needle_engine().unwrap();
+        let rendered = definitions
+            .iter()
+            .map(render_needle_candidate)
+            .collect::<Vec<_>>();
+        let descriptions = rendered.iter().map(String::as_str).collect::<Vec<_>>();
+        let ranked = engine.retrieve_tools(
             "what is the weather in Toronto?",
-            &serde_json::to_string(&definitions).unwrap(),
-            &needle_infer::v2_engine::GenerateOptions {
-                max_new_tokens: 64,
-                constrain: true,
-                ..Default::default()
-            },
-            |_, _| {},
+            &descriptions,
+            NEEDLE_TOP_K,
         );
-        let selected = result
-            .tool_call
-            .as_deref()
-            .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
-            .and_then(|value| {
-                value
-                    .as_array()
-                    .and_then(|calls| calls.first())
-                    .or_else(|| value.as_object().map(|_| &value))
-                    .and_then(|call| call.get("name"))
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned)
-            });
-        assert_eq!(selected.as_deref(), Some("get_weather"));
+        let selected = definitions_for_ranks(&ranked, &definitions, NEEDLE_TOP_K).unwrap();
+        assert!(selected.iter().any(|tool| tool.name == "get_weather"));
     }
 }
