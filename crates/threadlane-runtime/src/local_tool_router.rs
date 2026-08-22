@@ -67,7 +67,7 @@ pub async fn shortlist_from_environment(
         tracing::debug!(target: "threadlane_runtime::needle", "Needle inference already running; using full tool list");
         return definitions.to_vec();
     }
-    let _gate = InFlightGuard;
+    let gate = InFlightGuard;
     let query = query.to_owned();
     let definitions = definitions.to_vec();
     let fallback = definitions.clone();
@@ -75,6 +75,7 @@ pub async fn shortlist_from_environment(
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         tokio::task::spawn_blocking(move || {
+            let _gate = gate;
             let rendered = definitions
                 .iter()
                 .map(render_needle_candidate)
@@ -154,6 +155,9 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[cfg(feature = "needle")]
+    static GATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn tool(name: &str) -> AgentToolDefinition {
         AgentToolDefinition::new(name, name, json!({"type": "object"}))
     }
@@ -203,10 +207,31 @@ mod tests {
     #[cfg(feature = "needle")]
     #[test]
     fn releases_inference_gate_when_guard_drops() {
+        let _lock = GATE_TEST_LOCK.lock().unwrap();
         IN_FLIGHT.store(true, std::sync::atomic::Ordering::Release);
         {
             let _guard = InFlightGuard;
         }
+        assert!(!IN_FLIGHT.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[cfg(feature = "needle")]
+    #[test]
+    fn keeps_inference_gate_until_blocking_job_finishes() {
+        use std::sync::mpsc;
+        let _lock = GATE_TEST_LOCK.lock().unwrap();
+        IN_FLIGHT.store(true, std::sync::atomic::Ordering::Release);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (finish_tx, finish_rx) = mpsc::channel();
+        let job = std::thread::spawn(move || {
+            let _guard = InFlightGuard;
+            started_tx.send(()).unwrap();
+            finish_rx.recv().unwrap();
+        });
+        started_rx.recv().unwrap();
+        assert!(IN_FLIGHT.load(std::sync::atomic::Ordering::Acquire));
+        finish_tx.send(()).unwrap();
+        job.join().unwrap();
         assert!(!IN_FLIGHT.load(std::sync::atomic::Ordering::Acquire));
     }
 
