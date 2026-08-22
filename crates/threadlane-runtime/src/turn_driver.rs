@@ -264,6 +264,96 @@ mod needle_tests {
             2
         );
     }
+
+    #[cfg(feature = "needle")]
+    #[tokio::test]
+    async fn durable_second_attempt_restores_full_tool_catalogue() {
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = Arc::new(ContinuationProvider {
+            requests: requests.clone(),
+            calls: std::sync::atomic::AtomicUsize::new(1),
+        });
+        let mut runtime = crate::runtime::AgentRuntime::new_with_provider(
+            "",
+            None,
+            "test-model",
+            None,
+            crate::config::AgentConfig::default(),
+            provider,
+        )
+        .unwrap();
+        runtime.set_needle_enabled(true);
+        runtime
+            .register_tool_executor(Arc::new(ContinuationExecutor))
+            .unwrap();
+        let expected_tool_count = runtime.configured_tool_definitions().len();
+        let prepared_tools = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_prepared_tools = prepared_tools.clone();
+        runtime.set_provider_boundary_preparer(Some(Arc::new(move |request| {
+            let captured_prepared_tools = captured_prepared_tools.clone();
+            Box::pin(async move {
+                let tools: serde_json::Value = serde_json::from_str(
+                    request
+                        .tool_schema_json
+                        .as_deref()
+                        .expect("full configured schema"),
+                )
+                .unwrap();
+                captured_prepared_tools.lock().unwrap().push(tools);
+                Ok(ProviderBoundaryResult {
+                    messages: request.messages,
+                    context_limit: 128_000,
+                    context_limit_is_estimate: true,
+                    compaction_generation: 0,
+                    provisional_estimated_tokens: None,
+                    provider_attempt: Some(2),
+                    provider_request_id: Some("durable-request-2".into()),
+                })
+            })
+        })));
+        let manifest_tools = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_manifest_tools = manifest_tools.clone();
+        runtime.set_provider_trace_recorder(Some(Arc::new(move |event| {
+            let captured_manifest_tools = captured_manifest_tools.clone();
+            Box::pin(async move {
+                if let ProviderTraceEvent::ContextManifest { items, .. } = event {
+                    captured_manifest_tools.lock().unwrap().extend(
+                        items
+                            .into_iter()
+                            .filter(|item| item.source == ContextItemSource::ToolSchema),
+                    );
+                }
+                Ok(())
+            })
+        })));
+        runtime
+            .state_clone()
+            .lock()
+            .await
+            .messages
+            .push(AgentMessage::user(
+                "__needle_test_force_shortlist__",
+                Vec::new(),
+            ));
+
+        runtime.resume_pending_turn().await;
+
+        let prepared_tools = prepared_tools.lock().unwrap();
+        assert_eq!(prepared_tools.len(), 1);
+        assert_eq!(
+            prepared_tools[0].as_array().unwrap().len(),
+            expected_tool_count
+        );
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].as_array().unwrap().len(), expected_tool_count);
+        let manifest_tools = manifest_tools.lock().unwrap();
+        assert_eq!(manifest_tools.len(), 1);
+        assert_eq!(
+            manifest_tools[0].label.as_ref().map(|label| label.as_str()),
+            Some(format!("{expected_tool_count} tools").as_str())
+        );
+    }
 }
 
 fn classify_provider_error(error: &str) -> ErrorCategory {
@@ -440,32 +530,25 @@ impl<'a> TurnDriver<'a> {
             };
             let overflow_recovery = std::mem::take(&mut overflow_recovery_pending);
             let configured_tool_definitions = self.tool_dispatcher.configured_tool_definitions();
-            let query = {
-                let turn = self.turn.lock().await;
-                needle_query(turn_number as u32, &turn.messages).map(str::to_owned)
-            };
-            let tool_definitions = tool_definitions_for_attempt(
-                turn_number as u32,
-                query.as_deref(),
-                &configured_tool_definitions,
-                self.config.needle_enabled,
-            )
-            .await;
-            let provider_tools = tool_definitions
+            let full_provider_tools = configured_tool_definitions
                 .iter()
                 .map(|tool| tool.to_chat_completions_tool())
                 .collect::<Vec<_>>();
-            let tool_schema_json = (!provider_tools.is_empty())
-                .then(|| serde_json::to_string(&provider_tools).unwrap_or_default());
+            let full_tool_schema_json = (!full_provider_tools.is_empty())
+                .then(|| serde_json::to_string(&full_provider_tools).unwrap_or_default());
 
             let mut boundary_result: Option<ProviderBoundaryResult> = None;
             if let Some(preparer) = &self.provider_boundary_preparer {
                 let messages = self.turn.lock().await.messages.clone();
+                // Prepare against the full catalogue before looking at Needle:
+                // a reopened driver must use the journal's provider attempt,
+                // not its process-local turn number, to decide whether routing
+                // is permitted. This also makes compaction conservative.
                 let prepared = preparer(ProviderBoundaryRequest {
                     attempt: turn_number as u32,
                     model: model.clone(),
                     messages,
-                    tool_schema_json: tool_schema_json.clone(),
+                    tool_schema_json: full_tool_schema_json.clone(),
                     overflow_recovery,
                 })
                 .await
@@ -497,10 +580,24 @@ impl<'a> TurnDriver<'a> {
                         PROVIDER_REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed)
                     )
                 });
+            let request_messages = self.turn.lock().await.messages.clone();
+            let query = needle_query(provider_attempt, &request_messages).map(str::to_owned);
+            let tool_definitions = tool_definitions_for_attempt(
+                provider_attempt,
+                query.as_deref(),
+                &configured_tool_definitions,
+                self.config.needle_enabled,
+            )
+            .await;
+            let provider_tools = tool_definitions
+                .iter()
+                .map(|tool| tool.to_chat_completions_tool())
+                .collect::<Vec<_>>();
+            let tool_schema_json = (!provider_tools.is_empty())
+                .then(|| serde_json::to_string(&provider_tools).unwrap_or_default());
             let (stream_tx, mut stream_rx) = mpsc::channel(100);
             let client = self.provider_client.clone();
             let payload_cache_key = self.prompt_cache_key.clone();
-            let request_messages = self.turn.lock().await.messages.clone();
             let request = {
                 let turn = self.turn.lock().await;
                 RuntimeRequest {
