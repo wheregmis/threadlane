@@ -49,6 +49,31 @@ impl Drop for InFlightGuard {
 }
 
 #[cfg(feature = "needle")]
+async fn run_with_inflight_gate<T, F>(
+    timeout: std::time::Duration,
+    job: F,
+) -> Option<Result<Result<T, tokio::task::JoinError>, tokio::time::error::Elapsed>>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    if IN_FLIGHT.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return None;
+    }
+    let gate = InFlightGuard;
+    Some(
+        tokio::time::timeout(
+            timeout,
+            tokio::task::spawn_blocking(move || {
+                let _gate = gate;
+                job()
+            }),
+        )
+        .await,
+    )
+}
+
+#[cfg(feature = "needle")]
 pub async fn shortlist_from_environment(
     query: &str,
     definitions: &[AgentToolDefinition],
@@ -63,30 +88,25 @@ pub async fn shortlist_from_environment(
     let Ok(engine) = needle_engine() else {
         return definitions.to_vec();
     };
-    if IN_FLIGHT.swap(true, std::sync::atomic::Ordering::AcqRel) {
-        tracing::debug!(target: "threadlane_runtime::needle", "Needle inference already running; using full tool list");
-        return definitions.to_vec();
-    }
-    let gate = InFlightGuard;
     let query = query.to_owned();
     let definitions = definitions.to_vec();
     let fallback = definitions.clone();
     let started = std::time::Instant::now();
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        tokio::task::spawn_blocking(move || {
-            let _gate = gate;
-            let rendered = definitions
-                .iter()
-                .map(render_needle_candidate)
-                .collect::<Vec<_>>();
-            let descriptions = rendered.iter().map(String::as_str).collect::<Vec<_>>();
-            let ranked = engine.retrieve_tools(&query, &descriptions, NEEDLE_TOP_K);
-            definitions_for_ranks(&ranked, &definitions, NEEDLE_TOP_K)
-                .unwrap_or_else(|| definitions.clone())
-        }),
-    )
-    .await;
+    let Some(result) = run_with_inflight_gate(std::time::Duration::from_secs(2), move || {
+        let rendered = definitions
+            .iter()
+            .map(render_needle_candidate)
+            .collect::<Vec<_>>();
+        let descriptions = rendered.iter().map(String::as_str).collect::<Vec<_>>();
+        let ranked = engine.retrieve_tools(&query, &descriptions, NEEDLE_TOP_K);
+        definitions_for_ranks(&ranked, &definitions, NEEDLE_TOP_K)
+            .unwrap_or_else(|| definitions.clone())
+    })
+    .await
+    else {
+        tracing::debug!(target: "threadlane_runtime::needle", duration_ms = started.elapsed().as_millis() as u64, "Needle routing already in flight; using full tool list");
+        return fallback;
+    };
     match result {
         Ok(Ok(routed)) => {
             let selected_names = routed
@@ -216,22 +236,22 @@ mod tests {
     }
 
     #[cfg(feature = "needle")]
-    #[test]
-    fn keeps_inference_gate_until_blocking_job_finishes() {
+    #[tokio::test]
+    async fn keeps_inference_gate_until_blocking_job_finishes() {
         use std::sync::mpsc;
         let _lock = GATE_TEST_LOCK.lock().unwrap();
-        IN_FLIGHT.store(true, std::sync::atomic::Ordering::Release);
         let (started_tx, started_rx) = mpsc::channel();
         let (finish_tx, finish_rx) = mpsc::channel();
-        let job = std::thread::spawn(move || {
-            let _guard = InFlightGuard;
+        let job = run_with_inflight_gate(std::time::Duration::from_millis(1), move || {
             started_tx.send(()).unwrap();
             finish_rx.recv().unwrap();
-        });
+        })
+        .await;
         started_rx.recv().unwrap();
+        assert!(job.as_ref().is_some_and(Result::is_err));
         assert!(IN_FLIGHT.load(std::sync::atomic::Ordering::Acquire));
         finish_tx.send(()).unwrap();
-        job.join().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
         assert!(!IN_FLIGHT.load(std::sync::atomic::Ordering::Acquire));
     }
 
