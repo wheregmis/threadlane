@@ -277,6 +277,27 @@ cargo test -p threadlane-updater
 cargo test --workspace
 ```
 
+### Local Needle tool-routing evaluation
+
+Needle weights are not distributed with Threadlane. Place `needle2.cact` at
+`needle/needle2.cact` or set `THREADLANE_NEEDLE_WEIGHTS` to an explicit local
+file. Evaluate the current provider-format tool catalogue against canonical
+project sessions with:
+
+```bash
+cargo run -p threadlane-runtime --features needle --bin needle-history-eval -- \
+  --sessions /path/to/project/.threadlane/sessions \
+  --tools /path/to/provider-tools.json
+```
+
+The command is read-only and prints aggregates only. Exit codes are `0` pass,
+`1` below 99% top-five recall, `2` fewer than 200 eligible turns, and `3`
+invalid input or unavailable model. Needle only shortlists at most five tools
+on a first provider attempt whose last model-visible message is a user message;
+retries, continuations, and unavailable, busy, invalid, failed, or timed-out
+retrieval use the full configured catalogue. This phase does not bundle or
+download models, train LoRA adapters, or perform online learning.
+
 For coding agent rules and repository conventions, consult [`AGENTS.md`](AGENTS.md).
 
 ---
