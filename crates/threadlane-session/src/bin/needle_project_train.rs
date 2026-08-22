@@ -4,15 +4,15 @@ use std::process::{self, Command as ProcessCommand};
 use threadlane_runtime::needle_history_eval::{run_needle_eval_for_paths, NeedleEvalReport};
 use threadlane_runtime::needle_training::{
     compare_candidate, export_needle_dataset, load_needle_eval_report, load_training_manifest,
-    resolve_holdout_paths, run_needle_finetune, validate_evaluation_inputs,
-    validate_evaluation_report_model, write_needle_eval_report, NeedleDatasetConfig,
-    NeedleTrainingManifest, ADAPTER_FILE, CANDIDATE_EVAL_FILE, CANDIDATE_FILE, CURRENT_EVAL_FILE,
-    MANIFEST_FILE, TRAIN_FILE,
+    promote_needle_candidate, resolve_holdout_paths, run_needle_finetune,
+    validate_evaluation_inputs, validate_evaluation_report_model, write_needle_eval_report,
+    NeedleDatasetConfig, NeedleTrainingManifest, ADAPTER_FILE, CANDIDATE_EVAL_FILE,
+    CANDIDATE_FILE, CURRENT_EVAL_FILE, MANIFEST_FILE, TRAIN_FILE,
 };
 use threadlane_runtime::types::AgentToolDefinition;
 use threadlane_session::{CodingAgent, CodingAgentOptions, SystemPromptConfig};
 
-const USAGE: &str = "usage: needle-project-train dataset --project <directory> --sessions <directory> --work-dir <directory> [--replace]\n       needle-project-train finetune --work-dir <directory> [--needle <path>]\n       needle-project-train evaluate --project <directory> --sessions <directory> --work-dir <directory>";
+const USAGE: &str = "usage: needle-project-train dataset --project <directory> --sessions <directory> --work-dir <directory> [--replace]\n       needle-project-train finetune --work-dir <directory> [--needle <path>]\n       needle-project-train evaluate --project <directory> --sessions <directory> --work-dir <directory>\n       needle-project-train promote --project <directory> --work-dir <directory>";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EvalReport {
@@ -67,6 +67,10 @@ enum Command {
         work_dir: PathBuf,
         model: PathBuf,
         report: EvalReport,
+    },
+    Promote {
+        project: PathBuf,
+        work_dir: PathBuf,
     },
 }
 
@@ -179,6 +183,23 @@ where
                 report: report.ok_or(USAGE)?,
             })
         }
+        "promote" => {
+            while let Some(flag) = args.next() {
+                match flag.as_str() {
+                    "--project" if project.is_none() => {
+                        project = Some(PathBuf::from(args.next().ok_or(USAGE)?));
+                    }
+                    "--work-dir" if work_dir.is_none() => {
+                        work_dir = Some(PathBuf::from(args.next().ok_or(USAGE)?));
+                    }
+                    _ => return Err(USAGE),
+                }
+            }
+            Ok(Command::Promote {
+                project: project.ok_or(USAGE)?,
+                work_dir: work_dir.ok_or(USAGE)?,
+            })
+        }
         _ => Err(USAGE),
     }
 }
@@ -224,8 +245,8 @@ async fn project_definitions(project: PathBuf) -> Vec<AgentToolDefinition> {
     agent.configured_tool_definitions()
 }
 
-fn current_model_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../needle/needle2.cact")
+fn current_model_path(project: &Path) -> PathBuf {
+    project.join("needle/needle2.cact")
 }
 
 fn spawn_evaluation(
@@ -309,7 +330,7 @@ async fn run(command: Command) -> Result<(), String> {
 
             let executable = std::env::current_exe()
                 .map_err(|_| "Needle evaluation executable could not be resolved.".to_string())?;
-            let current_model = current_model_path();
+            let current_model = current_model_path(&project);
             for (model, report) in [
                 (&current_model, EvalReport::Current),
                 (&candidate_model, EvalReport::Candidate),
@@ -338,6 +359,17 @@ async fn run(command: Command) -> Result<(), String> {
             let paths = resolve_holdout_paths(&sessions, &manifest)?;
             let result = run_needle_eval_for_paths(&paths, &definitions, &model)?;
             write_needle_eval_report(&work_dir.join(report.file()), &result)
+        }
+        Command::Promote { project, work_dir } => {
+            let definitions = project_definitions(project.clone()).await;
+            let model = current_model_path(&project);
+            promote_needle_candidate(&work_dir, &model, &definitions)?;
+            let manifest = load_training_manifest(&work_dir)?;
+            if let Some(hash) = manifest.candidate_sha256 {
+                println!("promoted_candidate_sha256: {hash}");
+            }
+            println!("backup_path: {}", model.with_extension("cact.bak").display());
+            Ok(())
         }
     }
 }
@@ -465,5 +497,23 @@ mod tests {
             }
         );
         assert!(parse_args(["evaluate-one", "--report", "other"]).is_err());
+    }
+
+    #[test]
+    fn parses_promote_command() {
+        assert_eq!(
+            parse_args([
+                "promote",
+                "--project",
+                "/tmp/p",
+                "--work-dir",
+                "/tmp/p/.threadlane/needle-training",
+            ])
+            .unwrap(),
+            Command::Promote {
+                project: PathBuf::from("/tmp/p"),
+                work_dir: PathBuf::from("/tmp/p/.threadlane/needle-training"),
+            }
+        );
     }
 }

@@ -286,6 +286,84 @@ pub fn validate_evaluation_report_model(
     Ok(())
 }
 
+pub fn promote_needle_candidate(
+    work_dir: &Path,
+    model_path: &Path,
+    definitions: &[AgentToolDefinition],
+) -> Result<(), String> {
+    let manifest = load_training_manifest(work_dir)?;
+    let candidate_path = work_dir.join(CANDIDATE_FILE);
+    validate_evaluation_inputs(&manifest, definitions, &candidate_path)?;
+    validate_training_artifact_hashes(work_dir, &manifest)?;
+
+    let current = load_needle_eval_report(&work_dir.join(CURRENT_EVAL_FILE))?;
+    let candidate = load_needle_eval_report(&work_dir.join(CANDIDATE_EVAL_FILE))?;
+    validate_evaluation_report_model(&current, model_path)?;
+    validate_evaluation_report_model(&candidate, &candidate_path)?;
+
+    let comparison = compare_candidate(&manifest, &current, &candidate);
+    if !comparison.promotable {
+        return Err(comparison.reasons.join("; "));
+    }
+
+    replace_model_with_candidate(&candidate_path, model_path)
+}
+
+fn validate_training_artifact_hashes(
+    work_dir: &Path,
+    manifest: &NeedleTrainingManifest,
+) -> Result<(), String> {
+    if file_sha256(&work_dir.join(TRAIN_FILE), "Needle training dataset is unreadable.")?
+        != manifest.dataset_sha256
+    {
+        return Err("Needle training dataset hash does not match the manifest.".into());
+    }
+    for (path, expected, name) in [
+        (
+            work_dir.join(BASE_CHECKPOINT_FILE),
+            manifest.base_sha256.as_deref(),
+            "base checkpoint",
+        ),
+        (
+            work_dir.join(ADAPTER_FILE),
+            manifest.adapter_sha256.as_deref(),
+            "adapter",
+        ),
+    ] {
+        let expected =
+            expected.ok_or_else(|| format!("Needle training manifest has no {name} hash."))?;
+        if file_sha256(&path, "Needle training artifact is unreadable.")? != expected {
+            return Err(format!(
+                "Needle training {name} hash does not match the manifest."
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn replace_model_with_candidate(candidate_path: &Path, model_path: &Path) -> Result<(), String> {
+    let tmp_path = model_path.with_extension("cact.tmp");
+    let backup_path = model_path.with_extension("cact.bak");
+    if let Err(error) = copy_file_synced(candidate_path, &tmp_path)
+        .and_then(|_| copy_file_synced(model_path, &backup_path))
+        .and_then(|_| {
+            std::fs::rename(&tmp_path, model_path)
+                .map_err(|_| "Needle candidate could not be promoted atomically.".to_string())
+        })
+    {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn copy_file_synced(from: &Path, to: &Path) -> Result<(), String> {
+    std::fs::copy(from, to).map_err(|_| "Needle promotion artifact could not be copied.")?;
+    File::open(to)
+        .and_then(|file| file.sync_all())
+        .map_err(|_| "Needle promotion artifact could not be synced.".to_string())
+}
+
 pub fn write_needle_eval_report(path: &Path, report: &NeedleEvalReport) -> Result<(), String> {
     let bytes = serde_json::to_vec_pretty(report)
         .map_err(|_| "Needle evaluation report could not be serialized.".to_string())?;
@@ -837,6 +915,84 @@ mod tests {
         std::fs::write(&candidate_path, "tampered").unwrap();
         assert!(validate_evaluation_inputs(&manifest, &definitions, &candidate_path).is_err());
         assert!(validate_evaluation_report_model(&report, &candidate_path).is_err());
+    }
+
+    struct PromotionFixture {
+        _temp: tempfile::TempDir,
+        work_dir: PathBuf,
+        model: PathBuf,
+        definitions: Vec<AgentToolDefinition>,
+    }
+
+    fn promotion_fixture(
+        pilot: bool,
+        current_top_five_passes: usize,
+        candidate_top_five_passes: usize,
+    ) -> PromotionFixture {
+        let temp = tempfile::tempdir().unwrap();
+        let work_dir = temp.path().join("work");
+        let model = temp.path().join("project/needle/needle2.cact");
+        std::fs::create_dir_all(work_dir.join("checkpoints")).unwrap();
+        std::fs::create_dir_all(model.parent().unwrap()).unwrap();
+        std::fs::write(work_dir.join(TRAIN_FILE), "dataset").unwrap();
+        std::fs::write(work_dir.join(BASE_CHECKPOINT_FILE), "base").unwrap();
+        std::fs::write(work_dir.join(ADAPTER_FILE), "adapter").unwrap();
+        std::fs::write(work_dir.join(CANDIDATE_FILE), "candidate").unwrap();
+        std::fs::write(&model, "current").unwrap();
+
+        let definitions = vec![tool()];
+        let catalogue_sha256 = sha256(&serde_json::to_vec(&definitions).unwrap());
+        let mut manifest = non_pilot_manifest(200);
+        manifest.pilot = pilot;
+        manifest.catalogue_sha256 = catalogue_sha256.clone();
+        manifest.dataset_sha256 = sha256(b"dataset");
+        manifest.base_sha256 = Some(sha256(b"base"));
+        manifest.adapter_sha256 = Some(sha256(b"adapter"));
+        manifest.candidate_sha256 = Some(sha256(b"candidate"));
+        save_training_manifest(&work_dir, &manifest).unwrap();
+
+        let mut current = passing_report(200, current_top_five_passes);
+        current.model_sha256 = sha256(b"current");
+        current.catalogue_sha256 = catalogue_sha256.clone();
+        write_needle_eval_report(&work_dir.join(CURRENT_EVAL_FILE), &current).unwrap();
+
+        let mut candidate = passing_report(200, candidate_top_five_passes);
+        candidate.model_sha256 = sha256(b"candidate");
+        candidate.catalogue_sha256 = catalogue_sha256;
+        write_needle_eval_report(&work_dir.join(CANDIDATE_EVAL_FILE), &candidate).unwrap();
+
+        PromotionFixture {
+            _temp: temp,
+            work_dir,
+            model,
+            definitions,
+        }
+    }
+
+    #[test]
+    fn pilot_candidate_cannot_replace_current_model() {
+        let fixture = promotion_fixture(true, 199, 199);
+        let before = std::fs::read(&fixture.model).unwrap();
+        let error =
+            promote_needle_candidate(&fixture.work_dir, &fixture.model, &fixture.definitions)
+                .unwrap_err();
+        assert!(error.contains("pilot"));
+        assert_eq!(std::fs::read(&fixture.model).unwrap(), before);
+    }
+
+    #[test]
+    fn qualifying_candidate_replaces_model_and_preserves_backup() {
+        let fixture = promotion_fixture(false, 198, 199);
+        let old = std::fs::read(&fixture.model).unwrap();
+        let candidate = std::fs::read(fixture.work_dir.join(CANDIDATE_FILE)).unwrap();
+
+        promote_needle_candidate(&fixture.work_dir, &fixture.model, &fixture.definitions).unwrap();
+
+        assert_eq!(std::fs::read(&fixture.model).unwrap(), candidate);
+        assert_eq!(
+            std::fs::read(fixture.model.with_extension("cact.bak")).unwrap(),
+            old
+        );
     }
 
     fn turns_for_sessions(sessions: &[(&str, u64, usize)]) -> Vec<NeedleHistoryTurn> {

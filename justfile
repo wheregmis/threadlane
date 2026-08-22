@@ -26,3 +26,7 @@ needle_finetune work_dir=".threadlane/needle-training" needle="needle":
 needle_evaluate_candidate project="." sessions=".threadlane/sessions" work_dir=".threadlane/needle-training":
     cargo run --release -p threadlane-session --features needle --bin needle-project-train -- \
         evaluate --project "{{project}}" --sessions "{{sessions}}" --work-dir "{{work_dir}}"
+
+needle_promote project="." work_dir=".threadlane/needle-training":
+    cargo run --release -p threadlane-session --features needle --bin needle-project-train -- \
+        promote --project "{{project}}" --work-dir "{{work_dir}}"
