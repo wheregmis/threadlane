@@ -1,5 +1,7 @@
 use crate::harness::{JsonlStore, Record, SessionStore, ToolExecutionOutcome, ToolExecutionPhase};
-use crate::local_tool_router::{needle_engine, needle_model_path, render_needle_candidate};
+use crate::local_tool_router::{
+    needle_engine, needle_model_path, render_needle_candidate, validate_needle_model_path,
+};
 use crate::types::{AgentMessage, AgentToolDefinition};
 use sha2::{Digest, Sha256};
 use serde_json::Value;
@@ -199,14 +201,35 @@ pub fn run_needle_history_eval_with_definitions(
     definitions: Vec<AgentToolDefinition>,
 ) -> Result<NeedleEvalReport, String> {
     validate_catalogue(&definitions)?;
+    let model_path = needle_model_path();
+    let engine = needle_engine()?;
+    let paths = session_paths(sessions_dir)?;
+    let extracted = extract_needle_history_for_paths(&paths, &definitions)?;
+    evaluate_needle_corpus(&definitions, &model_path, &engine, extracted)
+}
+
+pub fn run_needle_eval_for_paths(
+    paths: &[PathBuf],
+    definitions: &[AgentToolDefinition],
+    model_path: &Path,
+) -> Result<NeedleEvalReport, String> {
+    validate_catalogue(definitions)?;
+    let engine = validate_needle_model_path(model_path)?;
+    let extracted = extract_needle_history_for_paths(paths, definitions)?;
+    evaluate_needle_corpus(definitions, model_path, &engine, extracted)
+}
+
+fn evaluate_needle_corpus(
+    definitions: &[AgentToolDefinition],
+    model_path: &Path,
+    engine: &needle_infer::v2_engine::V2Engine,
+    extracted: NeedleHistoryCorpus,
+) -> Result<NeedleEvalReport, String> {
     let catalogue_bytes = serde_json::to_vec(&definitions)
         .map_err(|_| "Tool catalogue could not be serialized.".to_string())?;
     let catalogue_sha256 = sha256(&catalogue_bytes);
-    let model_path = needle_model_path();
     let model_sha256 =
-        sha256(&std::fs::read(&model_path).map_err(|_| "Needle model is unreadable.".to_string())?);
-    let engine = needle_engine()?;
-    let extracted = extract_needle_history(sessions_dir, &definitions)?;
+        sha256(&std::fs::read(model_path).map_err(|_| "Needle model is unreadable.".to_string())?);
 
     let rendered = definitions
         .iter()
@@ -271,13 +294,20 @@ pub fn extract_needle_history(
     definitions: &[AgentToolDefinition],
 ) -> Result<NeedleHistoryCorpus, String> {
     validate_catalogue(definitions)?;
+    extract_needle_history_for_paths(&session_paths(sessions_dir)?, definitions)
+}
+
+fn extract_needle_history_for_paths(
+    paths: &[PathBuf],
+    definitions: &[AgentToolDefinition],
+) -> Result<NeedleHistoryCorpus, String> {
     let catalogue_names = definitions.iter().map(|tool| tool.name.clone()).collect();
     let mut extracted = NeedleHistoryCorpus::default();
 
-    for path in session_paths(sessions_dir)? {
-        match JsonlStore::open_read_only(&path) {
+    for path in paths {
+        match JsonlStore::open_read_only(path) {
             Ok(store) => {
-                let current = extract_store_examples(&store, &path, &catalogue_names);
+                let current = extract_store_examples(&store, path, &catalogue_names);
                 extracted.turns.extend(current.turns);
                 add_skipped(&mut extracted.skipped, &current.skipped);
             }
@@ -608,6 +638,33 @@ mod tests {
     use std::collections::{BTreeSet, HashSet};
     use threadlane_protocol::{RuntimeToolCall, RuntimeToolCallFunction};
 
+    fn passing_report(eligible: usize, top_five_passes: usize) -> NeedleEvalReport {
+        NeedleEvalReport {
+            decision: NeedleEvalDecision::Pass,
+            eligible,
+            skipped: NeedleEvalSkipped::default(),
+            top_one_passes: top_five_passes,
+            top_three_passes: top_five_passes,
+            top_five_passes,
+            p50_latency_us: Some(1),
+            p95_latency_us: Some(2),
+            misses_by_tool: BTreeMap::new(),
+            model_sha256: "model".into(),
+            catalogue_sha256: "catalogue".into(),
+        }
+    }
+
+    #[test]
+    fn report_json_round_trips_without_prompt_data() {
+        let report = passing_report(200, 199);
+        let json = serde_json::to_string(&report).unwrap();
+        assert_eq!(
+            serde_json::from_str::<NeedleEvalReport>(&json).unwrap(),
+            report
+        );
+        assert!(!json.contains("prompt"));
+    }
+
     fn assistant_call(id: &str, name: &str, arguments: &str) -> AgentMessage {
         AgentMessage::Assistant {
             content: None,
@@ -691,6 +748,39 @@ mod tests {
             is_error: false,
             terminate: false,
         }
+    }
+
+    fn write_eval_session(path: &Path, prompt: &str) {
+        let mut store = JsonlStore::open(path).unwrap();
+        let user = append_jsonl_message(&mut store, None, AgentMessage::user(prompt, vec![]));
+        let assistant = append_assistant_calls(
+            &mut store,
+            Some(user),
+            &[("call", "read_file", r#"{"path":"Cargo.toml"}"#)],
+        );
+        append_jsonl_message(
+            &mut store,
+            Some(assistant),
+            successful_tool("call", "read_file"),
+        );
+    }
+
+    #[test]
+    fn evaluates_only_explicit_session_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let included = temp.path().join("included.jsonl");
+        let ignored = temp.path().join("ignored.jsonl");
+        write_eval_session(&included, "read the manifest");
+        write_eval_session(&ignored, "read the lockfile");
+        let model_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../needle/needle2.cact");
+
+        let report =
+            run_needle_eval_for_paths(&[included], &definitions(&["read_file"]), &model_path)
+                .unwrap();
+
+        assert_eq!(report.eligible, 1);
+        assert_eq!(report.top_five_passes, 1);
     }
 
     fn definitions(names: &[&str]) -> Vec<AgentToolDefinition> {

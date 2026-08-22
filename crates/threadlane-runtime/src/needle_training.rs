@@ -1,17 +1,18 @@
 use crate::needle_history_eval::{
-    NeedleEvalSkipped, NeedleHistoryCall, NeedleHistoryTurn, extract_needle_history,
+    extract_needle_history, NeedleEvalReport, NeedleEvalSkipped, NeedleHistoryCall,
+    NeedleHistoryTurn,
 };
 use crate::types::AgentToolDefinition;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::io::ErrorKind;
 use std::io::{BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
@@ -48,6 +49,12 @@ pub struct NeedleTrainingManifest {
     pub base_sha256: Option<String>,
     pub adapter_sha256: Option<String>,
     pub candidate_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NeedleCandidateComparison {
+    pub promotable: bool,
+    pub reasons: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -206,6 +213,124 @@ pub fn save_training_manifest(
     let bytes = serde_json::to_vec_pretty(manifest)
         .map_err(|_| "Needle training manifest could not be serialized.".to_string())?;
     write_atomic(&work_dir.join(MANIFEST_FILE), &bytes)
+}
+
+pub fn resolve_holdout_paths(
+    sessions_dir: &Path,
+    manifest: &NeedleTrainingManifest,
+) -> Result<Vec<PathBuf>, String> {
+    let sessions_dir = sessions_dir
+        .canonicalize()
+        .map_err(|_| "Sessions directory is unreadable.".to_string())?;
+    let mut seen = BTreeSet::new();
+    let mut paths = Vec::with_capacity(manifest.holdout_sessions.len());
+    for relative in &manifest.holdout_sessions {
+        if relative.is_absolute()
+            || relative.components().any(|component| {
+                matches!(
+                    component,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
+            })
+        {
+            return Err("Needle holdout session path must be relative.".into());
+        }
+        let path = sessions_dir
+            .join(relative)
+            .canonicalize()
+            .map_err(|_| "Needle holdout session is missing or unreadable.".to_string())?;
+        if !path.starts_with(&sessions_dir) {
+            return Err("Needle holdout session is outside the sessions directory.".into());
+        }
+        if !path.is_file() {
+            return Err("Needle holdout session is not a file.".into());
+        }
+        if !seen.insert(path.clone()) {
+            return Err("Needle holdout sessions contain duplicates.".into());
+        }
+        paths.push(path);
+    }
+    Ok(paths)
+}
+
+pub fn validate_evaluation_inputs(
+    manifest: &NeedleTrainingManifest,
+    definitions: &[AgentToolDefinition],
+    candidate_path: &Path,
+) -> Result<(), String> {
+    if manifest.version != MANIFEST_VERSION {
+        return Err("Needle training manifest version is unsupported.".into());
+    }
+    let catalogue = serde_json::to_vec(definitions)
+        .map_err(|_| "Tool catalogue could not be serialized.".to_string())?;
+    if sha256(&catalogue) != manifest.catalogue_sha256 {
+        return Err("Needle tool catalogue hash does not match the manifest.".into());
+    }
+    let expected = manifest
+        .candidate_sha256
+        .as_deref()
+        .ok_or_else(|| "Needle training manifest has no candidate hash.".to_string())?;
+    if file_sha256(candidate_path, "Needle candidate is unreadable.")? != expected {
+        return Err("Needle candidate hash does not match the manifest.".into());
+    }
+    Ok(())
+}
+
+pub fn validate_evaluation_report_model(
+    report: &NeedleEvalReport,
+    model_path: &Path,
+) -> Result<(), String> {
+    if file_sha256(model_path, "Needle model is unreadable.")? != report.model_sha256 {
+        return Err("Needle evaluation report model hash does not match its model file.".into());
+    }
+    Ok(())
+}
+
+pub fn write_needle_eval_report(path: &Path, report: &NeedleEvalReport) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(report)
+        .map_err(|_| "Needle evaluation report could not be serialized.".to_string())?;
+    write_atomic(path, &bytes)
+}
+
+pub fn load_needle_eval_report(path: &Path) -> Result<NeedleEvalReport, String> {
+    let bytes =
+        std::fs::read(path).map_err(|_| "Needle evaluation report is unreadable.".to_string())?;
+    serde_json::from_slice(&bytes).map_err(|_| "Needle evaluation report is invalid.".to_string())
+}
+
+pub fn compare_candidate(
+    manifest: &NeedleTrainingManifest,
+    current: &NeedleEvalReport,
+    candidate: &NeedleEvalReport,
+) -> NeedleCandidateComparison {
+    let mut reasons = Vec::new();
+    if manifest.pilot {
+        reasons.push("dataset is a pilot".into());
+    }
+    if current.eligible != candidate.eligible {
+        reasons.push("eligible counts differ".into());
+    }
+    if current.eligible.min(candidate.eligible) < 200 {
+        reasons.push("holdout has fewer than 200 eligible examples".into());
+    }
+    if current.catalogue_sha256 != candidate.catalogue_sha256
+        || current.catalogue_sha256 != manifest.catalogue_sha256
+    {
+        reasons.push("catalogue hashes differ".into());
+    }
+    if manifest.candidate_sha256.as_deref() != Some(candidate.model_sha256.as_str()) {
+        reasons.push("candidate model hash differs from manifest".into());
+    }
+    if candidate.top_five_passes.saturating_mul(100) < candidate.eligible.saturating_mul(99) {
+        reasons.push("candidate top-five recall is below 99 percent".into());
+    }
+    if candidate.top_five_passes <= current.top_five_passes {
+        reasons.push("candidate does not strictly improve top-five recall".into());
+    }
+    NeedleCandidateComparison {
+        promotable: reasons.is_empty(),
+        reasons,
+    }
 }
 
 pub fn run_needle_finetune(
@@ -543,11 +668,176 @@ fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+fn file_sha256(path: &Path, unreadable: &str) -> Result<String, String> {
+    std::fs::read(path)
+        .map(|bytes| sha256(&bytes))
+        .map_err(|_| unreadable.into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::needle_history_eval::{NeedleEvalDecision, NeedleEvalReport};
     use serde_json::Value;
     use std::path::PathBuf;
+
+    fn non_pilot_manifest(holdout_turns: usize) -> NeedleTrainingManifest {
+        NeedleTrainingManifest {
+            version: MANIFEST_VERSION,
+            pilot: false,
+            eligible_turns: holdout_turns,
+            train_turns: 0,
+            holdout_turns,
+            train_sessions: Vec::new(),
+            holdout_sessions: Vec::new(),
+            skipped: NeedleEvalSkipped::default(),
+            redactions: BTreeMap::new(),
+            catalogue_sha256: "catalogue".into(),
+            dataset_sha256: "dataset".into(),
+            needle_version: Some("test".into()),
+            base_sha256: Some("base".into()),
+            adapter_sha256: Some("adapter".into()),
+            candidate_sha256: Some("candidate".into()),
+        }
+    }
+
+    fn passing_report(eligible: usize, top_five_passes: usize) -> NeedleEvalReport {
+        NeedleEvalReport {
+            decision: NeedleEvalDecision::Pass,
+            eligible,
+            skipped: NeedleEvalSkipped::default(),
+            top_one_passes: top_five_passes,
+            top_three_passes: top_five_passes,
+            top_five_passes,
+            p50_latency_us: Some(1),
+            p95_latency_us: Some(2),
+            misses_by_tool: BTreeMap::new(),
+            model_sha256: "candidate".into(),
+            catalogue_sha256: "catalogue".into(),
+        }
+    }
+
+    #[test]
+    fn comparison_requires_strict_top_five_improvement() {
+        let manifest = non_pilot_manifest(200);
+        let mut current = passing_report(200, 198);
+        current.model_sha256 = "current".into();
+        let equal = passing_report(200, 198);
+        let better = passing_report(200, 199);
+        assert!(!compare_candidate(&manifest, &current, &equal).promotable);
+        assert!(compare_candidate(&manifest, &current, &better).promotable);
+    }
+
+    #[test]
+    fn comparison_enforces_dataset_count_catalogue_and_recall_gates() {
+        let mut manifest = non_pilot_manifest(200);
+        manifest.pilot = true;
+        let current = passing_report(199, 198);
+        let mut candidate = passing_report(198, 196);
+        candidate.catalogue_sha256 = "different".into();
+
+        let comparison = compare_candidate(&manifest, &current, &candidate);
+
+        assert!(!comparison.promotable);
+        for reason in [
+            "dataset is a pilot",
+            "eligible counts differ",
+            "holdout has fewer than 200 eligible examples",
+            "catalogue hashes differ",
+            "candidate top-five recall is below 99 percent",
+            "candidate does not strictly improve top-five recall",
+        ] {
+            assert!(comparison.reasons.iter().any(|actual| actual == reason));
+        }
+    }
+
+    #[test]
+    fn resolves_only_manifest_holdout_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions_dir = temp.path().join("sessions");
+        std::fs::create_dir(&sessions_dir).unwrap();
+        std::fs::write(sessions_dir.join("holdout.jsonl"), "").unwrap();
+        std::fs::write(sessions_dir.join("ignored.jsonl"), "").unwrap();
+        let mut manifest = non_pilot_manifest(200);
+        manifest.holdout_sessions = vec![PathBuf::from("holdout.jsonl")];
+
+        assert_eq!(
+            resolve_holdout_paths(&sessions_dir, &manifest).unwrap(),
+            vec![sessions_dir.join("holdout.jsonl").canonicalize().unwrap()]
+        );
+    }
+
+    #[test]
+    fn rejects_unsafe_or_duplicate_holdout_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions_dir = temp.path().join("sessions");
+        std::fs::create_dir(&sessions_dir).unwrap();
+        std::fs::write(sessions_dir.join("holdout.jsonl"), "").unwrap();
+
+        for paths in [
+            vec![PathBuf::from("../outside.jsonl")],
+            vec![temp.path().join("outside.jsonl")],
+            vec![PathBuf::from("missing.jsonl")],
+            vec![
+                PathBuf::from("holdout.jsonl"),
+                PathBuf::from("./holdout.jsonl"),
+            ],
+        ] {
+            let mut manifest = non_pilot_manifest(200);
+            manifest.holdout_sessions = paths;
+            assert!(resolve_holdout_paths(&sessions_dir, &manifest).is_err());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_holdout_symlinks_outside_sessions_directory() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let sessions_dir = temp.path().join("sessions");
+        std::fs::create_dir(&sessions_dir).unwrap();
+        let outside = temp.path().join("outside.jsonl");
+        std::fs::write(&outside, "").unwrap();
+        symlink(&outside, sessions_dir.join("holdout.jsonl")).unwrap();
+        let mut manifest = non_pilot_manifest(200);
+        manifest.holdout_sessions = vec![PathBuf::from("holdout.jsonl")];
+
+        assert!(resolve_holdout_paths(&sessions_dir, &manifest).is_err());
+    }
+
+    #[test]
+    fn writes_and_loads_atomic_aggregate_reports() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(CURRENT_EVAL_FILE);
+        let report = passing_report(200, 199);
+
+        write_needle_eval_report(&path, &report).unwrap();
+
+        assert_eq!(load_needle_eval_report(&path).unwrap(), report);
+        assert!(!temp.path().join("current-eval.tmp").exists());
+        assert!(!std::fs::read_to_string(path).unwrap().contains("prompt"));
+    }
+
+    #[test]
+    fn validates_catalogue_candidate_and_report_model_hashes() {
+        let temp = tempfile::tempdir().unwrap();
+        let candidate_path = temp.path().join(CANDIDATE_FILE);
+        std::fs::write(&candidate_path, "candidate bytes").unwrap();
+        let definitions = vec![tool()];
+        let mut manifest = non_pilot_manifest(200);
+        manifest.catalogue_sha256 = sha256(&serde_json::to_vec(&definitions).unwrap());
+        manifest.candidate_sha256 = Some(sha256(b"candidate bytes"));
+        validate_evaluation_inputs(&manifest, &definitions, &candidate_path).unwrap();
+
+        let mut report = passing_report(200, 199);
+        report.model_sha256 = sha256(b"candidate bytes");
+        validate_evaluation_report_model(&report, &candidate_path).unwrap();
+
+        std::fs::write(&candidate_path, "tampered").unwrap();
+        assert!(validate_evaluation_inputs(&manifest, &definitions, &candidate_path).is_err());
+        assert!(validate_evaluation_report_model(&report, &candidate_path).is_err());
+    }
 
     fn turns_for_sessions(sessions: &[(&str, u64, usize)]) -> Vec<NeedleHistoryTurn> {
         sessions
@@ -812,12 +1102,10 @@ exit 0
 
         assert!(!export.work_dir.join("adapter.pkl.tmp").exists());
         assert!(!export.work_dir.join("candidate.cact.tmp").exists());
-        assert!(
-            load_training_manifest(&export.work_dir)
-                .unwrap()
-                .candidate_sha256
-                .is_none()
-        );
+        assert!(load_training_manifest(&export.work_dir)
+            .unwrap()
+            .candidate_sha256
+            .is_none());
     }
 
     #[test]
@@ -834,12 +1122,10 @@ exit 0
 
         assert!(!export.work_dir.join(ADAPTER_FILE).exists());
         assert!(!export.work_dir.join(CANDIDATE_FILE).exists());
-        assert!(
-            load_training_manifest(&export.work_dir)
-                .unwrap()
-                .candidate_sha256
-                .is_none()
-        );
+        assert!(load_training_manifest(&export.work_dir)
+            .unwrap()
+            .candidate_sha256
+            .is_none());
     }
 
     #[test]
@@ -873,12 +1159,10 @@ exit 0
             split.holdout_sessions,
             vec![PathBuf::from("b.jsonl"), PathBuf::from("c.jsonl")]
         );
-        assert!(
-            split
-                .train_sessions
-                .iter()
-                .all(|path| !split.holdout_sessions.contains(path))
-        );
+        assert!(split
+            .train_sessions
+            .iter()
+            .all(|path| !split.holdout_sessions.contains(path)));
     }
 
     #[test]
