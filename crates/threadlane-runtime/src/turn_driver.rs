@@ -58,6 +58,28 @@ fn needle_query(turn_number: u32, messages: &[AgentMessage]) -> Option<&str> {
     }
 }
 
+async fn tool_definitions_for_attempt(
+    turn_number: u32,
+    query: Option<&str>,
+    configured: &[crate::types::AgentToolDefinition],
+    enabled: bool,
+) -> Vec<crate::types::AgentToolDefinition> {
+    #[cfg(not(test))]
+    let _ = turn_number;
+
+    #[cfg(test)]
+    if turn_number == 1 && enabled {
+        return configured.iter().take(1).cloned().collect();
+    }
+
+    match query {
+        Some(query) => {
+            crate::local_tool_router::shortlist_from_environment(query, configured, enabled).await
+        }
+        None => configured.to_vec(),
+    }
+}
+
 fn is_quota_or_rate_limit(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
     error.contains("429")
@@ -215,10 +237,14 @@ mod needle_tests {
             .register_tool_executor(Arc::new(ContinuationExecutor))
             .unwrap();
         let expected_tool_count = runtime.configured_tool_definitions().len();
-        runtime.prompt("weather forecast").await;
+        let run = runtime.prompt("__needle_test_force_shortlist__");
+        tokio::time::timeout(std::time::Duration::from_secs(2), run)
+            .await
+            .expect("provider loop should finish");
 
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].as_array().unwrap().len(), 1);
         assert_eq!(requests[1].as_array().unwrap().len(), expected_tool_count);
     }
 }
@@ -401,17 +427,13 @@ impl<'a> TurnDriver<'a> {
                 let turn = self.turn.lock().await;
                 needle_query(turn_number as u32, &turn.messages).map(str::to_owned)
             };
-            let tool_definitions = match query {
-                Some(query) => {
-                    crate::local_tool_router::shortlist_from_environment(
-                        &query,
-                        &configured_tool_definitions,
-                        self.config.needle_enabled,
-                    )
-                    .await
-                }
-                None => configured_tool_definitions.clone(),
-            };
+            let tool_definitions = tool_definitions_for_attempt(
+                turn_number as u32,
+                query.as_deref(),
+                &configured_tool_definitions,
+                self.config.needle_enabled,
+            )
+            .await;
             let provider_tools = tool_definitions
                 .iter()
                 .map(|tool| tool.to_chat_completions_tool())
