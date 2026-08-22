@@ -310,9 +310,9 @@ just needle_promote
 `just needle_dataset` writes private local artifacts under
 `.threadlane/needle-training/`. The sensitive file is
 `.threadlane/needle-training/train.jsonl`, which contains local prompts and tool
-arguments, is git-ignored, and is never uploaded by these commands. Keep a
-backup of `.threadlane/needle-training/` before replacing or moving its
-contents.
+arguments, is git-ignored, and is never uploaded by these commands. Successful
+promotion copies the current repository-local model to `needle/needle2.cact.bak`
+before atomically replacing `needle/needle2.cact` with the promoted candidate.
 
 The current local history is expected to produce a non-promotable pilot export.
 Pilot data is enough to verify the mechanics locally, but `just needle_promote`
