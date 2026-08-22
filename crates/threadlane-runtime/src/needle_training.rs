@@ -293,28 +293,80 @@ pub fn promote_needle_candidate(
 ) -> Result<(), String> {
     let manifest = load_training_manifest(work_dir)?;
     let candidate_path = work_dir.join(CANDIDATE_FILE);
-    validate_evaluation_inputs(&manifest, definitions, &candidate_path)?;
+    if manifest.version != MANIFEST_VERSION {
+        return Err("Needle training manifest version is unsupported.".into());
+    }
+    let catalogue = serde_json::to_vec(definitions)
+        .map_err(|_| "Tool catalogue could not be serialized.".to_string())?;
+    if sha256(&catalogue) != manifest.catalogue_sha256 {
+        return Err("Needle tool catalogue hash does not match the manifest.".into());
+    }
+    let expected_candidate = manifest
+        .candidate_sha256
+        .as_deref()
+        .ok_or_else(|| "Needle training manifest has no candidate hash.".to_string())?;
+    let candidate_bytes = std::fs::read(&candidate_path)
+        .map_err(|_| "Needle candidate is unreadable.".to_string())?;
+    if sha256(&candidate_bytes) != expected_candidate {
+        return Err("Needle candidate hash does not match the manifest.".into());
+    }
     validate_training_artifact_hashes(work_dir, &manifest)?;
 
     let current = load_needle_eval_report(&work_dir.join(CURRENT_EVAL_FILE))?;
     let candidate = load_needle_eval_report(&work_dir.join(CANDIDATE_EVAL_FILE))?;
-    validate_evaluation_report_model(&current, model_path)?;
-    validate_evaluation_report_model(&candidate, &candidate_path)?;
+    let current_bytes =
+        std::fs::read(model_path).map_err(|_| "Needle model is unreadable.".to_string())?;
+    if sha256(&current_bytes) != current.model_sha256 {
+        return Err("Needle evaluation report model hash does not match its model file.".into());
+    }
+    if sha256(&candidate_bytes) != candidate.model_sha256 {
+        return Err("Needle evaluation report model hash does not match its model file.".into());
+    }
 
     let comparison = compare_candidate(&manifest, &current, &candidate);
     if !comparison.promotable {
         return Err(comparison.reasons.join("; "));
     }
 
-    replace_model_with_candidate(&candidate_path, model_path)
+    #[cfg(test)]
+    run_promotion_mutation_hook();
+
+    replace_model_with_candidate(&candidate_bytes, model_path, &current_bytes)
+}
+
+#[cfg(test)]
+static PROMOTION_MUTATION_HOOK: OnceLock<
+    std::sync::Mutex<Option<Box<dyn FnOnce() + Send + 'static>>>,
+> = OnceLock::new();
+
+#[cfg(test)]
+fn set_promotion_mutation_hook(hook: impl FnOnce() + Send + 'static) {
+    *PROMOTION_MUTATION_HOOK
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap() = Some(Box::new(hook));
+}
+
+#[cfg(test)]
+fn run_promotion_mutation_hook() {
+    if let Some(hook) = PROMOTION_MUTATION_HOOK
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap()
+        .take()
+    {
+        hook();
+    }
 }
 
 fn validate_training_artifact_hashes(
     work_dir: &Path,
     manifest: &NeedleTrainingManifest,
 ) -> Result<(), String> {
-    if file_sha256(&work_dir.join(TRAIN_FILE), "Needle training dataset is unreadable.")?
-        != manifest.dataset_sha256
+    if file_sha256(
+        &work_dir.join(TRAIN_FILE),
+        "Needle training dataset is unreadable.",
+    )? != manifest.dataset_sha256
     {
         return Err("Needle training dataset hash does not match the manifest.".into());
     }
@@ -341,15 +393,17 @@ fn validate_training_artifact_hashes(
     Ok(())
 }
 
-fn replace_model_with_candidate(candidate_path: &Path, model_path: &Path) -> Result<(), String> {
+fn replace_model_with_candidate(
+    candidate_bytes: &[u8],
+    model_path: &Path,
+    current_bytes: &[u8],
+) -> Result<(), String> {
     let tmp_path = model_path.with_extension("cact.tmp");
     let backup_path = model_path.with_extension("cact.bak");
-    if let Err(error) = copy_file_synced(candidate_path, &tmp_path)
-        .and_then(|_| copy_file_synced(model_path, &backup_path))
-        .and_then(|_| {
-            std::fs::rename(&tmp_path, model_path)
-                .map_err(|_| "Needle candidate could not be promoted atomically.".to_string())
-        })
+    if let Err(error) = write_file_synced(&tmp_path, candidate_bytes)
+        .and_then(|_| write_file_synced(&backup_path, current_bytes))
+        .and_then(|_| final_current_check(model_path, current_bytes))
+        .and_then(|_| replace_existing_model(&tmp_path, model_path))
     {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(error);
@@ -357,11 +411,32 @@ fn replace_model_with_candidate(candidate_path: &Path, model_path: &Path) -> Res
     Ok(())
 }
 
-fn copy_file_synced(from: &Path, to: &Path) -> Result<(), String> {
-    std::fs::copy(from, to).map_err(|_| "Needle promotion artifact could not be copied.")?;
-    File::open(to)
-        .and_then(|file| file.sync_all())
+fn write_file_synced(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut file = owner_only_create(path)?;
+    file.write_all(bytes)
+        .and_then(|_| file.flush())
+        .and_then(|_| file.sync_all())
         .map_err(|_| "Needle promotion artifact could not be synced.".to_string())
+}
+
+fn final_current_check(model_path: &Path, current_bytes: &[u8]) -> Result<(), String> {
+    if std::fs::read(model_path).map_err(|_| "Needle model is unreadable.".to_string())?
+        != current_bytes
+    {
+        return Err("Needle current model changed before promotion.".into());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn replace_existing_model(_tmp_path: &Path, _model_path: &Path) -> Result<(), String> {
+    Err("Needle candidate promotion is unsupported on this platform because atomic replacement of an existing model is unavailable.".into())
+}
+
+#[cfg(not(windows))]
+fn replace_existing_model(tmp_path: &Path, model_path: &Path) -> Result<(), String> {
+    std::fs::rename(tmp_path, model_path)
+        .map_err(|_| "Needle candidate could not be promoted atomically.".to_string())
 }
 
 pub fn write_needle_eval_report(path: &Path, report: &NeedleEvalReport) -> Result<(), String> {
@@ -993,6 +1068,71 @@ mod tests {
             std::fs::read(fixture.model.with_extension("cact.bak")).unwrap(),
             old
         );
+    }
+
+    #[test]
+    fn corrupt_current_report_cannot_replace_current_model() {
+        let fixture = promotion_fixture(false, 198, 199);
+        let before = std::fs::read(&fixture.model).unwrap();
+        let mut current =
+            load_needle_eval_report(&fixture.work_dir.join(CURRENT_EVAL_FILE)).unwrap();
+        current.model_sha256 = sha256(b"different current");
+        write_needle_eval_report(&fixture.work_dir.join(CURRENT_EVAL_FILE), &current).unwrap();
+
+        let error =
+            promote_needle_candidate(&fixture.work_dir, &fixture.model, &fixture.definitions)
+                .unwrap_err();
+
+        assert!(error.contains("report model hash"));
+        assert_eq!(std::fs::read(&fixture.model).unwrap(), before);
+        assert!(!fixture.model.with_extension("cact.tmp").exists());
+    }
+
+    #[test]
+    fn backup_failure_leaves_current_model_and_cleans_staging_temp() {
+        let fixture = promotion_fixture(false, 198, 199);
+        let before = std::fs::read(&fixture.model).unwrap();
+        let temp_path = fixture.model.with_extension("cact.tmp");
+        std::fs::create_dir(fixture.model.with_extension("cact.bak")).unwrap();
+
+        let error =
+            promote_needle_candidate(&fixture.work_dir, &fixture.model, &fixture.definitions)
+                .unwrap_err();
+
+        assert!(!error.is_empty());
+        assert_eq!(std::fs::read(&fixture.model).unwrap(), before);
+        assert!(!temp_path.exists());
+    }
+
+    #[test]
+    fn candidate_mutation_before_commit_does_not_install_unvalidated_bytes() {
+        let fixture = promotion_fixture(false, 198, 199);
+        let candidate_path = fixture.work_dir.join(CANDIDATE_FILE);
+        set_promotion_mutation_hook({
+            let candidate_path = candidate_path.clone();
+            move || std::fs::write(candidate_path, "evil candidate").unwrap()
+        });
+
+        promote_needle_candidate(&fixture.work_dir, &fixture.model, &fixture.definitions).unwrap();
+
+        assert_eq!(std::fs::read(&fixture.model).unwrap(), b"candidate");
+    }
+
+    #[test]
+    fn current_mutation_before_commit_leaves_mutated_current_in_place() {
+        let fixture = promotion_fixture(false, 198, 199);
+        set_promotion_mutation_hook({
+            let model = fixture.model.clone();
+            move || std::fs::write(model, "changed current").unwrap()
+        });
+
+        let error =
+            promote_needle_candidate(&fixture.work_dir, &fixture.model, &fixture.definitions)
+                .unwrap_err();
+
+        assert!(error.contains("changed"));
+        assert_eq!(std::fs::read(&fixture.model).unwrap(), b"changed current");
+        assert!(!fixture.model.with_extension("cact.tmp").exists());
     }
 
     fn turns_for_sessions(sessions: &[(&str, u64, usize)]) -> Vec<NeedleHistoryTurn> {

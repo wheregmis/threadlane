@@ -6,8 +6,8 @@ use threadlane_runtime::needle_training::{
     compare_candidate, export_needle_dataset, load_needle_eval_report, load_training_manifest,
     promote_needle_candidate, resolve_holdout_paths, run_needle_finetune,
     validate_evaluation_inputs, validate_evaluation_report_model, write_needle_eval_report,
-    NeedleDatasetConfig, NeedleTrainingManifest, ADAPTER_FILE, CANDIDATE_EVAL_FILE,
-    CANDIDATE_FILE, CURRENT_EVAL_FILE, MANIFEST_FILE, TRAIN_FILE,
+    NeedleDatasetConfig, NeedleTrainingManifest, ADAPTER_FILE, CANDIDATE_EVAL_FILE, CANDIDATE_FILE,
+    CURRENT_EVAL_FILE, MANIFEST_FILE, TRAIN_FILE,
 };
 use threadlane_runtime::types::AgentToolDefinition;
 use threadlane_session::{CodingAgent, CodingAgentOptions, SystemPromptConfig};
@@ -363,12 +363,13 @@ async fn run(command: Command) -> Result<(), String> {
         Command::Promote { project, work_dir } => {
             let definitions = project_definitions(project.clone()).await;
             let model = current_model_path(&project);
+            let candidate_sha256 = load_training_manifest(&work_dir)?
+                .candidate_sha256
+                .ok_or_else(|| "Needle training manifest has no candidate hash.".to_string())?;
+            let backup_path = model.with_extension("cact.bak");
             promote_needle_candidate(&work_dir, &model, &definitions)?;
-            let manifest = load_training_manifest(&work_dir)?;
-            if let Some(hash) = manifest.candidate_sha256 {
-                println!("promoted_candidate_sha256: {hash}");
-            }
-            println!("backup_path: {}", model.with_extension("cact.bak").display());
+            println!("promoted_candidate_sha256: {candidate_sha256}");
+            println!("backup_path: {}", backup_path.display());
             Ok(())
         }
     }
@@ -401,6 +402,32 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_sha256(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+
+        format!("{:x}", Sha256::digest(bytes))
+    }
+
+    fn test_eval_report(
+        model_sha256: String,
+        catalogue_sha256: String,
+        top_five_passes: usize,
+    ) -> NeedleEvalReport {
+        NeedleEvalReport {
+            decision: threadlane_runtime::needle_history_eval::NeedleEvalDecision::Pass,
+            eligible: 200,
+            skipped: Default::default(),
+            top_one_passes: top_five_passes,
+            top_three_passes: top_five_passes,
+            top_five_passes,
+            p50_latency_us: Some(1),
+            p95_latency_us: Some(2),
+            misses_by_tool: Default::default(),
+            model_sha256,
+            catalogue_sha256,
+        }
+    }
 
     #[test]
     fn parses_dataset_with_project_defaults_and_replace() {
@@ -515,5 +542,60 @@ mod tests {
                 work_dir: PathBuf::from("/tmp/p/.threadlane/needle-training"),
             }
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn promote_does_not_reload_manifest_after_successful_replacement() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        let work_dir = temp.path().join("work");
+        let model = current_model_path(&project);
+        std::fs::create_dir_all(model.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(work_dir.join("checkpoints")).unwrap();
+        std::fs::write(work_dir.join(TRAIN_FILE), "dataset").unwrap();
+        std::fs::write(work_dir.join("checkpoints/needle2.pkl"), "base").unwrap();
+        std::fs::write(work_dir.join(ADAPTER_FILE), "adapter").unwrap();
+        std::fs::write(work_dir.join(CANDIDATE_FILE), "candidate").unwrap();
+
+        let definitions = project_definitions(project.clone()).await;
+        let catalogue_sha256 = test_sha256(&serde_json::to_vec(&definitions).unwrap());
+        let manifest = NeedleTrainingManifest {
+            version: 1,
+            pilot: false,
+            eligible_turns: 200,
+            train_turns: 0,
+            holdout_turns: 200,
+            train_sessions: Vec::new(),
+            holdout_sessions: Vec::new(),
+            skipped: Default::default(),
+            redactions: Default::default(),
+            catalogue_sha256: catalogue_sha256.clone(),
+            dataset_sha256: test_sha256(b"dataset"),
+            needle_version: Some("test".into()),
+            base_sha256: Some(test_sha256(b"base")),
+            adapter_sha256: Some(test_sha256(b"adapter")),
+            candidate_sha256: Some(test_sha256(b"candidate")),
+        };
+        let manifest_bytes = serde_json::to_vec_pretty(&manifest).unwrap();
+        std::fs::write(&model, &manifest_bytes).unwrap();
+        symlink(&model, work_dir.join(MANIFEST_FILE)).unwrap();
+        write_needle_eval_report(
+            &work_dir.join(CURRENT_EVAL_FILE),
+            &test_eval_report(test_sha256(&manifest_bytes), catalogue_sha256.clone(), 198),
+        )
+        .unwrap();
+        write_needle_eval_report(
+            &work_dir.join(CANDIDATE_EVAL_FILE),
+            &test_eval_report(test_sha256(b"candidate"), catalogue_sha256, 199),
+        )
+        .unwrap();
+
+        let result = run(Command::Promote { project, work_dir }).await;
+
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(std::fs::read(model).unwrap(), b"candidate");
     }
 }
