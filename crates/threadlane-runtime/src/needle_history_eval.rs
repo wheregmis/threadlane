@@ -2,6 +2,7 @@ use crate::harness::{JsonlStore, Record, SessionStore, ToolExecutionOutcome, Too
 use crate::local_tool_router::{needle_engine, needle_model_path, render_needle_candidate};
 use crate::types::{AgentMessage, AgentToolDefinition};
 use sha2::{Digest, Sha256};
+use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -12,7 +13,7 @@ pub struct NeedleEvalConfig {
     pub tools_path: PathBuf,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum NeedleEvalDecision {
     Pass,
     Fail,
@@ -29,9 +30,10 @@ impl NeedleEvalDecision {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NeedleEvalSkipped {
     pub malformed: usize,
+    pub malformed_arguments: usize,
     pub text_only: usize,
     pub continuation_only: usize,
     pub failed: usize,
@@ -44,6 +46,7 @@ pub struct NeedleEvalSkipped {
 impl NeedleEvalSkipped {
     pub fn total(&self) -> usize {
         self.malformed
+            + self.malformed_arguments
             + self.text_only
             + self.continuation_only
             + self.failed
@@ -54,7 +57,7 @@ impl NeedleEvalSkipped {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NeedleEvalReport {
     pub decision: NeedleEvalDecision,
     pub eligible: usize,
@@ -83,6 +86,11 @@ impl fmt::Display for NeedleEvalReport {
         writeln!(f, "eligible_turns: {}", self.eligible)?;
         writeln!(f, "skipped_turns: {}", self.skipped.total())?;
         writeln!(f, "skipped_malformed: {}", self.skipped.malformed)?;
+        writeln!(
+            f,
+            "skipped_malformed_arguments: {}",
+            self.skipped.malformed_arguments
+        )?;
         writeln!(f, "skipped_text_only: {}", self.skipped.text_only)?;
         writeln!(
             f,
@@ -136,14 +144,24 @@ impl fmt::Display for NeedleEvalReport {
     }
 }
 
-struct EvalExample {
-    prompt: String,
-    expected: BTreeSet<String>,
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct NeedleHistoryCall {
+    pub name: String,
+    pub arguments: serde_json::Map<String, Value>,
 }
 
-struct ExtractedExamples {
-    examples: Vec<EvalExample>,
-    skipped: NeedleEvalSkipped,
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct NeedleHistoryTurn {
+    pub session_file: PathBuf,
+    pub timestamp: u64,
+    pub prompt: String,
+    pub calls: Vec<NeedleHistoryCall>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct NeedleHistoryCorpus {
+    pub turns: Vec<NeedleHistoryTurn>,
+    pub skipped: NeedleEvalSkipped,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -188,22 +206,7 @@ pub fn run_needle_history_eval_with_definitions(
     let model_sha256 =
         sha256(&std::fs::read(&model_path).map_err(|_| "Needle model is unreadable.".to_string())?);
     let engine = needle_engine()?;
-    let catalogue_names = definitions.iter().map(|tool| tool.name.clone()).collect();
-    let mut extracted = ExtractedExamples {
-        examples: Vec::new(),
-        skipped: NeedleEvalSkipped::default(),
-    };
-
-    for path in session_paths(sessions_dir)? {
-        match JsonlStore::open_read_only(path) {
-            Ok(store) => {
-                let current = extract_store_examples(&store, &catalogue_names);
-                extracted.examples.extend(current.examples);
-                add_skipped(&mut extracted.skipped, &current.skipped);
-            }
-            Err(_) => extracted.skipped.malformed += 1,
-        }
-    }
+    let extracted = extract_needle_history(sessions_dir, &definitions)?;
 
     let rendered = definitions
         .iter()
@@ -220,23 +223,27 @@ pub fn run_needle_history_eval_with_definitions(
     let mut top_one_passes = 0;
     let mut top_three_passes = 0;
     let mut top_five_passes = 0;
-    let mut latencies = Vec::with_capacity(extracted.examples.len());
+    let mut latencies = Vec::with_capacity(extracted.turns.len());
     let mut misses_by_tool = BTreeMap::new();
-    for example in &extracted.examples {
+    for turn in &extracted.turns {
+        let expected = turn
+            .calls
+            .iter()
+            .map(|call| call.name.clone())
+            .collect::<BTreeSet<_>>();
         let started = Instant::now();
         let query_embedding = engine
-            .encode_contrastive_with_state(&example.prompt, &mut head_state)
+            .encode_contrastive_with_state(&turn.prompt, &mut head_state)
             .ok_or_else(|| "Needle query could not be encoded.".to_string())?;
         let ranked = rank_embeddings(&query_embedding, &catalogue_embeddings, 5);
         latencies.push(started.elapsed().as_micros().try_into().unwrap_or(u64::MAX));
         let names = ranked_names(&ranked, &definitions);
-        top_one_passes += usize::from(turn_passes(&example.expected, &names[..names.len().min(1)]));
-        top_three_passes +=
-            usize::from(turn_passes(&example.expected, &names[..names.len().min(3)]));
-        if turn_passes(&example.expected, &names) {
+        top_one_passes += usize::from(turn_passes(&expected, &names[..names.len().min(1)]));
+        top_three_passes += usize::from(turn_passes(&expected, &names[..names.len().min(3)]));
+        if turn_passes(&expected, &names) {
             top_five_passes += 1;
         } else {
-            for name in &example.expected {
+            for name in &expected {
                 if !names.iter().any(|candidate| candidate == name) {
                     *misses_by_tool.entry(name.clone()).or_default() += 1;
                 }
@@ -245,8 +252,8 @@ pub fn run_needle_history_eval_with_definitions(
     }
     latencies.sort_unstable();
     Ok(NeedleEvalReport {
-        decision: decision(extracted.examples.len(), top_five_passes),
-        eligible: extracted.examples.len(),
+        decision: decision(extracted.turns.len(), top_five_passes),
+        eligible: extracted.turns.len(),
         skipped: extracted.skipped,
         top_one_passes,
         top_three_passes,
@@ -257,6 +264,28 @@ pub fn run_needle_history_eval_with_definitions(
         model_sha256,
         catalogue_sha256,
     })
+}
+
+pub fn extract_needle_history(
+    sessions_dir: &Path,
+    definitions: &[AgentToolDefinition],
+) -> Result<NeedleHistoryCorpus, String> {
+    validate_catalogue(definitions)?;
+    let catalogue_names = definitions.iter().map(|tool| tool.name.clone()).collect();
+    let mut extracted = NeedleHistoryCorpus::default();
+
+    for path in session_paths(sessions_dir)? {
+        match JsonlStore::open_read_only(&path) {
+            Ok(store) => {
+                let current = extract_store_examples(&store, &path, &catalogue_names);
+                extracted.turns.extend(current.turns);
+                add_skipped(&mut extracted.skipped, &current.skipped);
+            }
+            Err(_) => extracted.skipped.malformed += 1,
+        }
+    }
+
+    Ok(extracted)
 }
 
 fn read_catalogue(path: &Path) -> Result<Vec<AgentToolDefinition>, String> {
@@ -314,10 +343,11 @@ fn session_paths(sessions_dir: &Path) -> Result<Vec<PathBuf>, String> {
 
 fn extract_store_examples<S: SessionStore>(
     store: &S,
+    session_file: &Path,
     catalogue: &HashSet<String>,
-) -> ExtractedExamples {
-    let mut extracted = ExtractedExamples {
-        examples: Vec::new(),
+) -> NeedleHistoryCorpus {
+    let mut extracted = NeedleHistoryCorpus {
+        turns: Vec::new(),
         skipped: NeedleEvalSkipped::default(),
     };
     for lane in store.lanes() {
@@ -369,8 +399,9 @@ fn extract_store_examples<S: SessionStore>(
                     .or_else(|| entries.get(end))
                     .map_or(u64::MAX, |entry| entry.seq),
             );
-            let mut expected = BTreeSet::new();
             let mut observed = Vec::new();
+            let mut successful_calls = Vec::new();
+            let mut malformed_arguments = false;
             for call in calls {
                 let outcome = outcomes
                     .get(&(call.id.clone(), call.function.name.clone()))
@@ -384,21 +415,36 @@ fn extract_store_examples<S: SessionStore>(
                     });
                 if let Some(outcome) = outcome {
                     if outcome == ToolExecutionOutcome::Succeeded {
-                        expected.insert(call.function.name.clone());
+                        match serde_json::from_str::<Value>(&call.function.arguments) {
+                            Ok(Value::Object(arguments)) => {
+                                successful_calls.push(NeedleHistoryCall {
+                                    name: call.function.name.clone(),
+                                    arguments,
+                                });
+                            }
+                            _ => malformed_arguments = true,
+                        }
                     }
                     observed.push(outcome);
                 }
             }
-            if expected.is_empty() {
+            if malformed_arguments {
+                extracted.skipped.malformed_arguments += 1;
+            } else if successful_calls.is_empty() {
                 extracted.skipped.add(skip_for_outcomes(&observed));
-            } else if expected.iter().any(|name| !catalogue.contains(name)) {
+            } else if successful_calls
+                .iter()
+                .any(|call| !catalogue.contains(&call.name))
+            {
                 extracted.skipped.add(SkipReason::ObsoleteTool);
-            } else if expected.len() > 5 {
+            } else if successful_calls.len() > 5 {
                 extracted.skipped.add(SkipReason::OverFiveLabel);
             } else {
-                extracted.examples.push(EvalExample {
+                extracted.turns.push(NeedleHistoryTurn {
+                    session_file: session_file.to_path_buf(),
+                    timestamp: entry.timestamp,
                     prompt: prompt.clone(),
-                    expected,
+                    calls: successful_calls,
                 });
             }
         }
@@ -530,6 +576,7 @@ fn nearest_rank_percentile(sorted: &[u64], percentile: u64) -> Option<u64> {
 
 fn add_skipped(total: &mut NeedleEvalSkipped, current: &NeedleEvalSkipped) {
     total.malformed += current.malformed;
+    total.malformed_arguments += current.malformed_arguments;
     total.text_only += current.text_only;
     total.continuation_only += current.continuation_only;
     total.failed += current.failed;
@@ -561,7 +608,7 @@ mod tests {
     use std::collections::{BTreeSet, HashSet};
     use threadlane_protocol::{RuntimeToolCall, RuntimeToolCallFunction};
 
-    fn assistant_call(id: &str, name: &str) -> AgentMessage {
+    fn assistant_call(id: &str, name: &str, arguments: &str) -> AgentMessage {
         AgentMessage::Assistant {
             content: None,
             tool_calls: Some(vec![RuntimeToolCall {
@@ -569,13 +616,71 @@ mod tests {
                 r#type: "function".into(),
                 function: RuntimeToolCallFunction {
                     name: name.into(),
-                    arguments: "{}".into(),
+                    arguments: arguments.into(),
                 },
                 thought_signature: None,
             }]),
             stop_reason: None,
             deferred_handle: None,
         }
+    }
+
+    fn append_assistant_calls(
+        store: &mut JsonlStore,
+        parent_id: Option<String>,
+        calls: &[(&str, &str, &str)],
+    ) -> String {
+        let id = format!("entry-{}", store.next_sequence());
+        let seq = store.next_sequence();
+        store.append_entry(crate::harness::Entry::new(
+            id.clone(),
+            parent_id,
+            "main",
+            seq,
+            seq,
+            AgentMessage::Assistant {
+                content: None,
+                tool_calls: Some(
+                    calls
+                        .iter()
+                        .map(|(id, name, arguments)| RuntimeToolCall {
+                            id: (*id).into(),
+                            r#type: "function".into(),
+                            function: RuntimeToolCallFunction {
+                                name: (*name).into(),
+                                arguments: (*arguments).into(),
+                            },
+                            thought_signature: None,
+                        })
+                        .collect(),
+                ),
+                stop_reason: None,
+                deferred_handle: None,
+            },
+            false,
+        ))
+        .unwrap();
+        id
+    }
+
+    fn append_jsonl_message(
+        store: &mut JsonlStore,
+        parent_id: Option<String>,
+        message: AgentMessage,
+    ) -> String {
+        let id = format!("entry-{}", store.next_sequence());
+        let seq = store.next_sequence();
+        store.append_entry(crate::harness::Entry::new(
+            id.clone(),
+            parent_id,
+            "main",
+            seq,
+            seq,
+            message,
+            false,
+        ))
+        .unwrap();
+        id
     }
 
     fn successful_tool(id: &str, name: &str) -> AgentMessage {
@@ -588,6 +693,74 @@ mod tests {
         }
     }
 
+    fn definitions(names: &[&str]) -> Vec<AgentToolDefinition> {
+        names
+            .iter()
+            .map(|name| AgentToolDefinition::new(*name, *name, serde_json::json!({})))
+            .collect()
+    }
+
+    #[test]
+    fn extracts_successful_calls_in_assistant_order_with_json_arguments() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("ordered.jsonl");
+        let mut store = JsonlStore::open(&path).unwrap();
+        let user = append_jsonl_message(
+            &mut store,
+            None,
+            AgentMessage::User {
+                content: "inspect then search".into(),
+            },
+        );
+        let assistant = append_assistant_calls(
+            &mut store,
+            Some(user),
+            &[
+                ("read", "read_file", r#"{"path":"Cargo.toml"}"#),
+                ("search", "grep_search", r#"{"query":"needle"}"#),
+            ],
+        );
+        append_jsonl_message(
+            &mut store,
+            Some(assistant.clone()),
+            successful_tool("read", "read_file"),
+        );
+        append_jsonl_message(
+            &mut store,
+            Some(assistant),
+            successful_tool("search", "grep_search"),
+        );
+
+        let corpus =
+            extract_needle_history(temp.path(), &definitions(&["read_file", "grep_search"]))
+                .unwrap();
+        assert_eq!(corpus.turns[0].calls[0].name, "read_file");
+        assert_eq!(corpus.turns[0].calls[0].arguments["path"], "Cargo.toml");
+        assert_eq!(corpus.turns[0].calls[1].name, "grep_search");
+    }
+
+    #[test]
+    fn counts_successful_call_with_non_object_arguments_as_malformed() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("malformed.jsonl");
+        let mut store = JsonlStore::open(&path).unwrap();
+        let user = append_jsonl_message(&mut store, None, AgentMessage::user("inspect", vec![]));
+        let assistant = append_assistant_calls(
+            &mut store,
+            Some(user),
+            &[("read", "read_file", "[]")],
+        );
+        append_jsonl_message(
+            &mut store,
+            Some(assistant),
+            successful_tool("read", "read_file"),
+        );
+
+        let corpus = extract_needle_history(temp.path(), &definitions(&["read_file"])).unwrap();
+        assert!(corpus.turns.is_empty());
+        assert_eq!(corpus.skipped.malformed_arguments, 1);
+    }
+
     #[test]
     fn extracts_only_successful_first_assistant_tools() {
         let mut store = MemoryStore::new("session");
@@ -597,16 +770,14 @@ mod tests {
                 content: "find rust files".into(),
             },
         );
-        let assistant = store.append_message(Some(user), assistant_call("call-1", "search_files"));
+        let assistant =
+            store.append_message(Some(user), assistant_call("call-1", "search_files", "{}"));
         store.append_message(Some(assistant), successful_tool("call-1", "search_files"));
 
         let catalog = HashSet::from(["search_files".to_string()]);
-        let extracted = extract_store_examples(&store, &catalog);
-        assert_eq!(extracted.examples.len(), 1);
-        assert_eq!(
-            extracted.examples[0].expected,
-            BTreeSet::from(["search_files".into()])
-        );
+        let extracted = extract_store_examples(&store, Path::new("session.jsonl"), &catalog);
+        assert_eq!(extracted.turns.len(), 1);
+        assert_eq!(extracted.turns[0].calls[0].name, "search_files");
     }
 
     #[test]
@@ -629,7 +800,7 @@ mod tests {
             },
         );
         let failed_assistant =
-            store.append_message(Some(failed_user), assistant_call("failed", "search"));
+            store.append_message(Some(failed_user), assistant_call("failed", "search", "{}"));
         store.append_message(
             Some(failed_assistant),
             AgentMessage::Tool {
@@ -658,7 +829,7 @@ mod tests {
         );
         let continuation_call = store.append_message(
             Some(continuation_assistant),
-            assistant_call("later", "search"),
+            assistant_call("later", "search", "{}"),
         );
         store.append_message(Some(continuation_call), successful_tool("later", "search"));
 
@@ -669,7 +840,7 @@ mod tests {
             },
         );
         let obsolete_assistant =
-            store.append_message(Some(obsolete_user), assistant_call("obsolete", "gone"));
+            store.append_message(Some(obsolete_user), assistant_call("obsolete", "gone", "{}"));
         store.append_message(
             Some(obsolete_assistant),
             successful_tool("obsolete", "gone"),
@@ -714,8 +885,8 @@ mod tests {
             );
         }
 
-        let extracted = extract_store_examples(&store, &catalog);
-        assert!(extracted.examples.is_empty());
+        let extracted = extract_store_examples(&store, Path::new("session.jsonl"), &catalog);
+        assert!(extracted.turns.is_empty());
         assert_eq!(extracted.skipped.failed, 1);
         assert_eq!(extracted.skipped.continuation_only, 1);
         assert_eq!(extracted.skipped.obsolete_tool, 1);
@@ -731,15 +902,16 @@ mod tests {
                 content: "find".into(),
             },
         );
-        let assistant = store.append_message(Some(user), assistant_call("call", "search"));
+        let assistant = store.append_message(Some(user), assistant_call("call", "search", "{}"));
         store.append_message(Some(assistant.clone()), successful_tool("call", "search"));
         store.append_message(Some(assistant), successful_tool("call", "search"));
 
-        let extracted = extract_store_examples(&store, &HashSet::from(["search".to_string()]));
-        assert_eq!(
-            extracted.examples[0].expected,
-            BTreeSet::from(["search".into()])
+        let extracted = extract_store_examples(
+            &store,
+            Path::new("session.jsonl"),
+            &HashSet::from(["search".to_string()]),
         );
+        assert_eq!(extracted.turns[0].calls[0].name, "search");
     }
 
     #[test]
@@ -752,7 +924,7 @@ mod tests {
             },
         );
         let first_assistant =
-            store.append_message(Some(first_user), assistant_call("shared", "search"));
+            store.append_message(Some(first_user), assistant_call("shared", "search", "{}"));
         store.append_message(Some(first_assistant), successful_tool("shared", "search"));
         store.append_record_unchecked(Record::ToolExecutionObserved {
             id: "observed".into(),
@@ -782,15 +954,16 @@ mod tests {
             },
         );
         let second_assistant =
-            store.append_message(Some(second_user), assistant_call("shared", "search"));
+            store.append_message(Some(second_user), assistant_call("shared", "search", "{}"));
         store.append_message(Some(second_assistant), successful_tool("shared", "search"));
 
-        let extracted = extract_store_examples(&store, &HashSet::from(["search".to_string()]));
-        assert_eq!(extracted.examples.len(), 1);
-        assert_eq!(
-            extracted.examples[0].expected,
-            BTreeSet::from(["search".into()])
+        let extracted = extract_store_examples(
+            &store,
+            Path::new("session.jsonl"),
+            &HashSet::from(["search".to_string()]),
         );
+        assert_eq!(extracted.turns.len(), 1);
+        assert_eq!(extracted.turns[0].calls[0].name, "search");
         assert_eq!(extracted.skipped.failed, 1);
     }
 
@@ -798,7 +971,8 @@ mod tests {
     fn later_same_turn_call_id_cannot_overwrite_first_assistant_outcome() {
         let mut store = MemoryStore::new("session");
         let user = store.append_message(None, AgentMessage::user("find", Vec::new()));
-        let first_assistant = store.append_message(Some(user), assistant_call("shared", "search"));
+        let first_assistant =
+            store.append_message(Some(user), assistant_call("shared", "search", "{}"));
         store.append_record_unchecked(Record::ToolExecutionObserved {
             id: "first-observed".into(),
             seq: store.next_sequence(),
@@ -822,7 +996,10 @@ mod tests {
         });
         let first_result =
             store.append_message(Some(first_assistant), successful_tool("shared", "search"));
-        store.append_message(Some(first_result), assistant_call("shared", "write_file"));
+        store.append_message(
+            Some(first_result),
+            assistant_call("shared", "write_file", "{}"),
+        );
         store.append_record_unchecked(Record::ToolExecutionObserved {
             id: "later-observed".into(),
             seq: store.next_sequence(),
@@ -845,25 +1022,31 @@ mod tests {
             output_bytes: None,
         });
 
-        let extracted = extract_store_examples(&store, &HashSet::from(["search".to_string()]));
-        assert_eq!(extracted.examples.len(), 1);
-        assert_eq!(
-            extracted.examples[0].expected,
-            BTreeSet::from(["search".into()])
+        let extracted = extract_store_examples(
+            &store,
+            Path::new("session.jsonl"),
+            &HashSet::from(["search".to_string()]),
         );
+        assert_eq!(extracted.turns.len(), 1);
+        assert_eq!(extracted.turns[0].calls[0].name, "search");
     }
 
     #[test]
     fn legacy_outcome_does_not_cross_the_next_assistant() {
         let mut store = MemoryStore::new("session");
         let user = store.append_message(None, AgentMessage::user("find", Vec::new()));
-        let first_assistant = store.append_message(Some(user), assistant_call("shared", "search"));
+        let first_assistant =
+            store.append_message(Some(user), assistant_call("shared", "search", "{}"));
         let continuation =
-            store.append_message(Some(first_assistant), assistant_call("shared", "search"));
+            store.append_message(Some(first_assistant), assistant_call("shared", "search", "{}"));
         store.append_message(Some(continuation), successful_tool("shared", "search"));
 
-        let extracted = extract_store_examples(&store, &HashSet::from(["search".to_string()]));
-        assert!(extracted.examples.is_empty());
+        let extracted = extract_store_examples(
+            &store,
+            Path::new("session.jsonl"),
+            &HashSet::from(["search".to_string()]),
+        );
+        assert!(extracted.turns.is_empty());
         assert_eq!(extracted.skipped.failed, 1);
     }
 
