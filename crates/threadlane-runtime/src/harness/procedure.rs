@@ -2,7 +2,8 @@ use super::effects::{EffectAction, EffectsError, GatedEffects};
 use super::store::SessionStore;
 use super::types::{
     CompactionReason, Entry, OperationIntent, OperationOutcome, ProvisionedEntry, QueueKind,
-    Record, ToolResult, ToolSpec, UsageCause,
+    Record, ToolExecutionOutcome, ToolExecutionPhase, ToolResult, ToolSpec, TraceString,
+    UsageCause,
 };
 use crate::types::{AgentMessage, DeferredHandle, TokenUsage};
 
@@ -1596,6 +1597,34 @@ impl AbortProcedure {
                 parent_id = Some(tool.result_entry_id.clone());
             }
             effects.park(EffectAction::AppendRecord {
+                id: format!("abort-tool-execution-action-{run_id}-{}", tool.tool_call_id),
+                record: Record::ToolExecutionObserved {
+                    id: format!("abort-tool-execution-{run_id}-{}", tool.tool_call_id),
+                    seq,
+                    lane: lane.name.clone(),
+                    timestamp: seq,
+                    run_id: run_id.into(),
+                    attempt: Some(lane.attempts),
+                    tool_call_id: TraceString::new(tool.tool_call_id.clone())
+                        .map_err(|error| ProcedureError::Invalid(error.to_string()))?,
+                    tool_name: TraceString::new(tool.tool_name.clone())
+                        .map_err(|error| ProcedureError::Invalid(error.to_string()))?,
+                    executor_kind: TraceString::new("harness.abort_recovery")
+                        .map_err(|error| ProcedureError::Invalid(error.to_string()))?,
+                    phase: ToolExecutionPhase::Finished,
+                    started_at_ms: None,
+                    duration_ms: None,
+                    outcome: Some(ToolExecutionOutcome::Cancelled),
+                    exit_code: None,
+                    cancelled: true,
+                    is_error: Some(true),
+                    terminate: Some(false),
+                    output_sha256: None,
+                    output_bytes: None,
+                },
+            })?;
+            seq += 1;
+            effects.park(EffectAction::AppendRecord {
                 id: format!("abort-tool-finish-action-{run_id}-{}", tool.tool_call_id),
                 record: Record::ToolFinished {
                     id: format!("abort-tool-finished-{run_id}-{}", tool.tool_call_id),
@@ -2421,7 +2450,10 @@ fn next_seq_with_effects<S: SessionStore>(store: &S, effects: &GatedEffects) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::harness::{MemoryStore, Reducer, SessionStore};
+    use crate::harness::{
+        MemoryStore, Reducer, SessionStore, ToolExecutionOutcome, ToolExecutionPhase,
+    };
+    use threadlane_protocol::{RuntimeToolCall, RuntimeToolCallFunction};
 
     fn open_store(run_id: &str) -> MemoryStore {
         let mut store = MemoryStore::new("session");
@@ -2495,5 +2527,60 @@ mod tests {
                 if custom_type == "compaction_summary"
                     && payload["checkpoint_kind"] == "overflow_recovery"
         ));
+    }
+
+    #[test]
+    fn abort_recovery_records_cancelled_tool_outcome() {
+        let mut store = open_store("run");
+        let parent = store.entries().last().unwrap().id.clone();
+        let assistant_id = store.append_message(
+            Some(parent),
+            AgentMessage::Assistant {
+                content: None,
+                tool_calls: Some(vec![RuntimeToolCall {
+                    id: "call-1".into(),
+                    r#type: "function".into(),
+                    function: RuntimeToolCallFunction {
+                        name: "read_file".into(),
+                        arguments: "{}".into(),
+                    },
+                    thought_signature: None,
+                }]),
+                stop_reason: None,
+                deferred_handle: None,
+            },
+        );
+        let mut effects = GatedEffects::new();
+        ToolBatchProcedure::start(
+            &store,
+            "run",
+            &assistant_id,
+            &[ToolSpec {
+                index: 0,
+                call_id: "call-1".into(),
+                name: "read_file".into(),
+                effective_args: serde_json::json!({}),
+                result_entry_id: "result-1".into(),
+                replay: super::super::ToolReplaySafety::Safe,
+            }],
+            &mut effects,
+        )
+        .unwrap();
+        effects.run_to_completion(&mut store).unwrap();
+        AbortProcedure::request(&store, "run", &mut effects).unwrap();
+        effects.run_to_completion(&mut store).unwrap();
+        AbortProcedure::reconcile(&store, "run", &assistant_id, &mut effects).unwrap();
+        effects.run_to_completion(&mut store).unwrap();
+
+        assert!(store.records().iter().any(|record| matches!(
+            record,
+            Record::ToolExecutionObserved {
+                tool_call_id,
+                phase: ToolExecutionPhase::Finished,
+                outcome: Some(ToolExecutionOutcome::Cancelled),
+                cancelled: true,
+                ..
+            } if tool_call_id.as_str() == "call-1"
+        )));
     }
 }

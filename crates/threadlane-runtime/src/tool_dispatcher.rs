@@ -5,7 +5,7 @@
 
 use crate::error::AgentError;
 use crate::events::AgentEvent;
-use crate::harness::{HookContext, HookRegistry};
+use crate::harness::{HookContext, HookRegistry, ToolExecutionOutcome};
 use crate::loop_engine::AbortOnDrop;
 use crate::tool_executor::{builtin_tool_executor, ToolExecutor};
 use crate::types::{AgentToolCall, AgentToolDefinition, AgentToolResult, ToolExecutionMode};
@@ -230,14 +230,16 @@ impl ToolDispatcher {
             let mut executed_indices = Vec::new();
             for (index, call) in prepared {
                 let fallback_call = call.tc.clone();
+                let executor_kind =
+                    Self::executor_kind(&call.context.tool_routes, &call.tc.function.name);
                 let handle = AbortOnDrop::new(tokio::spawn(async move {
                     Self::execute_prepared_tool(call).await
                 }));
-                handles.push((index, fallback_call, handle));
+                handles.push((index, fallback_call, executor_kind, handle));
                 executed_indices.push(index);
             }
 
-            for (index, tool_call, handle) in handles {
+            for (index, tool_call, executor_kind, handle) in handles {
                 match handle.join().await {
                     Ok(result) => slots[index] = Some(result),
                     Err(error) => {
@@ -248,6 +250,22 @@ impl ToolDispatcher {
                             is_error: true,
                             terminate: false,
                         };
+                        let outcome = if error.is_cancelled() {
+                            ToolExecutionOutcome::Cancelled
+                        } else {
+                            ToolExecutionOutcome::Failed
+                        };
+                        let _ = Self::record_terminal_trace(
+                            self.tool_execution_trace_recorder.as_ref(),
+                            &tool_call.id,
+                            &tool_call.function.name,
+                            executor_kind,
+                            None,
+                            None,
+                            outcome,
+                            &result,
+                        )
+                        .await;
                         slots[index] = Some(result);
                     }
                 }
@@ -286,6 +304,7 @@ impl ToolDispatcher {
         intent_recorder: Option<ToolIntentRecorder>,
         skip_before_hook: bool,
     ) -> AgentToolResult {
+        let executor_kind = Self::executor_kind(&tool_routes, &tc.function.name);
         let result = AssertUnwindSafe(Self::run_tool_with_hooks(
             tc.clone(),
             ToolRunContext {
@@ -330,6 +349,17 @@ impl ToolDispatcher {
                     is_error: true,
                     terminate: false,
                 };
+                let _ = Self::record_terminal_trace(
+                    self.tool_execution_trace_recorder.as_ref(),
+                    &tc.id,
+                    &tc.function.name,
+                    executor_kind,
+                    None,
+                    None,
+                    ToolExecutionOutcome::Failed,
+                    &result,
+                )
+                .await;
                 let _ = self.event_tx.send(AgentEvent::ToolExecutionEnd {
                     tool_call_id: tc.id.clone(),
                     name: tc.function.name.clone(),
@@ -377,6 +407,17 @@ impl ToolDispatcher {
                 is_error: true,
                 terminate: false,
             };
+            let _ = Self::record_terminal_trace(
+                context.execution_trace_recorder.as_ref(),
+                &tc.id,
+                &tc.function.name,
+                Self::executor_kind(&context.tool_routes, &tc.function.name),
+                None,
+                None,
+                ToolExecutionOutcome::Declined,
+                &result,
+            )
+            .await;
             let _ = context.event_tx.send(AgentEvent::ToolExecutionEnd {
                 tool_call_id: tc.id,
                 name: tc.function.name,
@@ -410,6 +451,17 @@ impl ToolDispatcher {
                     is_error: true,
                     terminate: false,
                 };
+                let _ = Self::record_terminal_trace(
+                    context.execution_trace_recorder.as_ref(),
+                    &tc.id,
+                    &tc.function.name,
+                    Self::executor_kind(&context.tool_routes, &tc.function.name),
+                    None,
+                    None,
+                    ToolExecutionOutcome::Declined,
+                    &res,
+                )
+                .await;
                 let _ = context.event_tx.send(AgentEvent::ToolExecutionEnd {
                     tool_call_id: tc.id.clone(),
                     name: tc.function.name.clone(),
@@ -428,6 +480,17 @@ impl ToolDispatcher {
                     is_error: true,
                     terminate: false,
                 };
+                let _ = Self::record_terminal_trace(
+                    context.execution_trace_recorder.as_ref(),
+                    &tc.id,
+                    &tc.function.name,
+                    Self::executor_kind(&context.tool_routes, &tc.function.name),
+                    None,
+                    None,
+                    ToolExecutionOutcome::Failed,
+                    &result,
+                )
+                .await;
                 let _ = context.event_tx.send(AgentEvent::ToolExecutionEnd {
                     tool_call_id: tc.id,
                     name: tc.function.name,
@@ -457,12 +520,7 @@ impl ToolDispatcher {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
-        let executor_kind = context
-            .tool_routes
-            .iter()
-            .find(|route| route.tool_names.contains(&tc.function.name))
-            .map(|route| route.executor.executor_id().to_string())
-            .unwrap_or_else(|| "unregistered".to_string());
+        let executor_kind = Self::executor_kind(&context.tool_routes, &tc.function.name);
         if let Some(recorder) = &context.execution_trace_recorder {
             if let Err(error) = recorder(crate::provider::ToolExecutionTraceEvent::Started {
                 tool_call_id: tc.id.clone(),
@@ -473,13 +531,25 @@ impl ToolDispatcher {
             })
             .await
             {
-                return AgentToolResult {
+                let result = AgentToolResult {
                     tool_call_id: tc.id,
                     name: tc.function.name,
                     content: format!("Failed to persist tool execution start: {error}"),
                     is_error: true,
                     terminate: false,
                 };
+                let _ = Self::record_terminal_trace(
+                    context.execution_trace_recorder.as_ref(),
+                    &result.tool_call_id,
+                    &result.name,
+                    executor_kind,
+                    Some(started_at_ms),
+                    Some(start_time.elapsed().as_millis() as u64),
+                    ToolExecutionOutcome::Failed,
+                    &result,
+                )
+                .await;
+                return result;
             }
         }
         debug!(
@@ -493,7 +563,7 @@ impl ToolDispatcher {
         });
 
         let mut execution_result = None;
-        for route in context.tool_routes {
+        for route in &context.tool_routes {
             if !route.tool_names.contains(&tc.function.name) {
                 continue;
             }
@@ -571,26 +641,64 @@ impl ToolDispatcher {
             final_result.terminate = terminate;
         }
 
-        if let Some(recorder) = &context.execution_trace_recorder {
-            if let Err(error) = recorder(crate::provider::ToolExecutionTraceEvent::Finished {
-                tool_call_id: final_result.tool_call_id.clone(),
-                tool_name: final_result.name.clone(),
-                executor_kind: executor_kind.into(),
-                started_at_ms,
-                duration_ms: start_time.elapsed().as_millis() as u64,
-                is_error: final_result.is_error,
-                terminate: final_result.terminate,
-                output_sha256: format!("{:x}", Sha256::digest(final_result.content.as_bytes())),
-                output_bytes: final_result.content.len() as u64,
-            })
-            .await
-            {
-                final_result.content = format!("Failed to persist tool execution finish: {error}");
-                final_result.is_error = true;
-            }
+        let outcome = if final_result.is_error {
+            ToolExecutionOutcome::Failed
+        } else {
+            ToolExecutionOutcome::Succeeded
+        };
+        if let Err(error) = Self::record_terminal_trace(
+            context.execution_trace_recorder.as_ref(),
+            &tc.id,
+            &tc.function.name,
+            executor_kind,
+            Some(started_at_ms),
+            Some(start_time.elapsed().as_millis() as u64),
+            outcome,
+            &final_result,
+        )
+        .await
+        {
+            final_result.content = format!("Failed to persist tool execution finish: {error}");
+            final_result.is_error = true;
         }
 
         final_result
+    }
+
+    fn executor_kind(routes: &[ToolExecutorRoute], tool_name: &str) -> String {
+        routes
+            .iter()
+            .find(|route| route.tool_names.contains(tool_name))
+            .map(|route| route.executor.executor_id().to_string())
+            .unwrap_or_else(|| "unregistered".to_string())
+    }
+
+    async fn record_terminal_trace(
+        recorder: Option<&crate::provider::ToolExecutionTraceRecorder>,
+        tool_call_id: &str,
+        tool_name: &str,
+        executor_kind: String,
+        started_at_ms: Option<u64>,
+        duration_ms: Option<u64>,
+        outcome: ToolExecutionOutcome,
+        result: &AgentToolResult,
+    ) -> Result<(), String> {
+        let Some(recorder) = recorder else {
+            return Ok(());
+        };
+        recorder(crate::provider::ToolExecutionTraceEvent::Finished {
+            tool_call_id: tool_call_id.into(),
+            tool_name: tool_name.into(),
+            executor_kind,
+            started_at_ms,
+            duration_ms,
+            outcome,
+            is_error: result.is_error,
+            terminate: result.terminate,
+            output_sha256: format!("{:x}", Sha256::digest(result.content.as_bytes())),
+            output_bytes: result.content.len() as u64,
+        })
+        .await
     }
 
     async fn tool_execution_routes(&self) -> Vec<ToolExecutorRoute> {
@@ -844,6 +952,15 @@ mod tests {
             .unwrap();
 
         let mut dispatcher = ToolDispatcher::new(event_tx, hooks);
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder_observed = observed.clone();
+        dispatcher.tool_execution_trace_recorder = Some(Arc::new(move |event| {
+            let observed = recorder_observed.clone();
+            Box::pin(async move {
+                observed.lock().unwrap().push(event);
+                Ok(())
+            })
+        }));
         dispatcher
             .register_tool_executor(Arc::new(StubExecutor {
                 id: "stub".into(),
@@ -867,6 +984,19 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert!(results[0].is_error);
         assert!(results[0].content.contains("blocked by test"));
+        let observed = observed.lock().unwrap();
+        assert_eq!(observed.len(), 1);
+        assert!(matches!(
+            &observed[0],
+            crate::provider::ToolExecutionTraceEvent::Finished {
+                tool_call_id,
+                tool_name,
+                started_at_ms: None,
+                duration_ms: None,
+                outcome: ToolExecutionOutcome::Declined,
+                ..
+            } if tool_call_id == "call_1" && tool_name == "stub_write"
+        ));
     }
 
     #[tokio::test]

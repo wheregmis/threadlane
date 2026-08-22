@@ -336,19 +336,31 @@ fn extract_store_examples<S: SessionStore>(
                     continue;
                 }
             };
+            let outcome_end = turn[assistant_index + 1..]
+                .iter()
+                .position(|entry| matches!(entry.message, AgentMessage::Assistant { .. }))
+                .map_or(turn.len(), |offset| assistant_index + 1 + offset);
             let outcomes = bounded_outcomes(
                 store.records(),
                 &lane,
                 assistant.seq,
-                entries.get(end).map_or(u64::MAX, |entry| entry.seq),
+                turn.get(outcome_end)
+                    .or_else(|| entries.get(end))
+                    .map_or(u64::MAX, |entry| entry.seq),
             );
             let mut expected = BTreeSet::new();
             let mut observed = Vec::new();
             for call in calls {
                 let outcome = outcomes
-                    .get(call.id.as_str())
+                    .get(&(call.id.clone(), call.function.name.clone()))
                     .cloned()
-                    .or_else(|| legacy_outcome(&turn[assistant_index + 1..], &call.id));
+                    .or_else(|| {
+                        legacy_outcome(
+                            &turn[assistant_index + 1..outcome_end],
+                            &call.id,
+                            &call.function.name,
+                        )
+                    });
                 if let Some(outcome) = outcome {
                     if outcome == ToolExecutionOutcome::Succeeded {
                         expected.insert(call.function.name.clone());
@@ -378,20 +390,23 @@ fn bounded_outcomes(
     lane: &str,
     after_seq: u64,
     before_seq: u64,
-) -> BTreeMap<String, ToolExecutionOutcome> {
+) -> BTreeMap<(String, String), ToolExecutionOutcome> {
     let mut outcomes = BTreeMap::new();
     for record in records {
         if let Record::ToolExecutionObserved {
             seq,
             lane: record_lane,
             tool_call_id,
+            tool_name,
             phase: ToolExecutionPhase::Finished,
             outcome: Some(outcome),
             ..
         } = record
         {
             if record_lane == lane && *seq > after_seq && *seq < before_seq {
-                outcomes.insert(tool_call_id.as_str().into(), outcome.clone());
+                outcomes
+                    .entry((tool_call_id.as_str().into(), tool_name.as_str().into()))
+                    .or_insert_with(|| outcome.clone());
             }
         }
     }
@@ -401,13 +416,15 @@ fn bounded_outcomes(
 fn legacy_outcome(
     entries: &[crate::harness::Entry],
     call_id: &str,
+    tool_name: &str,
 ) -> Option<ToolExecutionOutcome> {
     entries.iter().find_map(|entry| match &entry.message {
         AgentMessage::Tool {
             tool_call_id,
+            name,
             is_error,
             ..
-        } if tool_call_id == call_id => Some(if *is_error {
+        } if tool_call_id == call_id && name == tool_name => Some(if *is_error {
             ToolExecutionOutcome::Failed
         } else {
             ToolExecutionOutcome::Succeeded
@@ -735,6 +752,79 @@ mod tests {
             extracted.examples[0].expected,
             BTreeSet::from(["search".into()])
         );
+        assert_eq!(extracted.skipped.failed, 1);
+    }
+
+    #[test]
+    fn later_same_turn_call_id_cannot_overwrite_first_assistant_outcome() {
+        let mut store = MemoryStore::new("session");
+        let user = store.append_message(None, AgentMessage::user("find", Vec::new()));
+        let first_assistant = store.append_message(Some(user), assistant_call("shared", "search"));
+        store.append_record_unchecked(Record::ToolExecutionObserved {
+            id: "first-observed".into(),
+            seq: store.next_sequence(),
+            lane: "main".into(),
+            timestamp: 1,
+            run_id: "run".into(),
+            attempt: Some(1),
+            tool_call_id: TraceString::new("shared").unwrap(),
+            tool_name: TraceString::new("search").unwrap(),
+            executor_kind: TraceString::new("test").unwrap(),
+            phase: ToolExecutionPhase::Finished,
+            started_at_ms: None,
+            duration_ms: None,
+            outcome: Some(ToolExecutionOutcome::Succeeded),
+            exit_code: Some(0),
+            cancelled: false,
+            is_error: Some(false),
+            terminate: Some(false),
+            output_sha256: None,
+            output_bytes: None,
+        });
+        let first_result =
+            store.append_message(Some(first_assistant), successful_tool("shared", "search"));
+        store.append_message(Some(first_result), assistant_call("shared", "write_file"));
+        store.append_record_unchecked(Record::ToolExecutionObserved {
+            id: "later-observed".into(),
+            seq: store.next_sequence(),
+            lane: "main".into(),
+            timestamp: 2,
+            run_id: "run".into(),
+            attempt: Some(2),
+            tool_call_id: TraceString::new("shared").unwrap(),
+            tool_name: TraceString::new("write_file").unwrap(),
+            executor_kind: TraceString::new("test").unwrap(),
+            phase: ToolExecutionPhase::Finished,
+            started_at_ms: None,
+            duration_ms: None,
+            outcome: Some(ToolExecutionOutcome::Failed),
+            exit_code: Some(1),
+            cancelled: false,
+            is_error: Some(true),
+            terminate: Some(false),
+            output_sha256: None,
+            output_bytes: None,
+        });
+
+        let extracted = extract_store_examples(&store, &HashSet::from(["search".to_string()]));
+        assert_eq!(extracted.examples.len(), 1);
+        assert_eq!(
+            extracted.examples[0].expected,
+            BTreeSet::from(["search".into()])
+        );
+    }
+
+    #[test]
+    fn legacy_outcome_does_not_cross_the_next_assistant() {
+        let mut store = MemoryStore::new("session");
+        let user = store.append_message(None, AgentMessage::user("find", Vec::new()));
+        let first_assistant = store.append_message(Some(user), assistant_call("shared", "search"));
+        let continuation =
+            store.append_message(Some(first_assistant), assistant_call("shared", "search"));
+        store.append_message(Some(continuation), successful_tool("shared", "search"));
+
+        let extracted = extract_store_examples(&store, &HashSet::from(["search".to_string()]));
+        assert!(extracted.examples.is_empty());
         assert_eq!(extracted.skipped.failed, 1);
     }
 
