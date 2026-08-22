@@ -36,3 +36,8 @@ tempfile = "3.10"
 name = "needle-project-eval"
 path = "src/bin/needle_project_eval.rs"
 required-features = ["needle"]
+
+[[bin]]
+name = "needle-project-train"
+path = "src/bin/needle_project_train.rs"
+required-features = ["needle"]
