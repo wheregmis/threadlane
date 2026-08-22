@@ -3,8 +3,8 @@ use crate::local_tool_router::{
     needle_engine, needle_model_path, render_needle_candidate, validate_needle_model_path,
 };
 use crate::types::{AgentMessage, AgentToolDefinition};
-use sha2::{Digest, Sha256};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -72,6 +72,10 @@ pub struct NeedleEvalReport {
     pub misses_by_tool: BTreeMap<String, usize>,
     pub model_sha256: String,
     pub catalogue_sha256: String,
+    #[serde(default)]
+    pub holdout_sha256: Option<String>,
+    #[serde(default)]
+    pub evaluation_run_id: Option<String>,
 }
 
 impl fmt::Display for NeedleEvalReport {
@@ -142,7 +146,17 @@ impl fmt::Display for NeedleEvalReport {
             writeln!(f, "miss_{}: {}", tool, misses)?;
         }
         writeln!(f, "model_sha256: {}", self.model_sha256)?;
-        write!(f, "catalogue_sha256: {}", self.catalogue_sha256)
+        writeln!(f, "catalogue_sha256: {}", self.catalogue_sha256)?;
+        writeln!(
+            f,
+            "holdout_sha256: {}",
+            self.holdout_sha256.as_deref().unwrap_or("n/a")
+        )?;
+        write!(
+            f,
+            "evaluation_run_id: {}",
+            self.evaluation_run_id.as_deref().unwrap_or("n/a")
+        )
     }
 }
 
@@ -286,6 +300,8 @@ fn evaluate_needle_corpus(
         misses_by_tool,
         model_sha256,
         catalogue_sha256,
+        holdout_sha256: None,
+        evaluation_run_id: None,
     })
 }
 
@@ -467,7 +483,13 @@ fn extract_store_examples<S: SessionStore>(
                 .any(|call| !catalogue.contains(&call.name))
             {
                 extracted.skipped.add(SkipReason::ObsoleteTool);
-            } else if successful_calls.len() > 5 {
+            } else if successful_calls
+                .iter()
+                .map(|call| &call.name)
+                .collect::<HashSet<_>>()
+                .len()
+                > 5
+            {
                 extracted.skipped.add(SkipReason::OverFiveLabel);
             } else {
                 extracted.turns.push(NeedleHistoryTurn {
@@ -651,6 +673,8 @@ mod tests {
             misses_by_tool: BTreeMap::new(),
             model_sha256: "model".into(),
             catalogue_sha256: "catalogue".into(),
+            holdout_sha256: None,
+            evaluation_run_id: None,
         }
     }
 
@@ -981,6 +1005,49 @@ mod tests {
         assert_eq!(extracted.skipped.continuation_only, 1);
         assert_eq!(extracted.skipped.obsolete_tool, 1);
         assert_eq!(extracted.skipped.over_five_label, 1);
+    }
+
+    #[test]
+    fn six_successful_calls_to_one_tool_remain_eligible() {
+        let mut store = MemoryStore::new("session");
+        let user = store.append_message(None, AgentMessage::user("search repeatedly", Vec::new()));
+        let assistant = store.append_message(
+            Some(user),
+            AgentMessage::Assistant {
+                content: None,
+                tool_calls: Some(
+                    (0..6)
+                        .map(|index| RuntimeToolCall {
+                            id: format!("call-{index}"),
+                            r#type: "function".into(),
+                            function: RuntimeToolCallFunction {
+                                name: "search".into(),
+                                arguments: "{}".into(),
+                            },
+                            thought_signature: None,
+                        })
+                        .collect(),
+                ),
+                stop_reason: None,
+                deferred_handle: None,
+            },
+        );
+        for index in 0..6 {
+            store.append_message(
+                Some(assistant.clone()),
+                successful_tool(&format!("call-{index}"), "search"),
+            );
+        }
+
+        let extracted = extract_store_examples(
+            &store,
+            Path::new("session.jsonl"),
+            &HashSet::from(["search".to_string()]),
+        );
+
+        assert_eq!(extracted.turns.len(), 1);
+        assert_eq!(extracted.turns[0].calls.len(), 6);
+        assert_eq!(extracted.skipped.over_five_label, 0);
     }
 
     #[test]

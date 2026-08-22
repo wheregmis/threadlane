@@ -23,7 +23,7 @@ pub const CANDIDATE_FILE: &str = "candidate.cact";
 const BASE_CHECKPOINT_FILE: &str = "checkpoints/needle2.pkl";
 pub const CURRENT_EVAL_FILE: &str = "current-eval.json";
 pub const CANDIDATE_EVAL_FILE: &str = "candidate-eval.json";
-pub const MANIFEST_VERSION: u32 = 1;
+pub const MANIFEST_VERSION: u32 = 2;
 
 #[derive(Debug, Clone)]
 pub struct NeedleDatasetConfig {
@@ -45,6 +45,8 @@ pub struct NeedleTrainingManifest {
     pub redactions: BTreeMap<String, usize>,
     pub catalogue_sha256: String,
     pub dataset_sha256: String,
+    #[serde(default)]
+    pub holdout_sha256: String,
     pub needle_version: Option<String>,
     pub base_sha256: Option<String>,
     pub adapter_sha256: Option<String>,
@@ -85,6 +87,11 @@ struct ExampleRedactor {
 impl ExampleRedactor {
     fn redact_text(&mut self, text: &str) -> String {
         let mut redacted = text.to_string();
+        let mut known = self.placeholders.iter().collect::<Vec<_>>();
+        known.sort_by(|(left, _), (right, _)| right.len().cmp(&left.len()));
+        for (secret, placeholder) in known {
+            redacted = redacted.replace(secret, placeholder);
+        }
         for rule in credential_rules() {
             let mut next = String::with_capacity(redacted.len());
             let mut last = 0;
@@ -130,11 +137,45 @@ fn redact_value(value: &mut Value, redactor: &mut ExampleRedactor) {
         Value::Array(values) => values
             .iter_mut()
             .for_each(|value| redact_value(value, redactor)),
-        Value::Object(values) => values
-            .values_mut()
-            .for_each(|value| redact_value(value, redactor)),
+        Value::Object(values) => redact_object(values, redactor),
         _ => {}
     }
+}
+
+fn redact_object(values: &mut serde_json::Map<String, Value>, redactor: &mut ExampleRedactor) {
+    for (key, value) in values {
+        if is_credential_field(key) {
+            redact_sensitive_value(value, redactor);
+        } else {
+            redact_value(value, redactor);
+        }
+    }
+}
+
+fn redact_sensitive_value(value: &mut Value, redactor: &mut ExampleRedactor) {
+    match value {
+        Value::String(text) if !text.is_empty() => {
+            *text = redactor.placeholder("credential_field", text)
+        }
+        Value::Array(values) => values
+            .iter_mut()
+            .for_each(|value| redact_sensitive_value(value, redactor)),
+        Value::Object(values) => values
+            .values_mut()
+            .for_each(|value| redact_sensitive_value(value, redactor)),
+        _ => {}
+    }
+}
+
+fn is_credential_field(key: &str) -> bool {
+    let normalized = key
+        .chars()
+        .filter(|character| !matches!(character, '_' | '-'))
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    ["token", "secret", "password", "apikey"]
+        .iter()
+        .any(|credential| normalized.contains(credential))
 }
 
 pub fn export_needle_dataset(
@@ -158,6 +199,8 @@ pub fn export_needle_dataset(
 
     let train_bytes = training_jsonl(&corpus.turns, definitions, &split.train_sessions)?;
     let dataset_sha256 = sha256(&train_bytes);
+    let holdout_sha256 =
+        holdout_sha256_for_relative_paths(&config.sessions_dir, &split.holdout_sessions)?;
     let catalogue_bytes = serde_json::to_vec(definitions)
         .map_err(|_| "Tool catalogue could not be serialized.".to_string())?;
     let redactions = redaction_counts(&corpus.turns, &split.train_sessions);
@@ -186,6 +229,7 @@ pub fn export_needle_dataset(
         redactions,
         catalogue_sha256: sha256(&catalogue_bytes),
         dataset_sha256,
+        holdout_sha256,
         needle_version: None,
         base_sha256: None,
         adapter_sha256: None,
@@ -195,8 +239,14 @@ pub fn export_needle_dataset(
         .map_err(|_| "Needle training manifest could not be serialized.".to_string())?;
     let train_tmp = write_temp(&train_path, &train_bytes)?;
     let manifest_tmp = write_temp(&manifest_path, &manifest_bytes)?;
-    finalize_temp(&train_tmp, &train_path)?;
-    finalize_temp(&manifest_tmp, &manifest_path)?;
+    if let Err(error) = replace_files_transactionally(&[
+        (train_tmp.clone(), train_path),
+        (manifest_tmp.clone(), manifest_path),
+    ]) {
+        let _ = std::fs::remove_file(train_tmp);
+        let _ = std::fs::remove_file(manifest_tmp);
+        return Err(error);
+    }
     Ok(manifest)
 }
 
@@ -219,12 +269,19 @@ pub fn resolve_holdout_paths(
     sessions_dir: &Path,
     manifest: &NeedleTrainingManifest,
 ) -> Result<Vec<PathBuf>, String> {
+    resolve_relative_holdout_paths(sessions_dir, &manifest.holdout_sessions)
+}
+
+fn resolve_relative_holdout_paths(
+    sessions_dir: &Path,
+    holdout_sessions: &[PathBuf],
+) -> Result<Vec<PathBuf>, String> {
     let sessions_dir = sessions_dir
         .canonicalize()
         .map_err(|_| "Sessions directory is unreadable.".to_string())?;
     let mut seen = BTreeSet::new();
-    let mut paths = Vec::with_capacity(manifest.holdout_sessions.len());
-    for relative in &manifest.holdout_sessions {
+    let mut paths = Vec::with_capacity(holdout_sessions.len());
+    for relative in holdout_sessions {
         if relative.is_absolute()
             || relative.components().any(|component| {
                 matches!(
@@ -253,14 +310,39 @@ pub fn resolve_holdout_paths(
     Ok(paths)
 }
 
+pub fn holdout_sha256(
+    sessions_dir: &Path,
+    manifest: &NeedleTrainingManifest,
+) -> Result<String, String> {
+    holdout_sha256_for_relative_paths(sessions_dir, &manifest.holdout_sessions)
+}
+
+fn holdout_sha256_for_relative_paths(
+    sessions_dir: &Path,
+    holdout_sessions: &[PathBuf],
+) -> Result<String, String> {
+    let paths = resolve_relative_holdout_paths(sessions_dir, holdout_sessions)?;
+    let mut digest = Sha256::new();
+    for (relative, path) in holdout_sessions.iter().zip(paths) {
+        let identity = relative.to_string_lossy();
+        let bytes = std::fs::read(path)
+            .map_err(|_| "Needle holdout session is missing or unreadable.".to_string())?;
+        digest.update((identity.len() as u64).to_le_bytes());
+        digest.update(identity.as_bytes());
+        digest.update((bytes.len() as u64).to_le_bytes());
+        digest.update(bytes);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
 pub fn validate_evaluation_inputs(
+    work_dir: &Path,
+    sessions_dir: &Path,
     manifest: &NeedleTrainingManifest,
     definitions: &[AgentToolDefinition],
     candidate_path: &Path,
-) -> Result<(), String> {
-    if manifest.version != MANIFEST_VERSION {
-        return Err("Needle training manifest version is unsupported.".into());
-    }
+) -> Result<String, String> {
+    validate_training_artifact_hashes(work_dir, manifest)?;
     let catalogue = serde_json::to_vec(definitions)
         .map_err(|_| "Tool catalogue could not be serialized.".to_string())?;
     if sha256(&catalogue) != manifest.catalogue_sha256 {
@@ -273,7 +355,11 @@ pub fn validate_evaluation_inputs(
     if file_sha256(candidate_path, "Needle candidate is unreadable.")? != expected {
         return Err("Needle candidate hash does not match the manifest.".into());
     }
-    Ok(())
+    let holdout_sha256 = holdout_sha256(sessions_dir, manifest)?;
+    if holdout_sha256 != manifest.holdout_sha256 {
+        return Err("Needle holdout hash does not match the manifest.".into());
+    }
+    Ok(holdout_sha256)
 }
 
 pub fn validate_evaluation_report_model(
@@ -288,19 +374,19 @@ pub fn validate_evaluation_report_model(
 
 pub fn promote_needle_candidate(
     work_dir: &Path,
+    sessions_dir: &Path,
     model_path: &Path,
     definitions: &[AgentToolDefinition],
-) -> Result<(), String> {
+) -> Result<String, String> {
     let manifest = load_training_manifest(work_dir)?;
     let candidate_path = work_dir.join(CANDIDATE_FILE);
-    if manifest.version != MANIFEST_VERSION {
-        return Err("Needle training manifest version is unsupported.".into());
-    }
-    let catalogue = serde_json::to_vec(definitions)
-        .map_err(|_| "Tool catalogue could not be serialized.".to_string())?;
-    if sha256(&catalogue) != manifest.catalogue_sha256 {
-        return Err("Needle tool catalogue hash does not match the manifest.".into());
-    }
+    validate_evaluation_inputs(
+        work_dir,
+        sessions_dir,
+        &manifest,
+        definitions,
+        &candidate_path,
+    )?;
     let expected_candidate = manifest
         .candidate_sha256
         .as_deref()
@@ -310,7 +396,7 @@ pub fn promote_needle_candidate(
     if sha256(&candidate_bytes) != expected_candidate {
         return Err("Needle candidate hash does not match the manifest.".into());
     }
-    validate_training_artifact_hashes(work_dir, &manifest)?;
+    let promoted_sha256 = sha256(&candidate_bytes);
 
     let current = load_needle_eval_report(&work_dir.join(CURRENT_EVAL_FILE))?;
     let candidate = load_needle_eval_report(&work_dir.join(CANDIDATE_EVAL_FILE))?;
@@ -331,7 +417,11 @@ pub fn promote_needle_candidate(
     #[cfg(test)]
     run_promotion_mutation_hook();
 
-    replace_model_with_candidate(&candidate_bytes, model_path, &current_bytes)
+    if holdout_sha256(sessions_dir, &manifest)? != manifest.holdout_sha256 {
+        return Err("Needle holdout hash does not match the manifest.".into());
+    }
+    replace_model_with_candidate(&candidate_bytes, model_path, &current_bytes)?;
+    Ok(promoted_sha256)
 }
 
 #[cfg(test)]
@@ -363,12 +453,13 @@ fn validate_training_artifact_hashes(
     work_dir: &Path,
     manifest: &NeedleTrainingManifest,
 ) -> Result<(), String> {
-    if file_sha256(
-        &work_dir.join(TRAIN_FILE),
-        "Needle training dataset is unreadable.",
-    )? != manifest.dataset_sha256
+    validate_finetune_inputs(work_dir, manifest)?;
+    if manifest
+        .needle_version
+        .as_deref()
+        .is_none_or(|version| version.trim().is_empty())
     {
-        return Err("Needle training dataset hash does not match the manifest.".into());
+        return Err("Needle training manifest has no Needle version.".into());
     }
     for (path, expected, name) in [
         (
@@ -393,6 +484,23 @@ fn validate_training_artifact_hashes(
     Ok(())
 }
 
+fn validate_finetune_inputs(
+    work_dir: &Path,
+    manifest: &NeedleTrainingManifest,
+) -> Result<(), String> {
+    if manifest.version != MANIFEST_VERSION {
+        return Err("Needle training manifest version is unsupported.".into());
+    }
+    if file_sha256(
+        &work_dir.join(TRAIN_FILE),
+        "Needle training dataset is unreadable.",
+    )? != manifest.dataset_sha256
+    {
+        return Err("Needle training dataset hash does not match the manifest.".into());
+    }
+    Ok(())
+}
+
 fn replace_model_with_candidate(
     candidate_bytes: &[u8],
     model_path: &Path,
@@ -400,12 +508,15 @@ fn replace_model_with_candidate(
 ) -> Result<(), String> {
     let tmp_path = model_path.with_extension("cact.tmp");
     let backup_path = model_path.with_extension("cact.bak");
+    let backup_tmp = model_path.with_extension("cact.bak.tmp");
     if let Err(error) = write_file_synced(&tmp_path, candidate_bytes)
-        .and_then(|_| write_file_synced(&backup_path, current_bytes))
+        .and_then(|_| write_file_synced(&backup_tmp, current_bytes))
+        .and_then(|_| replace_existing_backup(&backup_tmp, &backup_path))
         .and_then(|_| final_current_check(model_path, current_bytes))
         .and_then(|_| replace_existing_model(&tmp_path, model_path))
     {
         let _ = std::fs::remove_file(&tmp_path);
+        let _ = std::fs::remove_file(&backup_tmp);
         return Err(error);
     }
     Ok(())
@@ -426,6 +537,17 @@ fn final_current_check(model_path: &Path, current_bytes: &[u8]) -> Result<(), St
         return Err("Needle current model changed before promotion.".into());
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn replace_existing_backup(_tmp_path: &Path, _backup_path: &Path) -> Result<(), String> {
+    Err("Needle backup could not be replaced atomically on this platform.".into())
+}
+
+#[cfg(not(windows))]
+fn replace_existing_backup(tmp_path: &Path, backup_path: &Path) -> Result<(), String> {
+    std::fs::rename(tmp_path, backup_path)
+        .map_err(|_| "Needle backup could not be replaced atomically.".to_string())
 }
 
 #[cfg(windows)]
@@ -471,6 +593,16 @@ pub fn compare_candidate(
     {
         reasons.push("catalogue hashes differ".into());
     }
+    if current.holdout_sha256.as_deref() != Some(manifest.holdout_sha256.as_str())
+        || candidate.holdout_sha256.as_deref() != Some(manifest.holdout_sha256.as_str())
+    {
+        reasons.push("holdout hashes differ".into());
+    }
+    if current.evaluation_run_id.is_none()
+        || current.evaluation_run_id != candidate.evaluation_run_id
+    {
+        reasons.push("evaluation run identities differ".into());
+    }
     if manifest.candidate_sha256.as_deref() != Some(candidate.model_sha256.as_str()) {
         reasons.push("candidate model hash differs from manifest".into());
     }
@@ -502,10 +634,8 @@ fn run_needle_finetune_inner(
     needle_executable: &OsStr,
 ) -> Result<NeedleTrainingManifest, String> {
     let mut manifest = load_training_manifest(work_dir)?;
-    let base_path = work_dir.join(BASE_CHECKPOINT_FILE);
-    let base_bytes = std::fs::read(&base_path)
-        .map_err(|_| "Needle base checkpoint is missing or unreadable.".to_string())?;
-    let version = needle_output(needle_executable, work_dir, ["--version"])?;
+    validate_finetune_inputs(work_dir, &manifest)?;
+    let version = needle_version(needle_executable, work_dir)?;
 
     run_needle(
         needle_executable,
@@ -515,6 +645,8 @@ fn run_needle_finetune_inner(
             TRAIN_FILE,
             "--epochs",
             "10",
+            "--checkpoint-dir",
+            "checkpoints",
             "--out",
             "adapter.pkl.tmp",
         ],
@@ -523,7 +655,8 @@ fn run_needle_finetune_inner(
     if !adapter_tmp.is_file() {
         return Err("Needle finetune did not produce adapter.pkl.tmp.".into());
     }
-    finalize_temp(&adapter_tmp, &work_dir.join(ADAPTER_FILE))?;
+    let base_bytes = std::fs::read(work_dir.join(BASE_CHECKPOINT_FILE))
+        .map_err(|_| "Needle base checkpoint is missing or unreadable.".to_string())?;
 
     run_needle(
         needle_executable,
@@ -532,7 +665,7 @@ fn run_needle_finetune_inner(
             "build",
             BASE_CHECKPOINT_FILE,
             "--lora",
-            ADAPTER_FILE,
+            "adapter.pkl.tmp",
             "--out",
             "candidate.cact.tmp",
         ],
@@ -541,39 +674,45 @@ fn run_needle_finetune_inner(
     if !candidate_tmp.is_file() {
         return Err("Needle build did not produce candidate.cact.tmp.".into());
     }
-    finalize_temp(&candidate_tmp, &work_dir.join(CANDIDATE_FILE))?;
 
-    manifest.needle_version = Some(version.trim().to_string());
+    manifest.needle_version = Some(version);
     manifest.base_sha256 = Some(sha256(&base_bytes));
     manifest.adapter_sha256 = Some(sha256(
-        &std::fs::read(work_dir.join(ADAPTER_FILE))
-            .map_err(|_| "Needle adapter is unreadable.".to_string())?,
+        &std::fs::read(&adapter_tmp).map_err(|_| "Needle adapter is unreadable.".to_string())?,
     ));
-    manifest.candidate_sha256 = Some(sha256(
-        &std::fs::read(work_dir.join(CANDIDATE_FILE))
-            .map_err(|_| "Needle candidate is unreadable.".to_string())?,
-    ));
-    if let Err(error) = save_training_manifest(work_dir, &manifest) {
-        cleanup_finetune_outputs(work_dir);
-        return Err(error);
-    }
+    manifest.candidate_sha256 =
+        Some(sha256(&std::fs::read(&candidate_tmp).map_err(|_| {
+            "Needle candidate is unreadable.".to_string()
+        })?));
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest)
+        .map_err(|_| "Needle training manifest could not be serialized.".to_string())?;
+    let manifest_path = work_dir.join(MANIFEST_FILE);
+    let manifest_tmp = write_temp(&manifest_path, &manifest_bytes)?;
+    replace_files_transactionally(&[
+        (adapter_tmp, work_dir.join(ADAPTER_FILE)),
+        (candidate_tmp, work_dir.join(CANDIDATE_FILE)),
+        (manifest_tmp, manifest_path),
+    ])?;
     Ok(manifest)
 }
 
-fn needle_output<const N: usize>(
-    needle_executable: &OsStr,
-    work_dir: &Path,
-    args: [&str; N],
-) -> Result<String, String> {
+fn needle_version(needle_executable: &OsStr, work_dir: &Path) -> Result<String, String> {
     let output = Command::new(needle_executable)
         .current_dir(work_dir)
-        .args(args)
+        .arg("--version")
         .output()
         .map_err(needle_spawn_error)?;
     if !output.status.success() {
-        return Err("Needle command failed.".into());
+        return Ok("unavailable".into());
     }
-    String::from_utf8(output.stdout).map_err(|_| "Needle command output was not UTF-8.".into())
+    let version = String::from_utf8(output.stdout)
+        .map_err(|_| "Needle command output was not UTF-8.".to_string())?;
+    let version = version.trim();
+    Ok(if version.is_empty() {
+        "unavailable".into()
+    } else {
+        version.into()
+    })
 }
 
 fn run_needle<const N: usize>(
@@ -603,13 +742,7 @@ fn needle_spawn_error(error: std::io::Error) -> String {
 }
 
 fn cleanup_finetune_temps(work_dir: &Path) {
-    for file in ["adapter.pkl.tmp", "candidate.cact.tmp"] {
-        let _ = std::fs::remove_file(work_dir.join(file));
-    }
-}
-
-fn cleanup_finetune_outputs(work_dir: &Path) {
-    for file in [ADAPTER_FILE, CANDIDATE_FILE] {
+    for file in ["adapter.pkl.tmp", "candidate.cact.tmp", "manifest.tmp"] {
         let _ = std::fs::remove_file(work_dir.join(file));
     }
 }
@@ -678,13 +811,11 @@ fn training_jsonl(
         .filter(|turn| train_sessions.contains(&turn.session_file))
     {
         let mut redactor = ExampleRedactor::default();
-        let query = redactor.redact_text(&turn.prompt);
         let mut answers = turn.calls.clone();
         for answer in &mut answers {
-            for value in answer.arguments.values_mut() {
-                redact_value(value, &mut redactor);
-            }
+            redact_object(&mut answer.arguments, &mut redactor);
         }
+        let query = redactor.redact_text(&turn.prompt);
         serde_json::to_writer(
             &mut bytes,
             &NeedleTrainingExample {
@@ -709,11 +840,11 @@ fn redaction_counts(
         .filter(|turn| train_sessions.contains(&turn.session_file))
     {
         let mut redactor = ExampleRedactor::default();
-        let _ = redactor.redact_text(&turn.prompt);
         for call in &turn.calls {
             let mut args = Value::Object(call.arguments.clone());
             redact_value(&mut args, &mut redactor);
         }
+        let _ = redactor.redact_text(&turn.prompt);
         for (name, count) in redactor.counts {
             *counts.entry(name).or_default() += count;
         }
@@ -756,6 +887,22 @@ fn credential_rules() -> &'static [CredentialRule] {
             CredentialRule {
                 name: "credential_assignment",
                 regex: Regex::new(
+                    r#"(?i)\b(?:token|secret|password|api[_-]?key)\b\s*[:=]\s*\"([^\"\r\n]{8,})\""#,
+                )
+                .unwrap(),
+                capture: 1,
+            },
+            CredentialRule {
+                name: "credential_assignment",
+                regex: Regex::new(
+                    r#"(?i)\b(?:token|secret|password|api[_-]?key)\b\s*[:=]\s*'([^'\r\n]{8,})'"#,
+                )
+                .unwrap(),
+                capture: 1,
+            },
+            CredentialRule {
+                name: "credential_assignment",
+                regex: Regex::new(
                     r#"(?i)\b(?:token|secret|password|api[_-]?key)\b\s*[:=]\s*([^\s'",;}<]{8,})"#,
                 )
                 .unwrap(),
@@ -790,8 +937,70 @@ fn write_temp(path: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
 }
 
 fn finalize_temp(tmp_path: &Path, path: &Path) -> Result<(), String> {
+    #[cfg(test)]
+    if take_finalize_failure(path) {
+        return Err("Needle training artifact could not be finalized.".into());
+    }
     std::fs::rename(&tmp_path, path)
         .map_err(|_| "Needle training artifact could not be finalized.".to_string())
+}
+
+fn replace_files_transactionally(files: &[(PathBuf, PathBuf)]) -> Result<(), String> {
+    let originals = files
+        .iter()
+        .map(|(_, path)| match std::fs::read(path) {
+            Ok(bytes) => Ok((path.clone(), Some(bytes))),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok((path.clone(), None)),
+            Err(_) => Err("Needle training artifact is unreadable.".to_string()),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for (tmp_path, path) in files {
+        if let Err(error) = finalize_temp(tmp_path, path) {
+            restore_files(&originals)?;
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+fn restore_files(originals: &[(PathBuf, Option<Vec<u8>>)]) -> Result<(), String> {
+    for (path, bytes) in originals.iter().rev() {
+        if let Some(bytes) = bytes {
+            write_atomic(path, bytes)
+                .map_err(|_| "Needle training artifact rollback failed.".to_string())?;
+        } else if let Err(error) = std::fs::remove_file(path) {
+            if error.kind() != ErrorKind::NotFound {
+                return Err("Needle training artifact rollback failed.".into());
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+static FINALIZE_FAILURE: OnceLock<std::sync::Mutex<Option<PathBuf>>> = OnceLock::new();
+
+#[cfg(test)]
+fn set_finalize_failure(path: PathBuf) {
+    *FINALIZE_FAILURE
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap() = Some(path);
+}
+
+#[cfg(test)]
+fn take_finalize_failure(path: &Path) -> bool {
+    let mut failure = FINALIZE_FAILURE
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap();
+    if failure.as_deref() == Some(path) {
+        failure.take();
+        true
+    } else {
+        false
+    }
 }
 
 #[cfg(unix)]
@@ -847,6 +1056,7 @@ mod tests {
             redactions: BTreeMap::new(),
             catalogue_sha256: "catalogue".into(),
             dataset_sha256: "dataset".into(),
+            holdout_sha256: "holdout".into(),
             needle_version: Some("test".into()),
             base_sha256: Some("base".into()),
             adapter_sha256: Some("adapter".into()),
@@ -867,6 +1077,8 @@ mod tests {
             misses_by_tool: BTreeMap::new(),
             model_sha256: "candidate".into(),
             catalogue_sha256: "catalogue".into(),
+            holdout_sha256: Some("holdout".into()),
+            evaluation_run_id: Some("run".into()),
         }
     }
 
@@ -902,6 +1114,43 @@ mod tests {
         ] {
             assert!(comparison.reasons.iter().any(|actual| actual == reason));
         }
+    }
+
+    #[test]
+    fn comparison_rejects_holdout_mutation_between_evaluation_children() {
+        let (_temp, _work_dir, sessions_dir, _candidate_path, _definitions, manifest) =
+            evaluation_fixture();
+        let mut current = passing_report(200, 198);
+        current.model_sha256 = "current".into();
+        current.holdout_sha256 = Some(manifest.holdout_sha256.clone());
+        std::fs::write(sessions_dir.join("holdout.jsonl"), "mutated holdout").unwrap();
+        let mut candidate = passing_report(200, 199);
+        candidate.holdout_sha256 = Some(holdout_sha256(&sessions_dir, &manifest).unwrap());
+
+        let comparison = compare_candidate(&manifest, &current, &candidate);
+
+        assert!(!comparison.promotable);
+        assert!(comparison
+            .reasons
+            .iter()
+            .any(|reason| reason == "holdout hashes differ"));
+    }
+
+    #[test]
+    fn comparison_rejects_stale_report_from_another_evaluation_run() {
+        let manifest = non_pilot_manifest(200);
+        let mut current = passing_report(200, 198);
+        current.model_sha256 = "current".into();
+        let mut candidate = passing_report(200, 199);
+        candidate.evaluation_run_id = Some("stale-run".into());
+
+        let comparison = compare_candidate(&manifest, &current, &candidate);
+
+        assert!(!comparison.promotable);
+        assert!(comparison
+            .reasons
+            .iter()
+            .any(|reason| reason == "evaluation run identities differ"));
     }
 
     #[test]
@@ -981,20 +1230,136 @@ mod tests {
         let mut manifest = non_pilot_manifest(200);
         manifest.catalogue_sha256 = sha256(&serde_json::to_vec(&definitions).unwrap());
         manifest.candidate_sha256 = Some(sha256(b"candidate bytes"));
-        validate_evaluation_inputs(&manifest, &definitions, &candidate_path).unwrap();
+        let work_dir = temp.path();
+        let sessions_dir = temp.path().join("sessions");
+        std::fs::create_dir(&sessions_dir).unwrap();
+        std::fs::write(work_dir.join(TRAIN_FILE), "dataset").unwrap();
+        std::fs::create_dir(work_dir.join("checkpoints")).unwrap();
+        std::fs::write(work_dir.join(BASE_CHECKPOINT_FILE), "base").unwrap();
+        std::fs::write(work_dir.join(ADAPTER_FILE), "adapter").unwrap();
+        std::fs::write(sessions_dir.join("holdout.jsonl"), "holdout").unwrap();
+        manifest.dataset_sha256 = sha256(b"dataset");
+        manifest.base_sha256 = Some(sha256(b"base"));
+        manifest.adapter_sha256 = Some(sha256(b"adapter"));
+        manifest.holdout_sessions = vec![PathBuf::from("holdout.jsonl")];
+        manifest.holdout_sha256 = holdout_sha256(&sessions_dir, &manifest).unwrap();
+        validate_evaluation_inputs(
+            work_dir,
+            &sessions_dir,
+            &manifest,
+            &definitions,
+            &candidate_path,
+        )
+        .unwrap();
 
         let mut report = passing_report(200, 199);
         report.model_sha256 = sha256(b"candidate bytes");
         validate_evaluation_report_model(&report, &candidate_path).unwrap();
 
         std::fs::write(&candidate_path, "tampered").unwrap();
-        assert!(validate_evaluation_inputs(&manifest, &definitions, &candidate_path).is_err());
+        assert!(validate_evaluation_inputs(
+            work_dir,
+            &sessions_dir,
+            &manifest,
+            &definitions,
+            &candidate_path,
+        )
+        .is_err());
         assert!(validate_evaluation_report_model(&report, &candidate_path).is_err());
+    }
+
+    fn evaluation_fixture() -> (
+        tempfile::TempDir,
+        PathBuf,
+        PathBuf,
+        PathBuf,
+        Vec<AgentToolDefinition>,
+        NeedleTrainingManifest,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let work_dir = temp.path().join("work");
+        let sessions_dir = temp.path().join("sessions");
+        std::fs::create_dir_all(work_dir.join("checkpoints")).unwrap();
+        std::fs::create_dir(&sessions_dir).unwrap();
+        std::fs::write(work_dir.join(TRAIN_FILE), "dataset").unwrap();
+        std::fs::write(work_dir.join(BASE_CHECKPOINT_FILE), "base").unwrap();
+        std::fs::write(work_dir.join(ADAPTER_FILE), "adapter").unwrap();
+        let candidate_path = work_dir.join(CANDIDATE_FILE);
+        std::fs::write(&candidate_path, "candidate").unwrap();
+        std::fs::write(sessions_dir.join("holdout.jsonl"), "holdout").unwrap();
+        let definitions = vec![tool()];
+        let mut manifest = non_pilot_manifest(200);
+        manifest.catalogue_sha256 = sha256(&serde_json::to_vec(&definitions).unwrap());
+        manifest.dataset_sha256 = sha256(b"dataset");
+        manifest.base_sha256 = Some(sha256(b"base"));
+        manifest.adapter_sha256 = Some(sha256(b"adapter"));
+        manifest.candidate_sha256 = Some(sha256(b"candidate"));
+        manifest.holdout_sessions = vec![PathBuf::from("holdout.jsonl")];
+        manifest.holdout_sha256 = holdout_sha256(&sessions_dir, &manifest).unwrap();
+        (
+            temp,
+            work_dir,
+            sessions_dir,
+            candidate_path,
+            definitions,
+            manifest,
+        )
+    }
+
+    fn evaluation_error_after_mutating(file: &str, bytes: &[u8]) -> String {
+        let (_temp, work_dir, sessions_dir, candidate_path, definitions, manifest) =
+            evaluation_fixture();
+        std::fs::write(work_dir.join(file), bytes).unwrap();
+        validate_evaluation_inputs(
+            &work_dir,
+            &sessions_dir,
+            &manifest,
+            &definitions,
+            &candidate_path,
+        )
+        .unwrap_err()
+    }
+
+    #[test]
+    fn evaluation_rejects_changed_dataset() {
+        assert!(evaluation_error_after_mutating(TRAIN_FILE, b"changed").contains("dataset hash"));
+    }
+
+    #[test]
+    fn evaluation_rejects_changed_base_checkpoint() {
+        assert!(
+            evaluation_error_after_mutating(BASE_CHECKPOINT_FILE, b"changed")
+                .contains("base checkpoint hash")
+        );
+    }
+
+    #[test]
+    fn evaluation_rejects_changed_adapter() {
+        assert!(evaluation_error_after_mutating(ADAPTER_FILE, b"changed").contains("adapter hash"));
+    }
+
+    #[test]
+    fn evaluation_rejects_missing_needle_version() {
+        let (_temp, work_dir, sessions_dir, candidate_path, definitions, mut manifest) =
+            evaluation_fixture();
+        manifest.needle_version = None;
+
+        let error = validate_evaluation_inputs(
+            &work_dir,
+            &sessions_dir,
+            &manifest,
+            &definitions,
+            &candidate_path,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("Needle version"));
     }
 
     struct PromotionFixture {
         _temp: tempfile::TempDir,
         work_dir: PathBuf,
+        sessions_dir: PathBuf,
         model: PathBuf,
         definitions: Vec<AgentToolDefinition>,
     }
@@ -1006,13 +1371,16 @@ mod tests {
     ) -> PromotionFixture {
         let temp = tempfile::tempdir().unwrap();
         let work_dir = temp.path().join("work");
+        let sessions_dir = temp.path().join("sessions");
         let model = temp.path().join("project/needle/needle2.cact");
         std::fs::create_dir_all(work_dir.join("checkpoints")).unwrap();
+        std::fs::create_dir(&sessions_dir).unwrap();
         std::fs::create_dir_all(model.parent().unwrap()).unwrap();
         std::fs::write(work_dir.join(TRAIN_FILE), "dataset").unwrap();
         std::fs::write(work_dir.join(BASE_CHECKPOINT_FILE), "base").unwrap();
         std::fs::write(work_dir.join(ADAPTER_FILE), "adapter").unwrap();
         std::fs::write(work_dir.join(CANDIDATE_FILE), "candidate").unwrap();
+        std::fs::write(sessions_dir.join("holdout.jsonl"), "holdout").unwrap();
         std::fs::write(&model, "current").unwrap();
 
         let definitions = vec![tool()];
@@ -1024,21 +1392,26 @@ mod tests {
         manifest.base_sha256 = Some(sha256(b"base"));
         manifest.adapter_sha256 = Some(sha256(b"adapter"));
         manifest.candidate_sha256 = Some(sha256(b"candidate"));
+        manifest.holdout_sessions = vec![PathBuf::from("holdout.jsonl")];
+        manifest.holdout_sha256 = holdout_sha256(&sessions_dir, &manifest).unwrap();
         save_training_manifest(&work_dir, &manifest).unwrap();
 
         let mut current = passing_report(200, current_top_five_passes);
         current.model_sha256 = sha256(b"current");
         current.catalogue_sha256 = catalogue_sha256.clone();
+        current.holdout_sha256 = Some(manifest.holdout_sha256.clone());
         write_needle_eval_report(&work_dir.join(CURRENT_EVAL_FILE), &current).unwrap();
 
         let mut candidate = passing_report(200, candidate_top_five_passes);
         candidate.model_sha256 = sha256(b"candidate");
         candidate.catalogue_sha256 = catalogue_sha256;
+        candidate.holdout_sha256 = Some(manifest.holdout_sha256.clone());
         write_needle_eval_report(&work_dir.join(CANDIDATE_EVAL_FILE), &candidate).unwrap();
 
         PromotionFixture {
             _temp: temp,
             work_dir,
+            sessions_dir,
             model,
             definitions,
         }
@@ -1048,9 +1421,13 @@ mod tests {
     fn pilot_candidate_cannot_replace_current_model() {
         let fixture = promotion_fixture(true, 199, 199);
         let before = std::fs::read(&fixture.model).unwrap();
-        let error =
-            promote_needle_candidate(&fixture.work_dir, &fixture.model, &fixture.definitions)
-                .unwrap_err();
+        let error = promote_needle_candidate(
+            &fixture.work_dir,
+            &fixture.sessions_dir,
+            &fixture.model,
+            &fixture.definitions,
+        )
+        .unwrap_err();
         assert!(error.contains("pilot"));
         assert_eq!(std::fs::read(&fixture.model).unwrap(), before);
     }
@@ -1061,9 +1438,16 @@ mod tests {
         let old = std::fs::read(&fixture.model).unwrap();
         let candidate = std::fs::read(fixture.work_dir.join(CANDIDATE_FILE)).unwrap();
 
-        promote_needle_candidate(&fixture.work_dir, &fixture.model, &fixture.definitions).unwrap();
+        let promoted_sha256 = promote_needle_candidate(
+            &fixture.work_dir,
+            &fixture.sessions_dir,
+            &fixture.model,
+            &fixture.definitions,
+        )
+        .unwrap();
 
         assert_eq!(std::fs::read(&fixture.model).unwrap(), candidate);
+        assert_eq!(promoted_sha256, sha256(&candidate));
         assert_eq!(
             std::fs::read(fixture.model.with_extension("cact.bak")).unwrap(),
             old
@@ -1079,13 +1463,39 @@ mod tests {
         current.model_sha256 = sha256(b"different current");
         write_needle_eval_report(&fixture.work_dir.join(CURRENT_EVAL_FILE), &current).unwrap();
 
-        let error =
-            promote_needle_candidate(&fixture.work_dir, &fixture.model, &fixture.definitions)
-                .unwrap_err();
+        let error = promote_needle_candidate(
+            &fixture.work_dir,
+            &fixture.sessions_dir,
+            &fixture.model,
+            &fixture.definitions,
+        )
+        .unwrap_err();
 
         assert!(error.contains("report model hash"));
         assert_eq!(std::fs::read(&fixture.model).unwrap(), before);
         assert!(!fixture.model.with_extension("cact.tmp").exists());
+    }
+
+    #[test]
+    fn changed_holdout_bytes_cannot_replace_current_model() {
+        let fixture = promotion_fixture(false, 198, 199);
+        let before = std::fs::read(&fixture.model).unwrap();
+        std::fs::write(
+            fixture.sessions_dir.join("holdout.jsonl"),
+            "changed holdout",
+        )
+        .unwrap();
+
+        let error = promote_needle_candidate(
+            &fixture.work_dir,
+            &fixture.sessions_dir,
+            &fixture.model,
+            &fixture.definitions,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("holdout hash"));
+        assert_eq!(std::fs::read(&fixture.model).unwrap(), before);
     }
 
     #[test]
@@ -1095,13 +1505,39 @@ mod tests {
         let temp_path = fixture.model.with_extension("cact.tmp");
         std::fs::create_dir(fixture.model.with_extension("cact.bak")).unwrap();
 
-        let error =
-            promote_needle_candidate(&fixture.work_dir, &fixture.model, &fixture.definitions)
-                .unwrap_err();
+        let error = promote_needle_candidate(
+            &fixture.work_dir,
+            &fixture.sessions_dir,
+            &fixture.model,
+            &fixture.definitions,
+        )
+        .unwrap_err();
 
         assert!(!error.is_empty());
         assert_eq!(std::fs::read(&fixture.model).unwrap(), before);
         assert!(!temp_path.exists());
+    }
+
+    #[test]
+    fn backup_staging_failure_preserves_previous_backup() {
+        let fixture = promotion_fixture(false, 198, 199);
+        let backup_path = fixture.model.with_extension("cact.bak");
+        let backup_tmp = fixture.model.with_extension("cact.bak.tmp");
+        std::fs::write(&backup_path, "previous backup").unwrap();
+        std::fs::create_dir(&backup_tmp).unwrap();
+        let current = std::fs::read(&fixture.model).unwrap();
+
+        let error = promote_needle_candidate(
+            &fixture.work_dir,
+            &fixture.sessions_dir,
+            &fixture.model,
+            &fixture.definitions,
+        )
+        .unwrap_err();
+
+        assert!(!error.is_empty());
+        assert_eq!(std::fs::read(&backup_path).unwrap(), b"previous backup");
+        assert_eq!(std::fs::read(&fixture.model).unwrap(), current);
     }
 
     #[test]
@@ -1113,9 +1549,37 @@ mod tests {
             move || std::fs::write(candidate_path, "evil candidate").unwrap()
         });
 
-        promote_needle_candidate(&fixture.work_dir, &fixture.model, &fixture.definitions).unwrap();
+        promote_needle_candidate(
+            &fixture.work_dir,
+            &fixture.sessions_dir,
+            &fixture.model,
+            &fixture.definitions,
+        )
+        .unwrap();
 
         assert_eq!(std::fs::read(&fixture.model).unwrap(), b"candidate");
+    }
+
+    #[test]
+    fn holdout_mutation_before_commit_leaves_current_model_in_place() {
+        let fixture = promotion_fixture(false, 198, 199);
+        let current = std::fs::read(&fixture.model).unwrap();
+        set_promotion_mutation_hook({
+            let holdout = fixture.sessions_dir.join("holdout.jsonl");
+            move || std::fs::write(holdout, "changed holdout").unwrap()
+        });
+
+        let error = promote_needle_candidate(
+            &fixture.work_dir,
+            &fixture.sessions_dir,
+            &fixture.model,
+            &fixture.definitions,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("holdout hash"));
+        assert_eq!(std::fs::read(&fixture.model).unwrap(), current);
+        assert!(!fixture.model.with_extension("cact.tmp").exists());
     }
 
     #[test]
@@ -1126,9 +1590,13 @@ mod tests {
             move || std::fs::write(model, "changed current").unwrap()
         });
 
-        let error =
-            promote_needle_candidate(&fixture.work_dir, &fixture.model, &fixture.definitions)
-                .unwrap_err();
+        let error = promote_needle_candidate(
+            &fixture.work_dir,
+            &fixture.sessions_dir,
+            &fixture.model,
+            &fixture.definitions,
+        )
+        .unwrap_err();
 
         assert!(error.contains("changed"));
         assert_eq!(std::fs::read(&fixture.model).unwrap(), b"changed current");
@@ -1162,6 +1630,15 @@ mod tests {
     }
 
     fn write_session(path: &std::path::Path, prompt: &str, result: &str) {
+        write_session_with_arguments(path, prompt, r#"{"path":"Cargo.toml"}"#, result);
+    }
+
+    fn write_session_with_arguments(
+        path: &std::path::Path,
+        prompt: &str,
+        arguments: &str,
+        result: &str,
+    ) {
         use crate::harness::{
             Entry, JsonlStore, SessionStore, ToolExecutionOutcome, ToolExecutionPhase, TraceString,
         };
@@ -1194,7 +1671,7 @@ mod tests {
                     r#type: "function".into(),
                     function: RuntimeToolCallFunction {
                         name: "read_file".into(),
-                        arguments: r#"{"path":"Cargo.toml"}"#.into(),
+                        arguments: arguments.into(),
                     },
                     thought_signature: None,
                 }]),
@@ -1299,6 +1776,22 @@ mod tests {
         export
     }
 
+    fn seed_previous_finetune(export: &FixtureExport) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        std::fs::write(export.work_dir.join(ADAPTER_FILE), "old adapter").unwrap();
+        std::fs::write(export.work_dir.join(CANDIDATE_FILE), "old candidate").unwrap();
+        let mut manifest = load_training_manifest(&export.work_dir).unwrap();
+        manifest.needle_version = Some("old-version".into());
+        manifest.base_sha256 = Some(sha256(b"base checkpoint"));
+        manifest.adapter_sha256 = Some(sha256(b"old adapter"));
+        manifest.candidate_sha256 = Some(sha256(b"old candidate"));
+        save_training_manifest(&export.work_dir, &manifest).unwrap();
+        (
+            std::fs::read(export.work_dir.join(ADAPTER_FILE)).unwrap(),
+            std::fs::read(export.work_dir.join(CANDIDATE_FILE)).unwrap(),
+            std::fs::read(export.work_dir.join(MANIFEST_FILE)).unwrap(),
+        )
+    }
+
     #[cfg(unix)]
     fn fake_needle(root: &std::path::Path, version: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
@@ -1308,11 +1801,19 @@ mod tests {
             &path,
             format!(
                 r#"#!/bin/sh
+printf '%s\n' "$*" >> needle.calls
 if [ "$1" = "--version" ]; then
+  if [ "{version}" = "__FAIL__" ]; then
+    exit 2
+  fi
   echo "{version}"
   exit 0
 fi
-printf '%s\n' "$*" >> needle.calls
+command="$1"
+if [ "$command" = "finetune" ]; then
+  mkdir -p checkpoints
+  printf 'base checkpoint' > checkpoints/needle2.pkl
+fi
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "--out" ]; then
     shift
@@ -1369,8 +1870,8 @@ exit 0
 
     #[test]
     #[cfg(unix)]
-    fn finetune_runs_upstream_commands_and_records_artifact_hashes() {
-        let export = training_fixture_with_manifest_and_base_checkpoint();
+    fn finetune_resolves_clean_work_dir_checkpoint_via_upstream() {
+        let export = export_fixture_with_tool_result("result");
         let needle = fake_needle(&export.work_dir, "2.0-test");
 
         let manifest = run_needle_finetune(&export.work_dir, needle.as_os_str()).unwrap();
@@ -1383,6 +1884,20 @@ exit 0
         assert!(manifest.adapter_sha256.is_some());
         assert!(manifest.candidate_sha256.is_some());
         assert_eq!(load_training_manifest(&export.work_dir).unwrap(), manifest);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn finetune_continues_when_launchable_needle_has_no_version_flag() {
+        let export = export_fixture_with_tool_result("result");
+        let needle = fake_needle(&export.work_dir, "__FAIL__");
+
+        let manifest = run_needle_finetune(&export.work_dir, needle.as_os_str()).unwrap();
+
+        assert_eq!(manifest.needle_version.as_deref(), Some("unavailable"));
+        let calls = std::fs::read_to_string(export.work_dir.join("needle.calls")).unwrap();
+        assert!(calls.contains("finetune train.jsonl --epochs 10"));
+        assert!(calls.contains("build checkpoints/needle2.pkl --lora adapter.pkl.tmp"));
     }
 
     #[test]
@@ -1422,6 +1937,81 @@ exit 0
             .unwrap()
             .candidate_sha256
             .is_none());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn finetune_rejects_unsupported_manifest_before_invoking_needle() {
+        let export = training_fixture_with_manifest_and_base_checkpoint();
+        let mut manifest = load_training_manifest(&export.work_dir).unwrap();
+        manifest.version = MANIFEST_VERSION + 1;
+        save_training_manifest(&export.work_dir, &manifest).unwrap();
+        let needle = fake_needle(&export.work_dir, "2.0-test");
+
+        let error = run_needle_finetune(&export.work_dir, needle.as_os_str()).unwrap_err();
+
+        assert!(error.contains("version"));
+        assert!(!export.work_dir.join("needle.calls").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn finetune_rejects_changed_dataset_before_invoking_needle() {
+        let export = training_fixture_with_manifest_and_base_checkpoint();
+        std::fs::write(export.work_dir.join(TRAIN_FILE), "changed dataset").unwrap();
+        let needle = fake_needle(&export.work_dir, "2.0-test");
+
+        let error = run_needle_finetune(&export.work_dir, needle.as_os_str()).unwrap_err();
+
+        assert!(error.contains("dataset hash"));
+        assert!(!export.work_dir.join("needle.calls").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn failed_refinetune_build_preserves_previous_final_artifacts_and_manifest() {
+        let export = training_fixture_with_manifest_and_base_checkpoint();
+        let before = seed_previous_finetune(&export);
+        let needle = fake_needle_build_failure(&export.work_dir);
+
+        assert!(run_needle_finetune(&export.work_dir, needle.as_os_str()).is_err());
+
+        assert_eq!(
+            std::fs::read(export.work_dir.join(ADAPTER_FILE)).unwrap(),
+            before.0
+        );
+        assert_eq!(
+            std::fs::read(export.work_dir.join(CANDIDATE_FILE)).unwrap(),
+            before.1
+        );
+        assert_eq!(
+            std::fs::read(export.work_dir.join(MANIFEST_FILE)).unwrap(),
+            before.2
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn failed_refinetune_manifest_save_preserves_previous_final_artifacts_and_manifest() {
+        let export = training_fixture_with_manifest_and_base_checkpoint();
+        let before = seed_previous_finetune(&export);
+        let needle = fake_needle(&export.work_dir, "2.0-test");
+        std::fs::create_dir(export.work_dir.join("manifest.tmp")).unwrap();
+
+        assert!(run_needle_finetune(&export.work_dir, needle.as_os_str()).is_err());
+
+        assert_eq!(
+            std::fs::read(export.work_dir.join(ADAPTER_FILE)).unwrap(),
+            before.0
+        );
+        assert_eq!(
+            std::fs::read(export.work_dir.join(CANDIDATE_FILE)).unwrap(),
+            before.1
+        );
+        assert_eq!(
+            std::fs::read(export.work_dir.join(MANIFEST_FILE)).unwrap(),
+            before.2
+        );
     }
 
     #[test]
@@ -1514,6 +2104,53 @@ exit 0
     }
 
     #[test]
+    fn export_redacts_structured_and_quoted_credentials_from_all_outputs() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions_dir = temp.path().join("sessions");
+        let work_dir = temp.path().join("work");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let token = "opaque-unprefixed-value";
+        let password = "correct horse battery staple";
+        let quoted = "quoted secret phrase";
+        let arguments = serde_json::json!({
+            "token": token,
+            "password": password,
+            "path": "Cargo.toml"
+        })
+        .to_string();
+        write_session_with_arguments(
+            &sessions_dir.join("a.jsonl"),
+            &format!("use {token}; password = \"{quoted}\""),
+            &arguments,
+            "result",
+        );
+        write_session(&sessions_dir.join("b.jsonl"), "newer", "result");
+
+        let manifest = export_needle_dataset(
+            &NeedleDatasetConfig {
+                sessions_dir,
+                work_dir: work_dir.clone(),
+                replace: false,
+            },
+            &[tool()],
+        )
+        .unwrap();
+        let outputs = [
+            std::fs::read_to_string(work_dir.join(TRAIN_FILE)).unwrap(),
+            serde_json::to_string(&manifest).unwrap(),
+            serde_json::to_string(&passing_report(200, 199)).unwrap(),
+        ]
+        .join("\n");
+
+        for secret in [token, password, quoted] {
+            assert!(!outputs.contains(secret));
+        }
+        assert!(outputs.contains("<REDACTED_"));
+        assert_eq!(manifest.redactions.get("credential_field"), Some(&2));
+        assert_eq!(manifest.redactions.get("credential_assignment"), Some(&1));
+    }
+
+    #[test]
     fn saves_loads_manifest_and_records_dataset_hash() {
         let export = export_fixture_with_tool_result("result");
         let manifest = load_training_manifest(&export.work_dir).unwrap();
@@ -1543,6 +2180,38 @@ exit 0
         assert_eq!(
             export_needle_dataset(&config, &[tool()]).unwrap_err(),
             "Needle training outputs already exist; set replace to overwrite."
+        );
+    }
+
+    #[test]
+    fn replacement_export_restores_previous_pair_when_second_finalize_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions_dir = temp.path().join("sessions");
+        let work_dir = temp.path().join("work");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        write_session(&sessions_dir.join("a.jsonl"), "older", "result");
+        write_session(&sessions_dir.join("b.jsonl"), "newer", "result");
+        let mut config = NeedleDatasetConfig {
+            sessions_dir,
+            work_dir: work_dir.clone(),
+            replace: false,
+        };
+        export_needle_dataset(&config, &[tool()]).unwrap();
+        let before_train = std::fs::read(work_dir.join(TRAIN_FILE)).unwrap();
+        let before_manifest = std::fs::read(work_dir.join(MANIFEST_FILE)).unwrap();
+        config.replace = true;
+        let changed_tool = AgentToolDefinition::new("read_file", "Changed", serde_json::json!({}));
+        set_finalize_failure(work_dir.join(MANIFEST_FILE));
+
+        assert!(export_needle_dataset(&config, &[changed_tool]).is_err());
+
+        assert_eq!(
+            std::fs::read(work_dir.join(TRAIN_FILE)).unwrap(),
+            before_train
+        );
+        assert_eq!(
+            std::fs::read(work_dir.join(MANIFEST_FILE)).unwrap(),
+            before_manifest
         );
     }
 
@@ -1618,7 +2287,7 @@ exit 0
         let mut args = serde_json::json!({
             "bearer": "Bearer abcdefghijklmnopqrstuvwxyz012345",
             "assignment": "password = supersecretvalue",
-            "api_key": "sk-live_12345678901234567890",
+            "prefix": "sk-live_12345678901234567890",
             "key": private_key,
             "path": "/Users/example/project/src/lib.rs"
         });
@@ -1632,6 +2301,44 @@ exit 0
         assert_eq!(redactor.counts().get("credential_assignment"), Some(&1));
         assert_eq!(redactor.counts().get("api_key_prefix"), Some(&1));
         assert_eq!(redactor.counts().get("private_key"), Some(&1));
+    }
+
+    #[test]
+    fn redacts_unprefixed_values_under_credential_keys() {
+        let raw = [
+            "correct horse battery staple",
+            "opaque unprefixed token value",
+            "ordinary secret value",
+            "plain api key value",
+        ];
+        let mut args = serde_json::json!({
+            "auth": {
+                "password": raw[0],
+                "token": raw[1],
+                "client_secret": raw[2],
+                "api-key": raw[3],
+            }
+        });
+        let mut redactor = ExampleRedactor::default();
+
+        redact_value(&mut args, &mut redactor);
+
+        let json = serde_json::to_string(&args).unwrap();
+        for secret in raw {
+            assert!(!json.contains(secret));
+        }
+        assert_eq!(redactor.counts().get("credential_field"), Some(&4));
+    }
+
+    #[test]
+    fn redacts_quoted_textual_assignments() {
+        let mut redactor = ExampleRedactor::default();
+
+        let redacted = redactor
+            .redact_text("password = \"correct horse battery staple\" token='opaque token value'");
+
+        assert_eq!(redacted, "password = \"<REDACTED_1>\" token='<REDACTED_2>'");
+        assert_eq!(redactor.counts().get("credential_assignment"), Some(&2));
     }
 
     #[test]
