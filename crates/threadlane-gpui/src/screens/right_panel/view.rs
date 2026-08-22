@@ -23,6 +23,15 @@ use threadlane_git::{GitBranchInfo, GitCommitInfo, GitFile, GitStatus};
 use crate::services::watcher::WorkspaceWatcher;
 use crate::state::AppState;
 
+fn can_publish_branch(status: Option<&GitStatus>) -> bool {
+    status.is_some_and(|status| {
+        !status.has_upstream
+            && !status.detached
+            && status.branch.is_some()
+            && status.remote.is_some()
+    })
+}
+
 fn normalize_generated_commit_message(raw: &str) -> String {
     let trimmed = raw.trim();
     let unquoted = trimmed
@@ -1239,10 +1248,22 @@ impl RightPanelView {
             "Fetch latest changes".to_string()
         };
 
-        let behind = self.git_status.as_ref().map_or(0, |s| s.behind);
-        let ahead = self.git_status.as_ref().map_or(0, |s| s.ahead);
+        let status = self.git_status.as_ref();
+        let behind = status.map_or(0, |s| s.behind);
+        let ahead = status.map_or(0, |s| s.ahead);
+        let can_publish = can_publish_branch(status);
 
-        let sync_button = if behind > 0 {
+        let sync_button = if can_publish {
+            Button::new("git-sync-action-btn")
+                .icon(IconName::ArrowUp)
+                .label("Publish Branch")
+                .primary()
+                .small()
+                .tooltip("Publish this branch to origin")
+                .on_click(cx.listener(|this, _event, window, cx| {
+                    this.run_git_action(GitAction::Push, window, cx);
+                }))
+        } else if behind > 0 {
             Button::new("git-sync-action-btn")
                 .icon(IconName::ArrowDown)
                 .label(format!("Pull ({behind})"))
@@ -3804,8 +3825,34 @@ fn scan_project_tree(root: &Path, limit: usize) -> Vec<FileNode> {
 
 #[cfg(test)]
 mod tests {
-    use super::scan_project_tree;
+    use super::{can_publish_branch, scan_project_tree};
     use std::time::{SystemTime, UNIX_EPOCH};
+    use threadlane_git::GitStatus;
+
+    #[test]
+    fn only_publishable_branches_without_upstreams_use_the_publish_action() {
+        let unpublished = GitStatus {
+            branch: Some("feature/demo".into()),
+            remote: Some("git@github.com:threadlane/threadlane.git".into()),
+            ahead: 731,
+            ..GitStatus::default()
+        };
+        assert!(can_publish_branch(Some(&unpublished)));
+
+        let published = GitStatus {
+            has_upstream: true,
+            ..unpublished.clone()
+        };
+        assert!(!can_publish_branch(Some(&published)));
+
+        let detached = GitStatus {
+            detached: true,
+            branch: None,
+            ..unpublished
+        };
+        assert!(!can_publish_branch(Some(&detached)));
+        assert!(!can_publish_branch(None));
+    }
 
     #[test]
     fn project_scan_is_bounded_and_skips_generated_roots() {
