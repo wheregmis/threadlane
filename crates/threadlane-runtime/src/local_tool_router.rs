@@ -39,6 +39,16 @@ static ENGINE: std::sync::OnceLock<Option<std::sync::Arc<needle_infer::v2_engine
 static IN_FLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(feature = "needle")]
+struct InFlightGuard;
+
+#[cfg(feature = "needle")]
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        IN_FLIGHT.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+#[cfg(feature = "needle")]
 pub async fn shortlist_from_environment(
     query: &str,
     definitions: &[AgentToolDefinition],
@@ -57,6 +67,7 @@ pub async fn shortlist_from_environment(
         tracing::debug!(target: "threadlane_runtime::needle", "Needle inference already running; using full tool list");
         return definitions.to_vec();
     }
+    let _gate = InFlightGuard;
     let query = query.to_owned();
     let definitions = definitions.to_vec();
     let fallback = definitions.clone();
@@ -70,7 +81,6 @@ pub async fn shortlist_from_environment(
                 .collect::<Vec<_>>();
             let descriptions = rendered.iter().map(String::as_str).collect::<Vec<_>>();
             let ranked = engine.retrieve_tools(&query, &descriptions, NEEDLE_TOP_K);
-            IN_FLIGHT.store(false, std::sync::atomic::Ordering::Release);
             definitions_for_ranks(&ranked, &definitions, NEEDLE_TOP_K)
                 .unwrap_or_else(|| definitions.clone())
         }),
@@ -85,12 +95,12 @@ pub async fn shortlist_from_environment(
             tracing::debug!(target: "threadlane_runtime::needle", selected_tools = routed.len(), ?selected_names, duration_ms = started.elapsed().as_millis() as u64, "Needle routing completed");
             routed
         }
-        Ok(Err(error)) => {
-            tracing::warn!(target: "threadlane_runtime::needle", %error, "Needle inference failed; using full tool list");
+        Ok(Err(_)) => {
+            tracing::warn!(target: "threadlane_runtime::needle", duration_ms = started.elapsed().as_millis() as u64, "Needle routing failed; using full tool list");
             fallback
         }
         Err(_) => {
-            tracing::warn!(target: "threadlane_runtime::needle", "Needle inference timed out; using full tool list");
+            tracing::warn!(target: "threadlane_runtime::needle", duration_ms = started.elapsed().as_millis() as u64, "Needle routing timed out; using full tool list");
             fallback
         }
     }
@@ -114,10 +124,7 @@ pub(crate) fn needle_engine() -> Result<std::sync::Arc<needle_infer::v2_engine::
     ENGINE
         .get_or_init(|| match needle_infer::v2_engine::V2Engine::load(&path) {
             Ok(engine) => Some(std::sync::Arc::new(engine)),
-            Err(error) => {
-                tracing::warn!(target: "threadlane_runtime::needle", %error, "Needle model unavailable");
-                None
-            }
+            Err(_) => None,
         })
         .clone()
         .ok_or_else(|| "Needle model weights could not be loaded.".into())
@@ -180,6 +187,27 @@ mod tests {
             rendered,
             "search_code\nSearch workspace code.\n{\"properties\":{\"query\":{\"type\":\"string\"}},\"type\":\"object\"}"
         );
+    }
+
+    #[tokio::test]
+    async fn bypasses_needle_for_five_or_fewer_tools() {
+        let definitions = (0..NEEDLE_TOP_K)
+            .map(|i| tool(&format!("tool_{i}")))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            shortlist_from_environment("query", &definitions, true).await,
+            definitions
+        );
+    }
+
+    #[cfg(feature = "needle")]
+    #[test]
+    fn releases_inference_gate_when_guard_drops() {
+        IN_FLIGHT.store(true, std::sync::atomic::Ordering::Release);
+        {
+            let _guard = InFlightGuard;
+        }
+        assert!(!IN_FLIGHT.load(std::sync::atomic::Ordering::Acquire));
     }
 
     #[cfg(feature = "needle")]
