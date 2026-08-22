@@ -68,7 +68,7 @@ async fn tool_definitions_for_attempt(
     let _ = turn_number;
 
     #[cfg(test)]
-    if turn_number == 1 && enabled {
+    if turn_number == 1 && query == Some("__needle_test_force_shortlist__") {
         return configured.iter().take(1).cloned().collect();
     }
 
@@ -237,7 +237,13 @@ mod needle_tests {
             .register_tool_executor(Arc::new(ContinuationExecutor))
             .unwrap();
         let expected_tool_count = runtime.configured_tool_definitions().len();
-        let run = runtime.prompt("__needle_test_force_shortlist__");
+        runtime
+            .state_clone()
+            .lock()
+            .await
+            .messages
+            .push(AgentMessage::user("__needle_test_force_shortlist__", Vec::new()));
+        let run = runtime.resume_pending_turn();
         tokio::time::timeout(std::time::Duration::from_secs(2), run)
             .await
             .expect("provider loop should finish");
@@ -246,6 +252,17 @@ mod needle_tests {
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].as_array().unwrap().len(), 1);
         assert_eq!(requests[1].as_array().unwrap().len(), expected_tool_count);
+
+        let small = vec![
+            crate::types::AgentToolDefinition::new("a", "", serde_json::json!({})),
+            crate::types::AgentToolDefinition::new("b", "", serde_json::json!({})),
+        ];
+        assert_eq!(
+            tool_definitions_for_attempt(1, Some("ordinary query"), &small, true)
+                .await
+                .len(),
+            2
+        );
     }
 }
 
