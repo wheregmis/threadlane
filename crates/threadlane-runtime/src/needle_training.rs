@@ -236,6 +236,12 @@ fn split_sessions(turns: &[NeedleHistoryTurn]) -> Result<SessionSplit, String> {
         holdout_turns += count;
         holdout_sessions.push(path);
     }
+    if holdout_turns < target {
+        return Err(
+            "Needle training export cannot satisfy a 20 percent holdout while preserving training sessions."
+                .into(),
+        );
+    }
     holdout_sessions.sort_by_key(|path| groups_order(&ordered, path));
     Ok(SessionSplit {
         train_sessions,
@@ -340,7 +346,7 @@ fn credential_rules() -> &'static [CredentialRule] {
             CredentialRule {
                 name: "credential_assignment",
                 regex: Regex::new(
-                    r#"(?i)\b(?:token|secret|password|api[_-]?key)\b\s*[:=]\s*([^\s'",;}]{8,})"#,
+                    r#"(?i)\b(?:token|secret|password|api[_-]?key)\b\s*[:=]\s*([^\s'",;}<]{8,})"#,
                 )
                 .unwrap(),
                 capture: 1,
@@ -382,10 +388,10 @@ fn finalize_temp(tmp_path: &Path, path: &Path) -> Result<(), String> {
 fn owner_only_create(path: &Path) -> Result<File, String> {
     use std::os::unix::fs::OpenOptionsExt;
 
+    let _ = std::fs::remove_file(path);
     OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(0o600)
         .open(path)
         .map_err(|_| "Needle training artifact could not be created.".to_string())
@@ -393,10 +399,10 @@ fn owner_only_create(path: &Path) -> Result<File, String> {
 
 #[cfg(not(unix))]
 fn owner_only_create(path: &Path) -> Result<File, String> {
+    let _ = std::fs::remove_file(path);
     OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .open(path)
         .map_err(|_| "Needle training artifact could not be created.".to_string())
 }
@@ -594,6 +600,15 @@ mod tests {
     }
 
     #[test]
+    fn split_errors_when_newest_whole_sessions_cannot_reach_holdout_floor() {
+        let turns = turns_for_sessions(&[("old.jsonl", 1, 10_000), ("new.jsonl", 2, 500)]);
+        assert_eq!(
+            split_sessions(&turns).unwrap_err(),
+            "Needle training export cannot satisfy a 20 percent holdout while preserving training sessions."
+        );
+    }
+
+    #[test]
     fn marks_fewer_than_two_hundred_holdout_turns_as_pilot() {
         let manifest = export_fixture(199);
         assert!(manifest.pilot);
@@ -693,6 +708,48 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn stale_broad_temp_files_do_not_make_sensitive_outputs_broad() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let sessions_dir = temp.path().join("sessions");
+        let work_dir = temp.path().join("work");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        std::fs::create_dir_all(&work_dir).unwrap();
+        write_session(&sessions_dir.join("a.jsonl"), "older", "result");
+        write_session(&sessions_dir.join("b.jsonl"), "newer", "result");
+        for file in ["train.tmp", "manifest.tmp"] {
+            let path = work_dir.join(file);
+            std::fs::write(&path, "stale").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+
+        export_needle_dataset(
+            &NeedleDatasetConfig {
+                sessions_dir,
+                work_dir: work_dir.clone(),
+                replace: true,
+            },
+            &[tool()],
+        )
+        .unwrap();
+
+        for file in [TRAIN_FILE, MANIFEST_FILE] {
+            assert_eq!(
+                std::fs::metadata(work_dir.join(file))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        assert!(!work_dir.join("train.tmp").exists());
+        assert!(!work_dir.join("manifest.tmp").exists());
+    }
+
     #[test]
     fn redacts_bearer_assignment_api_key_and_private_key_but_not_paths() {
         let private_key = "-----BEGIN PRIVATE KEY-----\nabc123\n-----END PRIVATE KEY-----";
@@ -713,5 +770,19 @@ mod tests {
         assert_eq!(redactor.counts().get("credential_assignment"), Some(&1));
         assert_eq!(redactor.counts().get("api_key_prefix"), Some(&1));
         assert_eq!(redactor.counts().get("private_key"), Some(&1));
+    }
+
+    #[test]
+    fn assignment_rule_does_not_rematch_generated_placeholders() {
+        let secret = "sk-test_1234567890123456";
+        let mut args = serde_json::json!({"env": {"line": format!("api_key={secret}")}});
+        let mut redactor = ExampleRedactor::default();
+        let query = redactor.redact_text(&format!("use {secret}"));
+        redact_value(&mut args, &mut redactor);
+        assert_eq!(query, "use <REDACTED_1>");
+        assert_eq!(args["env"]["line"], "api_key=<REDACTED_1>");
+        assert_eq!(redactor.count(), 1);
+        assert_eq!(redactor.counts().get("api_key_prefix"), Some(&1));
+        assert_eq!(redactor.counts().get("credential_assignment"), None);
     }
 }
