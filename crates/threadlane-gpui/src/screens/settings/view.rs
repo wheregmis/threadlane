@@ -680,7 +680,7 @@ impl SettingsView {
                                             .text_sm()
                                             .font_weight(FontWeight::MEDIUM)
                                             .text_color(theme.foreground)
-                                            .child("Local Needle Indexing"),
+                                            .child("Local Needle Tool Routing"),
                                     )
                                     .child(
                                         Tag::new()
@@ -698,7 +698,7 @@ impl SettingsView {
                                     .mt_1()
                                     .text_xs()
                                     .text_color(theme.muted_foreground)
-                                    .child("Accelerate file search and symbol extraction using the native local index."),
+                                    .child("Shortlist the five most relevant tools locally before the first provider request."),
                             ),
                     )
                     .child(

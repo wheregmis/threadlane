@@ -137,16 +137,24 @@ pub(crate) fn needle_model_path() -> std::path::PathBuf {
 }
 
 #[cfg(feature = "needle")]
+pub fn validate_needle_model_path(
+    path: &std::path::Path,
+) -> Result<needle_infer::v2_engine::V2Engine, String> {
+    if !path.is_file() {
+        return Err("Needle model weights are unavailable.".into());
+    }
+    needle_infer::v2_engine::V2Engine::load(path)
+        .map_err(|_| "Needle model weights could not be loaded.".into())
+}
+
+#[cfg(feature = "needle")]
 pub(crate) fn needle_engine() -> Result<std::sync::Arc<needle_infer::v2_engine::V2Engine>, String> {
     let path = needle_model_path();
     if !path.is_file() {
         return Err("Needle model weights are unavailable.".into());
     }
     ENGINE
-        .get_or_init(|| match needle_infer::v2_engine::V2Engine::load(&path) {
-            Ok(engine) => Some(std::sync::Arc::new(engine)),
-            Err(_) => None,
-        })
+        .get_or_init(|| validate_needle_model_path(&path).ok().map(std::sync::Arc::new))
         .clone()
         .ok_or_else(|| "Needle model weights could not be loaded.".into())
 }
@@ -222,6 +230,13 @@ mod tests {
             shortlist_from_environment("query", &definitions, true).await,
             definitions
         );
+    }
+
+    #[cfg(feature = "needle")]
+    #[test]
+    fn missing_model_is_rejected_before_enablement() {
+        let missing = std::path::Path::new("/definitely/missing/needle2.cact");
+        assert!(validate_needle_model_path(missing).is_err());
     }
 
     #[cfg(feature = "needle")]
