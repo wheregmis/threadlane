@@ -289,8 +289,39 @@ just evaluate_local
 ```
 
 This resolves the project's current capabilities, including configured MCP
-servers, before evaluating `.threadlane/sessions`. For a fixed, reproducible
-catalogue file instead, run:
+servers, before evaluating `.threadlane/sessions`.
+
+To run the complete local fine-tuning pipeline, first install the upstream CLI:
+
+```bash
+pip install cactus-needle
+# or: pip install "cactus-needle[metal]"
+```
+
+Then run the project-local sequence:
+
+```bash
+just needle_dataset
+just needle_finetune
+just needle_evaluate_candidate
+just needle_promote
+```
+
+`just needle_dataset` writes private local artifacts under
+`.threadlane/needle-training/`. The sensitive file is
+`.threadlane/needle-training/train.jsonl`, which contains local prompts and tool
+arguments, is git-ignored, and is never uploaded by these commands. Keep a
+backup of `.threadlane/needle-training/` before replacing or moving its
+contents.
+
+The current local history is expected to produce a non-promotable pilot export.
+Pilot data is enough to verify the mechanics locally, but `just needle_promote`
+refuses it. Promotion requires all of the following on untouched holdout data:
+at least 200 eligible turns, candidate top-five recall of at least 99 percent,
+and strict improvement over the current model on the same holdout.
+
+For a fixed, reproducible catalogue file instead of the live project catalogue,
+run:
 
 ```bash
 cargo run --release -p threadlane-runtime --features needle --bin needle-history-eval -- \
@@ -304,7 +335,9 @@ invalid input or unavailable model. Needle only shortlists at most five tools
 on a first provider attempt whose last model-visible message is a user message;
 retries, continuations, and unavailable, busy, invalid, failed, or timed-out
 retrieval use the full configured catalogue. This phase does not bundle or
-download models, train LoRA adapters, or perform online learning.
+download models, train LoRA adapters, or perform online learning. The local
+training pipeline also stays on disk unless you explicitly run upstream tooling
+that exports artifacts elsewhere.
 
 For coding agent rules and repository conventions, consult [`AGENTS.md`](AGENTS.md).
 
