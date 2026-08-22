@@ -72,6 +72,84 @@ fn is_quota_or_rate_limit(error: &str) -> bool {
 mod needle_tests {
     use super::*;
 
+    #[cfg(feature = "needle")]
+    struct ContinuationProvider {
+        requests: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[cfg(feature = "needle")]
+    #[async_trait::async_trait]
+    impl ProviderPort for ContinuationProvider {
+        async fn stream_request(
+            &self,
+            request: RuntimeRequest,
+            events: mpsc::Sender<StreamEvent>,
+        ) {
+            self.requests.lock().unwrap().push(request.tools);
+            let event = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                StreamEvent::Finished {
+                    tool_calls: vec![ToolCall {
+                        id: "call-1".into(),
+                        r#type: "function".into(),
+                        function: threadlane_protocol::RuntimeToolCallFunction {
+                            name: "needle_tool_0".into(),
+                            arguments: "{}".into(),
+                        },
+                        thought_signature: None,
+                    }],
+                    usage: Default::default(),
+                }
+            } else {
+                StreamEvent::Finished {
+                    tool_calls: Vec::new(),
+                    usage: Default::default(),
+                }
+            };
+            let _ = events.send(event).await;
+        }
+
+        async fn fetch_deferred(
+            &self,
+            _model: &str,
+            _handle_id: &str,
+        ) -> Result<threadlane_protocol::DeferredResponse, String> {
+            Ok(threadlane_protocol::DeferredResponse::Pending)
+        }
+
+        async fn cancel_deferred(&self, _model: &str, _handle_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn provider_kind(&self, _model: &str) -> &'static str {
+            "test"
+        }
+    }
+
+    #[cfg(feature = "needle")]
+    struct ContinuationExecutor;
+
+    #[cfg(feature = "needle")]
+    #[async_trait::async_trait]
+    impl crate::tool_executor::ToolExecutor for ContinuationExecutor {
+        fn tool_definitions(&self) -> Arc<[crate::types::AgentToolDefinition]> {
+            (0..6)
+                .map(|index| {
+                    crate::types::AgentToolDefinition::new(
+                        format!("needle_tool_{index}"),
+                        "test tool",
+                        serde_json::json!({"type": "object"}),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .into()
+        }
+
+        async fn execute_tool(&self, _name: &str, _args: &str) -> Option<Result<String, String>> {
+            Some(Ok("tool result".into()))
+        }
+    }
+
     #[test]
     fn routes_only_when_the_last_message_is_user_text() {
         let user = vec![AgentMessage::User {
@@ -113,6 +191,35 @@ mod needle_tests {
             payload: serde_json::json!({}),
         }];
         assert_eq!(needle_query(1, &custom), None);
+    }
+
+    #[cfg(feature = "needle")]
+    #[tokio::test]
+    async fn continuation_request_restores_full_tool_catalogue() {
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = Arc::new(ContinuationProvider {
+            requests: requests.clone(),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut runtime = crate::runtime::AgentRuntime::new_with_provider(
+            "",
+            None,
+            "test-model",
+            None,
+            crate::config::AgentConfig::default(),
+            provider,
+        )
+        .unwrap();
+        runtime.set_needle_enabled(true);
+        runtime
+            .register_tool_executor(Arc::new(ContinuationExecutor))
+            .unwrap();
+        let expected_tool_count = runtime.configured_tool_definitions().len();
+        runtime.prompt("weather forecast").await;
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1].as_array().unwrap().len(), expected_tool_count);
     }
 }
 
