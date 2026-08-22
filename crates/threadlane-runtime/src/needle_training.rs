@@ -1,5 +1,5 @@
 use crate::needle_history_eval::{
-    extract_needle_history, NeedleEvalSkipped, NeedleHistoryCall, NeedleHistoryTurn,
+    NeedleEvalSkipped, NeedleHistoryCall, NeedleHistoryTurn, extract_needle_history,
 };
 use crate::types::AgentToolDefinition;
 use regex::Regex;
@@ -7,15 +7,19 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
+use std::io::ErrorKind;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::OnceLock;
 
 pub const TRAIN_FILE: &str = "train.jsonl";
 pub const MANIFEST_FILE: &str = "manifest.json";
 pub const ADAPTER_FILE: &str = "adapter.pkl";
 pub const CANDIDATE_FILE: &str = "candidate.cact";
+const BASE_CHECKPOINT_FILE: &str = "checkpoints/needle2.pkl";
 pub const CURRENT_EVAL_FILE: &str = "current-eval.json";
 pub const CANDIDATE_EVAL_FILE: &str = "candidate-eval.json";
 pub const MANIFEST_VERSION: u32 = 1;
@@ -202,6 +206,125 @@ pub fn save_training_manifest(
     let bytes = serde_json::to_vec_pretty(manifest)
         .map_err(|_| "Needle training manifest could not be serialized.".to_string())?;
     write_atomic(&work_dir.join(MANIFEST_FILE), &bytes)
+}
+
+pub fn run_needle_finetune(
+    work_dir: &Path,
+    needle_executable: &OsStr,
+) -> Result<NeedleTrainingManifest, String> {
+    let result = run_needle_finetune_inner(work_dir, needle_executable);
+    if result.is_err() {
+        cleanup_finetune_temps(work_dir);
+    }
+    result
+}
+
+fn run_needle_finetune_inner(
+    work_dir: &Path,
+    needle_executable: &OsStr,
+) -> Result<NeedleTrainingManifest, String> {
+    let mut manifest = load_training_manifest(work_dir)?;
+    let base_path = work_dir.join(BASE_CHECKPOINT_FILE);
+    let base_bytes = std::fs::read(&base_path)
+        .map_err(|_| "Needle base checkpoint is missing or unreadable.".to_string())?;
+    let version = needle_output(needle_executable, work_dir, ["--version"])?;
+
+    run_needle(
+        needle_executable,
+        work_dir,
+        [
+            "finetune",
+            TRAIN_FILE,
+            "--epochs",
+            "10",
+            "--out",
+            "adapter.pkl.tmp",
+        ],
+    )?;
+    let adapter_tmp = work_dir.join("adapter.pkl.tmp");
+    if !adapter_tmp.is_file() {
+        return Err("Needle finetune did not produce adapter.pkl.tmp.".into());
+    }
+    finalize_temp(&adapter_tmp, &work_dir.join(ADAPTER_FILE))?;
+
+    run_needle(
+        needle_executable,
+        work_dir,
+        [
+            "build",
+            BASE_CHECKPOINT_FILE,
+            "--lora",
+            ADAPTER_FILE,
+            "--out",
+            "candidate.cact.tmp",
+        ],
+    )?;
+    let candidate_tmp = work_dir.join("candidate.cact.tmp");
+    if !candidate_tmp.is_file() {
+        return Err("Needle build did not produce candidate.cact.tmp.".into());
+    }
+    finalize_temp(&candidate_tmp, &work_dir.join(CANDIDATE_FILE))?;
+
+    manifest.needle_version = Some(version.trim().to_string());
+    manifest.base_sha256 = Some(sha256(&base_bytes));
+    manifest.adapter_sha256 = Some(sha256(
+        &std::fs::read(work_dir.join(ADAPTER_FILE))
+            .map_err(|_| "Needle adapter is unreadable.".to_string())?,
+    ));
+    manifest.candidate_sha256 = Some(sha256(
+        &std::fs::read(work_dir.join(CANDIDATE_FILE))
+            .map_err(|_| "Needle candidate is unreadable.".to_string())?,
+    ));
+    save_training_manifest(work_dir, &manifest)?;
+    Ok(manifest)
+}
+
+fn needle_output<const N: usize>(
+    needle_executable: &OsStr,
+    work_dir: &Path,
+    args: [&str; N],
+) -> Result<String, String> {
+    let output = Command::new(needle_executable)
+        .current_dir(work_dir)
+        .args(args)
+        .output()
+        .map_err(needle_spawn_error)?;
+    if !output.status.success() {
+        return Err("Needle command failed.".into());
+    }
+    String::from_utf8(output.stdout).map_err(|_| "Needle command output was not UTF-8.".into())
+}
+
+fn run_needle<const N: usize>(
+    needle_executable: &OsStr,
+    work_dir: &Path,
+    args: [&str; N],
+) -> Result<(), String> {
+    let status = Command::new(needle_executable)
+        .current_dir(work_dir)
+        .args(args)
+        .status()
+        .map_err(needle_spawn_error)?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("Needle command failed.".into())
+    }
+}
+
+fn needle_spawn_error(error: std::io::Error) -> String {
+    if error.kind() == ErrorKind::NotFound {
+        "Needle executable was not found. Install it with `pip install cactus-needle` or, on Apple GPU machines, `pip install \"cactus-needle[metal]\"`."
+            .into()
+    } else {
+        "Needle executable could not be started.".into()
+    }
+}
+
+fn cleanup_finetune_temps(work_dir: &Path) {
+    for file in ["adapter.pkl.tmp", "candidate.cact.tmp"] {
+        let _ = std::fs::remove_file(work_dir.join(file));
+    }
 }
 
 fn split_sessions(turns: &[NeedleHistoryTurn]) -> Result<SessionSplit, String> {
@@ -573,6 +696,132 @@ mod tests {
         }
     }
 
+    fn training_fixture_with_manifest_and_base_checkpoint() -> FixtureExport {
+        let export = export_fixture_with_tool_result("result");
+        let checkpoint_dir = export.work_dir.join("checkpoints");
+        std::fs::create_dir_all(&checkpoint_dir).unwrap();
+        std::fs::write(checkpoint_dir.join("needle2.pkl"), "base checkpoint").unwrap();
+        export
+    }
+
+    #[cfg(unix)]
+    fn fake_needle(root: &std::path::Path, version: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = root.join("needle");
+        std::fs::write(
+            &path,
+            format!(
+                r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "{version}"
+  exit 0
+fi
+printf '%s\n' "$*" >> needle.calls
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--out" ]; then
+    shift
+    mkdir -p "$(dirname "$1")"
+    printf 'artifact:%s\n' "$*" > "$1"
+    exit 0
+  fi
+  shift
+done
+exit 2
+"#
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    fn fake_needle_build_failure(root: &std::path::Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = root.join("needle-fail");
+        std::fs::write(
+            &path,
+            r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "2.0-test"
+  exit 0
+fi
+printf '%s\n' "$*" >> needle.calls
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--out" ]; then
+    shift
+    printf 'artifact\n' > "$1"
+    break
+  fi
+  shift
+done
+if grep -q '^build ' needle.calls; then
+  exit 1
+fi
+exit 0
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        path
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn finetune_runs_upstream_commands_and_records_artifact_hashes() {
+        let export = training_fixture_with_manifest_and_base_checkpoint();
+        let needle = fake_needle(&export.work_dir, "2.0-test");
+
+        let manifest = run_needle_finetune(&export.work_dir, needle.as_os_str()).unwrap();
+
+        let calls = std::fs::read_to_string(export.work_dir.join("needle.calls")).unwrap();
+        assert!(calls.contains("finetune train.jsonl --epochs 10"));
+        assert!(calls.contains("build checkpoints/needle2.pkl --lora"));
+        assert_eq!(manifest.needle_version.as_deref(), Some("2.0-test"));
+        assert_eq!(manifest.base_sha256, Some(sha256(b"base checkpoint")));
+        assert!(manifest.adapter_sha256.is_some());
+        assert!(manifest.candidate_sha256.is_some());
+        assert_eq!(load_training_manifest(&export.work_dir).unwrap(), manifest);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn finetune_removes_temp_artifacts_when_upstream_build_fails() {
+        let export = training_fixture_with_manifest_and_base_checkpoint();
+        let needle = fake_needle_build_failure(&export.work_dir);
+
+        assert_eq!(
+            run_needle_finetune(&export.work_dir, needle.as_os_str()).unwrap_err(),
+            "Needle command failed."
+        );
+
+        assert!(!export.work_dir.join("adapter.pkl.tmp").exists());
+        assert!(!export.work_dir.join("candidate.cact.tmp").exists());
+        assert!(
+            load_training_manifest(&export.work_dir)
+                .unwrap()
+                .candidate_sha256
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn finetune_missing_executable_mentions_pip_install_options() {
+        let export = training_fixture_with_manifest_and_base_checkpoint();
+        let needle = PathBuf::from("/definitely-not-installed-threadlane-needle");
+
+        let error = run_needle_finetune(&export.work_dir, needle.as_os_str()).unwrap_err();
+
+        assert!(error.contains("pip install cactus-needle"));
+        assert!(error.contains("pip install \"cactus-needle[metal]\""));
+    }
+
     #[test]
     fn redacts_the_same_secret_in_query_and_nested_arguments() {
         let mut args = serde_json::json!({"env": {"token": "sk-test_1234567890123456"}});
@@ -593,10 +842,12 @@ mod tests {
             split.holdout_sessions,
             vec![PathBuf::from("b.jsonl"), PathBuf::from("c.jsonl")]
         );
-        assert!(split
-            .train_sessions
-            .iter()
-            .all(|path| !split.holdout_sessions.contains(path)));
+        assert!(
+            split
+                .train_sessions
+                .iter()
+                .all(|path| !split.holdout_sessions.contains(path))
+        );
     }
 
     #[test]

@@ -16,3 +16,9 @@ needle_dataset project="." sessions=".threadlane/sessions" work_dir=".threadlane
         --sessions "{{sessions}}" \
         --work-dir "{{work_dir}}" \
         {{replace}}
+
+needle_finetune work_dir=".threadlane/needle-training" needle="needle":
+    cargo run --release -p threadlane-session --features needle --bin needle-project-train -- \
+        finetune \
+        --work-dir "{{work_dir}}" \
+        --needle "{{needle}}"
