@@ -169,17 +169,49 @@ impl SessionController {
         agent.set_model_roles(roles);
     }
 
-    pub fn try_set_needle_enabled(&self, enabled: bool) -> bool {
-        let Ok(mut agent) = self.agent.try_lock() else {
-            return false;
-        };
+    pub async fn set_needle_enabled(&self, enabled: bool) {
+        let mut agent = self.agent.lock().await;
         agent.set_needle_enabled(enabled);
-        true
     }
 
     pub async fn reload_extensions(&self) -> Result<usize, String> {
         let _guard = self.prompt_lock.lock().await;
         let mut agent = self.agent.lock().await;
         agent.reload_extensions().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::coding_agent::CodingAgentOptions;
+
+    #[tokio::test]
+    async fn queued_needle_toggle_applies_after_busy_agent_releases_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let controller = SessionController::new(
+            CodingAgentOptions {
+                api_key: "test-key".into(),
+                account_id: None,
+                model: "test-model".into(),
+                work_dir: temp.path().to_path_buf(),
+                session_file: Some(temp.path().join("session.jsonl")),
+                system_prompt: Default::default(),
+                agent_config: None,
+                coding_config: None,
+            },
+            ExecutionMode::Interactive,
+        );
+        let guard = controller.agent.lock().await;
+        let update = tokio::spawn({
+            let controller = controller.clone();
+            async move { controller.set_needle_enabled(true).await }
+        });
+
+        tokio::task::yield_now().await;
+        drop(guard);
+        update.await.unwrap();
+
+        assert!(controller.agent.lock().await.agent.config().needle_enabled);
     }
 }

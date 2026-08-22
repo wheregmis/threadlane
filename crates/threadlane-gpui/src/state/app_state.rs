@@ -840,7 +840,10 @@ impl AppState {
         crate::services::settings::save_needle_enabled(enabled)?;
         self.needle_enabled = enabled;
         for runtime in self.session_runtimes.values() {
-            let _ = runtime.try_set_needle_enabled(enabled);
+            let runtime = runtime.clone();
+            threadlane_runtime::get_runtime().spawn(async move {
+                runtime.set_needle_enabled(enabled).await;
+            });
         }
         Ok(())
     }
