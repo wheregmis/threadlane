@@ -173,6 +173,14 @@ impl NeedleEvalSkipped {
 
 pub fn run_needle_history_eval(config: &NeedleEvalConfig) -> Result<NeedleEvalReport, String> {
     let definitions = read_catalogue(&config.tools_path)?;
+    run_needle_history_eval_with_definitions(&config.sessions_dir, definitions)
+}
+
+pub fn run_needle_history_eval_with_definitions(
+    sessions_dir: &Path,
+    definitions: Vec<AgentToolDefinition>,
+) -> Result<NeedleEvalReport, String> {
+    validate_catalogue(&definitions)?;
     let catalogue_bytes = serde_json::to_vec(&definitions)
         .map_err(|_| "Tool catalogue could not be serialized.".to_string())?;
     let catalogue_sha256 = sha256(&catalogue_bytes);
@@ -186,7 +194,7 @@ pub fn run_needle_history_eval(config: &NeedleEvalConfig) -> Result<NeedleEvalRe
         skipped: NeedleEvalSkipped::default(),
     };
 
-    for path in session_paths(&config.sessions_dir)? {
+    for path in session_paths(sessions_dir)? {
         match JsonlStore::open_read_only(path) {
             Ok(store) => {
                 let current = extract_store_examples(&store, &catalogue_names);
@@ -201,7 +209,14 @@ pub fn run_needle_history_eval(config: &NeedleEvalConfig) -> Result<NeedleEvalRe
         .iter()
         .map(render_needle_candidate)
         .collect::<Vec<_>>();
-    let descriptions = rendered.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut head_state = engine
+        .new_head_state()
+        .ok_or_else(|| "Needle model has no contrastive head.".to_string())?;
+    let catalogue_embeddings = rendered
+        .iter()
+        .map(|description| engine.encode_contrastive_with_state(description, &mut head_state))
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| "Needle catalogue could not be encoded.".to_string())?;
     let mut top_one_passes = 0;
     let mut top_three_passes = 0;
     let mut top_five_passes = 0;
@@ -209,7 +224,10 @@ pub fn run_needle_history_eval(config: &NeedleEvalConfig) -> Result<NeedleEvalRe
     let mut misses_by_tool = BTreeMap::new();
     for example in &extracted.examples {
         let started = Instant::now();
-        let ranked = engine.retrieve_tools(&example.prompt, &descriptions, 5);
+        let query_embedding = engine
+            .encode_contrastive_with_state(&example.prompt, &mut head_state)
+            .ok_or_else(|| "Needle query could not be encoded.".to_string())?;
+        let ranked = rank_embeddings(&query_embedding, &catalogue_embeddings, 5);
         latencies.push(started.elapsed().as_micros().try_into().unwrap_or(u64::MAX));
         let names = ranked_names(&ranked, &definitions);
         top_one_passes += usize::from(turn_passes(&example.expected, &names[..names.len().min(1)]));
@@ -248,22 +266,25 @@ fn read_catalogue(path: &Path) -> Result<Vec<AgentToolDefinition>, String> {
     let schemas = schemas
         .as_array()
         .ok_or_else(|| "Tool catalogue must be an array.".to_string())?;
-    let mut names = HashSet::new();
-    let definitions = schemas
+    schemas
         .iter()
         .map(AgentToolDefinition::from_provider_schema)
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| "Tool catalogue contains an invalid tool.".to_string())?;
+        .map_err(|_| "Tool catalogue contains an invalid tool.".to_string())
+}
+
+fn validate_catalogue(definitions: &[AgentToolDefinition]) -> Result<(), String> {
     if definitions.is_empty() {
         return Err("Tool catalogue is empty.".into());
     }
+    let mut names = HashSet::new();
     if definitions
         .iter()
         .any(|tool| !names.insert(tool.name.clone()))
     {
         return Err("Tool catalogue contains duplicate names.".into());
     }
-    Ok(definitions)
+    Ok(())
 }
 
 fn session_paths(sessions_dir: &Path) -> Result<Vec<PathBuf>, String> {
@@ -462,6 +483,24 @@ fn ranked_names(ranked: &[(usize, f32)], definitions: &[AgentToolDefinition]) ->
         .map(|tool| tool.name.clone())
         .take(5)
         .collect()
+}
+
+fn rank_embeddings(query: &[f32], catalogue: &[Vec<f32>], top_k: usize) -> Vec<(usize, f32)> {
+    let mut ranked = catalogue
+        .iter()
+        .enumerate()
+        .map(|(index, embedding)| {
+            let score: f32 = query
+                .iter()
+                .zip(embedding)
+                .map(|(left, right)| left * right)
+                .sum();
+            (index, score)
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| right.1.total_cmp(&left.1));
+    ranked.truncate(top_k);
+    ranked
 }
 
 fn turn_passes(expected: &BTreeSet<String>, ranked: &[String]) -> bool {
@@ -839,10 +878,34 @@ mod tests {
     }
 
     #[test]
+    fn ranks_cached_catalogue_embeddings() {
+        let ranked = rank_embeddings(
+            &[1.0, 0.0],
+            &[vec![0.0, 1.0], vec![1.0, 0.0], vec![0.5, 0.5]],
+            2,
+        );
+        assert_eq!(
+            ranked.iter().map(|(index, _)| *index).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+
+    #[test]
     fn decision_requires_two_hundred_examples_and_ninety_nine_percent() {
         assert_eq!(decision(199, 199), NeedleEvalDecision::Inconclusive);
         assert_eq!(decision(200, 198), NeedleEvalDecision::Pass);
         assert_eq!(decision(200, 197), NeedleEvalDecision::Fail);
+    }
+
+    #[test]
+    fn rejects_duplicate_resolved_catalogue() {
+        let definitions = vec![
+            AgentToolDefinition::new("search", "Search", serde_json::json!({})),
+            AgentToolDefinition::new("search", "Search", serde_json::json!({})),
+        ];
+        let error = run_needle_history_eval_with_definitions(Path::new("."), definitions)
+            .expect_err("duplicate resolved tools must be rejected");
+        assert_eq!(error, "Tool catalogue contains duplicate names.");
     }
 
     #[test]

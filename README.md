@@ -282,10 +282,18 @@ cargo test --workspace
 Needle weights are not distributed with Threadlane. Place `needle2.cact` at
 `needle/needle2.cact` or set `THREADLANE_NEEDLE_WEIGHTS` to an explicit local
 file. Evaluate the current provider-format tool catalogue against canonical
-project sessions with:
+project sessions in one command with:
 
 ```bash
-cargo run -p threadlane-runtime --features needle --bin needle-history-eval -- \
+just evaluate_local
+```
+
+This resolves the project's current capabilities, including configured MCP
+servers, before evaluating `.threadlane/sessions`. For a fixed, reproducible
+catalogue file instead, run:
+
+```bash
+cargo run --release -p threadlane-runtime --features needle --bin needle-history-eval -- \
   --sessions /path/to/project/.threadlane/sessions \
   --tools /path/to/provider-tools.json
 ```

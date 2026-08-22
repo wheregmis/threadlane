@@ -6,6 +6,7 @@ description = "Threadlane session management: CodingAgent, SessionConfig, subage
 
 [features]
 test-support = []
+needle = ["threadlane-runtime/needle"]
 
 [dependencies]
 threadlane-runtime = { version = "0.1.0", path = "../threadlane-runtime" }
@@ -30,3 +31,8 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 
 [dev-dependencies]
 tempfile = "3.10"
+
+[[bin]]
+name = "needle-project-eval"
+path = "src/bin/needle_project_eval.rs"
+required-features = ["needle"]

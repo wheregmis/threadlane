@@ -4,7 +4,7 @@ hawkcheck:
 hawkfix:
     cargo +1.98.0 hawk check --fix --allow-dirty
 
-evaluate_local sessions=".threadlane/sessions" tools=".threadlane/provider-tools.json":
-    cargo run -p threadlane-runtime --features needle --bin needle-history-eval -- \
-        --sessions "{{sessions}}" \
-        --tools "{{tools}}"
+evaluate_local project="." sessions=".threadlane/sessions":
+    cargo run --release -p threadlane-session --features needle --bin needle-project-eval -- \
+        --project "{{project}}" \
+        --sessions "{{sessions}}"
