@@ -8,6 +8,8 @@ pub mod harness;
 pub mod local_tool_router;
 pub(crate) mod loop_engine;
 pub mod model_metadata;
+#[cfg(feature = "needle")]
+pub mod needle_history_eval;
 pub mod provider;
 pub mod rules;
 pub mod tool_dispatcher;
