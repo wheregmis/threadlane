@@ -3,12 +3,31 @@ use std::collections::HashSet;
 
 pub const NEEDLE_TOP_K: usize = 5;
 
+fn canonical_json(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(object) => {
+            let mut keys = object.keys().collect::<Vec<_>>();
+            keys.sort_unstable();
+            let mut canonical = serde_json::Map::new();
+            for key in keys {
+                canonical.insert(key.clone(), canonical_json(&object[key]));
+            }
+            serde_json::Value::Object(canonical)
+        }
+        serde_json::Value::Array(array) => {
+            serde_json::Value::Array(array.iter().map(canonical_json).collect())
+        }
+        _ => value.clone(),
+    }
+}
+
 pub fn render_needle_candidate(definition: &AgentToolDefinition) -> String {
     format!(
         "{}\n{}\n{}",
         definition.name,
         definition.description.as_deref().unwrap_or_default(),
-        serde_json::to_string(&definition.parameters).unwrap_or_else(|_| "null".into())
+        serde_json::to_string(&canonical_json(&definition.parameters))
+            .unwrap_or_else(|_| "null".into())
     )
 }
 
@@ -218,6 +237,19 @@ mod tests {
         assert_eq!(
             rendered,
             "search_code\nSearch workspace code.\n{\"properties\":{\"query\":{\"type\":\"string\"}},\"type\":\"object\"}"
+        );
+    }
+
+    #[test]
+    fn renders_nested_parameters_in_canonical_order() {
+        let rendered = render_needle_candidate(&AgentToolDefinition::new(
+            "nested",
+            "Nested schema.",
+            json!({"z": {"b": 1, "a": 2}, "a": [{"d": 4, "c": 3}]}),
+        ));
+        assert_eq!(
+            rendered,
+            "nested\nNested schema.\n{\"a\":[{\"c\":3,\"d\":4}],\"z\":{\"a\":2,\"b\":1}}"
         );
     }
 
