@@ -10,6 +10,8 @@ pub(crate) mod loop_engine;
 pub mod model_metadata;
 #[cfg(feature = "needle")]
 pub mod needle_history_eval;
+#[cfg(feature = "needle")]
+pub mod needle_training;
 pub mod provider;
 pub mod rules;
 pub mod tool_dispatcher;
