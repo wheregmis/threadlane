@@ -275,7 +275,10 @@ fn run_needle_finetune_inner(
         &std::fs::read(work_dir.join(CANDIDATE_FILE))
             .map_err(|_| "Needle candidate is unreadable.".to_string())?,
     ));
-    save_training_manifest(work_dir, &manifest)?;
+    if let Err(error) = save_training_manifest(work_dir, &manifest) {
+        cleanup_finetune_outputs(work_dir);
+        return Err(error);
+    }
     Ok(manifest)
 }
 
@@ -323,6 +326,12 @@ fn needle_spawn_error(error: std::io::Error) -> String {
 
 fn cleanup_finetune_temps(work_dir: &Path) {
     for file in ["adapter.pkl.tmp", "candidate.cact.tmp"] {
+        let _ = std::fs::remove_file(work_dir.join(file));
+    }
+}
+
+fn cleanup_finetune_outputs(work_dir: &Path) {
+    for file in [ADAPTER_FILE, CANDIDATE_FILE] {
         let _ = std::fs::remove_file(work_dir.join(file));
     }
 }
@@ -803,6 +812,28 @@ exit 0
 
         assert!(!export.work_dir.join("adapter.pkl.tmp").exists());
         assert!(!export.work_dir.join("candidate.cact.tmp").exists());
+        assert!(
+            load_training_manifest(&export.work_dir)
+                .unwrap()
+                .candidate_sha256
+                .is_none()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn finetune_removes_promoted_artifacts_when_manifest_save_fails() {
+        let export = training_fixture_with_manifest_and_base_checkpoint();
+        let needle = fake_needle(&export.work_dir, "2.0-test");
+        std::fs::create_dir(export.work_dir.join("manifest.tmp")).unwrap();
+
+        assert_eq!(
+            run_needle_finetune(&export.work_dir, needle.as_os_str()).unwrap_err(),
+            "Needle training artifact could not be created."
+        );
+
+        assert!(!export.work_dir.join(ADAPTER_FILE).exists());
+        assert!(!export.work_dir.join(CANDIDATE_FILE).exists());
         assert!(
             load_training_manifest(&export.work_dir)
                 .unwrap()
