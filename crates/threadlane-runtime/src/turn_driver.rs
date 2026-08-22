@@ -46,6 +46,18 @@ async fn persist_messages_with(
     Ok(())
 }
 
+fn needle_query(turn_number: u32, messages: &[AgentMessage]) -> Option<&str> {
+    if turn_number != 1 {
+        return None;
+    }
+    match messages.last()? {
+        AgentMessage::User { content } | AgentMessage::UserWithImages { content, .. } => {
+            Some(content)
+        }
+        _ => None,
+    }
+}
+
 fn is_quota_or_rate_limit(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
     error.contains("429")
@@ -54,6 +66,54 @@ fn is_quota_or_rate_limit(error: &str) -> bool {
         || error.contains("quota")
         || error.contains("too many requests")
         || error.contains("resource_exhausted")
+}
+
+#[cfg(test)]
+mod needle_tests {
+    use super::*;
+
+    #[test]
+    fn routes_only_when_the_last_message_is_user_text() {
+        let user = vec![AgentMessage::User {
+            content: "search code".into(),
+        }];
+        assert_eq!(needle_query(1, &user), Some("search code"));
+        assert_eq!(needle_query(2, &user), None);
+
+        let continued = vec![
+            AgentMessage::User {
+                content: "search code".into(),
+            },
+            AgentMessage::Tool {
+                tool_call_id: "call-1".into(),
+                name: "search".into(),
+                content: "result".into(),
+                is_error: false,
+                terminate: false,
+            },
+        ];
+        assert_eq!(needle_query(1, &continued), None);
+
+        let with_images = vec![AgentMessage::UserWithImages {
+            content: "search images".into(),
+            images: Vec::new(),
+        }];
+        assert_eq!(needle_query(1, &with_images), Some("search images"));
+
+        let assistant = vec![AgentMessage::Assistant {
+            content: Some("answer".into()),
+            tool_calls: None,
+            stop_reason: None,
+            deferred_handle: None,
+        }];
+        assert_eq!(needle_query(1, &assistant), None);
+
+        let custom = vec![AgentMessage::Custom {
+            custom_type: "thinking".into(),
+            payload: serde_json::json!({}),
+        }];
+        assert_eq!(needle_query(1, &custom), None);
+    }
 }
 
 fn classify_provider_error(error: &str) -> ErrorCategory {
@@ -232,21 +292,19 @@ impl<'a> TurnDriver<'a> {
             let configured_tool_definitions = self.tool_dispatcher.configured_tool_definitions();
             let query = {
                 let turn = self.turn.lock().await;
-                turn.messages
-                    .iter()
-                    .rev()
-                    .find_map(|message| match message {
-                        AgentMessage::User { content }
-                        | AgentMessage::UserWithImages { content, .. } => Some(content.clone()),
-                        _ => None,
-                    })
+                needle_query(turn_number as u32, &turn.messages).map(str::to_owned)
             };
-            let tool_definitions = crate::local_tool_router::shortlist_from_environment(
-                &query.unwrap_or_default(),
-                &configured_tool_definitions,
-                self.config.needle_enabled,
-            )
-            .await;
+            let tool_definitions = match query {
+                Some(query) => {
+                    crate::local_tool_router::shortlist_from_environment(
+                        &query,
+                        &configured_tool_definitions,
+                        self.config.needle_enabled,
+                    )
+                    .await
+                }
+                None => configured_tool_definitions.clone(),
+            };
             let provider_tools = tool_definitions
                 .iter()
                 .map(|tool| tool.to_chat_completions_tool())
