@@ -16,7 +16,7 @@ regex = "1.10"
 thiserror = "2.0"
 directories = "6.0"
 tracing = "0.1"
-sha2 = "0.10"
+sha2 = "0.11"
 libsqlite3-sys = "0.38.2"
 
 [features]
