@@ -19,6 +19,9 @@ pub(crate) fn load_needle_enabled() -> bool {
 }
 
 pub(crate) fn save_needle_enabled(enabled: bool) -> Result<(), String> {
+    if enabled {
+        threadlane_runtime::local_tool_router::validate_needle_model()?;
+    }
     let path = needle_preferences_path()
         .ok_or_else(|| "Global settings directory is unavailable.".to_string())?;
     let parent = path

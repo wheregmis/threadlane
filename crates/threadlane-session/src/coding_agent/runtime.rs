@@ -26,7 +26,8 @@ use threadlane_provider::openai::fetch_available_models;
 use threadlane_provider::router::ProviderClient;
 use threadlane_runtime::harness::{OperationOutcome, QueueKind, Reducer, SessionStore, Snapshot};
 use threadlane_runtime::{
-    AgentEvent, AgentMessage, AgentRuntime, ImageAttachment, ReasoningEffort, TokenUsage,
+    AgentEvent, AgentMessage, AgentRuntime, AgentToolDefinition, ImageAttachment, ReasoningEffort,
+    TokenUsage,
 };
 use threadlane_skills::{SkillManager, SkillRegistry};
 use threadlane_wasi::packages::default_global_threadlane_dir;
@@ -205,6 +206,10 @@ impl CodingAgent {
 
     pub async fn refresh_mcp(&self) {
         self.mcp_manager.discover_and_connect().await;
+    }
+
+    pub fn configured_tool_definitions(&self) -> Vec<AgentToolDefinition> {
+        self.agent.configured_tool_definitions()
     }
 
     pub(crate) async fn set_model(&mut self, model: String) -> Result<(), String> {
@@ -1206,6 +1211,32 @@ impl CodingAgent {
         }
 
         None
+    }
+}
+
+#[cfg(test)]
+mod catalogue_tests {
+    use super::{CodingAgent, CodingAgentOptions};
+    use crate::system_prompt::SystemPromptConfig;
+
+    #[test]
+    fn exposes_resolved_project_tool_definitions() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = CodingAgent::new(CodingAgentOptions {
+            api_key: String::new(),
+            account_id: None,
+            model: "catalogue-only".into(),
+            work_dir: dir.path().to_path_buf(),
+            session_file: None,
+            system_prompt: SystemPromptConfig::default(),
+            agent_config: None,
+            coding_config: None,
+        });
+
+        assert!(agent
+            .configured_tool_definitions()
+            .iter()
+            .any(|tool| tool.name == "read_file"));
     }
 }
 

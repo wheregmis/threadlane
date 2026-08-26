@@ -49,6 +49,7 @@ pub struct SessionController {
     is_generating: AtomicBool,
     status: Mutex<SessionStatus>,
     pub recovery_loaded: AtomicBool,
+    needle_enabled: AtomicBool,
 }
 
 impl SessionController {
@@ -76,6 +77,7 @@ impl SessionController {
         };
 
         let selected_model = agent.model().to_string();
+        let needle_enabled = agent.agent.config().needle_enabled;
 
         Arc::new(Self {
             agent: Arc::new(tokio::sync::Mutex::new(agent)),
@@ -91,6 +93,7 @@ impl SessionController {
             is_generating: AtomicBool::new(false),
             status: Mutex::new(status),
             recovery_loaded: AtomicBool::new(false),
+            needle_enabled: AtomicBool::new(needle_enabled),
         })
     }
 
@@ -169,17 +172,98 @@ impl SessionController {
         agent.set_model_roles(roles);
     }
 
-    pub fn try_set_needle_enabled(&self, enabled: bool) -> bool {
-        let Ok(mut agent) = self.agent.try_lock() else {
-            return false;
-        };
-        agent.set_needle_enabled(enabled);
-        true
+    pub fn set_needle_enabled(&self, enabled: bool) {
+        self.needle_enabled.store(enabled, Ordering::SeqCst);
+    }
+
+    pub async fn apply_needle_enabled(&self) {
+        let mut agent = self.agent.lock().await;
+        agent.set_needle_enabled(self.needle_enabled.load(Ordering::SeqCst));
     }
 
     pub async fn reload_extensions(&self) -> Result<usize, String> {
         let _guard = self.prompt_lock.lock().await;
         let mut agent = self.agent.lock().await;
         agent.reload_extensions().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::coding_agent::CodingAgentOptions;
+
+    #[tokio::test]
+    async fn queued_needle_toggle_applies_after_busy_agent_releases_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let controller = SessionController::new(
+            CodingAgentOptions {
+                api_key: "test-key".into(),
+                account_id: None,
+                model: "test-model".into(),
+                work_dir: temp.path().to_path_buf(),
+                session_file: Some(temp.path().join("session.jsonl")),
+                system_prompt: Default::default(),
+                agent_config: None,
+                coding_config: None,
+            },
+            ExecutionMode::Interactive,
+        );
+        let guard = controller.agent.lock().await;
+        controller.set_needle_enabled(true);
+        let update = tokio::spawn({
+            let controller = controller.clone();
+            async move { controller.apply_needle_enabled().await }
+        });
+
+        tokio::task::yield_now().await;
+        drop(guard);
+        update.await.unwrap();
+
+        assert!(controller.agent.lock().await.agent.config().needle_enabled);
+    }
+
+    #[tokio::test]
+    async fn latest_needle_toggle_wins_when_waiters_apply_in_reverse_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let controller = SessionController::new(
+            CodingAgentOptions {
+                api_key: "test-key".into(),
+                account_id: None,
+                model: "test-model".into(),
+                work_dir: temp.path().to_path_buf(),
+                session_file: Some(temp.path().join("session.jsonl")),
+                system_prompt: Default::default(),
+                agent_config: None,
+                coding_config: None,
+            },
+            ExecutionMode::Interactive,
+        );
+        let guard = controller.agent.lock().await;
+        let (true_ready_tx, true_ready_rx) = tokio::sync::oneshot::channel();
+        let true_gate = Arc::new(tokio::sync::Notify::new());
+        controller.set_needle_enabled(true);
+        let stale_true = tokio::spawn({
+            let controller = controller.clone();
+            let true_gate = true_gate.clone();
+            async move {
+                true_ready_tx.send(()).unwrap();
+                true_gate.notified().await;
+                controller.apply_needle_enabled().await;
+            }
+        });
+        true_ready_rx.await.unwrap();
+
+        controller.set_needle_enabled(false);
+        let current_false = tokio::spawn({
+            let controller = controller.clone();
+            async move { controller.apply_needle_enabled().await }
+        });
+        drop(guard);
+        current_false.await.unwrap();
+        true_gate.notify_one();
+        stale_true.await.unwrap();
+
+        assert!(!controller.agent.lock().await.agent.config().needle_enabled);
     }
 }

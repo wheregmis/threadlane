@@ -27,6 +27,11 @@ needle = ["dep:needle-infer"]
 git = "https://github.com/Geekgineer/needle-rs"
 optional = true
 
+[[bin]]
+name = "needle-history-eval"
+path = "src/bin/needle_history_eval.rs"
+required-features = ["needle"]
+
 [dev-dependencies]
 tempfile = "3.10"
 threadlane-provider = { version = "0.1.0", path = "../threadlane-provider" }

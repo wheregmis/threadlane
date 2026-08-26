@@ -46,6 +46,40 @@ async fn persist_messages_with(
     Ok(())
 }
 
+fn needle_query(turn_number: u32, messages: &[AgentMessage]) -> Option<&str> {
+    if turn_number != 1 {
+        return None;
+    }
+    match messages.last()? {
+        AgentMessage::User { content } | AgentMessage::UserWithImages { content, .. } => {
+            Some(content)
+        }
+        _ => None,
+    }
+}
+
+async fn tool_definitions_for_attempt(
+    turn_number: u32,
+    query: Option<&str>,
+    configured: &[crate::types::AgentToolDefinition],
+    enabled: bool,
+) -> Vec<crate::types::AgentToolDefinition> {
+    #[cfg(not(test))]
+    let _ = turn_number;
+
+    #[cfg(test)]
+    if turn_number == 1 && query == Some("__needle_test_force_shortlist__") {
+        return configured.iter().take(1).cloned().collect();
+    }
+
+    match query {
+        Some(query) => {
+            crate::local_tool_router::shortlist_from_environment(query, configured, enabled).await
+        }
+        None => configured.to_vec(),
+    }
+}
+
 fn is_quota_or_rate_limit(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
     error.contains("429")
@@ -54,6 +88,272 @@ fn is_quota_or_rate_limit(error: &str) -> bool {
         || error.contains("quota")
         || error.contains("too many requests")
         || error.contains("resource_exhausted")
+}
+
+#[cfg(test)]
+mod needle_tests {
+    use super::*;
+
+    #[cfg(feature = "needle")]
+    struct ContinuationProvider {
+        requests: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[cfg(feature = "needle")]
+    #[async_trait::async_trait]
+    impl ProviderPort for ContinuationProvider {
+        async fn stream_request(
+            &self,
+            request: RuntimeRequest,
+            events: mpsc::Sender<StreamEvent>,
+        ) {
+            self.requests.lock().unwrap().push(request.tools);
+            let event = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                StreamEvent::Finished {
+                    tool_calls: vec![ToolCall {
+                        id: "call-1".into(),
+                        r#type: "function".into(),
+                        function: threadlane_protocol::RuntimeToolCallFunction {
+                            name: "needle_tool_0".into(),
+                            arguments: "{}".into(),
+                        },
+                        thought_signature: None,
+                    }],
+                    usage: Default::default(),
+                }
+            } else {
+                StreamEvent::Finished {
+                    tool_calls: Vec::new(),
+                    usage: Default::default(),
+                }
+            };
+            let _ = events.send(event).await;
+        }
+
+        async fn fetch_deferred(
+            &self,
+            _model: &str,
+            _handle_id: &str,
+        ) -> Result<threadlane_protocol::DeferredResponse, String> {
+            Ok(threadlane_protocol::DeferredResponse::Pending)
+        }
+
+        async fn cancel_deferred(&self, _model: &str, _handle_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn provider_kind(&self, _model: &str) -> &'static str {
+            "test"
+        }
+    }
+
+    #[cfg(feature = "needle")]
+    struct ContinuationExecutor;
+
+    #[cfg(feature = "needle")]
+    #[async_trait::async_trait]
+    impl crate::tool_executor::ToolExecutor for ContinuationExecutor {
+        fn tool_definitions(&self) -> Arc<[crate::types::AgentToolDefinition]> {
+            (0..6)
+                .map(|index| {
+                    crate::types::AgentToolDefinition::new(
+                        format!("needle_tool_{index}"),
+                        "test tool",
+                        serde_json::json!({"type": "object"}),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .into()
+        }
+
+        async fn execute_tool(&self, _name: &str, _args: &str) -> Option<Result<String, String>> {
+            Some(Ok("tool result".into()))
+        }
+    }
+
+    #[test]
+    fn routes_only_when_the_last_message_is_user_text() {
+        let user = vec![AgentMessage::User {
+            content: "search code".into(),
+        }];
+        assert_eq!(needle_query(1, &user), Some("search code"));
+        assert_eq!(needle_query(2, &user), None);
+
+        let continued = vec![
+            AgentMessage::User {
+                content: "search code".into(),
+            },
+            AgentMessage::Tool {
+                tool_call_id: "call-1".into(),
+                name: "search".into(),
+                content: "result".into(),
+                is_error: false,
+                terminate: false,
+            },
+        ];
+        assert_eq!(needle_query(1, &continued), None);
+
+        let with_images = vec![AgentMessage::UserWithImages {
+            content: "search images".into(),
+            images: Vec::new(),
+        }];
+        assert_eq!(needle_query(1, &with_images), Some("search images"));
+
+        let assistant = vec![AgentMessage::Assistant {
+            content: Some("answer".into()),
+            tool_calls: None,
+            stop_reason: None,
+            deferred_handle: None,
+        }];
+        assert_eq!(needle_query(1, &assistant), None);
+
+        let custom = vec![AgentMessage::Custom {
+            custom_type: "thinking".into(),
+            payload: serde_json::json!({}),
+        }];
+        assert_eq!(needle_query(1, &custom), None);
+    }
+
+    #[cfg(feature = "needle")]
+    #[tokio::test]
+    async fn continuation_request_restores_full_tool_catalogue() {
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = Arc::new(ContinuationProvider {
+            requests: requests.clone(),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut runtime = crate::runtime::AgentRuntime::new_with_provider(
+            "",
+            None,
+            "test-model",
+            None,
+            crate::config::AgentConfig::default(),
+            provider,
+        )
+        .unwrap();
+        runtime.set_needle_enabled(true);
+        runtime
+            .register_tool_executor(Arc::new(ContinuationExecutor))
+            .unwrap();
+        let expected_tool_count = runtime.configured_tool_definitions().len();
+        runtime
+            .state_clone()
+            .lock()
+            .await
+            .messages
+            .push(AgentMessage::user("__needle_test_force_shortlist__", Vec::new()));
+        let run = runtime.resume_pending_turn();
+        tokio::time::timeout(std::time::Duration::from_secs(2), run)
+            .await
+            .expect("provider loop should finish");
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].as_array().unwrap().len(), 1);
+        assert_eq!(requests[1].as_array().unwrap().len(), expected_tool_count);
+
+        let small = vec![
+            crate::types::AgentToolDefinition::new("a", "", serde_json::json!({})),
+            crate::types::AgentToolDefinition::new("b", "", serde_json::json!({})),
+        ];
+        assert_eq!(
+            tool_definitions_for_attempt(1, Some("ordinary query"), &small, true)
+                .await
+                .len(),
+            2
+        );
+    }
+
+    #[cfg(feature = "needle")]
+    #[tokio::test]
+    async fn durable_second_attempt_restores_full_tool_catalogue() {
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = Arc::new(ContinuationProvider {
+            requests: requests.clone(),
+            calls: std::sync::atomic::AtomicUsize::new(1),
+        });
+        let mut runtime = crate::runtime::AgentRuntime::new_with_provider(
+            "",
+            None,
+            "test-model",
+            None,
+            crate::config::AgentConfig::default(),
+            provider,
+        )
+        .unwrap();
+        runtime.set_needle_enabled(true);
+        runtime
+            .register_tool_executor(Arc::new(ContinuationExecutor))
+            .unwrap();
+        let expected_tool_count = runtime.configured_tool_definitions().len();
+        let prepared_tools = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_prepared_tools = prepared_tools.clone();
+        runtime.set_provider_boundary_preparer(Some(Arc::new(move |request| {
+            let captured_prepared_tools = captured_prepared_tools.clone();
+            Box::pin(async move {
+                let tools: serde_json::Value = serde_json::from_str(
+                    request
+                        .tool_schema_json
+                        .as_deref()
+                        .expect("full configured schema"),
+                )
+                .unwrap();
+                captured_prepared_tools.lock().unwrap().push(tools);
+                Ok(ProviderBoundaryResult {
+                    messages: request.messages,
+                    context_limit: 128_000,
+                    context_limit_is_estimate: true,
+                    compaction_generation: 0,
+                    provisional_estimated_tokens: None,
+                    provider_attempt: Some(2),
+                    provider_request_id: Some("durable-request-2".into()),
+                })
+            })
+        })));
+        let manifest_tools = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_manifest_tools = manifest_tools.clone();
+        runtime.set_provider_trace_recorder(Some(Arc::new(move |event| {
+            let captured_manifest_tools = captured_manifest_tools.clone();
+            Box::pin(async move {
+                if let ProviderTraceEvent::ContextManifest { items, .. } = event {
+                    captured_manifest_tools.lock().unwrap().extend(
+                        items
+                            .into_iter()
+                            .filter(|item| item.source == ContextItemSource::ToolSchema),
+                    );
+                }
+                Ok(())
+            })
+        })));
+        runtime
+            .state_clone()
+            .lock()
+            .await
+            .messages
+            .push(AgentMessage::user(
+                "__needle_test_force_shortlist__",
+                Vec::new(),
+            ));
+
+        runtime.resume_pending_turn().await;
+
+        let prepared_tools = prepared_tools.lock().unwrap();
+        assert_eq!(prepared_tools.len(), 1);
+        assert_eq!(
+            prepared_tools[0].as_array().unwrap().len(),
+            expected_tool_count
+        );
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].as_array().unwrap().len(), expected_tool_count);
+        let manifest_tools = manifest_tools.lock().unwrap();
+        assert_eq!(manifest_tools.len(), 1);
+        assert_eq!(
+            manifest_tools[0].label.as_ref().map(|label| label.as_str()),
+            Some(format!("{expected_tool_count} tools").as_str())
+        );
+    }
 }
 
 fn classify_provider_error(error: &str) -> ErrorCategory {
@@ -230,38 +530,25 @@ impl<'a> TurnDriver<'a> {
             };
             let overflow_recovery = std::mem::take(&mut overflow_recovery_pending);
             let configured_tool_definitions = self.tool_dispatcher.configured_tool_definitions();
-            let query = {
-                let turn = self.turn.lock().await;
-                turn.messages
-                    .iter()
-                    .rev()
-                    .find_map(|message| match message {
-                        AgentMessage::User { content }
-                        | AgentMessage::UserWithImages { content, .. } => Some(content.clone()),
-                        _ => None,
-                    })
-            };
-            let tool_definitions = crate::local_tool_router::shortlist_from_environment(
-                &query.unwrap_or_default(),
-                &configured_tool_definitions,
-                self.config.needle_enabled,
-            )
-            .await;
-            let provider_tools = tool_definitions
+            let full_provider_tools = configured_tool_definitions
                 .iter()
                 .map(|tool| tool.to_chat_completions_tool())
                 .collect::<Vec<_>>();
-            let tool_schema_json = (!provider_tools.is_empty())
-                .then(|| serde_json::to_string(&provider_tools).unwrap_or_default());
+            let full_tool_schema_json = (!full_provider_tools.is_empty())
+                .then(|| serde_json::to_string(&full_provider_tools).unwrap_or_default());
 
             let mut boundary_result: Option<ProviderBoundaryResult> = None;
             if let Some(preparer) = &self.provider_boundary_preparer {
                 let messages = self.turn.lock().await.messages.clone();
+                // Prepare against the full catalogue before looking at Needle:
+                // a reopened driver must use the journal's provider attempt,
+                // not its process-local turn number, to decide whether routing
+                // is permitted. This also makes compaction conservative.
                 let prepared = preparer(ProviderBoundaryRequest {
                     attempt: turn_number as u32,
                     model: model.clone(),
                     messages,
-                    tool_schema_json: tool_schema_json.clone(),
+                    tool_schema_json: full_tool_schema_json.clone(),
                     overflow_recovery,
                 })
                 .await
@@ -293,10 +580,24 @@ impl<'a> TurnDriver<'a> {
                         PROVIDER_REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed)
                     )
                 });
+            let request_messages = self.turn.lock().await.messages.clone();
+            let query = needle_query(provider_attempt, &request_messages).map(str::to_owned);
+            let tool_definitions = tool_definitions_for_attempt(
+                provider_attempt,
+                query.as_deref(),
+                &configured_tool_definitions,
+                self.config.needle_enabled,
+            )
+            .await;
+            let provider_tools = tool_definitions
+                .iter()
+                .map(|tool| tool.to_chat_completions_tool())
+                .collect::<Vec<_>>();
+            let tool_schema_json = (!provider_tools.is_empty())
+                .then(|| serde_json::to_string(&provider_tools).unwrap_or_default());
             let (stream_tx, mut stream_rx) = mpsc::channel(100);
             let client = self.provider_client.clone();
             let payload_cache_key = self.prompt_cache_key.clone();
-            let request_messages = self.turn.lock().await.messages.clone();
             let request = {
                 let turn = self.turn.lock().await;
                 RuntimeRequest {

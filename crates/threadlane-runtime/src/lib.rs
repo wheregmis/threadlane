@@ -8,6 +8,10 @@ pub mod harness;
 pub mod local_tool_router;
 pub(crate) mod loop_engine;
 pub mod model_metadata;
+#[cfg(feature = "needle")]
+pub mod needle_history_eval;
+#[cfg(feature = "needle")]
+pub mod needle_training;
 pub mod provider;
 pub mod rules;
 pub mod tool_dispatcher;
@@ -40,7 +44,6 @@ pub use harness::{
     OperationOutcome, QueueKind, Record, RecoveryResult, SteerItem, SteerPriority,
     ToolReplaySafety, has_open_subagent_lanes, interrupted_subagent_lanes,
 };
-pub use local_tool_router::LocalToolRouter;
 pub use loop_engine::repair_interrupted_tool_turn;
 pub use provider::{
     AssistantMessageRecorder, ChatCompletionsAdapter, CodexResponsesAdapter, ProviderAdapter,

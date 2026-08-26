@@ -12,7 +12,7 @@ gpui-component = { git = "https://github.com/longbridge/gpui-component", feature
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
 gpui = { git = "https://github.com/zed-industries/zed" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit"] }
-threadlane-runtime = { version = "0.1.0", path = "../threadlane-runtime" }
+threadlane-runtime = { version = "0.1.0", path = "../threadlane-runtime", features = ["needle"] }
 threadlane-session = { version = "0.1.0", path = "../threadlane-session" }
 threadlane-provider = { version = "0.1.0", path = "../threadlane-provider" }
 threadlane-auth = { version = "0.1.0", path = "../threadlane-auth" }

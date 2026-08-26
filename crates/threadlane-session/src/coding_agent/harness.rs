@@ -884,6 +884,7 @@ impl CodingSessionHarness {
                 executor_kind,
                 started_at_ms,
                 duration_ms,
+                outcome,
                 is_error,
                 terminate,
                 output_sha256,
@@ -899,15 +900,11 @@ impl CodingSessionHarness {
                 tool_name: TraceString::new(tool_name)?,
                 executor_kind: TraceString::new(executor_kind)?,
                 phase: ToolExecutionPhase::Finished,
-                started_at_ms: Some(started_at_ms),
-                duration_ms: Some(duration_ms),
-                outcome: Some(if is_error {
-                    ToolExecutionOutcome::Failed
-                } else {
-                    ToolExecutionOutcome::Succeeded
-                }),
+                started_at_ms,
+                duration_ms,
+                outcome: Some(outcome.clone()),
                 exit_code: None,
-                cancelled: false,
+                cancelled: outcome == ToolExecutionOutcome::Cancelled,
                 is_error: Some(is_error),
                 terminate: Some(terminate),
                 output_sha256: Some(TraceString::new(output_sha256)?),
@@ -3673,6 +3670,64 @@ mod tests {
             (intent_seq, observed_seq),
             (Some(intent), Some(observed)) if intent < observed
         ));
+    }
+
+    #[tokio::test]
+    async fn typed_terminal_tool_outcomes_survive_jsonl_reload() {
+        let (_dir, path) = temp_session();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        harness
+            .begin_run("run-1", AgentMessage::user("prompt", vec![]))
+            .unwrap();
+
+        for (call_id, outcome) in [
+            ("declined", ToolExecutionOutcome::Declined),
+            ("cancelled", ToolExecutionOutcome::Cancelled),
+        ] {
+            harness
+                .record_tool_execution(
+                    "run-1",
+                    ToolExecutionTraceEvent::Finished {
+                        tool_call_id: call_id.into(),
+                        tool_name: "read_file".into(),
+                        executor_kind: "dispatcher".into(),
+                        started_at_ms: None,
+                        duration_ms: None,
+                        outcome,
+                        is_error: true,
+                        terminate: false,
+                        output_sha256:
+                            "0000000000000000000000000000000000000000000000000000000000000000"
+                                .into(),
+                        output_bytes: 0,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        drop(harness);
+
+        let store = JsonlStore::open(&path).unwrap();
+        let outcomes = store
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                HarnessRecord::ToolExecutionObserved {
+                    phase: ToolExecutionPhase::Finished,
+                    outcome: Some(outcome),
+                    cancelled,
+                    ..
+                } => Some((outcome.clone(), *cancelled)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            outcomes,
+            vec![
+                (ToolExecutionOutcome::Declined, false),
+                (ToolExecutionOutcome::Cancelled, true),
+            ]
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
