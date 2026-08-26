@@ -18,7 +18,7 @@ futures-util = "0.3"
 bytes = "1.6"
 tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
 sha2 = "0.10"
-base64 = "0.22"
+base64 = "0.23"
 url = "2.5"
 getrandom = "0.4"
 tracing = "0.1"
