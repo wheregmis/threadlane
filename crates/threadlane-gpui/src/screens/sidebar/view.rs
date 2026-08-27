@@ -185,6 +185,20 @@ pub struct SidebarView {
     _subscriptions: Vec<Subscription>,
 }
 
+fn sidebar_session_fingerprint(session: &SessionInfo) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    session.id.hash(&mut hasher);
+    session.title.hash(&mut hasher);
+    session.work_dir.hash(&mut hasher);
+    session.session_file.hash(&mut hasher);
+    session.updated_at.hash(&mut hasher);
+    session.health.hash(&mut hasher);
+    session.git_branch.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// Hash of every piece of `AppState` the sidebar renders. Streaming deltas
 /// mutate messages, plans, and usage without touching any of these fields, so
 /// an unchanged hash lets the observer skip `cx.notify()` entirely. The minute
@@ -201,12 +215,7 @@ fn sidebar_fingerprint(state: &AppState, now: u64) -> u64 {
         project.name.hash(&mut hasher);
         project.work_dir.hash(&mut hasher);
         for session in &project.sessions {
-            session.id.hash(&mut hasher);
-            session.title.hash(&mut hasher);
-            session.work_dir.hash(&mut hasher);
-            session.session_file.hash(&mut hasher);
-            session.updated_at.hash(&mut hasher);
-            session.health.hash(&mut hasher);
+            sidebar_session_fingerprint(session).hash(&mut hasher);
             state
                 .session_is_generating(&session.session_file)
                 .hash(&mut hasher);
@@ -1231,7 +1240,7 @@ impl SidebarView {
 mod tests {
     use super::{
         DateGroup, HistoryRow, flatten_history_groups, format_time_ago, same_history_row_identity,
-        session_pr_info,
+        session_pr_info, sidebar_session_fingerprint,
     };
     use crate::state::{SessionHealth, SessionInfo};
     use std::collections::HashMap;
@@ -1300,6 +1309,17 @@ mod tests {
 
         assert_eq!(session_pr_info(&first, &prs).unwrap().number, 11);
         assert_eq!(session_pr_info(&second, &prs).unwrap().number, 22);
+    }
+
+    #[test]
+    fn changing_a_session_branch_changes_the_sidebar_fingerprint() {
+        let mut item = session("session");
+        item.git_branch = Some("feature/one".into());
+        let first = sidebar_session_fingerprint(&item);
+
+        item.git_branch = Some("feature/two".into());
+
+        assert_ne!(first, sidebar_session_fingerprint(&item));
     }
 }
 

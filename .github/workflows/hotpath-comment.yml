@@ -137,9 +137,10 @@ jobs:
             exit 1
           fi
           comment_id="$(
-            gh api --paginate --slurp \
+            gh api --paginate \
               "repos/$GITHUB_REPOSITORY/issues/$pr_number/comments" \
-              --jq 'add | map(select(.user.login == "github-actions[bot]" and (.body | contains("<!-- threadlane-hotpath-report -->")))) | last | .id // empty'
+              --jq 'map(select(.user.login == "github-actions[bot]" and (.body | contains("<!-- threadlane-hotpath-report -->")))) | .[].id' \
+              | tail -n 1
           )"
           if test -n "$comment_id"; then
             gh api --method PATCH \
