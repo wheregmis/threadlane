@@ -780,34 +780,37 @@ impl SidebarView {
         }
 
         if session.is_worktree {
-            let (label, background, foreground) = if session.worktree_available {
-                ("worktree", theme.secondary, theme.muted_foreground)
+            let (background, foreground, tooltip) = if session.worktree_available {
+                (
+                    theme.secondary,
+                    theme.muted_foreground,
+                    format!(
+                        "Local worktree\nChecked out at {}",
+                        session.runtime_work_dir.display()
+                    ),
+                )
             } else {
                 (
-                    "not checked out",
                     theme.warning.opacity(0.12),
                     theme.warning,
+                    format!(
+                        "Worktree unavailable\nNot checked out locally\nRecorded path: {}\nSession history remains available",
+                        session.runtime_work_dir.display()
+                    ),
                 )
             };
             row2_items.push(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(2.0))
-                    .px_1()
-                    .py(px(0.5))
-                    .rounded(px(3.0))
-                    .bg(background)
-                    .text_color(foreground)
-                    .child(
-                        svg()
-                            .path("icons/git/branch.svg")
-                            .size(px(10.0))
-                            .text_color(foreground),
-                    )
-                    .child(label)
-                    .into_any_element(),
+                Button::new(SharedString::from(format!(
+                    "session-worktree-{}",
+                    session.id
+                )))
+                .icon(Icon::default().path("icons/git/branch.svg"))
+                .tooltip(tooltip)
+                .ghost()
+                .xsmall()
+                .bg(background)
+                .text_color(foreground)
+                .into_any_element(),
             );
         }
 
