@@ -734,13 +734,11 @@ impl ChatListView {
             window,
             move |this, input_state, event: &InputEvent, window, cx| {
                 cx.notify();
-                if matches!(
-                    event,
-                    InputEvent::PressEnter {
-                        secondary: false,
-                        shift: false
-                    }
-                ) {
+                if let InputEvent::PressEnter {
+                    secondary,
+                    shift: false,
+                } = event
+                {
                     let text = input_state.read(cx).value().to_string();
                     let is_generating = model_clone.read(cx).is_generating;
                     if !text.trim().is_empty() || (!is_generating && !this.pasted_images.is_empty())
@@ -750,10 +748,15 @@ impl ChatListView {
                         } else {
                             std::mem::take(&mut this.pasted_images)
                         };
+                        let is_steer = *secondary;
                         model_clone.update(cx, |state, cx| {
                             if is_generating {
                                 controller::dispatch(state, AppAction::StageBusyMessage(text));
-                                controller::dispatch(state, AppAction::QueuePendingMessage);
+                                if is_steer {
+                                    controller::dispatch(state, AppAction::SteerPendingMessage);
+                                } else {
+                                    controller::dispatch(state, AppAction::QueuePendingMessage);
+                                }
                             } else {
                                 controller::dispatch(
                                     state,
@@ -871,6 +874,19 @@ impl ChatListView {
         if pasted > 0 {
             cx.notify();
         }
+    }
+
+    pub(crate) fn set_tab(&mut self, tab: CentralTab, cx: &mut Context<Self>) {
+        self.current_tab = tab;
+        cx.notify();
+    }
+
+    pub(crate) fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.current_tab = CentralTab::Chat;
+        self.input_state.update(cx, |input, cx| {
+            input.focus(window, cx);
+        });
+        cx.notify();
     }
 
     pub(crate) fn set_composer_text(
@@ -2695,45 +2711,65 @@ impl ChatListView {
     fn render_message(&mut self, msg: &ChatMessageInfo, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().colors;
         match msg.role {
-            MessageRole::User => div()
-                .w_full()
-                .min_w_0()
-                .flex()
-                .justify_end()
-                .my_2()
-                .px_4()
-                .child(
-                    div()
-                        .min_w_0()
-                        .max_w(px(USER_BUBBLE_MAX_WIDTH))
-                        .p_3()
-                        .rounded_lg()
-                        .bg(theme.secondary)
-                        .text_sm()
-                        .text_color(theme.secondary_foreground)
-                        .child({
-                            let markdown_state =
-                                self.markdown_state(msg.id.clone(), &msg.content, cx);
-                            self.chat_markdown_view(&markdown_state)
-                        })
-                        .context_menu({
-                            let content = msg.content.clone();
-                            move |menu, _window, _cx| {
-                                let text = content.clone();
-                                menu.item(PopupMenuItem::new("Copy Message").on_click(
-                                    move |_event, window, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            text.clone(),
-                                        ));
-                                        window.push_notification(
-                                            Notification::info("Copied to clipboard"),
-                                            cx,
-                                        );
-                                    },
-                                ))
-                            }
-                        }),
-                ),
+            MessageRole::User => {
+                let is_queued =
+                    msg.id.starts_with("queued-user-") && self.model.read(cx).is_generating;
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .my_2()
+                    .px_4()
+                    .when(is_queued, |el| {
+                        el.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .mb_1()
+                                .child(
+                                    Tag::new()
+                                        .child("Queued for next turn")
+                                        .with_variant(TagVariant::Secondary)
+                                        .small(),
+                                ),
+                        )
+                    })
+                    .child(
+                        div()
+                            .min_w_0()
+                            .max_w(px(USER_BUBBLE_MAX_WIDTH))
+                            .p_3()
+                            .rounded_lg()
+                            .bg(theme.secondary)
+                            .text_sm()
+                            .text_color(theme.secondary_foreground)
+                            .child({
+                                let markdown_state =
+                                    self.markdown_state(msg.id.clone(), &msg.content, cx);
+                                self.chat_markdown_view(&markdown_state)
+                            })
+                            .context_menu({
+                                let content = msg.content.clone();
+                                move |menu, _window, _cx| {
+                                    let text = content.clone();
+                                    menu.item(PopupMenuItem::new("Copy Message").on_click(
+                                        move |_event, window, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                text.clone(),
+                                            ));
+                                            window.push_notification(
+                                                Notification::info("Copied to clipboard"),
+                                                cx,
+                                            );
+                                        },
+                                    ))
+                                }
+                            }),
+                    )
+            }
             MessageRole::Assistant => {
                 let reasoning_element = self.render_reasoning_block(msg, cx);
                 let tool_elements: Vec<_> = msg
@@ -3487,8 +3523,6 @@ impl ChatListView {
 
     fn render_composer(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
-        let model = self.model.clone();
-        let input_state = self.input_state.clone();
         let (
             selected_model,
             reasoning_effort,
@@ -3564,6 +3598,13 @@ impl ChatListView {
         let steer_model = self.model.clone();
         let dismiss_model = self.model.clone();
         let dismiss_input = self.input_state.clone();
+        let cancel_model = self.model.clone();
+        let queue_prompt_model = self.model.clone();
+        let queue_prompt_input = self.input_state.clone();
+        let steer_prompt_model = self.model.clone();
+        let steer_prompt_input = self.input_state.clone();
+        let send_model = self.model.clone();
+        let send_input = self.input_state.clone();
 
         let image_chips = self
             .pasted_images
@@ -4306,60 +4347,128 @@ impl ChatListView {
                             .child(stash_button)
                             .children(subagent_popover)
                             .child(context_meter)
-                            .child(
-                                Button::new("send-btn")
-                                    .w(px(40.0))
-                                    .h(px(40.0))
-                                    .icon(if is_generating {
-                                        IconName::CircleX
-                                    } else {
-                                        IconName::ArrowUp
-                                    })
-                                    .tooltip(if is_generating {
-                                        "Stop generation (Esc)"
-                                    } else if needs_provider {
-                                        "Connect a model provider in Settings before sending"
-                                    } else if has_prompt {
-                                        "Send message (Enter)"
-                                    } else {
-                                        "Type a message to send"
-                                    })
-                                    .when(is_generating, |button| button.danger())
-                                    .when(!is_generating, |button| button.primary())
-                                    .disabled(!is_generating && (!has_prompt || needs_provider))
-                                    .on_click(cx.listener(move |this, _event, window, cx| {
-                                        if is_generating {
-                                            model.update(cx, |state, cx| {
-                                                controller::dispatch(
-                                                    state,
-                                                    AppAction::CancelGeneration,
-                                                );
+                            .children(if is_generating {
+                                if has_prompt {
+                                    vec![
+                                        Button::new("composer-queue-btn")
+                                            .icon(IconName::Plus)
+                                            .label("Queue")
+                                            .small()
+                                            .secondary()
+                                            .tooltip("Queue for next turn (Enter)")
+                                            .on_click(cx.listener(move |this, _event, window, cx| {
+                                                let text = queue_prompt_input.read(cx).value().to_string();
+                                                if !text.trim().is_empty() {
+                                                    queue_prompt_model.update(cx, |state, cx| {
+                                                        controller::dispatch(state, AppAction::StageBusyMessage(text));
+                                                        controller::dispatch(state, AppAction::QueuePendingMessage);
+                                                        cx.notify();
+                                                    });
+                                                    queue_prompt_input.update(cx, |state, cx| {
+                                                        state.set_value("", window, cx);
+                                                    });
+                                                    this.transcript_list_state.scroll_to_end();
+                                                    cx.notify();
+                                                }
+                                            }))
+                                            .into_any_element(),
+                                        Button::new("composer-steer-btn")
+                                            .icon(IconName::ArrowRight)
+                                            .label("Steer")
+                                            .small()
+                                            .primary()
+                                            .tooltip("Steer current turn immediately (Cmd+Enter)")
+                                            .on_click(cx.listener(move |this, _event, window, cx| {
+                                                let text = steer_prompt_input.read(cx).value().to_string();
+                                                if !text.trim().is_empty() {
+                                                    steer_prompt_model.update(cx, |state, cx| {
+                                                        controller::dispatch(state, AppAction::StageBusyMessage(text));
+                                                        controller::dispatch(state, AppAction::SteerPendingMessage);
+                                                        cx.notify();
+                                                    });
+                                                    steer_prompt_input.update(cx, |state, cx| {
+                                                        state.set_value("", window, cx);
+                                                    });
+                                                    this.transcript_list_state.scroll_to_end();
+                                                    cx.notify();
+                                                }
+                                            }))
+                                            .into_any_element(),
+                                        Button::new("composer-stop-btn")
+                                            .icon(IconName::CircleX)
+                                            .small()
+                                            .danger()
+                                            .tooltip("Stop generation (Esc)")
+                                            .on_click(cx.listener(move |_this, _event, _window, cx| {
+                                                cancel_model.update(cx, |state, cx| {
+                                                    controller::dispatch(
+                                                        state,
+                                                        AppAction::CancelGeneration,
+                                                    );
+                                                    cx.notify();
+                                                });
+                                            }))
+                                            .into_any_element(),
+                                    ]
+                                } else {
+                                    vec![
+                                        Button::new("send-btn")
+                                            .w(px(40.0))
+                                            .h(px(40.0))
+                                            .icon(IconName::CircleX)
+                                            .danger()
+                                            .tooltip("Stop generation (Esc)")
+                                            .on_click(cx.listener(move |_this, _event, _window, cx| {
+                                                cancel_model.update(cx, |state, cx| {
+                                                    controller::dispatch(
+                                                        state,
+                                                        AppAction::CancelGeneration,
+                                                    );
+                                                    cx.notify();
+                                                });
+                                            }))
+                                            .into_any_element(),
+                                    ]
+                                }
+                            } else {
+                                vec![
+                                    Button::new("send-btn")
+                                        .w(px(40.0))
+                                        .h(px(40.0))
+                                        .icon(IconName::ArrowUp)
+                                        .tooltip(if needs_provider {
+                                            "Connect a model provider in Settings before sending"
+                                        } else if has_prompt {
+                                            "Send message (Enter)"
+                                        } else {
+                                            "Type a message to send"
+                                        })
+                                        .primary()
+                                        .disabled(!has_prompt || needs_provider)
+                                        .on_click(cx.listener(move |this, _event, window, cx| {
+                                            let text = send_input.read(cx).value().to_string();
+                                            if !text.trim().is_empty() || !this.pasted_images.is_empty() {
+                                                let images = std::mem::take(&mut this.pasted_images);
+                                                send_model.update(cx, |state, cx| {
+                                                    controller::dispatch(
+                                                        state,
+                                                        AppAction::SendPromptWithImages {
+                                                            text,
+                                                            images,
+                                                        },
+                                                    );
+                                                    cx.notify();
+                                                });
+                                                send_input.update(cx, |state, cx| {
+                                                    state.set_value("", window, cx);
+                                                });
+                                                this.transcript_list_state.scroll_to_end();
                                                 cx.notify();
-                                            });
-                                            return;
-                                        }
-                                        let text = input_state.read(cx).value().to_string();
-                                        if !text.trim().is_empty() || !this.pasted_images.is_empty()
-                                        {
-                                            let images = std::mem::take(&mut this.pasted_images);
-                                            model.update(cx, |state, cx| {
-                                                controller::dispatch(
-                                                    state,
-                                                    AppAction::SendPromptWithImages {
-                                                        text,
-                                                        images,
-                                                    },
-                                                );
-                                                cx.notify();
-                                            });
-                                            input_state.update(cx, |state, cx| {
-                                                state.set_value("", window, cx);
-                                            });
-                                            this.transcript_list_state.scroll_to_end();
-                                            cx.notify();
-                                        }
-                                    })),
-                            ),
+                                            }
+                                        }))
+                                        .into_any_element(),
+                                ]
+                            }),
                     ),
             )
             .when(
@@ -4585,8 +4694,8 @@ mod hot_path_tests {
         reconcile_trajectory_entries_by_epoch, subagent_popover_counts, summarize_trajectory,
     };
     use crate::state::{
-        ChatMessageInfo, ChatStreamEvent, MessageRole, SubagentActivityStatus, ToolActivityInfo,
-        TrajectoryDiagnostics, TrajectoryEntry,
+        reported_session_shape_state, ChatMessageInfo, ChatStreamEvent, MessageRole,
+        SubagentActivityStatus, ToolActivityInfo, TrajectoryDiagnostics, TrajectoryEntry,
     };
 
     #[test]

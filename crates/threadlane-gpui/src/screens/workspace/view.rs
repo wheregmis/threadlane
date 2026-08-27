@@ -20,6 +20,10 @@ actions!(
         BeginNewTask,
         OpenSettings,
         CancelActiveGeneration,
+        SelectChatTab,
+        SelectTrajectoryTab,
+        SelectEditorTab,
+        FocusComposer,
     ]
 );
 use threadlane_git::GitStatus;
@@ -51,6 +55,14 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-j", ToggleTerminal, None),
         KeyBinding::new("cmd-n", BeginNewTask, None),
         KeyBinding::new("ctrl-n", BeginNewTask, None),
+        KeyBinding::new("cmd-1", SelectChatTab, None),
+        KeyBinding::new("ctrl-1", SelectChatTab, None),
+        KeyBinding::new("cmd-2", SelectTrajectoryTab, None),
+        KeyBinding::new("ctrl-2", SelectTrajectoryTab, None),
+        KeyBinding::new("cmd-3", SelectEditorTab, None),
+        KeyBinding::new("ctrl-3", SelectEditorTab, None),
+        KeyBinding::new("cmd-l", FocusComposer, None),
+        KeyBinding::new("ctrl-l", FocusComposer, None),
         KeyBinding::new("cmd-,", OpenSettings, None),
         KeyBinding::new("ctrl-,", OpenSettings, None),
         KeyBinding::new("escape", CancelActiveGeneration, None),
@@ -1268,6 +1280,50 @@ impl WorkspaceView {
             });
         }
     }
+
+    fn select_chat_tab_action(
+        &mut self,
+        _: &SelectChatTab,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.chat_list.update(cx, |chat, cx| {
+            chat.set_tab(crate::screens::chat::CentralTab::Chat, cx);
+        });
+    }
+
+    fn select_trajectory_tab_action(
+        &mut self,
+        _: &SelectTrajectoryTab,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.chat_list.update(cx, |chat, cx| {
+            chat.set_tab(crate::screens::chat::CentralTab::Trajectory, cx);
+        });
+    }
+
+    fn select_editor_tab_action(
+        &mut self,
+        _: &SelectEditorTab,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.chat_list.update(cx, |chat, cx| {
+            chat.set_tab(crate::screens::chat::CentralTab::Editor, cx);
+        });
+    }
+
+    fn focus_composer_action(
+        &mut self,
+        _: &FocusComposer,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.chat_list.update(cx, |chat, cx| {
+            chat.focus_composer(window, cx);
+        });
+    }
 }
 
 impl Render for WorkspaceView {
@@ -1588,6 +1644,10 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::begin_new_task_action))
             .on_action(cx.listener(Self::open_settings_action))
             .on_action(cx.listener(Self::cancel_active_generation_action))
+            .on_action(cx.listener(Self::select_chat_tab_action))
+            .on_action(cx.listener(Self::select_trajectory_tab_action))
+            .on_action(cx.listener(Self::select_editor_tab_action))
+            .on_action(cx.listener(Self::focus_composer_action))
             .bg(theme.background)
             .child(view_with_status_bar)
             .children((workspace_page == WorkspacePage::Chat).then(|| {
