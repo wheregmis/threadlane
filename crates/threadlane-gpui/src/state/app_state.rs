@@ -982,11 +982,32 @@ impl AppState {
         Self::load_from_registry(load_project_registry())
     }
 
+    /// Constructs the UI before the daemon snapshot arrives. This deliberately
+    /// contains no local project, session, or model discovery.
+    pub(crate) fn loading() -> Self {
+        let mut state = Self::load_from_registry_with_options(Vec::new(), false);
+        state.projects.clear();
+        state.active_work_dir = None;
+        state.active_session_id = None;
+        state.is_new_task = true;
+        state.available_models.clear();
+        state.selected_model.clear();
+        state.session_status = Some("Connecting to daemon…".into());
+        state
+    }
+
     fn load_from_registry(registry_projects: Vec<AttachedProject>) -> Self {
+        Self::load_from_registry_with_options(registry_projects, true)
+    }
+
+    fn load_from_registry_with_options(
+        registry_projects: Vec<AttachedProject>,
+        allow_current_directory_fallback: bool,
+    ) -> Self {
         #[cfg(not(test))]
         let mut registry_projects = registry_projects;
         #[cfg(not(test))]
-        if registry_projects.is_empty() {
+        if allow_current_directory_fallback && registry_projects.is_empty() {
             if let Ok(curr) = std::env::current_dir().and_then(std::fs::canonicalize) {
                 let name = curr
                     .file_name()
@@ -1163,6 +1184,90 @@ impl AppState {
     pub(crate) fn refresh_available_models(&mut self) {
         self.available_models =
             crate::model_catalog::available_models_for_project(self.active_work_dir.as_deref());
+    }
+
+    /// Replaces the startup snapshot with the daemon's authoritative project,
+    /// session, and model catalog. The daemon owns discovery and persistence;
+    /// GPUI only keeps the data needed to render the views.
+    pub(crate) fn apply_daemon_snapshot(
+        &mut self,
+        projects: Vec<threadlane_protocol::ProjectRecord>,
+        sessions: Vec<(String, Vec<threadlane_protocol::SessionSummary>)>,
+        models: Vec<threadlane_protocol::ModelDescriptor>,
+    ) {
+        let mut project_infos = Vec::with_capacity(projects.len());
+        for project in projects {
+            let work_dir = PathBuf::from(&project.path);
+            let project_sessions = sessions
+                .iter()
+                .find(|(path, _)| path == &project.path)
+                .map(|(_, summaries)| {
+                    summaries
+                        .iter()
+                        .map(|summary| SessionInfo {
+                            id: summary.session_id.clone(),
+                            title: summary.title.clone(),
+                            work_dir: work_dir.clone(),
+                            runtime_work_dir: work_dir.clone(),
+                            session_file: work_dir
+                                .join(".threadlane/sessions")
+                                .join(format!("{}.jsonl", summary.session_id)),
+                            updated_at: summary.updated_at.parse().unwrap_or_default(),
+                            health: if summary.is_active {
+                                SessionHealth::Working
+                            } else {
+                                SessionHealth::Healthy
+                            },
+                            git_branch: None,
+                            is_worktree: false,
+                            worktree_available: true,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            project_infos.push(ProjectInfo {
+                name: project.name,
+                work_dir,
+                sessions: project_sessions,
+                is_expanded: true,
+            });
+        }
+
+        self.projects = project_infos;
+        self.available_models = models
+            .into_iter()
+            .map(|model| crate::model_catalog::ModelOption {
+                id: model.id,
+                label: model.name,
+                provider: match model.provider.as_str() {
+                    "antigravity" => crate::model_catalog::ModelProvider::Antigravity,
+                    "opencode" | "opencode-go" => crate::model_catalog::ModelProvider::OpenCode,
+                    "acp" => crate::model_catalog::ModelProvider::Acp,
+                    _ => crate::model_catalog::ModelProvider::OpenAi,
+                },
+            })
+            .collect();
+
+        if let Some(project) = self.projects.first() {
+            self.active_work_dir = Some(project.work_dir.clone());
+            self.active_session_id = project.sessions.first().map(|session| session.id.clone());
+            self.is_new_task = self.active_session_id.is_none();
+        } else {
+            self.active_work_dir = None;
+            self.active_session_id = None;
+            self.is_new_task = true;
+        }
+        if !self
+            .available_models
+            .iter()
+            .any(|model| model.id == self.selected_model)
+        {
+            self.selected_model = self
+                .available_models
+                .first()
+                .map(|model| model.id.clone())
+                .unwrap_or_default();
+        }
     }
 
     pub(crate) fn set_needle_enabled(&mut self, enabled: bool) -> Result<(), String> {

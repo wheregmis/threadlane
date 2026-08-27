@@ -1,12 +1,18 @@
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use threadlane_protocol::client::DaemonClient;
+use tokio::runtime::Runtime;
 use tokio::sync::OnceCell;
 use tracing::{info, warn};
 
 static DAEMON_CLIENT: OnceCell<Arc<DaemonClient>> = OnceCell::const_new();
+static DAEMON_RUNTIME: OnceLock<Runtime> = OnceLock::new();
+
+fn daemon_runtime() -> &'static Runtime {
+    DAEMON_RUNTIME.get_or_init(|| Runtime::new().expect("create daemon client Tokio runtime"))
+}
 
 pub fn default_daemon_socket_path() -> PathBuf {
     dirs::home_dir()
@@ -68,7 +74,10 @@ pub async fn get_daemon_client() -> Result<Arc<DaemonClient>, String> {
         .get_or_try_init(|| async {
             ensure_local_daemon_running();
             let socket_path = default_daemon_socket_path();
-            let client = DaemonClient::connect_uds(&socket_path).await?;
+            let client = daemon_runtime()
+                .spawn(async move { DaemonClient::connect_uds(&socket_path).await })
+                .await
+                .map_err(|error| format!("Daemon client task failed: {error}"))??;
             Ok(Arc::new(client))
         })
         .await

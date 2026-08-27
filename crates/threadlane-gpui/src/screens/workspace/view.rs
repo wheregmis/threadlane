@@ -252,7 +252,38 @@ impl WorkspaceView {
     }
 
     pub fn build(window: &mut Window, cx: &mut App) -> Entity<Self> {
-        let model = cx.new(|_cx| AppState::load());
+        let model = cx.new(|_cx| AppState::loading());
+        let daemon_model = model.clone();
+        cx.spawn(async move |cx| {
+            let result = async {
+                let client = crate::services::daemon_client::get_daemon_client().await?;
+                let projects = client.list_projects().await?.projects;
+                let mut sessions = Vec::with_capacity(projects.len());
+                for project in &projects {
+                    sessions.push((
+                        project.path.clone(),
+                        client.list_sessions(&project.path).await?,
+                    ));
+                }
+                let models = client.list_models().await?.models;
+                Ok::<_, String>((projects, sessions, models))
+            }
+            .await;
+
+            let _ = daemon_model.update(cx, |state, cx| {
+                match result {
+                    Ok((projects, sessions, models)) => {
+                        state.apply_daemon_snapshot(projects, sessions, models);
+                        state.session_status = None;
+                    }
+                    Err(error) => {
+                        state.session_status = Some(format!("Daemon unavailable: {error}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         let sidebar = cx.new(|cx| SidebarView::new(model.clone(), window, cx));
         let chat_list = cx.new(|cx| ChatListView::new(model.clone(), window, cx));
         let settings = cx.new(|cx| SettingsView::new(model.clone(), window, cx));
@@ -745,7 +776,8 @@ impl WorkspaceView {
             // Refresh remote-tracking refs before calculating ahead/behind and PR state.
             // A failed fetch should not hide the local Git status (offline use is valid).
             let _ = crate::services::git::sync_remote(&work_dir);
-            let result = crate::services::git::inspect(&work_dir).map_err(|error| error.to_string());
+            let result =
+                crate::services::git::inspect(&work_dir).map_err(|error| error.to_string());
             let _ = tx.send(GitEvent::Loaded { work_dir, result });
         });
     }
