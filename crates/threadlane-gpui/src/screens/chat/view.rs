@@ -4962,8 +4962,10 @@ impl ChatListView {
                     .child(
                         div()
                             .id("slash-command-list")
+                            .relative()
                             .track_scroll(&self.slash_scroll_handle)
-                            .overflow_y_scrollbar()
+                            .overflow_y_scroll()
+                            .vertical_scrollbar(&self.slash_scroll_handle)
                             .max_h(px(260.0))
                             .when(!has_commands, |list| {
                                 list.child(
