@@ -640,6 +640,7 @@ pub async fn listen_for_browser_oauth_callback(expected_state: String) -> Result
     use std::net::TcpListener;
 
     let listener = TcpListener::bind("127.0.0.1:1455")
+        .or_else(|_| TcpListener::bind("0.0.0.0:1455"))
         .map_err(|e| format!("Failed to bind loopback callback listener on port 1455: {e}"))?;
 
     listener

@@ -42,6 +42,10 @@ fn daemon_executable() -> Option<PathBuf> {
 pub fn ensure_local_daemon_running() {
     let socket_path = default_daemon_socket_path();
     if socket_path.exists() {
+        info!(
+            "Reusing existing threadlane-daemon at {}; use --restart-daemon for fresh debug logs",
+            socket_path.display()
+        );
         return;
     }
 
@@ -50,11 +54,17 @@ pub fn ensure_local_daemon_running() {
         "Spawning background threadlane-daemon from {}...",
         executable.display()
     );
-    match Command::new(&executable)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    {
+    let inherit_stdio = std::env::var("THREADLANE_DAEMON_STDIO")
+        .map(|value| value == "inherit")
+        .unwrap_or(false);
+    let mut command = Command::new(&executable);
+    if inherit_stdio {
+        command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    } else {
+        command.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+
+    match command.spawn() {
         Ok(child) => {
             let _ = child.id();
             std::thread::sleep(Duration::from_millis(200));

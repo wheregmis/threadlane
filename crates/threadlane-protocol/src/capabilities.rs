@@ -48,10 +48,7 @@ pub struct AcpAgentConfig {
 
 impl AcpAgentConfig {
     pub fn from_command_line(name: &str, command: &str, scope: AcpScope) -> Option<Self> {
-        let parts: Vec<String> = command
-            .split_whitespace()
-            .map(|s| s.to_string())
-            .collect();
+        let parts: Vec<String> = command.split_whitespace().map(|s| s.to_string()).collect();
         if parts.is_empty() {
             return None;
         }
@@ -273,6 +270,12 @@ pub struct ProviderAuthStatusResponse {
     pub connected: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    /// True while a browser-based authentication flow is waiting for completion.
+    #[serde(default)]
+    pub pending: bool,
+    /// A sanitized error from the most recent browser-based authentication flow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

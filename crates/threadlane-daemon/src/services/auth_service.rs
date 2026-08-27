@@ -2,17 +2,59 @@
 //! The actual credential storage is handled by threadlane-auth; this service
 //! provides the protocol bridge so GPUI never touches auth state directly.
 
-use threadlane_auth::{
-    antigravity_auth, github_auth, openai_auth, opencode_auth,
-};
+use std::sync::{Arc, Mutex};
+
+use threadlane_auth::{antigravity_auth, github_auth, openai_auth, opencode_auth};
 use threadlane_protocol::capabilities::*;
 
+#[derive(Clone, Debug, Default)]
+struct AuthFlowState {
+    pending: bool,
+    error: Option<String>,
+}
+
+type SharedAuthFlow = Arc<Mutex<AuthFlowState>>;
+
 #[derive(Clone, Default)]
-pub struct AuthService;
+pub struct AuthService {
+    antigravity_flow: SharedAuthFlow,
+    openai_flow: SharedAuthFlow,
+}
 
 impl AuthService {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    fn mark_pending(flow: &SharedAuthFlow) {
+        if let Ok(mut state) = flow.lock() {
+            state.pending = true;
+            state.error = None;
+        }
+    }
+
+    fn mark_completed(flow: &SharedAuthFlow) {
+        if let Ok(mut state) = flow.lock() {
+            state.pending = false;
+            state.error = None;
+        }
+    }
+
+    fn mark_failed(flow: &SharedAuthFlow, error: String) {
+        if let Ok(mut state) = flow.lock() {
+            state.pending = false;
+            state.error = Some(error);
+        }
+    }
+
+    fn flow_snapshot(flow: &SharedAuthFlow) -> AuthFlowState {
+        flow.lock().map(|state| state.clone()).unwrap_or_default()
+    }
+
+    fn clear_flow(flow: &SharedAuthFlow) {
+        if let Ok(mut state) = flow.lock() {
+            *state = AuthFlowState::default();
+        }
     }
 
     pub fn get_status(
@@ -44,28 +86,59 @@ impl AuthService {
                 (account.is_some(), account)
             }
         };
+        let flow = match req.provider {
+            ProviderKind::Antigravity => Self::flow_snapshot(&self.antigravity_flow),
+            ProviderKind::OpenAi => Self::flow_snapshot(&self.openai_flow),
+            ProviderKind::OpenCode | ProviderKind::GitHub | ProviderKind::GitLab => {
+                AuthFlowState::default()
+            }
+        };
         Ok(ProviderAuthStatusResponse {
             provider: req.provider,
             connected,
             account,
+            pending: flow.pending,
+            error: flow.error,
         })
     }
 
-    pub fn connect(
-        &self,
-        req: ConnectProviderRequest,
-    ) -> Result<ConnectProviderResponse, String> {
+    pub fn connect(&self, req: ConnectProviderRequest) -> Result<ConnectProviderResponse, String> {
         match req.provider {
             ProviderKind::Antigravity => {
                 // Build a PKCE challenge and return the browser URL.
                 let (verifier, challenge) = antigravity_auth::generate_pkce_pair();
-                let state = format!("{:x}", std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos())
-                    .unwrap_or(0));
+                let state = antigravity_auth::generate_oauth_state();
                 let url = antigravity_auth::build_authorization_url(&challenge, &state);
-                // Store verifier for later exchange (GPUI will poll `auth/status`).
-                let _ = verifier; // TODO: persist verifier for token exchange
+
+                Self::mark_pending(&self.antigravity_flow);
+                let expected_state = state.clone();
+                let verifier_clone = verifier.clone();
+                let flow = self.antigravity_flow.clone();
+                tokio::spawn(async move {
+                    tracing::info!("Antigravity OAuth listener starting on port 51121...");
+                    let result = async {
+                        let code =
+                            antigravity_auth::listen_for_oauth_callback(expected_state).await?;
+                        tracing::info!("Received Antigravity OAuth code, exchanging tokens...");
+                        antigravity_auth::exchange_code_for_tokens(&code, &verifier_clone).await
+                    }
+                    .await;
+
+                    match result {
+                        Ok(creds) => {
+                            Self::mark_completed(&flow);
+                            tracing::info!(
+                                "Antigravity authentication successful for {:?}",
+                                creds.account_email
+                            );
+                        }
+                        Err(error) => {
+                            Self::mark_failed(&flow, error.clone());
+                            tracing::error!("Antigravity authentication failed: {error}");
+                        }
+                    }
+                });
+
                 Ok(ConnectProviderResponse {
                     status: "pending".to_string(),
                     auth_url: Some(url),
@@ -82,12 +155,37 @@ impl AuthService {
                 } else {
                     // Codex OAuth device-code flow: generate PKCE and return browser URL.
                     let (verifier, challenge) = antigravity_auth::generate_pkce_pair();
-                    let state = format!("{:x}", std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_nanos())
-                        .unwrap_or(0));
+                    let state = antigravity_auth::generate_oauth_state();
                     let url = openai_auth::build_browser_oauth_url(&challenge, &state);
-                    let _ = verifier;
+
+                    Self::mark_pending(&self.openai_flow);
+                    let expected_state = state.clone();
+                    let verifier_clone = verifier.clone();
+                    let flow = self.openai_flow.clone();
+                    tokio::spawn(async move {
+                        tracing::info!("OpenAI OAuth listener starting on port 1455...");
+                        let result = async {
+                            let code =
+                                openai_auth::listen_for_browser_oauth_callback(expected_state)
+                                    .await?;
+                            tracing::info!("Received OpenAI OAuth code, exchanging tokens...");
+                            openai_auth::exchange_browser_code_for_tokens(&code, &verifier_clone)
+                                .await
+                        }
+                        .await;
+
+                        match result {
+                            Ok(_) => {
+                                Self::mark_completed(&flow);
+                                tracing::info!("OpenAI authentication successful");
+                            }
+                            Err(error) => {
+                                Self::mark_failed(&flow, error.clone());
+                                tracing::error!("OpenAI authentication failed: {error}");
+                            }
+                        }
+                    });
+
                     Ok(ConnectProviderResponse {
                         status: "pending".to_string(),
                         auth_url: Some(url),
@@ -121,9 +219,7 @@ impl AuthService {
             }
             ProviderKind::GitLab => Ok(ConnectProviderResponse {
                 status: "pending".to_string(),
-                auth_url: Some(
-                    "https://gitlab.com/-/profile/personal_access_tokens".to_string(),
-                ),
+                auth_url: Some("https://gitlab.com/-/profile/personal_access_tokens".to_string()),
             }),
         }
     }
@@ -131,9 +227,13 @@ impl AuthService {
     pub fn disconnect(&self, req: DisconnectProviderRequest) -> Result<(), String> {
         match req.provider {
             ProviderKind::Antigravity => {
+                Self::clear_flow(&self.antigravity_flow);
                 antigravity_auth::clear_antigravity_credentials()
             }
-            ProviderKind::OpenAi => openai_auth::remove_credentials(),
+            ProviderKind::OpenAi => {
+                Self::clear_flow(&self.openai_flow);
+                openai_auth::remove_credentials()
+            }
             ProviderKind::OpenCode => opencode_auth::clear_opencode_api_key(),
             ProviderKind::GitHub => github_auth::remove_github_credentials(),
             ProviderKind::GitLab => github_auth::remove_gitlab_credentials(),

@@ -1,9 +1,13 @@
 //! Provider authentication service client — all credential operations via daemon.
 
-use tokio::sync::mpsc::UnboundedSender as Sender;
+use std::sync::Arc;
+use std::time::Duration;
+
 use threadlane_protocol::{
-    ConnectProviderRequest, DisconnectProviderRequest, GetProviderAuthRequest, ProviderKind,
+    client::DaemonClient, ConnectProviderRequest, DisconnectProviderRequest,
+    GetProviderAuthRequest, ProviderKind,
 };
+use tokio::sync::mpsc::UnboundedSender as Sender;
 
 #[derive(Clone, Debug)]
 pub enum ProviderAuthEvent {
@@ -16,6 +20,59 @@ pub enum ProviderAuthEvent {
 
 fn executor() -> Result<&'static tokio::runtime::Runtime, String> {
     crate::services::chat::executor()
+}
+
+async fn wait_for_oauth_completion(
+    client: Arc<DaemonClient>,
+    provider: ProviderKind,
+    tx: Sender<ProviderAuthEvent>,
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+    let provider_name = match provider {
+        ProviderKind::Antigravity => "Google Antigravity",
+        ProviderKind::OpenAi => "ChatGPT",
+        _ => return,
+    };
+
+    loop {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        match client
+            .get_provider_auth(GetProviderAuthRequest { provider })
+            .await
+        {
+            Ok(status) => {
+                if let Some(error) = status.error {
+                    let _ = tx.send(ProviderAuthEvent::Error(error));
+                    return;
+                }
+                if status.connected && !status.pending {
+                    let account = status
+                        .account
+                        .as_deref()
+                        .map(|value| format!(" as {value}"))
+                        .unwrap_or_default();
+                    let _ = tx.send(ProviderAuthEvent::Connected(format!(
+                        "Connected to {provider_name}{account}."
+                    )));
+                    return;
+                }
+            }
+            Err(error) => {
+                let _ = tx.send(ProviderAuthEvent::Error(format!(
+                    "Unable to check {provider_name} authentication: {error}"
+                )));
+                return;
+            }
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            let _ = tx.send(ProviderAuthEvent::Error(format!(
+                "{provider_name} sign-in timed out. Please try again."
+            )));
+            return;
+        }
+    }
 }
 
 fn connect(provider: ProviderKind, api_key: Option<String>, tx: Sender<ProviderAuthEvent>) {
@@ -35,6 +92,9 @@ fn connect(provider: ProviderKind, api_key: Option<String>, tx: Sender<ProviderA
                 Ok(res) => {
                     if let Some(url) = res.auth_url {
                         let _ = tx.send(ProviderAuthEvent::AuthUrl(url));
+                        if matches!(provider, ProviderKind::Antigravity | ProviderKind::OpenAi) {
+                            wait_for_oauth_completion(client, provider, tx.clone()).await;
+                        }
                     } else {
                         let _ = tx.send(ProviderAuthEvent::Connected(res.status));
                     }
