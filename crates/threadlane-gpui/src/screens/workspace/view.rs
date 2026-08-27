@@ -26,7 +26,7 @@ actions!(
         FocusComposer,
     ]
 );
-use threadlane_git::GitStatus;
+use threadlane_protocol::git::GitStatus;
 
 use crate::app::actions::AppAction;
 use crate::app::controller;
@@ -35,7 +35,7 @@ use crate::screens::right_panel::RightPanelView;
 use crate::screens::settings::SettingsView;
 use crate::screens::sidebar::SidebarView;
 use crate::screens::terminal::TerminalView;
-use crate::services::sessions::{ExecutionMode, SessionRuntime};
+use crate::services::sessions::SessionRuntime;
 use crate::services::updater::{self, UpdaterEvent};
 use crate::state::{
     coding_agent_options, compute_full_session_projection, compute_session_messages,
@@ -79,7 +79,7 @@ enum GitEvent {
     PrLoaded {
         work_dir: PathBuf,
         branch: String,
-        result: Result<Option<threadlane_git::GitHubPrInfo>, String>,
+        result: Result<Option<threadlane_protocol::git::GitHubPrInfo>, String>,
     },
 }
 
@@ -176,13 +176,13 @@ impl WorkspaceView {
             let runtime_task = request
                 .runtime_options
                 .clone()
-                .map(|(work_dir, model, roles)| {
+                .map(|(work_dir, model, _roles)| {
+                    let session_id = request.session_id.clone();
                     let session_file = request.session_file.clone();
                     cx.background_executor().spawn(async move {
-                        SessionRuntime::new(
-                            coding_agent_options(work_dir, session_file, model, roles),
-                            ExecutionMode::Interactive,
-                        )
+                        let mut rt = SessionRuntime::new(session_id, work_dir, session_file);
+                        rt.selected_model = model;
+                        std::sync::Arc::new(rt)
                     })
                 });
             if request.reload_messages {
@@ -705,7 +705,7 @@ impl WorkspaceView {
     fn spawn_session_pr_refresh(&self, work_dir: PathBuf, branch: String) {
         let tx = self.git_event_tx.clone();
         std::thread::spawn(move || {
-            let result = threadlane_git::inspect_pr_for_branch(&work_dir, &branch)
+            let result = crate::services::git::inspect_pr_for_branch(&work_dir, &branch)
                 .map_err(|error| error.to_string());
             let _ = tx.send(GitEvent::PrLoaded {
                 work_dir,
@@ -744,8 +744,8 @@ impl WorkspaceView {
         std::thread::spawn(move || {
             // Refresh remote-tracking refs before calculating ahead/behind and PR state.
             // A failed fetch should not hide the local Git status (offline use is valid).
-            let _ = threadlane_git::sync_remote(&work_dir);
-            let result = threadlane_git::inspect(&work_dir).map_err(|error| error.to_string());
+            let _ = crate::services::git::sync_remote(&work_dir);
+            let result = crate::services::git::inspect(&work_dir).map_err(|error| error.to_string());
             let _ = tx.send(GitEvent::Loaded { work_dir, result });
         });
     }
@@ -1876,7 +1876,7 @@ mod tests {
     use crate::state::SessionInfo;
     use std::collections::{HashMap, HashSet};
     use std::path::{Path, PathBuf};
-    use threadlane_git::GitStatus;
+    use threadlane_protocol::git::GitStatus;
 
     #[test]
     fn status_bar_uses_shared_status_for_active_project() {

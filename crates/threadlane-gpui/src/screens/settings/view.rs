@@ -15,7 +15,7 @@ use crate::screens::next_event_batch;
 use crate::services::provider_auth::{self, ProviderAuthEvent};
 use crate::services::settings::{self, SettingsEvent};
 use crate::state::AppState;
-use threadlane_session::{
+use threadlane_protocol::{
     AcpAgentRecord, AcpScope, ExtensionRecord, ExtensionScope, SkillMetadata,
 };
 use threadlane_updater::UpdateStatus;
@@ -50,17 +50,17 @@ struct ProvidersStatusSnapshot {
 impl ProvidersStatusSnapshot {
     fn load() -> Self {
         Self {
-            github_status: threadlane_auth::github_auth::get_github_auth_status(),
-            gitlab_status: threadlane_auth::github_auth::get_gitlab_auth_status(),
-            codex_accounts: threadlane_auth::openai_auth::load_all_codex_accounts()
+            github_status: crate::services::provider_auth::get_github_auth_status(),
+            gitlab_status: crate::services::provider_auth::get_gitlab_auth_status(),
+            codex_accounts: crate::services::provider_auth::load_all_codex_accounts()
                 .into_iter()
-                .filter(|account| threadlane_auth::openai_auth::is_own_source(&account.source))
-                .map(|account| (account.id, account.label))
+                .filter(|account| crate::services::provider_auth::is_own_source(&account.source))
+                .map(|account| (account.id, account.name))
                 .collect(),
-            active_codex_account_id: threadlane_auth::openai_auth::get_active_codex_account()
+            active_codex_account_id: crate::services::provider_auth::get_active_codex_account()
                 .map(|account| account.id),
             antigravity_connected:
-                threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some(),
+                crate::services::provider_auth::has_antigravity_credentials(),
         }
     }
 }
@@ -141,7 +141,7 @@ impl SettingsView {
                 .default_value(&opencode_key)
                 .masked(true)
         });
-        let github_token = threadlane_auth::github_auth::load_github_credentials()
+        let github_token = crate::services::provider_auth::load_github_credentials()
             .map(|c| c.token)
             .unwrap_or_default();
         let github_input = cx.new(|cx| {
@@ -550,7 +550,7 @@ impl SettingsView {
     fn render_subagents(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().colors;
         let state = self.model.read(cx);
-        let Some(project) = state.active_work_dir.clone() else {
+        let Some(project) = state.active_work_dir.as_ref().map(|p| std::path::PathBuf::from(p)) else {
             return Self::empty_state("Attach a project to configure subagents.", theme);
         };
         let preferences = crate::services::subagent_settings::load(&project);
@@ -624,10 +624,10 @@ impl SettingsView {
                 let project = project_for_reasoning.clone();
                 [
                     None,
-                    Some(threadlane_runtime::ReasoningEffort::Minimal),
-                    Some(threadlane_runtime::ReasoningEffort::Low),
-                    Some(threadlane_runtime::ReasoningEffort::Medium),
-                    Some(threadlane_runtime::ReasoningEffort::High),
+                    Some(threadlane_protocol::ReasoningEffort::Minimal),
+                    Some(threadlane_protocol::ReasoningEffort::Low),
+                    Some(threadlane_protocol::ReasoningEffort::Medium),
+                    Some(threadlane_protocol::ReasoningEffort::High),
                 ]
                 .into_iter()
                 .fold(menu, |menu, effort| {
@@ -1326,9 +1326,9 @@ impl SettingsView {
                             let _ = view.update(cx, |this, cx| {
                                 if connected {
                                     let result = if antigravity {
-                                        threadlane_provider::antigravity_auth::clear_antigravity_credentials()
+                                        crate::services::provider_auth::clear_antigravity_credentials()
                                     } else {
-                                        threadlane_auth::openai_auth::remove_credentials()
+                                        crate::services::provider_auth::remove_openai_credentials()
                                     };
                                     let disconnected = result.is_ok();
                                     this.auth_message = Some(match result {
@@ -1385,7 +1385,7 @@ impl SettingsView {
             .providers_snapshot
             .as_ref()
             .map(|snapshot| snapshot.github_status.clone())
-            .unwrap_or_else(threadlane_auth::github_auth::get_github_auth_status);
+            .unwrap_or_else(crate::services::provider_auth::get_github_auth_status);
         let connected = github_status.is_some();
         let status_label = github_status.unwrap_or_else(|| "Not connected".to_string());
         let auth_tx = self.auth_tx.clone();
@@ -1551,7 +1551,7 @@ impl SettingsView {
             .providers_snapshot
             .as_ref()
             .map(|snapshot| snapshot.gitlab_status.clone())
-            .unwrap_or_else(threadlane_auth::github_auth::get_gitlab_auth_status);
+            .unwrap_or_else(crate::services::provider_auth::get_gitlab_auth_status);
         let connected = gitlab_status.is_some();
         let status_label = gitlab_status.unwrap_or_else(|| "Not connected".to_string());
 
@@ -1657,14 +1657,14 @@ impl SettingsView {
                 snapshot.active_codex_account_id.clone(),
             ),
             None => {
-                let accounts = threadlane_auth::openai_auth::load_all_codex_accounts()
+                let accounts = crate::services::provider_auth::load_all_codex_accounts()
                     .into_iter()
-                    .filter(|a| threadlane_auth::openai_auth::is_own_source(&a.source))
-                    .map(|a| (a.id, a.label))
+                    .filter(|a| crate::services::provider_auth::is_own_source(&a.source))
+                    .map(|a| (a.id, a.name))
                     .collect::<Vec<_>>();
                 (
                     accounts,
-                    threadlane_auth::openai_auth::get_active_codex_account().map(|a| a.id),
+                    crate::services::provider_auth::get_active_codex_account().map(|a| a.id),
                 )
             }
         };
@@ -2041,9 +2041,7 @@ impl SettingsView {
             .providers_snapshot
             .as_ref()
             .map(|snapshot| snapshot.antigravity_connected)
-            .unwrap_or_else(|| {
-                threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some()
-            });
+            .unwrap_or_else(crate::services::provider_auth::has_antigravity_credentials);
 
         div()
             .mt_5()
@@ -2554,7 +2552,7 @@ impl SettingsView {
                         let enabled = configured.is_some_and(|record| record.config.enabled);
                         let status = configured
                             .map(|record| record.status.display_status())
-                            .unwrap_or_else(|| "Not configured".to_string());
+                            .unwrap_or("Not configured");
                         let preset_id = preset.id;
                         div()
                             .rounded_lg()

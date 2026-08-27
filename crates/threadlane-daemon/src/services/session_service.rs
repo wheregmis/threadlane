@@ -298,7 +298,11 @@ impl SessionService {
                     PermissionScope::Once => threadlane_session::PermissionDecision::AllowOnce,
                     PermissionScope::Always => threadlane_session::PermissionDecision::AllowAlways,
                 },
-                PermissionDecision::Deny { .. } => threadlane_session::PermissionDecision::Deny,
+                PermissionDecision::AllowOnce => threadlane_session::PermissionDecision::AllowOnce,
+                PermissionDecision::AllowAlways => threadlane_session::PermissionDecision::AllowAlways,
+                PermissionDecision::Deny | PermissionDecision::DenyWithReason { .. } => {
+                    threadlane_session::PermissionDecision::Deny
+                }
                 PermissionDecision::AllowWithModifications { .. } => {
                     threadlane_session::PermissionDecision::AllowOnce
                 }

@@ -19,6 +19,7 @@ impl ProjectService {
                 path: p.path.to_string_lossy().to_string(),
                 name: p.name,
                 last_opened_at: Some(p.last_opened_at.to_string()),
+                last_session_id: None,
             })
             .collect();
         Ok(ListProjectsResponse { projects })
@@ -36,6 +37,7 @@ impl ProjectService {
             path: record.path.to_string_lossy().to_string(),
             name: record.name,
             last_opened_at: Some(record.last_opened_at.to_string()),
+            last_session_id: None,
         })
     }
 

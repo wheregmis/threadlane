@@ -78,6 +78,7 @@ impl GitService {
                 name: b.name,
                 is_current: b.is_current,
                 is_remote: b.is_remote,
+                ..Default::default()
             })
             .collect();
 

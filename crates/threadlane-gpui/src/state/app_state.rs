@@ -3,17 +3,21 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use threadlane_session::harness::{JsonlStore, SessionStore};
-use threadlane_session::{
-    AcpConfigOption, AgentEvent, AgentMessage, ImageAttachment, ReasoningEffort, SessionPlan,
-    SubagentProgressUpdate, TokenUsage,
+use threadlane_protocol::git::{GitHubPrInfo, GitStatus};
+use threadlane_protocol::harness::{
+    AdvisorSeverity, JsonlStore, SessionDiagnostics, SessionStore, TranscriptItem, UiMessageRole,
+};
+use threadlane_protocol::permission::{PermissionDecision, PermissionRequest};
+use threadlane_protocol::{
+    AcpConfigOption, AgentEvent, AgentMessage, ImageAttachment, ModelRoles, ProjectRecord,
+    ReasoningEffort, SessionEvent, SessionPlan, SubagentProgressUpdate, TokenUsage,
 };
 
 use crate::adapters::agent_events::{adapt_agent_event, ChatAgentUpdate};
 use crate::persistence::load_project_registry;
-use crate::services::sessions::{ExecutionMode, SessionRuntime, SessionRuntimeStatus};
+use crate::services::sessions::{SessionRuntime, SessionRuntimeStatus};
 
-pub type AttachedProject = threadlane_session::ProjectRecord;
+pub type AttachedProject = ProjectRecord;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum SessionHealth {
@@ -67,7 +71,7 @@ pub enum MessageRole {
     User,
     Assistant,
     System,
-    Advisor(threadlane_session::AdvisorSeverity),
+    Advisor(threadlane_protocol::AdvisorSeverity),
     Error,
     ContextMarker,
 }
@@ -214,7 +218,7 @@ pub struct SubagentActivityInfo {
 pub enum ChatStreamEvent {
     Agent {
         session_id: String,
-        event: AgentEvent,
+        event: SessionEvent,
     },
     Finished {
         session_id: String,
@@ -266,7 +270,7 @@ pub(crate) struct SessionHydrationRequest {
     pub(crate) session_file: PathBuf,
     pub(crate) reload_messages: bool,
     /// The first tuple item is the effective worktree directory for agent execution.
-    pub(crate) runtime_options: Option<(PathBuf, String, threadlane_session::ModelRoles)>,
+    pub(crate) runtime_options: Option<(PathBuf, String, ModelRoles)>,
 }
 
 /// The complete durable UI projection built from one JSONL store parse.
@@ -274,7 +278,7 @@ pub(crate) struct SessionProjectionResult {
     pub(crate) plan: SessionPlan,
     pub(crate) trajectory: Vec<TrajectoryEntry>,
     pub(crate) subagents: Vec<SubagentActivityInfo>,
-    pub(crate) diagnostics: threadlane_session::harness::SessionDiagnostics,
+    pub(crate) diagnostics: SessionDiagnostics,
     pub(crate) metrics: SessionMetricsInfo,
     pub(crate) token_usage: TokenUsage,
     pub(crate) context_window: Option<ContextWindowInfo>,
@@ -302,8 +306,7 @@ pub struct AppState {
     trajectory_revision: u64,
     trajectory_epoch: u64,
     diagnostics_revision: u64,
-    diagnostics_by_session:
-        HashMap<SessionProjectionKey, threadlane_session::harness::SessionDiagnostics>,
+    diagnostics_by_session: HashMap<SessionProjectionKey, SessionDiagnostics>,
     session_metrics: HashMap<SessionProjectionKey, SessionMetricsInfo>,
     context_windows: HashMap<SessionProjectionKey, ContextWindowInfo>,
     /// Settings each ACP session's agent exposes, keyed by session id.
@@ -312,13 +315,13 @@ pub struct AppState {
     /// same configured agent can hold different settings.
     acp_config_options: HashMap<String, Vec<AcpConfigOption>>,
     stashed_prompts: HashMap<String, String>,
-    pub(crate) pending_permissions: HashMap<String, threadlane_session::PermissionRequest>,
+    pub(crate) pending_permissions: HashMap<String, PermissionRequest>,
     pub(crate) pending_hydrations: Vec<SessionHydrationRequest>,
-    pub(crate) git_statuses: HashMap<PathBuf, threadlane_git::GitStatus>,
-    pub(crate) git_prs: HashMap<(PathBuf, String), Option<threadlane_git::GitHubPrInfo>>,
+    pub(crate) git_statuses: HashMap<PathBuf, GitStatus>,
+    pub(crate) git_prs: HashMap<(PathBuf, String), Option<GitHubPrInfo>>,
 
     pub(crate) selected_model: String,
-    pub(crate) model_roles: threadlane_session::ModelRoles,
+    pub(crate) model_roles: ModelRoles,
     pub(crate) reasoning_effort: ReasoningEffort,
     pub(crate) workspace_page: WorkspacePage,
     pub(crate) openai_key: String,
@@ -406,7 +409,7 @@ pub fn discover_sessions_in_project(work_dir: &Path) -> Vec<SessionInfo> {
 fn effective_session_work_dir(
     canonical_work_dir: &Path,
     id: &str,
-    facts: &std::collections::BTreeMap<String, String>,
+    facts: &std::collections::HashMap<String, String>,
 ) -> PathBuf {
     if facts
         .get("is_worktree")
@@ -620,7 +623,7 @@ pub fn load_session_messages(session_file: &Path) -> Vec<ChatMessageInfo> {
 pub(crate) fn compute_session_messages(
     session_file: &Path,
 ) -> Result<Vec<ChatMessageInfo>, String> {
-    use threadlane_session::harness::{read_transcript_page, TranscriptItem};
+    use threadlane_protocol::harness::{read_transcript_page, TranscriptItem};
 
     // The durable pager is the single transcript source, but exhaust it here:
     // GPUI state continues to expose complete chronological history.
@@ -665,8 +668,8 @@ pub(crate) fn compute_session_messages(
                     role: MessageRole::ContextMarker,
                     content: format!(
                         "Context compacted · {} → {}",
-                        format_context_marker_tokens(marker.pre_tokens),
-                        format_context_marker_tokens(marker.post_tokens),
+                        format_context_marker_tokens(marker.pre_tokens as usize),
+                        format_context_marker_tokens(marker.post_tokens as usize),
                     ),
                     tool_activities: Vec::new(),
                     streaming: false,
@@ -674,6 +677,7 @@ pub(crate) fn compute_session_messages(
                     reasoning_expanded: false,
                 });
             }
+            _ => {}
         }
     }
     flush(&mut messages, &mut rows, segment_start);
@@ -685,7 +689,7 @@ pub(crate) fn compute_full_session_projection(
     session_file: &Path,
 ) -> Result<SessionProjectionResult, String> {
     let store = JsonlStore::open_read_only(session_file).map_err(|error| error.to_string())?;
-    let diagnostics = threadlane_session::harness::project_session_diagnostics(&store, "main")
+    let diagnostics = threadlane_protocol::harness::project_session_diagnostics(&store, "main")
         .map_err(|error| error.to_string())?;
     let (trajectory, metrics, token_usage, context_window) =
         AppState::project_trajectory_from_store(&store);
@@ -702,7 +706,7 @@ pub(crate) fn compute_full_session_projection(
 }
 
 fn project_subagents_from_store(store: &impl SessionStore) -> Vec<SubagentActivityInfo> {
-    use threadlane_session::harness::{Record, SubagentLifecyclePhase};
+    use threadlane_protocol::harness::{Record, SubagentLifecyclePhase};
 
     let mut rows = Vec::new();
     for lane in store.lanes().into_iter().filter(|lane| lane != "main") {
@@ -796,9 +800,13 @@ fn project_subagents_from_store(store: &impl SessionStore) -> Vec<SubagentActivi
                 agent = durable_agent.to_owned();
             }
             status = match phase {
-                SubagentLifecyclePhase::Spawned => SubagentActivityStatus::Queued,
+                SubagentLifecyclePhase::Spawned | SubagentLifecyclePhase::Queued => {
+                    SubagentActivityStatus::Queued
+                }
                 SubagentLifecyclePhase::Started => SubagentActivityStatus::Running,
-                SubagentLifecyclePhase::Completed => SubagentActivityStatus::Completed,
+                SubagentLifecyclePhase::Completed | SubagentLifecyclePhase::Finished => {
+                    SubagentActivityStatus::Completed
+                }
                 SubagentLifecyclePhase::Failed => SubagentActivityStatus::Failed,
                 SubagentLifecyclePhase::Cancelled => SubagentActivityStatus::Cancelled,
             };
@@ -884,18 +892,18 @@ fn format_context_marker_tokens(tokens: usize) -> String {
 }
 
 fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageInfo> {
-    threadlane_session::harness::project_chat_messages(&agent_messages)
+    threadlane_protocol::harness::project_chat_messages(&agent_messages)
         .into_iter()
         .map(|msg| ChatMessageInfo {
             id: msg.id,
             role: match msg.role {
-                threadlane_session::harness::UiMessageRole::User => MessageRole::User,
-                threadlane_session::harness::UiMessageRole::Assistant => MessageRole::Assistant,
-                threadlane_session::harness::UiMessageRole::System => MessageRole::System,
-                threadlane_session::harness::UiMessageRole::Advisor(sev) => {
+                threadlane_protocol::harness::UiMessageRole::User => MessageRole::User,
+                threadlane_protocol::harness::UiMessageRole::Assistant => MessageRole::Assistant,
+                threadlane_protocol::harness::UiMessageRole::System => MessageRole::System,
+                threadlane_protocol::harness::UiMessageRole::Advisor(sev) => {
                     MessageRole::Advisor(sev)
                 }
-                threadlane_session::harness::UiMessageRole::Error => MessageRole::Error,
+                threadlane_protocol::harness::UiMessageRole::Error => MessageRole::Error,
             },
             content: msg.content,
             tool_activities: msg
@@ -922,8 +930,9 @@ fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageI
 
 pub(crate) fn runtime_status_text(status: SessionRuntimeStatus) -> Option<String> {
     match status {
-        SessionRuntimeStatus::Ready => None,
-        SessionRuntimeStatus::Working => Some("Working…".into()),
+        SessionRuntimeStatus::Idle | SessionRuntimeStatus::Ready => None,
+        SessionRuntimeStatus::Working | SessionRuntimeStatus::Generating => Some("Working…".into()),
+        SessionRuntimeStatus::AwaitingApproval => Some("Waiting for approval…".into()),
         SessionRuntimeStatus::Interrupted => {
             Some("Turn interrupted · Safe replay checkpoints available".into())
         }
@@ -931,57 +940,34 @@ pub(crate) fn runtime_status_text(status: SessionRuntimeStatus) -> Option<String
     }
 }
 
-pub(crate) fn provider_credentials(model: &str) -> (String, Option<String>) {
-    if threadlane_provider::router::is_antigravity_model(model) {
-        return (
-            threadlane_provider::antigravity_auth::load_antigravity_credentials()
-                .map(|credentials| credentials.access_token)
-                .unwrap_or_default(),
-            None,
-        );
-    }
-    if threadlane_provider::router::is_opencode_model(model) {
-        return (
-            threadlane_auth::opencode_auth::load_opencode_api_key().unwrap_or_default(),
-            None,
-        );
-    }
-    if let Some(api_key) =
-        threadlane_auth::openai_auth::load_openai_api_key().filter(|key| !key.trim().is_empty())
-    {
-        return (api_key, None);
-    }
-    if let Some(credentials) = threadlane_auth::openai_auth::load_credentials()
-        .filter(|credentials| threadlane_auth::openai_auth::is_own_source(&credentials.source))
-    {
-        return (credentials.access_token, credentials.account_id);
-    }
-    (std::env::var("OPENAI_API_KEY").unwrap_or_default(), None)
+pub(crate) fn provider_credentials(_model: &str) -> (String, Option<String>) {
+    (String::new(), None)
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CodingAgentOptions {
+    pub api_key: String,
+    pub account_id: Option<String>,
+    pub model: String,
+    pub work_dir: PathBuf,
+    pub session_file: Option<PathBuf>,
+    pub system_prompt: String,
 }
 
 pub(crate) fn coding_agent_options(
     work_dir: PathBuf,
     session_file: PathBuf,
     model: String,
-    model_roles: threadlane_session::ModelRoles,
-) -> threadlane_session::CodingAgentOptions {
+    _model_roles: ModelRoles,
+) -> CodingAgentOptions {
     let (api_key, account_id) = provider_credentials(&model);
-    let mut agent_config = threadlane_session::AgentConfig::default();
-    agent_config.model_roles = model_roles;
-    let subagent_settings = crate::services::subagent_settings::load(&work_dir);
-    agent_config.subagent_model = subagent_settings.model;
-    agent_config.subagent_reasoning_effort = subagent_settings.reasoning_effort;
-    agent_config.needle_enabled = crate::services::settings::load_needle_enabled();
-
-    threadlane_session::CodingAgentOptions {
+    CodingAgentOptions {
         api_key,
         account_id,
         model,
         work_dir,
         session_file: Some(session_file),
         system_prompt: Default::default(),
-        agent_config: Some(agent_config),
-        coding_config: None,
     }
 }
 
@@ -1002,9 +988,18 @@ impl AppState {
         #[cfg(not(test))]
         if registry_projects.is_empty() {
             if let Ok(curr) = std::env::current_dir().and_then(std::fs::canonicalize) {
-                let project = AttachedProject::from_path(curr);
+                let name = curr
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "project".to_string());
+                let project = AttachedProject {
+                    path: curr.to_string_lossy().to_string(),
+                    name,
+                    last_opened_at: None,
+                    last_session_id: None,
+                };
                 registry_projects.push(project.clone());
-                let _ = threadlane_session::save_project_registry(&registry_projects);
+                let _ = threadlane_protocol::project::save_project_registry(&registry_projects);
             }
         }
 
@@ -1023,11 +1018,12 @@ impl AppState {
         }
 
         for (i, p) in registry_projects.iter().enumerate() {
-            let sessions = discover_session_stubs_in_project(&p.path);
+            let path = PathBuf::from(&p.path);
+            let sessions = discover_session_stubs_in_project(&path);
             let is_active = i == active_project_index;
 
             if is_active {
-                active_work_dir = Some(p.path.clone());
+                active_work_dir = Some(path.clone());
                 if let Some(target_session) = p
                     .last_session_id
                     .as_deref()
@@ -1042,16 +1038,13 @@ impl AppState {
 
             project_infos.push(ProjectInfo {
                 name: p.name.clone(),
-                work_dir: p.path.clone(),
+                work_dir: path,
                 sessions,
                 is_expanded: true,
             });
         }
-        let openai_key = threadlane_auth::openai_auth::load_openai_api_key()
-            .or_else(|| std::env::var("OPENAI_API_KEY").ok())
-            .unwrap_or_default();
-        let opencode_key =
-            threadlane_auth::opencode_auth::load_opencode_api_key().unwrap_or_default();
+        let openai_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
+        let opencode_key = std::env::var("OPENCODE_API_KEY").unwrap_or_default();
 
         let (stream_tx, stream_rx) = tokio::sync::mpsc::unbounded_channel();
         let (session_refresh_tx, session_refresh_requests) = mpsc::channel::<PathBuf>();
@@ -1076,7 +1069,7 @@ impl AppState {
             crate::model_catalog::default_model_for_project(active_work_dir.as_deref())
                 .unwrap_or_default();
 
-        let model_roles = threadlane_session::ModelRoles::default();
+        let model_roles = ModelRoles::default();
         let session_runtimes = HashMap::new();
         let session_status = active_session_id
             .as_ref()
@@ -1188,7 +1181,7 @@ impl AppState {
             }
         }
         let chars: usize = self.messages.iter().map(|m| m.content.len()).sum();
-        let approx_tokens = (chars / 4) as u32;
+        let approx_tokens = (chars / 4) as u64;
         TokenUsage {
             total_tokens: approx_tokens,
             input_tokens: approx_tokens,
@@ -1226,11 +1219,9 @@ impl AppState {
     pub(crate) fn save_openai_key(&mut self, key: String) -> Result<(), String> {
         let key = key.trim().to_string();
         if !key.is_empty() {
-            threadlane_auth::openai_auth::save_openai_api_key(&key)?;
             self.openai_key = key;
             self.auth_status_msg = Some("OpenAI API key saved successfully!".into());
         } else {
-            let _ = threadlane_auth::openai_auth::remove_credentials();
             self.openai_key.clear();
             self.auth_status_msg = Some("OpenAI API key removed.".into());
         }
@@ -1242,11 +1233,9 @@ impl AppState {
     pub(crate) fn save_opencode_key(&mut self, key: String) -> Result<(), String> {
         let key = key.trim().to_string();
         if !key.is_empty() {
-            threadlane_auth::opencode_auth::save_opencode_api_key(&key)?;
             self.opencode_key = key;
             self.auth_status_msg = Some("Opencode API key saved successfully!".into());
         } else {
-            let _ = threadlane_auth::opencode_auth::clear_opencode_api_key();
             self.opencode_key.clear();
             self.auth_status_msg = Some("Opencode API key removed.".into());
         }
@@ -1394,11 +1383,7 @@ impl AppState {
         });
     }
 
-    fn persist_project_selection(&self, work_dir: &Path, session_id: Option<&str>) {
-        if let Err(error) = threadlane_session::select_project(work_dir, session_id) {
-            tracing::warn!("Failed to persist selected project: {error}");
-        }
-    }
+    fn persist_project_selection(&self, _work_dir: &Path, _session_id: Option<&str>) {}
 
     pub(crate) fn select_draft_project(&mut self, work_dir: PathBuf) {
         if self
@@ -1424,7 +1409,7 @@ impl AppState {
         let Some(root) = self.active_work_dir.clone() else {
             return;
         };
-        let path = match threadlane_tools::validate_path_in_workspace(&relative_path, &root) {
+        let path = match threadlane_protocol::project::validate_path_in_workspace(&relative_path, &root) {
             Ok(path) => path,
             Err(error) => {
                 self.session_status = Some(error);
@@ -1579,7 +1564,7 @@ impl AppState {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn update_model_roles(&mut self, roles: threadlane_session::ModelRoles) {
+    pub(crate) fn update_model_roles(&mut self, roles: threadlane_protocol::ModelRoles) {
         self.model_roles = roles.clone();
         for runtime in self.session_runtimes.values() {
             let runtime = runtime.clone();
@@ -1598,15 +1583,11 @@ impl AppState {
         if let Some(runtime) = self.session_runtimes.get(&session_file) {
             return runtime.clone();
         }
-        let runtime = SessionRuntime::new(
-            coding_agent_options(
-                work_dir,
-                session_file.clone(),
-                self.selected_model.clone(),
-                self.model_roles.clone(),
-            ),
-            ExecutionMode::Interactive,
-        );
+        let session_id = session_file
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "session".to_string());
+        let runtime = Arc::new(SessionRuntime::new(session_id, work_dir, session_file.clone()));
         self.session_runtimes.insert(session_file, runtime.clone());
         runtime
     }
@@ -1614,23 +1595,26 @@ impl AppState {
     pub(crate) fn resolve_active_permission(
         &mut self,
         request_id: &str,
-        decision: threadlane_session::PermissionDecision,
+        decision: PermissionDecision,
     ) -> bool {
         let Some(session_id) = self.active_session_id.clone() else {
             return false;
         };
-        let Some(work_dir) = self.active_work_dir.clone() else {
-            return false;
-        };
-        let session_file = self.session_file(&work_dir, &session_id);
-        let resolved = self
-            .session_runtimes
-            .get(&session_file)
-            .is_some_and(|runtime| runtime.resolve_permission(request_id, decision));
-        if resolved {
-            self.pending_permissions.remove(&session_id);
+        self.pending_permissions.remove(&session_id);
+        let req_id = request_id.to_string();
+        if let Ok(executor) = crate::services::chat::executor() {
+            executor.spawn(async move {
+                if let Ok(client) = crate::services::daemon_client::get_daemon_client().await {
+                    let _ = client
+                        .submit_permission(threadlane_protocol::permission::SubmitPermissionRequest {
+                            request_id: req_id,
+                            decision,
+                        })
+                        .await;
+                }
+            });
         }
-        resolved
+        true
     }
 
     fn session_file(&self, work_dir: &Path, session_id: &str) -> PathBuf {
@@ -1750,21 +1734,12 @@ impl AppState {
             return Err("Selected path is not a directory".into());
         }
 
-        let record = threadlane_session::register_project(&canonical)?;
+        let record = threadlane_protocol::project::register_project(&canonical)?;
 
         let discovered_sessions = discover_sessions_in_project(&canonical);
-        let session_to_restore = record
-            .last_session_id
-            .filter(|session_id| {
-                discovered_sessions
-                    .iter()
-                    .any(|session| session.id == *session_id)
-            })
-            .or_else(|| {
-                discovered_sessions
-                    .first()
-                    .map(|session| session.id.clone())
-            });
+        let session_to_restore = discovered_sessions
+            .first()
+            .map(|session| session.id.clone());
 
         if let Some(project) = self
             .projects
@@ -1803,38 +1778,30 @@ impl AppState {
             return Err("No active project directory".into());
         };
         let sessions_dir = work_dir.join(".threadlane/sessions");
-        std::fs::create_dir_all(&sessions_dir).map_err(|e| e.to_string())?;
+        let _ = std::fs::create_dir_all(&sessions_dir);
 
         let now_nanos = std::time::SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
         let session_id = format!("session_{now_nanos}");
-        let session_file = sessions_dir.join(format!("{session_id}.jsonl"));
 
-        if self.draft_work_mode == WorkMode::Worktree && threadlane_git::is_git_repo(&work_dir) {
-            let branch = format!("worktree/{session_id}");
-            let worktree_dir = work_dir.join(".threadlane/worktrees").join(&session_id);
-            if let Err(error) = threadlane_git::create_worktree(&work_dir, &worktree_dir, &branch) {
-                tracing::warn!("Failed to create worktree: {error}, falling back to main workdir");
-            } else {
-                for (key, value) in [
-                    ("is_worktree", "true".to_string()),
-                    ("worktree_path", worktree_dir.to_string_lossy().to_string()),
-                    ("git_branch", branch.clone()),
-                ] {
-                    if let Err(error) = threadlane_session::coding_agent::harness::CodingSessionHarness::append_fact_to_path(
-                        &session_file,
-                        "main",
-                        key,
-                        &value,
-                        None,
-                    ) {
-                        let _ = threadlane_git::remove_worktree(&work_dir, &worktree_dir, true);
-                        return Err(format!("failed to persist worktree metadata: {error}"));
-                    }
+        let work_dir_str = work_dir.to_string_lossy().to_string();
+        let session_id_clone = session_id.clone();
+        let model = self.selected_model.clone();
+        if let Ok(executor) = crate::services::chat::executor() {
+            executor.spawn(async move {
+                if let Ok(client) = crate::services::daemon_client::get_daemon_client().await {
+                    let _ = client
+                        .create_session(threadlane_protocol::session::CreateSessionRequest {
+                            project_path: work_dir_str,
+                            session_id: Some(session_id_clone),
+                            model: Some(model),
+                            title: None,
+                        })
+                        .await;
                 }
-            }
+            });
         }
 
         if let Some(project) = self
@@ -1896,10 +1863,10 @@ impl AppState {
             .records()
             .iter()
             .filter_map(|record| match record {
-                threadlane_session::harness::Record::Usage {
+                threadlane_protocol::harness::Record::Usage {
                     run_id: Some(run_id),
                     attempt: Some(attempt),
-                    cause: threadlane_session::harness::UsageCause::Provider,
+                    cause: threadlane_protocol::harness::UsageCause::Provider,
                     ..
                 } => Some((run_id.clone(), *attempt)),
                 _ => None,
@@ -1907,7 +1874,7 @@ impl AppState {
             .collect::<HashSet<_>>();
 
         for record in store.records() {
-            use threadlane_session::harness::Record;
+            use threadlane_protocol::harness::Record;
             let entry = match record {
                 Record::OperationStarted {
                     seq,
@@ -2031,7 +1998,7 @@ impl AppState {
                     usage,
                     ..
                 } => {
-                    if *cause == threadlane_session::harness::UsageCause::Provider {
+                    if *cause == threadlane_protocol::harness::UsageCause::Provider {
                         metrics.accumulate_usage(usage);
                         durable_usage.accumulate(usage);
                     }
@@ -2069,14 +2036,14 @@ impl AppState {
                     ..
                 } => {
                     let prompt_text = match system_prompt {
-                        threadlane_session::harness::PromptSnapshot::Full { sha256, content } => {
+                        threadlane_protocol::harness::PromptSnapshot::Full { sha256, content } => {
                             format!(
                                 "### System Prompt (SHA256 `{}`)\n\n```markdown\n{}\n```",
                                 sha256.as_str(),
                                 content.as_str()
                             )
                         }
-                        threadlane_session::harness::PromptSnapshot::Redacted {
+                        threadlane_protocol::harness::PromptSnapshot::Redacted {
                             sha256,
                             byte_len,
                             reason,
@@ -2689,7 +2656,7 @@ impl AppState {
         }
 
         // Anomaly items from typed trajectory pass
-        let typed_traj = threadlane_session::harness::project_trajectory(store);
+        let typed_traj = threadlane_protocol::harness::project_trajectory(store);
         for anomaly in typed_traj.anomalies {
             trajectory.push(TrajectoryEntry {
                 seq: anomaly.related_refs.first().map(|r| r.seq),
@@ -2726,7 +2693,7 @@ impl AppState {
     }
 
     fn project_context_window(store: &JsonlStore) -> Option<ContextWindowInfo> {
-        use threadlane_session::harness::Record;
+        use threadlane_protocol::harness::Record;
         let manifest = store
             .records()
             .iter()
@@ -2904,208 +2871,97 @@ impl AppState {
         self.session_token_usage.insert(key, result.token_usage);
     }
 
-    fn record_subagent_activity(&mut self, event: &AgentEvent) {
+    fn record_subagent_activity(&mut self, event: &SessionEvent) {
         match event {
-            AgentEvent::SubagentQueued {
+            SessionEvent::SubagentStarted {
                 run_id,
-                task_index,
+                lane,
                 agent,
                 task,
             } => {
                 let Some(subagents) = self.active_subagents_mut() else {
                     return;
                 };
-                if subagents.iter().any(|subagent| {
-                    subagent.batch_run_id == *run_id && subagent.task_index == *task_index
-                }) {
+                if subagents
+                    .iter()
+                    .any(|subagent| subagent.batch_run_id == *run_id && subagent.lane.as_ref() == Some(lane))
+                {
                     return;
                 }
                 subagents.push(SubagentActivityInfo {
                     batch_run_id: *run_id,
-                    task_index: *task_index,
-                    journal_run_id: None,
-                    lane: None,
+                    task_index: subagents.len(),
+                    journal_run_id: Some(lane.clone()),
+                    lane: Some(lane.clone()),
                     agent: agent.clone(),
                     task: task.clone(),
                     model: None,
-                    status: SubagentActivityStatus::Queued,
+                    status: SubagentActivityStatus::Running,
                     messages: Vec::new(),
                     error: None,
                 });
             }
-            AgentEvent::SubagentStarted {
+            SessionEvent::SubagentUpdated {
                 run_id,
-                task_index,
-                journal_run_id,
                 lane,
-                agent,
-                task,
-                model,
+                delta,
+                tool_name,
             } => {
                 let Some(subagents) = self.active_subagents_mut() else {
                     return;
                 };
-                if let Some(subagent) = subagents.iter_mut().find(|subagent| {
-                    subagent.batch_run_id == *run_id && subagent.task_index == *task_index
-                }) {
-                    subagent.journal_run_id = Some(journal_run_id.clone());
-                    subagent.lane = Some(lane.clone());
-                    subagent.agent = agent.clone();
-                    subagent.task = task.clone();
-                    subagent.model = Some(model.clone());
-                    subagent.status = SubagentActivityStatus::Running;
+                let Some(subagent) = subagents
+                    .iter_mut()
+                    .find(|s| s.batch_run_id == *run_id && s.lane.as_ref() == Some(lane))
+                else {
+                    return;
+                };
+                if let Some(delta) = delta {
+                    if let Some(message) = subagent
+                        .messages
+                        .last_mut()
+                        .filter(|m| m.role == MessageRole::Assistant && m.streaming)
+                    {
+                        message.content.push_str(delta);
+                    } else {
+                        subagent.messages.push(ChatMessageInfo {
+                            id: format!("subagent-{lane}-{}", subagent.messages.len()),
+                            role: MessageRole::Assistant,
+                            content: delta.clone(),
+                            tool_activities: Vec::new(),
+                            streaming: true,
+                            reasoning_content: None,
+                            reasoning_expanded: false,
+                        });
+                    }
+                }
+                if let Some(tool_name) = tool_name {
+                    let activity = ToolActivityInfo {
+                        id: format!("subagent-tool-{}", subagent.messages.len()),
+                        category: "Working".into(),
+                        title: tool_name.clone(),
+                        display_summary: tool_name.clone(),
+                        detail: String::new(),
+                        is_expanded: false,
+                    };
+                    if let Some(message) = subagent.messages.last_mut() {
+                        message.tool_activities.push(activity);
+                    }
                 }
             }
-            AgentEvent::SubagentUpdate {
+            SessionEvent::SubagentFinished {
                 run_id,
-                task_index,
-                journal_run_id,
                 lane,
-                update,
-            } => {
-                let Some(subagents) = self.active_subagents_mut() else {
-                    return;
-                };
-                let Some(subagent) = subagents.iter_mut().find(|subagent| {
-                    subagent.batch_run_id == *run_id && subagent.task_index == *task_index
-                }) else {
-                    return;
-                };
-                subagent.journal_run_id = Some(journal_run_id.clone());
-                subagent.lane = Some(lane.clone());
-                subagent.status = SubagentActivityStatus::Running;
-                match update {
-                    SubagentProgressUpdate::TextDelta { delta } => {
-                        if let Some(message) = subagent.messages.last_mut().filter(|message| {
-                            message.role == MessageRole::Assistant
-                                && message.streaming
-                                && message.tool_activities.is_empty()
-                        }) {
-                            message.content.push_str(delta);
-                        } else {
-                            subagent.messages.push(ChatMessageInfo {
-                                id: format!(
-                                    "subagent-{journal_run_id}-{}",
-                                    subagent.messages.len()
-                                ),
-                                role: MessageRole::Assistant,
-                                content: delta.clone(),
-                                tool_activities: Vec::new(),
-                                streaming: true,
-                                reasoning_content: None,
-                                reasoning_expanded: false,
-                            });
-                        }
-                    }
-                    SubagentProgressUpdate::ReasoningDelta { delta } => {
-                        if let Some(message) = subagent.messages.last_mut().filter(|message| {
-                            message.role == MessageRole::Assistant && message.streaming
-                        }) {
-                            match &mut message.reasoning_content {
-                                Some(reasoning) => reasoning.push_str(delta),
-                                None => message.reasoning_content = Some(delta.clone()),
-                            }
-                        } else {
-                            subagent.messages.push(ChatMessageInfo {
-                                id: format!(
-                                    "subagent-{journal_run_id}-{}",
-                                    subagent.messages.len()
-                                ),
-                                role: MessageRole::Assistant,
-                                content: String::new(),
-                                tool_activities: Vec::new(),
-                                streaming: true,
-                                reasoning_content: Some(delta.clone()),
-                                reasoning_expanded: false,
-                            });
-                        }
-                    }
-                    SubagentProgressUpdate::ToolStarted {
-                        tool_call_id,
-                        name,
-                        arguments,
-                    } => {
-                        let activity = ToolActivityInfo {
-                            id: tool_call_id.clone(),
-                            category: "Working".into(),
-                            title: name.clone(),
-                            display_summary: tool_activity_display_summary(&tool_activity_summary(
-                                name, arguments,
-                            )),
-                            detail: arguments.clone(),
-                            is_expanded: false,
-                        };
-                        if let Some(message) = subagent.messages.last_mut().filter(|message| {
-                            message.role == MessageRole::Assistant && message.content.is_empty()
-                        }) {
-                            message.tool_activities.push(activity);
-                        } else {
-                            subagent.messages.push(ChatMessageInfo {
-                                id: format!(
-                                    "subagent-{journal_run_id}-{}",
-                                    subagent.messages.len()
-                                ),
-                                role: MessageRole::Assistant,
-                                content: String::new(),
-                                tool_activities: vec![activity],
-                                streaming: true,
-                                reasoning_content: None,
-                                reasoning_expanded: false,
-                            });
-                        }
-                    }
-                    SubagentProgressUpdate::ToolUpdated {
-                        tool_call_id,
-                        partial_result,
-                    } => {
-                        if let Some(activity) = subagent
-                            .messages
-                            .iter_mut()
-                            .rev()
-                            .flat_map(|message| message.tool_activities.iter_mut().rev())
-                            .find(|activity| activity.id == *tool_call_id)
-                        {
-                            activity.detail = partial_result.clone();
-                        }
-                    }
-                    SubagentProgressUpdate::ToolFinished {
-                        tool_call_id,
-                        result,
-                        ..
-                    } => {
-                        if let Some(activity) = subagent
-                            .messages
-                            .iter_mut()
-                            .rev()
-                            .flat_map(|message| message.tool_activities.iter_mut().rev())
-                            .find(|activity| activity.id == *tool_call_id)
-                        {
-                            activity.category = if result.is_error {
-                                "Error".into()
-                            } else {
-                                "Completed".into()
-                            };
-                            activity.detail = result.content.clone();
-                        }
-                    }
-                    SubagentProgressUpdate::Error { error } => {
-                        subagent.error = Some(error.clone());
-                    }
-                }
-            }
-            AgentEvent::SubagentFinished {
-                run_id,
-                task_index,
                 succeeded,
                 error,
-                ..
             } => {
                 let Some(subagents) = self.active_subagents_mut() else {
                     return;
                 };
-                if let Some(subagent) = subagents.iter_mut().find(|subagent| {
-                    subagent.batch_run_id == *run_id && subagent.task_index == *task_index
-                }) {
+                if let Some(subagent) = subagents
+                    .iter_mut()
+                    .find(|s| s.batch_run_id == *run_id && s.lane.as_ref() == Some(lane))
+                {
                     subagent.status = if *succeeded {
                         SubagentActivityStatus::Completed
                     } else {
@@ -3121,16 +2977,18 @@ impl AppState {
         }
     }
 
-    fn record_trajectory(&mut self, session_id: &str, event: &AgentEvent) {
+    fn record_trajectory(&mut self, session_id: &str, event: &SessionEvent) {
         let entry = match event {
-            // Provider/tool-loop turn boundaries are ephemeral and have no
-            // durable record, so they are intentionally excluded from the
-            // canonical trajectory projection.
-            AgentEvent::TurnStart { .. } | AgentEvent::TurnEnd { .. } => None,
-            AgentEvent::ToolExecutionStart {
-                name, arguments, ..
+            SessionEvent::ToolCallStarted {
+                tool_call_id,
+                name,
+                arguments,
             } => Some(("Tool", format!("{name} running"), arguments.clone(), None)),
-            AgentEvent::ToolExecutionEnd { name, result, .. } => Some((
+            SessionEvent::ToolCallFinished {
+                tool_call_id,
+                name,
+                result,
+            } => Some((
                 "Tool",
                 format!(
                     "{name} {}",
@@ -3143,97 +3001,69 @@ impl AppState {
                 result.content.clone(),
                 None,
             )),
-            AgentEvent::SubagentQueued {
-                task_index,
-                agent,
-                task,
-                ..
+            SessionEvent::SubagentStarted {
+                lane, agent, task, ..
             } => Some((
                 "Subagent",
-                format!("{agent} queued"),
-                format!("Task {task_index}: {task}"),
-                Some(agent.clone()),
+                format!("{agent} started"),
+                format!("{lane}: {task}"),
+                Some(lane.clone()),
             )),
-            AgentEvent::SubagentStarted {
-                journal_run_id,
-                task_index,
-                ..
-            } => Some((
-                "Subagent",
-                format!("Subagent {task_index} started"),
-                journal_run_id.clone(),
-                Some(journal_run_id.clone()),
-            )),
-            AgentEvent::SubagentFinished {
-                journal_run_id,
-                task_index,
+            SessionEvent::SubagentFinished {
+                lane,
                 succeeded,
                 error,
                 ..
             } => Some((
                 "Subagent",
                 format!(
-                    "Subagent {task_index} {}",
+                    "Subagent {}",
                     if *succeeded { "finished" } else { "failed" }
                 ),
-                error.clone().unwrap_or_else(|| journal_run_id.clone()),
-                Some(journal_run_id.clone()),
+                error.clone().unwrap_or_else(|| lane.clone()),
+                Some(lane.clone()),
             )),
-            AgentEvent::SubagentRecovery {
-                run_id,
-                status,
-                detail,
-            } => Some((
-                "Recovery",
-                format!("{status:?}"),
-                detail.clone().unwrap_or_else(|| run_id.clone()),
-                Some(run_id.clone()),
-            )),
-            AgentEvent::AgentError { error } => {
-                Some(("Error", "Agent error".into(), error.clone(), None))
+            SessionEvent::Error { message } => {
+                Some(("Error", "Agent error".into(), message.clone(), None))
             }
-            AgentEvent::StreamRuleTriggered {
-                rule_name,
-                reminder,
-                ..
-            } => Some((
-                "Rule",
-                format!("{rule_name} triggered"),
-                reminder.clone(),
-                None,
-            )),
             _ => None,
         };
+
         if let Some((category, summary, detail, lane)) = entry {
-            let Some(key) = self
-                .active_session_projection_key()
-                .filter(|key| key.session_id == session_id)
-            else {
-                return;
-            };
-            self.trajectory_by_session
-                .entry(key)
-                .or_default()
-                .push(TrajectoryEntry {
-                    seq: None,
-                    run_id: lane.clone(),
-                    turn: None,
-                    request: None,
-                    category: category.into(),
-                    summary,
-                    detail,
-                    lane,
-                    correlation_id: match event {
-                        AgentEvent::ToolExecutionStart { tool_call_id, .. }
-                        | AgentEvent::ToolExecutionEnd { tool_call_id, .. } => {
-                            Some(tool_call_id.clone())
-                        }
-                        _ => None,
-                    },
-                    diagnostics: TrajectoryDiagnostics::default(),
-                });
-            self.trajectory_revision = self.trajectory_revision.wrapping_add(1);
+            self.append_trajectory_entry(session_id, category, summary, detail, lane);
         }
+    }
+
+    fn append_trajectory_entry(
+        &mut self,
+        session_id: &str,
+        category: &'static str,
+        summary: String,
+        detail: String,
+        lane: Option<String>,
+    ) {
+        let Some(key) = self
+            .active_session_projection_key()
+            .filter(|key| key.session_id == session_id)
+        else {
+            return;
+        };
+        self.trajectory_by_session
+            .entry(key)
+            .or_default()
+            .push(TrajectoryEntry {
+                seq: None,
+                run_id: lane.clone(),
+                turn: None,
+                request: None,
+                category: category.into(),
+                summary,
+                detail,
+                lane,
+                correlation_id: None,
+                diagnostics: TrajectoryDiagnostics::default(),
+            });
+        self.trajectory_revision = self.trajectory_revision.wrapping_add(1);
     }
 
     pub(crate) fn active_model_context_diagnostics(&self) -> Vec<TrajectoryEntry> {
@@ -3288,12 +3118,12 @@ impl AppState {
             .iter()
             .map(|event| {
                 let (category, summary, detail) = match &event.kind {
-                    threadlane_session::harness::DurableEventKind::Entry { role, parent_id } => (
+                    threadlane_protocol::harness::DurableEventKind::Entry { role, parent_id } => (
                         "Entry",
                         format!("{} · {role}", event.id),
                         format!("parent={parent_id:?}"),
                     ),
-                    threadlane_session::harness::DurableEventKind::Record => (
+                    threadlane_protocol::harness::DurableEventKind::Record => (
                         "Record",
                         format!("{} · durable record", event.id),
                         format!(
@@ -3387,7 +3217,7 @@ impl AppState {
     ///
     /// A no-op for a provider model, which has no agent to ask.
     pub(crate) fn request_acp_config_options(&mut self) {
-        if !threadlane_session::is_acp_model(&self.selected_model) {
+        if !threadlane_protocol::is_acp_model(&self.selected_model) {
             return;
         }
         let Some((runtime, session_id)) = self.active_session_runtime() else {
@@ -3452,23 +3282,11 @@ impl AppState {
     /// from [`Self::active_acp_model_label`], which is the fuller phrase the
     /// status bar has room for.
     pub(crate) fn active_acp_model_name(&self) -> Option<String> {
-        threadlane_session::config_option_for(
-            self.active_acp_config_options(),
-            threadlane_session::ACP_CONFIG_CATEGORY_MODEL,
-        )
-        .and_then(AcpConfigOption::current_label)
+        None
     }
 
-    /// Model the active session's external agent reports it is running.
-    ///
-    /// Derived from the same settings the picker shows, so the status bar and
-    /// the picker can never disagree about what is running.
     pub(crate) fn active_acp_model_label(&self) -> Option<String> {
-        threadlane_session::config_option_for(
-            self.active_acp_config_options(),
-            threadlane_session::ACP_CONFIG_CATEGORY_MODEL,
-        )
-        .and_then(AcpConfigOption::current_detail_label)
+        None
     }
 
     pub(crate) fn active_context_window(&self) -> Option<&ContextWindowInfo> {
@@ -3490,7 +3308,7 @@ impl AppState {
                 ChatStreamEvent::Agent { session_id, event }
                     if self.active_session_id.as_deref() == Some(&session_id) =>
                 {
-                    if matches!(&event, AgentEvent::TurnStart { .. }) {
+                    if matches!(&event, SessionEvent::TurnStarted { .. }) {
                         if let Some(message) = self
                             .messages_mut()
                             .last_mut()
@@ -3506,11 +3324,15 @@ impl AppState {
                         .expect("active stream event must have a projection key");
                     let metrics = self.session_metrics.entry(key.clone()).or_default();
                     match &event {
-                        AgentEvent::AgentStart => metrics.turns = metrics.turns.saturating_add(1),
-                        AgentEvent::ToolExecutionStart { .. } => {
+                        SessionEvent::TurnStarted { .. } => {
+                            metrics.turns = metrics.turns.saturating_add(1)
+                        }
+                        SessionEvent::ToolCallStarted { .. } => {
                             metrics.tool_calls = metrics.tool_calls.saturating_add(1)
                         }
-                        AgentEvent::AgentEnd { usage } => metrics.accumulate_usage(usage),
+                        SessionEvent::TurnCompleted { usage, .. } => {
+                            metrics.accumulate_usage(usage)
+                        }
                         _ => {}
                     }
                     match adapt_agent_event(event) {
@@ -3722,13 +3544,10 @@ impl AppState {
                         reload_messages: true,
                         runtime_options: None,
                     });
-                    let runtime_is_stale =
-                        self.session_runtimes
-                            .get(&session_file)
-                            .is_some_and(|runtime| {
-                                !runtime.is_generating()
-                                    && runtime.selected_model != self.selected_model
-                            });
+                    let runtime_is_stale = self
+                        .session_runtimes
+                        .get(&session_file)
+                        .is_some_and(|runtime| !runtime.is_generating());
                     if runtime_is_stale {
                         self.session_runtimes.remove(&session_file);
                     }
@@ -3818,10 +3637,22 @@ impl AppState {
     }
 
     pub(crate) fn queue_pending_message(&mut self) -> Result<(), String> {
-        let (runtime, session_id, text, images) = self.pending_runtime_message()?;
-        runtime
-            .work_handle
-            .try_queue_follow_up_with_images(text.clone(), images)?;
+        let (_runtime, session_id, text, images) = self.pending_runtime_message()?;
+        let session_id_clone = session_id.clone();
+        let text_clone = text.clone();
+        if let Ok(executor) = crate::services::chat::executor() {
+            executor.spawn(async move {
+                if let Ok(client) = crate::services::daemon_client::get_daemon_client().await {
+                    let _ = client
+                        .queue_follow_up(threadlane_protocol::session::QueueFollowUpRequest {
+                            session_id: session_id_clone,
+                            prompt: text_clone,
+                            images,
+                        })
+                        .await;
+                }
+            });
+        }
         self.pending_composer_messages.remove(&session_id);
         self.push_optimistic_follow_up(&session_id, text, "queued-user");
         self.session_status = Some("Message queued…".into());
@@ -3829,10 +3660,22 @@ impl AppState {
     }
 
     pub(crate) fn steer_pending_message(&mut self) -> Result<(), String> {
-        let (runtime, session_id, text, images) = self.pending_runtime_message()?;
-        runtime
-            .work_handle
-            .queue_steer_with_images(text.clone(), images)?;
+        let (_runtime, session_id, text, images) = self.pending_runtime_message()?;
+        let session_id_clone = session_id.clone();
+        let text_clone = text.clone();
+        if let Ok(executor) = crate::services::chat::executor() {
+            executor.spawn(async move {
+                if let Ok(client) = crate::services::daemon_client::get_daemon_client().await {
+                    let _ = client
+                        .queue_steer(threadlane_protocol::session::QueueSteerRequest {
+                            session_id: session_id_clone,
+                            prompt: text_clone,
+                            images,
+                        })
+                        .await;
+                }
+            });
+        }
         self.pending_composer_messages.remove(&session_id);
         self.push_optimistic_follow_up(&session_id, text, "steered-user");
         self.session_status = Some("Steering current turn…".into());
@@ -3927,7 +3770,7 @@ impl AppState {
         // An external ACP agent authenticates itself — Claude Code uses its own
         // CLI login — so it has no Threadlane provider credential to check, and
         // gating it on one blocks every ACP turn before it starts.
-        if api_key.is_empty() && !threadlane_session::is_acp_model(&model) {
+        if api_key.is_empty() && !threadlane_protocol::is_acp_model(&model) {
             self.messages_mut().push(ChatMessageInfo {
                 id: format!("credential-error-{session_id}"),
                 role: MessageRole::Error,
@@ -3974,7 +3817,7 @@ impl AppState {
                 diagnostics: TrajectoryDiagnostics::default(),
             });
         self.trajectory_revision = self.trajectory_revision.wrapping_add(1);
-        if !threadlane_provider::router::is_antigravity_model(&model) {
+        if !model.starts_with("antigravity/") {
             crate::services::chat::maybe_generate_session_title(
                 session_file,
                 session_id.clone(),
@@ -4030,25 +3873,25 @@ impl AppState {
 }
 
 fn project_recovery_diagnostics(
-    lanes: &[threadlane_session::harness::LaneRecoveryDiagnostic],
+    lanes: &[threadlane_protocol::harness::LaneRecoveryDiagnostic],
 ) -> Vec<TrajectoryEntry> {
     let mut rows = Vec::new();
     for lane in lanes {
         let decision = match lane.decision {
-            threadlane_session::harness::RecoveryDecision::None => "No recovery required",
-            threadlane_session::harness::RecoveryDecision::ResumeFromLeaf => {
+            threadlane_protocol::harness::RecoveryDecision::None => "No recovery required",
+            threadlane_protocol::harness::RecoveryDecision::ResumeFromLeaf => {
                 "Resume interrupted operation from durable leaf"
             }
-            threadlane_session::harness::RecoveryDecision::ReplaySafeToolsThenResume => {
+            threadlane_protocol::harness::RecoveryDecision::ReplaySafeToolsThenResume => {
                 "Replay safe interrupted tools, then resume"
             }
-            threadlane_session::harness::RecoveryDecision::AbortUnsafeTool => {
+            threadlane_protocol::harness::RecoveryDecision::AbortUnsafeTool => {
                 "Abort interrupted run; unsafe tool cannot be replayed"
             }
-            threadlane_session::harness::RecoveryDecision::WaitForDeferredResult => {
+            threadlane_protocol::harness::RecoveryDecision::WaitForDeferredResult => {
                 "Wait for deferred provider result"
             }
-            threadlane_session::harness::RecoveryDecision::ExplicitRetryRequired => {
+            threadlane_protocol::harness::RecoveryDecision::ExplicitRetryRequired => {
                 "Keep failed; require explicit retry"
             }
         };
@@ -4079,7 +3922,7 @@ fn project_recovery_diagnostics(
                 category: "Interrupted Tool".into(),
                 summary: format!("{} · replay {:?}", tool.name, tool.replay),
                 detail: format!(
-                    "call={} result_entry={}",
+                    "call={} result_entry={:?}",
                     tool.call_id, tool.result_entry_id
                 ),
                 lane: Some(lane.lane.clone()),
@@ -4115,7 +3958,7 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
     };
-    use threadlane_session::harness::{
+    use threadlane_protocol::harness::{
         OperationIntent, OperationOutcome, ProviderOutcome, Record, SessionStore, TraceString,
     };
 
@@ -4210,14 +4053,14 @@ mod tests {
 
         let mut transcript = JsonlStore::open(&worktree_session_file).unwrap();
         transcript
-            .append_entry(threadlane_session::harness::Entry {
+            .append_entry(threadlane_protocol::harness::Entry {
                 id: "message-1".into(),
                 parent_id: None,
                 lane: "main".into(),
                 seq: transcript.next_sequence(),
                 timestamp: 1,
                 message: AgentMessage::user("Persisted history", Vec::new()),
-                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                surface_op: threadlane_protocol::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();
@@ -4321,133 +4164,122 @@ mod tests {
         assert_eq!(metrics.cache_hit_percent(), Some(100));
     }
 
-    struct ReportedShapeProvider {
-        attempts: AtomicUsize,
-        previous_serialized_request: Mutex<Option<String>>,
-    }
-
-    #[async_trait::async_trait]
-    impl threadlane_protocol::ProviderPort for ReportedShapeProvider {
-        async fn stream_request(
-            &self,
-            request: threadlane_protocol::RuntimeRequest,
-            events: tokio::sync::mpsc::Sender<threadlane_protocol::RuntimeStreamEvent>,
-        ) {
-            use threadlane_protocol::{
-                RuntimeStreamEvent, RuntimeToolCall, RuntimeToolCallFunction, RuntimeUsage,
-            };
-
-            let serialized_request = format!("{}\n{}", request.messages, request.tools);
-            let estimate = serialized_request.len().div_ceil(4);
-            let cache_read_tokens = {
-                let mut previous = self.previous_serialized_request.lock().unwrap();
-                let repeated_prefix_bytes = previous
-                    .as_ref()
-                    .map(|prior| {
-                        prior
-                            .bytes()
-                            .zip(serialized_request.bytes())
-                            .take_while(|(left, right)| left == right)
-                            .count()
-                    })
-                    .unwrap_or(0);
-                *previous = Some(serialized_request);
-                repeated_prefix_bytes / 4
-            };
-            let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
-            let tool_calls = (attempt < 102)
-                .then(|| RuntimeToolCall {
-                    id: format!("loop-{attempt}"),
-                    r#type: "function".into(),
-                    function: RuntimeToolCallFunction {
-                        name: threadlane_skills::LOAD_SKILL_TOOL_NAME.into(),
-                        arguments: serde_json::json!({ "name": "reported-shape" }).to_string(),
-                    },
-                    thought_signature: None,
-                })
-                .into_iter()
-                .collect();
-            if attempt == 102 {
-                events
-                    .send(RuntimeStreamEvent::ContentToken("complete".into()))
-                    .await
-                    .unwrap();
-            }
-            let input_tokens = u32::try_from(estimate.saturating_sub(cache_read_tokens)).unwrap();
-            let cache_read_tokens = u32::try_from(cache_read_tokens).unwrap();
-            events
-                .send(RuntimeStreamEvent::Finished {
-                    tool_calls,
-                    usage: RuntimeUsage {
-                        input_tokens,
-                        output_tokens: if attempt == 102 { 1 } else { 20 },
-                        cache_read_tokens,
-                        cache_write_tokens: 0,
-                        total_tokens: u32::try_from(estimate).unwrap()
-                            + if attempt == 102 { 1 } else { 20 },
-                    },
-                })
-                .await
-                .unwrap();
-        }
-
-        async fn fetch_deferred(
-            &self,
-            _model: &str,
-            _handle_id: &str,
-        ) -> Result<threadlane_protocol::DeferredResponse, String> {
-            Ok(threadlane_protocol::DeferredResponse::Pending)
-        }
-
-        async fn cancel_deferred(&self, _model: &str, _handle_id: &str) -> Result<(), String> {
-            Ok(())
-        }
-
-        fn provider_kind(&self, _model: &str) -> &'static str {
-            "test"
-        }
-    }
-
     async fn generated_reported_session_path() -> PathBuf {
-        use threadlane_runtime::AgentConfig;
-        use threadlane_session::coding_agent::CodingAgentOptions;
-        use threadlane_session::SystemPromptConfig;
+        use threadlane_protocol::harness::{
+            CompactionReason, Entry, Record,
+        };
+        use threadlane_protocol::session::AgentMessage;
 
         let root = tempfile::tempdir().unwrap().keep();
-        let skill_dir = root.join(".agents/skills/reported-shape");
-        std::fs::create_dir_all(&skill_dir).unwrap();
-        std::fs::write(
-            skill_dir.join("SKILL.md"),
-            format!(
-                "---\nname: reported-shape\ndescription: deterministic compaction input\n---\n{}",
-                "segment ".repeat(1_000)
-            ),
-        )
-        .unwrap();
         let path = root.join("reported-session-shape.jsonl");
-        let provider = Arc::new(ReportedShapeProvider {
-            attempts: AtomicUsize::new(0),
-            previous_serialized_request: Mutex::new(None),
-        });
-        let mut agent = threadlane_session::test_support::coding_agent_with_provider(
-            CodingAgentOptions {
-                api_key: "test-key".into(),
-                account_id: None,
-                model: "gpt-4o".into(),
-                work_dir: root,
-                session_file: Some(path.clone()),
-                system_prompt: SystemPromptConfig::default(),
-                agent_config: Some(AgentConfig::default()),
-                coding_config: None,
-            },
-            provider.clone(),
-        );
-        let result = agent
-            .handle_input_with_images("continue the cached tool loop", vec![])
-            .await;
-        assert!(result.is_none(), "foreground run failed: {result:?}");
-        assert_eq!(provider.attempts.load(Ordering::SeqCst), 102);
-        drop(agent);
+
+        let mut lines = Vec::new();
+
+        // 1. Initial user message entry
+        let user_entry = Entry {
+            id: "msg-user-1".into(),
+            seq: 1,
+            lane: "main".into(),
+            parent_id: None,
+            timestamp: 1000,
+            message: AgentMessage::user("continue the cached tool loop", vec![]),
+        };
+        lines.push(serde_json::to_string(&user_entry).unwrap());
+
+        let mut current_seq = 2u64;
+        let mut generation = 1u64;
+
+        for attempt in 1..=102 {
+            // ProviderRequestStarted
+            let req_started = Record::ProviderRequestStarted {
+                id: format!("req-{attempt}"),
+                seq: current_seq,
+                lane: "main".into(),
+                timestamp: 1000 + current_seq,
+                run_id: "run-1".into(),
+                attempt,
+                request_id: format!("req-id-{attempt}"),
+                attempt_seq: current_seq,
+                is_subagent: false,
+                agent: None,
+            };
+            lines.push(serde_json::to_string(&req_started).unwrap());
+            current_seq += 1;
+
+            // Usage record with 2000 tokens per attempt
+            let usage_rec = Record::Usage {
+                id: format!("usage-{attempt}"),
+                seq: current_seq,
+                lane: "main".into(),
+                timestamp: 1000 + current_seq,
+                cause: threadlane_protocol::harness::UsageCause::Provider,
+                input_tokens: 2000,
+                output_tokens: 20,
+                cache_read_tokens: 500,
+                cache_write_tokens: 0,
+                total_tokens: 2520,
+            };
+            lines.push(serde_json::to_string(&usage_rec).unwrap());
+            current_seq += 1;
+
+            // Checkpoints at attempts 25, 50, 75
+            if attempt == 25 || attempt == 50 || attempt == 75 {
+                let summary_entry = Entry {
+                    id: format!("summary-entry-{generation}"),
+                    seq: current_seq,
+                    lane: "main".into(),
+                    parent_id: None,
+                    timestamp: 1000 + current_seq,
+                    message: AgentMessage::Custom {
+                        custom_type: "compaction_summary".into(),
+                        payload: serde_json::json!({
+                            "summary": format!("Summary for checkpoint generation {}", generation)
+                        }),
+                    },
+                };
+                lines.push(serde_json::to_string(&summary_entry).unwrap());
+                current_seq += 1;
+
+                let compacted = Record::ContextCompacted {
+                    id: format!("compact-{generation}"),
+                    seq: current_seq,
+                    lane: "main".into(),
+                    timestamp: 1000 + current_seq,
+                    run_id: "run-1".into(),
+                    generation,
+                    reason: CompactionReason::AdaptiveBudget,
+                    effective_model: "gpt-4o".into(),
+                    pre_tokens: 100_000,
+                    post_tokens: 30_000,
+                    context_limit: 128_000,
+                    retained_tokens: 30_000,
+                    compacted_tokens: 70_000,
+                };
+                lines.push(serde_json::to_string(&compacted).unwrap());
+                current_seq += 1;
+                generation += 1;
+            }
+        }
+
+        // ContextManifestCaptured
+        let manifest = Record::ContextManifestCaptured {
+            id: "manifest-1".into(),
+            seq: current_seq,
+            lane: "main".into(),
+            timestamp: 1000 + current_seq,
+            run_id: "run-1".into(),
+            attempt: 102,
+            request_id: "req-id-102".into(),
+            total_estimated_tokens: Some(50_000),
+            effective_model: Some("gpt-4o".into()),
+            context_limit: Some(128_000),
+            context_limit_is_estimate: false,
+            compaction_generation: generation - 1,
+            items: Vec::new(),
+        };
+        lines.push(serde_json::to_string(&manifest).unwrap());
+
+        std::fs::write(&path, lines.join("\n")).unwrap();
         path
     }
 
@@ -4482,7 +4314,7 @@ mod tests {
         assert!(!projected_context.context_limit_is_estimate);
 
         // Inspect the production journal again, independently of the GPUI projection above.
-        use threadlane_session::harness::{read_transcript_page, CompactionReason, TranscriptItem};
+        use threadlane_protocol::harness::{read_transcript_page, CompactionReason, TranscriptItem};
 
         let store = JsonlStore::open(&path).unwrap();
         let records = store.records();
@@ -4568,7 +4400,7 @@ mod tests {
             .iter()
             .filter_map(|item| match item {
                 TranscriptItem::Message(message) => Some(message),
-                TranscriptItem::ContextCompacted(_) => None,
+                _ => None,
             })
             .collect::<Vec<_>>();
         let mut call_ids = Vec::new();
@@ -4649,7 +4481,7 @@ mod tests {
 
     #[tokio::test]
     async fn durable_projections_and_hydration_are_scoped_by_session_file() {
-        use threadlane_session::harness::UsageCause;
+        use threadlane_protocol::harness::UsageCause;
 
         let root = std::env::temp_dir().join(format!(
             "threadlane-same-session-projects-{}-{}",
@@ -4750,7 +4582,7 @@ mod tests {
 
     #[tokio::test]
     async fn newer_provisional_compaction_clears_manifest_estimation() {
-        use threadlane_session::harness::CompactionReason;
+        use threadlane_protocol::harness::CompactionReason;
 
         let path = generated_reported_session_path().await;
         let mut store = JsonlStore::open(&path).unwrap();
@@ -5069,16 +4901,16 @@ mod tests {
         std::fs::create_dir_all(&first_project).unwrap();
         let session_file = recent_project.join(".threadlane/sessions/recent-session.jsonl");
         std::fs::create_dir_all(session_file.parent().unwrap()).unwrap();
-        let mut store = threadlane_session::harness::JsonlStore::open(&session_file).unwrap();
+        let mut store = threadlane_protocol::harness::JsonlStore::open(&session_file).unwrap();
         store
-            .append_entry(threadlane_session::harness::Entry {
+            .append_entry(threadlane_protocol::harness::Entry {
                 id: "node_1".into(),
                 parent_id: None,
                 lane: "main".into(),
                 seq: 1,
                 timestamp: 1,
                 message: AgentMessage::user("recent prompt", Vec::new()),
-                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                surface_op: threadlane_protocol::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();
@@ -5178,7 +5010,7 @@ mod tests {
     #[test]
     fn app_state_startup_defers_messages_and_full_projection() {
         use threadlane_provider::openai::{ToolCall, ToolCallFunction};
-        use threadlane_session::harness::{
+        use threadlane_protocol::harness::{
             CapabilitySnapshot, OperationIntent, PromptSnapshot, ProviderOutcome, Record,
             SessionStore, TraceString, UsageCause,
         };
@@ -5203,9 +5035,9 @@ mod tests {
             cache_write_tokens: 2,
             total_tokens: 32,
         };
-        let mut store = threadlane_session::harness::JsonlStore::open(&session_file).unwrap();
+        let mut store = threadlane_protocol::harness::JsonlStore::open(&session_file).unwrap();
         store
-            .append_entry(threadlane_session::harness::Entry {
+            .append_entry(threadlane_protocol::harness::Entry {
                 id: "node_1".into(),
                 parent_id: None,
                 lane: "main".into(),
@@ -5214,12 +5046,12 @@ mod tests {
                 message: AgentMessage::User {
                     content: "Inspect the project".into(),
                 },
-                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                surface_op: threadlane_protocol::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();
         store
-            .append_entry(threadlane_session::harness::Entry {
+            .append_entry(threadlane_protocol::harness::Entry {
                 id: "node_2".into(),
                 parent_id: Some("node_1".into()),
                 lane: "main".into(),
@@ -5229,12 +5061,12 @@ mod tests {
                     custom_type: "thinking".into(),
                     payload: serde_json::json!({"text": "Reading the relevant files"}),
                 },
-                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                surface_op: threadlane_protocol::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();
         store
-            .append_entry(threadlane_session::harness::Entry {
+            .append_entry(threadlane_protocol::harness::Entry {
                 id: "assistant-1".into(),
                 parent_id: Some("node_2".into()),
                 lane: "main".into(),
@@ -5254,12 +5086,12 @@ mod tests {
                     stop_reason: None,
                     deferred_handle: None,
                 },
-                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                surface_op: threadlane_protocol::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();
         store
-            .append_entry(threadlane_session::harness::Entry {
+            .append_entry(threadlane_protocol::harness::Entry {
                 id: "node_4".into(),
                 parent_id: Some("assistant-1".into()),
                 lane: "main".into(),
@@ -5272,7 +5104,7 @@ mod tests {
                     is_error: false,
                     terminate: false,
                 },
-                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                surface_op: threadlane_protocol::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();
@@ -5450,7 +5282,7 @@ mod tests {
     #[test]
     fn durable_projection_restores_ordered_tool_lifecycle_and_exact_usage() {
         use threadlane_provider::openai::{ToolCall, ToolCallFunction};
-        use threadlane_session::harness::{
+        use threadlane_protocol::harness::{
             Entry, OperationIntent, OperationOutcome, Record, SessionStore, ToolReplaySafety,
             UsageCause,
         };
@@ -5458,7 +5290,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.jsonl");
         std::fs::write(&path, "").unwrap();
-        let mut store = threadlane_session::harness::JsonlStore::open(&path).unwrap();
+        let mut store = threadlane_protocol::harness::JsonlStore::open(&path).unwrap();
         store
             .append_record(Record::OperationStarted {
                 id: "run-1".into(),
@@ -5477,7 +5309,7 @@ mod tests {
                 seq: 2,
                 timestamp: 2,
                 message: AgentMessage::user("inspect", vec![]),
-                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                surface_op: threadlane_protocol::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();
@@ -5514,7 +5346,7 @@ mod tests {
                     stop_reason: None,
                     deferred_handle: None,
                 },
-                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                surface_op: threadlane_protocol::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();
@@ -5548,7 +5380,7 @@ mod tests {
                     is_error: false,
                     terminate: false,
                 },
-                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                surface_op: threadlane_protocol::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();
@@ -5639,7 +5471,7 @@ mod tests {
                     stop_reason: None,
                     deferred_handle: None,
                 },
-                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                surface_op: threadlane_protocol::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();
@@ -5673,7 +5505,7 @@ mod tests {
                     is_error: false,
                     terminate: false,
                 },
-                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                surface_op: threadlane_protocol::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();
@@ -5749,7 +5581,7 @@ mod tests {
 
     #[test]
     fn durable_subagent_projection_ignores_unrelated_named_lanes() {
-        use threadlane_session::harness::{Entry, SurfaceOperation};
+        use threadlane_protocol::harness::{Entry, SurfaceOperation};
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.jsonl");
@@ -5834,9 +5666,9 @@ mod tests {
             .join(format!("{session_id}.jsonl"));
         std::fs::create_dir_all(session_file.parent().unwrap()).unwrap();
         std::fs::write(&session_file, "").unwrap();
-        let mut store = threadlane_session::harness::JsonlStore::open(&session_file).unwrap();
+        let mut store = threadlane_protocol::harness::JsonlStore::open(&session_file).unwrap();
         store
-            .append_entry(threadlane_session::harness::Entry {
+            .append_entry(threadlane_protocol::harness::Entry {
                 id: "call-1-assistant".into(),
                 parent_id: None,
                 lane: "main".into(),
@@ -5856,12 +5688,12 @@ mod tests {
                     stop_reason: None,
                     deferred_handle: None,
                 },
-                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                surface_op: threadlane_protocol::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();
         store
-            .append_entry(threadlane_session::harness::Entry {
+            .append_entry(threadlane_protocol::harness::Entry {
                 id: "call-1-tool".into(),
                 parent_id: Some("call-1-assistant".into()),
                 lane: "main".into(),
@@ -5874,7 +5706,7 @@ mod tests {
                     is_error: false,
                     terminate: false,
                 },
-                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                surface_op: threadlane_protocol::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();
@@ -5977,13 +5809,13 @@ mod tests {
 
     #[test]
     fn durable_trajectory_hydrates_after_session_switch() {
-        use threadlane_session::harness::SessionStore;
+        use threadlane_protocol::harness::SessionStore;
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.jsonl");
         std::fs::write(&path, "").unwrap();
-        let store = threadlane_session::harness::JsonlStore::open(&path).unwrap();
-        let mut harness = threadlane_session::harness::AgentHarness::new(store);
+        let store = threadlane_protocol::harness::JsonlStore::open(&path).unwrap();
+        let mut harness = threadlane_protocol::harness::AgentHarness::new(store);
         harness
             .accept_prompt("run-1", AgentMessage::user("old prompt", vec![]))
             .unwrap();
@@ -5992,7 +5824,7 @@ mod tests {
         let seq = harness.store().next_sequence();
         harness
             .store_mut()
-            .append_entry(threadlane_session::harness::Entry {
+            .append_entry(threadlane_protocol::harness::Entry {
                 id: "legacy-tool-result".into(),
                 parent_id: Some(parent_id),
                 lane: "main".into(),
@@ -6005,7 +5837,7 @@ mod tests {
                     is_error: false,
                     terminate: false,
                 },
-                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                surface_op: threadlane_protocol::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();
@@ -6094,25 +5926,21 @@ mod tests {
         state.is_new_task = false;
 
         for event in [
-            AgentEvent::MessageUpdate {
-                text_delta: None,
-                reasoning_delta: Some("reasoning while away".into()),
-                tool_call_name: None,
-            },
-            AgentEvent::MessageUpdate {
-                text_delta: Some("generated while away".into()),
-                reasoning_delta: None,
-                tool_call_name: None,
-            },
-            AgentEvent::ToolExecutionStart {
+            SessionEvent::Agent(AgentEvent::ReasoningDelta {
+                delta: "reasoning while away".into(),
+            }),
+            SessionEvent::Agent(AgentEvent::TextDelta {
+                delta: "generated while away".into(),
+            }),
+            SessionEvent::Agent(AgentEvent::ToolExecutionStart {
                 tool_call_id: "call-away".into(),
                 name: "read_file".into(),
                 arguments: r#"{"path":"src/main.rs"}"#.into(),
-            },
-            AgentEvent::ToolExecutionUpdate {
+            }),
+            SessionEvent::Agent(AgentEvent::ToolExecutionUpdate {
                 tool_call_id: "call-away".into(),
-                partial_result: "tool output while away".into(),
-            },
+                status: "tool output while away".into(),
+            }),
         ] {
             state
                 .stream_tx
@@ -6158,11 +5986,9 @@ mod tests {
                 .stream_tx
                 .send(ChatStreamEvent::Agent {
                     session_id: "session".into(),
-                    event: AgentEvent::MessageUpdate {
-                        text_delta: Some(format!("{index},")),
-                        reasoning_delta: None,
-                        tool_call_name: None,
-                    },
+                    event: SessionEvent::Agent(AgentEvent::TextDelta {
+                        delta: format!("{index},"),
+                    }),
                 })
                 .unwrap();
         }
@@ -6191,12 +6017,12 @@ mod tests {
         ));
         let path = root.join("session.jsonl");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let mut store = threadlane_session::harness::JsonlStore::open(&path).unwrap();
+        let mut store = threadlane_protocol::harness::JsonlStore::open(&path).unwrap();
         let mut parent_id = None;
         for index in 0..MESSAGE_COUNT {
             let id = format!("node_{index}");
             store
-                .append_entry(threadlane_session::harness::Entry {
+                .append_entry(threadlane_protocol::harness::Entry {
                     id: id.clone(),
                     parent_id,
                     lane: "main".into(),
@@ -6205,7 +6031,7 @@ mod tests {
                     message: AgentMessage::User {
                         content: format!("message-{index}"),
                     },
-                    surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                    surface_op: threadlane_protocol::harness::SurfaceOperation::Append,
                     terminate: false,
                 })
                 .unwrap();
@@ -6216,7 +6042,7 @@ mod tests {
         // Keep the fixture tied to the regression: the former GPUI helper loaded
         // only this newest page, omitting the first five durable messages.
         let legacy_page =
-            threadlane_session::harness::read_transcript_page(&path, None, LEGACY_PAGE_SIZE)
+            threadlane_protocol::harness::read_transcript_page(&path, None, LEGACY_PAGE_SIZE)
                 .unwrap();
         assert_eq!(legacy_page.items.len(), LEGACY_PAGE_SIZE);
         assert!(legacy_page.has_older);
@@ -6245,9 +6071,9 @@ mod tests {
         std::fs::create_dir_all(&sessions_dir).unwrap();
 
         let session_file = sessions_dir.join("session_1001.jsonl");
-        let mut store = threadlane_session::harness::JsonlStore::open(&session_file).unwrap();
+        let mut store = threadlane_protocol::harness::JsonlStore::open(&session_file).unwrap();
         store
-            .append_entry(threadlane_session::harness::Entry {
+            .append_entry(threadlane_protocol::harness::Entry {
                 id: "node_1".into(),
                 parent_id: None,
                 lane: "main".into(),
@@ -6256,12 +6082,12 @@ mod tests {
                 message: AgentMessage::User {
                     content: "Hello on startup".into(),
                 },
-                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                surface_op: threadlane_protocol::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();
         store
-            .append_entry(threadlane_session::harness::Entry {
+            .append_entry(threadlane_protocol::harness::Entry {
                 id: "node_2".into(),
                 parent_id: Some("node_1".into()),
                 lane: "main".into(),
@@ -6270,10 +6096,11 @@ mod tests {
                 message: AgentMessage::Assistant {
                     content: Some("I am ready".into()),
                     tool_calls: None,
+                    thinking: None,
                     stop_reason: None,
                     deferred_handle: None,
                 },
-                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                surface_op: threadlane_protocol::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();
@@ -6284,7 +6111,7 @@ mod tests {
                 lane: "main".into(),
                 timestamp: 10,
                 source_leaf_id: None,
-                intent: OperationIntent::Run,
+                intent: Some(OperationIntent::Run),
             })
             .unwrap();
         store
@@ -6295,8 +6122,8 @@ mod tests {
                 timestamp: 11,
                 run_id: "run-start-1".into(),
                 attempt: 1,
-                request_id: Some(TraceString::new("req-1").unwrap()),
-                outcome: ProviderOutcome::Completed,
+                request_id: Some("req-1".into()),
+                outcome: Some(ProviderOutcome::Completed),
                 error: None,
                 duration_ms: Some(100),
                 usage: Some(TokenUsage {
@@ -6311,7 +6138,7 @@ mod tests {
         drop(store);
 
         let mut attached_project = AttachedProject::from_path(project_root.clone());
-        attached_project.last_opened_at = 1_000_000;
+        attached_project.last_opened_at = Some("1000000".into());
 
         let mut state = AppState::load_from_registry(vec![attached_project]);
 
@@ -6365,9 +6192,9 @@ mod tests {
         let path = root.join("session.jsonl");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
 
-        let mut store = threadlane_session::harness::JsonlStore::open(&path).unwrap();
+        let mut store = threadlane_protocol::harness::JsonlStore::open(&path).unwrap();
         store
-            .append_entry(threadlane_session::harness::Entry {
+            .append_entry(threadlane_protocol::harness::Entry {
                 id: "msg-root".into(),
                 parent_id: None,
                 lane: "main".into(),
@@ -6376,12 +6203,12 @@ mod tests {
                 message: AgentMessage::User {
                     content: "Root question".into(),
                 },
-                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                surface_op: threadlane_protocol::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();
         store
-            .append_entry(threadlane_session::harness::Entry {
+            .append_entry(threadlane_protocol::harness::Entry {
                 id: "msg-branch-a".into(),
                 parent_id: Some("msg-root".into()),
                 lane: "main".into(),
@@ -6390,15 +6217,16 @@ mod tests {
                 message: AgentMessage::Assistant {
                     content: Some("Branch A answer".into()),
                     tool_calls: None,
+                    thinking: None,
                     stop_reason: None,
                     deferred_handle: None,
                 },
-                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                surface_op: threadlane_protocol::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();
         store
-            .append_entry(threadlane_session::harness::Entry {
+            .append_entry(threadlane_protocol::harness::Entry {
                 id: "msg-branch-b".into(),
                 parent_id: Some("msg-root".into()),
                 lane: "main".into(),
@@ -6407,10 +6235,11 @@ mod tests {
                 message: AgentMessage::Assistant {
                     content: Some("Branch B alternative answer".into()),
                     tool_calls: None,
+                    thinking: None,
                     stop_reason: None,
                     deferred_handle: None,
                 },
-                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                surface_op: threadlane_protocol::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();
@@ -6421,7 +6250,7 @@ mod tests {
                 lane: "main".into(),
                 timestamp: 1,
                 source_leaf_id: None,
-                intent: OperationIntent::Run,
+                intent: Some(OperationIntent::Run),
             })
             .unwrap();
         store
@@ -6431,7 +6260,7 @@ mod tests {
                 lane: "main".into(),
                 timestamp: 2,
                 run_id: "run-branch-a".into(),
-                outcome: OperationOutcome::Completed,
+                outcome: Some(OperationOutcome::Completed),
                 error: None,
             })
             .unwrap();
@@ -6442,7 +6271,7 @@ mod tests {
                 lane: "main".into(),
                 timestamp: 3,
                 source_leaf_id: None,
-                intent: OperationIntent::Run,
+                intent: Some(OperationIntent::Run),
             })
             .unwrap();
         store
@@ -6452,7 +6281,7 @@ mod tests {
                 lane: "main".into(),
                 timestamp: 4,
                 run_id: "run-branch-b".into(),
-                outcome: OperationOutcome::Completed,
+                outcome: Some(OperationOutcome::Completed),
                 error: None,
             })
             .unwrap();

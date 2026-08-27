@@ -33,9 +33,11 @@ pub enum PermissionDecision {
     Allow {
         scope: PermissionScope,
     },
-    Deny {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        reason: Option<String>,
+    AllowOnce,
+    AllowAlways,
+    Deny,
+    DenyWithReason {
+        reason: String,
     },
     AllowWithModifications {
         scope: PermissionScope,

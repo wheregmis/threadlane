@@ -261,15 +261,15 @@ fn session_pr_info<'a>(
     session: &SessionInfo,
     prs: &'a std::collections::HashMap<
         (std::path::PathBuf, String),
-        Option<threadlane_git::GitHubPrInfo>,
+        Option<threadlane_protocol::git::GitHubPrInfo>,
     >,
-) -> Option<&'a threadlane_git::GitHubPrInfo> {
+) -> Option<&'a threadlane_protocol::git::GitHubPrInfo> {
     let branch = session.git_branch.as_ref()?;
     prs.get(&(session.work_dir.clone(), branch.clone()))
         .and_then(Option::as_ref)
 }
 
-fn pr_status_label(pr: &threadlane_git::GitHubPrInfo) -> &'static str {
+fn pr_status_label(pr: &threadlane_protocol::git::GitHubPrInfo) -> &'static str {
     if pr.state.eq_ignore_ascii_case("merged") {
         "Merged"
     } else if pr.is_draft || pr.state.eq_ignore_ascii_case("draft") {
@@ -281,7 +281,7 @@ fn pr_status_label(pr: &threadlane_git::GitHubPrInfo) -> &'static str {
     }
 }
 
-fn pr_status_tooltip(pr: &threadlane_git::GitHubPrInfo) -> String {
+fn pr_status_tooltip(pr: &threadlane_protocol::git::GitHubPrInfo) -> String {
     format!(
         "PR #{} · {}\n{}\n{} → {}\nChecks: {} passed · {} pending · {} failed\nDiscussion: {} comments · {} review comments\n{}",
         pr.number,
@@ -1416,9 +1416,7 @@ mod tests {
         same_history_row_identity, session_pr_info, sidebar_session_fingerprint, DateGroup,
         HistoryRow,
     };
-    use crate::state::{SessionHealth, SessionInfo};
-    use std::collections::HashMap;
-    use threadlane_git::GitHubPrInfo;
+    use threadlane_protocol::git::GitHubPrInfo;
 
     fn session(id: &str) -> SessionInfo {
         SessionInfo {

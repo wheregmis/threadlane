@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use threadlane_session::{ImageAttachment, ReasoningEffort};
+use threadlane_protocol::{ImageAttachment, ReasoningEffort};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AppAction {

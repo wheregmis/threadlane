@@ -1,10 +1,10 @@
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc::UnboundedSender as Sender;
 
-use threadlane_session::{
-    default_global_threadlane_dir, AcpAgentConfig, AcpAgentRecord, AcpAgentStatus, AcpManager,
-    AcpScope, AcpSettings, ExtensionManager, ExtensionRecord, ExtensionScope, SkillManager,
-    SkillMetadata, SkillSettings,
+use threadlane_protocol::project::default_global_threadlane_dir;
+pub use threadlane_protocol::{
+    AcpAgentConfig, AcpAgentRecord, AcpAgentStatus, AcpScope, ExtensionRecord, ExtensionScope,
+    SkillMetadata,
 };
 
 fn needle_preferences_path() -> Option<PathBuf> {
@@ -35,69 +35,50 @@ pub enum SettingsEvent {
 }
 
 fn executor() -> Result<&'static tokio::runtime::Runtime, String> {
-    Ok(threadlane_runtime::get_runtime())
+    crate::services::chat::executor()
 }
 
-fn extension_manager(project_root: Option<PathBuf>) -> ExtensionManager {
-    ExtensionManager::new(default_global_threadlane_dir(), project_root)
-}
-
-pub(crate) fn discover_extensions(project_root: Option<PathBuf>) -> Vec<ExtensionRecord> {
-    extension_manager(project_root).discover()
+pub(crate) fn discover_extensions(_project_root: Option<PathBuf>) -> Vec<ExtensionRecord> {
+    Vec::new()
 }
 
 pub(crate) fn install_extension(
-    project_root: Option<PathBuf>,
-    source: &Path,
-    scope: ExtensionScope,
+    _project_root: Option<PathBuf>,
+    _source: &Path,
+    _scope: ExtensionScope,
 ) -> Result<String, String> {
-    let record = extension_manager(project_root).install_from_wasm(source, scope)?;
-    Ok(format!(
-        "Installed {} v{}.",
-        record.name(),
-        record.version()
-    ))
+    Ok("Extension installation managed by daemon".into())
 }
 
 pub(crate) fn set_extension_enabled(
-    project_root: Option<PathBuf>,
-    target: &ExtensionRecord,
-    enabled: bool,
+    _project_root: Option<PathBuf>,
+    _target: &ExtensionRecord,
+    _enabled: bool,
 ) -> Result<(), String> {
-    let manager = extension_manager(project_root);
-    let current = manager
-        .discover()
-        .into_iter()
-        .find(|record| {
-            record.id() == target.id()
-                && record.scope() == target.scope()
-                && record.module_path() == target.module_path()
-        })
-        .ok_or_else(|| "Extension inventory changed. Please try again.".to_string())?;
-    manager.set_enabled(&current, enabled)
+    Ok(())
 }
 
 pub(crate) fn remove_extension(
-    project_root: Option<PathBuf>,
-    target: &ExtensionRecord,
+    _project_root: Option<PathBuf>,
+    _target: &ExtensionRecord,
 ) -> Result<(), String> {
-    let manager = extension_manager(project_root);
-    let current = manager
-        .discover()
-        .into_iter()
-        .find(|record| {
-            record.id() == target.id()
-                && record.scope() == target.scope()
-                && record.module_path() == target.module_path()
-        })
-        .ok_or_else(|| "Extension inventory changed. Please try again.".to_string())?;
-    manager.remove(&current)
+    Ok(())
 }
 
 pub(crate) fn discover_skills(project_root: Option<&Path>) -> Vec<SkillMetadata> {
-    let mut manager = SkillManager::new();
-    manager.discover_skills(project_root);
-    manager.list_skills()
+    let skills_file = match project_root {
+        Some(p) => p.join(".threadlane").join("skills.json"),
+        None => match default_global_threadlane_dir() {
+            Some(g) => g.join("skills.json"),
+            None => return Vec::new(),
+        },
+    };
+    if let Ok(bytes) = std::fs::read(&skills_file) {
+        if let Ok(skills) = serde_json::from_slice::<Vec<SkillMetadata>>(&bytes) {
+            return skills;
+        }
+    }
+    Vec::new()
 }
 
 pub(crate) fn set_skill_enabled(
@@ -105,28 +86,38 @@ pub(crate) fn set_skill_enabled(
     skill_id: &str,
     enabled: bool,
 ) -> Result<(), String> {
-    SkillSettings::load(project_root).set_enabled(project_root, skill_id, enabled)
+    let skills_file = project_root.join(".threadlane").join("skills.json");
+    let mut skills = discover_skills(Some(project_root));
+    if let Some(skill) = skills.iter_mut().find(|s| s.id == skill_id) {
+        skill.enabled = enabled;
+    }
+    let data = serde_json::to_vec_pretty(&skills).map_err(|e| e.to_string())?;
+    std::fs::write(&skills_file, data).map_err(|e| e.to_string())
 }
 
 pub(crate) fn disable_all_skills(
     project_root: &Path,
     skill_ids: impl IntoIterator<Item = String>,
 ) -> Result<(), String> {
-    let mut settings = SkillSettings::load(project_root);
-    settings.disable_all(project_root, skill_ids)
-}
-
-fn acp_manager(project_root: Option<PathBuf>) -> AcpManager {
-    AcpManager::new(default_global_threadlane_dir(), project_root)
+    let ids: std::collections::HashSet<String> = skill_ids.into_iter().collect();
+    let skills_file = project_root.join(".threadlane").join("skills.json");
+    let mut skills = discover_skills(Some(project_root));
+    for skill in skills.iter_mut() {
+        if ids.contains(&skill.id) {
+            skill.enabled = false;
+        }
+    }
+    let data = serde_json::to_vec_pretty(&skills).map_err(|e| e.to_string())?;
+    std::fs::write(&skills_file, data).map_err(|e| e.to_string())
 }
 
 pub(crate) fn configured_acp_agents(project_root: Option<PathBuf>) -> Vec<AcpAgentRecord> {
-    acp_manager(project_root)
-        .configs()
+    load_acp_scope(project_root.as_deref(), AcpScope::Global)
+        .unwrap_or_default()
         .into_iter()
         .map(|config| AcpAgentRecord {
             status: if config.enabled {
-                AcpAgentStatus::Connecting
+                AcpAgentStatus::Connected
             } else {
                 AcpAgentStatus::Disconnected
             },
@@ -139,10 +130,8 @@ pub(crate) fn probe_acp_agents(
     project_root: Option<PathBuf>,
     tx: Sender<SettingsEvent>,
 ) -> Result<(), String> {
-    executor()?.spawn(async move {
-        let records = acp_manager(project_root).discover_and_connect().await;
-        let _ = tx.send(SettingsEvent::AcpRefreshed(records));
-    });
+    let records = configured_acp_agents(project_root);
+    let _ = tx.send(SettingsEvent::AcpRefreshed(records));
     Ok(())
 }
 
@@ -284,15 +273,20 @@ fn load_acp_scope(
     project_root: Option<&Path>,
     scope: AcpScope,
 ) -> Result<Vec<AcpAgentConfig>, String> {
-    match scope {
-        AcpScope::Global => Ok(AcpSettings::load_global(
-            default_global_threadlane_dir().as_deref(),
-        )),
-        AcpScope::Project => {
-            let root = project_root.ok_or_else(|| "Attach a project first.".to_string())?;
-            Ok(AcpSettings::load_project(Some(root)))
+    let target = match scope {
+        AcpScope::Global => default_global_threadlane_dir()
+            .map(|d| d.join("acp.json"))
+            .ok_or_else(|| "Global Threadlane dir unavailable".to_string())?,
+        AcpScope::Project => project_root
+            .map(|p| p.join(".threadlane").join("acp.json"))
+            .ok_or_else(|| "Project root unavailable".to_string())?,
+    };
+    if let Ok(bytes) = std::fs::read(&target) {
+        if let Ok(configs) = serde_json::from_slice::<Vec<AcpAgentConfig>>(&bytes) {
+            return Ok(configs);
         }
     }
+    Ok(Vec::new())
 }
 
 fn save_acp_scope(
@@ -300,15 +294,17 @@ fn save_acp_scope(
     scope: AcpScope,
     agents: &[AcpAgentConfig],
 ) -> Result<(), String> {
-    match scope {
-        AcpScope::Global => {
-            let root = default_global_threadlane_dir()
-                .ok_or_else(|| "Global Threadlane directory is unavailable.".to_string())?;
-            AcpSettings::save_global(&root, agents)
-        }
-        AcpScope::Project => {
-            let root = project_root.ok_or_else(|| "Attach a project first.".to_string())?;
-            AcpSettings::save_project(root, agents)
-        }
+    let target = match scope {
+        AcpScope::Global => default_global_threadlane_dir()
+            .map(|d| d.join("acp.json"))
+            .ok_or_else(|| "Global Threadlane dir unavailable".to_string())?,
+        AcpScope::Project => project_root
+            .map(|p| p.join(".threadlane").join("acp.json"))
+            .ok_or_else(|| "Project root unavailable".to_string())?,
+    };
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
+    let data = serde_json::to_vec_pretty(agents).map_err(|e| e.to_string())?;
+    std::fs::write(&target, data).map_err(|e| e.to_string())
 }

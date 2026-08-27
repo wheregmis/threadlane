@@ -4,9 +4,7 @@ use std::path::PathBuf;
 use threadlane_gpui::assets::Assets;
 use threadlane_gpui::screens::workspace::WorkspaceView;
 use threadlane_gpui::theme;
-use threadlane_session::{CodingAgentOptions, HarnessCompositionSnapshot};
-use threadlane_skills::SkillManager;
-use threadlane_wasi::{packages::default_global_threadlane_dir, WasiExtensionManager};
+use threadlane_protocol::HarnessCompositionSnapshot;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 fn dump_config(args: &[String]) -> Result<(), String> {
@@ -24,31 +22,30 @@ fn dump_config(args: &[String]) -> Result<(), String> {
         .iter()
         .position(|arg| arg == "--session")
         .and_then(|index| args.get(index + 1))
-        .map(PathBuf::from);
+        .map(|s| PathBuf::from(s).to_string_lossy().to_string());
     let model = args
         .iter()
         .position(|arg| arg == "--model")
         .and_then(|index| args.get(index + 1))
         .cloned()
         .unwrap_or_else(|| "gpt-4o".into());
-    let options = CodingAgentOptions {
-        api_key: String::new(),
-        account_id: None,
-        model,
-        work_dir: project.clone(),
+
+    let snapshot = HarnessCompositionSnapshot {
+        active_lane: "main".into(),
         session_file,
-        system_prompt: Default::default(),
-        agent_config: None,
-        coding_config: None,
+        model: model.clone(),
+        provider: if model.starts_with("antigravity/") {
+            "antigravity".into()
+        } else if model.starts_with("opencode-go/") {
+            "opencode".into()
+        } else {
+            "openai".into()
+        },
+        skills: Vec::new(),
+        extensions: Vec::new(),
+        sandbox_policy: "workspace-write".into(),
     };
-    let mut manager = SkillManager::new();
-    manager.discover_skills(Some(&project));
-    let skills = manager.snapshot();
-    let extensions = WasiExtensionManager::for_project_session(&project, "dump-config");
-    extensions
-        .reload_from_roots(default_global_threadlane_dir().as_deref(), Some(&project))
-        .map_err(|error| error.to_string())?;
-    let snapshot = HarnessCompositionSnapshot::resolved(&options, &skills, &extensions);
+
     println!("active_lane={}", snapshot.active_lane);
     println!(
         "session_file={}",

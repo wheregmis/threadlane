@@ -191,8 +191,9 @@ fn context_meter_view_model(
         provisional: context.provisional,
     }
 }
-use threadlane_session::commands::{available_slash_commands, SlashCommandInfo};
-use threadlane_session::{ImageAttachment, PlanItemStatus, ReasoningEffort, SessionPlan};
+
+use threadlane_protocol::commands::{available_slash_commands, SlashCommandInfo};
+use threadlane_protocol::{ImageAttachment, PlanItemStatus, ReasoningEffort, SessionPlan};
 
 actions!(
     threadlane_composer,
@@ -1118,12 +1119,12 @@ impl ChatListView {
 
             let mime_type = image.format.mime_type();
             let extension = mime_type.strip_prefix("image/").unwrap_or("png");
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&image.bytes);
             self.pasted_images.push(ImageAttachment {
-                display_name: format!("Pasted image {}.{extension}", self.pasted_images.len() + 1),
-                data_url: format!(
-                    "data:{mime_type};base64,{}",
-                    base64::engine::general_purpose::STANDARD.encode(image.bytes)
-                ),
+                mime_type: mime_type.to_string(),
+                data: encoded.clone(),
+                display_name: Some(format!("Pasted image {}.{extension}", self.pasted_images.len() + 1)),
+                data_url: Some(format!("data:{mime_type};base64,{}", encoded)),
             });
             pasted += 1;
         }
@@ -3332,19 +3333,22 @@ impl ChatListView {
             ),
             MessageRole::Advisor(severity) => {
                 let (badge_text, bg_color, border_color, text_color) = match severity {
-                    threadlane_session::AdvisorSeverity::Aside => (
+                    threadlane_protocol::AdvisorSeverity::Aside
+                    | threadlane_protocol::AdvisorSeverity::Info => (
                         "ADVISOR ASIDE",
                         theme.secondary,
                         theme.border,
                         theme.secondary_foreground,
                     ),
-                    threadlane_session::AdvisorSeverity::Concern => (
+                    threadlane_protocol::AdvisorSeverity::Concern
+                    | threadlane_protocol::AdvisorSeverity::Warning => (
                         "ADVISOR CONCERN",
                         theme.warning,
                         theme.warning,
                         theme.warning_foreground,
                     ),
-                    threadlane_session::AdvisorSeverity::Blocker => (
+                    threadlane_protocol::AdvisorSeverity::Blocker
+                    | threadlane_protocol::AdvisorSeverity::Critical => (
                         "ADVISOR BLOCKER",
                         theme.danger,
                         theme.danger,
@@ -3543,7 +3547,7 @@ impl ChatListView {
     fn resolve_pending_permission(
         &mut self,
         request_id: &str,
-        decision: threadlane_session::PermissionDecision,
+        decision: threadlane_protocol::PermissionDecision,
         cx: &mut Context<Self>,
     ) {
         self.permission_details_open = false;
@@ -3686,9 +3690,9 @@ impl ChatListView {
             };
             if let Some(request) = request {
                 let decision = match key {
-                    "y" | "Y" | "enter" => Some(threadlane_session::PermissionDecision::AllowOnce),
-                    "a" | "A" => Some(threadlane_session::PermissionDecision::AllowAlways),
-                    "n" | "N" => Some(threadlane_session::PermissionDecision::Deny),
+                    "y" | "Y" | "enter" => Some(threadlane_protocol::PermissionDecision::AllowOnce),
+                    "a" | "A" => Some(threadlane_protocol::PermissionDecision::AllowAlways),
+                    "n" | "N" => Some(threadlane_protocol::PermissionDecision::Deny),
                     _ => None,
                 };
                 if let Some(decision) = decision {
@@ -3764,7 +3768,7 @@ impl ChatListView {
 
         let action_button = |id: &'static str,
                              label: &'static str,
-                             decision: threadlane_session::PermissionDecision,
+                             decision: threadlane_protocol::PermissionDecision,
                              primary: bool,
                              danger: bool| {
             let request_id = request.id.clone();
@@ -3774,7 +3778,7 @@ impl ChatListView {
                 .when(primary, |button| button.primary())
                 .when(danger, |button| button.danger())
                 .on_click(cx.listener(move |this, _event, _window, cx| {
-                    this.resolve_pending_permission(&request_id, decision, cx);
+                    this.resolve_pending_permission(&request_id, decision.clone(), cx);
                 }))
         };
 
@@ -3880,21 +3884,21 @@ impl ChatListView {
                                         .child(action_button(
                                             "details-deny",
                                             "Deny [N]",
-                                            threadlane_session::PermissionDecision::Deny,
+                                            threadlane_protocol::PermissionDecision::Deny,
                                             false,
                                             true,
                                         ))
                                         .child(action_button(
                                             "details-allow-once",
                                             "Allow once [Y]",
-                                            threadlane_session::PermissionDecision::AllowOnce,
+                                            threadlane_protocol::PermissionDecision::AllowOnce,
                                             true,
                                             false,
                                         ))
                                         .child(action_button(
                                             "details-allow-always",
                                             "Always [A]",
-                                            threadlane_session::PermissionDecision::AllowAlways,
+                                            threadlane_protocol::PermissionDecision::AllowAlways,
                                             false,
                                             false,
                                         )),
@@ -3913,7 +3917,7 @@ impl ChatListView {
 
         let action_button = |id: &'static str,
                              label: &'static str,
-                             decision: threadlane_session::PermissionDecision,
+                             decision: threadlane_protocol::PermissionDecision,
                              primary: bool,
                              danger: bool| {
             let request_id = request.id.clone();
@@ -3923,7 +3927,7 @@ impl ChatListView {
                 .when(primary, |button| button.primary())
                 .when(danger, |button| button.danger())
                 .on_click(cx.listener(move |this, _event, _window, cx| {
-                    this.resolve_pending_permission(&request_id, decision, cx);
+                    this.resolve_pending_permission(&request_id, decision.clone(), cx);
                 }))
         };
 
@@ -3992,21 +3996,21 @@ impl ChatListView {
                         .child(action_button(
                             "permission-deny",
                             "Deny [N]",
-                            threadlane_session::PermissionDecision::Deny,
+                            threadlane_protocol::PermissionDecision::Deny,
                             false,
                             true,
                         ))
                         .child(action_button(
                             "permission-allow-once",
                             "Allow once [Y]",
-                            threadlane_session::PermissionDecision::AllowOnce,
+                            threadlane_protocol::PermissionDecision::AllowOnce,
                             true,
                             false,
                         ))
                         .child(action_button(
                             "permission-allow-always",
                             "Always [A]",
-                            threadlane_session::PermissionDecision::AllowAlways,
+                            threadlane_protocol::PermissionDecision::AllowAlways,
                             false,
                             false,
                         )),
@@ -4436,13 +4440,12 @@ impl ChatListView {
         // Selecting an ACP agent picks the *agent*; the agent then runs one of
         // its own models. Both are "which model am I on", so both belong in
         // this one control rather than split across two.
-        let acp_model_option = threadlane_session::is_acp_model(&selected_model)
+        let acp_model_option = threadlane_protocol::is_acp_model(&selected_model)
             .then(|| {
-                threadlane_session::config_option_for(
+                threadlane_protocol::config_option_for(
                     self.model.read(cx).active_acp_config_options(),
-                    threadlane_session::ACP_CONFIG_CATEGORY_MODEL,
+                    threadlane_protocol::ACP_CONFIG_CATEGORY_MODEL,
                 )
-                .cloned()
             })
             .flatten();
         let acp_model_menu_model = self.model.clone();
@@ -4475,7 +4478,7 @@ impl ChatListView {
                     .bg(theme.secondary)
                     .text_xs()
                     .child("▣")
-                    .child(name)
+                    .child(name.unwrap_or_default())
                     .child(
                         Button::new(("remove-pasted-image", index))
                             .icon(IconName::Close)
@@ -4839,7 +4842,7 @@ impl ChatListView {
             let menu = menu
                 .item(PopupMenuItem::separator())
                 .item(PopupMenuItem::label(acp_model.name.clone()));
-            acp_model.options.iter().fold(menu, |menu, choice| {
+            acp_model.choices.iter().fold(menu, |menu, choice| {
                 let model = acp_model_menu_model.clone();
                 let config_id = config_id.clone();
                 let value = choice.value.clone();
@@ -5047,7 +5050,7 @@ impl ChatListView {
                 output_tokens: metrics.output_tokens,
                 cache_hit_percent: metrics.cache_hit_percent(),
             },
-            !threadlane_session::is_acp_model(&selected_model),
+            !threadlane_protocol::is_acp_model(&selected_model),
         );
         let displayed_percent = meter.percent.unwrap_or_default();
         let meter_color = if meter.percent.is_none() || displayed_percent == 0.0 {

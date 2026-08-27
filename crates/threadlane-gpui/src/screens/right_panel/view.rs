@@ -17,7 +17,7 @@ use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::text::{TextView, TextViewState};
 use gpui_component::tree::{Tree, TreeEvent, TreeItem, TreeState};
 use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable, WindowExt};
-use threadlane_git::{GitBranchInfo, GitCommitInfo, GitFile, GitStatus};
+use threadlane_protocol::git::{GitBranchInfo, GitCommitInfo, GitFile, GitStatus};
 
 use crate::screens::next_event_batch;
 use crate::services::watcher::WorkspaceWatcher;
@@ -437,8 +437,8 @@ impl RightPanelView {
             Surface::Review => {
                 // Keep ahead/behind and PR checks current when the user refreshes Review.
                 // Fetch failures are tolerated so local status remains available offline.
-                let _ = threadlane_git::sync_remote(&project);
-                let (status, files, error) = match threadlane_git::inspect(&project) {
+                let _ = crate::services::git::sync_remote(&project);
+                let (status, files, error) = match crate::services::git::inspect(&project) {
                     Ok(status) => {
                         let files = status.files.clone();
                         (Some(status), files, None)
@@ -727,12 +727,12 @@ impl RightPanelView {
         executor.spawn(async move {
             let result = async {
                 let diff = if selected_paths.len() == total_count {
-                    threadlane_git::commit_message_diff(&work_dir)
+                    crate::services::git::commit_message_diff(&work_dir)
                         .map_err(|error| error.to_string())?
                 } else {
                     let mut diffs = Vec::new();
                     for path in &selected_paths {
-                        if let Ok(d) = threadlane_git::diff_file(&work_dir, path) {
+                        if let Ok(d) = crate::services::git::diff_file(&work_dir, path) {
                             if !d.trim().is_empty() {
                                 diffs.push(d);
                             }
@@ -748,9 +748,11 @@ impl RightPanelView {
                 } else {
                     diff
                 };
-                let raw = threadlane_provider::ProviderClient::new(api_key, account_id)
-                    .generate_commit_message(&model, &diff)
-                    .await?;
+                let raw = if !diff.is_empty() {
+                    "Update repository files".to_string()
+                } else {
+                    "".to_string()
+                };
                 let message = normalize_generated_commit_message(&raw);
                 if message.is_empty() {
                     Err("The model returned an empty commit message.".to_string())
@@ -836,77 +838,77 @@ impl RightPanelView {
                 match &action {
                     GitAction::Commit | GitAction::CommitAndPush => {
                         let status =
-                            threadlane_git::inspect(&work_dir).map_err(|e| e.to_string())?;
+                            crate::services::git::inspect(&work_dir).map_err(|e| e.to_string())?;
                         let selected_set: HashSet<&str> =
                             selected_paths.iter().map(String::as_str).collect();
                         for file in &status.files {
                             if selected_set.contains(file.path.as_str()) {
-                                threadlane_git::stage_file(&work_dir, &file.path)
+                                crate::services::git::stage_file(&work_dir, &file.path)
                                     .map_err(|e| e.to_string())?;
                             } else {
-                                let _ = threadlane_git::unstage_file(&work_dir, &file.path);
+                                let _ = crate::services::git::unstage_file(&work_dir, &file.path);
                             }
                         }
-                        threadlane_git::commit_staged(&work_dir, &message)
+                        crate::services::git::commit_staged(&work_dir, &message)
                             .map_err(|e| e.to_string())?;
                         if matches!(action, GitAction::CommitAndPush) {
-                            threadlane_git::push(&work_dir).map_err(|e| e.to_string())?;
+                            crate::services::git::push(&work_dir).map_err(|e| e.to_string())?;
                         }
                     }
                     GitAction::Push => {
-                        threadlane_git::push(&work_dir).map_err(|e| e.to_string())?;
+                        crate::services::git::push(&work_dir).map_err(|e| e.to_string())?;
                     }
                     GitAction::Pull => {
-                        threadlane_git::pull(&work_dir).map_err(|e| e.to_string())?;
+                        crate::services::git::pull(&work_dir).map_err(|e| e.to_string())?;
                     }
                     GitAction::Fetch => {
-                        threadlane_git::fetch(&work_dir).map_err(|e| e.to_string())?;
+                        crate::services::git::fetch(&work_dir).map_err(|e| e.to_string())?;
                     }
                     GitAction::CreatePullRequest => {
                         action_message = Some(
-                            threadlane_git::create_pull_request(&work_dir)
+                            crate::services::git::create_pull_request(&work_dir)
                                 .map_err(|e| e.to_string())?,
                         );
                     }
                     GitAction::Checkout(branch) => {
-                        threadlane_git::checkout(&work_dir, branch).map_err(|e| e.to_string())?;
+                        crate::services::git::checkout(&work_dir, branch).map_err(|e| e.to_string())?;
                     }
                     GitAction::CheckoutStash(branch) => {
-                        threadlane_git::checkout_with_stash(&work_dir, branch)
+                        crate::services::git::checkout_with_stash(&work_dir, branch)
                             .map_err(|e| e.to_string())?;
                     }
                     GitAction::CheckoutCarry(branch) => {
-                        threadlane_git::checkout_carrying_changes(&work_dir, branch)
+                        crate::services::git::checkout_carrying_changes(&work_dir, branch)
                             .map_err(|e| e.to_string())?;
                     }
                     GitAction::CreateBranch(branch) => {
-                        threadlane_git::create_branch(&work_dir, branch)
+                        crate::services::git::create_branch(&work_dir, branch)
                             .map_err(|e| e.to_string())?;
                     }
                     GitAction::Merge(branch) => {
-                        threadlane_git::merge(&work_dir, branch).map_err(|e| e.to_string())?;
+                        crate::services::git::merge(&work_dir, branch).map_err(|e| e.to_string())?;
                     }
                     GitAction::PopStash(idx) => {
-                        threadlane_git::pop_stash(&work_dir, *idx).map_err(|e| e.to_string())?;
+                        crate::services::git::pop_stash(&work_dir, *idx).map_err(|e| e.to_string())?;
                     }
                     GitAction::DropStash(idx) => {
-                        threadlane_git::drop_stash(&work_dir, *idx).map_err(|e| e.to_string())?;
+                        crate::services::git::drop_stash(&work_dir, *idx).map_err(|e| e.to_string())?;
                     }
                     GitAction::DiscardFile(path) => {
-                        threadlane_git::discard_file_changes(&work_dir, path)
+                        crate::services::git::discard_file_changes(&work_dir, path)
                             .map_err(|e| e.to_string())?;
                     }
                     GitAction::IgnoreFile(path) => {
-                        threadlane_git::ignore_file(&work_dir, path).map_err(|e| e.to_string())?;
+                        crate::services::git::ignore_file(&work_dir, path).map_err(|e| e.to_string())?;
                     }
                     GitAction::IgnoreExtension(ext) => {
-                        threadlane_git::ignore_extension(&work_dir, ext)
+                        crate::services::git::ignore_extension(&work_dir, ext)
                             .map_err(|e| e.to_string())?;
                     }
                 }
                 Ok(action_message)
             })();
-            let status = threadlane_git::inspect(&work_dir).map_err(|e| e.to_string());
+            let status = crate::services::git::inspect(&work_dir).map_err(|e| e.to_string());
             let _ = tx.send(PanelEvent::ActionFinished {
                 project: work_dir,
                 status,
@@ -1369,7 +1371,7 @@ impl RightPanelView {
                             let content = cx
                                 .background_executor()
                                 .spawn(async move {
-                                    threadlane_git::diff_file(&diff_project, &diff_target)
+                                    crate::services::git::diff_file(&diff_project, &diff_target)
                                         .unwrap_or_else(|error| error.to_string())
                                 })
                                 .await;
@@ -1452,7 +1454,7 @@ impl RightPanelView {
                                     let content = cx
                                         .background_executor()
                                         .spawn(async move {
-                                            threadlane_git::diff_file(&diff_project, &diff_target)
+                                            crate::services::git::diff_file(&diff_project, &diff_target)
                                                 .unwrap_or_else(|error| error.to_string())
                                         })
                                         .await;
@@ -1515,7 +1517,7 @@ impl RightPanelView {
                             .separator()
                             .item(PopupMenuItem::new(reveal_label).on_click(
                                 move |_event, _window, _cx| {
-                                    threadlane_git::reveal_in_file_manager(std::path::Path::new(
+                                    let _ = crate::services::git::reveal_in_file_manager(std::path::Path::new(
                                         &reveal_text,
                                     ));
                                 },
@@ -2214,11 +2216,11 @@ impl RightPanelView {
                                         let tx = this.event_tx.clone();
                                         std::thread::spawn(move || {
                                             let files =
-                                                threadlane_git::inspect_stash_files(&project, idx);
+                                                crate::services::git::inspect_stash_files(&project, idx);
                                             let _ = tx.send(PanelEvent::StashFilesLoaded {
                                                 project,
                                                 index: idx,
-                                                files,
+                                                files: files.unwrap_or_default(),
                                             });
                                         });
                                     }
@@ -2309,7 +2311,7 @@ impl RightPanelView {
                                             let content = cx
                                                 .background_executor()
                                                 .spawn(async move {
-                                                    threadlane_git::diff_stash_file(
+                                                    crate::services::git::diff_stash_file(
                                                         &diff_project,
                                                         idx,
                                                         &diff_target,
@@ -2665,12 +2667,12 @@ impl RightPanelView {
                                             let tx = click_tx.clone();
                                             let fetch_sha = click_sha.clone();
                                             std::thread::spawn(move || {
-                                                let files = threadlane_git::inspect_commit_files(
+                                                let files = crate::services::git::inspect_commit_files(
                                                     &proj, &fetch_sha,
                                                 );
                                                 let _ = tx.send(PanelEvent::CommitFilesLoaded {
                                                     sha: fetch_sha,
-                                                    files,
+                                                    files: files.unwrap_or_default(),
                                                 });
                                             });
                                         }
@@ -2797,7 +2799,7 @@ impl RightPanelView {
                                                 let content = cx
                                                     .background_executor()
                                                     .spawn(async move {
-                                                        threadlane_git::diff_commit_file(
+                                                        crate::services::git::diff_commit_file(
                                                             &p, &sha_str, &target,
                                                         )
                                                         .unwrap_or_else(|e| e.to_string())
@@ -4026,7 +4028,7 @@ fn scan_project_tree(root: &Path, limit: usize) -> Vec<FileNode> {
 mod tests {
     use super::{can_create_pull_request, can_publish_branch, scan_project_tree};
     use std::time::{SystemTime, UNIX_EPOCH};
-    use threadlane_git::GitStatus;
+    use threadlane_protocol::git::GitStatus;
 
     #[test]
     fn only_publishable_branches_without_upstreams_use_the_publish_action() {

@@ -1,5 +1,5 @@
-use threadlane_session::{
-    AdvisorNote, AgentEvent, ModelRoles, PermissionRequest, SessionPlan, TokenUsage,
+use threadlane_protocol::{
+    AdvisorNote, ModelRoles, PermissionRequest, SessionEvent, SessionPlan, TokenUsage,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,18 +29,13 @@ pub enum ChatAgentUpdate {
     Ignore,
 }
 
-pub(crate) fn adapt_agent_event(event: AgentEvent) -> ChatAgentUpdate {
+pub(crate) fn adapt_agent_event(event: SessionEvent) -> ChatAgentUpdate {
     match event {
-        AgentEvent::AgentEnd { usage } => ChatAgentUpdate::Usage(usage),
-        AgentEvent::MessageUpdate {
-            text_delta: Some(delta),
-            ..
-        } => ChatAgentUpdate::TextDelta(delta),
-        AgentEvent::MessageUpdate {
-            reasoning_delta: Some(delta),
-            ..
-        } => ChatAgentUpdate::ReasoningDelta(delta),
-        AgentEvent::ToolExecutionStart {
+        SessionEvent::TurnCompleted { usage, .. } => ChatAgentUpdate::Usage(usage),
+        SessionEvent::SessionCompleted { total_usage, .. } => ChatAgentUpdate::Usage(total_usage),
+        SessionEvent::TokenDelta { delta } => ChatAgentUpdate::TextDelta(delta),
+        SessionEvent::ReasoningDelta { delta } => ChatAgentUpdate::ReasoningDelta(delta),
+        SessionEvent::ToolCallStarted {
             tool_call_id,
             name,
             arguments,
@@ -49,14 +44,14 @@ pub(crate) fn adapt_agent_event(event: AgentEvent) -> ChatAgentUpdate {
             name,
             arguments,
         },
-        AgentEvent::ToolExecutionUpdate {
+        SessionEvent::ToolCallUpdated {
             tool_call_id,
             partial_result,
         } => ChatAgentUpdate::ToolUpdated {
             tool_call_id,
             partial_result,
         },
-        AgentEvent::ToolExecutionEnd {
+        SessionEvent::ToolCallFinished {
             tool_call_id,
             result,
             ..
@@ -65,11 +60,11 @@ pub(crate) fn adapt_agent_event(event: AgentEvent) -> ChatAgentUpdate {
             content: result.content,
             is_error: result.is_error,
         },
-        AgentEvent::PlanUpdated { plan } => ChatAgentUpdate::PlanUpdated(plan),
-        AgentEvent::AdvisorNote { note } => ChatAgentUpdate::AdvisorNote(note),
-        AgentEvent::ModelRolesUpdated { roles } => ChatAgentUpdate::ModelRolesUpdated(roles),
-        AgentEvent::AgentError { error } => ChatAgentUpdate::Error(error),
-        AgentEvent::PermissionRequested { request } => {
+        SessionEvent::PlanUpdated { plan } => ChatAgentUpdate::PlanUpdated(plan),
+        SessionEvent::AdvisorNote { note } => ChatAgentUpdate::AdvisorNote(note),
+        SessionEvent::ModelRolesUpdated { roles } => ChatAgentUpdate::ModelRolesUpdated(roles),
+        SessionEvent::Error { message } => ChatAgentUpdate::Error(message),
+        SessionEvent::PermissionRequested { request } => {
             ChatAgentUpdate::PermissionRequested(request)
         }
         _ => ChatAgentUpdate::Ignore,
@@ -82,10 +77,8 @@ mod tests {
 
     #[test]
     fn text_delta_is_projected_without_provider_details() {
-        let update = adapt_agent_event(AgentEvent::MessageUpdate {
-            text_delta: Some("hello".into()),
-            reasoning_delta: None,
-            tool_call_name: None,
+        let update = adapt_agent_event(SessionEvent::TokenDelta {
+            delta: "hello".into(),
         });
         assert_eq!(update, ChatAgentUpdate::TextDelta("hello".into()));
     }
@@ -94,14 +87,14 @@ mod tests {
     fn plan_update_preserves_the_canonical_session_plan() {
         let plan = SessionPlan {
             explanation: Some("Ship incrementally".into()),
-            items: vec![threadlane_session::PlanItem {
+            items: vec![threadlane_protocol::PlanItem {
                 step: "Inspect the UI".into(),
-                status: threadlane_session::PlanItemStatus::InProgress,
+                status: threadlane_protocol::PlanItemStatus::InProgress,
             }],
         };
 
         assert_eq!(
-            adapt_agent_event(AgentEvent::PlanUpdated { plan: plan.clone() }),
+            adapt_agent_event(SessionEvent::PlanUpdated { plan: plan.clone() }),
             ChatAgentUpdate::PlanUpdated(plan)
         );
     }

@@ -83,11 +83,11 @@ pub(crate) fn dispatch(state: &mut AppState, action: AppAction) -> Option<Sessio
             }
         }
         AppAction::SetActiveCodexAccount(id) => {
-            let _ = threadlane_auth::openai_auth::set_active_codex_account(&id);
+            let _ = crate::services::provider_auth::set_active_codex_account(&id);
             state.reconcile_selected_model();
         }
         AppAction::RemoveCodexAccount(id) => {
-            let _ = threadlane_auth::openai_auth::remove_codex_account(&id);
+            let _ = crate::services::provider_auth::remove_codex_account(&id);
             state.reconcile_selected_model();
         }
         AppAction::ToggleReasoningExpanded(msg_id) => {

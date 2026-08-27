@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use threadlane_runtime::ReasoningEffort;
+use threadlane_protocol::ReasoningEffort;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SubagentSettings {

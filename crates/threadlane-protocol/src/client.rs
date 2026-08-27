@@ -204,6 +204,20 @@ impl DaemonClient {
         self.request("session/submit_permission", req).await
     }
 
+    pub async fn queue_follow_up(
+        &self,
+        req: crate::session::QueueFollowUpRequest,
+    ) -> Result<(), String> {
+        self.request("session/queue_follow_up", req).await
+    }
+
+    pub async fn queue_steer(
+        &self,
+        req: crate::session::QueueSteerRequest,
+    ) -> Result<(), String> {
+        self.request("session/queue_steer", req).await
+    }
+
     pub async fn spawn_terminal(
         &self,
         req: SpawnTerminalRequest,

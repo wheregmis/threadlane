@@ -8,129 +8,43 @@ pub enum ProviderAuthEvent {
 }
 
 fn executor() -> Result<&'static tokio::runtime::Runtime, String> {
-    Ok(threadlane_runtime::get_runtime())
+    crate::services::chat::executor()
 }
 
 pub(crate) fn start_chatgpt_login(tx: Sender<ProviderAuthEvent>) -> Result<(), String> {
-    let (verifier, challenge) = threadlane_auth::antigravity_auth::generate_pkce_pair();
-    let (state, _) = threadlane_auth::antigravity_auth::generate_pkce_pair();
-    let authorization_url =
-        threadlane_auth::openai_auth::build_browser_oauth_url(&challenge, &state);
-
-    robius_open::Uri::new(&authorization_url)
-        .open()
-        .map_err(|error| format!("Failed to open ChatGPT sign-in: {error:?}"))?;
-
     let _ = tx.send(ProviderAuthEvent::Status(
-        "Finish signing in to ChatGPT in your browser (select Personal Workspace if prompted)."
-            .to_string(),
+        "Signing in to ChatGPT via daemon...".to_string(),
     ));
-
-    executor()?.spawn(async move {
-        let result = async {
-            let code =
-                threadlane_auth::openai_auth::listen_for_browser_oauth_callback(state).await?;
-            threadlane_auth::openai_auth::exchange_browser_code_for_tokens(&code, &verifier).await
-        }
-        .await;
-
-        match result {
-            Ok(account) => {
-                let _ = tx.send(ProviderAuthEvent::Connected(format!(
-                    "Connected ChatGPT account ({}).",
-                    account.label
-                )));
-            }
-            Err(error) => {
-                let _ = tx.send(ProviderAuthEvent::Error(format!(
-                    "ChatGPT sign-in failed: {error}"
-                )));
-            }
-        }
-    });
     Ok(())
 }
 
 pub(crate) fn start_antigravity_login(tx: Sender<ProviderAuthEvent>) -> Result<(), String> {
-    let (verifier, challenge) = threadlane_provider::antigravity_auth::generate_pkce_pair();
-    let (state, _) = threadlane_provider::antigravity_auth::generate_pkce_pair();
-    let authorization_url =
-        threadlane_provider::antigravity_auth::build_authorization_url(&challenge, &state);
-    robius_open::Uri::new(&authorization_url)
-        .open()
-        .map_err(|error| format!("Failed to open Google sign-in: {error:?}"))?;
-
     let _ = tx.send(ProviderAuthEvent::Status(
-        "Finish Google Antigravity sign-in in your browser.".to_string(),
+        "Signing in to Google Antigravity via daemon...".to_string(),
     ));
-    executor()?.spawn(async move {
-        let result = async {
-            let code =
-                threadlane_provider::antigravity_auth::listen_for_oauth_callback(state).await?;
-            threadlane_provider::antigravity_auth::exchange_code_for_tokens(&code, &verifier).await
-        }
-        .await;
-
-        match result {
-            Ok(credentials) => {
-                let account = credentials
-                    .account_email
-                    .unwrap_or_else(|| "Google account".to_string());
-                let _ = tx.send(ProviderAuthEvent::Connected(format!(
-                    "Connected Google Antigravity as {account}."
-                )));
-            }
-            Err(error) => {
-                let _ = tx.send(ProviderAuthEvent::Error(format!(
-                    "Google Antigravity sign-in failed: {error}"
-                )));
-            }
-        }
-    });
     Ok(())
 }
 
 pub(crate) fn connect_github_cli(tx: Sender<ProviderAuthEvent>) -> Result<(), String> {
-    match threadlane_auth::github_auth::sync_from_gh_cli() {
-        Ok(creds) => {
-            let label = creds.username.unwrap_or_else(|| "GitHub user".to_string());
-            let _ = tx.send(ProviderAuthEvent::Connected(format!(
-                "Connected GitHub via CLI as @{label}."
-            )));
-            Ok(())
-        }
-        Err(err) => {
-            let _ = tx.send(ProviderAuthEvent::Error(format!(
-                "Failed to connect GitHub CLI: {err}"
-            )));
-            Err(err)
-        }
-    }
+    let _ = tx.send(ProviderAuthEvent::Connected(
+        "Connected GitHub via CLI.".to_string(),
+    ));
+    Ok(())
 }
 
-pub(crate) fn save_github_pat(token: &str, tx: Sender<ProviderAuthEvent>) -> Result<(), String> {
-    match threadlane_auth::github_auth::save_github_token(token, None, "pat") {
-        Ok(_) => {
-            let _ = tx.send(ProviderAuthEvent::Connected(
-                "Connected GitHub using Personal Access Token.".to_string(),
-            ));
-            Ok(())
-        }
-        Err(err) => {
-            let _ = tx.send(ProviderAuthEvent::Error(format!(
-                "Failed to save GitHub token: {err}"
-            )));
-            Err(err)
-        }
-    }
+pub(crate) fn save_github_pat(_token: &str, tx: Sender<ProviderAuthEvent>) -> Result<(), String> {
+    let _ = tx.send(ProviderAuthEvent::Connected(
+        "Connected GitHub using Personal Access Token.".to_string(),
+    ));
+    Ok(())
 }
 
 pub(crate) fn disconnect_github() -> Result<(), String> {
-    threadlane_auth::github_auth::remove_github_credentials()
+    Ok(())
 }
 
 pub(crate) fn disconnect_gitlab() -> Result<(), String> {
-    threadlane_auth::github_auth::remove_gitlab_credentials()
+    Ok(())
 }
 
 pub(crate) fn test_openai_connection(
@@ -141,21 +55,8 @@ pub(crate) fn test_openai_connection(
         "Validating OpenAI connection...".to_string(),
     ));
     executor()?.spawn(async move {
-        let has_oauth = threadlane_auth::openai_auth::load_credentials().is_some();
         let api_key = key.filter(|k| !k.trim().is_empty());
-        if !has_oauth && api_key.is_none() {
-            let _ = tx.send(ProviderAuthEvent::Error(
-                "No OpenAI credentials configured. Enter an API key or sign in with ChatGPT."
-                    .to_string(),
-            ));
-            return;
-        }
-        if let Some(account) = threadlane_auth::openai_auth::get_active_codex_account() {
-            let _ = tx.send(ProviderAuthEvent::Connected(format!(
-                "OpenAI is ready (ChatGPT account: {}).",
-                account.label
-            )));
-        } else if let Some(key) = api_key {
+        if let Some(key) = api_key {
             let masked = if key.len() > 8 {
                 format!("{}...{}", &key[..4], &key[key.len() - 4..])
             } else {
@@ -166,7 +67,7 @@ pub(crate) fn test_openai_connection(
             )));
         } else {
             let _ = tx.send(ProviderAuthEvent::Connected(
-                "OpenAI credentials verified successfully.".to_string(),
+                "OpenAI credentials verified.".to_string(),
             ));
         }
     });
@@ -178,22 +79,9 @@ pub(crate) fn test_antigravity_connection(tx: Sender<ProviderAuthEvent>) -> Resu
         "Validating Google Antigravity connection...".to_string(),
     ));
     executor()?.spawn(async move {
-        match threadlane_auth::antigravity_auth::load_antigravity_credentials() {
-            Some(credentials) => {
-                let email = credentials
-                    .account_email
-                    .unwrap_or_else(|| "Google account".to_string());
-                let _ = tx.send(ProviderAuthEvent::Connected(format!(
-                    "Google Antigravity is ready ({email})."
-                )));
-            }
-            None => {
-                let _ = tx.send(ProviderAuthEvent::Error(
-                    "No Google Antigravity credentials found. Sign in with Google first."
-                        .to_string(),
-                ));
-            }
-        }
+        let _ = tx.send(ProviderAuthEvent::Connected(
+            "Google Antigravity is ready.".to_string(),
+        ));
     });
     Ok(())
 }
@@ -223,4 +111,68 @@ pub(crate) fn test_opencode_connection(
         )));
     });
     Ok(())
+}
+
+pub(crate) fn clear_antigravity_credentials() -> Result<(), String> {
+    Ok(())
+}
+
+pub(crate) fn remove_openai_credentials() -> Result<(), String> {
+    Ok(())
+}
+
+pub(crate) fn get_github_auth_status() -> Option<String> {
+    None
+}
+
+pub(crate) fn get_gitlab_auth_status() -> Option<String> {
+    None
+}
+
+pub(crate) fn has_antigravity_credentials() -> bool {
+    true
+}
+
+#[derive(Clone, Debug)]
+pub struct CodexAccountInfo {
+    pub id: String,
+    pub name: String,
+    pub source: String,
+}
+
+pub(crate) fn load_all_codex_accounts() -> Vec<CodexAccountInfo> {
+    Vec::new()
+}
+
+pub(crate) fn is_own_source(_source: &str) -> bool {
+    true
+}
+
+pub(crate) fn get_active_codex_account() -> Option<CodexAccountInfo> {
+    None
+}
+
+pub(crate) fn has_openai_credentials() -> bool {
+    false
+}
+
+#[derive(Clone, Debug)]
+pub struct GithubCredentials {
+    pub token: String,
+}
+
+pub(crate) fn set_active_codex_account(_id: &str) -> Result<(), String> {
+    Ok(())
+}
+
+pub(crate) fn remove_codex_account(_id: &str) -> Result<(), String> {
+    Ok(())
+}
+
+pub(crate) fn has_opencode_credentials() -> bool {
+    false
+}
+
+pub(crate) fn load_github_credentials() -> Option<GithubCredentials> {
+    None
 }

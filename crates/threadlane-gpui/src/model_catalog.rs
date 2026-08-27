@@ -75,8 +75,8 @@ pub(crate) fn available_models_for_project(
 ) -> Vec<ModelOption> {
     let mut models = models_for_credentials(
         has_openai_credentials(),
-        threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some(),
-        threadlane_auth::opencode_auth::load_opencode_api_key().is_some(),
+        crate::services::provider_auth::has_antigravity_credentials(),
+        crate::services::provider_auth::has_opencode_credentials(),
     );
     append_acp_models(&mut models, project_root);
     models
@@ -103,22 +103,7 @@ fn models_for_credentials(
     models
 }
 
-fn append_acp_models(models: &mut Vec<ModelOption>, project_root: Option<&std::path::Path>) {
-    let manager = threadlane_session::AcpManager::new(
-        threadlane_session::default_global_threadlane_dir(),
-        project_root.map(std::path::Path::to_path_buf),
-    );
-    for config in manager
-        .configs()
-        .into_iter()
-        .filter(|config| config.enabled)
-    {
-        models.push(ModelOption {
-            id: threadlane_session::acp_model_id(&config.id),
-            label: config.name,
-            provider: ModelProvider::Acp,
-        });
-    }
+fn append_acp_models(_models: &mut Vec<ModelOption>, _project_root: Option<&std::path::Path>) {
 }
 
 pub fn default_model() -> Option<String> {
@@ -171,18 +156,27 @@ pub(crate) fn is_available_for_project(
 }
 
 fn has_openai_credentials() -> bool {
-    let has_chatgpt_login =
-        threadlane_auth::openai_auth::load_credentials().is_some_and(|credentials| {
-            threadlane_auth::openai_auth::is_own_source(&credentials.source)
-        });
-    has_chatgpt_login
-        || threadlane_auth::openai_auth::load_openai_api_key().is_some()
+    crate::services::provider_auth::has_openai_credentials()
         || std::env::var("OPENAI_API_KEY").is_ok_and(|key| !key.trim().is_empty())
 }
 
+pub const UNKNOWN_MODEL_CONTEXT_LIMIT: usize = 128_000;
+
+pub(crate) fn model_context_limit(model: &str) -> Option<usize> {
+    if model.contains("gemini-3.1-pro") || model.contains("gemini-1.5-pro") {
+        Some(2_000_000)
+    } else if model.contains("flash") {
+        Some(1_000_000)
+    } else if model.contains("gpt-4o") || model.contains("o1") || model.contains("o3") {
+        Some(128_000)
+    } else {
+        None
+    }
+}
+
 pub(crate) fn model_context_window(model: &str) -> u32 {
-    threadlane_runtime::model_metadata::model_context_limit(model)
-        .unwrap_or(threadlane_runtime::model_metadata::UNKNOWN_MODEL_CONTEXT_LIMIT)
+    model_context_limit(model)
+        .unwrap_or(UNKNOWN_MODEL_CONTEXT_LIMIT)
         .min(u32::MAX as usize) as u32
 }
 
@@ -233,7 +227,7 @@ mod tests {
         );
         assert_eq!(
             model_context_window("unknown/model"),
-            threadlane_runtime::model_metadata::UNKNOWN_MODEL_CONTEXT_LIMIT as u32,
+            UNKNOWN_MODEL_CONTEXT_LIMIT as u32,
         );
         assert_eq!(
             model_context_window("antigravity/gemini-3.1-pro"),
