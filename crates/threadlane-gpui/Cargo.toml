@@ -23,6 +23,7 @@ threadlane-git = { version = "0.1.0", path = "../threadlane-git" }
 threadlane-updater = { version = ">=0.1.0, <1.0.0", path = "../threadlane-updater" }
 threadlane-skills = { version = "0.1.0", path = "../threadlane-skills" }
 threadlane-wasi = { version = "0.1.0", path = "../threadlane-wasi" }
+threadlane-protocol = { version = "0.1.0", path = "../threadlane-protocol" }
 tokio = { version = "1.38", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

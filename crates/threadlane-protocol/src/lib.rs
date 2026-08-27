@@ -1,4 +1,5 @@
 pub mod capabilities;
+pub mod client;
 pub mod git;
 pub mod permission;
 pub mod project;
@@ -10,6 +11,7 @@ pub mod terminal;
 
 // Re-export provider types for backward compatibility across the workspace
 pub use capabilities::*;
+pub use client::*;
 pub use git::*;
 pub use permission::*;
 pub use project::*;
