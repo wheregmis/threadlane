@@ -1407,7 +1407,18 @@ impl AppState {
         self.active_work_dir = Some(work_dir.clone());
         self.active_session_id = Some(session_id.clone());
         self.is_new_task = false;
-        self.persist_project_selection(&work_dir, Some(&session_id));
+        let project_work_dir = self
+            .projects
+            .iter()
+            .find(|project| {
+                project
+                    .sessions
+                    .iter()
+                    .any(|session| session.id == session_id && session.work_dir == work_dir)
+            })
+            .map(|project| project.work_dir.as_path())
+            .unwrap_or(&work_dir);
+        self.persist_project_selection(project_work_dir, Some(&session_id));
         self.refresh_available_models();
 
         let session_file = self.session_file(&work_dir, &session_id);
@@ -1538,12 +1549,10 @@ impl AppState {
     fn session_file(&self, work_dir: &Path, session_id: &str) -> PathBuf {
         self.projects
             .iter()
-            .find(|project| project.work_dir == work_dir)
-            .and_then(|project| {
-                project
-                    .sessions
-                    .iter()
-                    .find(|session| session.id == session_id)
+            .flat_map(|project| project.sessions.iter())
+            .find(|session| {
+                session.id == session_id
+                    && (session.work_dir == work_dir || session.session_file.starts_with(work_dir))
             })
             .map(|session| session.session_file.clone())
             .unwrap_or_else(|| {

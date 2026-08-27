@@ -1097,11 +1097,15 @@ impl SidebarView {
             (DateGroup::ThisWeek, Vec::new()),
             (DateGroup::Older, Vec::new()),
         ];
+        let mut seen_session_ids = std::collections::HashSet::new();
         for session in state
             .projects
             .iter()
             .flat_map(|project| project.sessions.iter())
         {
+            if !seen_session_ids.insert(session.id.clone()) {
+                continue;
+            }
             if !query.is_empty()
                 && !session.title.to_lowercase().contains(query)
                 && !session.id.to_lowercase().contains(query)
