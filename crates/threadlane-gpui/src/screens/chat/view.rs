@@ -58,11 +58,6 @@ struct ContextMeterViewModel {
     effective_model: Option<String>,
     last_compaction_seq: Option<u64>,
     provisional: bool,
-    /// Whether a usage figure is ever coming for this model.
-    ///
-    /// Separates "measuring" from "unmeasurable": both render without a
-    /// percentage, but only the first should show a pending animation.
-    reports_usage: bool,
 }
 
 #[derive(IntoElement)]
@@ -133,8 +128,7 @@ fn context_meter_view_model(
 
     // An external ACP agent runs its own loop and reports no token accounting,
     // so there is no context window to measure. Saying "Estimating…" would
-    // promise a number that never arrives, and the meter would animate for the
-    // whole turn waiting for it.
+    // promise a number that never arrives.
     if !reports_usage {
         return ContextMeterViewModel {
             percent: None,
@@ -146,7 +140,6 @@ fn context_meter_view_model(
             effective_model: None,
             last_compaction_seq: None,
             provisional: false,
-            reports_usage: false,
         };
     }
 
@@ -161,7 +154,6 @@ fn context_meter_view_model(
             effective_model: None,
             last_compaction_seq: None,
             provisional: false,
-            reports_usage: true,
         };
     };
 
@@ -197,7 +189,6 @@ fn context_meter_view_model(
             .then(|| context.effective_model.clone()),
         last_compaction_seq: context.last_compaction_seq,
         provisional: context.provisional,
-        reports_usage: true,
     }
 }
 use threadlane_session::commands::{available_slash_commands, SlashCommandInfo};
@@ -4574,12 +4565,6 @@ impl ChatListView {
                     .child(
                         ProgressCircle::new("context-meter-circle")
                             .value(meter.bar_percent as f32)
-                            // Only animate while a figure is actually pending;
-                            // a model that never reports one would spin for the
-                            // whole turn, every turn.
-                            .loading(
-                                is_generating && meter.reports_usage && meter.bar_percent == 0.0,
-                            )
                             .color(meter_color)
                             .size(px(24.0)),
                     )
@@ -5386,15 +5371,13 @@ mod hot_path_tests {
         // promises a number that never arrives and leaves the badge animating
         // for the whole turn.
         let view = context_meter_view_model(None, &ContextMeterMetrics::default(), false);
-        assert!(!view.reports_usage);
         assert_eq!(view.current_label, "Not reported");
         assert_eq!(view.percent, None);
         assert_eq!(view.bar_percent, 0.0);
 
-        // A model that does report usage keeps the pending state, so the
-        // animation still runs where a figure is genuinely on its way.
+        // A model that does report usage keeps the pending label until a
+        // context figure arrives.
         let estimating = context_meter_view_model(None, &ContextMeterMetrics::default(), true);
-        assert!(estimating.reports_usage);
         assert_eq!(estimating.current_label, "Estimating…");
     }
 
