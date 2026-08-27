@@ -114,7 +114,14 @@ async fn a_turn_streams_the_agents_output_in_order() {
     let permissions = responding_handle(None, &tx);
 
     engine
-        .run_turn("stub", "hi", &[], ReasoningEffort::Medium, &tx, &permissions)
+        .run_turn(
+            "stub",
+            "hi",
+            &[],
+            ReasoningEffort::Medium,
+            &tx,
+            &permissions,
+        )
         .await
         .expect("the turn should complete");
 
@@ -158,7 +165,14 @@ async fn another_sessions_updates_never_reach_this_turn() {
     let permissions = responding_handle(None, &tx);
 
     engine
-        .run_turn("stub", "hi", &[], ReasoningEffort::Medium, &tx, &permissions)
+        .run_turn(
+            "stub",
+            "hi",
+            &[],
+            ReasoningEffort::Medium,
+            &tx,
+            &permissions,
+        )
         .await
         .unwrap();
 
@@ -176,12 +190,26 @@ async fn the_conversation_is_reused_across_turns() {
     let permissions = responding_handle(None, &tx);
 
     engine
-        .run_turn("stub", "first", &[], ReasoningEffort::Medium, &tx, &permissions)
+        .run_turn(
+            "stub",
+            "first",
+            &[],
+            ReasoningEffort::Medium,
+            &tx,
+            &permissions,
+        )
         .await
         .unwrap();
     let first = collect(&mut rx);
     engine
-        .run_turn("stub", "second", &[], ReasoningEffort::Medium, &tx, &permissions)
+        .run_turn(
+            "stub",
+            "second",
+            &[],
+            ReasoningEffort::Medium,
+            &tx,
+            &permissions,
+        )
         .await
         .unwrap();
     let second = collect(&mut rx);
@@ -200,7 +228,14 @@ async fn a_granted_permission_reaches_the_agent() {
     let permissions = responding_handle(Some(PermissionDecision::AllowOnce), &tx);
 
     engine
-        .run_turn("stub", "run it", &[], ReasoningEffort::Medium, &tx, &permissions)
+        .run_turn(
+            "stub",
+            "run it",
+            &[],
+            ReasoningEffort::Medium,
+            &tx,
+            &permissions,
+        )
         .await
         .unwrap();
 
@@ -224,7 +259,14 @@ async fn a_denied_permission_reaches_the_agent() {
     let permissions = responding_handle(Some(PermissionDecision::Deny), &tx);
 
     engine
-        .run_turn("stub", "run it", &[], ReasoningEffort::Medium, &tx, &permissions)
+        .run_turn(
+            "stub",
+            "run it",
+            &[],
+            ReasoningEffort::Medium,
+            &tx,
+            &permissions,
+        )
         .await
         .unwrap();
 
@@ -240,7 +282,14 @@ async fn without_a_ui_a_permission_request_is_refused() {
     let permissions = responding_handle(None, &tx);
 
     engine
-        .run_turn("stub", "run it", &[], ReasoningEffort::Medium, &tx, &permissions)
+        .run_turn(
+            "stub",
+            "run it",
+            &[],
+            ReasoningEffort::Medium,
+            &tx,
+            &permissions,
+        )
         .await
         .unwrap();
 
@@ -281,7 +330,14 @@ async fn cancelling_a_turn_tells_the_agent_to_stop() {
         let _ = engine_for_turn
             .lock()
             .await
-            .run_turn("stub", "work forever", &[], ReasoningEffort::Medium, &tx, &permissions)
+            .run_turn(
+                "stub",
+                "work forever",
+                &[],
+                ReasoningEffort::Medium,
+                &tx,
+                &permissions,
+            )
             .await;
     });
 
@@ -361,7 +417,14 @@ async fn a_missing_agent_reports_a_usable_error() {
     let permissions = responding_handle(None, &tx);
 
     let error = engine
-        .run_turn("not-configured", "hi", &[], ReasoningEffort::Medium, &tx, &permissions)
+        .run_turn(
+            "not-configured",
+            "hi",
+            &[],
+            ReasoningEffort::Medium,
+            &tx,
+            &permissions,
+        )
         .await
         .expect_err("an unconfigured agent id cannot run");
     assert!(error.contains("not-configured"), "got {error}");
@@ -500,7 +563,14 @@ async fn the_reasoning_picker_reaches_the_agent() {
     // A later turn re-applies the current pick: the picker can change between
     // turns, and the agent would otherwise keep the first one forever.
     engine
-        .run_turn("stub", "again", &[], ReasoningEffort::Low, &tx, &permissions)
+        .run_turn(
+            "stub",
+            "again",
+            &[],
+            ReasoningEffort::Low,
+            &tx,
+            &permissions,
+        )
         .await
         .unwrap();
     assert_eq!(text_of(&collect(&mut rx)), "model:default effort:low");
@@ -518,7 +588,14 @@ async fn the_agents_model_is_reported_once_it_connects() {
     assert_eq!(engine.model_label("stub"), None);
 
     engine
-        .run_turn("stub", "hi", &[], ReasoningEffort::Medium, &tx, &permissions)
+        .run_turn(
+            "stub",
+            "hi",
+            &[],
+            ReasoningEffort::Medium,
+            &tx,
+            &permissions,
+        )
         .await
         .unwrap();
 
@@ -587,7 +664,10 @@ async fn the_effort_setting_is_hidden_from_the_picker() {
     // A second control for it would let the two disagree, with the reasoning
     // picker silently winning.
     assert!(config_option_for(&options, ACP_CONFIG_CATEGORY_EFFORT).is_none());
-    assert!(!options.is_empty(), "the other settings must still be shown");
+    assert!(
+        !options.is_empty(),
+        "the other settings must still be shown"
+    );
 
     engine.shutdown().await;
 }
@@ -613,7 +693,14 @@ async fn picking_a_setting_applies_it_on_the_agent() {
 
     // And the agent is actually holding it: it echoes its settings back.
     engine
-        .run_turn("stub", "hi", &[], ReasoningEffort::Medium, &tx, &permissions)
+        .run_turn(
+            "stub",
+            "hi",
+            &[],
+            ReasoningEffort::Medium,
+            &tx,
+            &permissions,
+        )
         .await
         .unwrap();
     assert_eq!(text_of(&collect(&mut rx)), "model:sonnet effort:medium");
@@ -649,7 +736,14 @@ async fn a_value_the_agent_does_not_offer_is_refused_rather_than_sent() {
 
     // A refused change must leave the agent exactly as it was.
     engine
-        .run_turn("stub", "hi", &[], ReasoningEffort::Medium, &tx, &permissions)
+        .run_turn(
+            "stub",
+            "hi",
+            &[],
+            ReasoningEffort::Medium,
+            &tx,
+            &permissions,
+        )
         .await
         .unwrap();
     assert_eq!(text_of(&collect(&mut rx)), "model:default effort:medium");

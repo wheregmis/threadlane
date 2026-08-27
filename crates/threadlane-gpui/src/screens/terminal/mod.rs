@@ -1,15 +1,15 @@
 use std::future::Future;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use gpui::*;
-use gpui_component::ThemeMode;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
+use gpui_component::ThemeMode;
 use gpui_component::{ActiveTheme, ElementExt, Icon, IconName, Sizable};
-use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
 const DEFAULT_ROWS: u16 = 30;
 const DEFAULT_COLS: u16 = 120;
@@ -194,9 +194,7 @@ fn start_parser_worker(
                 }
 
                 if terminal_parse_budget_exhausted(parsed_bytes, parse_budget) {
-                    std::thread::sleep(
-                        next_frame.saturating_duration_since(Instant::now()),
-                    );
+                    std::thread::sleep(next_frame.saturating_duration_since(Instant::now()));
                     continue;
                 }
 
@@ -274,34 +272,32 @@ pub struct TerminalView {
 impl TerminalView {
     pub(crate) fn new(project: PathBuf, cx: &mut Context<Self>) -> Self {
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
-        cx.spawn(async move |this, cx| {
-            loop {
-                let wake = next_terminal_wake(
-                    &mut event_rx,
-                    cx.background_executor().timer(CURSOR_BLINK_INTERVAL),
-                )
-                .await;
-                let (events, blink) = match wake {
-                    TerminalWake::Events(events) => (events, false),
-                    TerminalWake::Blink => (Vec::new(), true),
-                    TerminalWake::Disconnected => break,
-                };
-                if this
-                    .update(cx, |this, cx| {
-                        for event in events {
-                            this.apply_event(event);
-                        }
-                        if blink {
-                            this.cursor_visible = !this.cursor_visible;
-                        } else {
-                            this.cursor_visible = true;
-                        }
-                        cx.notify();
-                    })
-                    .is_err()
-                {
-                    break;
-                }
+        cx.spawn(async move |this, cx| loop {
+            let wake = next_terminal_wake(
+                &mut event_rx,
+                cx.background_executor().timer(CURSOR_BLINK_INTERVAL),
+            )
+            .await;
+            let (events, blink) = match wake {
+                TerminalWake::Events(events) => (events, false),
+                TerminalWake::Blink => (Vec::new(), true),
+                TerminalWake::Disconnected => break,
+            };
+            if this
+                .update(cx, |this, cx| {
+                    for event in events {
+                        this.apply_event(event);
+                    }
+                    if blink {
+                        this.cursor_visible = !this.cursor_visible;
+                    } else {
+                        this.cursor_visible = true;
+                    }
+                    cx.notify();
+                })
+                .is_err()
+            {
+                break;
             }
         })
         .detach();
@@ -1176,10 +1172,9 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        ParserCommand, PtyEvent, TERMINAL_PARSE_BUDGET_PER_FRAME, TerminalWake,
-        ansi_index_to_hsla, next_terminal_wake, rgb_to_hsla, selection_bounds,
-        should_paint_cursor, start_parser_worker, terminal_frame_policy,
-        terminal_parse_budget_exhausted,
+        ansi_index_to_hsla, next_terminal_wake, rgb_to_hsla, selection_bounds, should_paint_cursor,
+        start_parser_worker, terminal_frame_policy, terminal_parse_budget_exhausted, ParserCommand,
+        PtyEvent, TerminalWake, TERMINAL_PARSE_BUDGET_PER_FRAME,
     };
 
     #[test]

@@ -6,16 +6,16 @@ use super::subagents::*;
 
 use super::broker::ManagedProcessRegistry;
 use super::capabilities::{
-    McpCapability, PlanCapability, SkillCapability, SubagentCapability, WasiCapability,
-    build_broker_dispatcher, render_agent_catalog, restored_tool_policy,
+    build_broker_dispatcher, render_agent_catalog, restored_tool_policy, McpCapability,
+    PlanCapability, SkillCapability, SubagentCapability, WasiCapability,
 };
 use super::harness::{CodingSessionHarness, HarnessWatch, InterruptedSubagentRecoveryState};
-use crate::commands::{CommandAction, execute_slash_command, parse_slash_command};
+use crate::commands::{execute_slash_command, parse_slash_command, CommandAction};
 use crate::context::ProjectContext;
 use crate::extension_broker::CapabilityDispatcher;
 use crate::plan::SessionPlanStore;
 use crate::policy::ToolPolicy;
-use crate::system_prompt::{SystemPromptBuildOptions, build_system_prompt};
+use crate::system_prompt::{build_system_prompt, SystemPromptBuildOptions};
 use log::warn;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -1426,16 +1426,17 @@ impl CodingAgent {
 #[cfg(test)]
 mod compaction_sync_tests {
     use super::{
-        CodingAgent, CodingAgentOptions, CompletedSubagentLane, MAX_PERSISTED_SYSTEM_PROMPT_BYTES,
-        SubagentLaneStatus, durable_prompt_snapshot, requires_harness_compaction_reset,
+        durable_prompt_snapshot, requires_harness_compaction_reset, CodingAgent,
+        CodingAgentOptions, CompletedSubagentLane, SubagentLaneStatus,
+        MAX_PERSISTED_SYSTEM_PROMPT_BYTES,
     };
     use crate::system_prompt::SystemPromptConfig;
     use async_trait::async_trait;
     use std::{
         collections::HashSet,
         sync::{
-            Arc, Mutex,
             atomic::{AtomicUsize, Ordering},
+            Arc, Mutex,
         },
     };
     use threadlane_protocol::{
@@ -1443,10 +1444,10 @@ mod compaction_sync_tests {
         RuntimeToolCallFunction, RuntimeUsage,
     };
     use threadlane_runtime::{
-        AgentConfig, AgentMessage, Record,
         harness::{
-            CompactionReason, JsonlStore, SessionStore, TranscriptItem, read_transcript_page,
+            read_transcript_page, CompactionReason, JsonlStore, SessionStore, TranscriptItem,
         },
+        AgentConfig, AgentMessage, Record,
     };
 
     fn summary() -> AgentMessage {
@@ -1552,12 +1553,10 @@ mod compaction_sync_tests {
             &entry.message,
             AgentMessage::Custom { custom_type, .. } if custom_type == "subagent_lane"
         )));
-        assert!(
-            store
-                .entries()
-                .iter()
-                .all(|entry| entry.parent_id.as_deref() != Some("node_69"))
-        );
+        assert!(store
+            .entries()
+            .iter()
+            .all(|entry| entry.parent_id.as_deref() != Some("node_69")));
     }
 
     struct LongToolLoopProvider {
@@ -1787,18 +1786,14 @@ mod compaction_sync_tests {
         // The reopened branch selects the latest durable checkpoint and a descendant leaf.
         let model_context = store.model_context("main").unwrap();
         let checkpoint = model_context.checkpoint.expect("durable checkpoint");
-        assert!(
-            model_context
-                .leaf_id
-                .as_deref()
-                .is_some_and(|leaf| leaf != checkpoint.entry_id)
-        );
-        assert!(
-            model_context
-                .entries
-                .iter()
-                .any(|entry| entry.id == checkpoint.entry_id)
-        );
+        assert!(model_context
+            .leaf_id
+            .as_deref()
+            .is_some_and(|leaf| leaf != checkpoint.entry_id));
+        assert!(model_context
+            .entries
+            .iter()
+            .any(|entry| entry.id == checkpoint.entry_id));
 
         let page = read_transcript_page(&path, None, 1_000).unwrap();
         assert!(!page.has_older);

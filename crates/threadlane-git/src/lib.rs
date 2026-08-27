@@ -116,6 +116,16 @@ pub struct GitCommitInfo {
     pub timestamp: i64,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GitWorktreeInfo {
+    pub path: PathBuf,
+    pub branch: Option<String>,
+    pub head: String,
+    pub is_bare: bool,
+    pub is_detached: bool,
+    pub is_locked: bool,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GitStatus {
     pub branch: Option<String>,
@@ -496,7 +506,8 @@ pub fn inspect(work_dir: &Path) -> Result<GitStatus, GitError> {
                 .unwrap_or(0);
         }
     }
-    if let (Some(branch), Some(base)) = (status.branch.as_deref(), status.default_branch.as_deref()) {
+    if let (Some(branch), Some(base)) = (status.branch.as_deref(), status.default_branch.as_deref())
+    {
         if branch != base {
             let local_base = command(work_dir, &["rev-list", "--count", &format!("{base}..HEAD")])
                 .or_else(|_| {
@@ -545,7 +556,10 @@ pub fn list_stashes(work_dir: &Path) -> Result<Vec<GitStashInfo>, GitError> {
                 .unwrap_or(0);
             let message = parts[1].trim().to_string();
             let relative_time = parts[2].trim().to_string();
-            let timestamp = parts.get(3).and_then(|s| s.trim().parse::<u64>().ok()).unwrap_or(0);
+            let timestamp = parts
+                .get(3)
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .unwrap_or(0);
 
             let branch = if let Some(rest) = message.strip_prefix("Stash on ") {
                 rest.split_whitespace().next().map(|s| s.to_string())
@@ -573,18 +587,39 @@ pub fn list_stashes(work_dir: &Path) -> Result<Vec<GitStashInfo>, GitError> {
 
 pub fn inspect_stash_files(work_dir: &Path, stash_index: usize) -> Vec<GitFile> {
     let stash_ref = format!("stash@{{{stash_index}}}");
-    let numstat_output = command(work_dir, &["stash", "show", "--include-untracked", "--numstat", &stash_ref])
-        .or_else(|_| command(work_dir, &["stash", "show", "--numstat", &stash_ref]))
-        .unwrap_or_default();
-    let name_status_output = command(work_dir, &["stash", "show", "--include-untracked", "--name-status", &stash_ref])
-        .or_else(|_| command(work_dir, &["stash", "show", "--name-status", &stash_ref]))
-        .unwrap_or_default();
+    let numstat_output = command(
+        work_dir,
+        &[
+            "stash",
+            "show",
+            "--include-untracked",
+            "--numstat",
+            &stash_ref,
+        ],
+    )
+    .or_else(|_| command(work_dir, &["stash", "show", "--numstat", &stash_ref]))
+    .unwrap_or_default();
+    let name_status_output = command(
+        work_dir,
+        &[
+            "stash",
+            "show",
+            "--include-untracked",
+            "--name-status",
+            &stash_ref,
+        ],
+    )
+    .or_else(|_| command(work_dir, &["stash", "show", "--name-status", &stash_ref]))
+    .unwrap_or_default();
 
     let mut status_map = std::collections::HashMap::new();
     for line in name_status_output.lines() {
         let mut parts = line.split_whitespace();
         if let (Some(code), Some(path)) = (parts.next(), parts.next()) {
-            status_map.insert(path.trim().to_string(), code.trim().chars().next().unwrap_or('M'));
+            status_map.insert(
+                path.trim().to_string(),
+                code.trim().chars().next().unwrap_or('M'),
+            );
         }
     }
 
@@ -611,22 +646,55 @@ pub fn inspect_stash_files(work_dir: &Path, stash_index: usize) -> Vec<GitFile> 
     files
 }
 
-pub fn diff_stash_file(work_dir: &Path, stash_index: usize, file_path: &str) -> Result<String, GitError> {
+pub fn diff_stash_file(
+    work_dir: &Path,
+    stash_index: usize,
+    file_path: &str,
+) -> Result<String, GitError> {
     let stash_ref = format!("stash@{{{stash_index}}}");
-    if let Ok(diff) = command(work_dir, &["diff", &format!("{stash_ref}^..{stash_ref}"), "--", file_path]) {
+    if let Ok(diff) = command(
+        work_dir,
+        &[
+            "diff",
+            &format!("{stash_ref}^..{stash_ref}"),
+            "--",
+            file_path,
+        ],
+    ) {
         if !diff.trim().is_empty() {
             return Ok(diff);
         }
     }
-    if let Ok(diff) = command(work_dir, &["diff", "4b825dc642cb6eb9a060e54bf8d69288fbee4904", &format!("{stash_ref}^3"), "--", file_path]) {
+    if let Ok(diff) = command(
+        work_dir,
+        &[
+            "diff",
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+            &format!("{stash_ref}^3"),
+            "--",
+            file_path,
+        ],
+    ) {
         if !diff.trim().is_empty() {
             return Ok(diff);
         }
     }
     if let Ok(content) = command(work_dir, &["show", &format!("{stash_ref}^3:{file_path}")]) {
-        return Ok(format!("--- /dev/null\n+++ b/{file_path}\n@@ -0,0 +1,{} @@\n{}", content.lines().count(), content));
+        return Ok(format!(
+            "--- /dev/null\n+++ b/{file_path}\n@@ -0,0 +1,{} @@\n{}",
+            content.lines().count(),
+            content
+        ));
     }
-    command(work_dir, &["diff", &format!("{stash_ref}^..{stash_ref}"), "--", file_path])
+    command(
+        work_dir,
+        &[
+            "diff",
+            &format!("{stash_ref}^..{stash_ref}"),
+            "--",
+            file_path,
+        ],
+    )
 }
 
 pub fn pop_stash(work_dir: &Path, stash_index: Option<usize>) -> Result<(), GitError> {
@@ -653,7 +721,11 @@ pub fn list_commits(work_dir: &Path, max_count: usize) -> Result<Vec<GitCommitIn
     let count_arg = format!("-n{max_count}");
     let output = match command(
         work_dir,
-        &["log", &count_arg, "--format=%H%x1f%h%x1f%an%x1f%ae%x1f%cr%x1f%ct%x1f%s"],
+        &[
+            "log",
+            &count_arg,
+            "--format=%H%x1f%h%x1f%an%x1f%ae%x1f%cr%x1f%ct%x1f%s",
+        ],
     ) {
         Ok(out) => out,
         Err(_) => return Ok(Vec::new()),
@@ -687,8 +759,10 @@ pub fn list_commits(work_dir: &Path, max_count: usize) -> Result<Vec<GitCommitIn
 }
 
 pub fn inspect_commit_files(work_dir: &Path, sha: &str) -> Vec<GitFile> {
-    let numstat_output = command(work_dir, &["show", "--numstat", "--format=", sha]).unwrap_or_default();
-    let name_status_output = command(work_dir, &["show", "--name-status", "--format=", sha]).unwrap_or_default();
+    let numstat_output =
+        command(work_dir, &["show", "--numstat", "--format=", sha]).unwrap_or_default();
+    let name_status_output =
+        command(work_dir, &["show", "--name-status", "--format=", sha]).unwrap_or_default();
 
     let mut status_map = std::collections::HashMap::new();
     let mut rename_destinations = std::collections::HashMap::new();
@@ -700,7 +774,8 @@ pub fn inspect_commit_files(work_dir: &Path, sha: &str) -> Vec<GitFile> {
                 if let Some(destination) = parts.get(2) {
                     let source = path.trim().to_string();
                     let destination = destination.trim().to_string();
-                    rename_destinations.insert(format!("{source} => {destination}"), destination.clone());
+                    rename_destinations
+                        .insert(format!("{source} => {destination}"), destination.clone());
                     status_map.insert(destination, status);
                 }
             } else {
@@ -737,7 +812,10 @@ pub fn inspect_commit_files(work_dir: &Path, sha: &str) -> Vec<GitFile> {
 }
 
 pub fn diff_commit_file(work_dir: &Path, sha: &str, file_path: &str) -> Result<String, GitError> {
-    if let Ok(diff) = command(work_dir, &["diff", &format!("{sha}^..{sha}"), "--", file_path]) {
+    if let Ok(diff) = command(
+        work_dir,
+        &["diff", &format!("{sha}^..{sha}"), "--", file_path],
+    ) {
         if !diff.trim().is_empty() {
             return Ok(diff);
         }
@@ -750,7 +828,12 @@ pub fn discard_file_changes(work_dir: &Path, relative_path: &str) -> Result<(), 
     let full_path = work_dir.join(relative_path);
     let in_index = command(work_dir, &["ls-files", "--error-unmatch", relative_path]).is_ok();
     if in_index {
-        if command(work_dir, &["restore", "--staged", "--worktree", "--", relative_path]).is_err() {
+        if command(
+            work_dir,
+            &["restore", "--staged", "--worktree", "--", relative_path],
+        )
+        .is_err()
+        {
             let _ = command(work_dir, &["reset", "HEAD", "--", relative_path]);
             command(work_dir, &["checkout", "HEAD", "--", relative_path])?;
         }
@@ -774,7 +857,10 @@ pub fn ignore_file(work_dir: &Path, relative_path: &str) -> Result<(), GitError>
     let entry = format!("/{normalized}");
 
     let lines: Vec<&str> = current_content.lines().collect();
-    if !lines.iter().any(|l| l.trim() == entry || l.trim() == normalized) {
+    if !lines
+        .iter()
+        .any(|l| l.trim() == entry || l.trim() == normalized)
+    {
         if !current_content.is_empty() && !current_content.ends_with('\n') {
             current_content.push('\n');
         }
@@ -810,7 +896,10 @@ pub fn ignore_extension(work_dir: &Path, ext: &str) -> Result<(), GitError> {
         })?;
     }
 
-    let _ = command(work_dir, &["rm", "--cached", "-r", "--", &format!("*.{ext}")]);
+    let _ = command(
+        work_dir,
+        &["rm", "--cached", "-r", "--", &format!("*.{ext}")],
+    );
     Ok(())
 }
 
@@ -1110,7 +1199,9 @@ pub fn checkout_carrying_changes(work_dir: &Path, name: &str) -> Result<(), GitE
         return Ok(());
     }
     // 3. Try plain switch / checkout (if working tree has no conflicts)
-    if command(work_dir, &["switch", &valid_name]).is_ok() || command(work_dir, &["checkout", &valid_name]).is_ok() {
+    if command(work_dir, &["switch", &valid_name]).is_ok()
+        || command(work_dir, &["checkout", &valid_name]).is_ok()
+    {
         return Ok(());
     }
     // 4. Fallback: stash, switch, and pop
@@ -1378,6 +1469,116 @@ pub fn commit_message_diff(work_dir: &Path) -> Result<String, GitError> {
         });
     }
     Ok(diff)
+}
+
+/// Checks whether the given directory is inside a Git repository.
+pub fn is_git_repo(work_dir: &Path) -> bool {
+    command(work_dir, &["rev-parse", "--is-inside-work-tree"])
+        .map(|out| out.trim() == "true")
+        .unwrap_or(false)
+}
+
+/// Creates a new Git worktree at `worktree_path` checked out on `branch_name`.
+pub fn create_worktree(
+    repo_path: &Path,
+    worktree_path: &Path,
+    branch_name: &str,
+) -> Result<(), GitError> {
+    if let Some(parent) = worktree_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| GitError {
+            work_dir: repo_path.to_path_buf(),
+            message: format!("Failed to create parent directory for worktree: {e}"),
+        })?;
+    }
+    let worktree_str = worktree_path.to_str().ok_or_else(|| GitError {
+        work_dir: repo_path.to_path_buf(),
+        message: "Invalid worktree path".into(),
+    })?;
+
+    // If the branch already exists, attach to it; otherwise create a new branch.
+    let branch_exists = command(
+        repo_path,
+        &[
+            "rev-parse",
+            "--verify",
+            &format!("refs/heads/{branch_name}"),
+        ],
+    )
+    .is_ok();
+    if branch_exists {
+        command(repo_path, &["worktree", "add", worktree_str, branch_name])?;
+    } else {
+        command(
+            repo_path,
+            &["worktree", "add", "-b", branch_name, worktree_str],
+        )?;
+    }
+    Ok(())
+}
+
+/// Removes an existing Git worktree.
+pub fn remove_worktree(
+    repo_path: &Path,
+    worktree_path: &Path,
+    force: bool,
+) -> Result<(), GitError> {
+    let worktree_str = worktree_path.to_str().ok_or_else(|| GitError {
+        work_dir: repo_path.to_path_buf(),
+        message: "Invalid worktree path".into(),
+    })?;
+    let mut args = vec!["worktree", "remove"];
+    if force {
+        args.push("--force");
+    }
+    args.push(worktree_str);
+    command(repo_path, &args)?;
+    Ok(())
+}
+
+/// Lists all worktrees in the repository.
+pub fn list_worktrees(repo_path: &Path) -> Result<Vec<GitWorktreeInfo>, GitError> {
+    let output = command(repo_path, &["worktree", "list", "--porcelain"])?;
+    let mut worktrees = Vec::new();
+    let mut current = GitWorktreeInfo::default();
+    let mut has_entry = false;
+
+    for line in output.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            if has_entry {
+                worktrees.push(current);
+                current = GitWorktreeInfo::default();
+                has_entry = false;
+            }
+            continue;
+        }
+
+        if let Some(path_str) = line.strip_prefix("worktree ") {
+            if has_entry {
+                worktrees.push(current);
+                current = GitWorktreeInfo::default();
+            }
+            current.path = PathBuf::from(path_str.trim());
+            has_entry = true;
+        } else if let Some(head) = line.strip_prefix("HEAD ") {
+            current.head = head.trim().to_string();
+        } else if let Some(branch) = line.strip_prefix("branch ") {
+            let b = branch.trim();
+            current.branch = Some(b.strip_prefix("refs/heads/").unwrap_or(b).to_string());
+        } else if line == "bare" {
+            current.is_bare = true;
+        } else if line == "detached" {
+            current.is_detached = true;
+        } else if line.starts_with("locked") {
+            current.is_locked = true;
+        }
+    }
+
+    if has_entry {
+        worktrees.push(current);
+    }
+
+    Ok(worktrees)
 }
 
 fn discover_default_branch(work_dir: &Path) -> Option<String> {
@@ -1826,7 +2027,9 @@ mod tests {
 
         // Detailed branches
         let branches = list_branches_detailed(dir.path(), None).unwrap();
-        assert!(branches.iter().any(|b| b.name == "feature-1" && b.is_current));
+        assert!(branches
+            .iter()
+            .any(|b| b.name == "feature-1" && b.is_current));
         assert!(branches.iter().any(|b| b.name == "main"));
 
         // Switch back to main
@@ -1968,7 +2171,10 @@ mod tests {
         run_git(dir.path(), &["add", "."]);
         run_git(dir.path(), &["commit", "-qm", "initial"]);
         fs::write(dir.path().join("work.txt"), "work\n").unwrap();
-        run_git(dir.path(), &["stash", "push", "-u", "-m", "message | detail"]);
+        run_git(
+            dir.path(),
+            &["stash", "push", "-u", "-m", "message | detail"],
+        );
 
         let stashes = list_stashes(dir.path()).unwrap();
 
@@ -2020,7 +2226,10 @@ mod tests {
         assert_eq!(inspect(dir.path()).unwrap().files.len(), 1);
         discard_file_changes(dir.path(), "file1.txt").unwrap();
         assert_eq!(inspect(dir.path()).unwrap().files.len(), 0);
-        assert_eq!(fs::read_to_string(dir.path().join("file1.txt")).unwrap(), "original\n");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("file1.txt")).unwrap(),
+            "original\n"
+        );
 
         // 2. Create untracked file and discard
         fs::write(dir.path().join("untracked.rs"), "fn main() {}\n").unwrap();
@@ -2069,5 +2278,35 @@ mod tests {
 
         let diff = diff_commit_file(dir.path(), &commits[0].sha, "b.txt").unwrap();
         assert!(diff.contains("second file"));
+    }
+
+    #[test]
+    fn worktree_lifecycle_and_listing() {
+        let dir = tempdir().unwrap();
+        run_git(dir.path(), &["init", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "dev@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Dev"]);
+        fs::write(dir.path().join("base.txt"), "hello worktree\n").unwrap();
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-qm", "initial commit"]);
+
+        assert!(is_git_repo(dir.path()));
+
+        let worktree_dir = dir.path().join(".threadlane/worktrees/task_1");
+        create_worktree(dir.path(), &worktree_dir, "worktree/task_1").unwrap();
+        assert!(worktree_dir.join("base.txt").exists());
+
+        let worktrees = list_worktrees(dir.path()).unwrap();
+        assert!(worktrees.len() >= 2);
+        assert!(worktrees
+            .iter()
+            .any(|wt| wt.branch.as_deref() == Some("worktree/task_1")));
+
+        // Write changes in worktree
+        fs::write(worktree_dir.join("new_feature.txt"), "isolated feature\n").unwrap();
+        assert!(!dir.path().join("new_feature.txt").exists());
+
+        remove_worktree(dir.path(), &worktree_dir, true).unwrap();
+        assert!(!worktree_dir.exists());
     }
 }

@@ -1,11 +1,11 @@
-use super::cancellation::{AgentRunTask, recover_v2_subagent_records};
+use super::cancellation::{recover_v2_subagent_records, AgentRunTask};
 use super::capabilities::dispatch_hook_requests;
 use super::harness::{
     CodingSessionHarness, InterruptedSubagentRecoveryState, SubagentLaneIdentity,
 };
 use super::runtime::CodingAgent;
 use super::subagents::{
-    NEXT_SUBAGENT_UI_RUN_ID, SubagentLaneStatus, SubagentRunContext, run_subagent_task,
+    run_subagent_task, SubagentLaneStatus, SubagentRunContext, NEXT_SUBAGENT_UI_RUN_ID,
 };
 use crate::agents::AgentDefinition;
 use crate::commands::{execute_slash_command, parse_slash_command};
@@ -14,8 +14,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use threadlane_runtime::harness::{
     HookContext, HookKind, JsonlStore, OperationOutcome, PromptSnapshot, Record as HarnessRecord,
     Reducer, SessionStore,

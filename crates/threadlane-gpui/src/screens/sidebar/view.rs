@@ -1,5 +1,5 @@
-use gpui::InteractiveElement;
 use gpui::prelude::FluentBuilder;
+use gpui::InteractiveElement;
 use gpui::*;
 
 use gpui_component::button::{Button, ButtonVariant, ButtonVariants};
@@ -196,6 +196,7 @@ fn sidebar_session_fingerprint(session: &SessionInfo) -> u64 {
     session.updated_at.hash(&mut hasher);
     session.health.hash(&mut hasher);
     session.git_branch.hash(&mut hasher);
+    session.is_worktree.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -639,6 +640,29 @@ impl SidebarView {
                 .child(div().max_w(px(110.0)).truncate().child(project))
                 .into_any_element(),
         );
+
+        if session.is_worktree {
+            row2_items.push(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(2.0))
+                    .px_1()
+                    .py(px(0.5))
+                    .rounded(px(3.0))
+                    .bg(theme.secondary)
+                    .text_color(theme.muted_foreground)
+                    .child(
+                        svg()
+                            .path("icons/git/branch.svg")
+                            .size(px(10.0))
+                            .text_color(theme.muted_foreground),
+                    )
+                    .child("worktree")
+                    .into_any_element(),
+            );
+        }
 
         if let Some(pr_chips) = pr_meta {
             row2_items.push(
@@ -1239,8 +1263,8 @@ impl SidebarView {
 #[cfg(test)]
 mod tests {
     use super::{
-        DateGroup, HistoryRow, flatten_history_groups, format_time_ago, same_history_row_identity,
-        session_pr_info, sidebar_session_fingerprint,
+        flatten_history_groups, format_time_ago, same_history_row_identity, session_pr_info,
+        sidebar_session_fingerprint, DateGroup, HistoryRow,
     };
     use crate::state::{SessionHealth, SessionInfo};
     use std::collections::HashMap;
@@ -1255,6 +1279,7 @@ mod tests {
             updated_at: 0,
             health: SessionHealth::Healthy,
             git_branch: None,
+            is_worktree: false,
         }
     }
 

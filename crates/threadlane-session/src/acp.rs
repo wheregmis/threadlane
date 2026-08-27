@@ -15,7 +15,7 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::future::Future;
@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::{Mutex as TokioMutex, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Mutex as TokioMutex};
 use tokio::task::JoinHandle;
 
 /// ACP major protocol version implemented by this client.

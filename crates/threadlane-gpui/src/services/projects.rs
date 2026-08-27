@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use crate::state::{ProjectInfo, discover_sessions_in_project};
+use crate::state::{discover_sessions_in_project, ProjectInfo};
 
 pub fn refresh_project(project: &mut ProjectInfo, work_dir: &Path) {
     project.sessions = discover_sessions_in_project(work_dir);

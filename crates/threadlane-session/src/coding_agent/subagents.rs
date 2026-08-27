@@ -8,24 +8,24 @@ use super::scheduler::AgentWorkScheduler;
 use super::scheduler::{
     AgentWork, AgentWorkObserver, DeterministicSubagentToolExecutor, SubagentBoundaryObserver,
 };
-use crate::agents::{AgentDefinition, AgentScope, discover_agents};
+use crate::agents::{discover_agents, AgentDefinition, AgentScope};
 use crate::policy::ToolPolicy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use threadlane_runtime::harness::HookKind;
 use threadlane_runtime::{
     AgentEvent, AgentMessage, AgentRuntime, SubagentProgressUpdate, TurnState,
 };
 use threadlane_wasi::WasiExtensionManager;
 use tokio::sync::broadcast;
-use tokio::time::{Duration, timeout};
+use tokio::time::{timeout, Duration};
 
 pub(crate) const MAX_SUBAGENT_TASKS: usize = 8;
 pub(crate) const MAX_SUBAGENT_TASK_CHARS: usize = 32_000;

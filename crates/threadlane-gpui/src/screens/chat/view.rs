@@ -26,7 +26,7 @@ use crate::app::{actions::AppAction, controller};
 use crate::screens::editor::EditorView;
 use crate::state::{
     AppState, ChatMessageInfo, ChatStreamEvent, MessageRole, SubagentActivityInfo,
-    SubagentActivityStatus, ToolActivityInfo, TrajectoryEntry,
+    SubagentActivityStatus, ToolActivityInfo, TrajectoryEntry, WorkMode,
 };
 
 #[derive(Clone, Debug)]
@@ -200,7 +200,7 @@ fn context_meter_view_model(
         reports_usage: true,
     }
 }
-use threadlane_session::commands::{SlashCommandInfo, available_slash_commands};
+use threadlane_session::commands::{available_slash_commands, SlashCommandInfo};
 use threadlane_session::{ImageAttachment, PlanItemStatus, ReasoningEffort, SessionPlan};
 
 actions!(threadlane_composer, [PasteClipboard]);
@@ -309,7 +309,12 @@ fn is_terminal_runnable_language(lang: &str) -> bool {
 fn active_shell_supports_language(lang: &str) -> bool {
     let shell = std::env::var("SHELL")
         .ok()
-        .and_then(|path| Path::new(&path).file_name().and_then(|name| name.to_str()).map(str::to_ascii_lowercase))
+        .and_then(|path| {
+            Path::new(&path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_ascii_lowercase)
+        })
         .unwrap_or_else(|| "sh".into());
     match lang.trim().to_ascii_lowercase().as_str() {
         "bash" => shell == "bash",
@@ -360,8 +365,16 @@ fn parse_code_block_header(header: &str, code: &str) -> (String, Option<String>)
             let comment_content = trimmed
                 .strip_prefix("//")
                 .or_else(|| trimmed.strip_prefix('#'))
-                .or_else(|| trimmed.strip_prefix("/*").and_then(|s| s.strip_suffix("*/")))
-                .or_else(|| trimmed.strip_prefix("<!--").and_then(|s| s.strip_suffix("-->")));
+                .or_else(|| {
+                    trimmed
+                        .strip_prefix("/*")
+                        .and_then(|s| s.strip_suffix("*/"))
+                })
+                .or_else(|| {
+                    trimmed
+                        .strip_prefix("<!--")
+                        .and_then(|s| s.strip_suffix("-->"))
+                });
 
             if let Some(candidate) = comment_content {
                 let candidate = candidate.trim();
@@ -402,7 +415,9 @@ pub fn extract_markdown_segments(raw: &str) -> Vec<MarkdownSegment> {
 
         let header_start = fence_start_idx + 3;
         let Some(header_newline) = raw[header_start..].find('\n') else {
-            segments.push(MarkdownSegment::Markdown(raw[fence_start_idx..].to_string()));
+            segments.push(MarkdownSegment::Markdown(
+                raw[fence_start_idx..].to_string(),
+            ));
             return segments;
         };
 
@@ -921,7 +936,10 @@ impl ChatListView {
                         let is_steer = *secondary;
                         model_clone.update(cx, |state, cx| {
                             if is_generating {
-                                controller::dispatch(state, AppAction::StageBusyMessage { text, images });
+                                controller::dispatch(
+                                    state,
+                                    AppAction::StageBusyMessage { text, images },
+                                );
                                 if is_steer {
                                     controller::dispatch(state, AppAction::SteerPendingMessage);
                                 } else {
@@ -2789,10 +2807,12 @@ impl ChatListView {
         let model = self.model.clone();
         let code_str = code.to_string();
         let copy_code = code.to_string();
-        let is_runnable =
-            !streaming && is_terminal_runnable_language(language) && active_shell_supports_language(language);
+        let is_runnable = !streaming
+            && is_terminal_runnable_language(language)
+            && active_shell_supports_language(language);
         let path_opt = header_path.and_then(|path| match classify_chat_link(path) {
-            ChatLinkTarget::ProjectFile(path) => Some(path), _ => None,
+            ChatLinkTarget::ProjectFile(path) => Some(path),
+            _ => None,
         });
         let path_for_open = (!streaming).then(|| path_opt.clone()).flatten();
 
@@ -3049,8 +3069,10 @@ impl ChatListView {
         let theme = cx.theme().colors;
         match msg.role {
             MessageRole::User => {
-                let is_queued = msg.id.starts_with("queued-user-") && self.model.read(cx).is_generating;
-                let is_steered = msg.id.starts_with("steered-user-") && self.model.read(cx).is_generating;
+                let is_queued =
+                    msg.id.starts_with("queued-user-") && self.model.read(cx).is_generating;
+                let is_steered =
+                    msg.id.starts_with("steered-user-") && self.model.read(cx).is_generating;
                 div()
                     .w_full()
                     .min_w_0()
@@ -3061,20 +3083,24 @@ impl ChatListView {
                     .px_4()
                     .when(is_queued, |el| {
                         el.child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .mb_1()
-                                .child(
-                                    Tag::new()
-                                        .child("Queued for next turn")
-                                        .with_variant(TagVariant::Secondary)
-                                        .small(),
-                                ),
+                            div().flex().items_center().gap_1().mb_1().child(
+                                Tag::new()
+                                    .child("Queued for next turn")
+                                    .with_variant(TagVariant::Secondary)
+                                    .small(),
+                            ),
                         )
                     })
-                    .when(is_steered, |el| el.child(div().child(Tag::new().child("Steering current turn").with_variant(TagVariant::Primary).small())))
+                    .when(is_steered, |el| {
+                        el.child(
+                            div().child(
+                                Tag::new()
+                                    .child("Steering current turn")
+                                    .with_variant(TagVariant::Primary)
+                                    .small(),
+                            ),
+                        )
+                    })
                     .child(
                         div()
                             .min_w_0()
@@ -4066,6 +4092,169 @@ impl ChatListView {
                 )
         });
 
+        let (
+            projects_list,
+            active_work_dir,
+            is_new_task,
+            draft_work_mode,
+            active_session_is_worktree,
+        ) = {
+            let state = self.model.read(cx);
+            let active_dir = state.active_work_dir.clone();
+            let session_is_wt = state
+                .active_session_id
+                .as_ref()
+                .and_then(|sid| {
+                    state
+                        .projects
+                        .iter()
+                        .flat_map(|p| p.sessions.iter())
+                        .find(|s| &s.id == sid)
+                        .map(|s| s.is_worktree)
+                })
+                .unwrap_or(false);
+            (
+                state
+                    .projects
+                    .iter()
+                    .map(|p| (p.name.clone(), p.work_dir.clone()))
+                    .collect::<Vec<_>>(),
+                active_dir,
+                state.is_new_task,
+                state.draft_work_mode,
+                session_is_wt,
+            )
+        };
+
+        let effective_work_mode = if is_new_task {
+            draft_work_mode
+        } else if active_session_is_worktree {
+            WorkMode::Worktree
+        } else {
+            WorkMode::Local
+        };
+
+        let selected_project_name = projects_list
+            .iter()
+            .find(|(_, work_dir)| active_work_dir.as_ref() == Some(work_dir))
+            .map(|(name, _)| name.clone())
+            .unwrap_or_else(|| "Select project".to_string());
+
+        let project_chip_model = self.model.clone();
+        let project_chip = Button::new("composer-project-chip")
+            .icon(IconName::Folder)
+            .label(selected_project_name)
+            .dropdown_caret(true)
+            .ghost()
+            .xsmall()
+            .dropdown_menu(move |menu, _window, _cx| {
+                let mut menu = menu;
+                for (name, work_dir) in projects_list.clone() {
+                    let model = project_chip_model.clone();
+                    menu = menu.item(PopupMenuItem::new(name).on_click(
+                        move |_event, _window, cx| {
+                            model.update(cx, |state, cx| {
+                                controller::dispatch(
+                                    state,
+                                    AppAction::SelectDraftProject(work_dir.clone()),
+                                );
+                                cx.notify();
+                            });
+                        },
+                    ));
+                }
+
+                let model = project_chip_model.clone();
+                menu.separator()
+                    .item(PopupMenuItem::new("New project...").on_click(
+                        move |_event, _window, cx| {
+                            let model = model.clone();
+                            cx.spawn(async move |cx| {
+                                let Some(folder) = rfd::AsyncFileDialog::new().pick_folder().await
+                                else {
+                                    return;
+                                };
+                                let path = folder.path().to_path_buf();
+                                let _ = model.update(cx, |state, cx| {
+                                    controller::dispatch(state, AppAction::AttachProject(path));
+                                    cx.notify();
+                                });
+                            })
+                            .detach();
+                        },
+                    ))
+            });
+
+        let work_mode_model = self.model.clone();
+        let work_mode_label = match effective_work_mode {
+            WorkMode::Local => "Local",
+            WorkMode::Worktree => {
+                if is_new_task {
+                    "New local worktree"
+                } else {
+                    "Worktree"
+                }
+            }
+        };
+
+        let work_mode_chip = Button::new("composer-workmode-chip")
+            .icon(if effective_work_mode == WorkMode::Worktree {
+                Icon::default().path("icons/git/branch.svg")
+            } else {
+                Icon::new(IconName::SquareTerminal)
+            })
+            .label(work_mode_label)
+            .dropdown_caret(true)
+            .ghost()
+            .xsmall()
+            .dropdown_menu(move |menu, _window, _cx| {
+                let local_model = work_mode_model.clone();
+                let wt_model = work_mode_model.clone();
+                menu.item(PopupMenuItem::label("Work in"))
+                    .item(
+                        PopupMenuItem::new("Local")
+                            .icon(IconName::SquareTerminal)
+                            .checked(effective_work_mode == WorkMode::Local)
+                            .on_click(move |_event, _window, cx| {
+                                local_model.update(cx, |state, cx| {
+                                    controller::dispatch(
+                                        state,
+                                        AppAction::SelectWorkMode(WorkMode::Local),
+                                    );
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new("New local worktree")
+                            .icon(Icon::default().path("icons/git/branch.svg"))
+                            .checked(effective_work_mode == WorkMode::Worktree)
+                            .on_click(move |_event, _window, cx| {
+                                wt_model.update(cx, |state, cx| {
+                                    controller::dispatch(
+                                        state,
+                                        AppAction::SelectWorkMode(WorkMode::Worktree),
+                                    );
+                                    cx.notify();
+                                });
+                            }),
+                    )
+            });
+
+        // Keep the context row focused on the two choices that affect where
+        // work happens. The branch is already represented by the worktree
+        // choice and is not an additional control the user needs to parse.
+        let composer_context_bar = div()
+            .w_full()
+            .max_w(px(1000.0))
+            .mx_auto()
+            .mb_1p5()
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .child(project_chip)
+            .child(work_mode_chip);
+
         let pending_preview = pending_message.map(|text| {
             div()
                 .w_full()
@@ -4687,6 +4876,7 @@ impl ChatListView {
                     .child(div().min_w_0().child(status))
             }))
             .children(pending_preview)
+            .child(composer_context_bar)
             .child(
                 div()
                     .w_full()
@@ -5045,15 +5235,16 @@ impl Render for ChatListView {
 #[cfg(test)]
 mod hot_path_tests {
     use super::{
-        ChatLinkTarget, ContextMeterContext, ContextMeterMetrics, MARKDOWN_CACHE_ENTRY_LIMIT,
-        MarkdownSegment, MarkdownUpdate, TrajectoryCacheKey, TrajectoryMode, TrajectoryRow,
-        TranscriptRow, build_trajectory_rows, build_transcript_rows, classify_chat_link,
-        classify_markdown_update, contains_case_insensitive, context_meter_view_model,
-        extend_trajectory_facets, extend_trajectory_previews, extend_trajectory_rows,
-        extend_trajectory_summary, extract_markdown_segments, format_trajectory_raw_json,
-        grouped_tool_activities, is_terminal_runnable_language, markdown_cache_exceeded,
-        next_chat_stream_batch, normalize_terminal_command, reconcile_trajectory_entries,
+        build_trajectory_rows, build_transcript_rows, classify_chat_link, classify_markdown_update,
+        contains_case_insensitive, context_meter_view_model, extend_trajectory_facets,
+        extend_trajectory_previews, extend_trajectory_rows, extend_trajectory_summary,
+        extract_markdown_segments, format_trajectory_raw_json, grouped_tool_activities,
+        is_terminal_runnable_language, markdown_cache_exceeded, next_chat_stream_batch,
+        normalize_terminal_command, reconcile_trajectory_entries,
         reconcile_trajectory_entries_by_epoch, subagent_popover_counts, summarize_trajectory,
+        ChatLinkTarget, ContextMeterContext, ContextMeterMetrics, MarkdownSegment, MarkdownUpdate,
+        TrajectoryCacheKey, TrajectoryMode, TrajectoryRow, TranscriptRow,
+        MARKDOWN_CACHE_ENTRY_LIMIT,
     };
     use crate::state::{
         reported_session_shape_state, ChatMessageInfo, ChatStreamEvent, MessageRole,
@@ -5069,14 +5260,12 @@ mod hot_path_tests {
     #[tokio::test]
     async fn chat_stream_batch_waits_then_caps_ready_events() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        assert!(
-            tokio::time::timeout(
-                std::time::Duration::from_millis(10),
-                next_chat_stream_batch(&mut rx),
-            )
-            .await
-            .is_err()
-        );
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            next_chat_stream_batch(&mut rx),
+        )
+        .await
+        .is_err());
         for index in 0..130 {
             tx.send(ChatStreamEvent::Finished {
                 session_id: index.to_string(),
@@ -5709,15 +5898,13 @@ mod hot_path_tests {
                 code: "// src/main.rs\nfn main() {}\n".into(),
             }
         );
-        assert_eq!(
-            segments[4],
-            MarkdownSegment::Markdown("Finished!".into())
-        );
+        assert_eq!(segments[4], MarkdownSegment::Markdown("Finished!".into()));
     }
 
     #[test]
     fn extract_markdown_segments_handles_comment_path_heuristic() {
-        let input = "```typescript\n// app/routes/index.tsx\nexport default function Home() {}\n```";
+        let input =
+            "```typescript\n// app/routes/index.tsx\nexport default function Home() {}\n```";
         let segments = extract_markdown_segments(input);
         assert_eq!(segments.len(), 1);
         assert_eq!(
@@ -5732,27 +5919,43 @@ mod hot_path_tests {
 
     #[test]
     fn extract_markdown_segments_rejects_version_and_shebang_as_paths() {
-        for input in ["```sh\n#!/bin/sh\necho hi\n```", "```rust\n// v1.2\nfn main() {}\n```"] {
+        for input in [
+            "```sh\n#!/bin/sh\necho hi\n```",
+            "```rust\n// v1.2\nfn main() {}\n```",
+        ] {
             let segments = extract_markdown_segments(input);
-            assert!(matches!(segments.as_slice(), [MarkdownSegment::CodeBlock { header_path: None, .. }]));
+            assert!(matches!(
+                segments.as_slice(),
+                [MarkdownSegment::CodeBlock {
+                    header_path: None,
+                    ..
+                }]
+            ));
         }
     }
 
     #[test]
     fn extract_markdown_segments_accepts_indented_closing_fence() {
         let segments = extract_markdown_segments("```rust\nlet x = 1;\n  ```\nAfter");
-        assert!(matches!(segments.as_slice(), [MarkdownSegment::CodeBlock { .. }, MarkdownSegment::Markdown(text)] if text == "After"));
+        assert!(
+            matches!(segments.as_slice(), [MarkdownSegment::CodeBlock { .. }, MarkdownSegment::Markdown(text)] if text == "After")
+        );
     }
 
     #[test]
     fn extract_markdown_segments_keeps_text_before_mid_line_backticks() {
         let segments = extract_markdown_segments("Prefix ```inline\n```rust\ncode\n```");
-        assert!(matches!(segments.as_slice(), [MarkdownSegment::Markdown(text), MarkdownSegment::CodeBlock { language, .. }] if text == "Prefix ```inline\n" && language == "rust"));
+        assert!(
+            matches!(segments.as_slice(), [MarkdownSegment::Markdown(text), MarkdownSegment::CodeBlock { language, .. }] if text == "Prefix ```inline\n" && language == "rust")
+        );
     }
 
     #[test]
     fn normalize_terminal_command_removes_prompt_markers() {
-        assert_eq!(normalize_terminal_command("$ echo one\n>>> echo two\n> echo three"), "echo one\necho two\necho three");
+        assert_eq!(
+            normalize_terminal_command("$ echo one\n>>> echo two\n> echo three"),
+            "echo one\necho two\necho three"
+        );
     }
 
     #[test]

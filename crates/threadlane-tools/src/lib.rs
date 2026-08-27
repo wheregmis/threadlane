@@ -2,7 +2,7 @@ pub mod hashline;
 pub mod search;
 mod virtual_read;
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1340,14 +1340,12 @@ mod tests {
             {"path":"a.rs","text_edits":[{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":3}},"newText":"new"}]},
             {"path":"b.rs","text_edits":[{"range":{"start":{"line":9,"character":0},"end":{"line":9,"character":1}},"newText":"bad"}]}
         ]});
-        assert!(
-            try_execute_tool_in_workspace(
-                "apply_workspace_edit_plan",
-                &serde_json::json!({"plan":plan}).to_string(),
-                dir.path()
-            )
-            .is_err()
-        );
+        assert!(try_execute_tool_in_workspace(
+            "apply_workspace_edit_plan",
+            &serde_json::json!({"plan":plan}).to_string(),
+            dir.path()
+        )
+        .is_err());
         assert_eq!(
             std::fs::read_to_string(dir.path().join("a.rs")).unwrap(),
             "old\n"
@@ -1369,10 +1367,10 @@ mod tests {
         assert!(desc.contains("Always batch multiple edits for the same file in one tool call"));
 
         let params = &hashline_tool["function"]["parameters"]["properties"];
-        let start_anchor_desc =
-            params["edits"]["items"]["properties"]["start_anchor"]["description"]
-                .as_str()
-                .unwrap();
+        let start_anchor_desc = params["edits"]["items"]["properties"]["start_anchor"]
+            ["description"]
+            .as_str()
+            .unwrap();
         assert!(start_anchor_desc.contains("formatted as 'line_number:hash'"));
 
         let end_anchor_desc = params["edits"]["items"]["properties"]["end_anchor"]["description"]

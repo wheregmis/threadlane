@@ -35,12 +35,10 @@ mod tests {
         assert_eq!(runtime.session_file, session_file);
         assert!(runtime.session_file.exists());
         assert!(runtime.system_prompt.contains("Current working directory:"));
-        assert!(
-            !runtime
-                .session_file
-                .with_file_name("session.harness.jsonl")
-                .exists()
-        );
+        assert!(!runtime
+            .session_file
+            .with_file_name("session.harness.jsonl")
+            .exists());
 
         drop(runtime);
         let _ = std::fs::remove_dir_all(work_dir);

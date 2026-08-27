@@ -3,13 +3,13 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use threadlane_session::harness::{JsonlStore, SessionStore};
+use threadlane_session::harness::{JsonlStore, Record, SessionStore};
 use threadlane_session::{
     AcpConfigOption, AgentEvent, AgentMessage, ImageAttachment, ReasoningEffort, SessionPlan,
     SubagentProgressUpdate, TokenUsage,
 };
 
-use crate::adapters::agent_events::{ChatAgentUpdate, adapt_agent_event};
+use crate::adapters::agent_events::{adapt_agent_event, ChatAgentUpdate};
 use crate::persistence::load_project_registry;
 use crate::services::sessions::{ExecutionMode, SessionRuntime, SessionRuntimeStatus};
 
@@ -22,6 +22,22 @@ pub enum SessionHealth {
     Warning,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum WorkMode {
+    #[default]
+    Local,
+    Worktree,
+}
+
+impl WorkMode {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Local => "Local",
+            Self::Worktree => "Worktree",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SessionInfo {
     pub(crate) id: String,
@@ -31,6 +47,7 @@ pub struct SessionInfo {
     pub(crate) updated_at: u64,
     pub(crate) health: SessionHealth,
     pub(crate) git_branch: Option<String>,
+    pub(crate) is_worktree: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -263,6 +280,7 @@ pub struct AppState {
     pub(crate) active_work_dir: Option<PathBuf>,
     pub(crate) active_session_id: Option<String>,
     pub(crate) is_new_task: bool,
+    pub(crate) draft_work_mode: WorkMode,
     pub(crate) search_query: String,
     pub(crate) messages: Arc<Vec<ChatMessageInfo>>,
     pub(crate) available_models: Vec<crate::model_catalog::ModelOption>,
@@ -405,6 +423,7 @@ fn discover_session_stubs_in_project(work_dir: &Path) -> Vec<SessionInfo> {
                 session_file: path,
                 health: SessionHealth::Healthy,
                 git_branch: None,
+                is_worktree: false,
             })
         })
         .collect::<Vec<_>>();
@@ -451,29 +470,53 @@ fn discover_sessions_in_project_cached(
                     .file_stem()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| "session".into());
-                let (title, health, updated_at, git_branch) =
+                let (title, health, updated_at, git_branch, session_work_dir, is_worktree) =
                     match JsonlStore::open_read_only(&path) {
-                        Ok(store) => (
-                            extract_session_title(&store, &id),
-                            SessionHealth::Healthy,
-                            file_mtime(&path),
-                            store.facts().get("git_branch").cloned(),
-                        ),
+                        Ok(store) => {
+                            let facts = store.facts();
+                            let branch = facts.get("git_branch").cloned();
+                            let is_wt = facts.get("is_worktree").is_some_and(|v| v == "true");
+                            let wt_path = facts.get("worktree_path").map(PathBuf::from);
+                            let effective_work_dir = if is_wt {
+                                wt_path.unwrap_or_else(|| {
+                                    let inferred =
+                                        canonical_work_dir.join(".threadlane/worktrees").join(&id);
+                                    if inferred.exists() {
+                                        inferred
+                                    } else {
+                                        canonical_work_dir.clone()
+                                    }
+                                })
+                            } else {
+                                canonical_work_dir.clone()
+                            };
+                            (
+                                extract_session_title(&store, &id),
+                                SessionHealth::Healthy,
+                                file_mtime(&path),
+                                branch,
+                                effective_work_dir,
+                                is_wt,
+                            )
+                        }
                         Err(_) => (
                             "Unreadable session".to_string(),
                             SessionHealth::Warning,
                             file_mtime(&path),
                             None,
+                            canonical_work_dir.clone(),
+                            false,
                         ),
                     };
                 let info = SessionInfo {
                     id,
                     title,
-                    work_dir: canonical_work_dir.clone(),
+                    work_dir: session_work_dir,
                     session_file: path.clone(),
                     updated_at,
                     health,
                     git_branch,
+                    is_worktree,
                 };
                 cache.entries.insert(
                     path.clone(),
@@ -511,7 +554,7 @@ pub fn load_session_messages(session_file: &Path) -> Vec<ChatMessageInfo> {
 pub(crate) fn compute_session_messages(
     session_file: &Path,
 ) -> Result<Vec<ChatMessageInfo>, String> {
-    use threadlane_session::harness::{TranscriptItem, read_transcript_page};
+    use threadlane_session::harness::{read_transcript_page, TranscriptItem};
 
     // The durable pager is the single transcript source, but exhaust it here:
     // GPUI state continues to expose complete chronological history.
@@ -982,6 +1025,7 @@ impl AppState {
             projects: project_infos,
             active_work_dir,
             is_new_task: active_session_id.is_none(),
+            draft_work_mode: WorkMode::Local,
             active_session_id,
             search_query: String::new(),
             messages: Arc::new(messages),
@@ -1035,7 +1079,11 @@ impl AppState {
                 session_file: session_file.to_path_buf(),
                 reload_messages: true,
                 runtime_options: state.active_work_dir.clone().map(|work_dir| {
-                    (work_dir, state.selected_model.clone(), state.model_roles.clone())
+                    (
+                        work_dir,
+                        state.selected_model.clone(),
+                        state.model_roles.clone(),
+                    )
                 }),
             });
         }
@@ -1245,6 +1293,7 @@ impl AppState {
         self.workspace_page = WorkspacePage::Chat;
         self.active_session_id = None;
         self.is_new_task = true;
+        self.draft_work_mode = WorkMode::Local;
         self.messages = Arc::new(Vec::new());
         self.active_plan = SessionPlan::default();
         self.is_generating = false;
@@ -1255,6 +1304,10 @@ impl AppState {
                 .first()
                 .map(|project| project.work_dir.clone());
         }
+    }
+
+    pub(crate) fn set_work_mode(&mut self, mode: WorkMode) {
+        self.draft_work_mode = mode;
     }
 
     fn persist_project_selection(&self, work_dir: &Path, session_id: Option<&str>) {
@@ -1272,6 +1325,7 @@ impl AppState {
             self.active_work_dir = Some(work_dir.clone());
             self.active_session_id = None;
             self.is_new_task = true;
+            self.draft_work_mode = WorkMode::Local;
             self.messages = Arc::new(Vec::new());
             self.active_plan = SessionPlan::default();
             self.is_generating = false;
@@ -1283,7 +1337,9 @@ impl AppState {
     }
 
     pub(crate) fn request_open_file(&mut self, relative_path: String) {
-        let Some(root) = self.active_work_dir.clone() else { return };
+        let Some(root) = self.active_work_dir.clone() else {
+            return;
+        };
         let path = match threadlane_tools::validate_path_in_workspace(&relative_path, &root) {
             Ok(path) => path,
             Err(error) => {
@@ -1361,7 +1417,11 @@ impl AppState {
             session_id,
             session_file,
             reload_messages: true,
-            runtime_options: Some((work_dir, self.selected_model.clone(), self.model_roles.clone())),
+            runtime_options: Some((
+                work_dir,
+                self.selected_model.clone(),
+                self.model_roles.clone(),
+            )),
         };
         self.pending_hydrations.push(request.clone());
         request
@@ -1631,7 +1691,53 @@ impl AppState {
         let session_id = format!("session_{now_nanos}");
         let session_file = sessions_dir.join(format!("{session_id}.jsonl"));
 
-        let _ = std::fs::File::create(&session_file);
+        let mut store = JsonlStore::open(&session_file).map_err(|e| e.to_string())?;
+
+        let (session_work_dir, _git_branch, _is_worktree) = if self.draft_work_mode
+            == WorkMode::Worktree
+            && threadlane_git::is_git_repo(&work_dir)
+        {
+            let branch = format!("worktree/{session_id}");
+            let worktree_dir = work_dir.join(".threadlane/worktrees").join(&session_id);
+            if let Err(error) = threadlane_git::create_worktree(&work_dir, &worktree_dir, &branch) {
+                tracing::warn!("Failed to create worktree: {error}, falling back to main workdir");
+                (work_dir.clone(), None, false)
+            } else {
+                let seq1 = store.next_sequence();
+                let _ = store.append_record(Record::FactSet {
+                    id: format!("fact-is_worktree-{seq1}"),
+                    seq: seq1,
+                    lane: "main".into(),
+                    timestamp: 0,
+                    run_id: None,
+                    key: "is_worktree".into(),
+                    value: "true".into(),
+                });
+                let seq2 = store.next_sequence();
+                let _ = store.append_record(Record::FactSet {
+                    id: format!("fact-worktree_path-{seq2}"),
+                    seq: seq2,
+                    lane: "main".into(),
+                    timestamp: 0,
+                    run_id: None,
+                    key: "worktree_path".into(),
+                    value: worktree_dir.to_string_lossy().to_string(),
+                });
+                let seq3 = store.next_sequence();
+                let _ = store.append_record(Record::FactSet {
+                    id: format!("fact-git_branch-{seq3}"),
+                    seq: seq3,
+                    lane: "main".into(),
+                    timestamp: 0,
+                    run_id: None,
+                    key: "git_branch".into(),
+                    value: branch.clone(),
+                });
+                (worktree_dir, Some(branch), true)
+            }
+        } else {
+            (work_dir.clone(), None, false)
+        };
 
         if let Some(project) = self
             .projects
@@ -1640,7 +1746,7 @@ impl AppState {
         {
             project.sessions = discover_sessions_in_project(&work_dir);
         }
-        let _ = self.select_session(work_dir, session_id.clone());
+        let _ = self.select_session(session_work_dir, session_id.clone());
         self.is_new_task = false;
         Ok(session_id)
     }
@@ -3191,9 +3297,11 @@ impl AppState {
         };
         // A refusal here is not worth interrupting the user: this is a
         // background question, and the picker simply stays as it was.
-        if let Err(error) =
-            crate::services::chat::load_acp_config_options(runtime, session_id, self.stream_tx.clone())
-        {
+        if let Err(error) = crate::services::chat::load_acp_config_options(
+            runtime,
+            session_id,
+            self.stream_tx.clone(),
+        ) {
             tracing::debug!("Could not load ACP agent settings: {error}");
         }
     }
@@ -3591,7 +3699,11 @@ impl AppState {
             .map(|message| message.text.as_str())
     }
 
-    pub(crate) fn stage_busy_message(&mut self, text: String, images: Vec<ImageAttachment>) -> Result<(), String> {
+    pub(crate) fn stage_busy_message(
+        &mut self,
+        text: String,
+        images: Vec<ImageAttachment>,
+    ) -> Result<(), String> {
         let text = text.trim().to_string();
         if text.is_empty() {
             return Ok(());
@@ -3636,7 +3748,9 @@ impl AppState {
         }
     }
 
-    fn pending_runtime_message(&self) -> Result<(Arc<SessionRuntime>, String, String, Vec<ImageAttachment>), String> {
+    fn pending_runtime_message(
+        &self,
+    ) -> Result<(Arc<SessionRuntime>, String, String, Vec<ImageAttachment>), String> {
         let session_id = self
             .active_session_id
             .clone()
@@ -3903,8 +4017,8 @@ pub(crate) use tests::reported_session_shape_state;
 mod tests {
     use super::*;
     use std::sync::{
-        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
     };
     use threadlane_session::harness::{
         OperationIntent, OperationOutcome, ProviderOutcome, Record, SessionStore, TraceString,
@@ -4038,8 +4152,8 @@ mod tests {
 
     async fn generated_reported_session_path() -> PathBuf {
         use threadlane_runtime::AgentConfig;
-        use threadlane_session::SystemPromptConfig;
         use threadlane_session::coding_agent::CodingAgentOptions;
+        use threadlane_session::SystemPromptConfig;
 
         let root = tempfile::tempdir().unwrap().keep();
         let skill_dir = root.join(".agents/skills/reported-shape");
@@ -4110,7 +4224,7 @@ mod tests {
         assert!(!projected_context.context_limit_is_estimate);
 
         // Inspect the production journal again, independently of the GPUI projection above.
-        use threadlane_session::harness::{CompactionReason, TranscriptItem, read_transcript_page};
+        use threadlane_session::harness::{read_transcript_page, CompactionReason, TranscriptItem};
 
         let store = JsonlStore::open(&path).unwrap();
         let records = store.records();
@@ -4470,11 +4584,9 @@ mod tests {
             first.iter().map(|row| &row.id).collect::<Vec<_>>(),
             second.iter().map(|row| &row.id).collect::<Vec<_>>()
         );
-        assert!(
-            !first
-                .iter()
-                .any(|message| message.content.contains("Context checkpoint from"))
-        );
+        assert!(!first
+            .iter()
+            .any(|message| message.content.contains("Context checkpoint from")));
         assert!(first.iter().any(|message| {
             message.role == MessageRole::User && message.content == "continue the cached tool loop"
         }));
@@ -4509,12 +4621,10 @@ mod tests {
             })
             .unwrap();
         drop(store);
-        assert!(
-            compute_session_messages(&path)
-                .unwrap()
-                .iter()
-                .all(|message| message.role != MessageRole::ContextMarker)
-        );
+        assert!(compute_session_messages(&path)
+            .unwrap()
+            .iter()
+            .all(|message| message.role != MessageRole::ContextMarker));
         assert_eq!(
             compute_full_session_projection(&path)
                 .unwrap()
@@ -4553,6 +4663,7 @@ mod tests {
                 updated_at: 0,
                 health: SessionHealth::Healthy,
                 git_branch: None,
+                is_worktree: false,
             }],
             is_expanded: true,
         });
@@ -5330,12 +5441,10 @@ mod tests {
             .unwrap();
         drop(store);
 
-        assert!(
-            compute_full_session_projection(&path)
-                .unwrap()
-                .subagents
-                .is_empty()
-        );
+        assert!(compute_full_session_projection(&path)
+            .unwrap()
+            .subagents
+            .is_empty());
     }
 
     #[test]
@@ -5450,6 +5559,7 @@ mod tests {
                 updated_at: 0,
                 health: SessionHealth::Working,
                 git_branch: None,
+                is_worktree: false,
             }],
             is_expanded: true,
         });
@@ -5574,11 +5684,9 @@ mod tests {
 
         let trajectory = &state.trajectory_by_session[&cached_key(&state, "old-session")];
         assert!(trajectory.iter().any(|entry| entry.category == "Operation"));
-        assert!(
-            trajectory
-                .iter()
-                .any(|entry| { entry.category == "Input" && entry.detail == "old prompt" })
-        );
+        assert!(trajectory
+            .iter()
+            .any(|entry| { entry.category == "Input" && entry.detail == "old prompt" }));
         assert!(trajectory.iter().any(|entry| entry.category == "Step"));
         assert!(trajectory.iter().any(|entry| {
             entry.category == "Tool"
@@ -6033,16 +6141,12 @@ mod tests {
             .trajectory_by_session
             .get(&cached_key(&state, "branch-session"))
             .unwrap();
-        assert!(
-            trajectory
-                .iter()
-                .any(|t| t.run_id.as_deref() == Some("run-branch-a"))
-        );
-        assert!(
-            trajectory
-                .iter()
-                .any(|t| t.run_id.as_deref() == Some("run-branch-b"))
-        );
+        assert!(trajectory
+            .iter()
+            .any(|t| t.run_id.as_deref() == Some("run-branch-a")));
+        assert!(trajectory
+            .iter()
+            .any(|t| t.run_id.as_deref() == Some("run-branch-b")));
 
         let _ = std::fs::remove_dir_all(root);
     }

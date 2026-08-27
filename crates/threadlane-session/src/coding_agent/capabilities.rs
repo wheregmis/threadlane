@@ -1,12 +1,12 @@
 use super::broker::{
-    HostCapabilityHandler, MAX_BROKER_CONTINUATION_ROUNDS, ManagedProcessRegistry,
+    HostCapabilityHandler, ManagedProcessRegistry, MAX_BROKER_CONTINUATION_ROUNDS,
 };
 use super::cancellation::AgentRunTask;
 use super::scheduler::AgentWorkScheduler;
 use super::subagents::{AgentRunner, MAX_SUBAGENT_TASKS};
-use crate::agents::{AgentScope, discover_agents};
+use crate::agents::{discover_agents, AgentScope};
 use crate::extension_broker::{
-    BROKER_API_VERSION, BrokerError, CapabilityDispatcher, HostBrokerRequest,
+    BrokerError, CapabilityDispatcher, HostBrokerRequest, BROKER_API_VERSION,
 };
 use crate::permission::{PermissionHandle, PermissionManager};
 use crate::plan::{GeneratePlanToolExecutor, SessionPlanStore, UpdatePlanToolExecutor};
@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use threadlane_mcp::McpManager;
 use threadlane_protocol::ProviderPort;
-use threadlane_runtime::Capability;
 use threadlane_runtime::harness::{HookContext, HookEffect, HookHandler, HookKind};
+use threadlane_runtime::Capability;
 use threadlane_runtime::{
     AgentConfig, AgentEvent, AgentToolCall, AgentToolDefinition, ToolExecutor, TurnState,
 };

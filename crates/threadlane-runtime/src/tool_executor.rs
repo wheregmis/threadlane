@@ -120,11 +120,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let executor = BuiltinToolExecutor::new();
         let result = executor
-            .execute_tool_in_workspace(
-                "run_command",
-                r#"{"command":"exit 9"}"#,
-                Some(dir.path()),
-            )
+            .execute_tool_in_workspace("run_command", r#"{"command":"exit 9"}"#, Some(dir.path()))
             .await
             .expect("the built-in executor handles run_command");
 

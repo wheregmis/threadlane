@@ -3998,18 +3998,14 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["src"]
         );
-        assert!(
-            items[0]
-                .children
-                .iter()
-                .any(|item| item.relative_path == "src/main.rs")
-        );
-        assert!(
-            items[0]
-                .children
-                .iter()
-                .any(|item| item.relative_path == "src/nested")
-        );
+        assert!(items[0]
+            .children
+            .iter()
+            .any(|item| item.relative_path == "src/main.rs"));
+        assert!(items[0]
+            .children
+            .iter()
+            .any(|item| item.relative_path == "src/nested"));
 
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -35,14 +35,13 @@ pub use controller::{ExecutionMode, SessionController, SessionStatus};
 pub use acp::{
     config_option_for, AcpAgentCapabilities, AcpAgentConfig, AcpAgentRecord, AcpAgentStatus,
     AcpAuthMethod, AcpClientHandler, AcpConfigOption, AcpConfigOptionChoice, AcpConnection,
-    AcpContentBlock, AcpInitializeResult, AcpManager,
-    AcpNewSessionResult, AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionOutcome,
-    AcpPermissionPolicy, AcpPermissionRequest, AcpPlanEntry, AcpProbeClient,
-    AcpReadTextFileRequest, AcpScope, AcpSession, AcpSessionNotification, AcpSessionUpdate,
-    AcpPermissionResponder, AcpSettings, AcpStopReason, AcpToolCall, AcpToolCallStatus,
-    AcpToolKind, AcpWorkspaceClient, AcpWriteTextFileRequest, ACP_CONFIG_CATEGORY_EFFORT,
-    ACP_CONFIG_CATEGORY_MODE, ACP_CONFIG_CATEGORY_MODEL, ACP_CONFIG_ID_AGENT,
-    ACP_PROTOCOL_VERSION,
+    AcpContentBlock, AcpInitializeResult, AcpManager, AcpNewSessionResult, AcpPermissionOption,
+    AcpPermissionOptionKind, AcpPermissionOutcome, AcpPermissionPolicy, AcpPermissionRequest,
+    AcpPermissionResponder, AcpPlanEntry, AcpProbeClient, AcpReadTextFileRequest, AcpScope,
+    AcpSession, AcpSessionNotification, AcpSessionUpdate, AcpSettings, AcpStopReason, AcpToolCall,
+    AcpToolCallStatus, AcpToolKind, AcpWorkspaceClient, AcpWriteTextFileRequest,
+    ACP_CONFIG_CATEGORY_EFFORT, ACP_CONFIG_CATEGORY_MODE, ACP_CONFIG_CATEGORY_MODEL,
+    ACP_CONFIG_ID_AGENT, ACP_PROTOCOL_VERSION,
 };
 pub use acp_bridge::{
     acp_agent_id, acp_model_id, agent_events_for, is_acp_model, ACP_MODEL_PREFIX,

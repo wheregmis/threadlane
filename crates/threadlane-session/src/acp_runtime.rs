@@ -27,11 +27,11 @@ use log::warn;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::acp::{
-    ACP_CONFIG_CATEGORY_EFFORT, ACP_CONFIG_CATEGORY_MODEL, AcpClientHandler, AcpConfigOption,
-    AcpContentBlock, AcpManager, AcpPermissionOptionKind, AcpPermissionOutcome,
-    AcpPermissionRequest, AcpReadTextFileRequest, AcpSession, AcpSessionNotification,
-    AcpSessionUpdate, AcpStopReason, AcpToolCall, AcpWorkspaceClient, AcpWriteTextFileRequest,
-    config_option_for,
+    config_option_for, AcpClientHandler, AcpConfigOption, AcpContentBlock, AcpManager,
+    AcpPermissionOptionKind, AcpPermissionOutcome, AcpPermissionRequest, AcpReadTextFileRequest,
+    AcpSession, AcpSessionNotification, AcpSessionUpdate, AcpStopReason, AcpToolCall,
+    AcpWorkspaceClient, AcpWriteTextFileRequest, ACP_CONFIG_CATEGORY_EFFORT,
+    ACP_CONFIG_CATEGORY_MODEL,
 };
 use crate::acp_bridge::agent_events_for;
 use crate::permission::{PermissionDecision, PermissionHandle};

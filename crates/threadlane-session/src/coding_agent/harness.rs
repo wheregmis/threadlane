@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 
 use crate::permission::PermissionTraceEvent;
 use threadlane_runtime::compaction::{
-    PreparedCompaction, compact_for_budget, estimate_request_tokens,
+    compact_for_budget, estimate_request_tokens, PreparedCompaction,
 };
 pub use threadlane_runtime::harness::Record as HarnessRecord;
 use threadlane_runtime::harness::{
@@ -22,7 +22,7 @@ use threadlane_runtime::harness::{
     ToolExecutionPhase, ToolReplaySafety as HarnessToolReplaySafety,
     ToolResult as HarnessToolResult, ToolSpec, TraceString,
 };
-use threadlane_runtime::model_metadata::{ContextBudget, context_budget};
+use threadlane_runtime::model_metadata::{context_budget, ContextBudget};
 use threadlane_runtime::{
     AgentConfig, AgentMessage, AgentToolResult, ImageAttachment, ProviderBoundaryRequest,
     ProviderBoundaryResult, ProviderTraceEvent, ReasoningEffort, TokenUsage,
@@ -3272,13 +3272,11 @@ mod tests {
         fs::set_permissions(&path, original).unwrap();
         assert!(result.is_err());
         assert_eq!(fs::read(&path).unwrap(), canonical);
-        assert!(
-            !harness
-                .store
-                .records()
-                .iter()
-                .any(|record| matches!(record, HarnessRecord::ProviderRequestStarted { .. }))
-        );
+        assert!(!harness
+            .store
+            .records()
+            .iter()
+            .any(|record| matches!(record, HarnessRecord::ProviderRequestStarted { .. })));
     }
 
     #[test]
@@ -3523,15 +3521,13 @@ mod tests {
                 _ => None,
             })
             .expect("abort record");
-        assert!(
-            harness
-                .prepare_provider_boundary(
-                    "run-compact",
-                    boundary_request(false),
-                    &AgentConfig::default(),
-                )
-                .is_err()
-        );
+        assert!(harness
+            .prepare_provider_boundary(
+                "run-compact",
+                boundary_request(false),
+                &AgentConfig::default(),
+            )
+            .is_err());
         assert!(!harness.store.records().iter().any(|record| {
             matches!(record, HarnessRecord::ContextCompacted { seq, .. } if *seq > abort_seq)
                 || matches!(record, HarnessRecord::ProviderRequestStarted { seq, .. } if *seq > abort_seq)
@@ -4286,15 +4282,13 @@ mod tests {
             .assert_model_visible(&[initial, queued.clone()])
             .unwrap();
 
-        assert!(
-            harness
-                .store
-                .model_context("main")
-                .unwrap()
-                .entries
-                .iter()
-                .any(|entry| entry.message == queued)
-        );
+        assert!(harness
+            .store
+            .model_context("main")
+            .unwrap()
+            .entries
+            .iter()
+            .any(|entry| entry.message == queued));
     }
 
     #[test]
@@ -4336,13 +4330,11 @@ mod tests {
             .assert_model_visible(&[prompt, thinking.clone()])
             .unwrap();
 
-        assert!(
-            harness
-                .store
-                .entries()
-                .iter()
-                .any(|entry| entry.message == thinking)
-        );
+        assert!(harness
+            .store
+            .entries()
+            .iter()
+            .any(|entry| entry.message == thinking));
     }
 
     #[test]

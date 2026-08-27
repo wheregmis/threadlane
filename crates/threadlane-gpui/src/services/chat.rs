@@ -77,13 +77,13 @@ pub(crate) fn execute_prompt(
             .and_then(std::path::Path::parent)
             .map(std::path::Path::to_path_buf);
         let git_branch = match work_dir {
-            Some(work_dir) => tokio::task::spawn_blocking(move || {
-                threadlane_git::current_branch(&work_dir)
-            })
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .flatten(),
+            Some(work_dir) => {
+                tokio::task::spawn_blocking(move || threadlane_git::current_branch(&work_dir))
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .flatten()
+            }
             None => None,
         };
         let mut agent = task_runtime.agent.lock().await;

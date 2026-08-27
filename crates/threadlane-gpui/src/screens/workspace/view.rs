@@ -5,10 +5,10 @@ use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::command::{Command, CommandGroup, CommandItem, CommandState};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
-use gpui_component::resizable::{ResizableState, h_resizable, resizable_panel, v_resizable};
+use gpui_component::resizable::{h_resizable, resizable_panel, v_resizable, ResizableState};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::status_bar::StatusBar;
-use gpui_component::{ActiveTheme, Icon, IconName, Root, Selectable, Sizable, v_flex};
+use gpui_component::{v_flex, ActiveTheme, Icon, IconName, Root, Selectable, Sizable};
 
 actions!(
     threadlane_workspace,
@@ -38,8 +38,8 @@ use crate::screens::terminal::TerminalView;
 use crate::services::sessions::{ExecutionMode, SessionRuntime};
 use crate::services::updater::{self, UpdaterEvent};
 use crate::state::{
-    AppState, SessionHydrationRequest, SessionInfo, WorkspacePage, coding_agent_options,
-    compute_full_session_projection, compute_session_messages, runtime_status_text,
+    coding_agent_options, compute_full_session_projection, compute_session_messages,
+    runtime_status_text, AppState, SessionHydrationRequest, SessionInfo, WorkspacePage,
 };
 use threadlane_updater::UpdateStatus;
 
@@ -173,15 +173,18 @@ impl WorkspaceView {
         cx: &mut AsyncApp,
     ) {
         cx.spawn(async move |cx| {
-            let runtime_task = request.runtime_options.clone().map(|(work_dir, model, roles)| {
-                let session_file = request.session_file.clone();
-                cx.background_executor().spawn(async move {
-                    SessionRuntime::new(
-                        coding_agent_options(work_dir, session_file, model, roles),
-                        ExecutionMode::Interactive,
-                    )
-                })
-            });
+            let runtime_task = request
+                .runtime_options
+                .clone()
+                .map(|(work_dir, model, roles)| {
+                    let session_file = request.session_file.clone();
+                    cx.background_executor().spawn(async move {
+                        SessionRuntime::new(
+                            coding_agent_options(work_dir, session_file, model, roles),
+                            ExecutionMode::Interactive,
+                        )
+                    })
+                });
             if request.reload_messages {
                 let history_file = request.session_file.clone();
                 let history = cx
@@ -700,10 +703,7 @@ impl WorkspaceView {
         });
     }
 
-    fn schedule_session_pr_refresh(
-        target: (PathBuf, String),
-        cx: &mut Context<Self>,
-    ) {
+    fn schedule_session_pr_refresh(target: (PathBuf, String), cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(std::time::Duration::from_secs(31))
@@ -1857,8 +1857,8 @@ impl Render for WorkspaceView {
 #[cfg(test)]
 mod tests {
     use super::{
-        GitEvent, WorkspacePumpEvent, active_project_git_status, git_result_matches_active,
-        next_workspace_event, session_pr_target_is_active,
+        active_project_git_status, git_result_matches_active, next_workspace_event,
+        session_pr_target_is_active, GitEvent, WorkspacePumpEvent,
     };
     use crate::services::updater::UpdaterEvent;
     use crate::state::SessionInfo;
@@ -1896,38 +1896,35 @@ mod tests {
 
     #[test]
     fn session_pr_refresh_stops_after_the_branch_is_no_longer_used() {
-        let target = (PathBuf::from("/projects/current"), "feature/one".to_string());
+        let target = (
+            PathBuf::from("/projects/current"),
+            "feature/one".to_string(),
+        );
         let targets = HashSet::from([target.clone()]);
 
         assert!(session_pr_target_is_active(&targets, &target));
-        assert!(!session_pr_target_is_active(
-            &HashSet::new(),
-            &target
-        ));
+        assert!(!session_pr_target_is_active(&HashSet::new(), &target));
     }
 
     #[tokio::test]
     async fn workspace_pump_waits_for_a_real_producer_event() {
         let (_git_tx, mut git_rx) = tokio::sync::mpsc::unbounded_channel::<GitEvent>();
-        let (_updater_tx, mut updater_rx) =
-            tokio::sync::mpsc::unbounded_channel::<UpdaterEvent>();
+        let (_updater_tx, mut updater_rx) = tokio::sync::mpsc::unbounded_channel::<UpdaterEvent>();
         let (_sessions_tx, mut sessions_rx) =
             tokio::sync::mpsc::unbounded_channel::<(PathBuf, Vec<SessionInfo>)>();
         let (model_tx, mut model_rx) = tokio::sync::mpsc::unbounded_channel();
 
-        assert!(
-            tokio::time::timeout(
-                std::time::Duration::from_millis(10),
-                next_workspace_event(
-                    &mut git_rx,
-                    &mut updater_rx,
-                    &mut sessions_rx,
-                    &mut model_rx,
-                ),
-            )
-            .await
-            .is_err()
-        );
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            next_workspace_event(
+                &mut git_rx,
+                &mut updater_rx,
+                &mut sessions_rx,
+                &mut model_rx,
+            ),
+        )
+        .await
+        .is_err());
         model_tx.send(()).unwrap();
         assert!(matches!(
             next_workspace_event(

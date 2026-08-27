@@ -20,12 +20,16 @@ pub enum AppAction {
     ToggleProject(PathBuf),
     BeginNewTask,
     SelectDraftProject(PathBuf),
+    SelectWorkMode(crate::state::WorkMode),
     SendPrompt(String),
     SendPromptWithImages {
         text: String,
         images: Vec<ImageAttachment>,
     },
-    StageBusyMessage { text: String, images: Vec<ImageAttachment> },
+    StageBusyMessage {
+        text: String,
+        images: Vec<ImageAttachment>,
+    },
     QueuePendingMessage,
     SteerPendingMessage,
     DismissPendingMessage,

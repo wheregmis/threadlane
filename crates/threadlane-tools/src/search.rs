@@ -99,7 +99,7 @@ fn simple_glob(pattern: &str, value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_FILE_BYTES, MAX_MATCHES, grep_search};
+    use super::{grep_search, MAX_FILE_BYTES, MAX_MATCHES};
     use std::fs;
     use std::process::Command;
     use std::time::{Duration, Instant};
