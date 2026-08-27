@@ -1275,6 +1275,7 @@ mod tests {
             id: id.into(),
             title: id.into(),
             work_dir: "/project".into(),
+            runtime_work_dir: "/project".into(),
             session_file: format!("/project/{id}.jsonl").into(),
             updated_at: 0,
             health: SessionHealth::Healthy,
