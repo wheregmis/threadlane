@@ -20,6 +20,10 @@ use super::subagents::{AgentRunner, MAX_SUBAGENT_TASKS, MAX_SUBAGENT_TASK_CHARS}
 
 pub(crate) const CAPABILITY_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) const MAX_CAPABILITY_BUFFER_BYTES: usize = 64 * 1024;
+/// Generous timeout for public web fetches (DNS + TLS + transfer).
+const NETWORK_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+/// Web pages are routinely 100 KiB–1 MiB; the extension truncates after HTML→text.
+const MAX_NETWORK_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 pub(crate) const MAX_PROCESS_TIMEOUT_MS: u64 = 120_000;
 pub(crate) const MAX_PROCESS_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_MANAGED_PROCESSES: usize = 16;
@@ -790,10 +794,13 @@ impl HostCapabilityHandler {
         let method = reqwest::Method::from_bytes(method.as_bytes())
             .map_err(|_| invalid_argument("invalid HTTP method"))?;
         let client = reqwest::Client::builder()
+            // A redirect may target a host that has not passed the approval flow.
+            // Return the 3xx response so the extension can request the destination
+            // explicitly and the next broker call can authorize its exact host.
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(host_error)?;
-        let result = timeout(CAPABILITY_TIMEOUT, async move {
+        let result = timeout(NETWORK_HTTP_TIMEOUT, async move {
             let response = client
                 .request(method, parsed.clone())
                 .header(reqwest::header::USER_AGENT, "Threadlane/0.1")
@@ -817,11 +824,11 @@ impl HostCapabilityHandler {
             let mut stream = response.bytes_stream();
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk.map_err(host_error)?;
-                if bytes.len().saturating_add(chunk.len()) > MAX_CAPABILITY_BUFFER_BYTES {
+                if bytes.len().saturating_add(chunk.len()) > MAX_NETWORK_RESPONSE_BYTES {
                     return Err(BrokerError {
                         code: "network_response_too_large".into(),
                         message: format!(
-                            "network response exceeded {MAX_CAPABILITY_BUFFER_BYTES} bytes"
+                            "network response exceeded {MAX_NETWORK_RESPONSE_BYTES} bytes"
                         ),
                     });
                 }
