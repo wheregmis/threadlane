@@ -171,8 +171,18 @@ cd threadlane
 ./scripts/build_extensions.sh
 
 # Run the native GPUI desktop application
+# macOS: the app must run from a bundle, so use the dev-run script
+./scripts/run-gpui-macos.sh
+
+# Linux / other platforms
 cargo run -p threadlane-gpui
 ```
+
+> **macOS:** `cargo run -p threadlane-gpui` aborts with `bundleProxyForCurrentProcess is nil`.
+> Startup reaches `UNUserNotificationCenter`, which macOS refuses to hand to a process that is
+> not inside an app bundle. `./scripts/run-gpui-macos.sh` builds the same binary, wraps it in
+> `target/debug/Threadlane-dev.app`, and runs it in the foreground, so `RUST_LOG`, stdout, and
+> Ctrl-C behave as usual. Pass `--release` for a release build.
 
 ### Provider Authentication
 
@@ -180,7 +190,37 @@ Threadlane supports multiple provider backends:
 
 - **Google Antigravity:** Supports Antigravity OAuth credentials with automatic Cloud Code Assist endpoint discovery.
 - **OpenAI / Codex:** Use the built-in PKCE device authorization flow (`~/.threadlane/auth.json`) or configure your API key in Settings.
-- **External ACP Agents:** Configure binaries in `~/.threadlane/acp.json` or `<project>/.threadlane/acp.json` (e.g. `gemini --experimental-acp`).
+- **External ACP Agents:** Configure binaries in `~/.threadlane/acp.json` or `<project>/.threadlane/acp.json`,
+  or from Settings → ACP Agents. The agent signs itself in, so no Threadlane provider credential is needed.
+  Select it afterwards from the model picker or `/model` as `acp/<id>`.
+
+  ```jsonc
+  // ~/.threadlane/acp.json
+  {
+    "agents": [
+      {
+        "id": "claude_code",
+        "name": "Claude Code",
+        // An app launched from Finder inherits no shell PATH, so a
+        // version-manager binary such as npx needs an absolute path here.
+        "command": "/usr/local/bin/npx",
+        "args": ["-y", "@agentclientprotocol/claude-agent-acp"],
+        "enabled": true
+      },
+      {
+        "id": "gemini",
+        "name": "Gemini CLI",
+        "command": "gemini",
+        "args": ["--experimental-acp"],
+        "enabled": true
+      }
+    ]
+  }
+  ```
+
+  Claude Code uses the credentials of the `claude` CLI; run `claude /login` once if it reports that
+  sign-in is required. Project entries shadow global entries sharing an `id`, and `scope` is always
+  taken from the file an entry was read from rather than from the entry itself.
 
 ### Structured Logging
 
@@ -188,17 +228,19 @@ Control console verbosity at launch using `RUST_LOG`:
 
 ```bash
 # Default info logging
-cargo run -p threadlane-gpui
+./scripts/run-gpui-macos.sh
 
 # Debug logging for harness events, revision bumps, and UI state
-RUST_LOG=threadlane_gpui=debug cargo run -p threadlane-gpui
+RUST_LOG=threadlane_gpui=debug ./scripts/run-gpui-macos.sh
 
 # Deep trace of agent execution loops & harness records
-RUST_LOG=threadlane_gpui=debug,threadlane_agent=trace cargo run -p threadlane-gpui
+RUST_LOG=threadlane_gpui=debug,threadlane_agent=trace ./scripts/run-gpui-macos.sh
 
 # GPUI frame-time overlay (current, slowest 1%/10%, max, and frame count)
 THREADLANE_GPUI_PROFILE=1 cargo run -p threadlane-gpui --features gpui-profiler
 ```
+
+On Linux, substitute `cargo run -p threadlane-gpui` for the script in each of the above.
 
 ---
 

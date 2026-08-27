@@ -63,6 +63,9 @@ pub(crate) fn dispatch(state: &mut AppState, action: AppAction) -> Option<Sessio
         }
         AppAction::SelectModel(model) => state.set_selected_model(model),
         AppAction::SelectReasoningEffort(effort) => state.set_reasoning_effort(effort),
+        AppAction::SetAcpConfigOption { config_id, value } => {
+            state.set_acp_config_option(config_id, value)
+        }
         AppAction::OpenSettings => state.open_settings(),
         AppAction::CloseSettings => state.close_settings(),
         AppAction::SaveOpenAiKey(key) => {

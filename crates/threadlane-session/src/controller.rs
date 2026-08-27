@@ -182,4 +182,35 @@ impl SessionController {
         let mut agent = self.agent.lock().await;
         agent.reload_extensions().await
     }
+
+    /// Settings the session's external agent offers, starting it if it is not
+    /// running yet.
+    ///
+    /// Connecting is the point rather than a side effect: an agent reports its
+    /// settings on `session/new`, so there is nothing to offer before then.
+    /// Empty for a non-ACP model, since asking what an agent offers is a
+    /// question the caller may ask about any selection.
+    ///
+    /// A turn holds the agent for its whole duration, so callers gate on
+    /// [`Self::is_generating`] rather than letting this block on the lock.
+    pub async fn acp_config_options(&self) -> Result<Vec<crate::AcpConfigOption>, String> {
+        let _guard = self.prompt_lock.lock().await;
+        let mut agent = self.agent.lock().await;
+        agent.acp_config_options().await
+    }
+
+    /// Applies one agent-defined setting, addressed by the agent's own id.
+    ///
+    /// Returns the settings as the agent reports them afterwards: changing one
+    /// can change another, because picking a different model changes which
+    /// effort levels that model offers.
+    pub async fn set_acp_config_option(
+        &self,
+        config_id: &str,
+        value: &str,
+    ) -> Result<Vec<crate::AcpConfigOption>, String> {
+        let _guard = self.prompt_lock.lock().await;
+        let mut agent = self.agent.lock().await;
+        agent.set_acp_config_option(config_id, value).await
+    }
 }

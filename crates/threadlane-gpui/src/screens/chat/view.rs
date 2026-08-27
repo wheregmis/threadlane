@@ -58,6 +58,11 @@ struct ContextMeterViewModel {
     effective_model: Option<String>,
     last_compaction_seq: Option<u64>,
     provisional: bool,
+    /// Whether a usage figure is ever coming for this model.
+    ///
+    /// Separates "measuring" from "unmeasurable": both render without a
+    /// percentage, but only the first should show a pending animation.
+    reports_usage: bool,
 }
 
 #[derive(IntoElement)]
@@ -119,11 +124,31 @@ fn format_meter_tokens(tokens: u64) -> String {
 fn context_meter_view_model(
     context: Option<&ContextMeterContext>,
     metrics: &ContextMeterMetrics,
+    reports_usage: bool,
 ) -> ContextMeterViewModel {
     let total_processed = metrics
         .billed_input_tokens
         .saturating_add(metrics.output_tokens);
     let cache_hit_label = metrics.cache_hit_percent.map(|value| format!("{value}%"));
+
+    // An external ACP agent runs its own loop and reports no token accounting,
+    // so there is no context window to measure. Saying "Estimating…" would
+    // promise a number that never arrives, and the meter would animate for the
+    // whole turn waiting for it.
+    if !reports_usage {
+        return ContextMeterViewModel {
+            percent: None,
+            bar_percent: 0.0,
+            current_label: "Not reported".into(),
+            detail_label: "Context usage is not reported by this agent".into(),
+            total_processed_label: format_meter_tokens(total_processed),
+            cache_hit_label,
+            effective_model: None,
+            last_compaction_seq: None,
+            provisional: false,
+            reports_usage: false,
+        };
+    }
 
     let Some(context) = context else {
         return ContextMeterViewModel {
@@ -136,6 +161,7 @@ fn context_meter_view_model(
             effective_model: None,
             last_compaction_seq: None,
             provisional: false,
+            reports_usage: true,
         };
     };
 
@@ -171,6 +197,7 @@ fn context_meter_view_model(
             .then(|| context.effective_model.clone()),
         last_compaction_seq: context.last_compaction_seq,
         provisional: context.provisional,
+        reports_usage: true,
     }
 }
 use threadlane_session::commands::{SlashCommandInfo, available_slash_commands};
@@ -2535,30 +2562,31 @@ impl ChatListView {
 
     fn chat_markdown_view(&self, state: &Entity<TextViewState>) -> TextView {
         let model = self.model.clone();
-        // Selection hit-testing dominates scroll frames; whole-message copy remains available.
-        TextView::new(state).on_link_click(move |url, event, _window, cx| {
-            let activate = match event {
-                ClickEvent::Mouse(click) => {
-                    matches!(click.up.button, MouseButton::Left | MouseButton::Middle)
+        TextView::new(state)
+            .selectable(true)
+            .on_link_click(move |url, event, _window, cx| {
+                let activate = match event {
+                    ClickEvent::Mouse(click) => {
+                        matches!(click.up.button, MouseButton::Left | MouseButton::Middle)
+                    }
+                    ClickEvent::Keyboard(_) => true,
+                    ClickEvent::Touch(click) => !click.long_press,
+                };
+                if !activate {
+                    return;
                 }
-                ClickEvent::Keyboard(_) => true,
-                ClickEvent::Touch(click) => !click.long_press,
-            };
-            if !activate {
-                return;
-            }
 
-            match classify_chat_link(url) {
-                ChatLinkTarget::Web => cx.open_url(url),
-                ChatLinkTarget::ProjectFile(path) => {
-                    model.update(cx, |state, cx| {
-                        state.request_open_file(path);
-                        cx.notify();
-                    });
+                match classify_chat_link(url) {
+                    ChatLinkTarget::Web => cx.open_url(url),
+                    ChatLinkTarget::ProjectFile(path) => {
+                        model.update(cx, |state, cx| {
+                            state.request_open_file(path);
+                            cx.notify();
+                        });
+                    }
+                    ChatLinkTarget::Rejected => {}
                 }
-                ChatLinkTarget::Rejected => {}
-            }
-        })
+            })
     }
 
     fn render_reasoning_block(
@@ -2650,7 +2678,7 @@ impl ChatListView {
                 let markdown_state =
                     self.markdown_state(format!("reasoning-{}", msg.id), reasoning, cx);
                 container
-                    .child(TextView::new(&markdown_state).selectable(true))
+                    .child(self.chat_markdown_view(&markdown_state))
                     .into_any_element()
             }
         });
@@ -3510,6 +3538,27 @@ impl ChatListView {
             .as_ref()
             .map(|option| option.label.clone())
             .unwrap_or_else(|| "Connect a provider".to_string());
+        // Selecting an ACP agent picks the *agent*; the agent then picks its own
+        // model. Naming it here rather than only in the settings menu is what
+        // makes choosing a model visibly take effect, since this is the control
+        // a user reads to answer "which model am I on".
+        let model_label = match self.model.read(cx).active_acp_model_name() {
+            Some(agent_model) => format!("{model_label} · {agent_model}"),
+            None => model_label,
+        };
+        // Selecting an ACP agent picks the *agent*; the agent then runs one of
+        // its own models. Both are "which model am I on", so both belong in
+        // this one control rather than split across two.
+        let acp_model_option = threadlane_session::is_acp_model(&selected_model)
+            .then(|| {
+                threadlane_session::config_option_for(
+                    self.model.read(cx).active_acp_config_options(),
+                    threadlane_session::ACP_CONFIG_CATEGORY_MODEL,
+                )
+                .cloned()
+            })
+            .flatten();
+        let acp_model_menu_model = self.model.clone();
         let model_for_picker = self.model.clone();
         let queue_model = self.model.clone();
         let steer_model = self.model.clone();
@@ -3689,7 +3738,7 @@ impl ChatListView {
             model_picker
         };
         let model_picker = model_picker.dropdown_menu(move |menu, _window, _cx| {
-            model_options.iter().cloned().fold(menu, |menu, option| {
+            let menu = model_options.iter().cloned().fold(menu, |menu, option| {
                 let model = model_for_picker.clone();
                 menu.item(
                     PopupMenuItem::new(option.label)
@@ -3699,6 +3748,35 @@ impl ChatListView {
                                 controller::dispatch(
                                     state,
                                     AppAction::SelectModel(option.id.to_string()),
+                                );
+                                cx.notify();
+                            });
+                        }),
+                )
+            });
+            let Some(acp_model) = acp_model_option.as_ref() else {
+                return menu;
+            };
+            let current = acp_model.current_value();
+            let config_id = acp_model.id.clone();
+            let menu = menu
+                .item(PopupMenuItem::separator())
+                .item(PopupMenuItem::label(acp_model.name.clone()));
+            acp_model.options.iter().fold(menu, |menu, choice| {
+                let model = acp_model_menu_model.clone();
+                let config_id = config_id.clone();
+                let value = choice.value.clone();
+                menu.item(
+                    PopupMenuItem::new(choice.name.clone())
+                        .checked(current == Some(choice.value.as_str()))
+                        .on_click(move |_event, _window, cx| {
+                            model.update(cx, |state, cx| {
+                                controller::dispatch(
+                                    state,
+                                    AppAction::SetAcpConfigOption {
+                                        config_id: config_id.clone(),
+                                        value: value.clone(),
+                                    },
                                 );
                                 cx.notify();
                             });
@@ -3850,6 +3928,7 @@ impl ChatListView {
                 output_tokens: metrics.output_tokens,
                 cache_hit_percent: metrics.cache_hit_percent(),
             },
+            !threadlane_session::is_acp_model(&selected_model),
         );
         let displayed_percent = meter.percent.unwrap_or_default();
         let meter_color = if meter.percent.is_none() || displayed_percent == 0.0 {
@@ -3887,7 +3966,12 @@ impl ChatListView {
                     .child(
                         ProgressCircle::new("context-meter-circle")
                             .value(meter.bar_percent as f32)
-                            .loading(is_generating && meter.bar_percent == 0.0)
+                            // Only animate while a figure is actually pending;
+                            // a model that never reports one would spin for the
+                            // whole turn, every turn.
+                            .loading(
+                                is_generating && meter.reports_usage && meter.bar_percent == 0.0,
+                            )
                             .color(meter_color)
                             .size(px(24.0)),
                     )
@@ -4457,7 +4541,10 @@ impl Render for ChatListView {
                                     self.transcript_list_state.clone(),
                                     cx.processor(Self::render_transcript_row),
                                 )
-                                .size_full()
+                                .w_full()
+                                .max_w(px(CHAT_CONTENT_MAX_WIDTH))
+                                .h_full()
+                                .mx_auto()
                                 .pt_3()
                                 .pb_6()
                                 .with_sizing_behavior(ListSizingBehavior::Auto),
@@ -4488,14 +4575,14 @@ impl Render for ChatListView {
 #[cfg(test)]
 mod hot_path_tests {
     use super::{
-        ChatLinkTarget, ContextMeterContext, ContextMeterMetrics, MarkdownUpdate,
-        TrajectoryCacheKey, TrajectoryMode, TrajectoryRow, TranscriptRow, build_trajectory_rows,
-        build_transcript_rows, classify_chat_link, classify_markdown_update,
+        ChatLinkTarget, ContextMeterContext, ContextMeterMetrics, MARKDOWN_CACHE_ENTRY_LIMIT,
+        MarkdownUpdate, TrajectoryCacheKey, TrajectoryMode, TrajectoryRow, TranscriptRow,
+        build_trajectory_rows, build_transcript_rows, classify_chat_link, classify_markdown_update,
         contains_case_insensitive, context_meter_view_model, extend_trajectory_facets,
         extend_trajectory_previews, extend_trajectory_rows, extend_trajectory_summary,
-        format_trajectory_raw_json, grouped_tool_activities, reconcile_trajectory_entries,
-        markdown_cache_exceeded, next_chat_stream_batch, reconcile_trajectory_entries_by_epoch,
-        subagent_popover_counts, summarize_trajectory, MARKDOWN_CACHE_ENTRY_LIMIT,
+        format_trajectory_raw_json, grouped_tool_activities, markdown_cache_exceeded,
+        next_chat_stream_batch, reconcile_trajectory_entries,
+        reconcile_trajectory_entries_by_epoch, subagent_popover_counts, summarize_trajectory,
     };
     use crate::state::{
         ChatMessageInfo, ChatStreamEvent, MessageRole, SubagentActivityStatus, ToolActivityInfo,
@@ -4633,7 +4720,46 @@ mod hot_path_tests {
     }
 
     #[test]
-    fn meter_separates_current_context_from_total_processed() {
+    fn a_model_that_never_reports_usage_is_not_shown_as_estimating() {
+        // An ACP agent runs its own loop and sends no token accounting, so the
+        // meter has nothing to project. Rendering that as "Estimating…" both
+        // promises a number that never arrives and leaves the badge animating
+        // for the whole turn.
+        let view = context_meter_view_model(None, &ContextMeterMetrics::default(), false);
+        assert!(!view.reports_usage);
+        assert_eq!(view.current_label, "Not reported");
+        assert_eq!(view.percent, None);
+        assert_eq!(view.bar_percent, 0.0);
+
+        // A model that does report usage keeps the pending state, so the
+        // animation still runs where a figure is genuinely on its way.
+        let estimating = context_meter_view_model(None, &ContextMeterMetrics::default(), true);
+        assert!(estimating.reports_usage);
+        assert_eq!(estimating.current_label, "Estimating…");
+    }
+
+    #[test]
+    fn an_unreported_context_still_shows_what_was_processed() {
+        // Turn counts and any usage Threadlane did observe stay meaningful
+        // even when the context window itself is unmeasurable.
+        let view = context_meter_view_model(
+            None,
+            &ContextMeterMetrics {
+                billed_input_tokens: 1_200,
+                output_tokens: 800,
+                cache_hit_percent: Some(40),
+            },
+            false,
+        );
+        assert_eq!(view.total_processed_label, "2.0k");
+        assert_eq!(view.cache_hit_label.as_deref(), Some("40%"));
+    }
+
+    #[tokio::test]
+    async fn meter_separates_current_context_from_total_processed() {
+        let (path, state) = reported_session_shape_state().await;
+        let projected_context = state.active_context_window().unwrap();
+        let projected_metrics = state.active_session_metrics();
         let view = context_meter_view_model(
             Some(&ContextMeterContext {
                 current_tokens: 38_278,
@@ -4644,7 +4770,12 @@ mod hot_path_tests {
                 provisional: false,
                 estimating: false,
             }),
-            &metrics_with_usage(1_071_000, 0, 10_829_000, 0),
+            &ContextMeterMetrics {
+                billed_input_tokens: projected_metrics.billed_input_tokens(),
+                output_tokens: projected_metrics.output_tokens,
+                cache_hit_percent: projected_metrics.cache_hit_percent(),
+            },
+            true,
         );
         let percent = view.percent.expect("known context percentage");
         assert!((percent - 29.904_687_5).abs() < 1e-12);
@@ -4657,8 +4788,11 @@ mod hot_path_tests {
 
     #[test]
     fn meter_estimating_context_has_no_false_percentage() {
-        let view =
-            context_meter_view_model(Some(&estimating_context()), &ContextMeterMetrics::default());
+        let view = context_meter_view_model(
+            Some(&estimating_context()),
+            &ContextMeterMetrics::default(),
+            true,
+        );
         assert_eq!(view.percent, None);
         assert_eq!(view.current_label, "Estimating…");
         assert_eq!(view.bar_percent, 0.0);
@@ -4671,7 +4805,7 @@ mod hot_path_tests {
         context.current_tokens = 42;
         context.estimating = false;
 
-        let view = context_meter_view_model(Some(&context), &ContextMeterMetrics::default());
+        let view = context_meter_view_model(Some(&context), &ContextMeterMetrics::default(), true);
 
         assert_eq!(view.percent, None);
         assert_eq!(view.current_label, "Estimating…");
@@ -4700,6 +4834,7 @@ mod hot_path_tests {
                 estimating: false,
             }),
             &ContextMeterMetrics::default(),
+            true,
         );
         assert_eq!(view.percent, Some(120.0));
         assert_eq!(view.bar_percent, 100.0);

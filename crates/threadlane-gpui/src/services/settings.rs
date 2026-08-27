@@ -146,6 +146,94 @@ pub(crate) fn probe_acp_agents(
     Ok(())
 }
 
+pub(crate) struct AcpPreset {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub description: &'static str,
+    pub command: &'static str,
+    previous_commands: &'static [&'static str],
+}
+
+impl AcpPreset {
+    pub fn matches_agent(&self, agent: &AcpAgentConfig) -> bool {
+        self.id == agent.id
+    }
+
+    pub fn needs_command_upgrade(&self, agent: &AcpAgentConfig) -> bool {
+        self.previous_commands
+            .contains(&agent.command_line().as_str())
+    }
+
+    pub fn to_agent_config(&self, scope: AcpScope) -> AcpAgentConfig {
+        AcpAgentConfig::from_command_line(self.name, self.command, scope)
+            .expect("built-in ACP presets must have a name and command")
+    }
+}
+
+pub(crate) const ACP_PRESETS: &[AcpPreset] = &[
+    AcpPreset {
+        id: "claude_code",
+        name: "Claude Code",
+        description: "Use Anthropic's Claude Code agent through ACP.",
+        command: "npx -y @zed-industries/claude-code-acp",
+        previous_commands: &[],
+    },
+    AcpPreset {
+        id: "codex",
+        name: "Codex",
+        description: "Use OpenAI Codex through ACP.",
+        command: "npx -y @agentclientprotocol/codex-acp",
+        previous_commands: &["npx -y @zed-industries/codex-acp"],
+    },
+];
+
+pub(crate) fn upgrade_acp_presets(project_root: Option<&Path>) -> Result<(), String> {
+    let scopes = if project_root.is_some() {
+        &[AcpScope::Global, AcpScope::Project][..]
+    } else {
+        &[AcpScope::Global][..]
+    };
+    for &scope in scopes {
+        let mut agents = load_acp_scope(project_root, scope)?;
+        let mut changed = false;
+        for preset in ACP_PRESETS {
+            let Some(agent) = agents.iter_mut().find(|agent| preset.matches_agent(agent)) else {
+                continue;
+            };
+            if preset.needs_command_upgrade(agent) {
+                let enabled = agent.enabled;
+                *agent = preset.to_agent_config(scope);
+                agent.enabled = enabled;
+                changed = true;
+            }
+        }
+        if changed {
+            save_acp_scope(project_root, scope, &agents)?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn set_acp_preset_enabled(
+    project_root: Option<&Path>,
+    scope: AcpScope,
+    preset: &AcpPreset,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut agents = load_acp_scope(project_root, scope)?;
+    if let Some(agent) = agents.iter_mut().find(|agent| preset.matches_agent(agent)) {
+        if preset.needs_command_upgrade(agent) {
+            *agent = preset.to_agent_config(scope);
+        }
+        agent.enabled = enabled;
+    } else {
+        let mut config = preset.to_agent_config(scope);
+        config.enabled = enabled;
+        agents.push(config);
+    }
+    save_acp_scope(project_root, scope, &agents)
+}
+
 pub(crate) fn add_acp_agent(
     project_root: Option<&Path>,
     scope: AcpScope,

@@ -7344,6 +7344,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "threadlane-benchmarks"
+version = "0.0.0"
+dependencies = [
+ "hotpath",
+ "tempfile",
+ "threadlane-mcp",
+ "threadlane-runtime",
+ "threadlane-tools",
+ "tokio",
+ "vt100",
+]
+
+[[package]]
 name = "threadlane-git"
 version = "0.1.0"
 dependencies = [
@@ -7402,7 +7415,6 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures",
- "hotpath",
  "serde",
  "serde_json",
  "tempfile",
@@ -7450,7 +7462,6 @@ dependencies = [
  "async-trait",
  "directories",
  "futures",
- "hotpath",
  "libsqlite3-sys",
  "needle-infer",
  "regex",
@@ -7509,7 +7520,6 @@ dependencies = [
 name = "threadlane-tools"
 version = "0.1.0"
 dependencies = [
- "hotpath",
  "serde",
  "serde_json",
  "tempfile",

@@ -133,6 +133,17 @@ pub(crate) fn execute_prompt(
         };
 
         tracing::info!(error = ?run_error, "chat turn finished");
+        // Read after the turn because an external agent defines its own
+        // settings and only reports them once a session is open. This is the
+        // free path: the turn already connected, so nothing is started here.
+        let acp_options = agent.acp_user_config_options();
+        if !acp_options.is_empty() {
+            let _ = task_stream_tx.send(ChatStreamEvent::AcpConfigOptions {
+                session_id: task_session_id.clone(),
+                options: acp_options,
+                error: None,
+            });
+        }
         drop(agent);
         cleanup.error = run_error;
     });
@@ -154,6 +165,68 @@ pub(crate) fn execute_prompt(
     Ok(())
 }
 
+/// Asks the session's external agent what settings it offers.
+///
+/// Starting the agent is the point: it reports its settings on `session/new`,
+/// so opening the picker before the first turn is the only way to find out what
+/// it offers. After a turn they arrive free from `execute_prompt`.
+pub(crate) fn load_acp_config_options(
+    runtime: Arc<SessionRuntime>,
+    session_id: String,
+    stream_tx: Sender<ChatStreamEvent>,
+) -> Result<(), String> {
+    spawn_acp_config_task(runtime, session_id, stream_tx, |runtime| async move {
+        runtime.acp_config_options().await
+    })
+}
+
+/// Applies one of the agent's own settings and reports what it holds afterwards.
+pub(crate) fn set_acp_config_option(
+    runtime: Arc<SessionRuntime>,
+    session_id: String,
+    config_id: String,
+    value: String,
+    stream_tx: Sender<ChatStreamEvent>,
+) -> Result<(), String> {
+    spawn_acp_config_task(runtime, session_id, stream_tx, move |runtime| async move {
+        runtime.set_acp_config_option(&config_id, &value).await
+    })
+}
+
+/// Runs one agent-settings operation off the UI thread.
+///
+/// Refuses while a turn is running rather than awaiting the lock: a turn holds
+/// the agent for its whole duration, so waiting would hang the picker with no
+/// feedback instead of failing.
+fn spawn_acp_config_task<F, Fut>(
+    runtime: Arc<SessionRuntime>,
+    session_id: String,
+    stream_tx: Sender<ChatStreamEvent>,
+    operation: F,
+) -> Result<(), String>
+where
+    F: FnOnce(Arc<SessionRuntime>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<Vec<threadlane_session::AcpConfigOption>, String>>
+        + Send,
+{
+    if runtime.is_generating() {
+        return Err("Stop the current turn before changing the agent's settings".into());
+    }
+    executor()?.spawn(async move {
+        let (options, error) = match operation(runtime).await {
+            Ok(options) => (options, None),
+            Err(error) => (Vec::new(), Some(error)),
+        };
+        let _ = stream_tx.send(ChatStreamEvent::AcpConfigOptions {
+            session_id,
+            options,
+            error,
+        });
+    });
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn maybe_generate_session_title(
     session_file: PathBuf,
     session_id: String,
@@ -161,6 +234,7 @@ pub(crate) fn maybe_generate_session_title(
     api_key: String,
     account_id: Option<String>,
     model: String,
+    work_dir: PathBuf,
     stream_tx: Sender<ChatStreamEvent>,
 ) {
     let mut store = match JsonlStore::open(&session_file) {
@@ -196,8 +270,25 @@ pub(crate) fn maybe_generate_session_title(
     };
     executor.spawn(async move {
         let result = async {
-            let client = ProviderClient::new(api_key, account_id);
-            let raw = client.generate_title(&model, &submitted_prompt).await?;
+            // Title generation follows the selected model. Routing an ACP
+            // model through ProviderClient would fall through to OpenAI and
+            // fail with a 401, because an ACP agent has no provider key.
+            let raw = match threadlane_session::acp_agent_id(&model) {
+                Some(agent_id) => {
+                    threadlane_session::acp_runtime::generate_title(
+                        threadlane_session::default_global_threadlane_dir(),
+                        work_dir,
+                        agent_id,
+                        &submitted_prompt,
+                    )
+                    .await?
+                }
+                None => {
+                    ProviderClient::new(api_key, account_id)
+                        .generate_title(&model, &submitted_prompt)
+                        .await?
+                }
+            };
             let title = normalize_session_title(&raw);
             if title.is_empty() {
                 return Err("title normalization produced an empty title".to_string());

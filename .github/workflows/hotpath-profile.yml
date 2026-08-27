@@ -2,6 +2,9 @@ name: hotpath-profile
 
 on:
   pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
 
 permissions:
   contents: read
@@ -20,52 +23,70 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - id: runtime
-            package: threadlane-runtime
-            example: hotpath_jsonl
-            example_path: crates/threadlane-runtime/examples/hotpath_jsonl.rs
-          - id: tools
-            package: threadlane-tools
-            example: hotpath_search
-            example_path: crates/threadlane-tools/examples/hotpath_search.rs
-          - id: mcp
-            package: threadlane-mcp
-            example: hotpath_mcp
-            example_path: crates/threadlane-mcp/examples/hotpath_mcp.rs
-          - id: terminal
-            package: threadlane-gpui
-            example: hotpath_terminal
-            example_path: crates/threadlane-gpui/examples/hotpath_terminal.rs
+          - suite: runtime
+            mode: timing
+            features: hotpath
+          - suite: runtime
+            mode: alloc
+            features: hotpath,hotpath-alloc
+          - suite: tools
+            mode: timing
+            features: hotpath
+          - suite: tools
+            mode: alloc
+            features: hotpath,hotpath-alloc
+          - suite: mcp
+            mode: timing
+            features: hotpath
+          - suite: terminal
+            mode: timing
+            features: hotpath
+          - suite: terminal
+            mode: alloc
+            features: hotpath,hotpath-alloc
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
-      - uses: dtolnay/rust-toolchain@1.95.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: 1.95.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: hotpath-profile
-      - run: mkdir -p /tmp/metrics/${{ matrix.id }}
+      - run: mkdir -p /tmp/metrics/${{ matrix.suite }}-${{ matrix.mode }}
       - name: Benchmark head
         env:
           HOTPATH_OUTPUT_FORMAT: json
-          HOTPATH_OUTPUT_PATH: /tmp/metrics/${{ matrix.id }}/head.json
-        run: cargo run -p ${{ matrix.package }} --release --example ${{ matrix.example }} --features hotpath
+          HOTPATH_OUTPUT_PATH: /tmp/metrics/${{ matrix.suite }}-${{ matrix.mode }}/head.json
+        run: cargo run -p threadlane-benchmarks --release --bin ${{ matrix.suite }} --features '${{ matrix.features }}'
       - name: Benchmark base
         env:
           HOTPATH_OUTPUT_FORMAT: json
-          HOTPATH_OUTPUT_PATH: /tmp/metrics/${{ matrix.id }}/base.json
+          HOTPATH_OUTPUT_PATH: /tmp/metrics/${{ matrix.suite }}-${{ matrix.mode }}/base.json
         run: |
           git checkout --force '${{ github.event.pull_request.base.sha }}'
-          if test -f '${{ matrix.example_path }}'; then
-            cargo run -p ${{ matrix.package }} --release --example ${{ matrix.example }} --features hotpath
+          if test -f 'crates/threadlane-benchmarks/src/bin/${{ matrix.suite }}.rs'; then
+            cargo run -p threadlane-benchmarks --release --bin ${{ matrix.suite }} --features '${{ matrix.features }}'
           else
-            echo "Base branch has no Hotpath benchmark yet"
+            echo "Base branch has no centralized Hotpath benchmark yet"
           fi
-      - name: Save PR number
-        run: echo '${{ github.event.pull_request.number }}' > /tmp/metrics/${{ matrix.id }}/pr_number.txt
-      - uses: actions/upload-artifact@v4
+      - name: Save run metadata
+        run: |
+          metrics='/tmp/metrics/${{ matrix.suite }}-${{ matrix.mode }}'
+          echo '${{ github.event.pull_request.number }}' > "$metrics/pr_number.txt"
+          {
+            echo 'suite=${{ matrix.suite }}'
+            echo 'mode=${{ matrix.mode }}'
+            echo 'head_sha=${{ github.event.pull_request.head.sha }}'
+            echo 'base_sha=${{ github.event.pull_request.base.sha }}'
+            rustc --version
+            uname -a
+            grep -m1 'model name' /proc/cpuinfo || true
+          } > "$metrics/run_metadata.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: hotpath-metrics-${{ matrix.id }}
+          name: hotpath-metrics-${{ matrix.suite }}-${{ matrix.mode }}
           path: /tmp/metrics/
-          retention-days: 1
+          retention-days: 14

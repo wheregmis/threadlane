@@ -16,9 +16,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.95.0
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: 1.95.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: hotpath-metrics-*
           path: /tmp/metrics/
@@ -26,7 +28,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           run-id: ${{ github.event.workflow_run.id }}
       - name: Install hotpath-utils
-        run: cargo install hotpath --version '^0.24' --bin hotpath-utils --features utils
+        run: cargo install hotpath --version '=0.24.0' --bin hotpath-utils --features utils
       - name: Post benchmark comparison
         env:
           GH_TOKEN: ${{ github.token }}
@@ -39,20 +41,20 @@ jobs:
             candidate=""
             for metrics in /tmp/metrics/*; do
               test -d "$metrics" || continue
-              suite_id="$(basename "$metrics")"
-              case "$suite_id" in
-                runtime|tools|mcp|terminal) ;;
+              benchmark_id="$(basename "$metrics")"
+              case "$benchmark_id" in
+                runtime-timing|runtime-alloc|tools-timing|tools-alloc|mcp-timing|terminal-timing|terminal-alloc) ;;
                 *) continue ;;
               esac
               test -f "$metrics/pr_number.txt" || continue
               if test "$(wc -c < "$metrics/pr_number.txt")" -gt 32; then
-                echo "Invalid PR candidate for $suite_id" >&2
+                echo "Invalid PR candidate for $benchmark_id" >&2
                 exit 1
               fi
               suite_candidate="$(<"$metrics/pr_number.txt")"
               case "$suite_candidate" in
                 ''|*[!0-9]*)
-                  echo "Invalid PR candidate for $suite_id" >&2
+                  echo "Invalid PR candidate for $benchmark_id" >&2
                   exit 1
                   ;;
               esac
@@ -79,40 +81,72 @@ jobs:
             pr_number="$candidate"
           fi
           failures=0
+          report_file=/tmp/threadlane-hotpath-report.md
+          {
+            echo '<!-- threadlane-hotpath-report -->'
+            echo '## Threadlane performance report'
+            echo
+            echo "Base/head comparisons from [workflow run ${{ github.event.workflow_run.id }}]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/${{ github.event.workflow_run.id }})."
+            echo
+          } > "$report_file"
           for metrics in /tmp/metrics/*; do
             test -d "$metrics" || continue
-            suite_id="$(basename "$metrics")"
-            case "$suite_id" in
-              runtime|tools|mcp|terminal) ;;
+            benchmark_id="$(basename "$metrics")"
+            case "$benchmark_id" in
+              runtime-timing|runtime-alloc|tools-timing|tools-alloc|mcp-timing|terminal-timing|terminal-alloc) ;;
               *)
-                echo "Skipping unexpected benchmark suite: $suite_id"
+                echo "Skipping unexpected benchmark suite: $benchmark_id"
                 continue
                 ;;
             esac
             if ! test -f "$metrics/head.json" || ! test -f "$metrics/base.json"; then
-              echo "Missing metrics for $suite_id; skipping"
+              echo "Missing metrics for $benchmark_id; skipping"
               continue
             fi
             if comparison_output="$(
               hotpath-utils profile-pr \
                 --head-metrics "$metrics/head.json" \
                 --base-metrics "$metrics/base.json" \
-                --pr-number "$pr_number" \
-                --benchmark-id "$suite_id" \
-                --github-token "$GH_TOKEN" 2>&1
+                --benchmark-id "$benchmark_id" \
+                --emoji-threshold 10 \
+                --dry-run 2>&1
             )"; then
               comparison_status=0
             else
               comparison_status=$?
             fi
             printf '%s\n' "$comparison_output"
-            if test "$comparison_status" -ne 0 \
-              || [[ "$comparison_output" == *"Failed to post/update comment"* ]]; then
-              echo "Comparison failed for $suite_id; continuing"
+            if test "$comparison_status" -ne 0; then
+              echo "Comparison failed for $benchmark_id; continuing"
               failures=$((failures + 1))
+              continue
             fi
+            comparison_output="$(printf '%s\n' "$comparison_output" | sed '/^#### Threads/,$d')"
+            {
+              echo '<details>'
+              echo "<summary><strong>$benchmark_id</strong></summary>"
+              echo
+              printf '%s\n' "$comparison_output"
+              echo
+              echo '</details>'
+              echo
+            } >> "$report_file"
           done
           if test "$failures" -ne 0; then
             echo "$failures benchmark comparison(s) failed" >&2
             exit 1
+          fi
+          comment_id="$(
+            gh api --paginate --slurp \
+              "repos/$GITHUB_REPOSITORY/issues/$pr_number/comments" \
+              --jq 'add | map(select(.user.login == "github-actions[bot]" and (.body | contains("<!-- threadlane-hotpath-report -->")))) | last | .id // empty'
+          )"
+          if test -n "$comment_id"; then
+            gh api --method PATCH \
+              "repos/$GITHUB_REPOSITORY/issues/comments/$comment_id" \
+              --raw-field body="$(cat "$report_file")"
+          else
+            gh api --method POST \
+              "repos/$GITHUB_REPOSITORY/issues/$pr_number/comments" \
+              --raw-field body="$(cat "$report_file")"
           fi

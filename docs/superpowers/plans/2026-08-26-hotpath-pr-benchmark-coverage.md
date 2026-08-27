@@ -1,5 +1,7 @@
 # Hotpath PR Benchmark Coverage Implementation Plan
 
+> Historical plan: the implemented harnesses now live in `crates/threadlane-benchmarks`, and CI reports timing plus selective allocation metrics in one sticky PR comment. Commands and per-crate example paths below describe the original rollout and are superseded by the current design specification.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Report base-versus-head performance for deterministic runtime, tools, MCP, and terminal hot paths on every pull request.

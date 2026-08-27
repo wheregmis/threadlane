@@ -1,0 +1,20 @@
+[package]
+name = "threadlane-benchmarks"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+description = "Centralized performance measurement harnesses for Threadlane"
+
+[features]
+default = []
+hotpath = ["hotpath/hotpath"]
+hotpath-alloc = ["hotpath/hotpath-alloc"]
+
+[dependencies]
+hotpath = "0.24"
+tempfile = "3.10"
+threadlane-mcp = { version = "0.1.0", path = "../threadlane-mcp" }
+threadlane-runtime = { version = "0.1.0", path = "../threadlane-runtime" }
+threadlane-tools = { version = "0.1.0", path = "../threadlane-tools" }
+tokio = { version = "1.38", features = ["full"] }
+vt100 = "0.16"

@@ -33,6 +33,14 @@ pub enum AppAction {
     CancelGeneration,
     SelectModel(String),
     SelectReasoningEffort(ReasoningEffort),
+    /// Applies one setting an external ACP agent exposes.
+    ///
+    /// Carries the agent's own option id rather than a Threadlane concept:
+    /// the setting list is agent-defined and open-ended.
+    SetAcpConfigOption {
+        config_id: String,
+        value: String,
+    },
     OpenSettings,
     CloseSettings,
     SaveOpenAiKey(String),

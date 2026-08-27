@@ -3,6 +3,16 @@ name = "threadlane-session"
 version = "0.1.0"
 edition = "2021"
 description = "Threadlane session management: CodingAgent, SessionConfig, subagents, skills, and ACP"
+# The only binary here is a test fixture, declared explicitly below so it is
+# not built into ordinary workspace builds.
+autobins = false
+
+# A stand-in ACP agent for `tests/acp_engine_tests.rs`. The ACP client spawns a
+# real subprocess, so covering it needs something real to spawn.
+[[bin]]
+name = "acp_stub_agent"
+path = "src/bin/acp_stub_agent.rs"
+required-features = ["test-support"]
 
 [features]
 test-support = []

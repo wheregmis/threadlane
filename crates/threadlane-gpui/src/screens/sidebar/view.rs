@@ -166,7 +166,7 @@ fn get_date_group(timestamp: u64, now: u64) -> DateGroup {
 fn format_time_ago(timestamp: u64, now: u64) -> String {
     let seconds = now.saturating_sub(timestamp);
     match seconds {
-        0..=59 => format!("{}s ago", seconds),
+        0..=59 => "Just now".to_string(),
         60..=3599 => format!("{}m ago", seconds / 60),
         3600..=86399 => format!("{}h ago", seconds / 3600),
         _ => format!("{}d ago", seconds / 86400),
@@ -626,7 +626,7 @@ impl SidebarView {
             .relative()
             .flex()
             .items_stretch()
-            .mx_2()
+            .w_full()
             .my(px(1.5))
             .rounded_md()
             .bg(bg_color)
@@ -707,6 +707,9 @@ impl SidebarView {
                                             div()
                                                 .text_xs()
                                                 .text_color(theme.muted_foreground)
+                                                .group_hover("session-card", |style| {
+                                                    style.opacity(0.0)
+                                                })
                                                 .child(time_ago),
                                         )
                                     })
@@ -719,6 +722,9 @@ impl SidebarView {
                                         .ghost()
                                         .xsmall()
                                         .compact()
+                                        .absolute()
+                                        .right(px(10.0))
+                                        .top(px(8.0))
                                         .opacity(0.0)
                                         .group_hover("session-card", |style| style.opacity(1.0))
                                         .tooltip("Archive session")
@@ -1201,7 +1207,9 @@ impl SidebarView {
 
 #[cfg(test)]
 mod tests {
-    use super::{DateGroup, HistoryRow, flatten_history_groups, same_history_row_identity};
+    use super::{
+        DateGroup, HistoryRow, flatten_history_groups, format_time_ago, same_history_row_identity,
+    };
     use crate::state::{SessionHealth, SessionInfo};
 
     fn session(id: &str) -> SessionInfo {
@@ -1232,6 +1240,13 @@ mod tests {
             &HistoryRow::Session(session("one"))
         ));
         assert!(!same_history_row_identity(&rows[1], &rows[3]));
+    }
+
+    #[test]
+    fn recent_timestamps_use_stable_labels() {
+        assert_eq!(format_time_ago(100, 100), "Just now");
+        assert_eq!(format_time_ago(41, 100), "Just now");
+        assert_eq!(format_time_ago(40, 100), "1m ago");
     }
 }
 

@@ -57,6 +57,11 @@ pub struct CodingAgent {
     pub(crate) harness_run_id: Arc<std::sync::Mutex<Option<String>>>,
     pub(crate) cancellation: CodingAgentCancellation,
     pub(crate) interrupted_subagent_recovery: InterruptedSubagentRecoveryState,
+    /// Connection to an external ACP agent, opened on first use.
+    ///
+    /// An ACP agent keeps its own conversation state, so this is held for the
+    /// life of the session rather than rebuilt per turn.
+    pub(crate) acp: crate::acp_runtime::AcpEngine,
     #[cfg(test)]
     pub(crate) subagent_work_observer: SubagentObserverState,
     #[cfg(test)]
@@ -169,6 +174,61 @@ impl CodingAgent {
 
     pub fn model_roles(&self) -> &threadlane_runtime::ModelRoles {
         self.agent.model_roles()
+    }
+
+    /// Settings the selected external agent offers, without connecting.
+    ///
+    /// Empty when no agent is selected or none has connected yet, which is
+    /// what lets a caller read them after a turn without paying to start one.
+    pub fn acp_user_config_options(&self) -> Vec<crate::acp::AcpConfigOption> {
+        let model = self.agent.model();
+        crate::acp_bridge::acp_agent_id(&model)
+            .map(|agent_id| self.acp.user_config_options(agent_id))
+            .unwrap_or_default()
+    }
+
+    /// Settings the selected external agent offers the user, connecting to it
+    /// if necessary.
+    ///
+    /// Returns an empty list for a non-ACP model rather than an error: asking
+    /// what an agent offers is a question the UI may ask about any selection.
+    pub async fn acp_config_options(&mut self) -> Result<Vec<crate::acp::AcpConfigOption>, String> {
+        let model = self.agent.model();
+        let Some(agent_id) = crate::acp_bridge::acp_agent_id(&model) else {
+            return Ok(Vec::new());
+        };
+        let event_tx = self.agent.event_tx.clone();
+        let permissions = self.permission_handle.clone();
+        self.acp
+            .ensure_connected(agent_id, &event_tx, &permissions)
+            .await
+    }
+
+    /// Applies one of the selected external agent's settings.
+    pub async fn set_acp_config_option(
+        &mut self,
+        config_id: &str,
+        value: &str,
+    ) -> Result<Vec<crate::acp::AcpConfigOption>, String> {
+        let model = self.agent.model();
+        let agent_id = crate::acp_bridge::acp_agent_id(&model)
+            .ok_or_else(|| format!("Model '{model}' is not an ACP agent"))?;
+        let event_tx = self.agent.event_tx.clone();
+        let permissions = self.permission_handle.clone();
+        self.acp
+            .set_config_option(agent_id, config_id, value, &event_tx, &permissions)
+            .await
+    }
+
+    /// Model the live external agent reports it is running, if one is selected
+    /// and connected.
+    ///
+    /// The agent names its own model, so this is only known once a session
+    /// exists; before that there is nothing truthful to show.
+    pub fn acp_model_label(&self) -> Option<String> {
+        let model = self.agent.model();
+        let agent_id = crate::acp_bridge::acp_agent_id(&model)?;
+        self.acp.model_label(agent_id)
     }
 
     pub fn model(&self) -> String {
@@ -546,6 +606,11 @@ impl CodingAgent {
             }
         }
 
+        let acp = crate::acp_runtime::AcpEngine::new(
+            default_global_threadlane_dir(),
+            options.work_dir.clone(),
+        );
+
         Self {
             agent,
             session_id,
@@ -570,11 +635,152 @@ impl CodingAgent {
             harness_run_id,
             cancellation,
             interrupted_subagent_recovery,
+            acp,
             #[cfg(test)]
             subagent_work_observer,
             #[cfg(test)]
             subagent_branch_observer: None,
         }
+    }
+
+    /// Runs one turn against an external ACP agent and journals it.
+    ///
+    /// The agent owns its own conversation, so nothing here replays a message
+    /// list; the journal still has to record the exchange or the transcript is
+    /// empty when the session is reopened and the session list shows a named
+    /// session with no content.
+    async fn run_acp_turn(
+        &mut self,
+        agent_id: &str,
+        input: &str,
+        images: Vec<ImageAttachment>,
+    ) -> Option<Result<String, String>> {
+        let msg = AgentMessage::user(input, images.clone());
+        let harness_run_id = match self.begin_harness_run(msg).await {
+            Ok(run_id) => run_id,
+            Err(error) => {
+                let message = format!("Harness Error: {error}");
+                let _ = self.agent.event_tx.send(AgentEvent::AgentError {
+                    error: message.clone(),
+                });
+                return Some(Err(message));
+            }
+        };
+
+        let event_tx = self.agent.event_tx.clone();
+        let permissions = self.permission_handle.clone();
+        let outcome = self
+            .acp
+            .run_turn_detailed(
+                agent_id,
+                input,
+                &images,
+                self.agent.reasoning_effort(),
+                &event_tx,
+                &permissions,
+            )
+            .await;
+
+        let run_id = harness_run_id.as_ref().map(|run| run.run_id.as_str());
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                // `run_turn` already reported the failure as an event; closing
+                // the run keeps the journal from holding an open operation.
+                let _ = self
+                    .finish_harness_run(run_id, OperationOutcome::Failed, Some(error.clone()))
+                    .await;
+                return Some(Err(error));
+            }
+        };
+
+        if let (Some(run_id), Some(journal)) = (run_id, self.harness.as_mut()) {
+            let tool_calls = (!outcome.tools.is_empty()).then(|| {
+                outcome
+                    .tools
+                    .iter()
+                    .map(|tool| threadlane_provider::openai::ToolCall {
+                        id: tool.tool_call_id.clone(),
+                        r#type: "function".into(),
+                        function: threadlane_provider::openai::ToolCallFunction {
+                            name: tool.name.clone(),
+                            arguments: tool.arguments.clone(),
+                        },
+                        thought_signature: None,
+                    })
+                    .collect()
+            });
+            let recorded = journal.append_message_to_lane(
+                "main",
+                run_id,
+                AgentMessage::Assistant {
+                    content: Some(outcome.reply),
+                    tool_calls,
+                    stop_reason: None,
+                    deferred_handle: None,
+                },
+            );
+            if let Err(error) = recorded {
+                let _ = self
+                    .finish_harness_run(Some(run_id), OperationOutcome::Failed, Some(error.clone()))
+                    .await;
+                return Some(Err(format!("Harness Error: {error}")));
+            }
+
+            // ACP tools execute inside the external agent, but their ordered
+            // lifecycle still belongs in the canonical trajectory.
+            for tool in outcome.tools {
+                let arguments = serde_json::from_str(&tool.arguments)
+                    .unwrap_or_else(|_| serde_json::Value::String(tool.arguments.clone()));
+                let recorded = journal
+                    .tool_started_on_lane("main", run_id, &tool.tool_call_id, &tool.name, arguments)
+                    .and_then(|_| {
+                        let mut result = tool.result.unwrap_or_else(|| {
+                            threadlane_runtime::types::AgentToolResult::external(
+                                tool.tool_call_id,
+                                tool.name.clone(),
+                                "ACP tool call ended without a terminal update",
+                                true,
+                            )
+                        });
+                        // ACP terminal updates are patches and commonly omit the
+                        // start event's title. The durable harness requires the
+                        // result name to match its intent exactly.
+                        result.name = tool.name;
+                        journal.finish_tool_result(run_id, &result)
+                    });
+                if let Err(error) = recorded {
+                    let _ = self
+                        .finish_harness_run(
+                            Some(run_id),
+                            OperationOutcome::Failed,
+                            Some(error.clone()),
+                        )
+                        .await;
+                    return Some(Err(format!("Harness Error: {error}")));
+                }
+            }
+
+            // ACP reports no token accounting, so the attempt records zero
+            // usage rather than a number the agent never sent.
+            let recorded = journal.record_assistant_attempt(run_id, TokenUsage::default());
+            if let Err(error) = recorded {
+                let _ = self
+                    .finish_harness_run(Some(run_id), OperationOutcome::Failed, Some(error.clone()))
+                    .await;
+                return Some(Err(format!("Harness Error: {error}")));
+            }
+        }
+
+        if let Err(error) = self
+            .finish_harness_run(run_id, OperationOutcome::Completed, None)
+            .await
+        {
+            return Some(Err(format!("Harness Error: {error}")));
+        }
+        // The reply already streamed as events; returning it would render the
+        // whole turn a second time.
+        None
     }
 
     pub async fn handle_input_with_images(
@@ -1057,6 +1263,14 @@ impl CodingAgent {
                 let output = execute_slash_command(cmd_action, &mut self.agent).await;
                 return Some(Ok(output));
             }
+        }
+
+        // An ACP agent runs its own loop behind the protocol: it does not use
+        // Threadlane's provider, tools, or message replay, so it is dispatched
+        // here rather than through the provider run below.
+        if let Some(agent_id) = crate::acp_bridge::acp_agent_id(&self.agent.model()) {
+            let agent_id = agent_id.to_string();
+            return self.run_acp_turn(&agent_id, effective_input, images).await;
         }
 
         let msg = AgentMessage::user(effective_input, images);

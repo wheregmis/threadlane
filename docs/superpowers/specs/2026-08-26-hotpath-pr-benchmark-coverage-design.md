@@ -6,9 +6,9 @@ Every pull request reports comparable performance changes for the repository's d
 
 ## Scope
 
-Add Hotpath examples for four suites:
+Keep four Hotpath suite binaries in the non-published `crates/threadlane-benchmarks` crate:
 
-- `runtime`: JSONL append/open, reducer replay, and session reload.
+- `runtime`: fixed-cardinality JSONL append/open, reducer replay, and session reload.
 - `tools`: warm in-process repository search.
 - `mcp`: warmed discovery/reconnect and steady-state tool calls against a local stub server.
 - `terminal`: VT100 parsing and resize/scrollback work without launching GPUI.
@@ -17,15 +17,15 @@ Benchmarks use fixed realistic workloads and `std::hint::black_box` where needed
 
 ## CI and Reporting
 
-Convert `hotpath-profile.yml` to a matrix with one entry per suite. Each entry runs the same example on the PR head and base SHA and uploads uniquely named JSON files plus the PR number.
+`hotpath-profile.yml` runs timing jobs for all four suites and allocation jobs for runtime, tools, and terminal. Each entry runs the same centralized binary on the PR head and base SHA and uploads uniquely named JSON plus PR, revision, toolchain, runner, and CPU metadata. MCP remains timing-only because parent-process allocation data does not represent its child process.
 
-`hotpath-comment.yml` downloads all metrics and calls the existing `hotpath-utils profile-pr` once per complete base/head pair. Stable benchmark IDs (`runtime`, `tools`, `mcp`, and `terminal`) make each suite update its own PR comment instead of colliding with the others.
+`hotpath-comment.yml` verifies artifact lineage, renders each complete pair through `hotpath-utils profile-pr --dry-run`, and updates one sticky Threadlane report with compact collapsible sections. Raw metrics remain downloadable for 14 days.
 
 A base branch that lacks a newly added suite is skipped for that suite. Other suites still report. Benchmark command failures fail profiling rather than silently publishing incomplete measurements.
 
 ## Validation
 
-- Run every benchmark example locally in release mode with Hotpath enabled.
+- Run every centralized benchmark binary locally in release mode with Hotpath enabled.
 - Parse the emitted JSON through `hotpath-utils profile-pr --dry-run` using a file as both base and head.
 - Run focused checks for every touched crate.
 - Run `git diff --check`.

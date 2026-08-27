@@ -15,18 +15,20 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
+use std::future::Future;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::{mpsc, oneshot, Mutex as TokioMutex};
+use tokio::sync::{Mutex as TokioMutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 /// ACP major protocol version implemented by this client.
@@ -82,7 +84,7 @@ fn default_enabled() -> bool {
 
 impl AcpAgentConfig {
     /// Builds a config from a display name and a single shell-style command
-    /// line such as `npx -y @zed-industries/claude-code-acp`.
+    /// line such as `npx -y @agentclientprotocol/claude-agent-acp`.
     ///
     /// Returns `None` when the name or command line is blank.
     pub fn from_command_line(name: &str, command_line: &str, scope: AcpScope) -> Option<Self> {
@@ -276,6 +278,16 @@ pub struct AcpAgentCapabilities {
     prompt_capabilities: AcpPromptCapabilities,
 }
 
+impl AcpAgentCapabilities {
+    /// Whether the agent accepts image blocks in a prompt.
+    ///
+    /// Agents that do not advertise this may reject the whole prompt, so an
+    /// attachment has to be described in text instead of sent.
+    pub fn supports_image_prompts(&self) -> bool {
+        self.prompt_capabilities.image
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AcpAuthMethod {
     pub id: String,
@@ -304,10 +316,6 @@ impl AcpInitializeResult {
             .map(|info| info.name.clone())
             .unwrap_or_else(|| "ACP agent".to_string())
     }
-
-    pub fn requires_authentication(&self) -> bool {
-        !self.auth_methods.is_empty()
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -327,12 +335,136 @@ pub struct AcpSessionModeState {
     available_modes: Vec<AcpSessionMode>,
 }
 
+/// One choice offered by an [`AcpConfigOption`].
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpConfigOptionChoice {
+    pub value: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// A session setting the agent exposes for the client to change.
+///
+/// This is how an agent surfaces things Threadlane has no protocol field for —
+/// which model it runs, how much effort to spend, which permission mode is
+/// active. The set is agent-defined and open-ended, so options are matched by
+/// `id` and `category` rather than modelled as fixed fields.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpConfigOption {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub category: Option<String>,
+    /// Kept as raw JSON: `select` options carry strings today, but the type is
+    /// agent-defined and a boolean or number must not fail the whole session.
+    #[serde(default)]
+    pub current_value: Value,
+    #[serde(default)]
+    pub options: Vec<AcpConfigOptionChoice>,
+}
+
+/// `category` an agent reports for the option naming its model.
+pub const ACP_CONFIG_CATEGORY_MODEL: &str = "model";
+/// `category` an agent reports for the option controlling its permission mode.
+pub const ACP_CONFIG_CATEGORY_MODE: &str = "mode";
+/// `category` an agent reports for the option controlling reasoning effort.
+pub const ACP_CONFIG_CATEGORY_EFFORT: &str = "thought_level";
+/// `id` of the agent-persona option, matched by id because it carries no
+/// `category`.
+pub const ACP_CONFIG_ID_AGENT: &str = "agent";
+
+impl AcpConfigOption {
+    pub fn current_value(&self) -> Option<&str> {
+        self.current_value.as_str()
+    }
+
+    fn current_choice(&self) -> Option<&AcpConfigOptionChoice> {
+        let current = self.current_value()?;
+        self.options.iter().find(|choice| choice.value == current)
+    }
+
+    /// Name of the current selection, as the agent labels it.
+    ///
+    /// This is the control-sized label — "Default", "Plan Mode". Falls back to
+    /// the raw value so an agent that reports something outside its own option
+    /// list still displays truthfully.
+    pub fn current_label(&self) -> Option<String> {
+        self.current_choice()
+            .map(|choice| choice.name.clone())
+            .or_else(|| self.current_value().map(str::to_string))
+    }
+
+    /// The most specific description of the current selection.
+    ///
+    /// Prefers the leading segment of the agent's description, because that is
+    /// where it names what is concretely running ("Opus 4.8 with 1M context ·
+    /// Best for everyday…") — a model's option *name* is often generic
+    /// ("Default (recommended)") and answers the wrong question. Only useful
+    /// where there is room for a phrase; a mode's description is a whole
+    /// sentence, so a button should use [`Self::current_label`] instead.
+    pub fn current_detail_label(&self) -> Option<String> {
+        self.current_description()
+            .and_then(|description| description.split(" · ").next())
+            .map(str::trim)
+            .filter(|head| !head.is_empty())
+            .map(str::to_string)
+            .or_else(|| self.current_label())
+    }
+
+    /// Description the agent gave for the current selection, which is where it
+    /// names the underlying model ("Opus 4.8 with 1M context").
+    pub fn current_description(&self) -> Option<&str> {
+        self.current_choice()
+            .and_then(|choice| choice.description.as_deref())
+    }
+
+    pub fn has_choice(&self, value: &str) -> bool {
+        self.options.iter().any(|choice| choice.value == value)
+    }
+
+    fn is_category(&self, category: &str) -> bool {
+        self.category.as_deref() == Some(category)
+    }
+
+    /// Whether this option should be presented to the user for configuration.
+    ///
+    /// Excludes effort/thought level (owned by the reasoning picker) and
+    /// agent persona (owned by the agent's internal routing).
+    pub fn is_user_configurable(&self) -> bool {
+        self.category.as_deref() != Some(ACP_CONFIG_CATEGORY_EFFORT)
+            && self.id != ACP_CONFIG_ID_AGENT
+    }
+}
+
+/// Finds the option an agent reports for `category`.
+pub fn config_option_for<'a>(
+    options: &'a [AcpConfigOption],
+    category: &str,
+) -> Option<&'a AcpConfigOption> {
+    options.iter().find(|option| option.is_category(category))
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpNewSessionResult {
     pub session_id: String,
     #[serde(default)]
     modes: Option<AcpSessionModeState>,
+    #[serde(default)]
+    config_options: Vec<AcpConfigOption>,
+}
+
+/// Response shape of `session/set_config_option`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AcpSetConfigOptionResult {
+    #[serde(default)]
+    config_options: Vec<AcpConfigOption>,
 }
 
 /// A single block of prompt or response content.
@@ -576,6 +708,21 @@ pub struct AcpPermissionOption {
     kind: AcpPermissionOptionKind,
 }
 
+impl AcpPermissionOption {
+    pub fn option_id(&self) -> &str {
+        &self.option_id
+    }
+
+    /// Agent-authored label for this choice ("Yes, allow once").
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn kind(&self) -> AcpPermissionOptionKind {
+        self.kind
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpPermissionRequest {
@@ -584,6 +731,34 @@ pub struct AcpPermissionRequest {
     tool_call: Option<AcpToolCall>,
     #[serde(default)]
     options: Vec<AcpPermissionOption>,
+}
+
+impl AcpPermissionRequest {
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    pub fn tool_call(&self) -> Option<&AcpToolCall> {
+        self.tool_call.as_ref()
+    }
+
+    pub fn options(&self) -> &[AcpPermissionOption] {
+        &self.options
+    }
+
+    /// Picks the option matching `kind`, if the agent offered one.
+    ///
+    /// Agents choose their own option ids, so a decision can only ever be
+    /// expressed as one of the ids they actually sent.
+    pub fn option_for(&self, kind: AcpPermissionOptionKind) -> Option<&AcpPermissionOption> {
+        self.options.iter().find(|option| option.kind == kind)
+    }
+
+    /// Whether the agent offered a durable "always" grant for this request.
+    pub fn offers_allow_always(&self) -> bool {
+        self.option_for(AcpPermissionOptionKind::AllowAlways)
+            .is_some()
+    }
 }
 
 /// Client answer to `session/request_permission`.
@@ -686,11 +861,22 @@ impl AcpPermissionPolicy {
     }
 }
 
+/// Answers `session/request_permission` by asking somebody.
+///
+/// This is what lets a UI sit in the permission loop instead of the fixed
+/// [`AcpPermissionPolicy`], which cannot represent "ask the user".
+pub type AcpPermissionResponder = Arc<
+    dyn Fn(AcpPermissionRequest) -> Pin<Box<dyn Future<Output = AcpPermissionOutcome> + Send>>
+        + Send
+        + Sync,
+>;
+
 /// Default handler: workspace-scoped filesystem access, a fixed permission
 /// policy, and session updates forwarded on a channel.
 pub struct AcpWorkspaceClient {
     workspace_root: PathBuf,
     permission_policy: AcpPermissionPolicy,
+    permission_responder: Option<AcpPermissionResponder>,
     updates: Option<mpsc::UnboundedSender<AcpSessionNotification>>,
 }
 
@@ -699,12 +885,23 @@ impl AcpWorkspaceClient {
         Self {
             workspace_root,
             permission_policy: AcpPermissionPolicy::default(),
+            permission_responder: None,
             updates: None,
         }
     }
 
     pub fn with_permission_policy(mut self, policy: AcpPermissionPolicy) -> Self {
         self.permission_policy = policy;
+        self
+    }
+
+    /// Routes permission requests to `responder` instead of the fixed policy.
+    ///
+    /// Takes precedence over [`Self::with_permission_policy`]: a responder is
+    /// a real consent path, and the policy only exists for when there isn't
+    /// one.
+    pub fn with_permission_responder(mut self, responder: AcpPermissionResponder) -> Self {
+        self.permission_responder = Some(responder);
         self
     }
 
@@ -730,7 +927,10 @@ impl AcpClientHandler for AcpWorkspaceClient {
     }
 
     async fn request_permission(&self, request: AcpPermissionRequest) -> AcpPermissionOutcome {
-        self.permission_policy.select(&request.options)
+        match &self.permission_responder {
+            Some(responder) => responder(request).await,
+            None => self.permission_policy.select(&request.options),
+        }
     }
 
     async fn read_text_file(&self, request: AcpReadTextFileRequest) -> Result<String, String> {
@@ -1035,6 +1235,30 @@ impl AcpConnection {
             .await
     }
 
+    /// Changes one agent-defined session setting, returning the full option
+    /// set as the agent reports it afterwards.
+    ///
+    /// The reply is authoritative rather than assumed: changing one option can
+    /// change another, as picking a different model changes which effort
+    /// levels that model offers.
+    pub async fn set_config_option(
+        &self,
+        session_id: &str,
+        config_id: &str,
+        value: &str,
+    ) -> Result<Vec<AcpConfigOption>, String> {
+        let result = self
+            .request(
+                "session/set_config_option",
+                json!({ "sessionId": session_id, "configId": config_id, "value": value }),
+                Some(HANDSHAKE_TIMEOUT),
+            )
+            .await?;
+        Ok(serde_json::from_value::<AcpSetConfigOptionResult>(result)
+            .map(|decoded| decoded.config_options)
+            .unwrap_or_default())
+    }
+
     pub async fn set_session_mode(&self, session_id: &str, mode_id: &str) -> Result<(), String> {
         self.request(
             "session/set_mode",
@@ -1223,6 +1447,8 @@ pub struct AcpSession {
     session_id: String,
     agent: AcpInitializeResult,
     modes: Option<AcpSessionModeState>,
+    /// Agent-defined settings, kept current as they are changed.
+    config_options: Mutex<Vec<AcpConfigOption>>,
 }
 
 impl AcpSession {
@@ -1253,6 +1479,7 @@ impl AcpSession {
             session_id: session.session_id,
             agent,
             modes: session.modes,
+            config_options: Mutex::new(session.config_options),
         })
     }
 
@@ -1270,6 +1497,85 @@ impl AcpSession {
 
     pub fn connection(&self) -> &Arc<AcpConnection> {
         &self.connection
+    }
+
+    /// Inspects the agent's session settings without cloning the vector.
+    pub fn with_config_options<R>(&self, f: impl FnOnce(&[AcpConfigOption]) -> R) -> R {
+        let guard = self.config_options.lock();
+        let options = guard.as_deref().map(Vec::as_slice).unwrap_or(&[]);
+        f(options)
+    }
+
+    /// Snapshot of the agent's session settings.
+    pub fn config_options(&self) -> Vec<AcpConfigOption> {
+        self.with_config_options(|options| options.to_vec())
+    }
+
+    /// Label the agent reports for `category`, such as which model it runs.
+    pub fn config_label(&self, category: &str) -> Option<String> {
+        self.with_config_options(|options| {
+            config_option_for(options, category).and_then(AcpConfigOption::current_label)
+        })
+    }
+
+    /// Sets one session setting, keeping the local snapshot in step with the
+    /// agent's own answer.
+    ///
+    /// A value the agent does not offer is refused here rather than sent: an
+    /// agent is free to reject it however it likes, including by failing the
+    /// call, and a rejected setting must not look applied.
+    pub async fn set_config_option(&self, category: &str, value: &str) -> Result<(), String> {
+        let config_id = {
+            let options = self.config_options();
+            let Some(option) = config_option_for(&options, category) else {
+                return Err(format!("This agent exposes no '{category}' setting"));
+            };
+            option.id.clone()
+        };
+        self.set_config_option_by_id(&config_id, value).await
+    }
+
+    /// Sets one session setting by its agent-assigned id.
+    ///
+    /// Ids are how an open-ended setting list is addressed: not every option
+    /// carries a `category` (Claude Code's persona picker does not), so a
+    /// category-only setter cannot reach all of them.
+    ///
+    /// A value the agent does not offer is refused here rather than sent: an
+    /// agent is free to reject it however it likes, including by failing the
+    /// call, and a rejected setting must not look applied.
+    pub async fn set_config_option_by_id(
+        &self,
+        config_id: &str,
+        value: &str,
+    ) -> Result<(), String> {
+        {
+            let options = self.config_options();
+            let Some(option) = options.iter().find(|option| option.id == config_id) else {
+                return Err(format!("This agent exposes no '{config_id}' setting"));
+            };
+            if option.current_value() == Some(value) {
+                return Ok(());
+            }
+            if !option.has_choice(value) {
+                return Err(format!(
+                    "This agent does not offer '{value}' for {}",
+                    option.name
+                ));
+            }
+        }
+        let updated = self
+            .connection
+            .set_config_option(&self.session_id, config_id, value)
+            .await?;
+        if let Ok(mut options) = self.config_options.lock() {
+            if !updated.is_empty() {
+                *options = updated;
+            } else if let Some(option) = options.iter_mut().find(|option| option.id == config_id) {
+                option.current_value = Value::String(value.to_string());
+            }
+        }
+        Ok(())
     }
 
     pub async fn prompt_text(&self, text: &str) -> Result<AcpStopReason, String> {
@@ -1302,7 +1608,6 @@ pub enum AcpAgentStatus {
     Connected {
         agent_name: String,
         protocol_version: u16,
-        auth_required: bool,
     },
     Error(String),
 }
@@ -1315,14 +1620,7 @@ impl AcpAgentStatus {
             Self::Connected {
                 agent_name,
                 protocol_version,
-                auth_required,
-            } => {
-                if *auth_required {
-                    format!("Connected to {agent_name} (ACP v{protocol_version}, sign-in required)")
-                } else {
-                    format!("Connected to {agent_name} (ACP v{protocol_version})")
-                }
-            }
+            } => format!("Connected to {agent_name} (ACP v{protocol_version})"),
             Self::Error(error) => format!("Error: {error}"),
         }
     }
@@ -1419,7 +1717,6 @@ impl AcpManager {
             Ok(result) => AcpAgentStatus::Connected {
                 agent_name: result.agent_display_name(),
                 protocol_version: result.protocol_version,
-                auth_required: result.requires_authentication(),
             },
             Err(error) => {
                 connection.shutdown().await;
@@ -1826,16 +2123,12 @@ mod tests {
     }
 
     #[test]
-    fn agent_status_display_reports_auth_requirement() {
+    fn agent_status_display_reports_connection() {
         let connected = AcpAgentStatus::Connected {
             agent_name: "Gemini".to_string(),
             protocol_version: 1,
-            auth_required: true,
         };
-        assert_eq!(
-            connected.display_status(),
-            "Connected to Gemini (ACP v1, sign-in required)"
-        );
+        assert_eq!(connected.display_status(), "Connected to Gemini (ACP v1)");
         assert_eq!(
             AcpAgentStatus::Error("boom".to_string()).display_status(),
             "Error: boom"

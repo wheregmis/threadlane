@@ -1023,10 +1023,15 @@ impl WorkspaceView {
         });
         let dirty_count = git_status.map_or(0, |s| s.files.len());
 
-        let model_name = if state.selected_model.is_empty() {
-            "default"
-        } else {
-            &state.selected_model
+        // An external ACP agent chooses its own model, so the selection alone
+        // does not say what actually ran; show what the agent reports.
+        let model_name = match (
+            state.selected_model.is_empty(),
+            state.active_acp_model_label(),
+        ) {
+            (true, _) => "default".to_string(),
+            (false, Some(agent_model)) => format!("{} · {agent_model}", state.selected_model),
+            (false, None) => state.selected_model.clone(),
         };
 
         let active_project = state

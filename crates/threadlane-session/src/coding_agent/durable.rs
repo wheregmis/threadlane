@@ -322,11 +322,16 @@ impl CodingAgent {
             .model_roles
             .resolve_task(&self.agent.model())
             .to_string();
-        let provider = self
-            .agent
-            .provider_client()
-            .provider_kind(&model)
-            .to_string();
+        // The router has no ACP branch and would label an ACP run as an
+        // OpenAI one, which makes the trajectory misreport what actually ran.
+        let provider = if crate::acp_bridge::is_acp_model(&model) {
+            "acp".to_string()
+        } else {
+            self.agent
+                .provider_client()
+                .provider_kind(&model)
+                .to_string()
+        };
         let tool_definitions = self.agent.configured_tool_definitions();
         let tool_schema = serde_json::to_vec(&tool_definitions)
             .map_err(|error| format!("failed to serialize resolved tool schema: {error}"))?;

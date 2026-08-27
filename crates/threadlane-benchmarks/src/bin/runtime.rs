@@ -24,14 +24,18 @@ fn pad_to(store: &mut JsonlStore, n: usize) {
     }
 }
 
-#[hotpath::measure]
-fn append_scaling(store: &mut JsonlStore) {
+fn append_records(store: &mut JsonlStore) {
     for _ in 0..200 {
         let seq = store.next_sequence();
         store
             .append_record(fact(format!("fact-bench-{seq}"), seq))
             .unwrap();
     }
+}
+
+#[hotpath::measure]
+fn append_scaling(store: &mut JsonlStore) {
+    append_records(store);
 }
 
 #[hotpath::measure]
@@ -48,10 +52,25 @@ fn reducer_replay(store: &MemoryStore) {
 
 #[hotpath::main]
 fn main() {
-    let append_dir = tempfile::tempdir().unwrap();
-    let mut append_store =
-        JsonlStore::open(append_dir.path().join("append-scaling.jsonl")).unwrap();
-    pad_to(&mut append_store, 4_000);
+    let append_template_dir = tempfile::tempdir().unwrap();
+    let append_template_path = append_template_dir.path().join("append-template.jsonl");
+    let mut append_template = JsonlStore::open(&append_template_path).unwrap();
+    pad_to(&mut append_template, 4_000);
+    drop(append_template);
+
+    let warmup_dir = tempfile::tempdir().unwrap();
+    let warmup_path = warmup_dir.path().join("append-warmup.jsonl");
+    std::fs::copy(&append_template_path, &warmup_path).unwrap();
+    let mut warmup_store = JsonlStore::open(warmup_path).unwrap();
+    append_records(&mut warmup_store);
+
+    let mut append_fixtures = Vec::with_capacity(SAMPLES);
+    for _ in 0..SAMPLES {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("append-scaling.jsonl");
+        std::fs::copy(&append_template_path, &path).unwrap();
+        append_fixtures.push((directory, JsonlStore::open(path).unwrap()));
+    }
 
     let open_dir = tempfile::tempdir().unwrap();
     let open_path = open_dir.path().join("open-scaling.jsonl");
@@ -64,8 +83,12 @@ fn main() {
         store.append_record(fact(format!("fact-bench-{seq}"), seq));
     }
 
-    for _ in 0..SAMPLES {
-        append_scaling(&mut append_store);
+    std::hint::black_box(JsonlStore::open(&open_path).unwrap());
+    std::hint::black_box(Reducer::reduce(&store).unwrap());
+
+    for (_, append_store) in &mut append_fixtures {
+        assert_eq!(append_store.records().len(), 4_000);
+        append_scaling(append_store);
         open_scaling(&open_path);
         reducer_replay(&store);
     }

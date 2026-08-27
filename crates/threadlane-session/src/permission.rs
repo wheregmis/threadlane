@@ -113,11 +113,7 @@ impl PermissionManager {
     }
 
     fn generate_request_id(&self) -> String {
-        format!(
-            "permission-{}-{}",
-            self.handle.inner.session_prefix,
-            self.handle.inner.next_id.fetch_add(1, Ordering::Relaxed)
-        )
+        self.handle.generate_request_id()
     }
 
     pub(crate) fn network_host_is_approved(&self, host: &str) -> bool {
@@ -129,17 +125,7 @@ impl PermissionManager {
     }
 
     async fn record_trace(&self, event: PermissionTraceEvent) -> Result<(), String> {
-        let recorder = self
-            .handle
-            .inner
-            .trace_recorder
-            .lock()
-            .map_err(|_| "permission trace recorder is unavailable".to_string())?
-            .clone();
-        match recorder {
-            Some(recorder) => recorder(event).await,
-            None => Ok(()),
-        }
+        self.handle.record_trace(event).await
     }
 
     pub(crate) async fn trace_preapproved_network_host(
@@ -304,6 +290,138 @@ impl PermissionHandle {
         }
     }
 
+    pub(crate) fn generate_request_id(&self) -> String {
+        format!(
+            "permission-{}-{}",
+            self.inner.session_prefix,
+            self.inner.next_id.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
+    pub(crate) async fn record_trace(&self, event: PermissionTraceEvent) -> Result<(), String> {
+        let recorder = self
+            .inner
+            .trace_recorder
+            .lock()
+            .map_err(|_| "permission trace recorder is unavailable".to_string())?
+            .clone();
+        match recorder {
+            Some(recorder) => recorder(event).await,
+            None => Ok(()),
+        }
+    }
+
+    pub fn is_interactive(&self) -> bool {
+        self.inner.interactive.load(Ordering::SeqCst)
+    }
+
+    /// Asks the user to approve an action originating outside the tool
+    /// dispatcher, such as an external ACP agent's `session/request_permission`.
+    ///
+    /// Unlike the capability requests above this grants nothing on its own and
+    /// persists nothing: it renders a prompt, waits for the answer, and returns
+    /// it. Without a UI attached there is no informed consent to give, so the
+    /// answer is [`PermissionDecision::Deny`] rather than a silent allow.
+    pub async fn request_external(
+        &self,
+        event_tx: &tokio::sync::broadcast::Sender<AgentEvent>,
+        capability: &str,
+        title: String,
+        detail: String,
+        allow_always: bool,
+    ) -> PermissionDecision {
+        let id = self.generate_request_id();
+        let interactive = self.is_interactive();
+        let mut scopes = vec![PermissionScope::Once];
+        if allow_always {
+            scopes.push(PermissionScope::Always);
+        }
+        let trace_scopes = scopes
+            .iter()
+            .map(|scope| match scope {
+                PermissionScope::Always => {
+                    threadlane_runtime::harness::PermissionTraceScope::Project
+                }
+                _ => threadlane_runtime::harness::PermissionTraceScope::Once,
+            })
+            .collect();
+        let requested = PermissionTraceEvent::Requested {
+            request_id: id.clone(),
+            capability: capability.to_string(),
+            scopes: trace_scopes,
+            detail_sha256: format!("{:x}", Sha256::digest(detail.as_bytes())),
+            source: if interactive {
+                threadlane_runtime::harness::PermissionTraceSource::User
+            } else {
+                threadlane_runtime::harness::PermissionTraceSource::UnattendedDefault
+            },
+        };
+        if self.record_trace(requested).await.is_err() {
+            return PermissionDecision::Deny;
+        }
+        if !interactive {
+            let _ = self
+                .record_trace(PermissionTraceEvent::Resolved {
+                    request_id: id,
+                    decision: threadlane_runtime::harness::PermissionTraceDecision::Denied,
+                    scope: None,
+                    source: threadlane_runtime::harness::PermissionTraceSource::UnattendedDefault,
+                    remembered: false,
+                })
+                .await;
+            return PermissionDecision::Deny;
+        }
+        let (tx, rx) = oneshot::channel();
+        if let Ok(mut pending) = self.inner.pending.lock() {
+            pending.insert(id.clone(), tx);
+        } else {
+            return PermissionDecision::Deny;
+        }
+        let request = PermissionRequest {
+            id: id.clone(),
+            capability: capability.to_string(),
+            title,
+            detail,
+            scopes,
+        };
+        if event_tx
+            .send(AgentEvent::PermissionRequested { request })
+            .is_err()
+        {
+            self.remove_pending(&id);
+            return PermissionDecision::Deny;
+        }
+        let guard = PendingRequestGuard {
+            handle: self.clone(),
+            request_id: id.clone(),
+        };
+        let decision = rx.await.unwrap_or(PermissionDecision::Deny);
+        drop(guard);
+        let _ = self
+            .record_trace(PermissionTraceEvent::Resolved {
+                request_id: id,
+                decision: match decision {
+                    PermissionDecision::Deny => {
+                        threadlane_runtime::harness::PermissionTraceDecision::Denied
+                    }
+                    _ => threadlane_runtime::harness::PermissionTraceDecision::Allowed,
+                },
+                scope: match decision {
+                    PermissionDecision::AllowAlways => {
+                        Some(threadlane_runtime::harness::PermissionTraceScope::Project)
+                    }
+                    PermissionDecision::AllowOnce => {
+                        Some(threadlane_runtime::harness::PermissionTraceScope::Once)
+                    }
+                    PermissionDecision::Deny => None,
+                },
+                source: threadlane_runtime::harness::PermissionTraceSource::User,
+                remembered: false,
+            })
+            .await;
+        decision
+    }
+
     pub fn set_interactive(&self, interactive: bool) {
         self.inner.interactive.store(interactive, Ordering::SeqCst);
     }
@@ -321,6 +439,19 @@ impl PermissionHandle {
         if let Ok(mut pending) = self.inner.pending.lock() {
             pending.remove(request_id);
         }
+    }
+}
+
+/// Test-only constructor for a standalone permission handle.
+///
+/// The manager that owns a handle is crate-private, so integration tests that
+/// need to answer prompts (the ACP engine's, for one) have no other way to get
+/// one.
+#[cfg(feature = "test-support")]
+impl PermissionHandle {
+    pub fn for_tests(project_root: PathBuf) -> Self {
+        let (event_tx, _rx) = tokio::sync::broadcast::channel(64);
+        PermissionManager::new(project_root, event_tx).handle()
     }
 }
 

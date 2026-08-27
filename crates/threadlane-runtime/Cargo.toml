@@ -21,7 +21,6 @@ libsqlite3-sys = "0.38.2"
 
 [features]
 default = []
-hotpath = ["hotpath/hotpath"]
 needle = ["dep:needle-infer"]
 
 [dependencies.needle-infer]
@@ -29,6 +28,5 @@ git = "https://github.com/Geekgineer/needle-rs"
 optional = true
 
 [dev-dependencies]
-hotpath = "0.24"
 tempfile = "3.10"
 threadlane-provider = { version = "0.1.0", path = "../threadlane-provider" }

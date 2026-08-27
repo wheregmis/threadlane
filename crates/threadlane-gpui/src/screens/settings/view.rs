@@ -152,7 +152,7 @@ impl SettingsView {
         });
         let acp_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("Claude Code"));
         let acp_command_input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("npx -y @zed-industries/claude-code-acp")
+            InputState::new(window, cx).placeholder("npx -y @agentclientprotocol/claude-agent-acp")
         });
 
         let (auth_tx, mut auth_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -291,6 +291,9 @@ impl SettingsView {
 
     fn refresh_acp(&mut self, cx: &mut Context<Self>) {
         let project = self.active_project(cx);
+        if let Err(error) = settings::upgrade_acp_presets(project.as_deref()) {
+            self.capability_status = Some(error);
+        }
         self.acp_rows = settings::configured_acp_agents(project.clone());
         self.model.update(cx, |state, cx| {
             state.reconcile_selected_model();
@@ -2516,6 +2519,11 @@ impl SettingsView {
         let theme = cx.theme().colors;
         let rows = self.acp_rows.clone();
         let has_project = self.active_project(cx).is_some();
+        let selected_scope = if self.install_globally {
+            AcpScope::Global
+        } else {
+            AcpScope::Project
+        };
         let add_view = cx.entity().downgrade();
         let name_input = self.acp_name_input.clone();
         let command_input = self.acp_command_input.clone();
@@ -2528,6 +2536,108 @@ impl SettingsView {
             .child(self.render_scope_picker("acp-scope", cx))
             .child(
                 div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child("Quick setup"),
+                    )
+                    .children(settings::ACP_PRESETS.iter().map(|preset| {
+                        let preset_view = cx.entity().downgrade();
+                        let configured = rows.iter().find(|record| {
+                            preset.matches_agent(&record.config)
+                                && record.config.scope == selected_scope
+                        });
+                        let enabled = configured.is_some_and(|record| record.config.enabled);
+                        let status = configured
+                            .map(|record| record.status.display_status())
+                            .unwrap_or_else(|| "Not configured".to_string());
+                        let preset_id = preset.id;
+                        div()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.title_bar)
+                            .px_4()
+                            .py_3()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .size(px(32.0))
+                                    .flex_none()
+                                    .rounded_md()
+                                    .bg(theme.muted)
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_color(theme.muted_foreground)
+                                    .child(Icon::default().path("icons/providers/acp.svg")),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .child(preset.name),
+                                    )
+                                    .child(
+                                        div()
+                                            .mt_1()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(preset.description),
+                                    )
+                                    .child(
+                                        div()
+                                            .mt_1()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(status),
+                                    ),
+                            )
+                            .child(
+                                Switch::new(SharedString::from(format!(
+                                    "acp-preset-{preset_id}-{:?}",
+                                    selected_scope
+                                )))
+                                .checked(enabled)
+                                .disabled(selected_scope == AcpScope::Project && !has_project)
+                                .tooltip(if enabled {
+                                    "Disable ACP agent"
+                                } else {
+                                    "Enable ACP agent"
+                                })
+                                .on_click(
+                                    move |checked, _window, cx| {
+                                        let checked = *checked;
+                                        let _ = preset_view.update(cx, |this, cx| {
+                                            let project = this.active_project(cx);
+                                            this.capability_status =
+                                                settings::set_acp_preset_enabled(
+                                                    project.as_deref(),
+                                                    selected_scope,
+                                                    preset,
+                                                    checked,
+                                                )
+                                                .err();
+                                            this.refresh_acp(cx);
+                                            cx.notify();
+                                        });
+                                    },
+                                ),
+                            )
+                    })),
+            )
+            .child(
+                div()
                     .rounded_lg()
                     .border_1()
                     .border_color(theme.border)
@@ -2536,6 +2646,12 @@ impl SettingsView {
                     .flex()
                     .flex_col()
                     .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child("Custom agent"),
+                    )
                     .child(Input::new(&self.acp_name_input))
                     .child(Input::new(&self.acp_command_input))
                     .child(
@@ -2583,7 +2699,13 @@ impl SettingsView {
                             ),
                     ),
             )
-            .children(rows.into_iter().map(|record| {
+            .children(rows.into_iter().filter_map(|record| {
+                if settings::ACP_PRESETS
+                    .iter()
+                    .any(|preset| preset.matches_agent(&record.config))
+                {
+                    return None;
+                }
                 let toggle_view = cx.entity().downgrade();
                 let remove_view = cx.entity().downgrade();
                 let config = record.config;
@@ -2712,10 +2834,8 @@ impl SettingsView {
                                 });
                             }),
                     )
+                    .into()
             }))
-            .when(self.acp_rows.is_empty(), |view| {
-                view.child(Self::empty_state("No ACP agents configured.", theme))
-            })
             .into_any_element()
     }
 }

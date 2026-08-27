@@ -1,5 +1,6 @@
 pub mod acp;
 pub mod acp_bridge;
+pub mod acp_runtime;
 pub mod agents;
 pub mod commands;
 pub mod config;
@@ -32,17 +33,21 @@ pub use controller::{ExecutionMode, SessionController, SessionStatus};
 
 // ── Re-exports ───────────────────────────────────────────────────────
 pub use acp::{
-    AcpAgentCapabilities, AcpAgentConfig, AcpAgentRecord, AcpAgentStatus, AcpAuthMethod,
-    AcpClientHandler, AcpConnection, AcpContentBlock, AcpInitializeResult, AcpManager,
+    config_option_for, AcpAgentCapabilities, AcpAgentConfig, AcpAgentRecord, AcpAgentStatus,
+    AcpAuthMethod, AcpClientHandler, AcpConfigOption, AcpConfigOptionChoice, AcpConnection,
+    AcpContentBlock, AcpInitializeResult, AcpManager,
     AcpNewSessionResult, AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionOutcome,
     AcpPermissionPolicy, AcpPermissionRequest, AcpPlanEntry, AcpProbeClient,
     AcpReadTextFileRequest, AcpScope, AcpSession, AcpSessionNotification, AcpSessionUpdate,
-    AcpSettings, AcpStopReason, AcpToolCall, AcpToolCallStatus, AcpToolKind, AcpWorkspaceClient,
-    AcpWriteTextFileRequest, ACP_PROTOCOL_VERSION,
+    AcpPermissionResponder, AcpSettings, AcpStopReason, AcpToolCall, AcpToolCallStatus,
+    AcpToolKind, AcpWorkspaceClient, AcpWriteTextFileRequest, ACP_CONFIG_CATEGORY_EFFORT,
+    ACP_CONFIG_CATEGORY_MODE, ACP_CONFIG_CATEGORY_MODEL, ACP_CONFIG_ID_AGENT,
+    ACP_PROTOCOL_VERSION,
 };
 pub use acp_bridge::{
     acp_agent_id, acp_model_id, agent_events_for, is_acp_model, ACP_MODEL_PREFIX,
 };
+pub use acp_runtime::AcpEngine;
 pub use commands::{
     available_slash_commands, builtin_commands, execute_slash_command, parse_slash_command,
     CommandAction, SlashCommandInfo,

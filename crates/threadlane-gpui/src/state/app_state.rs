@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use threadlane_session::harness::{JsonlStore, SessionStore};
 use threadlane_session::{
-    AgentEvent, AgentMessage, ImageAttachment, ReasoningEffort, SessionPlan,
+    AcpConfigOption, AgentEvent, AgentMessage, ImageAttachment, ReasoningEffort, SessionPlan,
     SubagentProgressUpdate, TokenUsage,
 };
 
@@ -202,6 +202,16 @@ pub enum ChatStreamEvent {
         session_id: String,
         session_file: PathBuf,
     },
+    /// Settings an external ACP agent exposes, as it reports them.
+    ///
+    /// Unlike a provider model these are not known from the selection alone —
+    /// the agent defines them and names its own current values — so they
+    /// arrive once it has connected.
+    AcpConfigOptions {
+        session_id: String,
+        options: Vec<AcpConfigOption>,
+        error: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -264,6 +274,11 @@ pub struct AppState {
         HashMap<SessionProjectionKey, threadlane_session::harness::SessionDiagnostics>,
     session_metrics: HashMap<SessionProjectionKey, SessionMetricsInfo>,
     context_windows: HashMap<SessionProjectionKey, ContextWindowInfo>,
+    /// Settings each ACP session's agent exposes, keyed by session id.
+    ///
+    /// Keyed by session rather than by model id because two sessions on the
+    /// same configured agent can hold different settings.
+    acp_config_options: HashMap<String, Vec<AcpConfigOption>>,
     stashed_prompts: HashMap<String, String>,
     pub(crate) pending_permissions: HashMap<String, threadlane_session::PermissionRequest>,
     pub(crate) pending_hydrations: Vec<SessionHydrationRequest>,
@@ -971,6 +986,7 @@ impl AppState {
             diagnostics_by_session: HashMap::new(),
             session_metrics: HashMap::new(),
             context_windows: HashMap::new(),
+            acp_config_options: HashMap::new(),
             stashed_prompts: HashMap::new(),
             selected_model,
             model_roles,
@@ -1143,6 +1159,12 @@ impl AppState {
             }
         }
         self.auth_status_msg = Some(format!("Model switched to {model}"));
+        // The runtime above was dropped, taking the old agent connection with
+        // it, so anything cached about the previous agent is now stale.
+        if let Some(session_id) = self.active_session_id.clone() {
+            self.acp_config_options.remove(&session_id);
+        }
+        self.request_acp_config_options();
     }
 
     pub(crate) fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {
@@ -1442,6 +1464,7 @@ impl AppState {
         let session_file = self.session_file(work_dir, session_id);
         self.session_runtimes.remove(&session_file);
         self.pending_composer_messages.remove(session_id);
+        self.acp_config_options.remove(session_id);
         if let Some(project) = self
             .projects
             .iter_mut()
@@ -3112,6 +3135,93 @@ impl AppState {
             .unwrap_or_default()
     }
 
+    /// Asks the selected external agent what settings it offers.
+    ///
+    /// A no-op for a provider model, which has no agent to ask.
+    pub(crate) fn request_acp_config_options(&mut self) {
+        if !threadlane_session::is_acp_model(&self.selected_model) {
+            return;
+        }
+        let Some((runtime, session_id)) = self.active_session_runtime() else {
+            return;
+        };
+        // A refusal here is not worth interrupting the user: this is a
+        // background question, and the picker simply stays as it was.
+        if let Err(error) =
+            crate::services::chat::load_acp_config_options(runtime, session_id, self.stream_tx.clone())
+        {
+            tracing::debug!("Could not load ACP agent settings: {error}");
+        }
+    }
+
+    /// Applies one of the selected external agent's settings.
+    pub(crate) fn set_acp_config_option(&mut self, config_id: String, value: String) {
+        let Some((runtime, session_id)) = self.active_session_runtime() else {
+            self.session_status = Some("Open a session before changing agent settings".into());
+            return;
+        };
+        // A refusal here *is* worth surfacing: the user picked something and
+        // it did not take effect.
+        if let Err(error) = crate::services::chat::set_acp_config_option(
+            runtime,
+            session_id,
+            config_id,
+            value,
+            self.stream_tx.clone(),
+        ) {
+            self.session_status = Some(error);
+        }
+    }
+
+    /// The active session's runtime, creating it if this is its first use.
+    ///
+    /// Settings are held by the agent inside the runtime, so reaching them
+    /// means having one — the same runtime a turn would use, so asking about
+    /// settings and then sending a prompt talk to one agent, not two.
+    fn active_session_runtime(&mut self) -> Option<(Arc<SessionRuntime>, String)> {
+        let work_dir = self.active_work_dir.clone()?;
+        let session_id = self.active_session_id.clone()?;
+        let session_file = work_dir
+            .join(".threadlane/sessions")
+            .join(format!("{session_id}.jsonl"));
+        let runtime = self.ensure_session_runtime(work_dir, session_file);
+        Some((runtime, session_id))
+    }
+
+    /// Settings the active session's external agent exposes.
+    pub(crate) fn active_acp_config_options(&self) -> &[AcpConfigOption] {
+        self.active_session_id
+            .as_deref()
+            .and_then(|session_id| self.acp_config_options.get(session_id))
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    /// Short name of the model the active session's agent is running.
+    ///
+    /// The control-sized form ("Opus", "Sonnet") for a button, as distinct
+    /// from [`Self::active_acp_model_label`], which is the fuller phrase the
+    /// status bar has room for.
+    pub(crate) fn active_acp_model_name(&self) -> Option<String> {
+        threadlane_session::config_option_for(
+            self.active_acp_config_options(),
+            threadlane_session::ACP_CONFIG_CATEGORY_MODEL,
+        )
+        .and_then(AcpConfigOption::current_label)
+    }
+
+    /// Model the active session's external agent reports it is running.
+    ///
+    /// Derived from the same settings the picker shows, so the status bar and
+    /// the picker can never disagree about what is running.
+    pub(crate) fn active_acp_model_label(&self) -> Option<String> {
+        threadlane_session::config_option_for(
+            self.active_acp_config_options(),
+            threadlane_session::ACP_CONFIG_CATEGORY_MODEL,
+        )
+        .and_then(AcpConfigOption::current_detail_label)
+    }
+
     pub(crate) fn active_context_window(&self) -> Option<&ContextWindowInfo> {
         self.active_session_projection_key()
             .and_then(|key| self.context_windows.get(&key))
@@ -3381,6 +3491,28 @@ impl AppState {
                         self.request_session_refresh(work_dir);
                     }
                 }
+                ChatStreamEvent::AcpConfigOptions {
+                    session_id,
+                    options,
+                    error,
+                } => {
+                    if let Some(error) = error {
+                        self.session_status = Some(error);
+                        active_changed = true;
+                    }
+                    if options.is_empty() {
+                        if self.acp_config_options.remove(&session_id).is_some()
+                            && self.active_session_id.as_deref() == Some(&session_id)
+                        {
+                            active_changed = true;
+                        }
+                    } else if self.acp_config_options.get(&session_id) != Some(&options) {
+                        self.acp_config_options.insert(session_id.clone(), options);
+                        if self.active_session_id.as_deref() == Some(&session_id) {
+                            active_changed = true;
+                        }
+                    }
+                }
                 ChatStreamEvent::TitleGenerated {
                     session_id,
                     session_file,
@@ -3538,7 +3670,10 @@ impl AppState {
         let model = self.selected_model.clone();
         let (api_key, account_id) = provider_credentials(&model);
 
-        if api_key.is_empty() {
+        // An external ACP agent authenticates itself — Claude Code uses its own
+        // CLI login — so it has no Threadlane provider credential to check, and
+        // gating it on one blocks every ACP turn before it starts.
+        if api_key.is_empty() && !threadlane_session::is_acp_model(&model) {
             self.messages_mut().push(ChatMessageInfo {
                 id: format!("credential-error-{session_id}"),
                 role: MessageRole::Error,
@@ -3593,6 +3728,7 @@ impl AppState {
                 api_key,
                 account_id,
                 model,
+                work_dir.clone(),
                 self.stream_tx.clone(),
             );
         }
