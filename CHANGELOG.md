@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.1.10](https://github.com/wheregmis/threadlane/compare/v0.1.9...v0.1.10) (2026-08-27)
+
+
+### Features
+
+* Add slash menu and permission details ([90888e6](https://github.com/wheregmis/threadlane/commit/90888e6677be3b00e501461755e00e4bc06fabd9))
+* Add slash menu and permission details ([aaaf7b4](https://github.com/wheregmis/threadlane/commit/aaaf7b4e22de4321badfb4144ec5602fdb59fec2))
+* **git:** add pull request creation support ([30faa30](https://github.com/wheregmis/threadlane/commit/30faa300a3a2b5f63490c73347fc931440fb5f37))
+* **gpui:** Add detailed pull request tooltips ([37ad11d](https://github.com/wheregmis/threadlane/commit/37ad11d89b914b4fb9c1931a438979741811be6e))
+* **gpui:** Improve slash command completion navigation ([c3643f5](https://github.com/wheregmis/threadlane/commit/c3643f510a8c6d3dec398987e73bd8b18c41768e))
+* Option to create PR from review ([07aee74](https://github.com/wheregmis/threadlane/commit/07aee740319a6366985fde4c064575a1859d8225))
+
+
+### Bug Fixes
+
+* Deduplicate and resolve cross-project sessions ([703b172](https://github.com/wheregmis/threadlane/commit/703b172c660cc9e73de3e5be939b2a6f39181312))
+* **gpui:** Reset task directory and status ([355b7ee](https://github.com/wheregmis/threadlane/commit/355b7ee2a42a248210c127eda56b731a203031a0))
+* Improve project filtering and recovery ([965918c](https://github.com/wheregmis/threadlane/commit/965918ce6ae65d85cae4e2cfb37f6dd977b6f11b))
+* preserve session metadata and stale git operation state ([40847b8](https://github.com/wheregmis/threadlane/commit/40847b87398aff2a75c7395da92c5ba05245e2af))
+* Restore slash command scrollbar rendering ([c7f5517](https://github.com/wheregmis/threadlane/commit/c7f5517a66ae299ead67d34b01ac85d69ffc973c))
+* Show active session project in composer chip ([70a31f7](https://github.com/wheregmis/threadlane/commit/70a31f7fb31f72df477ebeaa78f817005afe2abf))
+* Show unavailable worktrees ([a008aff](https://github.com/wheregmis/threadlane/commit/a008aff3f56afc4f6a86037157b45c856d6b4625))
+* Show worktree status in sidebar tooltip ([568182f](https://github.com/wheregmis/threadlane/commit/568182fdf8e8c2bf4f598b4f603cd56b395fd35a))
+* Stop Animating Context Meter for Unreported Usage ([4b9077a](https://github.com/wheregmis/threadlane/commit/4b9077a1ecd6ec99b46482d5a639c9f99adae4c5))
+* **ui:** refine chat shortcuts and merged PR styling ([4f91e9e](https://github.com/wheregmis/threadlane/commit/4f91e9e4d755202a3717b96b6ff94f1910030a97))
+* **worktree:** separate project and runtime session directories ([2c704e5](https://github.com/wheregmis/threadlane/commit/2c704e514e086b8abc18c52f787d215b060df23d))
+
+
+### Maintenance
+
+* Document explicit permission handling ([9c14558](https://github.com/wheregmis/threadlane/commit/9c145584391b69357f92b598b9562fdc5d3affdb))
+* gpui and component skills ([e30573d](https://github.com/wheregmis/threadlane/commit/e30573d756e9a5553ae2c10be63f4c599d5bf4ff))
+
 ## [0.1.9](https://github.com/wheregmis/threadlane/compare/v0.1.8...v0.1.9) (2026-08-27)
 
 
