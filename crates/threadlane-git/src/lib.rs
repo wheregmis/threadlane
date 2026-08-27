@@ -25,9 +25,11 @@ struct RepositoryMetadata {
 }
 
 type TimedCache<T> = HashMap<PathBuf, (Instant, T)>;
+type PrCacheKey = (PathBuf, String);
 
 static REPOSITORY_METADATA_CACHE: OnceLock<Mutex<TimedCache<RepositoryMetadata>>> = OnceLock::new();
-static PR_CACHE: OnceLock<Mutex<TimedCache<Option<GitHubPrInfo>>>> = OnceLock::new();
+static PR_CACHE: OnceLock<Mutex<HashMap<PrCacheKey, (Instant, Option<GitHubPrInfo>)>>> =
+    OnceLock::new();
 
 fn fresh_cache_value<T: Clone>(entry: &(Instant, T), now: Instant, ttl: Duration) -> Option<T> {
     (now.duration_since(entry.0) <= ttl).then(|| entry.1.clone())
@@ -37,6 +39,10 @@ fn repository_key(work_dir: &Path) -> PathBuf {
     work_dir
         .canonicalize()
         .unwrap_or_else(|_| work_dir.to_path_buf())
+}
+
+fn pr_cache_key(work_dir: &Path, branch: &str) -> PrCacheKey {
+    (repository_key(work_dir), branch.to_owned())
 }
 
 const GIT_FIELD_SEPARATOR: char = '\u{1f}';
@@ -937,11 +943,12 @@ pub fn parse_gh_pr_json(json_str: &str) -> Result<GitHubPrInfo, String> {
     })
 }
 
-fn inspect_pr_uncached(work_dir: &Path) -> Result<Option<GitHubPrInfo>, GitError> {
+fn inspect_pr_uncached(work_dir: &Path, branch: &str) -> Result<Option<GitHubPrInfo>, GitError> {
     let output = Command::new("gh")
         .args([
             "pr",
             "view",
+            branch,
             "--json",
             "number,title,url,state,isDraft,comments,statusCheckRollup,headRefName,baseRefName",
         ])
@@ -1006,7 +1013,17 @@ fn inspect_pr_uncached(work_dir: &Path) -> Result<Option<GitHubPrInfo>, GitError
 }
 
 pub fn inspect_pr(work_dir: &Path) -> Result<Option<GitHubPrInfo>, GitError> {
-    let key = repository_key(work_dir);
+    let Some(branch) = current_branch(work_dir)? else {
+        return Ok(None);
+    };
+    inspect_pr_for_branch(work_dir, &branch)
+}
+
+pub fn inspect_pr_for_branch(
+    work_dir: &Path,
+    branch: &str,
+) -> Result<Option<GitHubPrInfo>, GitError> {
+    let key = pr_cache_key(work_dir, branch);
     let now = Instant::now();
     let cache = PR_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(info) = cache.lock().ok().and_then(|cache| {
@@ -1016,11 +1033,16 @@ pub fn inspect_pr(work_dir: &Path) -> Result<Option<GitHubPrInfo>, GitError> {
     }) {
         return Ok(info);
     }
-    let info = inspect_pr_uncached(work_dir)?;
+    let info = inspect_pr_uncached(work_dir, branch)?;
     if let Ok(mut cache) = cache.lock() {
         cache.insert(key, (now, info.clone()));
     }
     Ok(info)
+}
+
+pub fn current_branch(work_dir: &Path) -> Result<Option<String>, GitError> {
+    let branch = command(work_dir, &["branch", "--show-current"])?;
+    Ok((!branch.trim().is_empty()).then(|| branch.trim().to_owned()))
 }
 
 pub fn create_branch(work_dir: &Path, name: &str) -> Result<(), GitError> {
@@ -1530,6 +1552,16 @@ mod tests {
                 std::time::Duration::from_secs(30),
             ),
             None
+        );
+    }
+
+    #[test]
+    fn pr_cache_separates_branches_in_the_same_repository() {
+        let repository = Path::new("/tmp/project");
+
+        assert_ne!(
+            pr_cache_key(repository, "feature/one"),
+            pr_cache_key(repository, "feature/two")
         );
     }
 
