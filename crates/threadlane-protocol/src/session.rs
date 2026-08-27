@@ -532,3 +532,222 @@ pub enum SessionEvent {
         message: String,
     },
 }
+
+// ── Session Discovery & Hydration Types ─────────────────────────────────────
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SessionHealth {
+    Healthy,
+    Working,
+    Warning,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionInfo {
+    pub id: String,
+    pub title: String,
+    pub work_dir: std::path::PathBuf,
+    pub runtime_work_dir: std::path::PathBuf,
+    pub session_file: std::path::PathBuf,
+    pub updated_at: u64,
+    pub health: SessionHealth,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_branch: Option<String>,
+    pub is_worktree: bool,
+    pub worktree_available: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MessageRole {
+    User,
+    Assistant,
+    System,
+    Advisor(crate::harness::AdvisorSeverity),
+    Error,
+    ContextMarker,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolActivityInfo {
+    pub id: String,
+    pub category: String,
+    pub title: String,
+    pub display_summary: String,
+    pub detail: String,
+    pub is_expanded: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatMessageInfo {
+    pub id: String,
+    pub role: MessageRole,
+    pub content: String,
+    pub tool_activities: Vec<ToolActivityInfo>,
+    pub streaming: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
+    pub reasoning_expanded: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrajectoryDiagnostics {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default)]
+    pub model_visible: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_bytes: Option<u64>,
+    #[serde(default)]
+    pub files_mutated: Vec<String>,
+    #[serde(default)]
+    pub commands_executed: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub items_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_estimate: Option<u32>,
+    #[serde(default)]
+    pub is_anomaly: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrajectoryEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<u32>,
+    pub category: String,
+    pub summary: String,
+    pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    #[serde(default)]
+    pub diagnostics: TrajectoryDiagnostics,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionMetricsInfo {
+    pub turns: usize,
+    pub tool_calls: usize,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+}
+
+impl SessionMetricsInfo {
+    pub fn billed_input_tokens(&self) -> u64 {
+        self.input_tokens
+            .saturating_add(self.cache_read_tokens)
+            .saturating_add(self.cache_write_tokens)
+    }
+
+    pub fn cache_hit_percent(&self) -> Option<u64> {
+        let billed_input = self.billed_input_tokens();
+        (billed_input > 0).then(|| {
+            (((self.cache_read_tokens as u128) * 100 + (billed_input as u128) / 2)
+                / billed_input as u128) as u64
+        })
+    }
+
+    pub fn accumulate_usage(&mut self, usage: &TokenUsageSummary) {
+        self.input_tokens = self
+            .input_tokens
+            .saturating_add(u64::from(usage.input_tokens));
+        self.output_tokens = self
+            .output_tokens
+            .saturating_add(u64::from(usage.output_tokens));
+        self.cache_read_tokens = self
+            .cache_read_tokens
+            .saturating_add(u64::from(usage.cache_read_tokens));
+        self.cache_write_tokens = self
+            .cache_write_tokens
+            .saturating_add(u64::from(usage.cache_write_tokens));
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextWindowInfo {
+    pub current_tokens: u64,
+    pub context_limit: u64,
+    pub context_limit_is_estimate: bool,
+    pub effective_model: String,
+    pub compaction_generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_compaction_seq: Option<u64>,
+    pub provisional: bool,
+    pub estimating: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SubagentActivityStatus {
+    Queued,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentActivityInfo {
+    pub batch_run_id: u64,
+    pub task_index: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub journal_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<String>,
+    pub agent: String,
+    pub task: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub status: SubagentActivityStatus,
+    pub messages: Vec<ChatMessageInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HydrateSessionRequest {
+    pub session_id: String,
+    pub session_file: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HydrateSessionResponse {
+    pub messages: Vec<ChatMessageInfo>,
+    pub plan: SessionPlan,
+    pub trajectory: Vec<TrajectoryEntry>,
+    pub subagents: Vec<SubagentActivityInfo>,
+    pub diagnostics: crate::harness::SessionDiagnostics,
+    pub metrics: SessionMetricsInfo,
+    pub token_usage: TokenUsageSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<ContextWindowInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchiveSessionRequest {
+    pub session_id: String,
+    pub project_path: String,
+}

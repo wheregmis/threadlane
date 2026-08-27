@@ -19,12 +19,11 @@ use crate::services::sessions::{SessionRuntime, SessionRuntimeStatus};
 
 pub type AttachedProject = ProjectRecord;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum SessionHealth {
-    Healthy,
-    Working,
-    Warning,
-}
+pub use threadlane_protocol::session::{
+    ChatMessageInfo, ContextWindowInfo, MessageRole, SessionHealth, SessionInfo,
+    SessionMetricsInfo, SubagentActivityInfo, SubagentActivityStatus, ToolActivityInfo,
+    TrajectoryDiagnostics, TrajectoryEntry,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum WorkMode {
@@ -43,175 +42,17 @@ impl WorkMode {
 }
 
 #[derive(Clone, Debug)]
-pub struct SessionInfo {
-    pub(crate) id: String,
-    pub(crate) title: String,
-    /// Canonical attached project that owns this session file.
-    pub(crate) work_dir: PathBuf,
-    /// Effective directory used for agent execution.
-    pub(crate) runtime_work_dir: PathBuf,
-    pub(crate) session_file: PathBuf,
-    pub(crate) updated_at: u64,
-    pub(crate) health: SessionHealth,
-    pub(crate) git_branch: Option<String>,
-    pub(crate) is_worktree: bool,
-    pub(crate) worktree_available: bool,
-}
-
-#[derive(Clone, Debug)]
 pub struct ProjectInfo {
     pub(crate) name: String,
     pub(crate) work_dir: PathBuf,
     pub(crate) sessions: Vec<SessionInfo>,
-    is_expanded: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum MessageRole {
-    User,
-    Assistant,
-    System,
-    Advisor(threadlane_protocol::AdvisorSeverity),
-    Error,
-    ContextMarker,
-}
-
-#[derive(Clone, Debug)]
-pub struct ToolActivityInfo {
-    pub(crate) id: String,
-    pub(crate) category: String,
-    pub(crate) title: String,
-    pub(crate) display_summary: String,
-    pub(crate) detail: String,
     pub(crate) is_expanded: bool,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
-pub struct TrajectoryDiagnostics {
-    pub(crate) status: Option<String>,
-    pub(crate) duration_ms: Option<u64>,
-    pub(crate) model_visible: bool,
-    pub(crate) source: Option<String>,
-    pub(crate) raw: Option<String>,
-    pub(crate) parent_id: Option<String>,
-    pub(crate) result_id: Option<String>,
-    pub(crate) exit_code: Option<i32>,
-    pub(crate) output_bytes: Option<u64>,
-    pub(crate) files_mutated: Vec<String>,
-    pub(crate) commands_executed: Vec<String>,
-    pub(crate) error_summary: Option<String>,
-    pub(crate) items_count: Option<usize>,
-    pub(crate) token_estimate: Option<u32>,
-    pub(crate) is_anomaly: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
-pub struct TrajectoryEntry {
-    pub(crate) seq: Option<u64>,
-    pub(crate) run_id: Option<String>,
-    pub(crate) turn: Option<u32>,
-    /// The user-facing request this entry belongs to, when it can be inferred
-    /// from the canonical transcript. Runtime records inherit the active request.
-    pub(crate) request: Option<u32>,
-    pub(crate) category: String,
-    pub(crate) summary: String,
-    pub(crate) detail: String,
-    pub(crate) lane: Option<String>,
-    pub(crate) correlation_id: Option<String>,
-    pub(crate) diagnostics: TrajectoryDiagnostics,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct SessionMetricsInfo {
-    pub(crate) turns: usize,
-    pub(crate) tool_calls: usize,
-    pub(crate) input_tokens: u64,
-    pub(crate) output_tokens: u64,
-    pub(crate) cache_read_tokens: u64,
-    pub(crate) cache_write_tokens: u64,
-}
-
-impl SessionMetricsInfo {
-    pub(crate) fn billed_input_tokens(&self) -> u64 {
-        self.input_tokens
-            .saturating_add(self.cache_read_tokens)
-            .saturating_add(self.cache_write_tokens)
-    }
-
-    pub(crate) fn cache_hit_percent(&self) -> Option<u64> {
-        let billed_input = self.billed_input_tokens();
-        (billed_input > 0).then(|| {
-            (((self.cache_read_tokens as u128) * 100 + (billed_input as u128) / 2)
-                / billed_input as u128) as u64
-        })
-    }
-
-    fn accumulate_usage(&mut self, usage: &TokenUsage) {
-        self.input_tokens = self
-            .input_tokens
-            .saturating_add(u64::from(usage.input_tokens));
-        self.output_tokens = self
-            .output_tokens
-            .saturating_add(u64::from(usage.output_tokens));
-        self.cache_read_tokens = self
-            .cache_read_tokens
-            .saturating_add(u64::from(usage.cache_read_tokens));
-        self.cache_write_tokens = self
-            .cache_write_tokens
-            .saturating_add(u64::from(usage.cache_write_tokens));
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ContextWindowInfo {
-    pub(crate) current_tokens: u64,
-    pub(crate) context_limit: u64,
-    pub(crate) context_limit_is_estimate: bool,
-    pub(crate) effective_model: String,
-    pub(crate) compaction_generation: u64,
-    pub(crate) last_compaction_seq: Option<u64>,
-    pub(crate) provisional: bool,
-    pub(crate) estimating: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct SessionProjectionKey {
     session_id: String,
     session_file: PathBuf,
-}
-
-#[derive(Clone, Debug)]
-pub struct ChatMessageInfo {
-    pub(crate) id: String,
-    pub(crate) role: MessageRole,
-    pub(crate) content: String,
-    pub(crate) tool_activities: Vec<ToolActivityInfo>,
-    pub(crate) streaming: bool,
-    pub(crate) reasoning_content: Option<String>,
-    pub(crate) reasoning_expanded: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SubagentActivityStatus {
-    Queued,
-    Running,
-    Completed,
-    Failed,
-    Cancelled,
-}
-
-#[derive(Clone, Debug)]
-pub struct SubagentActivityInfo {
-    pub(crate) batch_run_id: u64,
-    pub(crate) task_index: usize,
-    pub(crate) journal_run_id: Option<String>,
-    pub(crate) lane: Option<String>,
-    pub(crate) agent: String,
-    pub(crate) task: String,
-    pub(crate) model: Option<String>,
-    pub(crate) status: SubagentActivityStatus,
-    pub(crate) messages: Vec<ChatMessageInfo>,
-    pub(crate) error: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -282,6 +123,20 @@ pub(crate) struct SessionProjectionResult {
     pub(crate) metrics: SessionMetricsInfo,
     pub(crate) token_usage: TokenUsage,
     pub(crate) context_window: Option<ContextWindowInfo>,
+}
+
+impl From<threadlane_protocol::session::HydrateSessionResponse> for SessionProjectionResult {
+    fn from(res: threadlane_protocol::session::HydrateSessionResponse) -> Self {
+        Self {
+            plan: res.plan,
+            trajectory: res.trajectory,
+            subagents: res.subagents,
+            diagnostics: res.diagnostics,
+            metrics: res.metrics,
+            token_usage: res.token_usage,
+            context_window: res.context_window,
+        }
+    }
 }
 
 pub struct AppState {
@@ -1640,13 +1495,20 @@ impl AppState {
         {
             return Err("Stop the running generation before archiving this session".into());
         }
-        let archive_dir = work_dir.join(".threadlane/sessions/archive");
-        std::fs::create_dir_all(&archive_dir).map_err(|error| error.to_string())?;
-        let file_name = session_file
-            .file_name()
-            .ok_or_else(|| "Session file has no file name".to_string())?;
-        std::fs::rename(&session_file, archive_dir.join(file_name))
-            .map_err(|error| error.to_string())?;
+        let work_dir_str = work_dir.to_string_lossy().to_string();
+        let session_id_clone = session_id.clone();
+        if let Ok(executor) = crate::services::chat::executor() {
+            executor.spawn(async move {
+                if let Ok(client) = crate::services::daemon_client::get_daemon_client().await {
+                    let _ = client
+                        .archive_session(threadlane_protocol::session::ArchiveSessionRequest {
+                            session_id: session_id_clone,
+                            project_path: work_dir_str,
+                        })
+                        .await;
+                }
+            });
+        }
         self.finish_session_removal(&work_dir, &session_id);
         Ok(())
     }
@@ -1664,7 +1526,18 @@ impl AppState {
         {
             return Err("Stop the running generation before deleting this session".into());
         }
-        std::fs::remove_file(session_file).map_err(|error| error.to_string())?;
+        let session_id_clone = session_id.clone();
+        if let Ok(executor) = crate::services::chat::executor() {
+            executor.spawn(async move {
+                if let Ok(client) = crate::services::daemon_client::get_daemon_client().await {
+                    let _ = client
+                        .delete_session(threadlane_protocol::session::DeleteSessionRequest {
+                            session_id: session_id_clone,
+                        })
+                        .await;
+                }
+            });
+        }
         self.finish_session_removal(&work_dir, &session_id);
         Ok(())
     }

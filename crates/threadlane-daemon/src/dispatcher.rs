@@ -53,6 +53,30 @@ impl RpcDispatcher {
                     .map(|res| serde_json::to_value(res).unwrap()),
                 Err(e) => Err(format!("Invalid params: {e}")),
             },
+            "session/list_infos" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .session_service
+                    .list_session_infos(req)
+                    .await
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "session/hydrate" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .session_service
+                    .hydrate_session(req)
+                    .await
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "session/archive" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .session_service
+                    .archive_session(req)
+                    .await
+                    .map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
             "session/get" => match serde_json::from_value(params) {
                 Ok(req) => self
                     .session_service

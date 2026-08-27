@@ -38,8 +38,8 @@ use crate::screens::terminal::TerminalView;
 use crate::services::sessions::SessionRuntime;
 use crate::services::updater::{self, UpdaterEvent};
 use crate::state::{
-    coding_agent_options, compute_full_session_projection, compute_session_messages,
-    runtime_status_text, AppState, SessionHydrationRequest, SessionInfo, WorkspacePage,
+    coding_agent_options, runtime_status_text, AppState, SessionHydrationRequest, SessionInfo,
+    SessionProjectionResult, WorkspacePage,
 };
 use threadlane_protocol::UpdateStatus;
 
@@ -185,34 +185,23 @@ impl WorkspaceView {
                         std::sync::Arc::new(rt)
                     })
                 });
-            if request.reload_messages {
-                let history_file = request.session_file.clone();
-                let history = cx
-                    .background_executor()
-                    .spawn(async move { compute_session_messages(&history_file) })
-                    .await;
-                let _ = model.update(cx, |state, cx| {
-                    if !state.active_session_matches(&request.session_id, &request.session_file) {
-                        return;
-                    }
-                    match history {
-                        Ok(messages) => state.apply_session_messages(
-                            &request.session_id,
-                            &request.session_file,
-                            messages,
-                        ),
-                        Err(error) => {
-                            state.session_status = Some(format!("Could not load session: {error}"))
-                        }
-                    }
-                    cx.notify();
-                });
-            }
+            let session_id = request.session_id.clone();
             let session_file = request.session_file.clone();
-            let result = cx
+            let session_file_str = session_file.to_string_lossy().to_string();
+            let hydration_result = cx
                 .background_executor()
-                .spawn(async move { compute_full_session_projection(&session_file) })
+                .spawn(async move {
+                    let client = crate::services::daemon_client::get_daemon_client().await?;
+                    client
+                        .hydrate_session(threadlane_protocol::session::HydrateSessionRequest {
+                            session_id,
+                            session_file: session_file_str,
+                            project_path: None,
+                        })
+                        .await
+                })
                 .await;
+
             let runtime = match runtime_task {
                 Some(task) => Some(task.await),
                 None => None,
@@ -221,17 +210,25 @@ impl WorkspaceView {
                 if !state.active_session_matches(&request.session_id, &request.session_file) {
                     return;
                 }
-                match result {
-                    Ok(result) => {
+                match hydration_result {
+                    Ok(resp) => {
+                        if request.reload_messages {
+                            state.apply_session_messages(
+                                &request.session_id,
+                                &request.session_file,
+                                resp.messages.clone(),
+                            );
+                        }
+                        let proj_result = SessionProjectionResult::from(resp);
                         state.apply_session_hydration(
                             &request.session_id,
                             &request.session_file,
-                            result,
+                            proj_result,
                         );
                         state.session_status = state.session_status_for_file(&request.session_file);
                     }
                     Err(error) => {
-                        state.session_status = Some(format!("Could not load session: {error}"))
+                        state.session_status = Some(format!("Could not load session: {error}"));
                     }
                 }
                 if let Some(runtime) = runtime {

@@ -4,15 +4,13 @@ pub(crate) use app_state::provider_credentials;
 
 #[cfg(all(test, feature = "legacy-api-tests"))]
 pub(crate) use app_state::reported_session_shape_state;
-pub(crate) use app_state::TrajectoryDiagnostics;
 pub(crate) use app_state::{
-    coding_agent_options, compute_full_session_projection, compute_session_messages,
-    runtime_status_text, SessionHydrationRequest,
+    coding_agent_options, runtime_status_text, SessionHydrationRequest, SessionProjectionResult,
 };
 
 pub use app_state::{
     discover_sessions_in_project, load_session_messages, AppState, AttachedProject,
     ChatMessageInfo, ChatStreamEvent, MessageRole, ProjectInfo, RequestedEditorTarget,
     SessionHealth, SessionInfo, SubagentActivityInfo, SubagentActivityStatus, ToolActivityInfo,
-    TrajectoryEntry, WorkMode, WorkspacePage,
+    TrajectoryDiagnostics, TrajectoryEntry, WorkMode, WorkspacePage,
 };

@@ -182,6 +182,40 @@ impl DaemonClient {
         .await
     }
 
+    pub async fn list_session_infos(
+        &self,
+        project_path: &str,
+    ) -> Result<Vec<SessionInfo>, String> {
+        self.request(
+            "session/list_infos",
+            ListSessionsRequest {
+                project_path: project_path.to_string(),
+            },
+        )
+        .await
+    }
+
+    pub async fn hydrate_session(
+        &self,
+        req: HydrateSessionRequest,
+    ) -> Result<HydrateSessionResponse, String> {
+        self.request("session/hydrate", req).await
+    }
+
+    pub async fn archive_session(
+        &self,
+        req: ArchiveSessionRequest,
+    ) -> Result<(), String> {
+        self.request("session/archive", req).await
+    }
+
+    pub async fn delete_session(
+        &self,
+        req: DeleteSessionRequest,
+    ) -> Result<(), String> {
+        self.request("session/delete", req).await
+    }
+
     pub async fn send_prompt(
         &self,
         req: SendPromptRequest,
