@@ -12,6 +12,7 @@ threadlane-tools = { version = "0.1.0", path = "../threadlane-tools" }
 threadlane-git = { version = "0.1.0", path = "../threadlane-git" }
 threadlane-auth = { version = "0.1.0", path = "../threadlane-auth" }
 threadlane-skills = { version = "0.1.0", path = "../threadlane-skills" }
+threadlane-updater = { version = ">=0.1.0, <1.0.0", path = "../threadlane-updater" }
 threadlane-wasi = { version = "0.1.0", path = "../threadlane-wasi" }
 tokio = { version = "1.38", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }
@@ -21,6 +22,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 portable-pty = "0.9"
+notify = "8.2"
 dirs = "6.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

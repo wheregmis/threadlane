@@ -16,9 +16,8 @@ use crate::services::provider_auth::{self, ProviderAuthEvent};
 use crate::services::settings::{self, SettingsEvent};
 use crate::state::AppState;
 use threadlane_protocol::{
-    AcpAgentRecord, AcpScope, ExtensionRecord, ExtensionScope, SkillMetadata,
+    AcpAgentRecord, AcpScope, ExtensionRecord, ExtensionScope, SkillMetadata, UpdateStatus,
 };
-use threadlane_updater::UpdateStatus;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum SettingsPage {
@@ -171,6 +170,13 @@ impl SettingsView {
                             }
                             ProviderAuthEvent::Error(message) => {
                                 AuthStatusMessage::new(message, AuthStatusKind::Error)
+                            }
+                            ProviderAuthEvent::AuthUrl(url) => {
+                                cx.open_url(&url);
+                                AuthStatusMessage::new(
+                                    "Opened authorization page in your browser. Please complete sign in.",
+                                    AuthStatusKind::Info,
+                                )
                             }
                         });
                         if credentials_changed {

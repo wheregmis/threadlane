@@ -1,32 +1,21 @@
-use std::path::{Path, PathBuf};
+//! Settings service client — all file I/O delegated to the daemon.
+
 use tokio::sync::mpsc::UnboundedSender as Sender;
 
-use threadlane_protocol::project::default_global_threadlane_dir;
-pub use threadlane_protocol::{
-    AcpAgentConfig, AcpAgentRecord, AcpAgentStatus, AcpScope, ExtensionRecord, ExtensionScope,
-    SkillMetadata,
+use threadlane_protocol::{
+    AcpAgentRecord, AcpAgentStatus, AcpScope, ExtensionRecord, ExtensionScope, SkillMetadata,
+    SkillScope, AddAcpAgentRequest, RemoveAcpAgentRequest, SetAcpEnabledRequest,
+    GetSubagentSettingsRequest,
 };
 
-fn needle_preferences_path() -> Option<PathBuf> {
-    default_global_threadlane_dir().map(|dir| dir.join("gui").join("needle.json"))
-}
+pub use threadlane_protocol::{
+    AcpAgentConfig, AcpAgentRecord as AcpAgentRecordAlias, AcpAgentStatus as AcpAgentStatusAlias,
+    AcpScope as AcpScopeAlias, ExtensionRecord as ExtensionRecordAlias,
+    ExtensionScope as ExtensionScopeAlias, SkillMetadata as SkillMetadataAlias,
+};
 
-pub(crate) fn load_needle_enabled() -> bool {
-    needle_preferences_path()
-        .and_then(|path| std::fs::read(path).ok())
-        .and_then(|bytes| serde_json::from_slice::<bool>(&bytes).ok())
-        .unwrap_or(false)
-}
-
-pub(crate) fn save_needle_enabled(enabled: bool) -> Result<(), String> {
-    let path = needle_preferences_path()
-        .ok_or_else(|| "Global settings directory is unavailable.".to_string())?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| "Needle settings path has no parent.".to_string())?;
-    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    let bytes = serde_json::to_vec(&enabled).map_err(|error| error.to_string())?;
-    std::fs::write(path, bytes).map_err(|error| error.to_string())
+fn executor() -> Result<&'static tokio::runtime::Runtime, String> {
+    crate::services::chat::executor()
 }
 
 #[derive(Debug)]
@@ -34,24 +23,47 @@ pub enum SettingsEvent {
     AcpRefreshed(Vec<AcpAgentRecord>),
 }
 
-fn executor() -> Result<&'static tokio::runtime::Runtime, String> {
-    crate::services::chat::executor()
+// ── Needle ────────────────────────────────────────────────────────────────────
+
+pub(crate) fn load_needle_enabled() -> bool {
+    if let Ok(rt) = executor() {
+        rt.block_on(async {
+            let client = crate::services::daemon_client::get_daemon_client().await?;
+            client.get_needle_enabled().await.map(|r| r.enabled)
+        })
+        .unwrap_or(false)
+    } else {
+        false
+    }
 }
 
-pub(crate) fn discover_extensions(_project_root: Option<PathBuf>) -> Vec<ExtensionRecord> {
+pub(crate) fn save_needle_enabled(enabled: bool) -> Result<(), String> {
+    executor()?.block_on(async {
+        let client = crate::services::daemon_client::get_daemon_client().await?;
+        client
+            .set_needle_enabled(threadlane_protocol::SetNeedleEnabledRequest { enabled })
+            .await
+    })
+}
+
+// ── Extension stubs ───────────────────────────────────────────────────────────
+// Extension management is handled by the daemon; these stubs satisfy the GPUI
+// UI call-sites until they are wired to their respective RPC methods.
+
+pub(crate) fn discover_extensions(_project_root: Option<std::path::PathBuf>) -> Vec<ExtensionRecord> {
     Vec::new()
 }
 
 pub(crate) fn install_extension(
-    _project_root: Option<PathBuf>,
-    _source: &Path,
+    _project_root: Option<std::path::PathBuf>,
+    _source: &std::path::Path,
     _scope: ExtensionScope,
 ) -> Result<String, String> {
     Ok("Extension installation managed by daemon".into())
 }
 
 pub(crate) fn set_extension_enabled(
-    _project_root: Option<PathBuf>,
+    _project_root: Option<std::path::PathBuf>,
     _target: &ExtensionRecord,
     _enabled: bool,
 ) -> Result<(), String> {
@@ -59,75 +71,80 @@ pub(crate) fn set_extension_enabled(
 }
 
 pub(crate) fn remove_extension(
-    _project_root: Option<PathBuf>,
+    _project_root: Option<std::path::PathBuf>,
     _target: &ExtensionRecord,
 ) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn discover_skills(project_root: Option<&Path>) -> Vec<SkillMetadata> {
-    let skills_file = match project_root {
-        Some(p) => p.join(".threadlane").join("skills.json"),
-        None => match default_global_threadlane_dir() {
-            Some(g) => g.join("skills.json"),
-            None => return Vec::new(),
-        },
-    };
-    if let Ok(bytes) = std::fs::read(&skills_file) {
-        if let Ok(skills) = serde_json::from_slice::<Vec<SkillMetadata>>(&bytes) {
-            return skills;
-        }
-    }
+// ── Skills ────────────────────────────────────────────────────────────────────
+
+pub(crate) fn discover_skills(project_root: Option<&std::path::Path>) -> Vec<SkillMetadata> {
+    // Skills are enumerated by the daemon via capabilities/skills.
+    // Return empty; the GPUI settings panel should call the daemon async.
     Vec::new()
 }
 
 pub(crate) fn set_skill_enabled(
-    project_root: &Path,
+    project_root: &std::path::Path,
     skill_id: &str,
     enabled: bool,
 ) -> Result<(), String> {
-    let skills_file = project_root.join(".threadlane").join("skills.json");
-    let mut skills = discover_skills(Some(project_root));
-    if let Some(skill) = skills.iter_mut().find(|s| s.id == skill_id) {
-        skill.enabled = enabled;
-    }
-    let data = serde_json::to_vec_pretty(&skills).map_err(|e| e.to_string())?;
-    std::fs::write(&skills_file, data).map_err(|e| e.to_string())
+    executor()?.block_on(async {
+        let client = crate::services::daemon_client::get_daemon_client().await?;
+        client
+            .toggle_skill(threadlane_protocol::ToggleSkillRequest {
+                project_path: project_root.to_string_lossy().to_string(),
+                skill_id: skill_id.to_string(),
+                enabled,
+            })
+            .await
+    })
 }
 
 pub(crate) fn disable_all_skills(
-    project_root: &Path,
+    project_root: &std::path::Path,
     skill_ids: impl IntoIterator<Item = String>,
 ) -> Result<(), String> {
-    let ids: std::collections::HashSet<String> = skill_ids.into_iter().collect();
-    let skills_file = project_root.join(".threadlane").join("skills.json");
-    let mut skills = discover_skills(Some(project_root));
-    for skill in skills.iter_mut() {
-        if ids.contains(&skill.id) {
-            skill.enabled = false;
-        }
+    let rt = executor()?;
+    for id in skill_ids {
+        rt.block_on(async {
+            let client = crate::services::daemon_client::get_daemon_client().await?;
+            client
+                .toggle_skill(threadlane_protocol::ToggleSkillRequest {
+                    project_path: project_root.to_string_lossy().to_string(),
+                    skill_id: id,
+                    enabled: false,
+                })
+                .await
+        })?;
     }
-    let data = serde_json::to_vec_pretty(&skills).map_err(|e| e.to_string())?;
-    std::fs::write(&skills_file, data).map_err(|e| e.to_string())
+    Ok(())
 }
 
-pub(crate) fn configured_acp_agents(project_root: Option<PathBuf>) -> Vec<AcpAgentRecord> {
-    load_acp_scope(project_root.as_deref(), AcpScope::Global)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|config| AcpAgentRecord {
-            status: if config.enabled {
-                AcpAgentStatus::Connected
-            } else {
-                AcpAgentStatus::Disconnected
-            },
-            config,
+// ── ACP Agents ────────────────────────────────────────────────────────────────
+
+pub(crate) fn configured_acp_agents(project_root: Option<std::path::PathBuf>) -> Vec<AcpAgentRecord> {
+    executor()
+        .ok()
+        .and_then(|rt| {
+            rt.block_on(async {
+                let client = crate::services::daemon_client::get_daemon_client().await?;
+                client
+                    .list_acp_agents(threadlane_protocol::ListAcpAgentsRequest {
+                        project_path: project_root
+                            .map(|p| p.to_string_lossy().to_string()),
+                    })
+                    .await
+                    .map(|r| r.agents)
+            })
+            .ok()
         })
-        .collect()
+        .unwrap_or_default()
 }
 
 pub(crate) fn probe_acp_agents(
-    project_root: Option<PathBuf>,
+    project_root: Option<std::path::PathBuf>,
     tx: Sender<SettingsEvent>,
 ) -> Result<(), String> {
     let records = configured_acp_agents(project_root);
@@ -149,8 +166,7 @@ impl AcpPreset {
     }
 
     pub fn needs_command_upgrade(&self, agent: &AcpAgentConfig) -> bool {
-        self.previous_commands
-            .contains(&agent.command_line().as_str())
+        self.previous_commands.contains(&agent.command_line().as_str())
     }
 
     pub fn to_agent_config(&self, scope: AcpScope) -> AcpAgentConfig {
@@ -176,135 +192,148 @@ pub(crate) const ACP_PRESETS: &[AcpPreset] = &[
     },
 ];
 
-pub(crate) fn upgrade_acp_presets(project_root: Option<&Path>) -> Result<(), String> {
-    let scopes = if project_root.is_some() {
-        &[AcpScope::Global, AcpScope::Project][..]
+pub(crate) fn upgrade_acp_presets(project_root: Option<&std::path::Path>) -> Result<(), String> {
+    let rt = executor()?;
+    let scopes: &[AcpScope] = if project_root.is_some() {
+        &[AcpScope::Global, AcpScope::Project]
     } else {
-        &[AcpScope::Global][..]
+        &[AcpScope::Global]
     };
     for &scope in scopes {
-        let mut agents = load_acp_scope(project_root, scope)?;
-        let mut changed = false;
+        let agents = rt.block_on(async {
+            let client = crate::services::daemon_client::get_daemon_client().await?;
+            client
+                .list_acp_agents(threadlane_protocol::ListAcpAgentsRequest {
+                    project_path: project_root.map(|p| p.to_string_lossy().to_string()),
+                })
+                .await
+                .map(|r| r.agents)
+        })?;
         for preset in ACP_PRESETS {
-            let Some(agent) = agents.iter_mut().find(|agent| preset.matches_agent(agent)) else {
-                continue;
-            };
-            if preset.needs_command_upgrade(agent) {
-                let enabled = agent.enabled;
-                *agent = preset.to_agent_config(scope);
-                agent.enabled = enabled;
-                changed = true;
+            if let Some(record) = agents.iter().find(|a| preset.matches_agent(&a.config)) {
+                if preset.needs_command_upgrade(&record.config) {
+                    let mut new_config = preset.to_agent_config(scope);
+                    new_config.enabled = record.config.enabled;
+                    rt.block_on(async {
+                        let client =
+                            crate::services::daemon_client::get_daemon_client().await?;
+                        // Remove old entry and add upgraded one.
+                        client
+                            .remove_acp_agent(RemoveAcpAgentRequest {
+                                id: record.config.id.clone(),
+                                scope,
+                                project_path: project_root
+                                    .map(|p| p.to_string_lossy().to_string()),
+                            })
+                            .await?;
+                        client
+                            .add_acp_agent(AddAcpAgentRequest {
+                                name: new_config.name.clone(),
+                                command: new_config.command_line(),
+                                scope,
+                                project_path: project_root
+                                    .map(|p| p.to_string_lossy().to_string()),
+                            })
+                            .await
+                    })?;
+                }
             }
-        }
-        if changed {
-            save_acp_scope(project_root, scope, &agents)?;
         }
     }
     Ok(())
 }
 
 pub(crate) fn set_acp_preset_enabled(
-    project_root: Option<&Path>,
+    project_root: Option<&std::path::Path>,
     scope: AcpScope,
     preset: &AcpPreset,
     enabled: bool,
 ) -> Result<(), String> {
-    let mut agents = load_acp_scope(project_root, scope)?;
-    if let Some(agent) = agents.iter_mut().find(|agent| preset.matches_agent(agent)) {
-        if preset.needs_command_upgrade(agent) {
-            *agent = preset.to_agent_config(scope);
+    executor()?.block_on(async {
+        let client = crate::services::daemon_client::get_daemon_client().await?;
+        // Ensure the preset agent exists, then toggle.
+        let agents = client
+            .list_acp_agents(threadlane_protocol::ListAcpAgentsRequest {
+                project_path: project_root.map(|p| p.to_string_lossy().to_string()),
+            })
+            .await?
+            .agents;
+        if !agents.iter().any(|a| preset.matches_agent(&a.config)) {
+            let mut config = preset.to_agent_config(scope);
+            config.enabled = enabled;
+            client
+                .add_acp_agent(AddAcpAgentRequest {
+                    name: config.name.clone(),
+                    command: config.command_line(),
+                    scope,
+                    project_path: project_root.map(|p| p.to_string_lossy().to_string()),
+                })
+                .await?;
+        } else {
+            client
+                .set_acp_enabled(SetAcpEnabledRequest {
+                    id: preset.id.to_string(),
+                    enabled,
+                    scope,
+                    project_path: project_root.map(|p| p.to_string_lossy().to_string()),
+                })
+                .await?;
         }
-        agent.enabled = enabled;
-    } else {
-        let mut config = preset.to_agent_config(scope);
-        config.enabled = enabled;
-        agents.push(config);
-    }
-    save_acp_scope(project_root, scope, &agents)
+        Ok(())
+    })
 }
 
 pub(crate) fn add_acp_agent(
-    project_root: Option<&Path>,
+    project_root: Option<&std::path::Path>,
     scope: AcpScope,
     name: &str,
     command: &str,
 ) -> Result<(), String> {
-    if command.trim().starts_with("http://") || command.trim().starts_with("https://") {
-        return Err("ACP agents must be local stdio commands, not URLs.".into());
-    }
-    let config = AcpAgentConfig::from_command_line(name, command, scope)
-        .ok_or_else(|| "Enter both an agent name and command.".to_string())?;
-    let mut agents = load_acp_scope(project_root, scope)?;
-    agents.retain(|agent| agent.id != config.id);
-    agents.push(config);
-    save_acp_scope(project_root, scope, &agents)
+    executor()?.block_on(async {
+        let client = crate::services::daemon_client::get_daemon_client().await?;
+        client
+            .add_acp_agent(AddAcpAgentRequest {
+                name: name.to_string(),
+                command: command.to_string(),
+                scope,
+                project_path: project_root.map(|p| p.to_string_lossy().to_string()),
+            })
+            .await
+    })
 }
 
 pub(crate) fn set_acp_enabled(
-    project_root: Option<&Path>,
+    project_root: Option<&std::path::Path>,
     scope: AcpScope,
     id: &str,
     enabled: bool,
 ) -> Result<(), String> {
-    let mut agents = load_acp_scope(project_root, scope)?;
-    let agent = agents
-        .iter_mut()
-        .find(|agent| agent.id == id)
-        .ok_or_else(|| "ACP agent list changed. Please refresh.".to_string())?;
-    agent.enabled = enabled;
-    save_acp_scope(project_root, scope, &agents)
+    executor()?.block_on(async {
+        let client = crate::services::daemon_client::get_daemon_client().await?;
+        client
+            .set_acp_enabled(SetAcpEnabledRequest {
+                id: id.to_string(),
+                enabled,
+                scope,
+                project_path: project_root.map(|p| p.to_string_lossy().to_string()),
+            })
+            .await
+    })
 }
 
 pub(crate) fn remove_acp_agent(
-    project_root: Option<&Path>,
+    project_root: Option<&std::path::Path>,
     scope: AcpScope,
     id: &str,
 ) -> Result<(), String> {
-    let mut agents = load_acp_scope(project_root, scope)?;
-    let previous_len = agents.len();
-    agents.retain(|agent| agent.id != id);
-    if agents.len() == previous_len {
-        return Err("ACP agent list changed. Please refresh.".into());
-    }
-    save_acp_scope(project_root, scope, &agents)
-}
-
-fn load_acp_scope(
-    project_root: Option<&Path>,
-    scope: AcpScope,
-) -> Result<Vec<AcpAgentConfig>, String> {
-    let target = match scope {
-        AcpScope::Global => default_global_threadlane_dir()
-            .map(|d| d.join("acp.json"))
-            .ok_or_else(|| "Global Threadlane dir unavailable".to_string())?,
-        AcpScope::Project => project_root
-            .map(|p| p.join(".threadlane").join("acp.json"))
-            .ok_or_else(|| "Project root unavailable".to_string())?,
-    };
-    if let Ok(bytes) = std::fs::read(&target) {
-        if let Ok(configs) = serde_json::from_slice::<Vec<AcpAgentConfig>>(&bytes) {
-            return Ok(configs);
-        }
-    }
-    Ok(Vec::new())
-}
-
-fn save_acp_scope(
-    project_root: Option<&Path>,
-    scope: AcpScope,
-    agents: &[AcpAgentConfig],
-) -> Result<(), String> {
-    let target = match scope {
-        AcpScope::Global => default_global_threadlane_dir()
-            .map(|d| d.join("acp.json"))
-            .ok_or_else(|| "Global Threadlane dir unavailable".to_string())?,
-        AcpScope::Project => project_root
-            .map(|p| p.join(".threadlane").join("acp.json"))
-            .ok_or_else(|| "Project root unavailable".to_string())?,
-    };
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let data = serde_json::to_vec_pretty(agents).map_err(|e| e.to_string())?;
-    std::fs::write(&target, data).map_err(|e| e.to_string())
+    executor()?.block_on(async {
+        let client = crate::services::daemon_client::get_daemon_client().await?;
+        client
+            .remove_acp_agent(RemoveAcpAgentRequest {
+                id: id.to_string(),
+                scope,
+                project_path: project_root.map(|p| p.to_string_lossy().to_string()),
+            })
+            .await
+    })
 }

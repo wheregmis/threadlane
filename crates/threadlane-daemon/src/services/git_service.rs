@@ -1,5 +1,6 @@
 use std::path::Path;
 use threadlane_git::{inspect, list_branches_detailed};
+use threadlane_protocol::capabilities::*;
 use threadlane_protocol::git::*;
 
 #[derive(Clone, Default)]
@@ -105,5 +106,114 @@ impl GitService {
         }
 
         Ok(())
+    }
+
+    // ── Extended git operations ────────────────────────────────────────────
+
+    fn run_git(args: &[&str], work_dir: &Path) -> Result<String, String> {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(work_dir)
+            .output()
+            .map_err(|e| format!("Failed to execute git {}: {e}", args[0]))?;
+        if !output.status.success() {
+            let err = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("git {} failed: {err}", args[0]));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    pub fn stage_file(&self, req: GitStageFileRequest) -> Result<(), String> {
+        let work_dir = Path::new(&req.project_path);
+        if req.stage {
+            Self::run_git(&["add", "--", &req.file_path], work_dir)?;
+        } else {
+            Self::run_git(&["restore", "--staged", "--", &req.file_path], work_dir)?;
+        }
+        Ok(())
+    }
+
+    pub fn commit(&self, req: GitCommitRequest) -> Result<GitCommitResponse, String> {
+        let work_dir = Path::new(&req.project_path);
+        Self::run_git(&["commit", "-m", &req.message], work_dir)?;
+        let sha = Self::run_git(&["rev-parse", "HEAD"], work_dir)?;
+        Ok(GitCommitResponse { sha })
+    }
+
+    pub fn push(&self, req: GitPushPullRequest) -> Result<(), String> {
+        let work_dir = Path::new(&req.project_path);
+        Self::run_git(&["push"], work_dir)?;
+        Ok(())
+    }
+
+    pub fn pull(&self, req: GitPushPullRequest) -> Result<(), String> {
+        let work_dir = Path::new(&req.project_path);
+        Self::run_git(&["pull", "--rebase"], work_dir)?;
+        Ok(())
+    }
+
+    pub fn discard_file(&self, req: GitDiscardFileRequest) -> Result<(), String> {
+        let work_dir = Path::new(&req.project_path);
+        Self::run_git(&["restore", "--", &req.file_path], work_dir)?;
+        Ok(())
+    }
+
+    pub fn ignore(&self, req: GitIgnoreRequest) -> Result<(), String> {
+        let gitignore = Path::new(&req.project_path).join(".gitignore");
+        let mut content = std::fs::read_to_string(&gitignore).unwrap_or_default();
+        if !content.lines().any(|l| l.trim() == req.pattern.trim()) {
+            if !content.is_empty() && !content.ends_with('\n') {
+                content.push('\n');
+            }
+            content.push_str(&req.pattern);
+            content.push('\n');
+            std::fs::write(&gitignore, content).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    pub fn merge(&self, req: GitMergeRequest) -> Result<(), String> {
+        let work_dir = Path::new(&req.project_path);
+        Self::run_git(&["merge", "--no-ff", &req.branch], work_dir)?;
+        Ok(())
+    }
+
+    pub fn stash_pop(&self, req: GitStashActionRequest) -> Result<(), String> {
+        let work_dir = Path::new(&req.project_path);
+        if let Some(idx) = req.index {
+            Self::run_git(&["stash", "pop", &format!("stash@{{{idx}}}") ], work_dir)?;
+        } else {
+            Self::run_git(&["stash", "pop"], work_dir)?;
+        }
+        Ok(())
+    }
+
+    pub fn stash_drop(&self, req: GitStashActionRequest) -> Result<(), String> {
+        let work_dir = Path::new(&req.project_path);
+        if let Some(idx) = req.index {
+            Self::run_git(&["stash", "drop", &format!("stash@{{{idx}}}") ], work_dir)?;
+        } else {
+            Self::run_git(&["stash", "drop"], work_dir)?;
+        }
+        Ok(())
+    }
+
+    pub fn commit_diff_message(
+        &self,
+        project_path: &str,
+    ) -> Result<GitCommitDiffMessageResponse, String> {
+        let work_dir = Path::new(project_path);
+        let diff = Self::run_git(&["diff", "--staged", "--stat"], work_dir)?;
+        // Return the staged diff stat as a commit message seed.
+        let message = if diff.is_empty() {
+            String::new()
+        } else {
+            diff.lines()
+                .last()
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        };
+        Ok(GitCommitDiffMessageResponse { message })
     }
 }

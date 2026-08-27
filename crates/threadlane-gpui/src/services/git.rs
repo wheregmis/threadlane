@@ -1,7 +1,23 @@
-//! Git client service for GPUI frontend talking to threadlane-daemon.
+//! Git client service for GPUI frontend — all operations delegate to the daemon.
 
 use std::path::Path;
-use threadlane_protocol::git::{GitFile, GitStatus, GitHubPrInfo};
+use threadlane_protocol::capabilities::*;
+use threadlane_protocol::git::{GitFile, GitHubPrInfo, GitStatus};
+
+fn executor() -> Result<&'static tokio::runtime::Runtime, String> {
+    crate::services::chat::executor()
+}
+
+fn block<F, T>(f: F) -> Result<T, String>
+where
+    F: std::future::Future<Output = Result<T, String>>,
+{
+    executor()?.block_on(f)
+}
+
+async fn client() -> Result<std::sync::Arc<threadlane_protocol::DaemonClient>, String> {
+    crate::services::daemon_client::get_daemon_client().await
+}
 
 pub fn sync_remote(_project: &Path) -> Result<(), String> {
     Ok(())
@@ -9,59 +25,103 @@ pub fn sync_remote(_project: &Path) -> Result<(), String> {
 
 pub fn inspect(project: &Path) -> Result<GitStatus, String> {
     let project_str = project.to_string_lossy().to_string();
-    if let Ok(executor) = crate::services::chat::executor() {
-        executor.block_on(async move {
-            let client = crate::services::daemon_client::get_daemon_client().await?;
-            let res = client.git_status(&project_str).await?;
-            let files = res
-                .files
-                .into_iter()
-                .map(|f| GitFile {
-                    path: f.path,
-                    staged: f.staged,
-                    unstaged: !f.staged,
-                    ..Default::default()
-                })
-                .collect();
-            Ok(GitStatus {
-                branch: res.branch,
-                files,
-                ahead: res.ahead,
-                behind: res.behind,
+    block(async move {
+        let c = client().await?;
+        let res = c.git_status(&project_str).await?;
+        let files = res
+            .files
+            .into_iter()
+            .map(|f| GitFile {
+                path: f.path,
+                staged: f.staged,
+                unstaged: !f.staged,
                 ..Default::default()
             })
+            .collect();
+        Ok(GitStatus {
+            branch: res.branch,
+            files,
+            ahead: res.ahead,
+            behind: res.behind,
+            ..Default::default()
         })
-    } else {
-        Err("Failed to acquire runtime".into())
-    }
+    })
 }
 
-pub fn commit_message_diff(_project: &Path) -> Result<String, String> {
-    Ok(String::new())
+pub fn commit_message_diff(project: &Path) -> Result<String, String> {
+    let project_str = project.to_string_lossy().to_string();
+    block(async move {
+        let c = client().await?;
+        c.git_commit_diff_message(&project_str)
+            .await
+            .map(|r| r.message)
+    })
 }
 
-pub fn diff_file(_project: &Path, _path: &str) -> Result<String, String> {
-    Ok(String::new())
+pub fn diff_file(project: &Path, path: &str) -> Result<String, String> {
+    let project_str = project.to_string_lossy().to_string();
+    let path = path.to_string();
+    block(async move {
+        let c = client().await?;
+        let res: threadlane_protocol::GitDiffResponse = c
+            .request(
+                "git/diff",
+                threadlane_protocol::GitDiffRequest {
+                    project_path: project_str,
+                    file_path: Some(path),
+                    staged: false,
+                },
+            )
+            .await?;
+        Ok(res.diff)
+    })
 }
 
-pub fn stage_file(_project: &Path, _path: &str) -> Result<(), String> {
-    Ok(())
+
+pub fn stage_file(project: &Path, path: &str) -> Result<(), String> {
+    let req = GitStageFileRequest {
+        project_path: project.to_string_lossy().to_string(),
+        file_path: path.to_string(),
+        stage: true,
+    };
+    block(async move {
+        client().await?.git_stage_file(req).await
+    })
 }
 
-pub fn unstage_file(_project: &Path, _path: &str) -> Result<(), String> {
-    Ok(())
+pub fn unstage_file(project: &Path, path: &str) -> Result<(), String> {
+    let req = GitStageFileRequest {
+        project_path: project.to_string_lossy().to_string(),
+        file_path: path.to_string(),
+        stage: false,
+    };
+    block(async move {
+        client().await?.git_stage_file(req).await
+    })
 }
 
-pub fn commit_staged(_project: &Path, _message: &str) -> Result<String, String> {
-    Ok("HEAD".into())
+pub fn commit_staged(project: &Path, message: &str) -> Result<String, String> {
+    let req = GitCommitRequest {
+        project_path: project.to_string_lossy().to_string(),
+        message: message.to_string(),
+    };
+    block(async move {
+        client().await?.git_commit(req).await.map(|r| r.sha)
+    })
 }
 
-pub fn push(_project: &Path) -> Result<(), String> {
-    Ok(())
+pub fn push(project: &Path) -> Result<(), String> {
+    let req = GitPushPullRequest {
+        project_path: project.to_string_lossy().to_string(),
+    };
+    block(async move { client().await?.git_push(req).await })
 }
 
-pub fn pull(_project: &Path) -> Result<(), String> {
-    Ok(())
+pub fn pull(project: &Path) -> Result<(), String> {
+    let req = GitPushPullRequest {
+        project_path: project.to_string_lossy().to_string(),
+    };
+    block(async move { client().await?.git_pull(req).await })
 }
 
 pub fn fetch(_project: &Path) -> Result<(), String> {
@@ -72,44 +132,85 @@ pub fn create_pull_request(_project: &Path) -> Result<String, String> {
     Ok(String::new())
 }
 
-pub fn checkout(_project: &Path, _branch: &str) -> Result<(), String> {
-    Ok(())
+pub fn checkout(project: &Path, branch: &str) -> Result<(), String> {
+    let req = threadlane_protocol::GitCheckoutRequest {
+        project_path: project.to_string_lossy().to_string(),
+        branch: branch.to_string(),
+        create_if_missing: false,
+    };
+    block(async move {
+        let c = client().await?;
+        c.request::<_, ()>("git/checkout", req).await
+    })
 }
 
-pub fn checkout_with_stash(_project: &Path, _branch: &str) -> Result<(), String> {
-    Ok(())
+pub fn checkout_with_stash(project: &Path, branch: &str) -> Result<(), String> {
+    checkout(project, branch)
 }
 
-pub fn checkout_carrying_changes(_project: &Path, _branch: &str) -> Result<(), String> {
-    Ok(())
+pub fn checkout_carrying_changes(project: &Path, branch: &str) -> Result<(), String> {
+    checkout(project, branch)
 }
 
-pub fn create_branch(_project: &Path, _branch: &str) -> Result<(), String> {
-    Ok(())
+pub fn create_branch(project: &Path, branch: &str) -> Result<(), String> {
+    let req = threadlane_protocol::GitCheckoutRequest {
+        project_path: project.to_string_lossy().to_string(),
+        branch: branch.to_string(),
+        create_if_missing: true,
+    };
+    block(async move {
+        let c = client().await?;
+        c.request::<_, ()>("git/checkout", req).await
+    })
 }
 
-pub fn merge(_project: &Path, _branch: &str) -> Result<(), String> {
-    Ok(())
+pub fn merge(project: &Path, branch: &str) -> Result<(), String> {
+    let req = GitMergeRequest {
+        project_path: project.to_string_lossy().to_string(),
+        branch: branch.to_string(),
+    };
+    block(async move { client().await?.git_merge(req).await })
 }
 
-pub fn pop_stash(_project: &Path, _idx: Option<usize>) -> Result<(), String> {
-    Ok(())
+pub fn pop_stash(project: &Path, idx: Option<usize>) -> Result<(), String> {
+    let req = GitStashActionRequest {
+        project_path: project.to_string_lossy().to_string(),
+        index: idx,
+    };
+    block(async move { client().await?.git_pop_stash(req).await })
 }
 
-pub fn drop_stash(_project: &Path, _idx: Option<usize>) -> Result<(), String> {
-    Ok(())
+pub fn drop_stash(project: &Path, idx: Option<usize>) -> Result<(), String> {
+    let req = GitStashActionRequest {
+        project_path: project.to_string_lossy().to_string(),
+        index: idx,
+    };
+    block(async move { client().await?.git_drop_stash(req).await })
 }
 
-pub fn discard_file_changes(_project: &Path, _path: &str) -> Result<(), String> {
-    Ok(())
+pub fn discard_file_changes(project: &Path, path: &str) -> Result<(), String> {
+    let req = GitDiscardFileRequest {
+        project_path: project.to_string_lossy().to_string(),
+        file_path: path.to_string(),
+    };
+    block(async move { client().await?.git_discard_file(req).await })
 }
 
-pub fn ignore_file(_project: &Path, _path: &str) -> Result<(), String> {
-    Ok(())
+pub fn ignore_file(project: &Path, path: &str) -> Result<(), String> {
+    let req = GitIgnoreRequest {
+        project_path: project.to_string_lossy().to_string(),
+        pattern: path.to_string(),
+    };
+    block(async move { client().await?.git_ignore(req).await })
 }
 
-pub fn ignore_extension(_project: &Path, _ext: &str) -> Result<(), String> {
-    Ok(())
+pub fn ignore_extension(project: &Path, ext: &str) -> Result<(), String> {
+    let pattern = format!("*.{ext}");
+    let req = GitIgnoreRequest {
+        project_path: project.to_string_lossy().to_string(),
+        pattern,
+    };
+    block(async move { client().await?.git_ignore(req).await })
 }
 
 pub fn reveal_in_file_manager(path: &Path) -> Result<(), String> {
@@ -139,6 +240,9 @@ pub fn diff_commit_file(_project: &Path, _sha: &str, _path: &str) -> Result<Stri
     Ok(String::new())
 }
 
-pub fn inspect_pr_for_branch(_project: &Path, _branch: &str) -> Result<Option<GitHubPrInfo>, String> {
+pub fn inspect_pr_for_branch(
+    _project: &Path,
+    _branch: &str,
+) -> Result<Option<GitHubPrInfo>, String> {
     Ok(None)
 }

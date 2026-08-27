@@ -2,11 +2,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender as Sender;
 
-use threadlane_protocol::{ImageAttachment, ReasoningEffort, SendPromptRequest, SessionEvent};
+use threadlane_protocol::{
+    GenerateTitleRequest, ImageAttachment, ReasoningEffort, SendPromptRequest, SessionEvent,
+};
 
 use crate::services::sessions::SessionRuntime;
 use crate::state::ChatStreamEvent;
 
+/// Returns the shared Tokio runtime used for all daemon-client calls in GPUI.
+/// There is exactly one runtime for all daemon I/O; callers in other service
+/// modules obtain it through this function.
 pub(crate) fn executor() -> Result<&'static tokio::runtime::Runtime, String> {
     static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
     let rt = RUNTIME.get_or_init(|| {
@@ -131,61 +136,51 @@ pub(crate) fn cancel_prompt(
     Ok(())
 }
 
+/// Generate a session title via the daemon and notify the UI on completion.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn maybe_generate_session_title(
     session_file: PathBuf,
     session_id: String,
-    _submitted_prompt: String,
+    submitted_prompt: String,
     _api_key: String,
     _account_id: Option<String>,
     _model: String,
-    _work_dir: PathBuf,
+    work_dir: PathBuf,
     stream_tx: Sender<ChatStreamEvent>,
 ) {
-    let _ = stream_tx.send(ChatStreamEvent::TitleGenerated {
-        session_id,
-        session_file,
-    });
+    if let Ok(executor) = executor() {
+        let tx = stream_tx.clone();
+        let file = session_file.clone();
+        let sid = session_id.clone();
+        let prompt = submitted_prompt.clone();
+        let project = work_dir.to_string_lossy().to_string();
+
+        executor.spawn(async move {
+            if let Ok(client) = crate::services::daemon_client::get_daemon_client().await {
+                let _ = client
+                    .generate_title(GenerateTitleRequest {
+                        session_id: sid.clone(),
+                        project_path: project,
+                        prompt,
+                    })
+                    .await;
+            }
+            let _ = tx.send(ChatStreamEvent::TitleGenerated {
+                session_id: sid,
+                session_file: file,
+            });
+        });
+    } else {
+        let _ = stream_tx.send(ChatStreamEvent::TitleGenerated {
+            session_id,
+            session_file,
+        });
+    }
 }
 
+/// Normalise an LLM-generated title. Delegates to the shared protocol helper.
 pub fn normalize_session_title(value: &str) -> String {
-    let mut title = value.trim().to_string();
-    loop {
-        let before = title.clone();
-        if title
-            .get(..6)
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("title:"))
-        {
-            title = title[6..].trim().to_string();
-        }
-        let quoted = ((title.starts_with('"') && title.ends_with('"'))
-            || (title.starts_with('\'') && title.ends_with('\'')))
-            && title.len() >= 2;
-        if quoted {
-            title = title[1..title.len() - 1].trim().to_string();
-        }
-        if title == before {
-            break;
-        }
-    }
-
-    let mut collapsed = String::with_capacity(title.len());
-    let mut previous_was_space = true;
-    for character in title.chars() {
-        if character.is_whitespace() {
-            if !previous_was_space {
-                collapsed.push(' ');
-                previous_was_space = true;
-            }
-        } else {
-            collapsed.push(character);
-            previous_was_space = false;
-        }
-    }
-    if collapsed.ends_with(' ') {
-        collapsed.pop();
-    }
-    collapsed.chars().take(42).collect()
+    threadlane_protocol::normalize_session_title(value)
 }
 
 pub fn load_acp_config_options(

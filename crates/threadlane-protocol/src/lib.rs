@@ -8,8 +8,10 @@ pub mod project;
 pub mod provider;
 pub mod rpc;
 pub mod session;
+pub mod settings;
 pub mod tasks;
 pub mod terminal;
+pub mod update;
 
 // Re-export provider types for backward compatibility across the workspace
 pub use capabilities::*;
@@ -22,8 +24,54 @@ pub use project::*;
 pub use provider::*;
 pub use rpc::*;
 pub use session::*;
+pub use settings::*;
 pub use tasks::*;
 pub use terminal::*;
+pub use update::*;
+
+/// Normalise an LLM-generated session title by stripping surrounding quotes,
+/// leading "Title:" prefixes, collapsing whitespace, and capping at 42 chars.
+/// Lives here so both the daemon and GPUI can share a single implementation.
+pub fn normalize_session_title(value: &str) -> String {
+    let mut title = value.trim().to_string();
+    loop {
+        let before = title.clone();
+        if title
+            .get(..6)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("title:"))
+        {
+            title = title[6..].trim().to_string();
+        }
+        let quoted = ((title.starts_with('"') && title.ends_with('"'))
+            || (title.starts_with('\'') && title.ends_with('\'')))
+            && title.len() >= 2;
+        if quoted {
+            title = title[1..title.len() - 1].trim().to_string();
+        }
+        if title == before {
+            break;
+        }
+    }
+
+    let mut collapsed = String::with_capacity(title.len());
+    let mut previous_was_space = true;
+    for character in title.chars() {
+        if character.is_whitespace() {
+            if !previous_was_space {
+                collapsed.push(' ');
+                previous_was_space = true;
+            }
+        } else {
+            collapsed.push(character);
+            previous_was_space = false;
+        }
+    }
+    if collapsed.ends_with(' ') {
+        collapsed.pop();
+    }
+    collapsed.chars().take(42).collect()
+}
+
 
 #[cfg(test)]
 mod tests {

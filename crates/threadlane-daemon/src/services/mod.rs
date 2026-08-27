@@ -1,13 +1,21 @@
+pub mod auth_service;
 pub mod capabilities_service;
 pub mod git_service;
 pub mod project_service;
 pub mod session_service;
+pub mod settings_service;
 pub mod task_service;
 pub mod terminal_service;
+pub mod update_service;
+pub mod watcher_service;
 
+pub use auth_service::AuthService;
 pub use capabilities_service::CapabilitiesService;
 pub use git_service::GitService;
 pub use project_service::ProjectService;
 pub use session_service::SessionService;
+pub use settings_service::SettingsService;
 pub use task_service::TaskService;
 pub use terminal_service::TerminalService;
+pub use update_service::UpdateService;
+pub use watcher_service::WatcherService;

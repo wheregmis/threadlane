@@ -15,7 +15,9 @@ use crate::permission::*;
 use crate::project::*;
 use crate::rpc::*;
 use crate::session::*;
+use crate::settings::*;
 use crate::terminal::*;
+use crate::update::*;
 
 pub struct DaemonClient {
     next_id: AtomicU64,
@@ -256,5 +258,156 @@ impl DaemonClient {
 
     pub fn subscribe_terminal_events(&self) -> broadcast::Receiver<TerminalOutputEvent> {
         self.terminal_events.subscribe()
+    }
+
+    // ── Skills ─────────────────────────────────────────────────────────────
+
+    pub async fn list_skills(
+        &self,
+        req: ListSkillsRequest,
+    ) -> Result<ListSkillsResponse, String> {
+        self.request("capabilities/skills", req).await
+    }
+
+    pub async fn toggle_skill(&self, req: ToggleSkillRequest) -> Result<(), String> {
+        self.request("capabilities/toggle_skill", req).await
+    }
+
+    // ── ACP Agent CRUD ─────────────────────────────────────────────────────
+
+    pub async fn list_acp_agents(
+        &self,
+        req: ListAcpAgentsRequest,
+    ) -> Result<ListAcpAgentsResponse, String> {
+        self.request("capabilities/acp/list", req).await
+    }
+
+    pub async fn add_acp_agent(&self, req: AddAcpAgentRequest) -> Result<(), String> {
+        self.request("capabilities/acp/add", req).await
+    }
+
+    pub async fn set_acp_enabled(&self, req: SetAcpEnabledRequest) -> Result<(), String> {
+        self.request("capabilities/acp/set_enabled", req).await
+    }
+
+    pub async fn remove_acp_agent(&self, req: RemoveAcpAgentRequest) -> Result<(), String> {
+        self.request("capabilities/acp/remove", req).await
+    }
+
+    // ── Provider Auth ──────────────────────────────────────────────────────
+
+    pub async fn get_provider_auth(
+        &self,
+        req: GetProviderAuthRequest,
+    ) -> Result<ProviderAuthStatusResponse, String> {
+        self.request("auth/status", req).await
+    }
+
+    pub async fn connect_provider(
+        &self,
+        req: ConnectProviderRequest,
+    ) -> Result<ConnectProviderResponse, String> {
+        self.request("auth/connect", req).await
+    }
+
+    pub async fn disconnect_provider(&self, req: DisconnectProviderRequest) -> Result<(), String> {
+        self.request("auth/disconnect", req).await
+    }
+
+    // ── Settings ───────────────────────────────────────────────────────────
+
+    pub async fn get_needle_enabled(&self) -> Result<GetNeedleEnabledResponse, String> {
+        self.request("settings/needle_get", serde_json::Value::Null)
+            .await
+    }
+
+    pub async fn set_needle_enabled(&self, req: SetNeedleEnabledRequest) -> Result<(), String> {
+        self.request("settings/needle_set", req).await
+    }
+
+    pub async fn get_subagent_settings(
+        &self,
+        req: GetSubagentSettingsRequest,
+    ) -> Result<SubagentSettingsData, String> {
+        self.request("settings/subagent_get", req).await
+    }
+
+    pub async fn set_subagent_settings(
+        &self,
+        req: SetSubagentSettingsRequest,
+    ) -> Result<(), String> {
+        self.request("settings/subagent_set", req).await
+    }
+
+    // ── Updater ────────────────────────────────────────────────────────────
+
+    pub async fn check_for_update(&self) -> Result<CheckForUpdateResponse, String> {
+        self.request("update/check", serde_json::Value::Null).await
+    }
+
+    pub async fn download_update(&self, req: DownloadUpdateRequest) -> Result<(), String> {
+        self.request("update/download", req).await
+    }
+
+    pub async fn install_update(&self, req: InstallUpdateRequest) -> Result<(), String> {
+        self.request("update/install", req).await
+    }
+
+    // ── Session title generation ───────────────────────────────────────────
+
+    pub async fn generate_title(
+        &self,
+        req: GenerateTitleRequest,
+    ) -> Result<GenerateTitleResponse, String> {
+        self.request("session/generate_title", req).await
+    }
+
+    // ── Git extended ops ───────────────────────────────────────────────────
+
+    pub async fn git_stage_file(&self, req: GitStageFileRequest) -> Result<(), String> {
+        self.request("git/stage_file", req).await
+    }
+
+    pub async fn git_commit(&self, req: GitCommitRequest) -> Result<GitCommitResponse, String> {
+        self.request("git/commit", req).await
+    }
+
+    pub async fn git_push(&self, req: GitPushPullRequest) -> Result<(), String> {
+        self.request("git/push", req).await
+    }
+
+    pub async fn git_pull(&self, req: GitPushPullRequest) -> Result<(), String> {
+        self.request("git/pull", req).await
+    }
+
+    pub async fn git_discard_file(&self, req: GitDiscardFileRequest) -> Result<(), String> {
+        self.request("git/discard_file", req).await
+    }
+
+    pub async fn git_ignore(&self, req: GitIgnoreRequest) -> Result<(), String> {
+        self.request("git/ignore", req).await
+    }
+
+    pub async fn git_merge(&self, req: GitMergeRequest) -> Result<(), String> {
+        self.request("git/merge", req).await
+    }
+
+    pub async fn git_pop_stash(&self, req: GitStashActionRequest) -> Result<(), String> {
+        self.request("git/stash_pop", req).await
+    }
+
+    pub async fn git_drop_stash(&self, req: GitStashActionRequest) -> Result<(), String> {
+        self.request("git/stash_drop", req).await
+    }
+
+    pub async fn git_commit_diff_message(
+        &self,
+        project_path: &str,
+    ) -> Result<GitCommitDiffMessageResponse, String> {
+        self.request(
+            "git/commit_diff_message",
+            serde_json::json!({ "project_path": project_path }),
+        )
+        .await
     }
 }

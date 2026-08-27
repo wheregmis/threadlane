@@ -1,23 +1,49 @@
+//! Updater service client — update check/download/install via the daemon.
+
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender as Sender;
-
-use threadlane_updater::{UpdateReleaseInfo, UpdateStatus};
+use threadlane_protocol::{
+    DownloadUpdateRequest, InstallUpdateRequest, UpdateReleaseInfo,
+    UpdateStatus,
+};
 
 #[derive(Clone, Debug)]
 pub enum UpdaterEvent {
     Status(UpdateStatus),
 }
 
+fn executor() -> Result<&'static tokio::runtime::Runtime, String> {
+    crate::services::chat::executor()
+}
+
+pub(crate) fn is_configured() -> bool {
+    // Daemon manages updater configuration; enable client check on macOS
+    cfg!(target_os = "macos")
+}
+
 pub(crate) fn check(tx: Sender<UpdaterEvent>) {
     let _ = tx.send(UpdaterEvent::Status(UpdateStatus::Checking));
-    std::thread::spawn(move || {
-        let status = match threadlane_updater::check_for_update() {
-            Ok(Some(info)) => UpdateStatus::Available(info),
-            Ok(None) => UpdateStatus::UpToDate,
-            Err(error) => UpdateStatus::Error(error),
-        };
-        let _ = tx.send(UpdaterEvent::Status(status));
-    });
+    if let Ok(rt) = executor() {
+        let tx2 = tx.clone();
+        rt.spawn(async move {
+            let status = match crate::services::daemon_client::get_daemon_client().await {
+                Ok(client) => match client.check_for_update().await {
+                    Ok(res) => match res.version {
+                        Some(version) => UpdateStatus::Available(UpdateReleaseInfo {
+                            version,
+                            url: String::new(),
+                            signature: String::new(),
+                            notes: None,
+                        }),
+                        None => UpdateStatus::UpToDate,
+                    },
+                    Err(e) => UpdateStatus::Error(e),
+                },
+                Err(e) => UpdateStatus::Error(e),
+            };
+            let _ = tx2.send(UpdaterEvent::Status(status));
+        });
+    }
 }
 
 pub(crate) fn download(info: UpdateReleaseInfo, tx: Sender<UpdaterEvent>) {
@@ -26,47 +52,55 @@ pub(crate) fn download(info: UpdateReleaseInfo, tx: Sender<UpdaterEvent>) {
         version: version.clone(),
         progress: 0.0,
     }));
-    std::thread::spawn(move || {
-        let progress_tx = tx.clone();
-        let progress_version = version.clone();
-        let result = threadlane_updater::download_update(&info, move |progress| {
-            let _ = progress_tx.send(UpdaterEvent::Status(UpdateStatus::Downloading {
-                version: progress_version.clone(),
-                progress: progress.clamp(0.0, 1.0),
-            }));
+    if let Ok(rt) = executor() {
+        let tx2 = tx.clone();
+        rt.spawn(async move {
+            let result = match crate::services::daemon_client::get_daemon_client().await {
+                Ok(client) => {
+                    client
+                        .download_update(DownloadUpdateRequest {
+                            version: version.clone(),
+                            url: info.url.clone(),
+                            signature: info.signature.clone(),
+                        })
+                        .await
+                }
+                Err(e) => Err(e),
+            };
+            match result {
+                Ok(()) => {
+                    let _ = tx2.send(UpdaterEvent::Status(UpdateStatus::ReadyToInstall {
+                        info,
+                        bytes: Arc::new(Vec::new()),
+                    }));
+                }
+                Err(e) => {
+                    let _ = tx2.send(UpdaterEvent::Status(UpdateStatus::Error(e)));
+                }
+            }
         });
-        let status = match result {
-            Ok(bytes) => UpdateStatus::ReadyToInstall {
-                info,
-                bytes: Arc::new(bytes),
-            },
-            Err(error) => UpdateStatus::Error(error),
-        };
-        let _ = tx.send(UpdaterEvent::Status(status));
-    });
+    }
 }
 
-pub(crate) fn install(info: UpdateReleaseInfo, bytes: Arc<Vec<u8>>, tx: Sender<UpdaterEvent>) {
+pub(crate) fn install(info: UpdateReleaseInfo, _bytes: Arc<Vec<u8>>, tx: Sender<UpdaterEvent>) {
     let _ = tx.send(UpdaterEvent::Status(UpdateStatus::Installing));
-    std::thread::spawn(move || {
-        let bytes = Arc::try_unwrap(bytes).unwrap_or_else(|bytes| (*bytes).clone());
-        if let Err(error) = threadlane_updater::install_and_relaunch(info, bytes) {
-            let _ = tx.send(UpdaterEvent::Status(UpdateStatus::Error(error)));
-        }
-    });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn failed_check_maps_to_error_status() {
-        let status = match Err::<Option<UpdateReleaseInfo>, _>("offline".to_string()) {
-            Ok(Some(info)) => UpdateStatus::Available(info),
-            Ok(None) => UpdateStatus::UpToDate,
-            Err(error) => UpdateStatus::Error(error),
-        };
-        assert!(matches!(status, UpdateStatus::Error(error) if error == "offline"));
+    if let Ok(rt) = executor() {
+        let tx2 = tx.clone();
+        rt.spawn(async move {
+            let result = match crate::services::daemon_client::get_daemon_client().await {
+                Ok(client) => {
+                    client
+                        .install_update(InstallUpdateRequest {
+                            version: info.version.clone(),
+                        })
+                        .await
+                }
+                Err(e) => Err(e),
+            };
+            if let Err(e) = result {
+                let _ = tx2.send(UpdaterEvent::Status(UpdateStatus::Error(e)));
+            }
+            // On success the daemon relaunches the app; no further events needed.
+        });
     }
 }

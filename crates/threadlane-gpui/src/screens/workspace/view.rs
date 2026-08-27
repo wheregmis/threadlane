@@ -41,7 +41,7 @@ use crate::state::{
     coding_agent_options, compute_full_session_projection, compute_session_messages,
     runtime_status_text, AppState, SessionHydrationRequest, SessionInfo, WorkspacePage,
 };
-use threadlane_updater::UpdateStatus;
+use threadlane_protocol::UpdateStatus;
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([
@@ -301,7 +301,7 @@ impl WorkspaceView {
         let _ = model_wake_tx.send(());
 
         #[cfg(target_os = "macos")]
-        if threadlane_updater::is_configured() {
+        if updater::is_configured() {
             updater::check(updater_tx.clone());
         }
 
@@ -1218,13 +1218,20 @@ impl WorkspaceView {
 
         // An external ACP agent chooses its own model, so the selection alone
         // does not say what actually ran; show what the agent reports.
-        let model_name = match (
-            state.selected_model.is_empty(),
-            state.active_acp_model_label(),
-        ) {
-            (true, _) => "default".to_string(),
-            (false, Some(agent_model)) => format!("{} · {agent_model}", state.selected_model),
-            (false, None) => state.selected_model.clone(),
+        let model_name = if state.available_models().is_empty() {
+            "Connect a provider".to_string()
+        } else if let Some(agent_model) = state.active_acp_model_label() {
+            format!("{} · {agent_model}", state.selected_model)
+        } else if let Some(opt) = state
+            .available_models()
+            .iter()
+            .find(|m| m.id == state.selected_model)
+        {
+            opt.label.clone()
+        } else if state.selected_model.is_empty() {
+            "Connect a provider".to_string()
+        } else {
+            "Connect a provider".to_string()
         };
 
         let active_project = state
