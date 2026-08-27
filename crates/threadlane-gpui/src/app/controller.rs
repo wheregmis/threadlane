@@ -33,6 +33,7 @@ pub(crate) fn dispatch(state: &mut AppState, action: AppAction) -> Option<Sessio
             }
         }
         AppAction::ToggleProject(path) => state.toggle_project_expanded(&path),
+        AppAction::SetSidebarProjectFilter(work_dir) => state.set_sidebar_project_filter(work_dir),
         AppAction::BeginNewTask => state.begin_new_task(),
         AppAction::SelectDraftProject(path) => state.select_draft_project(path),
         AppAction::SelectWorkMode(mode) => state.set_work_mode(mode),

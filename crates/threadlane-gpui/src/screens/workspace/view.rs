@@ -394,6 +394,18 @@ impl WorkspaceView {
         });
 
         view.update(cx, |view, cx| {
+            let hydration_requests = view.model.update(cx, |state, _cx| {
+                std::mem::take(&mut state.pending_hydrations)
+            });
+            if !hydration_requests.is_empty() {
+                let model = view.model.clone();
+                cx.spawn(async move |_view, cx| {
+                    for request in hydration_requests {
+                        Self::spawn_session_hydration(model.clone(), request, cx);
+                    }
+                })
+                .detach();
+            }
             view.sync_git_status_with_active_project(cx);
         });
 

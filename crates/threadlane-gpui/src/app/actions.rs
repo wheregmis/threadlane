@@ -18,6 +18,7 @@ pub enum AppAction {
         session_id: String,
     },
     ToggleProject(PathBuf),
+    SetSidebarProjectFilter(Option<PathBuf>),
     BeginNewTask,
     SelectDraftProject(PathBuf),
     SelectWorkMode(crate::state::WorkMode),

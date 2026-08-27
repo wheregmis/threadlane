@@ -5,10 +5,10 @@ use gpui::*;
 use gpui_component::button::{Button, ButtonVariant, ButtonVariants};
 use gpui_component::dialog::DialogButtonProps;
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
+use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::theme::ActiveTheme;
-use gpui_component::{Icon, IconName, Sizable, WindowExt};
+use gpui_component::{Icon, IconName, Selectable, Sizable, WindowExt};
 
 use crate::app::{actions::AppAction, controller};
 use crate::state::{AppState, SessionHealth, SessionInfo, TrajectoryEntry};
@@ -210,6 +210,7 @@ fn sidebar_fingerprint(state: &AppState, now: u64) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     state.active_work_dir.hash(&mut hasher);
     state.active_session_id.hash(&mut hasher);
+    state.sidebar_project_filter.hash(&mut hasher);
     state.search_query.trim().to_lowercase().hash(&mut hasher);
     (now / 60).hash(&mut hasher);
     for project in &state.projects {
@@ -316,10 +317,10 @@ impl SidebarView {
         div()
             .flex()
             .flex_col()
-            .gap_1()
+            .gap_0p5()
             .px_3()
             .pt(px(48.0))
-            .pb_3()
+            .pb_1()
             .bg(theme.title_bar)
             .child(
                 Button::new("new-task-btn")
@@ -354,14 +355,120 @@ impl SidebarView {
             )
     }
 
-    fn render_history_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let model = self.model.clone();
+    fn render_project_filter(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
-        let session_count = self
-            .model
-            .read(cx)
+        let (projects, selected_filter) = {
+            let state = self.model.read(cx);
+            (
+                state
+                    .projects
+                    .iter()
+                    .map(|project| (project.name.clone(), project.work_dir.clone()))
+                    .collect::<Vec<_>>(),
+                state.sidebar_project_filter.clone(),
+            )
+        };
+        let selected_label = selected_filter
+            .as_ref()
+            .and_then(|selected| {
+                projects
+                    .iter()
+                    .find(|(_, work_dir)| work_dir == selected)
+                    .map(|(name, _)| name.clone())
+            })
+            .unwrap_or_else(|| "All projects".into());
+        let filter_model = self.model.clone();
+        let attach_model = self.model.clone();
+
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_3()
+            .pb_1()
+            .child(
+                div().min_w_0().flex_1().child(
+                    Button::new("sidebar-project-filter")
+                        .icon(IconName::Folder)
+                        .label(selected_label)
+                        .dropdown_caret(true)
+                        .selected(true)
+                        .w_full()
+                        .justify_start()
+                        .dropdown_menu(move |menu, _window, _cx| {
+                            let all_model = filter_model.clone();
+                            let mut menu = menu.item(
+                                PopupMenuItem::new("All projects")
+                                    .checked(selected_filter.is_none())
+                                    .on_click(move |_event, _window, cx| {
+                                        all_model.update(cx, |state, cx| {
+                                            controller::dispatch(
+                                                state,
+                                                AppAction::SetSidebarProjectFilter(None),
+                                            );
+                                            cx.notify();
+                                        });
+                                    }),
+                            );
+                            for (name, work_dir) in projects.clone() {
+                                let model = filter_model.clone();
+                                let checked = selected_filter.as_ref() == Some(&work_dir);
+                                menu =
+                                    menu.item(PopupMenuItem::new(name).checked(checked).on_click(
+                                        move |_event, _window, cx| {
+                                            model.update(cx, |state, cx| {
+                                                controller::dispatch(
+                                                    state,
+                                                    AppAction::SetSidebarProjectFilter(Some(
+                                                        work_dir.clone(),
+                                                    )),
+                                                );
+                                                cx.notify();
+                                            });
+                                        },
+                                    ));
+                            }
+                            menu
+                        }),
+                ),
+            )
+            .child(
+                Button::new("attach-project-btn")
+                    .icon(IconName::Plus)
+                    .tooltip("Attach Project")
+                    .ghost()
+                    .xsmall()
+                    .on_click(move |_event, _window, cx| {
+                        let model = attach_model.clone();
+                        cx.spawn(async move |cx| {
+                            let Some(folder) = rfd::AsyncFileDialog::new().pick_folder().await
+                            else {
+                                return;
+                            };
+                            let path = folder.path().to_path_buf();
+                            let _ = model.update(cx, |state, cx| {
+                                controller::dispatch(state, AppAction::AttachProject(path));
+                                cx.notify();
+                            });
+                        })
+                        .detach();
+                    }),
+            )
+            .bg(theme.title_bar)
+    }
+
+    fn render_history_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().colors;
+        let state = self.model.read(cx);
+        let session_count = state
             .projects
             .iter()
+            .filter(|project| {
+                state
+                    .sidebar_project_filter
+                    .as_ref()
+                    .is_none_or(|selected| &project.work_dir == selected)
+            })
             .map(|project| project.sessions.len())
             .sum::<usize>();
 
@@ -370,7 +477,7 @@ impl SidebarView {
             .items_center()
             .justify_between()
             .px_3()
-            .pt_3()
+            .pt_2()
             .pb_1()
             .child(
                 div()
@@ -395,28 +502,6 @@ impl SidebarView {
                             .child(session_count.to_string()),
                     ),
             )
-            .child(
-                Button::new("attach-project-btn")
-                    .icon(IconName::Folder)
-                    .tooltip("Attach Project")
-                    .ghost()
-                    .xsmall()
-                    .on_click(move |_event, _window, cx| {
-                        let model = model.clone();
-                        cx.spawn(async move |cx| {
-                            let Some(folder) = rfd::AsyncFileDialog::new().pick_folder().await
-                            else {
-                                return;
-                            };
-                            let path = folder.path().to_path_buf();
-                            let _ = model.update(cx, |state, cx| {
-                                controller::dispatch(state, AppAction::AttachProject(path));
-                                cx.notify();
-                            });
-                        })
-                        .detach();
-                    }),
-            )
     }
 
     fn render_session_card(
@@ -438,11 +523,10 @@ impl SidebarView {
                     .flex()
                     .flex_none()
                     .items_center()
-                    .gap_1()
-                    .px_1p5()
-                    .py(px(0.5))
+                    .gap(px(3.0))
+                    .px_1()
                     .rounded_full()
-                    .bg(theme.primary.opacity(0.15))
+                    .bg(theme.primary.opacity(0.1))
                     .child(gpui_component::spinner::Spinner::new().xsmall())
                     .child(
                         div()
@@ -497,10 +581,18 @@ impl SidebarView {
         let quick_settle_work_dir = session.work_dir.clone();
         let quick_settle_session_id = session.id.clone();
         let time_ago = format_time_ago(session.updated_at, now_unix_secs());
-        let project = session
-            .work_dir
-            .file_name()
-            .map(|name| name.to_string_lossy().to_string())
+        let project = self
+            .model
+            .read(cx)
+            .projects
+            .iter()
+            .find(|project| {
+                project
+                    .sessions
+                    .iter()
+                    .any(|candidate| candidate.session_file == session.session_file)
+            })
+            .map(|project| project.name.clone())
             .unwrap_or_else(|| "Project".to_string());
 
         let pr_info = session_pr_info(session, &self.model.read(cx).git_prs).cloned();
@@ -1101,6 +1193,12 @@ impl SidebarView {
         for session in state
             .projects
             .iter()
+            .filter(|project| {
+                state
+                    .sidebar_project_filter
+                    .as_ref()
+                    .is_none_or(|selected| &project.work_dir == selected)
+            })
             .flat_map(|project| project.sessions.iter())
         {
             if !seen_session_ids.insert(session.id.clone()) {
@@ -1367,6 +1465,7 @@ impl Render for SidebarView {
             .min_h_0()
             .bg(theme.title_bar)
             .child(self.render_header(cx))
+            .child(self.render_project_filter(cx))
             .child(self.render_history_header(cx))
             .child(div().flex_1().min_h_0().child(self.render_history(cx)))
             .child(self.render_footer(cx))

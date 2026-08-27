@@ -94,7 +94,9 @@ A normal `cargo run` may be unsuitable for testing installation: update installa
 - The project attach button appears while hovering the `PROJECTS` header.
 - The canonical attached-project registry is owned by `threadlane-session` at `~/.threadlane/projects.json`; GPUI must use that API rather than maintaining a second registry. On first load, merge the legacy `~/.threadlane/gui/projects.json` metadata into the canonical records and remove the legacy file only after an atomic canonical save succeeds. Preserve supervisor task metadata and newer GUI project/session selections when rebasing stale writers.
 - The context-target state is distinct from the active-session state.
+- The sidebar project filter is presentation-only and distinct from both active-session and context-target state. It filters the existing flat session list by owning attached project; selecting a filter must not switch sessions, change the composer project, or persist project selection.
 - Archive and delete actions should flow through `SessionContextMenuAction` and the app’s existing action handler.
+- A worktree session can have a project-level `.threadlane/sessions/<id>.jsonl` metadata stub while its full durable transcript lives at `<worktree>/.threadlane/sessions/<id>.jsonl`. Both lightweight startup discovery and full background discovery must prefer the existing worktree-local transcript, while retaining the stub as the fallback before that transcript exists; they must produce the same session-file key so hydration is not discarded as stale, and must never replace visible history with the metadata-only file. Spawn startup hydration explicitly when constructing `WorkspaceView`; do not rely on the later workspace event pump receiving a wake event before the initial transcript load begins.
 
 ## Model Provider Routing
 

@@ -285,6 +285,8 @@ pub struct AppState {
     pub(crate) active_session_id: Option<String>,
     pub(crate) is_new_task: bool,
     pub(crate) draft_work_mode: WorkMode,
+    /// Presentation-only sidebar filter. `None` keeps the flat list scoped to all projects.
+    pub(crate) sidebar_project_filter: Option<PathBuf>,
     pub(crate) search_query: String,
     pub(crate) messages: Arc<Vec<ChatMessageInfo>>,
     pub(crate) available_models: Vec<crate::model_catalog::ModelOption>,
@@ -425,6 +427,22 @@ fn effective_session_work_dir(
     }
 }
 
+fn resolve_session_transcript_file(
+    stub_file: &Path,
+    runtime_work_dir: &Path,
+    session_id: &str,
+    is_worktree: bool,
+) -> PathBuf {
+    let worktree_file = runtime_work_dir
+        .join(".threadlane/sessions")
+        .join(format!("{session_id}.jsonl"));
+    if is_worktree && worktree_file.is_file() {
+        worktree_file
+    } else {
+        stub_file.to_path_buf()
+    }
+}
+
 fn discover_session_stubs_in_project(work_dir: &Path) -> Vec<SessionInfo> {
     let Ok(entries) = std::fs::read_dir(work_dir.join(".threadlane/sessions")) else {
         return Vec::new();
@@ -457,13 +475,15 @@ fn discover_session_stubs_in_project(work_dir: &Path) -> Vec<SessionInfo> {
                     )
                 })
                 .unwrap_or((canonical_work_dir.clone(), None, false));
+            let session_file =
+                resolve_session_transcript_file(&path, &runtime_work_dir, &id, is_worktree);
             Some(SessionInfo {
                 title: id.clone(),
                 id,
                 work_dir: canonical_work_dir.clone(),
                 runtime_work_dir,
-                updated_at: file_mtime(&path),
-                session_file: path,
+                updated_at: file_mtime(&session_file),
+                session_file,
                 health: SessionHealth::Healthy,
                 git_branch,
                 is_worktree,
@@ -503,7 +523,12 @@ fn discover_sessions_in_project_cached(
             continue;
         }
         seen_paths.insert(path.clone());
-        let metadata = std::fs::metadata(&path).ok();
+        let cached_data_path = cache
+            .entries
+            .get(&path)
+            .map(|cached| cached.info.session_file.as_path())
+            .unwrap_or(path.as_path());
+        let metadata = std::fs::metadata(cached_data_path).ok();
         let len = metadata.as_ref().map_or(0, |metadata| metadata.len());
         let modified = metadata.and_then(|metadata| metadata.modified().ok());
         let info = match cache.entries.get(&path) {
@@ -513,39 +538,43 @@ fn discover_sessions_in_project_cached(
                     .file_stem()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| "session".into());
-                let (title, health, updated_at, git_branch, runtime_work_dir, is_worktree) =
+                let (runtime_work_dir, is_worktree, stub_branch) =
                     match JsonlStore::open_read_only(&path) {
                         Ok(store) => {
                             let facts = store.facts();
-                            let branch = facts.get("git_branch").cloned();
-                            let is_wt = facts.get("is_worktree").is_some_and(|v| v == "true");
-                            let effective_work_dir =
+                            let is_worktree = facts
+                                .get("is_worktree")
+                                .is_some_and(|value| value == "true");
+                            let work_dir =
                                 effective_session_work_dir(&canonical_work_dir, &id, &facts);
-                            (
-                                extract_session_title(&store, &id),
-                                SessionHealth::Healthy,
-                                file_mtime(&path),
-                                branch,
-                                effective_work_dir,
-                                is_wt,
-                            )
+                            (work_dir, is_worktree, facts.get("git_branch").cloned())
                         }
-                        Err(_) => (
-                            "Unreadable session".to_string(),
-                            SessionHealth::Warning,
-                            file_mtime(&path),
-                            None,
-                            canonical_work_dir.clone(),
-                            false,
-                        ),
+                        Err(_) => (canonical_work_dir.clone(), false, None),
                     };
+                let session_file =
+                    resolve_session_transcript_file(&path, &runtime_work_dir, &id, is_worktree);
+                let (title, health, git_branch) = match JsonlStore::open_read_only(&session_file) {
+                    Ok(store) => (
+                        extract_session_title(&store, &id),
+                        SessionHealth::Healthy,
+                        store.facts().get("git_branch").cloned().or(stub_branch),
+                    ),
+                    Err(_) => (
+                        "Unreadable session".to_string(),
+                        SessionHealth::Warning,
+                        stub_branch,
+                    ),
+                };
+                let metadata = std::fs::metadata(&session_file).ok();
+                let len = metadata.as_ref().map_or(0, |metadata| metadata.len());
+                let modified = metadata.and_then(|metadata| metadata.modified().ok());
                 let info = SessionInfo {
                     id,
                     title,
                     work_dir: canonical_work_dir.clone(),
                     runtime_work_dir,
-                    session_file: path.clone(),
-                    updated_at,
+                    updated_at: file_mtime(&session_file),
+                    session_file,
                     health,
                     git_branch,
                     is_worktree,
@@ -1061,6 +1090,7 @@ impl AppState {
             is_new_task: active_session_id.is_none(),
             draft_work_mode: WorkMode::Local,
             active_session_id,
+            sidebar_project_filter: None,
             search_query: String::new(),
             messages: Arc::new(messages),
             available_models,
@@ -1349,6 +1379,14 @@ impl AppState {
 
     pub(crate) fn set_work_mode(&mut self, mode: WorkMode) {
         self.draft_work_mode = mode;
+    }
+
+    pub(crate) fn set_sidebar_project_filter(&mut self, work_dir: Option<PathBuf>) {
+        self.sidebar_project_filter = work_dir.filter(|candidate| {
+            self.projects
+                .iter()
+                .any(|project| project.work_dir == *candidate)
+        });
     }
 
     fn persist_project_selection(&self, work_dir: &Path, session_id: Option<&str>) {
@@ -4134,6 +4172,135 @@ mod tests {
     }
 
     #[test]
+    fn worktree_session_discovery_uses_existing_worktree_transcript() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        let session_id = "session-worktree";
+        let root_session_file = project
+            .join(".threadlane/sessions")
+            .join(format!("{session_id}.jsonl"));
+        let worktree = project.join(".threadlane/worktrees").join(session_id);
+        let worktree_session_file = worktree
+            .join(".threadlane/sessions")
+            .join(format!("{session_id}.jsonl"));
+        std::fs::create_dir_all(root_session_file.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(worktree_session_file.parent().unwrap()).unwrap();
+
+        let mut stub = JsonlStore::open(&root_session_file).unwrap();
+        stub.append_fact("main", "is_worktree", "true", None)
+            .unwrap();
+        stub.append_fact(
+            "main",
+            "worktree_path",
+            worktree.to_string_lossy().as_ref(),
+            None,
+        )
+        .unwrap();
+        drop(stub);
+
+        let mut transcript = JsonlStore::open(&worktree_session_file).unwrap();
+        transcript
+            .append_entry(threadlane_session::harness::Entry {
+                id: "message-1".into(),
+                parent_id: None,
+                lane: "main".into(),
+                seq: transcript.next_sequence(),
+                timestamp: 1,
+                message: AgentMessage::user("Persisted history", Vec::new()),
+                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                terminate: false,
+            })
+            .unwrap();
+        drop(transcript);
+
+        let sessions = discover_sessions_in_project(&project);
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_file, worktree_session_file);
+        assert_eq!(sessions[0].work_dir, project.canonicalize().unwrap());
+        assert_eq!(sessions[0].runtime_work_dir, worktree);
+        let messages = compute_session_messages(&sessions[0].session_file).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content, "Persisted history");
+    }
+
+    #[test]
+    fn startup_hydration_targets_existing_worktree_transcript() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        let session_id = "session-worktree";
+        let root_session_file = project
+            .join(".threadlane/sessions")
+            .join(format!("{session_id}.jsonl"));
+        let worktree = project.join(".threadlane/worktrees").join(session_id);
+        let worktree_session_file = worktree
+            .join(".threadlane/sessions")
+            .join(format!("{session_id}.jsonl"));
+        std::fs::create_dir_all(root_session_file.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(worktree_session_file.parent().unwrap()).unwrap();
+
+        let mut stub = JsonlStore::open(&root_session_file).unwrap();
+        stub.append_fact("main", "is_worktree", "true", None)
+            .unwrap();
+        stub.append_fact(
+            "main",
+            "worktree_path",
+            worktree.to_string_lossy().as_ref(),
+            None,
+        )
+        .unwrap();
+        drop(stub);
+        std::fs::write(&worktree_session_file, "").unwrap();
+
+        let mut state = AppState::load_from_registry(vec![AttachedProject {
+            id: "project".into(),
+            path: project.clone(),
+            name: "Project".into(),
+            last_selected_task_id: None,
+            attached_at: 0,
+            last_opened_at: 1,
+            last_session_id: Some(session_id.into()),
+        }]);
+
+        assert_eq!(state.pending_hydrations.len(), 1);
+        let request = state.pending_hydrations.pop().unwrap();
+        assert_eq!(request.session_file, worktree_session_file);
+        assert!(state.active_session_matches(&request.session_id, &request.session_file));
+    }
+
+    #[test]
+    fn worktree_session_discovery_keeps_stub_until_local_transcript_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        let root_session_file = project.join(".threadlane/sessions/session-worktree.jsonl");
+        let worktree = project
+            .join(".threadlane/worktrees")
+            .join("session-worktree");
+        std::fs::create_dir_all(root_session_file.parent().unwrap()).unwrap();
+        let mut stub = JsonlStore::open(&root_session_file).unwrap();
+        stub.append_fact("main", "is_worktree", "true", None)
+            .unwrap();
+        stub.append_fact(
+            "main",
+            "worktree_path",
+            worktree.to_string_lossy().as_ref(),
+            None,
+        )
+        .unwrap();
+        drop(stub);
+
+        let sessions = discover_sessions_in_project(&project);
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0].session_file,
+            root_session_file.canonicalize().unwrap()
+        );
+        assert_eq!(sessions[0].work_dir, project.canonicalize().unwrap());
+        assert_eq!(sessions[0].runtime_work_dir, worktree);
+    }
+
+    #[test]
     fn cache_hit_rounding_uses_wide_intermediates_at_u64_max() {
         let metrics = SessionMetricsInfo {
             cache_read_tokens: u64::MAX,
@@ -4754,6 +4921,36 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_project_filter_is_presentation_only_and_rejects_unattached_paths() {
+        let mut state = AppState::load_from_registry(Vec::new());
+        let project_work_dir = std::env::temp_dir().join("threadlane-filter-project");
+        state.projects.push(ProjectInfo {
+            name: "Filter project".into(),
+            work_dir: project_work_dir.clone(),
+            sessions: Vec::new(),
+            is_expanded: true,
+        });
+        state.active_work_dir = Some(std::env::temp_dir().join("threadlane-active-project"));
+        state.active_session_id = Some("active-session".into());
+        let active_work_dir = state.active_work_dir.clone();
+        let active_session_id = state.active_session_id.clone();
+
+        state.set_sidebar_project_filter(Some(project_work_dir.clone()));
+
+        assert_eq!(
+            state.sidebar_project_filter.as_ref(),
+            Some(&project_work_dir)
+        );
+        assert_eq!(state.active_work_dir, active_work_dir);
+        assert_eq!(state.active_session_id, active_session_id);
+
+        state.set_sidebar_project_filter(Some(
+            std::env::temp_dir().join("threadlane-unattached-project"),
+        ));
+        assert_eq!(state.sidebar_project_filter, None);
+    }
+
+    #[test]
     fn begin_new_task_returns_from_a_session_worktree_to_its_project_root() {
         let mut state = AppState::load_from_registry(Vec::new());
         let project_work_dir = std::env::temp_dir().join("threadlane-project-root");
@@ -4769,7 +4966,8 @@ mod tests {
             sessions: vec![SessionInfo {
                 id: "session-worktree".into(),
                 title: "Worktree session".into(),
-                work_dir: worktree_work_dir.clone(),
+                work_dir: project_work_dir.clone(),
+                runtime_work_dir: worktree_work_dir.clone(),
                 session_file,
                 updated_at: 0,
                 health: SessionHealth::Working,

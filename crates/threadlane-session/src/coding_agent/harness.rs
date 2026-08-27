@@ -1768,7 +1768,12 @@ impl CodingSessionHarness {
             return Ok(false);
         };
         if !lane.abort_requested {
-            return Err(format!("suspended harness operation {run_id}"));
+            self.store
+                .request_abort(&run_id)
+                .map_err(|error| error.to_string())?;
+            self.store
+                .drive_to_completion()
+                .map_err(|error| error.to_string())?;
         }
         let start_seq = self
             .store
@@ -3107,6 +3112,38 @@ mod tests {
                 .unwrap();
         }
         harness
+    }
+
+    #[test]
+    fn recover_abort_terminates_suspended_foreground_run_without_prior_cancel() {
+        let (_dir, path) = temp_session();
+        {
+            let mut harness = CodingSessionHarness::open(&path).unwrap();
+            harness
+                .begin_run("interrupted-run", AgentMessage::user("first", vec![]))
+                .unwrap();
+        }
+
+        let mut reopened = CodingSessionHarness::open(&path).unwrap();
+        assert!(reopened.recover_abort().unwrap());
+
+        let state = Reducer::reduce(&reopened.store).unwrap();
+        let main = state.lane("main").unwrap();
+        assert!(main.open_operation.is_none());
+        assert!(reopened.store.records().iter().any(|record| {
+            matches!(
+                record,
+                HarnessRecord::OperationFinished {
+                    run_id,
+                    outcome: OperationOutcome::Aborted,
+                    ..
+                } if run_id == "interrupted-run"
+            )
+        }));
+
+        reopened
+            .begin_run("next-run", AgentMessage::user("continue", vec![]))
+            .unwrap();
     }
 
     fn boundary_request(overflow_recovery: bool) -> ProviderBoundaryRequest {
