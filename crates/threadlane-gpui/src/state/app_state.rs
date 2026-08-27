@@ -5191,6 +5191,8 @@ mod tests {
             "threadlane-gpui-session-hydration-{}-{unique}",
             std::process::id()
         ));
+        std::fs::create_dir_all(&work_dir).unwrap();
+        let work_dir = std::fs::canonicalize(&work_dir).unwrap();
         let session_file = work_dir.join(".threadlane/sessions/hydration-test.jsonl");
         std::fs::create_dir_all(session_file.parent().unwrap()).unwrap();
 
@@ -6237,6 +6239,8 @@ mod tests {
             "threadlane-gpui-startup-test-{}-{unique}",
             std::process::id()
         ));
+        std::fs::create_dir_all(&project_root).unwrap();
+        let project_root = std::fs::canonicalize(&project_root).unwrap();
         let sessions_dir = project_root.join(".threadlane").join("sessions");
         std::fs::create_dir_all(&sessions_dir).unwrap();
 

@@ -269,6 +269,35 @@ fn session_pr_info<'a>(
         .and_then(Option::as_ref)
 }
 
+fn pr_status_label(pr: &threadlane_git::GitHubPrInfo) -> &'static str {
+    if pr.state.eq_ignore_ascii_case("merged") {
+        "Merged"
+    } else if pr.is_draft || pr.state.eq_ignore_ascii_case("draft") {
+        "Draft"
+    } else if pr.state.eq_ignore_ascii_case("closed") {
+        "Closed"
+    } else {
+        "Open"
+    }
+}
+
+fn pr_status_tooltip(pr: &threadlane_git::GitHubPrInfo) -> String {
+    format!(
+        "PR #{} · {}\n{}\n{} → {}\nChecks: {} passed · {} pending · {} failed\nDiscussion: {} comments · {} review comments\n{}",
+        pr.number,
+        pr_status_label(pr),
+        pr.title,
+        pr.head_ref,
+        pr.base_ref,
+        pr.passing_checks,
+        pr.pending_checks,
+        pr.failing_checks,
+        pr.comments_count,
+        pr.review_comments.len(),
+        pr.url,
+    )
+}
+
 impl SidebarView {
     pub(crate) fn new(
         model: Entity<AppState>,
@@ -603,24 +632,25 @@ impl SidebarView {
             let is_merged = state_upper == "MERGED";
             let is_draft = pr.is_draft || state_upper == "DRAFT";
             let is_closed = state_upper == "CLOSED";
+            let tooltip = pr_status_tooltip(&pr);
 
             let (pr_bg, pr_fg, pr_label) = if is_merged {
                 (
-                    theme.accent.opacity(0.15),
-                    theme.accent,
-                    format!("#{} merged", pr.number),
+                    theme.success.opacity(0.18),
+                    theme.success,
+                    format!("#{}", pr.number),
                 )
             } else if is_draft {
                 (
                     theme.secondary,
                     theme.muted_foreground,
-                    format!("#{} draft", pr.number),
+                    format!("#{}", pr.number),
                 )
             } else if is_closed {
                 (
                     theme.danger.opacity(0.12),
                     theme.danger,
-                    format!("#{} closed", pr.number),
+                    format!("#{}", pr.number),
                 )
             } else {
                 (
@@ -705,15 +735,17 @@ impl SidebarView {
                 .items_center()
                 .gap_1()
                 .child(
-                    div()
-                        .flex_none()
-                        .px_1p5()
-                        .py(px(0.5))
-                        .rounded(px(3.0))
-                        .bg(pr_bg)
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(pr_fg)
-                        .child(pr_label),
+                    Button::new(SharedString::from(format!(
+                        "session-pr-{}-{}",
+                        session.id, pr.number
+                    )))
+                    .icon(Icon::default().path("icons/git/compare.svg"))
+                    .label(pr_label)
+                    .tooltip(tooltip)
+                    .ghost()
+                    .xsmall()
+                    .bg(pr_bg)
+                    .text_color(pr_fg),
                 )
                 .children(ci_chip)
                 .children(comments_chip)
@@ -748,34 +780,37 @@ impl SidebarView {
         }
 
         if session.is_worktree {
-            let (label, background, foreground) = if session.worktree_available {
-                ("worktree", theme.secondary, theme.muted_foreground)
+            let (background, foreground, tooltip) = if session.worktree_available {
+                (
+                    theme.secondary,
+                    theme.muted_foreground,
+                    format!(
+                        "Local worktree\nChecked out at {}",
+                        session.runtime_work_dir.display()
+                    ),
+                )
             } else {
                 (
-                    "not checked out",
                     theme.warning.opacity(0.12),
                     theme.warning,
+                    format!(
+                        "Worktree unavailable\nNot checked out locally\nRecorded path: {}\nSession history remains available",
+                        session.runtime_work_dir.display()
+                    ),
                 )
             };
             row2_items.push(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(2.0))
-                    .px_1()
-                    .py(px(0.5))
-                    .rounded(px(3.0))
-                    .bg(background)
-                    .text_color(foreground)
-                    .child(
-                        svg()
-                            .path("icons/git/branch.svg")
-                            .size(px(10.0))
-                            .text_color(foreground),
-                    )
-                    .child(label)
-                    .into_any_element(),
+                Button::new(SharedString::from(format!(
+                    "session-worktree-{}",
+                    session.id
+                )))
+                .icon(Icon::default().path("icons/git/branch.svg"))
+                .tooltip(tooltip)
+                .ghost()
+                .xsmall()
+                .bg(background)
+                .text_color(foreground)
+                .into_any_element(),
             );
         }
 
@@ -1377,8 +1412,9 @@ impl SidebarView {
 #[cfg(test)]
 mod tests {
     use super::{
-        flatten_history_groups, format_time_ago, same_history_row_identity, session_pr_info,
-        sidebar_session_fingerprint, DateGroup, HistoryRow,
+        flatten_history_groups, format_time_ago, pr_status_label, pr_status_tooltip,
+        same_history_row_identity, session_pr_info, sidebar_session_fingerprint, DateGroup,
+        HistoryRow,
     };
     use crate::state::{SessionHealth, SessionInfo};
     use std::collections::HashMap;
@@ -1450,6 +1486,29 @@ mod tests {
 
         assert_eq!(session_pr_info(&first, &prs).unwrap().number, 11);
         assert_eq!(session_pr_info(&second, &prs).unwrap().number, 22);
+    }
+
+    #[test]
+    fn merged_pr_tooltip_exposes_status_checks_and_discussion() {
+        let pr = GitHubPrInfo {
+            number: 114,
+            title: "Improve review flow".into(),
+            url: "https://example.test/pull/114".into(),
+            state: "MERGED".into(),
+            head_ref: "feature/review".into(),
+            base_ref: "main".into(),
+            comments_count: 9,
+            passing_checks: 9,
+            ..Default::default()
+        };
+
+        assert_eq!(pr_status_label(&pr), "Merged");
+        let tooltip = pr_status_tooltip(&pr);
+        assert!(tooltip.contains("PR #114 · Merged"));
+        assert!(tooltip.contains("feature/review → main"));
+        assert!(tooltip.contains("Checks: 9 passed"));
+        assert!(tooltip.contains("Discussion: 9 comments"));
+        assert!(tooltip.contains("https://example.test/pull/114"));
     }
 
     #[test]
