@@ -735,14 +735,17 @@ impl SidebarView {
                 .items_center()
                 .gap_1()
                 .child(
-                    Button::new(SharedString::from(format!("session-pr-{}", pr.number)))
-                        .icon(Icon::default().path("icons/git/compare.svg"))
-                        .label(pr_label)
-                        .tooltip(tooltip)
-                        .ghost()
-                        .xsmall()
-                        .bg(pr_bg)
-                        .text_color(pr_fg),
+                    Button::new(SharedString::from(format!(
+                        "session-pr-{}-{}",
+                        session.id, pr.number
+                    )))
+                    .icon(Icon::default().path("icons/git/compare.svg"))
+                    .label(pr_label)
+                    .tooltip(tooltip)
+                    .ghost()
+                    .xsmall()
+                    .bg(pr_bg)
+                    .text_color(pr_fg),
                 )
                 .children(ci_chip)
                 .children(comments_chip)

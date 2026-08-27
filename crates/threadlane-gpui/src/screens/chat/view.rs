@@ -952,13 +952,8 @@ impl ChatListView {
                                     let selected = this
                                         .selected_slash_index
                                         .min(matching.len().saturating_sub(1));
-                                    let cmd = &matching[selected];
-                                    let value = format!("/{} ", cmd.name);
-                                    input_state.update(cx, |state, cx| {
-                                        state.set_value(&value, window, cx);
-                                    });
-                                    this.selected_slash_index = 0;
-                                    cx.notify();
+                                    let command_name = matching[selected].name.clone();
+                                    this.complete_slash_command(&command_name, window, cx);
                                     return;
                                 }
                             }
@@ -3510,6 +3505,34 @@ impl ChatListView {
             .into_any_element()
     }
 
+    fn resolve_pending_permission(
+        &mut self,
+        request_id: &str,
+        decision: threadlane_session::PermissionDecision,
+        cx: &mut Context<Self>,
+    ) {
+        self.permission_details_open = false;
+        self.model.update(cx, |state, cx| {
+            state.resolve_active_permission(request_id, decision);
+            cx.notify();
+        });
+        cx.notify();
+    }
+
+    fn complete_slash_command(
+        &mut self,
+        command_name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let value = format!("/{command_name} ");
+        self.input_state.update(cx, |state, cx| {
+            state.set_value(&value, window, cx);
+        });
+        self.selected_slash_index = 0;
+        cx.notify();
+    }
+
     fn handle_key_down(
         &mut self,
         event: &KeyDownEvent,
@@ -3519,59 +3542,36 @@ impl ChatListView {
         let key = event.keystroke.key.as_str();
 
         if self.permission_details_open {
-            let state = self.model.read(cx);
-            if let Some(session_id) = state.active_session_id.as_ref() {
-                if let Some(request) = state.pending_permissions.get(session_id).cloned() {
-                    let request_id = request.id.clone();
-                    match key {
-                        "y" | "Y" | "enter" => {
-                            self.permission_details_open = false;
-                            self.model.update(cx, |state, cx| {
-                                state.resolve_active_permission(
-                                    &request_id,
-                                    threadlane_session::PermissionDecision::AllowOnce,
-                                );
-                                cx.notify();
-                            });
-                            cx.stop_propagation();
-                            cx.notify();
-                            return;
-                        }
-                        "a" | "A" => {
-                            self.permission_details_open = false;
-                            self.model.update(cx, |state, cx| {
-                                state.resolve_active_permission(
-                                    &request_id,
-                                    threadlane_session::PermissionDecision::AllowAlways,
-                                );
-                                cx.notify();
-                            });
-                            cx.stop_propagation();
-                            cx.notify();
-                            return;
-                        }
-                        "n" | "N" => {
-                            self.permission_details_open = false;
-                            self.model.update(cx, |state, cx| {
-                                state.resolve_active_permission(
-                                    &request_id,
-                                    threadlane_session::PermissionDecision::Deny,
-                                );
-                                cx.notify();
-                            });
-                            cx.stop_propagation();
-                            cx.notify();
-                            return;
-                        }
-                        "escape" => {
-                            self.permission_details_open = false;
-                            cx.stop_propagation();
-                            cx.notify();
-                            return;
-                        }
-                        _ => {}
-                    }
+            if key == "escape" {
+                self.permission_details_open = false;
+                cx.stop_propagation();
+                cx.notify();
+                return;
+            }
+
+            let request = {
+                let state = self.model.read(cx);
+                state
+                    .active_session_id
+                    .as_ref()
+                    .and_then(|session_id| state.pending_permissions.get(session_id))
+                    .cloned()
+            };
+            if let Some(request) = request {
+                let decision = match key {
+                    "y" | "Y" | "enter" => Some(threadlane_session::PermissionDecision::AllowOnce),
+                    "a" | "A" => Some(threadlane_session::PermissionDecision::AllowAlways),
+                    "n" | "N" => Some(threadlane_session::PermissionDecision::Deny),
+                    _ => None,
+                };
+                if let Some(decision) = decision {
+                    self.resolve_pending_permission(&request.id, decision, cx);
+                    cx.stop_propagation();
+                    return;
                 }
+            } else {
+                self.permission_details_open = false;
+                cx.notify();
             }
         }
 
@@ -3613,64 +3613,10 @@ impl ChatListView {
                             let selected = self
                                 .selected_slash_index
                                 .min(matching.len().saturating_sub(1));
-                            let cmd = &matching[selected];
-                            let value = format!("/{} ", cmd.name);
-                            self.input_state.update(cx, |state, cx| {
-                                state.set_value(&value, window, cx);
-                            });
-                            self.selected_slash_index = 0;
+                            let command_name = matching[selected].name.clone();
+                            self.complete_slash_command(&command_name, window, cx);
                             cx.stop_propagation();
-                            cx.notify();
                             return;
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-
-        let permission_shortcuts_active = self.current_tab == CentralTab::Chat
-            && self.input_state.focus_handle(cx).is_focused(window)
-            && !event.keystroke.modifiers.modified()
-            && text.trim().is_empty();
-        let state = self.model.read(cx);
-        if permission_shortcuts_active {
-            if let Some(session_id) = state.active_session_id.as_ref() {
-                if let Some(request) = state.pending_permissions.get(session_id).cloned() {
-                    let request_id = request.id.clone();
-                    match key {
-                        "y" | "Y" => {
-                            self.model.update(cx, |state, cx| {
-                                state.resolve_active_permission(
-                                    &request_id,
-                                    threadlane_session::PermissionDecision::AllowOnce,
-                                );
-                                cx.notify();
-                            });
-                            cx.stop_propagation();
-                            cx.notify();
-                        }
-                        "a" | "A" => {
-                            self.model.update(cx, |state, cx| {
-                                state.resolve_active_permission(
-                                    &request_id,
-                                    threadlane_session::PermissionDecision::AllowAlways,
-                                );
-                                cx.notify();
-                            });
-                            cx.stop_propagation();
-                            cx.notify();
-                        }
-                        "n" | "N" => {
-                            self.model.update(cx, |state, cx| {
-                                state.resolve_active_permission(
-                                    &request_id,
-                                    threadlane_session::PermissionDecision::Deny,
-                                );
-                                cx.notify();
-                            });
-                            cx.stop_propagation();
-                            cx.notify();
                         }
                         _ => {}
                     }
@@ -3690,7 +3636,6 @@ impl ChatListView {
                              decision: threadlane_session::PermissionDecision,
                              primary: bool,
                              danger: bool| {
-            let model = self.model.clone();
             let request_id = request.id.clone();
             Button::new(id)
                 .label(label)
@@ -3698,12 +3643,7 @@ impl ChatListView {
                 .when(primary, |button| button.primary())
                 .when(danger, |button| button.danger())
                 .on_click(cx.listener(move |this, _event, _window, cx| {
-                    this.permission_details_open = false;
-                    model.update(cx, |state, cx| {
-                        state.resolve_active_permission(&request_id, decision);
-                        cx.notify();
-                    });
-                    cx.notify();
+                    this.resolve_pending_permission(&request_id, decision, cx);
                 }))
         };
 
@@ -3845,19 +3785,15 @@ impl ChatListView {
                              decision: threadlane_session::PermissionDecision,
                              primary: bool,
                              danger: bool| {
-            let model = self.model.clone();
             let request_id = request.id.clone();
             Button::new(id)
                 .label(label)
                 .xsmall()
                 .when(primary, |button| button.primary())
                 .when(danger, |button| button.danger())
-                .on_click(move |_event, _window, cx| {
-                    model.update(cx, |state, cx| {
-                        state.resolve_active_permission(&request_id, decision);
-                        cx.notify();
-                    });
-                })
+                .on_click(cx.listener(move |this, _event, _window, cx| {
+                    this.resolve_pending_permission(&request_id, decision, cx);
+                }))
         };
 
         Some(
@@ -4846,7 +4782,6 @@ impl ChatListView {
                 let shown_count = command_count.min(8);
                 let has_commands = command_count > 0;
                 let selected_idx = self.selected_slash_index.min(shown_count.saturating_sub(1));
-                let input_state = self.input_state.clone();
                 div()
                     .absolute()
                     .bottom_full()
@@ -4878,9 +4813,7 @@ impl ChatListView {
                                     .items_center()
                                     .gap_2()
                                     .child(
-                                        div()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child("COMMANDS"),
+                                        div().font_weight(FontWeight::SEMIBOLD).child("COMMANDS"),
                                     )
                                     .child(
                                         div()
@@ -4904,61 +4837,60 @@ impl ChatListView {
                                         .child("No matching commands"),
                                 )
                             })
-                            .children(commands.into_iter().take(8).enumerate().map(|(idx, command)| {
-                                let input_state = input_state.clone();
-                                let is_active = idx == selected_idx;
-                                let value = format!("/{} ", command.name);
-                                div()
-                                    .id(SharedString::from(format!(
-                                        "composer-command-{}",
-                                        command.name
-                                    )))
-                                    .h(px(30.0))
-                                    .flex()
-                                    .items_center()
-                                    .rounded_md()
-                                    .px_2()
-                                    .text_sm()
-                                    .bg(if is_active {
-                                        theme.accent.opacity(0.16)
-                                    } else {
-                                        hsla(0.0, 0.0, 0.0, 0.0)
-                                    })
-                                    .hover(|style| style.bg(theme.list_hover))
-                                    .cursor_pointer()
-                                    .child(
-                                        div()
-                                            .w(px(112.0))
-                                            .flex_none()
-                                            .font_weight(if is_active {
-                                                FontWeight::BOLD
-                                            } else {
-                                                FontWeight::SEMIBOLD
-                                            })
-                                            .text_color(if is_active {
-                                                theme.primary
-                                            } else {
-                                                theme.foreground
-                                            })
-                                            .child(format!("/{}", command.name)),
-                                    )
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .overflow_hidden()
-                                            .text_color(if is_active {
-                                                theme.foreground
-                                            } else {
-                                                theme.muted_foreground
-                                            })
-                                            .child(command.description),
-                                    )
-                                    .on_click(move |_event, window, cx| {
-                                        input_state.update(cx, |state, cx| {
-                                            state.set_value(&value, window, cx);
-                                        });
-                                    })
-                            })),
+                            .children(commands.into_iter().take(8).enumerate().map(
+                                |(idx, command)| {
+                                    let is_active = idx == selected_idx;
+                                    let command_name = command.name.clone();
+                                    div()
+                                        .id(SharedString::from(format!(
+                                            "composer-command-{}",
+                                            command.name
+                                        )))
+                                        .h(px(30.0))
+                                        .flex()
+                                        .items_center()
+                                        .rounded_md()
+                                        .px_2()
+                                        .text_sm()
+                                        .bg(if is_active {
+                                            theme.accent.opacity(0.16)
+                                        } else {
+                                            hsla(0.0, 0.0, 0.0, 0.0)
+                                        })
+                                        .hover(|style| style.bg(theme.list_hover))
+                                        .cursor_pointer()
+                                        .child(
+                                            div()
+                                                .w(px(112.0))
+                                                .flex_none()
+                                                .font_weight(if is_active {
+                                                    FontWeight::BOLD
+                                                } else {
+                                                    FontWeight::SEMIBOLD
+                                                })
+                                                .text_color(if is_active {
+                                                    theme.primary
+                                                } else {
+                                                    theme.foreground
+                                                })
+                                                .child(format!("/{}", command.name)),
+                                        )
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .overflow_hidden()
+                                                .text_color(if is_active {
+                                                    theme.foreground
+                                                } else {
+                                                    theme.muted_foreground
+                                                })
+                                                .child(command.description),
+                                        )
+                                        .on_click(cx.listener(move |this, _event, window, cx| {
+                                            this.complete_slash_command(&command_name, window, cx);
+                                        }))
+                                },
+                            )),
                     )
                     .into_any_element()
             }
@@ -5492,8 +5424,12 @@ impl ChatListView {
 
 impl Render for ChatListView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (messages, is_new_task, active_plan, session_key, is_generating) = {
+        let (messages, is_new_task, active_plan, session_key, is_generating, has_active_permission) = {
             let state = self.model.read(cx);
+            let has_active_permission = state
+                .active_session_id
+                .as_ref()
+                .is_some_and(|session_id| state.pending_permissions.contains_key(session_id));
             (
                 state.messages.clone(),
                 state.is_new_task,
@@ -5503,6 +5439,7 @@ impl Render for ChatListView {
                     .clone()
                     .zip(state.active_session_id.clone()),
                 state.is_generating,
+                has_active_permission,
             )
         };
         let session_changed = session_key != self.last_session_key;
@@ -5532,6 +5469,9 @@ impl Render for ChatListView {
             self.trajectory_search_input.update(cx, |state, cx| {
                 state.set_value("", window, cx);
             });
+        }
+        if self.permission_details_open && !has_active_permission {
+            self.permission_details_open = false;
         }
         self.sync_transcript_rows(messages.clone(), is_generating, session_changed);
         if let Some(prompt) = self
