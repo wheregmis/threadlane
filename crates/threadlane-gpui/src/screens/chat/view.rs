@@ -305,6 +305,35 @@ fn is_terminal_runnable_language(lang: &str) -> bool {
         "bash" | "sh" | "zsh" | "shell" | "terminal" | "console" | "cmd" | "powershell"
     )
 }
+
+fn active_shell_supports_language(lang: &str) -> bool {
+    let shell = std::env::var("SHELL")
+        .ok()
+        .and_then(|path| Path::new(&path).file_name().and_then(|name| name.to_str()).map(str::to_ascii_lowercase))
+        .unwrap_or_else(|| "sh".into());
+    match lang.trim().to_ascii_lowercase().as_str() {
+        "bash" => shell == "bash",
+        "zsh" => shell == "zsh",
+        "sh" => matches!(shell.as_str(), "sh" | "bash" | "zsh"),
+        "cmd" => matches!(shell.as_str(), "cmd" | "cmd.exe"),
+        "powershell" => matches!(shell.as_str(), "pwsh" | "powershell"),
+        "shell" | "terminal" | "console" => true,
+        _ => false,
+    }
+}
+
+fn normalize_terminal_command(command: &str) -> String {
+    command
+        .lines()
+        .map(|line| {
+            line.strip_prefix("$ ")
+                .or_else(|| line.strip_prefix(">>> "))
+                .or_else(|| line.strip_prefix("> "))
+                .unwrap_or(line)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 fn is_fence_line(raw: &str, idx: usize) -> bool {
     let line_start = raw[..idx].rfind('\n').map_or(0, |p| p + 1);
     raw[line_start..idx].len() <= 3 && raw[line_start..idx].bytes().all(|b| b == b' ')
@@ -336,10 +365,11 @@ fn parse_code_block_header(header: &str, code: &str) -> (String, Option<String>)
 
             if let Some(candidate) = comment_content {
                 let candidate = candidate.trim();
-                if (candidate.contains('/') || candidate.contains('.'))
+                if candidate.contains('/')
                     && !candidate.contains(' ')
                     && candidate.len() < 120
                     && !candidate.starts_with("http")
+                    && !candidate.starts_with('!')
                 {
                     detected_path = Some(candidate.to_string());
                 }
@@ -353,13 +383,13 @@ fn parse_code_block_header(header: &str, code: &str) -> (String, Option<String>)
 pub fn extract_markdown_segments(raw: &str) -> Vec<MarkdownSegment> {
     let mut segments = Vec::new();
     let mut current_pos = 0;
+    let mut search_from = 0;
 
-    while let Some(start_fence) = raw[current_pos..].find("```") {
-        let fence_start_idx = current_pos + start_fence;
+    while let Some(start_fence) = raw[search_from..].find("```") {
+        let fence_start_idx = search_from + start_fence;
 
-        let is_line_start = fence_start_idx == 0 || raw.as_bytes()[fence_start_idx - 1] == b'\n';
-        if !is_line_start {
-            current_pos = fence_start_idx + 3;
+        if !is_fence_line(raw, fence_start_idx) {
+            search_from = fence_start_idx + 3;
             continue;
         }
 
@@ -405,6 +435,7 @@ pub fn extract_markdown_segments(raw: &str) -> Vec<MarkdownSegment> {
                 after_close
             };
             current_pos = next_pos;
+            search_from = current_pos;
         } else {
             let code = &raw[code_start..];
             let (language, header_path) = parse_code_block_header(header_line, code);
@@ -2751,17 +2782,19 @@ impl ChatListView {
         language: &str,
         header_path: Option<&str>,
         code: &str,
+        streaming: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme().colors;
         let model = self.model.clone();
         let code_str = code.to_string();
         let copy_code = code.to_string();
-        let is_runnable = is_terminal_runnable_language(language);
+        let is_runnable =
+            !streaming && is_terminal_runnable_language(language) && active_shell_supports_language(language);
         let path_opt = header_path.and_then(|path| match classify_chat_link(path) {
             ChatLinkTarget::ProjectFile(path) => Some(path), _ => None,
         });
-        let path_for_open = path_opt.clone();
+        let path_for_open = (!streaming).then(|| path_opt.clone()).flatten();
 
         let display_lang = if language.trim().is_empty() {
             "code"
@@ -2824,14 +2857,29 @@ impl ChatListView {
                                 .secondary()
                                 .tooltip("Run in active project terminal")
                                 .on_click(move |_event, _window, cx| {
-                                    let cmd = cmd.clone();
-                                    model.update(cx, |state, cx| {
-                                        controller::dispatch(
-                                            state,
-                                            AppAction::RunTerminalCommand(cmd),
-                                        );
-                                        cx.notify();
-                                    });
+                                    let cmd = normalize_terminal_command(&cmd);
+                                    if cmd.lines().filter(|line| !line.trim().is_empty()).count() > 1 {
+                                        let model = model.clone();
+                                        cx.spawn(async move |cx| {
+                                            let result = rfd::AsyncMessageDialog::new()
+                                                .set_title("Run multiple terminal commands?")
+                                                .set_description("This code block contains multiple commands. Run them in the active terminal?")
+                                                .set_buttons(rfd::MessageButtons::YesNo)
+                                                .show()
+                                                .await;
+                                            if matches!(result, rfd::MessageDialogResult::Yes) {
+                                                let _ = model.update(cx, |state, cx| {
+                                                    controller::dispatch(state, AppAction::RunTerminalCommand(cmd));
+                                                    cx.notify();
+                                                });
+                                            }
+                                        }).detach();
+                                    } else {
+                                        model.update(cx, |state, cx| {
+                                            controller::dispatch(state, AppAction::RunTerminalCommand(cmd));
+                                            cx.notify();
+                                        });
+                                    }
                                 })
                             }))
                             .children(path_for_open.map(|path| {
@@ -2855,33 +2903,42 @@ impl ChatListView {
                                     });
                                 })
                             }))
-                            .child(
-                                Button::new(SharedString::from(format!(
-                                    "copy-code-{msg_id}-{block_index}"
-                                )))
-                                .icon(IconName::Copy)
-                                .xsmall()
-                                .ghost()
-                                .tooltip("Copy code to clipboard")
-                                .on_click(move |_event, window, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(
-                                        copy_code.clone(),
-                                    ));
-                                    window.push_notification(
-                                        Notification::info("Code copied to clipboard"),
-                                        cx,
-                                    );
-                                }),
-                            ),
+                            .when(!streaming, |actions| {
+                                actions.child(
+                                    Button::new(SharedString::from(format!(
+                                        "copy-code-{msg_id}-{block_index}"
+                                    )))
+                                    .icon(IconName::Copy)
+                                    .xsmall()
+                                    .ghost()
+                                    .tooltip("Copy code to clipboard")
+                                    .on_click(move |_event, window, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            copy_code.clone(),
+                                        ));
+                                        window.push_notification(
+                                            Notification::info("Code copied to clipboard"),
+                                            cx,
+                                        );
+                                    }),
+                                )
+                            }),
                     ),
             )
             .child(
                 div()
+                    .overflow_x_scrollbar()
                     .p_3()
                     .font_family("monospace")
                     .text_xs()
                     .text_color(theme.foreground)
-                    .child(code.trim_end().to_string()),
+                    .child(
+                        TextView::markdown(
+                            format!("code-{msg_id}-{block_index}"),
+                            format!("```{language}\n{}\n```", code.trim_end()),
+                        )
+                        .selectable(true),
+                    ),
             )
     }
 
@@ -3110,6 +3167,7 @@ impl ChatListView {
                                                 &language,
                                                 header_path.as_deref(),
                                                 &code,
+                                                msg.streaming,
                                                 cx,
                                             )
                                             .into_any_element(),
@@ -3876,6 +3934,7 @@ impl ChatListView {
             (state.active_session_metrics(), context_window)
         };
         let subagent_count = self.model.read(cx).active_subagents().len();
+        let has_composer_text = !self.input_state.read(cx).value().trim().is_empty();
         let has_prompt =
             !self.input_state.read(cx).value().trim().is_empty() || !self.pasted_images.is_empty();
         let (model_options, selected_option, project_root) = {
@@ -4667,13 +4726,13 @@ impl ChatListView {
                             .children(subagent_popover)
                             .child(context_meter)
                             .children(if is_generating {
-                                if has_prompt {
                                     vec![
                                         Button::new("composer-queue-btn")
                                             .icon(IconName::Plus)
                                             .label("Queue")
                                             .small()
                                             .secondary()
+                                            .disabled(!has_composer_text)
                                             .tooltip("Queue for next turn (Enter)")
                                             .on_click(cx.listener(move |this, _event, window, cx| {
                                                 let text = queue_prompt_input.read(cx).value().to_string();
@@ -4697,6 +4756,7 @@ impl ChatListView {
                                             .label("Steer")
                                             .small()
                                             .primary()
+                                            .disabled(!has_composer_text)
                                             .tooltip("Steer current turn immediately (Cmd+Enter)")
                                             .on_click(cx.listener(move |this, _event, window, cx| {
                                                 let text = steer_prompt_input.read(cx).value().to_string();
@@ -4731,26 +4791,6 @@ impl ChatListView {
                                             }))
                                             .into_any_element(),
                                     ]
-                                } else {
-                                    vec![
-                                        Button::new("send-btn")
-                                            .w(px(40.0))
-                                            .h(px(40.0))
-                                            .icon(IconName::CircleX)
-                                            .danger()
-                                            .tooltip("Stop generation (Esc)")
-                                            .on_click(cx.listener(move |_this, _event, _window, cx| {
-                                                cancel_model.update(cx, |state, cx| {
-                                                    controller::dispatch(
-                                                        state,
-                                                        AppAction::CancelGeneration,
-                                                    );
-                                                    cx.notify();
-                                                });
-                                            }))
-                                            .into_any_element(),
-                                    ]
-                                }
                             } else {
                                 vec![
                                     Button::new("send-btn")
@@ -5012,7 +5052,7 @@ mod hot_path_tests {
         extend_trajectory_facets, extend_trajectory_previews, extend_trajectory_rows,
         extend_trajectory_summary, extract_markdown_segments, format_trajectory_raw_json,
         grouped_tool_activities, is_terminal_runnable_language, markdown_cache_exceeded,
-        next_chat_stream_batch, reconcile_trajectory_entries,
+        next_chat_stream_batch, normalize_terminal_command, reconcile_trajectory_entries,
         reconcile_trajectory_entries_by_epoch, subagent_popover_counts, summarize_trajectory,
     };
     use crate::state::{
@@ -5691,9 +5731,28 @@ mod hot_path_tests {
     }
 
     #[test]
+    fn extract_markdown_segments_rejects_version_and_shebang_as_paths() {
+        for input in ["```sh\n#!/bin/sh\necho hi\n```", "```rust\n// v1.2\nfn main() {}\n```"] {
+            let segments = extract_markdown_segments(input);
+            assert!(matches!(segments.as_slice(), [MarkdownSegment::CodeBlock { header_path: None, .. }]));
+        }
+    }
+
+    #[test]
     fn extract_markdown_segments_accepts_indented_closing_fence() {
         let segments = extract_markdown_segments("```rust\nlet x = 1;\n  ```\nAfter");
         assert!(matches!(segments.as_slice(), [MarkdownSegment::CodeBlock { .. }, MarkdownSegment::Markdown(text)] if text == "After"));
+    }
+
+    #[test]
+    fn extract_markdown_segments_keeps_text_before_mid_line_backticks() {
+        let segments = extract_markdown_segments("Prefix ```inline\n```rust\ncode\n```");
+        assert!(matches!(segments.as_slice(), [MarkdownSegment::Markdown(text), MarkdownSegment::CodeBlock { language, .. }] if text == "Prefix ```inline\n" && language == "rust"));
+    }
+
+    #[test]
+    fn normalize_terminal_command_removes_prompt_markers() {
+        assert_eq!(normalize_terminal_command("$ echo one\n>>> echo two\n> echo three"), "echo one\necho two\necho three");
     }
 
     #[test]

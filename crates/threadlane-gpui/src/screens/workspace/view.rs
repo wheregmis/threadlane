@@ -266,12 +266,11 @@ impl WorkspaceView {
                     model.update(cx, |state, _cx| state.requested_terminal_command.take())
                 {
                     this.bottom_panel_visible = true;
-                    let work_dir = model
-                        .read(cx)
-                        .active_work_dir
-                        .clone()
-                        .unwrap_or_else(|| PathBuf::from("."));
-                    let term = this.get_or_create_active_terminal(&work_dir, cx);
+                    let term = if let Some(work_dir) = model.read(cx).active_work_dir.clone() {
+                        this.get_or_create_active_terminal(&work_dir, cx)
+                    } else {
+                        this.fallback_terminal(cx)
+                    };
                     term.update(cx, |term, _cx| {
                         let trimmed = cmd.trim_end();
                         term.send_input(&format!("{trimmed}\n"));
@@ -453,6 +452,15 @@ impl WorkspaceView {
         project: &PathBuf,
         cx: &mut Context<Self>,
     ) -> Entity<TerminalView> {
+        let group = self.get_or_create_terminal_group(project, cx);
+        group.tabs[group.active_tab].clone()
+    }
+
+    fn get_or_create_terminal_group(
+        &mut self,
+        project: &PathBuf,
+        cx: &mut Context<Self>,
+    ) -> &mut TerminalGroup {
         let group = self
             .terminal_groups
             .entry(project.clone())
@@ -466,8 +474,8 @@ impl WorkspaceView {
                 .push(cx.new(|cx| TerminalView::new(project.clone(), cx)));
             group.active_tab = 0;
         }
-        let active_tab = group.active_tab.min(group.tabs.len().saturating_sub(1));
-        group.tabs[active_tab].clone()
+        group.active_tab = group.active_tab.min(group.tabs.len().saturating_sub(1));
+        group
     }
 
     fn add_terminal_tab(&mut self, project: PathBuf, cx: &mut Context<Self>) {
@@ -1369,14 +1377,7 @@ impl Render for WorkspaceView {
         let terminal_project = self.model.read(cx).active_work_dir.clone();
         let (terminal_tabs, active_terminal_tab, active_terminal) =
             if let Some(project) = &terminal_project {
-                let group = self
-                    .terminal_groups
-                    .entry(project.clone())
-                    .or_insert_with(|| TerminalGroup {
-                        tabs: vec![cx.new(|cx| TerminalView::new(project.clone(), cx))],
-                        active_tab: 0,
-                    });
-                group.active_tab = group.active_tab.min(group.tabs.len().saturating_sub(1));
+                let group = self.get_or_create_terminal_group(project, cx);
                 (
                     group.tabs.clone(),
                     group.active_tab,
