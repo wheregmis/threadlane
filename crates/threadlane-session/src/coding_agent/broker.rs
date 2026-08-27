@@ -794,7 +794,10 @@ impl HostCapabilityHandler {
         let method = reqwest::Method::from_bytes(method.as_bytes())
             .map_err(|_| invalid_argument("invalid HTTP method"))?;
         let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::limited(5))
+            // A redirect may target a host that has not passed the approval flow.
+            // Return the 3xx response so the extension can request the destination
+            // explicitly and the next broker call can authorize its exact host.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(host_error)?;
         let result = timeout(NETWORK_HTTP_TIMEOUT, async move {
