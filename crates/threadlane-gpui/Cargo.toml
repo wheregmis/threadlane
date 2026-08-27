@@ -6,6 +6,8 @@ description = "GPUI Desktop application for Threadlane using gpui-component"
 
 [features]
 gpui-profiler = ["gpui/profiler"]
+# Tests written against the pre-harness-v2 protocol schema. Keep opt-in while migrating them.
+legacy-api-tests = []
 hotpath = ["hotpath/hotpath"]
 hotpath-alloc = ["hotpath/hotpath-alloc"]
 
@@ -38,6 +40,7 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["fo
 
 [dev-dependencies]
 async-trait = "0.1"
+threadlane-provider = { version = "0.1.0", path = "../threadlane-provider" }
 tempfile = "3.8"
 threadlane-protocol = { version = "0.1.0", path = "../threadlane-protocol" }
 

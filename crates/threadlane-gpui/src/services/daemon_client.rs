@@ -15,6 +15,23 @@ pub fn default_daemon_socket_path() -> PathBuf {
         .join("daemon.sock")
 }
 
+fn daemon_executable() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(path) = std::env::var_os("THREADLANE_DAEMON_PATH") {
+        candidates.push(PathBuf::from(path));
+    }
+
+    // In development the daemon is built beside the GPUI binary. In an app
+    // bundle both executables are placed in Contents/MacOS.
+    if let Ok(executable) = std::env::current_exe() {
+        if let Some(directory) = executable.parent() {
+            candidates.push(directory.join("threadlane-daemon"));
+        }
+    }
+
+    candidates.into_iter().find(|path| path.is_file())
+}
+
 /// Spawns the local daemon binary if not already running.
 pub fn ensure_local_daemon_running() {
     let socket_path = default_daemon_socket_path();
@@ -22,17 +39,26 @@ pub fn ensure_local_daemon_running() {
         return;
     }
 
-    info!("Spawning background threadlane-daemon...");
-    if let Ok(child) = Command::new("threadlane-daemon")
+    let executable = daemon_executable().unwrap_or_else(|| PathBuf::from("threadlane-daemon"));
+    info!(
+        "Spawning background threadlane-daemon from {}...",
+        executable.display()
+    );
+    match Command::new(&executable)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
     {
-        // Detach process
-        let _ = child.id();
-        std::thread::sleep(Duration::from_millis(200));
-    } else {
-        warn!("Failed to auto-spawn threadlane-daemon executable. Daemon may need manual launch.");
+        Ok(child) => {
+            let _ = child.id();
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        Err(error) => {
+            warn!(
+                "Failed to auto-spawn threadlane-daemon from {}: {error}. Daemon may need manual launch.",
+                executable.display()
+            );
+        }
     }
 }
 

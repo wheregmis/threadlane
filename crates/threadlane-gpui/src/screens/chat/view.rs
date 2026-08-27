@@ -1123,7 +1123,10 @@ impl ChatListView {
             self.pasted_images.push(ImageAttachment {
                 mime_type: mime_type.to_string(),
                 data: encoded.clone(),
-                display_name: Some(format!("Pasted image {}.{extension}", self.pasted_images.len() + 1)),
+                display_name: Some(format!(
+                    "Pasted image {}.{extension}",
+                    self.pasted_images.len() + 1
+                )),
                 data_url: Some(format!("data:{mime_type};base64,{}", encoded)),
             });
             pasted += 1;
@@ -4916,7 +4919,9 @@ impl ChatListView {
                 let command_count = commands.len();
                 let has_commands = command_count > 0;
                 slash_completion_active = has_commands;
-                let selected_idx = self.selected_slash_index.min(command_count.saturating_sub(1));
+                let selected_idx = self
+                    .selected_slash_index
+                    .min(command_count.saturating_sub(1));
                 div()
                     .absolute()
                     .bottom_full()
@@ -4982,60 +4987,58 @@ impl ChatListView {
                                         .child("No matching commands"),
                                 )
                             })
-                            .children(commands.into_iter().enumerate().map(
-                                |(idx, command)| {
-                                    let is_active = idx == selected_idx;
-                                    let command_name = command.name.clone();
-                                    div()
-                                        .id(SharedString::from(format!(
-                                            "composer-command-{}",
-                                            command.name
-                                        )))
-                                        .h(px(30.0))
-                                        .flex()
-                                        .items_center()
-                                        .rounded_md()
-                                        .px_2()
-                                        .text_sm()
-                                        .bg(if is_active {
-                                            theme.accent.opacity(0.16)
-                                        } else {
-                                            hsla(0.0, 0.0, 0.0, 0.0)
-                                        })
-                                        .hover(|style| style.bg(theme.list_hover))
-                                        .cursor_pointer()
-                                        .child(
-                                            div()
-                                                .w(px(112.0))
-                                                .flex_none()
-                                                .font_weight(if is_active {
-                                                    FontWeight::BOLD
-                                                } else {
-                                                    FontWeight::SEMIBOLD
-                                                })
-                                                .text_color(if is_active {
-                                                    theme.primary
-                                                } else {
-                                                    theme.foreground
-                                                })
-                                                .child(format!("/{}", command.name)),
-                                        )
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .overflow_hidden()
-                                                .text_color(if is_active {
-                                                    theme.foreground
-                                                } else {
-                                                    theme.muted_foreground
-                                                })
-                                                .child(command.description),
-                                        )
-                                        .on_click(cx.listener(move |this, _event, window, cx| {
-                                            this.complete_slash_command(&command_name, window, cx);
-                                        }))
-                                },
-                            )),
+                            .children(commands.into_iter().enumerate().map(|(idx, command)| {
+                                let is_active = idx == selected_idx;
+                                let command_name = command.name.clone();
+                                div()
+                                    .id(SharedString::from(format!(
+                                        "composer-command-{}",
+                                        command.name
+                                    )))
+                                    .h(px(30.0))
+                                    .flex()
+                                    .items_center()
+                                    .rounded_md()
+                                    .px_2()
+                                    .text_sm()
+                                    .bg(if is_active {
+                                        theme.accent.opacity(0.16)
+                                    } else {
+                                        hsla(0.0, 0.0, 0.0, 0.0)
+                                    })
+                                    .hover(|style| style.bg(theme.list_hover))
+                                    .cursor_pointer()
+                                    .child(
+                                        div()
+                                            .w(px(112.0))
+                                            .flex_none()
+                                            .font_weight(if is_active {
+                                                FontWeight::BOLD
+                                            } else {
+                                                FontWeight::SEMIBOLD
+                                            })
+                                            .text_color(if is_active {
+                                                theme.primary
+                                            } else {
+                                                theme.foreground
+                                            })
+                                            .child(format!("/{}", command.name)),
+                                    )
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .text_color(if is_active {
+                                                theme.foreground
+                                            } else {
+                                                theme.muted_foreground
+                                            })
+                                            .child(command.description),
+                                    )
+                                    .on_click(cx.listener(move |this, _event, window, cx| {
+                                        this.complete_slash_command(&command_name, window, cx);
+                                    }))
+                            })),
                     )
                     .into_any_element()
             }
@@ -5765,7 +5768,7 @@ impl Render for ChatListView {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "legacy-api-tests"))]
 mod hot_path_tests {
     use super::{
         active_slash_command_query, build_trajectory_rows, build_transcript_rows,

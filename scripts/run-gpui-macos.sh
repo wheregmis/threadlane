@@ -52,11 +52,13 @@ fi
 
 target_dir="${CARGO_TARGET_DIR:-target}"
 binary="$target_dir/$profile/threadlane-gpui"
+daemon_binary="$target_dir/$profile/threadlane-daemon"
 app="$target_dir/$profile/Threadlane-dev.app"
 contents="$app/Contents"
 
 # macOS ships bash 3.2, where an empty array expands as unset under `set -u`.
 cargo build -p threadlane-gpui --bin threadlane-gpui ${cargo_args[@]+"${cargo_args[@]}"}
+cargo build -p threadlane-daemon --bin threadlane-daemon ${cargo_args[@]+"${cargo_args[@]}"}
 
 mkdir -p "$contents/MacOS" "$contents/Resources"
 cp packaging/Info.plist "$contents/Info.plist"
@@ -70,6 +72,7 @@ plutil -replace CFBundleIdentifier -string dev.threadlane.app.dev "$contents/Inf
 # `cp` over a running app's executable fails with ETXTBSY, and cargo replaces
 # the build output by rename, so the copy is always taken fresh.
 cp -f "$binary" "$contents/MacOS/threadlane"
+cp -f "$daemon_binary" "$contents/MacOS/threadlane-daemon"
 
 if [[ "${THREADLANE_DEV_SIGN:-0}" == "1" ]]; then
   codesign --force --sign - "$app"

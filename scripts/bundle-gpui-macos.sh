@@ -14,10 +14,12 @@ dmg="$target_dir/release/Threadlane-${version}-${architecture}.dmg"
 iconset="$(mktemp -d)/Threadlane.iconset"
 trap 'rm -rf -- "$(dirname "$iconset")"' EXIT
 
-cargo build --locked --release --bin threadlane-gpui
+cargo build --locked --release -p threadlane-gpui --bin threadlane-gpui
+cargo build --locked --release -p threadlane-daemon --bin threadlane-daemon
 rm -rf "$app" "$archive" "$dmg"
 mkdir -p "$contents/MacOS" "$contents/Resources" "$iconset"
 install -m755 "$target_dir/release/threadlane-gpui" "$contents/MacOS/threadlane"
+install -m755 "$target_dir/release/threadlane-daemon" "$contents/MacOS/threadlane-daemon"
 cp packaging/Info.plist "$contents/Info.plist"
 plutil -replace CFBundleExecutable -string threadlane "$contents/Info.plist"
 plutil -replace CFBundleShortVersionString -string "$version" "$contents/Info.plist"

@@ -1416,7 +1416,10 @@ mod tests {
         same_history_row_identity, session_pr_info, sidebar_session_fingerprint, DateGroup,
         HistoryRow,
     };
+    use std::collections::HashMap;
     use threadlane_protocol::git::GitHubPrInfo;
+
+    use crate::state::{SessionHealth, SessionInfo};
 
     fn session(id: &str) -> SessionInfo {
         SessionInfo {

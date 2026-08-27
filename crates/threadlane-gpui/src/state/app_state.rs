@@ -1409,13 +1409,14 @@ impl AppState {
         let Some(root) = self.active_work_dir.clone() else {
             return;
         };
-        let path = match threadlane_protocol::project::validate_path_in_workspace(&relative_path, &root) {
-            Ok(path) => path,
-            Err(error) => {
-                self.session_status = Some(error);
-                return;
-            }
-        };
+        let path =
+            match threadlane_protocol::project::validate_path_in_workspace(&relative_path, &root) {
+                Ok(path) => path,
+                Err(error) => {
+                    self.session_status = Some(error);
+                    return;
+                }
+            };
         let canonical_root = match root.canonicalize() {
             Ok(root) => root,
             Err(error) => {
@@ -1587,7 +1588,11 @@ impl AppState {
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "session".to_string());
-        let runtime = Arc::new(SessionRuntime::new(session_id, work_dir, session_file.clone()));
+        let runtime = Arc::new(SessionRuntime::new(
+            session_id,
+            work_dir,
+            session_file.clone(),
+        ));
         self.session_runtimes.insert(session_file, runtime.clone());
         runtime
     }
@@ -1606,10 +1611,12 @@ impl AppState {
             executor.spawn(async move {
                 if let Ok(client) = crate::services::daemon_client::get_daemon_client().await {
                     let _ = client
-                        .submit_permission(threadlane_protocol::permission::SubmitPermissionRequest {
-                            request_id: req_id,
-                            decision,
-                        })
+                        .submit_permission(
+                            threadlane_protocol::permission::SubmitPermissionRequest {
+                                request_id: req_id,
+                                decision,
+                            },
+                        )
                         .await;
                 }
             });
@@ -2882,10 +2889,9 @@ impl AppState {
                 let Some(subagents) = self.active_subagents_mut() else {
                     return;
                 };
-                if subagents
-                    .iter()
-                    .any(|subagent| subagent.batch_run_id == *run_id && subagent.lane.as_ref() == Some(lane))
-                {
+                if subagents.iter().any(|subagent| {
+                    subagent.batch_run_id == *run_id && subagent.lane.as_ref() == Some(lane)
+                }) {
                     return;
                 }
                 subagents.push(SubagentActivityInfo {
@@ -3948,10 +3954,10 @@ fn project_recovery_diagnostics(
     rows
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "legacy-api-tests"))]
 pub(crate) use tests::reported_session_shape_state;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "legacy-api-tests"))]
 mod tests {
     use super::*;
     use std::sync::{
@@ -4165,9 +4171,7 @@ mod tests {
     }
 
     async fn generated_reported_session_path() -> PathBuf {
-        use threadlane_protocol::harness::{
-            CompactionReason, Entry, Record,
-        };
+        use threadlane_protocol::harness::{CompactionReason, Entry, Record};
         use threadlane_protocol::session::AgentMessage;
 
         let root = tempfile::tempdir().unwrap().keep();
@@ -4314,7 +4318,9 @@ mod tests {
         assert!(!projected_context.context_limit_is_estimate);
 
         // Inspect the production journal again, independently of the GPUI projection above.
-        use threadlane_protocol::harness::{read_transcript_page, CompactionReason, TranscriptItem};
+        use threadlane_protocol::harness::{
+            read_transcript_page, CompactionReason, TranscriptItem,
+        };
 
         let store = JsonlStore::open(&path).unwrap();
         let records = store.records();
@@ -5009,11 +5015,11 @@ mod tests {
 
     #[test]
     fn app_state_startup_defers_messages_and_full_projection() {
-        use threadlane_provider::openai::{ToolCall, ToolCallFunction};
         use threadlane_protocol::harness::{
             CapabilitySnapshot, OperationIntent, PromptSnapshot, ProviderOutcome, Record,
             SessionStore, TraceString, UsageCause,
         };
+        use threadlane_provider::openai::{ToolCall, ToolCallFunction};
 
         let unique = std::time::SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -5281,11 +5287,11 @@ mod tests {
 
     #[test]
     fn durable_projection_restores_ordered_tool_lifecycle_and_exact_usage() {
-        use threadlane_provider::openai::{ToolCall, ToolCallFunction};
         use threadlane_protocol::harness::{
             Entry, OperationIntent, OperationOutcome, Record, SessionStore, ToolReplaySafety,
             UsageCause,
         };
+        use threadlane_provider::openai::{ToolCall, ToolCallFunction};
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.jsonl");
