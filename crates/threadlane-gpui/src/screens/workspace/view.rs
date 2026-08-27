@@ -260,8 +260,23 @@ impl WorkspaceView {
 
         let model_clone = model.clone();
         let view = cx.new(|cx| {
-            let sub = cx.observe(&model_clone, move |this: &mut Self, _model, cx| {
+            let sub = cx.observe(&model_clone, move |this: &mut Self, model, cx| {
                 this.sync_git_status_with_active_project(cx);
+                if let Some(cmd) =
+                    model.update(cx, |state, _cx| state.requested_terminal_command.take())
+                {
+                    this.bottom_panel_visible = true;
+                    let work_dir = model
+                        .read(cx)
+                        .active_work_dir
+                        .clone()
+                        .unwrap_or_else(|| PathBuf::from("."));
+                    let term = this.get_or_create_active_terminal(&work_dir, cx);
+                    term.update(cx, |term, _cx| {
+                        let trimmed = cmd.trim_end();
+                        term.send_input(&format!("{trimmed}\n"));
+                    });
+                }
                 let _ = model_wake_tx.send(());
                 cx.notify();
             });
@@ -431,6 +446,28 @@ impl WorkspaceView {
         });
         self.refresh_git_status(cx);
         cx.notify();
+    }
+
+    fn get_or_create_active_terminal(
+        &mut self,
+        project: &PathBuf,
+        cx: &mut Context<Self>,
+    ) -> Entity<TerminalView> {
+        let group = self
+            .terminal_groups
+            .entry(project.clone())
+            .or_insert_with(|| TerminalGroup {
+                tabs: vec![cx.new(|cx| TerminalView::new(project.clone(), cx))],
+                active_tab: 0,
+            });
+        if group.tabs.is_empty() {
+            group
+                .tabs
+                .push(cx.new(|cx| TerminalView::new(project.clone(), cx)));
+            group.active_tab = 0;
+        }
+        let active_tab = group.active_tab.min(group.tabs.len().saturating_sub(1));
+        group.tabs[active_tab].clone()
     }
 
     fn add_terminal_tab(&mut self, project: PathBuf, cx: &mut Context<Self>) {

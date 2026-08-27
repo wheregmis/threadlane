@@ -49,4 +49,5 @@ pub enum AppAction {
     RemoveCodexAccount(String),
     ToggleReasoningExpanded(String),
     OpenFileInEditor(String),
+    RunTerminalCommand(String),
 }

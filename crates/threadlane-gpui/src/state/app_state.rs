@@ -296,6 +296,7 @@ pub struct AppState {
     pub(crate) update_notice_dismissed: bool,
     pub(crate) requested_editor_target: Option<RequestedEditorTarget>,
     pub(crate) requested_composer_prompt: Option<String>,
+    pub(crate) requested_terminal_command: Option<String>,
     stream_tx: tokio::sync::mpsc::UnboundedSender<ChatStreamEvent>,
     pub(crate) stream_rx: Option<tokio::sync::mpsc::UnboundedReceiver<ChatStreamEvent>>,
     session_refresh_tx: Sender<PathBuf>,
@@ -1000,6 +1001,7 @@ impl AppState {
             update_notice_dismissed: false,
             requested_editor_target: None,
             requested_composer_prompt: None,
+            requested_terminal_command: None,
             stream_tx,
             stream_rx: Some(stream_rx),
             session_refresh_tx,
@@ -1285,6 +1287,10 @@ impl AppState {
 
     pub(crate) fn request_composer_prompt(&mut self, prompt: String) {
         self.requested_composer_prompt = Some(prompt);
+    }
+
+    pub(crate) fn request_run_terminal_command(&mut self, command: String) {
+        self.requested_terminal_command = Some(command);
     }
 
     pub(crate) fn select_session(

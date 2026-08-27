@@ -288,6 +288,145 @@ fn classify_chat_link(link: &str) -> ChatLinkTarget {
         ChatLinkTarget::ProjectFile(normalized.to_string_lossy().into_owned())
     }
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MarkdownSegment {
+    Markdown(String),
+    CodeBlock {
+        language: String,
+        header_path: Option<String>,
+        code: String,
+    },
+}
+
+fn is_terminal_runnable_language(lang: &str) -> bool {
+    matches!(
+        lang.to_lowercase().as_str(),
+        "bash" | "sh" | "zsh" | "shell" | "terminal" | "console" | "cmd" | "powershell"
+    )
+}
+
+fn parse_code_block_header(header: &str, code: &str) -> (String, Option<String>) {
+    let header_trimmed = header.trim();
+    let parts: Vec<&str> = header_trimmed.split_whitespace().collect();
+    let language = parts.first().copied().unwrap_or("text").to_lowercase();
+
+    let mut detected_path = if parts.len() > 1 {
+        Some(parts[1].to_string())
+    } else if let Some((_, path)) = language.split_once(':') {
+        Some(path.to_string())
+    } else {
+        None
+    };
+
+    let clean_language = language.split(':').next().unwrap_or("text").to_string();
+
+    if detected_path.is_none() {
+        if let Some(first_line) = code.lines().next() {
+            let trimmed = first_line.trim();
+            let comment_content = trimmed
+                .strip_prefix("//")
+                .or_else(|| trimmed.strip_prefix('#'))
+                .or_else(|| trimmed.strip_prefix("/*").and_then(|s| s.strip_suffix("*/")))
+                .or_else(|| trimmed.strip_prefix("<!--").and_then(|s| s.strip_suffix("-->")));
+
+            if let Some(candidate) = comment_content {
+                let candidate = candidate.trim();
+                if (candidate.contains('/') || candidate.contains('.'))
+                    && !candidate.contains(' ')
+                    && candidate.len() < 120
+                    && !candidate.starts_with("http")
+                {
+                    detected_path = Some(candidate.to_string());
+                }
+            }
+        }
+    }
+
+    (clean_language, detected_path)
+}
+
+pub fn extract_markdown_segments(raw: &str) -> Vec<MarkdownSegment> {
+    let mut segments = Vec::new();
+    let mut current_pos = 0;
+
+    while let Some(start_fence) = raw[current_pos..].find("```") {
+        let fence_start_idx = current_pos + start_fence;
+
+        let is_line_start = fence_start_idx == 0 || raw.as_bytes()[fence_start_idx - 1] == b'\n';
+        if !is_line_start {
+            current_pos = fence_start_idx + 3;
+            continue;
+        }
+
+        if fence_start_idx > current_pos {
+            let text = &raw[current_pos..fence_start_idx];
+            if !text.is_empty() {
+                segments.push(MarkdownSegment::Markdown(text.to_string()));
+            }
+        }
+
+        let header_start = fence_start_idx + 3;
+        let Some(header_newline) = raw[header_start..].find('\n') else {
+            segments.push(MarkdownSegment::Markdown(raw[fence_start_idx..].to_string()));
+            return segments;
+        };
+
+        let header_line = raw[header_start..header_start + header_newline].trim();
+        let code_start = header_start + header_newline + 1;
+
+        let mut close_fence_idx = None;
+        let mut search_pos = code_start;
+        while let Some(close_pos) = raw[search_pos..].find("```") {
+            let candidate_idx = search_pos + close_pos;
+            if candidate_idx == 0 || raw.as_bytes()[candidate_idx - 1] == b'\n' {
+                close_fence_idx = Some(candidate_idx);
+                break;
+            }
+            search_pos = candidate_idx + 3;
+        }
+
+        if let Some(close_idx) = close_fence_idx {
+            let code = &raw[code_start..close_idx];
+            let (language, header_path) = parse_code_block_header(header_line, code);
+            segments.push(MarkdownSegment::CodeBlock {
+                language,
+                header_path,
+                code: code.to_string(),
+            });
+            let after_close = close_idx + 3;
+            let next_pos = if after_close < raw.len() && raw.as_bytes()[after_close] == b'\n' {
+                after_close + 1
+            } else {
+                after_close
+            };
+            current_pos = next_pos;
+        } else {
+            let code = &raw[code_start..];
+            let (language, header_path) = parse_code_block_header(header_line, code);
+            segments.push(MarkdownSegment::CodeBlock {
+                language,
+                header_path,
+                code: code.to_string(),
+            });
+            return segments;
+        }
+    }
+
+    if current_pos < raw.len() {
+        let remainder = &raw[current_pos..];
+        if !remainder.is_empty() {
+            segments.push(MarkdownSegment::Markdown(remainder.to_string()));
+        }
+    }
+
+    if segments.is_empty() && !raw.is_empty() {
+        segments.push(MarkdownSegment::Markdown(raw.to_string()));
+    }
+
+    segments
+}
+
 struct MarkdownRenderState {
     source: String,
     state: Entity<TextViewState>,
@@ -2605,6 +2744,145 @@ impl ChatListView {
             })
     }
 
+    fn render_interactive_code_block(
+        &mut self,
+        msg_id: &str,
+        block_index: usize,
+        language: &str,
+        header_path: Option<&str>,
+        code: &str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme().colors;
+        let model = self.model.clone();
+        let code_str = code.to_string();
+        let copy_code = code.to_string();
+        let is_runnable = is_terminal_runnable_language(language);
+        let path_opt = header_path.map(str::to_string);
+        let path_for_open = path_opt.clone();
+
+        let display_lang = if language.trim().is_empty() {
+            "code"
+        } else {
+            language.trim()
+        };
+
+        div()
+            .w_full()
+            .my_2()
+            .rounded_lg()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.title_bar)
+            .overflow_hidden()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_3()
+                    .py_1p5()
+                    .bg(theme.secondary)
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .min_w_0()
+                            .child(
+                                Tag::new()
+                                    .child(display_lang.to_string())
+                                    .with_variant(TagVariant::Secondary)
+                                    .small(),
+                            )
+                            .children(path_opt.map(|path| {
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .truncate()
+                                    .child(path)
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .children(is_runnable.then(|| {
+                                let cmd = code_str.clone();
+                                let model = model.clone();
+                                Button::new(SharedString::from(format!(
+                                    "run-term-{msg_id}-{block_index}"
+                                )))
+                                .icon(IconName::SquareTerminal)
+                                .label("Run in Terminal")
+                                .xsmall()
+                                .secondary()
+                                .tooltip("Run in active project terminal")
+                                .on_click(move |_event, _window, cx| {
+                                    let cmd = cmd.clone();
+                                    model.update(cx, |state, cx| {
+                                        controller::dispatch(
+                                            state,
+                                            AppAction::RunTerminalCommand(cmd),
+                                        );
+                                        cx.notify();
+                                    });
+                                })
+                            }))
+                            .children(path_for_open.map(|path| {
+                                let model = model.clone();
+                                Button::new(SharedString::from(format!(
+                                    "open-edit-{msg_id}-{block_index}"
+                                )))
+                                .icon(IconName::File)
+                                .label("Open in Editor")
+                                .xsmall()
+                                .ghost()
+                                .tooltip("Open file in central editor")
+                                .on_click(move |_event, _window, cx| {
+                                    let path = path.clone();
+                                    model.update(cx, |state, cx| {
+                                        controller::dispatch(
+                                            state,
+                                            AppAction::OpenFileInEditor(path),
+                                        );
+                                        cx.notify();
+                                    });
+                                })
+                            }))
+                            .child(
+                                Button::new(SharedString::from(format!(
+                                    "copy-code-{msg_id}-{block_index}"
+                                )))
+                                .icon(IconName::Copy)
+                                .xsmall()
+                                .ghost()
+                                .tooltip("Copy code to clipboard")
+                                .on_click(move |_event, window, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        copy_code.clone(),
+                                    ));
+                                    window.push_notification(
+                                        Notification::info("Code copied to clipboard"),
+                                        cx,
+                                    );
+                                }),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .p_3()
+                    .font_family("monospace")
+                    .text_xs()
+                    .text_color(theme.foreground)
+                    .child(code.trim_end().to_string()),
+            )
+    }
+
     fn render_reasoning_block(
         &mut self,
         msg: &ChatMessageInfo,
@@ -2795,16 +3073,54 @@ impl ChatListView {
                             .gap_2()
                             .children(reasoning_element)
                             .children(if !msg.content.is_empty() {
-                                let content = div().w_full().text_sm().text_color(theme.foreground);
-                                Some(if msg.streaming {
-                                    content.child(msg.content.clone()).into_any_element()
-                                } else {
-                                    let markdown_state =
-                                        self.markdown_state(msg.id.clone(), &msg.content, cx);
-                                    content
-                                        .child(self.chat_markdown_view(&markdown_state))
-                                        .into_any_element()
-                                })
+                                let segments = extract_markdown_segments(&msg.content);
+                                let rendered_segments: Vec<AnyElement> = segments
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(|(idx, seg)| match seg {
+                                        MarkdownSegment::Markdown(text) => {
+                                            if msg.streaming {
+                                                div()
+                                                    .w_full()
+                                                    .text_sm()
+                                                    .text_color(theme.foreground)
+                                                    .child(text)
+                                                    .into_any_element()
+                                            } else {
+                                                let markdown_state = self.markdown_state(
+                                                    format!("{}-seg-{}", msg.id, idx),
+                                                    &text,
+                                                    cx,
+                                                );
+                                                self.chat_markdown_view(&markdown_state)
+                                                    .into_any_element()
+                                            }
+                                        }
+                                        MarkdownSegment::CodeBlock {
+                                            language,
+                                            header_path,
+                                            code,
+                                        } => self
+                                            .render_interactive_code_block(
+                                                &msg.id,
+                                                idx,
+                                                &language,
+                                                header_path.as_deref(),
+                                                &code,
+                                                cx,
+                                            )
+                                            .into_any_element(),
+                                    })
+                                    .collect();
+
+                                Some(
+                                    div()
+                                        .w_full()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .children(rendered_segments),
+                                )
                             } else {
                                 None
                             })
@@ -4685,11 +5001,12 @@ impl Render for ChatListView {
 mod hot_path_tests {
     use super::{
         ChatLinkTarget, ContextMeterContext, ContextMeterMetrics, MARKDOWN_CACHE_ENTRY_LIMIT,
-        MarkdownUpdate, TrajectoryCacheKey, TrajectoryMode, TrajectoryRow, TranscriptRow,
-        build_trajectory_rows, build_transcript_rows, classify_chat_link, classify_markdown_update,
-        contains_case_insensitive, context_meter_view_model, extend_trajectory_facets,
-        extend_trajectory_previews, extend_trajectory_rows, extend_trajectory_summary,
-        format_trajectory_raw_json, grouped_tool_activities, markdown_cache_exceeded,
+        MarkdownSegment, MarkdownUpdate, TrajectoryCacheKey, TrajectoryMode, TrajectoryRow,
+        TranscriptRow, build_trajectory_rows, build_transcript_rows, classify_chat_link,
+        classify_markdown_update, contains_case_insensitive, context_meter_view_model,
+        extend_trajectory_facets, extend_trajectory_previews, extend_trajectory_rows,
+        extend_trajectory_summary, extract_markdown_segments, format_trajectory_raw_json,
+        grouped_tool_activities, is_terminal_runnable_language, markdown_cache_exceeded,
         next_chat_stream_batch, reconcile_trajectory_entries,
         reconcile_trajectory_entries_by_epoch, subagent_popover_counts, summarize_trajectory,
     };
@@ -5316,5 +5633,66 @@ mod hot_path_tests {
         let mut changed = base.clone();
         changed.query = "provider".into();
         assert_ne!(base, changed);
+    }
+
+    #[test]
+    fn extract_markdown_segments_parses_mixed_content_with_paths() {
+        let input = "Here is the command:\n```bash\ncargo build --workspace\n```\nAnd code in file:\n```rust src/main.rs\n// src/main.rs\nfn main() {}\n```\nFinished!";
+        let segments = extract_markdown_segments(input);
+        assert_eq!(segments.len(), 5);
+        assert_eq!(
+            segments[0],
+            MarkdownSegment::Markdown("Here is the command:\n".into())
+        );
+        assert_eq!(
+            segments[1],
+            MarkdownSegment::CodeBlock {
+                language: "bash".into(),
+                header_path: None,
+                code: "cargo build --workspace\n".into(),
+            }
+        );
+        assert_eq!(
+            segments[2],
+            MarkdownSegment::Markdown("And code in file:\n".into())
+        );
+        assert_eq!(
+            segments[3],
+            MarkdownSegment::CodeBlock {
+                language: "rust".into(),
+                header_path: Some("src/main.rs".into()),
+                code: "// src/main.rs\nfn main() {}\n".into(),
+            }
+        );
+        assert_eq!(
+            segments[4],
+            MarkdownSegment::Markdown("Finished!".into())
+        );
+    }
+
+    #[test]
+    fn extract_markdown_segments_handles_comment_path_heuristic() {
+        let input = "```typescript\n// app/routes/index.tsx\nexport default function Home() {}\n```";
+        let segments = extract_markdown_segments(input);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(
+            segments[0],
+            MarkdownSegment::CodeBlock {
+                language: "typescript".into(),
+                header_path: Some("app/routes/index.tsx".into()),
+                code: "// app/routes/index.tsx\nexport default function Home() {}\n".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn terminal_runnable_language_identifies_shell_flavors() {
+        assert!(is_terminal_runnable_language("bash"));
+        assert!(is_terminal_runnable_language("sh"));
+        assert!(is_terminal_runnable_language("zsh"));
+        assert!(is_terminal_runnable_language("shell"));
+        assert!(!is_terminal_runnable_language("rust"));
+        assert!(!is_terminal_runnable_language("python"));
+        assert!(!is_terminal_runnable_language("json"));
     }
 }
