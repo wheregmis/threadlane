@@ -4089,6 +4089,7 @@ impl ChatListView {
             is_new_task,
             draft_work_mode,
             active_session_is_worktree,
+            active_session_worktree_available,
             active_session_project_name,
         ) = {
             let state = self.model.read(cx);
@@ -4099,7 +4100,13 @@ impl ChatListView {
                         .sessions
                         .iter()
                         .find(|session| &session.id == sid)
-                        .map(|session| (project.name.clone(), session.is_worktree))
+                        .map(|session| {
+                            (
+                                project.name.clone(),
+                                session.is_worktree,
+                                session.worktree_available,
+                            )
+                        })
                 })
             });
             (
@@ -4113,8 +4120,11 @@ impl ChatListView {
                 state.draft_work_mode,
                 active_session
                     .as_ref()
-                    .is_some_and(|(_, is_worktree)| *is_worktree),
-                active_session.map(|(project_name, _)| project_name),
+                    .is_some_and(|(_, is_worktree, _)| *is_worktree),
+                active_session
+                    .as_ref()
+                    .is_none_or(|(_, _, available)| *available),
+                active_session.map(|(project_name, _, _)| project_name),
             )
         };
 
@@ -4190,8 +4200,10 @@ impl ChatListView {
             WorkMode::Worktree => {
                 if is_new_task {
                     "New local worktree"
-                } else {
+                } else if active_session_worktree_available {
                     "Worktree"
+                } else {
+                    "Worktree unavailable"
                 }
             }
         };

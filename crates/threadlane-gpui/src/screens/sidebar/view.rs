@@ -197,6 +197,7 @@ fn sidebar_session_fingerprint(session: &SessionInfo) -> u64 {
     session.health.hash(&mut hasher);
     session.git_branch.hash(&mut hasher);
     session.is_worktree.hash(&mut hasher);
+    session.worktree_available.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -735,29 +736,6 @@ impl SidebarView {
                 .into_any_element(),
         );
 
-        if session.is_worktree {
-            row2_items.push(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(2.0))
-                    .px_1()
-                    .py(px(0.5))
-                    .rounded(px(3.0))
-                    .bg(theme.secondary)
-                    .text_color(theme.muted_foreground)
-                    .child(
-                        svg()
-                            .path("icons/git/branch.svg")
-                            .size(px(10.0))
-                            .text_color(theme.muted_foreground),
-                    )
-                    .child("worktree")
-                    .into_any_element(),
-            );
-        }
-
         if let Some(pr_chips) = pr_meta {
             row2_items.push(
                 div()
@@ -767,6 +745,38 @@ impl SidebarView {
                     .into_any_element(),
             );
             row2_items.push(pr_chips.into_any_element());
+        }
+
+        if session.is_worktree {
+            let (label, background, foreground) = if session.worktree_available {
+                ("worktree", theme.secondary, theme.muted_foreground)
+            } else {
+                (
+                    "not checked out",
+                    theme.warning.opacity(0.12),
+                    theme.warning,
+                )
+            };
+            row2_items.push(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(2.0))
+                    .px_1()
+                    .py(px(0.5))
+                    .rounded(px(3.0))
+                    .bg(background)
+                    .text_color(foreground)
+                    .child(
+                        svg()
+                            .path("icons/git/branch.svg")
+                            .size(px(10.0))
+                            .text_color(foreground),
+                    )
+                    .child(label)
+                    .into_any_element(),
+            );
         }
 
         div()
@@ -1385,6 +1395,7 @@ mod tests {
             health: SessionHealth::Healthy,
             git_branch: None,
             is_worktree: false,
+            worktree_available: true,
         }
     }
 

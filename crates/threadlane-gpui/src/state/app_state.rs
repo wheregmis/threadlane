@@ -51,6 +51,7 @@ pub struct SessionInfo {
     pub(crate) health: SessionHealth,
     pub(crate) git_branch: Option<String>,
     pub(crate) is_worktree: bool,
+    pub(crate) worktree_available: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -477,6 +478,7 @@ fn discover_session_stubs_in_project(work_dir: &Path) -> Vec<SessionInfo> {
                 .unwrap_or((canonical_work_dir.clone(), None, false));
             let session_file =
                 resolve_session_transcript_file(&path, &runtime_work_dir, &id, is_worktree);
+            let worktree_available = !is_worktree || runtime_work_dir.is_dir();
             Some(SessionInfo {
                 title: id.clone(),
                 id,
@@ -487,6 +489,7 @@ fn discover_session_stubs_in_project(work_dir: &Path) -> Vec<SessionInfo> {
                 health: SessionHealth::Healthy,
                 git_branch,
                 is_worktree,
+                worktree_available,
             })
         })
         .collect::<Vec<_>>();
@@ -568,6 +571,7 @@ fn discover_sessions_in_project_cached(
                 let metadata = std::fs::metadata(&session_file).ok();
                 let len = metadata.as_ref().map_or(0, |metadata| metadata.len());
                 let modified = metadata.and_then(|metadata| metadata.modified().ok());
+                let worktree_available = !is_worktree || runtime_work_dir.is_dir();
                 let info = SessionInfo {
                     id,
                     title,
@@ -578,6 +582,7 @@ fn discover_sessions_in_project_cached(
                     health,
                     git_branch,
                     is_worktree,
+                    worktree_available,
                 };
                 cache.entries.insert(
                     path.clone(),
@@ -4169,6 +4174,11 @@ mod tests {
         assert_eq!(session.work_dir, project_dir.path().canonicalize().unwrap());
         assert_eq!(session.runtime_work_dir, runtime_work_dir);
         assert!(session.is_worktree);
+        assert!(!session.worktree_available);
+
+        std::fs::create_dir_all(&session.runtime_work_dir).unwrap();
+        let sessions = discover_sessions_in_project(project_dir.path());
+        assert!(sessions[0].worktree_available);
     }
 
     #[test]
@@ -4913,6 +4923,7 @@ mod tests {
                 health: SessionHealth::Healthy,
                 git_branch: None,
                 is_worktree: false,
+                worktree_available: true,
             }],
             is_expanded: true,
         });
@@ -4973,6 +4984,7 @@ mod tests {
                 health: SessionHealth::Working,
                 git_branch: Some("worktree/session-worktree".into()),
                 is_worktree: true,
+                worktree_available: true,
             }],
             is_expanded: true,
         });
@@ -5879,6 +5891,7 @@ mod tests {
                 health: SessionHealth::Working,
                 git_branch: None,
                 is_worktree: false,
+                worktree_available: true,
             }],
             is_expanded: true,
         });
