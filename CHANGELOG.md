@@ -1,5 +1,62 @@
 # Changelog
 
+## [0.1.9](https://github.com/wheregmis/threadlane/compare/v0.1.8...v0.1.9) (2026-08-27)
+
+
+### Features
+
+* **acp:** drop the agent settings control, keep models in the model picker ([975fda8](https://github.com/wheregmis/threadlane/commit/975fda8a3b423256793dca076f0df2ee4302a691))
+* **acp:** drop the agent settings control, keep models in the model picker ([5cfab98](https://github.com/wheregmis/threadlane/commit/5cfab985f932b9130e13f0b83bf5491e61149bba))
+* **acp:** run turns against external ACP agents end to end ([e04861e](https://github.com/wheregmis/threadlane/commit/e04861ebe28d205e04fc08e425216643699b0cdd))
+* **acp:** run turns against external ACP agents end to end ([849c21a](https://github.com/wheregmis/threadlane/commit/849c21aba8d3eaf8b8ced387172176ff96930645))
+* Add ACP preset quick setup ([2d932ba](https://github.com/wheregmis/threadlane/commit/2d932bae514caf5e87906594ba70745b9d008ca7))
+* Add chat navigation and steering shortcuts ([ef530b1](https://github.com/wheregmis/threadlane/commit/ef530b1c53a5a9990539ef0f51b4b393f3c92310))
+* Add chat navigation and steering shortcuts ([b9b47ca](https://github.com/wheregmis/threadlane/commit/b9b47ca01d95e49e2b62f21d8df8001a430978e7))
+* **gpui:** Add interactive code block controls ([01bd38d](https://github.com/wheregmis/threadlane/commit/01bd38d826da3e108f159b86ca71665fdcaff03c))
+* Persist ACP tool activity in session runs ([1ad503c](https://github.com/wheregmis/threadlane/commit/1ad503cd6748ed5ce5cd4d5e18cb2642ecaf9260))
+
+
+### Bug Fixes
+
+* address hotpath benchmark review ([d6f55b9](https://github.com/wheregmis/threadlane/commit/d6f55b9d0e8ea38b6d2d7b93b3185885079195a5))
+* allow redirects and larger network responses ([ab1cf23](https://github.com/wheregmis/threadlane/commit/ab1cf23ee0fb9babdb5fc304c2dc4114b5fa189a))
+* allow redirects and larger network responses ([df3a810](https://github.com/wheregmis/threadlane/commit/df3a81013bce77f542d3b01280acacdee4bc1840))
+* Constrain chat transcript width ([c7e0244](https://github.com/wheregmis/threadlane/commit/c7e02443ea1f0acdbb5d86778e7e6d1e326c1cad))
+* Correct ACP config and permission handling ([0d33d44](https://github.com/wheregmis/threadlane/commit/0d33d44fcb1ad484032d92494ad207831d7e967c))
+* Harden chat and terminal interactions ([20e189e](https://github.com/wheregmis/threadlane/commit/20e189ed8dbca274f0fbed5f9c27494ad66d0a81))
+* keep broker redirects behind host approval ([4c2ffe0](https://github.com/wheregmis/threadlane/commit/4c2ffe0e0de4d4dac1a4a299c978bd777c81e94d))
+* Preserve queued message attachments ([476aab0](https://github.com/wheregmis/threadlane/commit/476aab03d78747d196ccc2f6432938c154264121))
+* Refresh ACP settings and reasoning display ([f3765d7](https://github.com/wheregmis/threadlane/commit/f3765d75e0333d6aa1d41c060d2ecb4f1ff6a5b3))
+* refresh session PR data and sidebar state ([ead240b](https://github.com/wheregmis/threadlane/commit/ead240b627c0646174b746cc562ae685f7f1f860))
+* Use stable labels for recent timestamps ([091da27](https://github.com/wheregmis/threadlane/commit/091da27455f53b292fcac1563f20eab2d820b7e6))
+
+
+### Performance Improvements
+
+* add hotpath PR benchmarking ([8387cc2](https://github.com/wheregmis/threadlane/commit/8387cc296cfeb233e2b0830243909ba3293cb502))
+* benchmark MCP steady-state paths ([52fe687](https://github.com/wheregmis/threadlane/commit/52fe687e263bab62d8d28b672285481be7171362))
+* benchmark terminal parser hot paths ([a18c4ec](https://github.com/wheregmis/threadlane/commit/a18c4ec6dcc6339dbec5a6c33d3f3a2dcf6848a3))
+* benchmark warm repository search ([e1f3709](https://github.com/wheregmis/threadlane/commit/e1f37095e9a9be1bdb53e2667e8265adeebf025e))
+* Centralize Hotpath benchmarks in workspace crate ([ce43322](https://github.com/wheregmis/threadlane/commit/ce4332259b1276c790b45f885e5a315d496c0f0b))
+* expand hotpath PR benchmarks ([cfdcfed](https://github.com/wheregmis/threadlane/commit/cfdcfed2b6d1c5dabb0bbeb96c1538188018bb69))
+* expand runtime hotpath benchmark ([e482d97](https://github.com/wheregmis/threadlane/commit/e482d97da40f3f4c10958892e46d2846e9b503b1))
+* match terminal benchmark scrollback ([c69e3ff](https://github.com/wheregmis/threadlane/commit/c69e3ffc0aae79fb5e2051d3dc22b9d9ed4ebd54))
+
+
+### CI
+
+* comment each hotpath benchmark suite ([3a910ac](https://github.com/wheregmis/threadlane/commit/3a910ac32bf72cfb5531fcceb200d330ba614307))
+* Expand Hotpath benchmark reporting ([89a8bf4](https://github.com/wheregmis/threadlane/commit/89a8bf444d5994fac999e379fa93fb2fb264232f))
+* harden hotpath benchmark comments ([14c6e8e](https://github.com/wheregmis/threadlane/commit/14c6e8e2e7219fa59cc19ba7a8fda1622320a75a))
+* preserve hotpath suite paths in artifacts ([9646016](https://github.com/wheregmis/threadlane/commit/96460163c484710a0ffceb7f31d06c2107bf53a9))
+* profile deterministic hotpath suites ([1a93b96](https://github.com/wheregmis/threadlane/commit/1a93b962392dce5749a2bc7e79200d40742b89ab))
+
+
+### Maintenance
+
+* require conventional commit subjects ([8dc24bb](https://github.com/wheregmis/threadlane/commit/8dc24bbf05814a55cdd51a3d18a98fe4d854fd91))
+* untrack internal benchmark report ([26204d8](https://github.com/wheregmis/threadlane/commit/26204d8d2d796847d11f49990a4a7ea428c974d0))
+
 ## [0.1.8](https://github.com/wheregmis/threadlane/compare/v0.1.7...v0.1.8) (2026-08-26)
 
 
