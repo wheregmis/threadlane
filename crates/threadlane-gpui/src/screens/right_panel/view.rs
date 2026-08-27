@@ -346,7 +346,6 @@ impl RightPanelView {
             return;
         }
         self.project = project.clone();
-        self.git_busy = false;
         self.tree_state
             .update(cx, |state, cx| state.set_items(Vec::new(), cx));
         self.expanded_paths.clear();
@@ -610,6 +609,9 @@ impl RightPanelView {
                 action_message,
             } => {
                 if self.project.as_ref() != Some(&project) {
+                    // The action is complete, but its project is no longer active.
+                    // Release the guard without applying stale status to the new project.
+                    self.git_busy = false;
                     return;
                 }
                 self.git_busy = false;

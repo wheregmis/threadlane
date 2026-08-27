@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use threadlane_session::harness::{JsonlStore, Record, SessionStore};
+use threadlane_session::harness::{JsonlStore, SessionStore};
 use threadlane_session::{
     AcpConfigOption, AgentEvent, AgentMessage, ImageAttachment, ReasoningEffort, SessionPlan,
     SubagentProgressUpdate, TokenUsage,
@@ -1393,13 +1393,29 @@ impl AppState {
         session_id: String,
     ) -> SessionHydrationRequest {
         self.workspace_page = WorkspacePage::Chat;
+        let project_dir = self
+            .projects
+            .iter()
+            .find(|project| {
+                project
+                    .sessions
+                    .iter()
+                    .any(|session| session.id == session_id && session.work_dir == work_dir)
+            })
+            .map(|project| project.work_dir.clone())
+            .unwrap_or_else(|| work_dir.clone());
+        let session_file = self
+            .projects
+            .iter()
+            .flat_map(|project| project.sessions.iter())
+            .find(|session| session.id == session_id && session.work_dir == work_dir)
+            .map(|session| session.session_file.clone())
+            .unwrap_or_else(|| self.session_file(&project_dir, &session_id));
         self.active_work_dir = Some(work_dir.clone());
         self.active_session_id = Some(session_id.clone());
         self.is_new_task = false;
-        self.persist_project_selection(&work_dir, Some(&session_id));
+        self.persist_project_selection(&project_dir, Some(&session_id));
         self.refresh_available_models();
-
-        let session_file = self.session_file(&work_dir, &session_id);
         let completed_events = self
             .deferred_stream_events
             .remove(&session_id)
@@ -1691,8 +1707,6 @@ impl AppState {
         let session_id = format!("session_{now_nanos}");
         let session_file = sessions_dir.join(format!("{session_id}.jsonl"));
 
-        let mut store = JsonlStore::open(&session_file).map_err(|e| e.to_string())?;
-
         let (session_work_dir, _git_branch, _is_worktree) = if self.draft_work_mode
             == WorkMode::Worktree
             && threadlane_git::is_git_repo(&work_dir)
@@ -1703,36 +1717,22 @@ impl AppState {
                 tracing::warn!("Failed to create worktree: {error}, falling back to main workdir");
                 (work_dir.clone(), None, false)
             } else {
-                let seq1 = store.next_sequence();
-                let _ = store.append_record(Record::FactSet {
-                    id: format!("fact-is_worktree-{seq1}"),
-                    seq: seq1,
-                    lane: "main".into(),
-                    timestamp: 0,
-                    run_id: None,
-                    key: "is_worktree".into(),
-                    value: "true".into(),
-                });
-                let seq2 = store.next_sequence();
-                let _ = store.append_record(Record::FactSet {
-                    id: format!("fact-worktree_path-{seq2}"),
-                    seq: seq2,
-                    lane: "main".into(),
-                    timestamp: 0,
-                    run_id: None,
-                    key: "worktree_path".into(),
-                    value: worktree_dir.to_string_lossy().to_string(),
-                });
-                let seq3 = store.next_sequence();
-                let _ = store.append_record(Record::FactSet {
-                    id: format!("fact-git_branch-{seq3}"),
-                    seq: seq3,
-                    lane: "main".into(),
-                    timestamp: 0,
-                    run_id: None,
-                    key: "git_branch".into(),
-                    value: branch.clone(),
-                });
+                for (key, value) in [
+                    ("is_worktree", "true".to_string()),
+                    ("worktree_path", worktree_dir.to_string_lossy().to_string()),
+                    ("git_branch", branch.clone()),
+                ] {
+                    if let Err(error) = threadlane_session::coding_agent::harness::CodingSessionHarness::append_fact_to_path(
+                        &session_file,
+                        "main",
+                        key,
+                        &value,
+                        None,
+                    ) {
+                        let _ = threadlane_git::remove_worktree(&work_dir, &worktree_dir, true);
+                        return Err(format!("failed to persist worktree metadata: {error}"));
+                    }
+                }
                 (worktree_dir, Some(branch), true)
             }
         } else {
