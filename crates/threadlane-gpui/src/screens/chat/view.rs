@@ -194,9 +194,20 @@ fn context_meter_view_model(
 use threadlane_session::commands::{available_slash_commands, SlashCommandInfo};
 use threadlane_session::{ImageAttachment, PlanItemStatus, ReasoningEffort, SessionPlan};
 
-actions!(threadlane_composer, [PasteClipboard]);
+actions!(
+    threadlane_composer,
+    [
+        PasteClipboard,
+        CompleteSlashCommand,
+        SelectPreviousSlashCommand,
+        SelectNextSlashCommand,
+        DismissSlashCommand,
+    ]
+);
 
 const INPUT_KEY_CONTEXT: &str = "Input";
+const SLASH_COMMAND_KEY_CONTEXT: &str = "SlashCommandMenu";
+const SLASH_COMMAND_BINDING_CONTEXT: &str = "SlashCommandMenu > Input";
 
 const CHAT_CONTENT_MAX_WIDTH: f32 = 1040.0;
 const USER_BUBBLE_MAX_WIDTH: f32 = 680.0;
@@ -798,6 +809,26 @@ pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-v", PasteClipboard, Some(INPUT_KEY_CONTEXT)),
         KeyBinding::new("ctrl-v", PasteClipboard, Some(INPUT_KEY_CONTEXT)),
+        KeyBinding::new(
+            "tab",
+            CompleteSlashCommand,
+            Some(SLASH_COMMAND_BINDING_CONTEXT),
+        ),
+        KeyBinding::new(
+            "up",
+            SelectPreviousSlashCommand,
+            Some(SLASH_COMMAND_BINDING_CONTEXT),
+        ),
+        KeyBinding::new(
+            "down",
+            SelectNextSlashCommand,
+            Some(SLASH_COMMAND_BINDING_CONTEXT),
+        ),
+        KeyBinding::new(
+            "escape",
+            DismissSlashCommand,
+            Some(SLASH_COMMAND_BINDING_CONTEXT),
+        ),
     ]);
 }
 
@@ -832,6 +863,7 @@ pub struct ChatListView {
         std::time::Instant,
         Vec<SlashCommandInfo>,
     )>,
+    slash_scroll_handle: ScrollHandle,
     selected_slash_index: usize,
     dismiss_slash_menu: bool,
     permission_details_open: bool,
@@ -932,6 +964,8 @@ impl ChatListView {
                 match event {
                     InputEvent::Change => {
                         this.dismiss_slash_menu = false;
+                        this.selected_slash_index = 0;
+                        this.slash_scroll_handle.scroll_to_item(0);
                     }
                     InputEvent::PressEnter {
                         secondary,
@@ -1047,6 +1081,7 @@ impl ChatListView {
             trajectory_cache: None,
             trajectory_raw_json: None,
             slash_command_cache: None,
+            slash_scroll_handle: ScrollHandle::new(),
             selected_slash_index: 0,
             dismiss_slash_menu: false,
             permission_details_open: false,
@@ -3528,8 +3563,100 @@ impl ChatListView {
         let value = format!("/{command_name} ");
         self.input_state.update(cx, |state, cx| {
             state.set_value(&value, window, cx);
+            let cursor = value.len();
+            state.set_selected_range(cursor..cursor, cx);
         });
         self.selected_slash_index = 0;
+        self.slash_scroll_handle.scroll_to_item(0);
+        cx.notify();
+    }
+
+    fn matching_slash_command_count(&mut self, cx: &mut Context<Self>) -> usize {
+        if self.dismiss_slash_menu {
+            return 0;
+        }
+        let text = self.input_state.read(cx).value().to_string();
+        let project_root = self.model.read(cx).active_work_dir.clone();
+        let Some(query) = active_slash_command_query(&text) else {
+            return 0;
+        };
+        self.cached_slash_commands(project_root.as_deref())
+            .into_iter()
+            .filter(|command| query.is_empty() || command.name.starts_with(query))
+            .count()
+    }
+
+    fn select_previous_slash_command_action(
+        &mut self,
+        _: &SelectPreviousSlashCommand,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let count = self.matching_slash_command_count(cx);
+        if count == 0 {
+            return;
+        }
+        self.selected_slash_index = if self.selected_slash_index == 0 {
+            count - 1
+        } else {
+            self.selected_slash_index - 1
+        };
+        self.slash_scroll_handle
+            .scroll_to_item(self.selected_slash_index);
+        cx.notify();
+    }
+
+    fn select_next_slash_command_action(
+        &mut self,
+        _: &SelectNextSlashCommand,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let count = self.matching_slash_command_count(cx);
+        if count == 0 {
+            return;
+        }
+        self.selected_slash_index = (self.selected_slash_index + 1) % count;
+        self.slash_scroll_handle
+            .scroll_to_item(self.selected_slash_index);
+        cx.notify();
+    }
+
+    fn complete_slash_command_action(
+        &mut self,
+        _: &CompleteSlashCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.dismiss_slash_menu {
+            return;
+        }
+        let text = self.input_state.read(cx).value().to_string();
+        let project_root = self.model.read(cx).active_work_dir.clone();
+        let Some(query) = active_slash_command_query(&text) else {
+            return;
+        };
+        let matching = self
+            .cached_slash_commands(project_root.as_deref())
+            .into_iter()
+            .filter(|command| query.is_empty() || command.name.starts_with(query))
+            .collect::<Vec<_>>();
+        if matching.is_empty() {
+            return;
+        }
+        let selected = self
+            .selected_slash_index
+            .min(matching.len().saturating_sub(1));
+        self.complete_slash_command(&matching[selected].name, window, cx);
+    }
+
+    fn dismiss_slash_command_action(
+        &mut self,
+        _: &DismissSlashCommand,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.dismiss_slash_menu = true;
         cx.notify();
     }
 
@@ -3591,10 +3718,12 @@ impl ChatListView {
                     .filter(|cmd| query.is_empty() || cmd.name.starts_with(query))
                     .collect::<Vec<_>>();
                 if !matching.is_empty() {
-                    let total = matching.len().min(8);
+                    let total = matching.len();
                     match key {
                         "down" => {
                             self.selected_slash_index = (self.selected_slash_index + 1) % total;
+                            self.slash_scroll_handle
+                                .scroll_to_item(self.selected_slash_index);
                             cx.stop_propagation();
                             cx.notify();
                             return;
@@ -3605,6 +3734,8 @@ impl ChatListView {
                             } else {
                                 self.selected_slash_index - 1
                             };
+                            self.slash_scroll_handle
+                                .scroll_to_item(self.selected_slash_index);
                             cx.stop_propagation();
                             cx.notify();
                             return;
@@ -4769,6 +4900,7 @@ impl ChatListView {
             });
 
         let input_value = self.input_state.read(cx).value().to_string();
+        let mut slash_completion_active = false;
         let command_menu = if let Some(query) = active_slash_command_query(&input_value) {
             if self.dismiss_slash_menu {
                 div().into_any_element()
@@ -4779,9 +4911,9 @@ impl ChatListView {
                     .filter(|command| query.is_empty() || command.name.starts_with(query))
                     .collect::<Vec<_>>();
                 let command_count = commands.len();
-                let shown_count = command_count.min(8);
                 let has_commands = command_count > 0;
-                let selected_idx = self.selected_slash_index.min(shown_count.saturating_sub(1));
+                slash_completion_active = has_commands;
+                let selected_idx = self.selected_slash_index.min(command_count.saturating_sub(1));
                 div()
                     .absolute()
                     .bottom_full()
@@ -4821,10 +4953,18 @@ impl ChatListView {
                                             .child("↑↓ navigate · Tab/Enter select · Esc dismiss"),
                                     ),
                             )
-                            .child(format!("{shown_count}/{command_count}")),
+                            .child(if has_commands {
+                                format!("{}/{}", selected_idx + 1, command_count)
+                            } else {
+                                "0/0".to_string()
+                            }),
                     )
                     .child(
                         div()
+                            .id("slash-command-list")
+                            .track_scroll(&self.slash_scroll_handle)
+                            .overflow_y_scrollbar()
+                            .max_h(px(260.0))
                             .when(!has_commands, |list| {
                                 list.child(
                                     div()
@@ -4837,7 +4977,7 @@ impl ChatListView {
                                         .child("No matching commands"),
                                 )
                             })
-                            .children(commands.into_iter().take(8).enumerate().map(
+                            .children(commands.into_iter().enumerate().map(
                                 |(idx, command)| {
                                     let is_active = idx == selected_idx;
                                     let command_name = command.name.clone();
@@ -5256,6 +5396,14 @@ impl ChatListView {
                     .border_color(theme.border)
                     .bg(theme.title_bar)
                     .on_action(cx.listener(Self::paste_composer_clipboard))
+                    .when(slash_completion_active, |composer| {
+                        composer
+                            .key_context(SLASH_COMMAND_KEY_CONTEXT)
+                            .on_action(cx.listener(Self::complete_slash_command_action))
+                            .on_action(cx.listener(Self::select_previous_slash_command_action))
+                            .on_action(cx.listener(Self::select_next_slash_command_action))
+                            .on_action(cx.listener(Self::dismiss_slash_command_action))
+                    })
                     .children(stash_banner)
                     .children(
                         (!image_chips.is_empty())
@@ -5624,7 +5772,8 @@ mod hot_path_tests {
         reconcile_trajectory_entries, reconcile_trajectory_entries_by_epoch,
         subagent_popover_counts, summarize_trajectory, ChatLinkTarget, ContextMeterContext,
         ContextMeterMetrics, MarkdownSegment, MarkdownUpdate, TrajectoryCacheKey, TrajectoryMode,
-        TrajectoryRow, TranscriptRow, MARKDOWN_CACHE_ENTRY_LIMIT,
+        TrajectoryRow, TranscriptRow, INPUT_KEY_CONTEXT, MARKDOWN_CACHE_ENTRY_LIMIT,
+        SLASH_COMMAND_BINDING_CONTEXT, SLASH_COMMAND_KEY_CONTEXT,
     };
     use crate::state::{
         reported_session_shape_state, ChatMessageInfo, ChatStreamEvent, MessageRole,
@@ -6356,5 +6505,22 @@ mod hot_path_tests {
         assert_eq!(active_slash_command_query("/commit "), None);
         assert_eq!(active_slash_command_query("hello /help"), None);
         assert_eq!(active_slash_command_query("plain text"), None);
+    }
+
+    #[test]
+    fn slash_command_binding_context_matches_nested_input() {
+        use gpui::{KeyBindingContextPredicate, KeyContext};
+
+        let predicate = KeyBindingContextPredicate::parse(SLASH_COMMAND_BINDING_CONTEXT).unwrap();
+        let menu_ctx = KeyContext::try_from(SLASH_COMMAND_KEY_CONTEXT).unwrap();
+        let input_ctx = KeyContext::try_from(INPUT_KEY_CONTEXT).unwrap();
+
+        let active_contexts = vec![menu_ctx, input_ctx.clone()];
+        assert_eq!(predicate.depth_of(&active_contexts), Some(2));
+        assert!(predicate.eval(&active_contexts));
+
+        let normal_contexts = vec![input_ctx];
+        assert_eq!(predicate.depth_of(&normal_contexts), None);
+        assert!(!predicate.eval(&normal_contexts));
     }
 }
