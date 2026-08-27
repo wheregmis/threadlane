@@ -264,6 +264,7 @@ pub struct AppState {
     composer_text: String,
     pub(crate) session_status: Option<String>,
     pending_composer_messages: HashMap<String, String>,
+    pending_composer_images: HashMap<String, Vec<ImageAttachment>>,
     session_token_usage: HashMap<SessionProjectionKey, TokenUsage>,
     trajectory_by_session: HashMap<SessionProjectionKey, Vec<TrajectoryEntry>>,
     subagents_by_session: HashMap<SessionProjectionKey, Vec<SubagentActivityInfo>>,
@@ -978,6 +979,7 @@ impl AppState {
             composer_text: String::new(),
             session_status,
             pending_composer_messages: HashMap::new(),
+            pending_composer_images: HashMap::new(),
             session_token_usage: HashMap::new(),
             trajectory_by_session: HashMap::new(),
             subagents_by_session: HashMap::new(),
@@ -1269,7 +1271,11 @@ impl AppState {
     }
 
     pub(crate) fn request_open_file(&mut self, relative_path: String) {
-        self.requested_editor_target = Some(RequestedEditorTarget::File(relative_path));
+        let Some(root) = self.active_work_dir.as_deref() else { return };
+        let Ok(path) = threadlane_tools::validate_path_in_workspace(&relative_path, root) else { return };
+        let Ok(canonical_root) = root.canonicalize() else { return };
+        let Ok(relative) = path.strip_prefix(canonical_root) else { return };
+        self.requested_editor_target = Some(RequestedEditorTarget::File(relative.to_string_lossy().into_owned()));
     }
 
     pub(crate) fn request_open_diff(
@@ -1470,6 +1476,7 @@ impl AppState {
         let session_file = self.session_file(work_dir, session_id);
         self.session_runtimes.remove(&session_file);
         self.pending_composer_messages.remove(session_id);
+        self.pending_composer_images.remove(session_id);
         self.acp_config_options.remove(session_id);
         if let Some(project) = self
             .projects
@@ -3553,7 +3560,7 @@ impl AppState {
             .map(String::as_str)
     }
 
-    pub(crate) fn stage_busy_message(&mut self, text: String) -> Result<(), String> {
+    pub(crate) fn stage_busy_message(&mut self, text: String, images: Vec<ImageAttachment>) -> Result<(), String> {
         let text = text.trim().to_string();
         if text.is_empty() {
             return Ok(());
@@ -3565,28 +3572,31 @@ impl AppState {
         if !self.is_generating {
             return Err("The session is no longer generating".into());
         }
-        self.pending_composer_messages.insert(session_id, text);
+        self.pending_composer_messages.insert(session_id.clone(), text);
+        self.pending_composer_images.insert(session_id, images);
         Ok(())
     }
 
     pub(crate) fn queue_pending_message(&mut self) -> Result<(), String> {
-        let (runtime, session_id, text) = self.pending_runtime_message()?;
+        let (runtime, session_id, text, images) = self.pending_runtime_message()?;
         runtime
             .work_handle
-            .try_queue_follow_up_with_images(text.clone(), Vec::new())?;
+            .try_queue_follow_up_with_images(text.clone(), images)?;
         self.pending_composer_messages.remove(&session_id);
-        self.push_optimistic_follow_up(&session_id, text);
+        self.pending_composer_images.remove(&session_id);
+        self.push_optimistic_follow_up(&session_id, text, "queued-user");
         self.session_status = Some("Message queued…".into());
         Ok(())
     }
 
     pub(crate) fn steer_pending_message(&mut self) -> Result<(), String> {
-        let (runtime, session_id, text) = self.pending_runtime_message()?;
+        let (runtime, session_id, text, images) = self.pending_runtime_message()?;
         runtime
             .work_handle
-            .queue_steer_with_images(text.clone(), Vec::new())?;
+            .queue_steer_with_images(text.clone(), images)?;
         self.pending_composer_messages.remove(&session_id);
-        self.push_optimistic_follow_up(&session_id, text);
+        self.pending_composer_images.remove(&session_id);
+        self.push_optimistic_follow_up(&session_id, text, "steered-user");
         self.session_status = Some("Steering current turn…".into());
         Ok(())
     }
@@ -3594,10 +3604,11 @@ impl AppState {
     pub(crate) fn dismiss_pending_message(&mut self) {
         if let Some(session_id) = self.active_session_id.as_ref() {
             self.pending_composer_messages.remove(session_id);
+            self.pending_composer_images.remove(session_id);
         }
     }
 
-    fn pending_runtime_message(&self) -> Result<(Arc<SessionRuntime>, String, String), String> {
+    fn pending_runtime_message(&self) -> Result<(Arc<SessionRuntime>, String, String, Vec<ImageAttachment>), String> {
         let session_id = self
             .active_session_id
             .clone()
@@ -3619,14 +3630,14 @@ impl AppState {
             .get(&session_id)
             .cloned()
             .ok_or_else(|| "No pending composer message".to_string())?;
-        Ok((runtime, session_id, text))
+        Ok((runtime, session_id.clone(), text, self.pending_composer_images.get(&session_id).cloned().unwrap_or_default()))
     }
 
-    fn push_optimistic_follow_up(&mut self, session_id: &str, text: String) {
+    fn push_optimistic_follow_up(&mut self, session_id: &str, text: String, prefix: &str) {
         if self.active_session_id.as_deref() == Some(session_id) {
             let new_len = self.messages.len();
             self.messages_mut().push(ChatMessageInfo {
-                id: format!("queued-user-{session_id}-{new_len}"),
+                id: format!("{prefix}-{session_id}-{new_len}"),
                 role: MessageRole::User,
                 content: text,
                 tool_activities: Vec::new(),

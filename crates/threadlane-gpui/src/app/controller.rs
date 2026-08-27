@@ -45,8 +45,8 @@ pub(crate) fn dispatch(state: &mut AppState, action: AppAction) -> Option<Sessio
                 state.session_status = Some(error);
             }
         }
-        AppAction::StageBusyMessage(text) => {
-            let _ = state.stage_busy_message(text);
+        AppAction::StageBusyMessage { text, images } => {
+            let _ = state.stage_busy_message(text, images);
         }
         AppAction::QueuePendingMessage => {
             let _ = state.queue_pending_message();

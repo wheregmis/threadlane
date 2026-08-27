@@ -25,7 +25,7 @@ pub enum AppAction {
         text: String,
         images: Vec<ImageAttachment>,
     },
-    StageBusyMessage(String),
+    StageBusyMessage { text: String, images: Vec<ImageAttachment> },
     QueuePendingMessage,
     SteerPendingMessage,
     DismissPendingMessage,

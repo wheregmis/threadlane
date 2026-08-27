@@ -305,6 +305,10 @@ fn is_terminal_runnable_language(lang: &str) -> bool {
         "bash" | "sh" | "zsh" | "shell" | "terminal" | "console" | "cmd" | "powershell"
     )
 }
+fn is_fence_line(raw: &str, idx: usize) -> bool {
+    let line_start = raw[..idx].rfind('\n').map_or(0, |p| p + 1);
+    raw[line_start..idx].len() <= 3 && raw[line_start..idx].bytes().all(|b| b == b' ')
+}
 
 fn parse_code_block_header(header: &str, code: &str) -> (String, Option<String>) {
     let header_trimmed = header.trim();
@@ -379,7 +383,7 @@ pub fn extract_markdown_segments(raw: &str) -> Vec<MarkdownSegment> {
         let mut search_pos = code_start;
         while let Some(close_pos) = raw[search_pos..].find("```") {
             let candidate_idx = search_pos + close_pos;
-            if candidate_idx == 0 || raw.as_bytes()[candidate_idx - 1] == b'\n' {
+            if is_fence_line(raw, candidate_idx) {
                 close_fence_idx = Some(candidate_idx);
                 break;
             }
@@ -882,15 +886,11 @@ impl ChatListView {
                     let is_generating = model_clone.read(cx).is_generating;
                     if !text.trim().is_empty() || (!is_generating && !this.pasted_images.is_empty())
                     {
-                        let images = if is_generating {
-                            Vec::new()
-                        } else {
-                            std::mem::take(&mut this.pasted_images)
-                        };
+                        let images = std::mem::take(&mut this.pasted_images);
                         let is_steer = *secondary;
                         model_clone.update(cx, |state, cx| {
                             if is_generating {
-                                controller::dispatch(state, AppAction::StageBusyMessage(text));
+                                controller::dispatch(state, AppAction::StageBusyMessage { text, images });
                                 if is_steer {
                                     controller::dispatch(state, AppAction::SteerPendingMessage);
                                 } else {
@@ -2758,7 +2758,9 @@ impl ChatListView {
         let code_str = code.to_string();
         let copy_code = code.to_string();
         let is_runnable = is_terminal_runnable_language(language);
-        let path_opt = header_path.map(str::to_string);
+        let path_opt = header_path.and_then(|path| match classify_chat_link(path) {
+            ChatLinkTarget::ProjectFile(path) => Some(path), _ => None,
+        });
         let path_for_open = path_opt.clone();
 
         let display_lang = if language.trim().is_empty() {
@@ -2990,8 +2992,8 @@ impl ChatListView {
         let theme = cx.theme().colors;
         match msg.role {
             MessageRole::User => {
-                let is_queued =
-                    msg.id.starts_with("queued-user-") && self.model.read(cx).is_generating;
+                let is_queued = msg.id.starts_with("queued-user-") && self.model.read(cx).is_generating;
+                let is_steered = msg.id.starts_with("steered-user-") && self.model.read(cx).is_generating;
                 div()
                     .w_full()
                     .min_w_0()
@@ -3015,6 +3017,7 @@ impl ChatListView {
                                 ),
                         )
                     })
+                    .when(is_steered, |el| el.child(div().child(Tag::new().child("Steering current turn").with_variant(TagVariant::Primary).small())))
                     .child(
                         div()
                             .min_w_0()
@@ -4676,7 +4679,8 @@ impl ChatListView {
                                                 let text = queue_prompt_input.read(cx).value().to_string();
                                                 if !text.trim().is_empty() {
                                                     queue_prompt_model.update(cx, |state, cx| {
-                                                        controller::dispatch(state, AppAction::StageBusyMessage(text));
+                                                        let images = std::mem::take(&mut this.pasted_images);
+                                                        controller::dispatch(state, AppAction::StageBusyMessage { text, images });
                                                         controller::dispatch(state, AppAction::QueuePendingMessage);
                                                         cx.notify();
                                                     });
@@ -4698,7 +4702,8 @@ impl ChatListView {
                                                 let text = steer_prompt_input.read(cx).value().to_string();
                                                 if !text.trim().is_empty() {
                                                     steer_prompt_model.update(cx, |state, cx| {
-                                                        controller::dispatch(state, AppAction::StageBusyMessage(text));
+                                                        let images = std::mem::take(&mut this.pasted_images);
+                                                        controller::dispatch(state, AppAction::StageBusyMessage { text, images });
                                                         controller::dispatch(state, AppAction::SteerPendingMessage);
                                                         cx.notify();
                                                     });
@@ -5683,6 +5688,12 @@ mod hot_path_tests {
                 code: "// app/routes/index.tsx\nexport default function Home() {}\n".into(),
             }
         );
+    }
+
+    #[test]
+    fn extract_markdown_segments_accepts_indented_closing_fence() {
+        let segments = extract_markdown_segments("```rust\nlet x = 1;\n  ```\nAfter");
+        assert!(matches!(segments.as_slice(), [MarkdownSegment::CodeBlock { .. }, MarkdownSegment::Markdown(text)] if text == "After"));
     }
 
     #[test]
