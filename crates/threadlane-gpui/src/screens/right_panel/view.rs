@@ -32,6 +32,17 @@ fn can_publish_branch(status: Option<&GitStatus>) -> bool {
     })
 }
 
+fn can_create_pull_request(status: Option<&GitStatus>) -> bool {
+    status.is_some_and(|status| {
+        status.pr_ready
+            && !status.detached
+            && status.branch.is_some()
+            && status.remote.is_some()
+            && status.pr_lookup_available
+            && status.pr.is_none()
+    })
+}
+
 fn normalize_generated_commit_message(raw: &str) -> String {
     let trimmed = raw.trim();
     let unquoted = trimmed
@@ -125,6 +136,7 @@ pub enum GitAction {
     Push,
     Pull,
     Fetch,
+    CreatePullRequest,
     Checkout(String),
     CheckoutStash(String),
     CheckoutCarry(String),
@@ -162,7 +174,12 @@ enum PanelEvent {
         files_dirty: bool,
     },
     MessageGenerated(Result<String, String>),
-    ActionFinished(Result<GitStatus, String>),
+    ActionFinished {
+        project: PathBuf,
+        status: Result<GitStatus, String>,
+        action_error: Option<String>,
+        action_message: Option<String>,
+    },
     CommitFilesLoaded {
         sha: String,
         files: Vec<GitFile>,
@@ -585,16 +602,25 @@ impl RightPanelView {
                     }
                 }
             }
-            PanelEvent::ActionFinished(result) => {
+            PanelEvent::ActionFinished {
+                project,
+                status,
+                action_error,
+                action_message,
+            } => {
+                if self.project.as_ref() != Some(&project) {
+                    // The action is complete, but its project is no longer active.
+                    // Release the guard without applying stale status to the new project.
+                    self.git_busy = false;
+                    return;
+                }
                 self.git_busy = false;
-                match result {
+                match status {
                     Ok(status) => {
-                        if let Some(project) = &self.project {
-                            self.model.update(cx, |state, cx| {
-                                state.git_statuses.insert(project.clone(), status.clone());
-                                cx.notify();
-                            });
-                        }
+                        self.model.update(cx, |state, cx| {
+                            state.git_statuses.insert(project, status.clone());
+                            cx.notify();
+                        });
                         self.git_status = Some(status.clone());
                         self.stash_files = None;
                         self.loading_stash_index = None;
@@ -608,10 +634,23 @@ impl RightPanelView {
                         self.switch_dialog_open = false;
                         self.switch_target_branch = None;
                         self.last_fetched_time = Some(std::time::Instant::now());
-                        self.git_feedback = Some("Git action completed successfully.".into());
+                        self.git_feedback = Some(
+                            action_error
+                                .or_else(|| {
+                                    action_message.map(|message| {
+                                        if message.is_empty() {
+                                            "Pull request created successfully.".into()
+                                        } else {
+                                            format!("Pull request created: {message}")
+                                        }
+                                    })
+                                })
+                                .unwrap_or_else(|| "Git action completed successfully.".into()),
+                        );
                     }
-                    Err(error) => {
-                        self.git_feedback = Some(error);
+                    Err(status_error) => {
+                        self.review_error = Some(status_error.clone());
+                        self.git_feedback = Some(action_error.unwrap_or(status_error));
                     }
                 }
             }
@@ -740,6 +779,9 @@ impl RightPanelView {
             cx.notify();
             return;
         };
+        if self.git_busy {
+            return;
+        }
         let message = self
             .commit_message_input
             .read(cx)
@@ -773,6 +815,7 @@ impl RightPanelView {
             GitAction::Push => "Pushing…".to_string(),
             GitAction::Pull => "Pulling from origin…".to_string(),
             GitAction::Fetch => "Fetching origin…".to_string(),
+            GitAction::CreatePullRequest => "Creating pull request…".to_string(),
             GitAction::Checkout(b) => format!("Switching to {b}…"),
             GitAction::CheckoutStash(b) => format!("Stashing changes & switching to {b}…"),
             GitAction::CheckoutCarry(b) => format!("Switching to {b} with changes…"),
@@ -788,7 +831,8 @@ impl RightPanelView {
         window.push_notification(Notification::info(feedback), cx);
         let tx = self.event_tx.clone();
         std::thread::spawn(move || {
-            let result = (|| {
+            let action_result = (|| {
+                let mut action_message = None;
                 match &action {
                     GitAction::Commit | GitAction::CommitAndPush => {
                         let status =
@@ -817,6 +861,12 @@ impl RightPanelView {
                     }
                     GitAction::Fetch => {
                         threadlane_git::fetch(&work_dir).map_err(|e| e.to_string())?;
+                    }
+                    GitAction::CreatePullRequest => {
+                        action_message = Some(
+                            threadlane_git::create_pull_request(&work_dir)
+                                .map_err(|e| e.to_string())?,
+                        );
                     }
                     GitAction::Checkout(branch) => {
                         threadlane_git::checkout(&work_dir, branch).map_err(|e| e.to_string())?;
@@ -854,9 +904,15 @@ impl RightPanelView {
                             .map_err(|e| e.to_string())?;
                     }
                 }
-                threadlane_git::inspect(&work_dir).map_err(|e| e.to_string())
+                Ok(action_message)
             })();
-            let _ = tx.send(PanelEvent::ActionFinished(result));
+            let status = threadlane_git::inspect(&work_dir).map_err(|e| e.to_string());
+            let _ = tx.send(PanelEvent::ActionFinished {
+                project: work_dir,
+                status,
+                action_error: action_result.as_ref().err().cloned(),
+                action_message: action_result.ok().flatten(),
+            });
         });
         cx.notify();
     }
@@ -1528,6 +1584,7 @@ impl RightPanelView {
         let behind = status.map_or(0, |s| s.behind);
         let ahead = status.map_or(0, |s| s.ahead);
         let can_publish = can_publish_branch(status);
+        let can_create_pr = can_create_pull_request(status);
 
         let sync_button = if can_publish {
             Button::new("git-sync-action-btn")
@@ -1570,6 +1627,26 @@ impl RightPanelView {
                     this.run_git_action(GitAction::Fetch, window, cx);
                 }))
         };
+
+        let sync_actions = div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(sync_button.disabled(self.git_busy))
+            .when(can_create_pr, |row| {
+                row.child(
+                    Button::new("git-create-pull-request")
+                        .icon(IconName::Github)
+                        .label("Create Pull Request")
+                        .outline()
+                        .small()
+                        .tooltip("Create a pull request on GitHub")
+                        .disabled(self.git_busy)
+                        .on_click(cx.listener(|this, _event, window, cx| {
+                            this.run_git_action(GitAction::CreatePullRequest, window, cx);
+                        })),
+                )
+            });
 
         let branch_header = div()
             .flex()
@@ -1629,7 +1706,7 @@ impl RightPanelView {
                             }),
                     ),
             )
-            .child(sync_button);
+            .child(sync_actions);
 
         let pr_card = self.git_status.as_ref().and_then(|s| s.pr.as_ref()).map(|pr| {
             let pr_url = pr.url.clone();
@@ -3947,7 +4024,7 @@ fn scan_project_tree(root: &Path, limit: usize) -> Vec<FileNode> {
 
 #[cfg(test)]
 mod tests {
-    use super::{can_publish_branch, scan_project_tree};
+    use super::{can_create_pull_request, can_publish_branch, scan_project_tree};
     use std::time::{SystemTime, UNIX_EPOCH};
     use threadlane_git::GitStatus;
 
@@ -3974,6 +4051,44 @@ mod tests {
         };
         assert!(!can_publish_branch(Some(&detached)));
         assert!(!can_publish_branch(None));
+    }
+
+    #[test]
+    fn only_ready_branches_without_a_pull_request_offer_creation() {
+        let ready = GitStatus {
+            branch: Some("feature/demo".into()),
+            remote: Some("git@github.com:threadlane/threadlane.git".into()),
+            pr_ready: true,
+            pr_lookup_available: true,
+            ..GitStatus::default()
+        };
+        assert!(can_create_pull_request(Some(&ready)));
+
+        let unavailable = GitStatus {
+            pr_lookup_available: false,
+            ..ready.clone()
+        };
+        assert!(!can_create_pull_request(Some(&unavailable)));
+
+        let with_pr = GitStatus {
+            pr: Some(Default::default()),
+            ..ready.clone()
+        };
+        assert!(!can_create_pull_request(Some(&with_pr)));
+
+        let not_ready = GitStatus {
+            pr_ready: false,
+            ..ready.clone()
+        };
+        assert!(!can_create_pull_request(Some(&not_ready)));
+
+        let detached = GitStatus {
+            detached: true,
+            branch: None,
+            ..ready
+        };
+        assert!(!can_create_pull_request(Some(&detached)));
+        assert!(!can_create_pull_request(None));
     }
 
     #[test]

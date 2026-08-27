@@ -45,6 +45,14 @@ fn pr_cache_key(work_dir: &Path, branch: &str) -> PrCacheKey {
     (repository_key(work_dir), branch.to_owned())
 }
 
+fn invalidate_pr_cache(work_dir: &Path, branch: &str) {
+    if let Some(cache) = PR_CACHE.get() {
+        if let Ok(mut cache) = cache.lock() {
+            cache.remove(&pr_cache_key(work_dir, branch));
+        }
+    }
+}
+
 const GIT_FIELD_SEPARATOR: char = '\u{1f}';
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -138,6 +146,7 @@ pub struct GitStatus {
     pub ahead: usize,
     pub behind: usize,
     pub pr_ready: bool,
+    pub pr_lookup_available: bool,
     pub remote: Option<String>,
     pub branches: Vec<String>,
     pub branch_details: Vec<GitBranchInfo>,
@@ -232,6 +241,15 @@ fn command(work_dir: &Path, args: &[&str]) -> Result<String, GitError> {
             },
         });
     }
+}
+
+fn gh_command(work_dir: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new("gh");
+    command
+        .args(args)
+        .current_dir(work_dir)
+        .env("GH_PROMPT_DISABLED", "1");
+    command
 }
 
 fn parse_status(_work_dir: &Path, porcelain: &str) -> GitStatus {
@@ -359,6 +377,9 @@ fn apply_numstats(work_dir: &Path, status: &mut GitStatus) {
 
 pub fn sync_remote(work_dir: &Path) -> Result<(), GitError> {
     command(work_dir, &["fetch", "--prune", "--quiet"])?;
+    if let Ok(Some(branch)) = current_branch(work_dir) {
+        invalidate_pr_cache(work_dir, &branch);
+    }
     Ok(())
 }
 
@@ -522,7 +543,16 @@ pub fn inspect(work_dir: &Path) -> Result<GitStatus, GitError> {
                 .is_some_and(|count: usize| count > 0);
         }
     }
-    status.pr = inspect_pr(work_dir).ok().flatten();
+    match inspect_pr(work_dir) {
+        Ok(pr) => {
+            status.pr = pr;
+            status.pr_lookup_available = true;
+        }
+        Err(_) => {
+            status.pr = None;
+            status.pr_lookup_available = false;
+        }
+    }
     let stashes = list_stashes(work_dir).unwrap_or_default();
     let current_branch_name = status.branch.as_deref().unwrap_or("");
     let current_stash = stashes
@@ -1033,72 +1063,88 @@ pub fn parse_gh_pr_json(json_str: &str) -> Result<GitHubPrInfo, String> {
 }
 
 fn inspect_pr_uncached(work_dir: &Path, branch: &str) -> Result<Option<GitHubPrInfo>, GitError> {
-    let output = Command::new("gh")
-        .args([
+    let output = gh_command(
+        work_dir,
+        &[
             "pr",
             "view",
             branch,
             "--json",
             "number,title,url,state,isDraft,comments,statusCheckRollup,headRefName,baseRefName",
-        ])
-        .current_dir(work_dir)
-        .output();
-
-    let Ok(output) = output else {
-        return Ok(None);
-    };
+        ],
+    )
+    .output()
+    .map_err(|error| GitError {
+        work_dir: work_dir.to_path_buf(),
+        message: format!("could not start gh: {error}"),
+    })?;
 
     if !output.status.success() {
-        return Ok(None);
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        if stderr.to_ascii_lowercase().contains("no pull request") {
+            return Ok(None);
+        }
+        return Err(GitError {
+            work_dir: work_dir.to_path_buf(),
+            message: if stderr.is_empty() {
+                format!("gh exited with {}", output.status)
+            } else {
+                stderr
+            },
+        });
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    if let Ok(mut info) = parse_gh_pr_json(&stdout) {
-        // `gh pr view --json comments` exposes issue comments only. Inline
-        // review comments live on the REST review-comments endpoint.
-        if let Some((repo, number)) = info
-            .url
-            .split_once("/pull/")
-            .and_then(|(repo, number)| number.parse::<u64>().ok().map(|n| (repo, n)))
+    let mut info = parse_gh_pr_json(&stdout).map_err(|error| GitError {
+        work_dir: work_dir.to_path_buf(),
+        message: format!("could not parse gh pull request response: {error}"),
+    })?;
+
+    // `gh pr view --json comments` exposes issue comments only. Inline
+    // review comments live on the REST review-comments endpoint.
+    if let Some((repo, number)) = info
+        .url
+        .split_once("/pull/")
+        .and_then(|(repo, number)| number.parse::<u64>().ok().map(|n| (repo, n)))
+    {
+        let api_path = format!(
+            "repos/{}/pulls/{}/comments",
+            repo.trim_start_matches("https://github.com/"),
+            number
+        );
+        if let Ok(review_output) =
+            gh_command(work_dir, &["api", &api_path, "--paginate", "--slurp"]).output()
         {
-            let api_path = format!(
-                "repos/{}/pulls/{}/comments",
-                repo.trim_start_matches("https://github.com/"),
-                number
-            );
-            if let Ok(review_output) = Command::new("gh")
-                .args(["api", &api_path, "--paginate", "--slurp"])
-                .current_dir(work_dir)
-                .output()
-            {
-                if review_output.status.success() {
-                    let pages = String::from_utf8_lossy(&review_output.stdout);
-                    if let Ok(pages) = serde_json::from_str::<Vec<Vec<serde_json::Value>>>(&pages) {
-                        for item in pages.into_iter().flatten() {
-                            info.review_comments.push(PrReviewComment {
-                                author: item["user"]["login"]
-                                    .as_str()
-                                    .unwrap_or("unknown")
-                                    .to_string(),
-                                body: item["body"].as_str().unwrap_or("").to_string(),
-                                path: item["path"].as_str().map(str::to_string),
-                                line: item["line"]
-                                    .as_u64()
-                                    .or_else(|| item["original_line"].as_u64()),
-                                created_at: item["created_at"].as_str().unwrap_or("").to_string(),
-                            });
-                        }
-                        info.comments_count = info.review_comments.len();
+            if review_output.status.success() {
+                let pages = String::from_utf8_lossy(&review_output.stdout);
+                if let Ok(pages) = serde_json::from_str::<Vec<Vec<serde_json::Value>>>(&pages) {
+                    for item in pages.into_iter().flatten() {
+                        info.review_comments.push(PrReviewComment {
+                            author: item["user"]["login"]
+                                .as_str()
+                                .unwrap_or("unknown")
+                                .to_string(),
+                            body: item["body"].as_str().unwrap_or("").to_string(),
+                            path: item["path"].as_str().map(str::to_string),
+                            line: item["line"]
+                                .as_u64()
+                                .or_else(|| item["original_line"].as_u64()),
+                            created_at: item["created_at"].as_str().unwrap_or("").to_string(),
+                        });
                     }
+                    info.comments_count = info.review_comments.len();
                 }
             }
         }
-        if info.number > 0 {
-            return Ok(Some(info));
-        }
     }
 
-    Ok(None)
+    if info.number == 0 {
+        return Err(GitError {
+            work_dir: work_dir.to_path_buf(),
+            message: "gh returned a pull request without a number".to_owned(),
+        });
+    }
+    Ok(Some(info))
 }
 
 pub fn inspect_pr(work_dir: &Path) -> Result<Option<GitHubPrInfo>, GitError> {
@@ -1307,6 +1353,45 @@ pub fn push(work_dir: &Path) -> Result<(), GitError> {
     }
     command(work_dir, &["push", "--set-upstream", "origin", branch])?;
     Ok(())
+}
+
+/// Publishes the current branch and creates a GitHub pull request from its commits.
+///
+/// `gh pr create --fill` uses the current branch's commit messages for the PR
+/// title and body, so this action remains non-interactive when invoked from the
+/// desktop UI. Publishing first also handles branches that do not have an
+/// upstream yet.
+pub fn create_pull_request(work_dir: &Path) -> Result<String, GitError> {
+    let branch = current_branch(work_dir)?.ok_or_else(|| GitError {
+        work_dir: work_dir.to_path_buf(),
+        message:
+            "cannot create a pull request from a detached HEAD; check out a named branch first"
+                .to_owned(),
+    })?;
+
+    push(work_dir)?;
+    invalidate_pr_cache(work_dir, &branch);
+
+    let output = gh_command(work_dir, &["pr", "create", "--fill"])
+        .output()
+        .map_err(|error| GitError {
+            work_dir: work_dir.to_path_buf(),
+            message: format!("could not start gh: {error}"),
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(GitError {
+            work_dir: work_dir.to_path_buf(),
+            message: if stderr.is_empty() {
+                format!("gh exited with {}", output.status)
+            } else {
+                stderr
+            },
+        });
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 pub fn pull(work_dir: &Path) -> Result<String, GitError> {
@@ -1588,6 +1673,22 @@ fn discover_default_branch(work_dir: &Path) -> Option<String> {
     )
     .ok()
     .and_then(|value| value.trim().strip_prefix("origin/").map(str::to_owned))
+    {
+        return Some(branch);
+    }
+
+    // A freshly cloned repository may not have origin/HEAD configured yet.
+    // `remote show -n` reads the locally known remote HEAD without contacting
+    // the network and covers repositories whose default branch is not main or
+    // master.
+    if let Some(branch) = command(work_dir, &["remote", "show", "-n", "origin"])
+        .ok()
+        .and_then(|output| {
+            output.lines().find_map(|line| {
+                let branch = line.trim().strip_prefix("HEAD branch: ")?.trim();
+                (!branch.is_empty() && branch != "(unknown)").then(|| branch.to_owned())
+            })
+        })
     {
         return Some(branch);
     }
@@ -2074,6 +2175,21 @@ mod tests {
         let status_main = inspect(dir.path()).unwrap();
         assert_eq!(status_main.branch.as_deref(), Some("main"));
         assert!(dir.path().join("carry.txt").exists());
+    }
+
+    #[test]
+    fn pull_request_creation_rejects_detached_head() {
+        let dir = tempdir().unwrap();
+        run_git(dir.path(), &["init", "-b", "main"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Test"]);
+        fs::write(dir.path().join("base.txt"), "base\n").unwrap();
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-qm", "initial commit"]);
+        run_git(dir.path(), &["checkout", "--detach", "HEAD"]);
+
+        let error = create_pull_request(dir.path()).unwrap_err();
+        assert!(error.message.contains("detached HEAD"));
     }
 
     #[test]

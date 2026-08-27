@@ -217,6 +217,23 @@ impl CodingSessionHarness {
         })
     }
 
+    /// Append a durable fact through the canonical session harness adapter.
+    pub fn append_fact_to_path(
+        path: &Path,
+        lane: &str,
+        key: &str,
+        value: &str,
+        run_id: Option<&str>,
+    ) -> Result<(), String> {
+        Self::with_path(path, |journal| {
+            journal
+                .store
+                .store_mut()
+                .append_fact(lane, key, value, run_id)
+                .map_err(|error| error.to_string())
+        })
+    }
+
     pub(crate) fn append_message_to_path(path: &Path, message: AgentMessage) -> Result<(), String> {
         Self::with_path(path, |journal| journal.append_message(message).map(|_| ()))
     }
