@@ -1291,6 +1291,17 @@ impl AppState {
 
     pub(crate) fn begin_new_task(&mut self) {
         self.workspace_page = WorkspacePage::Chat;
+        if let Some(project_work_dir) = self.active_session_id.as_ref().and_then(|session_id| {
+            self.projects.iter().find_map(|project| {
+                project
+                    .sessions
+                    .iter()
+                    .any(|session| &session.id == session_id)
+                    .then(|| project.work_dir.clone())
+            })
+        }) {
+            self.active_work_dir = Some(project_work_dir);
+        }
         self.active_session_id = None;
         self.is_new_task = true;
         self.draft_work_mode = WorkMode::Local;
@@ -4669,6 +4680,44 @@ mod tests {
         });
         state.active_work_dir = Some(work_dir);
         state.active_session_id = Some(session_id.into());
+    }
+
+    #[test]
+    fn begin_new_task_returns_from_a_session_worktree_to_its_project_root() {
+        let mut state = AppState::load_from_registry(Vec::new());
+        let project_work_dir = std::env::temp_dir().join("threadlane-project-root");
+        let worktree_work_dir = project_work_dir
+            .join(".threadlane/worktrees")
+            .join("session-worktree");
+        let session_file = project_work_dir
+            .join(".threadlane/sessions")
+            .join("session-worktree.jsonl");
+        state.projects.push(ProjectInfo {
+            name: "Project".into(),
+            work_dir: project_work_dir.clone(),
+            sessions: vec![SessionInfo {
+                id: "session-worktree".into(),
+                title: "Worktree session".into(),
+                work_dir: worktree_work_dir.clone(),
+                session_file,
+                updated_at: 0,
+                health: SessionHealth::Working,
+                git_branch: Some("worktree/session-worktree".into()),
+                is_worktree: true,
+            }],
+            is_expanded: true,
+        });
+        state.active_work_dir = Some(worktree_work_dir);
+        state.active_session_id = Some("session-worktree".into());
+        state.is_new_task = false;
+        state.draft_work_mode = WorkMode::Worktree;
+
+        state.begin_new_task();
+
+        assert_eq!(state.active_work_dir.as_ref(), Some(&project_work_dir));
+        assert_eq!(state.active_session_id, None);
+        assert!(state.is_new_task);
+        assert_eq!(state.draft_work_mode, WorkMode::Local);
     }
 
     fn apply_pending_hydration(state: &mut AppState) {

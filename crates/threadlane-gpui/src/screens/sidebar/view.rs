@@ -427,7 +427,9 @@ impl SidebarView {
     ) -> impl IntoElement {
         let theme = cx.theme().colors;
         let health = session.health.clone();
-        let is_generating = is_active && self.model.read(cx).is_generating;
+        let state = self.model.read(cx);
+        let is_generating = state.session_is_generating(&session.session_file)
+            || (is_active && state.is_generating);
         let is_working = health == SessionHealth::Working || is_generating;
 
         let status_indicator = if is_working {
