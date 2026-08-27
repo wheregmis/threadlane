@@ -832,10 +832,25 @@ pub struct ChatListView {
         std::time::Instant,
         Vec<SlashCommandInfo>,
     )>,
+    selected_slash_index: usize,
+    dismiss_slash_menu: bool,
+    permission_details_open: bool,
     context_meter_open: bool,
     subagents_popover_open: bool,
     selected_subagent_run_id: Option<String>,
     _subscriptions: Vec<Subscription>,
+}
+
+fn active_slash_command_query(text: &str) -> Option<&str> {
+    let trimmed = text.trim_start();
+    if !trimmed.starts_with('/') {
+        return None;
+    }
+    let rest = &trimmed[1..];
+    if rest.contains(char::is_whitespace) {
+        return None;
+    }
+    Some(rest)
 }
 
 async fn next_chat_stream_batch(
@@ -914,42 +929,73 @@ impl ChatListView {
             window,
             move |this, input_state, event: &InputEvent, window, cx| {
                 cx.notify();
-                if let InputEvent::PressEnter {
-                    secondary,
-                    shift: false,
-                } = event
-                {
-                    let text = input_state.read(cx).value().to_string();
-                    let is_generating = model_clone.read(cx).is_generating;
-                    if !text.trim().is_empty() || (!is_generating && !this.pasted_images.is_empty())
-                    {
-                        let images = std::mem::take(&mut this.pasted_images);
-                        let is_steer = *secondary;
-                        model_clone.update(cx, |state, cx| {
-                            if is_generating {
-                                controller::dispatch(
-                                    state,
-                                    AppAction::StageBusyMessage { text, images },
-                                );
-                                if is_steer {
-                                    controller::dispatch(state, AppAction::SteerPendingMessage);
-                                } else {
-                                    controller::dispatch(state, AppAction::QueuePendingMessage);
-                                }
-                            } else {
-                                controller::dispatch(
-                                    state,
-                                    AppAction::SendPromptWithImages { text, images },
-                                );
-                            }
-                            cx.notify();
-                        });
-                        input_state.update(cx, |state, cx| {
-                            state.set_value("", window, cx);
-                        });
-                        submit_list_state.scroll_to_end();
-                        cx.notify();
+                match event {
+                    InputEvent::Change => {
+                        this.dismiss_slash_menu = false;
                     }
+                    InputEvent::PressEnter {
+                        secondary,
+                        shift: false,
+                    } => {
+                        let text = input_state.read(cx).value().to_string();
+                        let is_generating = model_clone.read(cx).is_generating;
+                        let project_root = model_clone.read(cx).active_work_dir.clone();
+
+                        if let Some(query) = active_slash_command_query(&text) {
+                            if !this.dismiss_slash_menu {
+                                let matching = this
+                                    .cached_slash_commands(project_root.as_deref())
+                                    .into_iter()
+                                    .filter(|cmd| query.is_empty() || cmd.name.starts_with(query))
+                                    .collect::<Vec<_>>();
+                                if !matching.is_empty() {
+                                    let selected = this
+                                        .selected_slash_index
+                                        .min(matching.len().saturating_sub(1));
+                                    let cmd = &matching[selected];
+                                    let value = format!("/{} ", cmd.name);
+                                    input_state.update(cx, |state, cx| {
+                                        state.set_value(&value, window, cx);
+                                    });
+                                    this.selected_slash_index = 0;
+                                    cx.notify();
+                                    return;
+                                }
+                            }
+                        }
+
+                        if !text.trim().is_empty()
+                            || (!is_generating && !this.pasted_images.is_empty())
+                        {
+                            let images = std::mem::take(&mut this.pasted_images);
+                            let is_steer = *secondary;
+                            model_clone.update(cx, |state, cx| {
+                                if is_generating {
+                                    controller::dispatch(
+                                        state,
+                                        AppAction::StageBusyMessage { text, images },
+                                    );
+                                    if is_steer {
+                                        controller::dispatch(state, AppAction::SteerPendingMessage);
+                                    } else {
+                                        controller::dispatch(state, AppAction::QueuePendingMessage);
+                                    }
+                                } else {
+                                    controller::dispatch(
+                                        state,
+                                        AppAction::SendPromptWithImages { text, images },
+                                    );
+                                }
+                                cx.notify();
+                            });
+                            input_state.update(cx, |state, cx| {
+                                state.set_value("", window, cx);
+                            });
+                            submit_list_state.scroll_to_end();
+                            cx.notify();
+                        }
+                    }
+                    _ => {}
                 }
             },
         );
@@ -1006,6 +1052,9 @@ impl ChatListView {
             trajectory_cache: None,
             trajectory_raw_json: None,
             slash_command_cache: None,
+            selected_slash_index: 0,
+            dismiss_slash_menu: false,
+            permission_details_open: false,
             context_meter_open: false,
             subagents_popover_open: false,
             selected_subagent_run_id: None,
@@ -3461,6 +3510,326 @@ impl ChatListView {
             .into_any_element()
     }
 
+    fn handle_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = event.keystroke.key.as_str();
+
+        if self.permission_details_open {
+            let state = self.model.read(cx);
+            if let Some(session_id) = state.active_session_id.as_ref() {
+                if let Some(request) = state.pending_permissions.get(session_id).cloned() {
+                    let request_id = request.id.clone();
+                    match key {
+                        "y" | "Y" | "enter" => {
+                            self.permission_details_open = false;
+                            self.model.update(cx, |state, cx| {
+                                state.resolve_active_permission(
+                                    &request_id,
+                                    threadlane_session::PermissionDecision::AllowOnce,
+                                );
+                                cx.notify();
+                            });
+                            cx.stop_propagation();
+                            cx.notify();
+                            return;
+                        }
+                        "a" | "A" => {
+                            self.permission_details_open = false;
+                            self.model.update(cx, |state, cx| {
+                                state.resolve_active_permission(
+                                    &request_id,
+                                    threadlane_session::PermissionDecision::AllowAlways,
+                                );
+                                cx.notify();
+                            });
+                            cx.stop_propagation();
+                            cx.notify();
+                            return;
+                        }
+                        "n" | "N" => {
+                            self.permission_details_open = false;
+                            self.model.update(cx, |state, cx| {
+                                state.resolve_active_permission(
+                                    &request_id,
+                                    threadlane_session::PermissionDecision::Deny,
+                                );
+                                cx.notify();
+                            });
+                            cx.stop_propagation();
+                            cx.notify();
+                            return;
+                        }
+                        "escape" => {
+                            self.permission_details_open = false;
+                            cx.stop_propagation();
+                            cx.notify();
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        let text = self.input_state.read(cx).value().to_string();
+        let project_root = self.model.read(cx).active_work_dir.clone();
+        if let Some(query) = active_slash_command_query(&text) {
+            if !self.dismiss_slash_menu {
+                let matching = self
+                    .cached_slash_commands(project_root.as_deref())
+                    .into_iter()
+                    .filter(|cmd| query.is_empty() || cmd.name.starts_with(query))
+                    .collect::<Vec<_>>();
+                if !matching.is_empty() {
+                    let total = matching.len().min(8);
+                    match key {
+                        "down" => {
+                            self.selected_slash_index = (self.selected_slash_index + 1) % total;
+                            cx.stop_propagation();
+                            cx.notify();
+                            return;
+                        }
+                        "up" => {
+                            self.selected_slash_index = if self.selected_slash_index == 0 {
+                                total.saturating_sub(1)
+                            } else {
+                                self.selected_slash_index - 1
+                            };
+                            cx.stop_propagation();
+                            cx.notify();
+                            return;
+                        }
+                        "tab" => {
+                            let selected = self
+                                .selected_slash_index
+                                .min(matching.len().saturating_sub(1));
+                            let cmd = &matching[selected];
+                            let value = format!("/{} ", cmd.name);
+                            self.input_state.update(cx, |state, cx| {
+                                state.set_value(&value, window, cx);
+                            });
+                            self.selected_slash_index = 0;
+                            cx.stop_propagation();
+                            cx.notify();
+                            return;
+                        }
+                        "escape" => {
+                            self.dismiss_slash_menu = true;
+                            cx.stop_propagation();
+                            cx.notify();
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        let state = self.model.read(cx);
+        if let Some(session_id) = state.active_session_id.as_ref() {
+            if let Some(request) = state.pending_permissions.get(session_id).cloned() {
+                let request_id = request.id.clone();
+                if text.trim().is_empty() {
+                    match key {
+                        "y" | "Y" => {
+                            self.model.update(cx, |state, cx| {
+                                state.resolve_active_permission(
+                                    &request_id,
+                                    threadlane_session::PermissionDecision::AllowOnce,
+                                );
+                                cx.notify();
+                            });
+                            cx.stop_propagation();
+                            cx.notify();
+                        }
+                        "a" | "A" => {
+                            self.model.update(cx, |state, cx| {
+                                state.resolve_active_permission(
+                                    &request_id,
+                                    threadlane_session::PermissionDecision::AllowAlways,
+                                );
+                                cx.notify();
+                            });
+                            cx.stop_propagation();
+                            cx.notify();
+                        }
+                        "n" | "N" => {
+                            self.model.update(cx, |state, cx| {
+                                state.resolve_active_permission(
+                                    &request_id,
+                                    threadlane_session::PermissionDecision::Deny,
+                                );
+                                cx.notify();
+                            });
+                            cx.stop_propagation();
+                            cx.notify();
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    fn render_permission_details_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let state = self.model.read(cx);
+        let session_id = state.active_session_id.as_ref()?;
+        let request = state.pending_permissions.get(session_id)?.clone();
+        let theme = cx.theme().colors;
+
+        let action_button = |id: &'static str,
+                             label: &'static str,
+                             decision: threadlane_session::PermissionDecision,
+                             primary: bool,
+                             danger: bool| {
+            let model = self.model.clone();
+            let request_id = request.id.clone();
+            Button::new(id)
+                .label(label)
+                .small()
+                .when(primary, |button| button.primary())
+                .when(danger, |button| button.danger())
+                .on_click(cx.listener(move |this, _event, _window, cx| {
+                    this.permission_details_open = false;
+                    model.update(cx, |state, cx| {
+                        state.resolve_active_permission(&request_id, decision);
+                        cx.notify();
+                    });
+                    cx.notify();
+                }))
+        };
+
+        Some(
+            div()
+                .id("permission-details-backdrop")
+                .absolute()
+                .inset_0()
+                .bg(hsla(0.0, 0.0, 0.0, 0.6))
+                .flex()
+                .items_center()
+                .justify_center()
+                .p_4()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _event, _window, cx| {
+                        this.permission_details_open = false;
+                        cx.notify();
+                    }),
+                )
+                .child(
+                    div()
+                        .id("permission-details-modal")
+                        .w(px(640.0))
+                        .max_w(px(CHAT_CONTENT_MAX_WIDTH))
+                        .p_5()
+                        .rounded_xl()
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.title_bar)
+                        .shadow_xl()
+                        .flex()
+                        .flex_col()
+                        .gap_4()
+                        .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
+                            cx.stop_propagation();
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .text_base()
+                                                .font_weight(FontWeight::BOLD)
+                                                .text_color(theme.foreground)
+                                                .child(format!("Permission Request: {}", request.title)),
+                                        )
+                                        .child(
+                                            Tag::new()
+                                                .child(request.capability.clone())
+                                                .with_variant(TagVariant::Secondary)
+                                                .small(),
+                                        ),
+                                )
+                                .child(
+                                    Button::new("close-permission-details-dialog-btn")
+                                        .icon(IconName::Close)
+                                        .ghost()
+                                        .xsmall()
+                                        .on_click(cx.listener(|this, _event, _window, cx| {
+                                            this.permission_details_open = false;
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .w_full()
+                                .max_h(px(320.0))
+                                .p_3()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(theme.border)
+                                .bg(theme.background)
+                                .text_xs()
+                                .text_color(theme.foreground)
+                                .overflow_y_scrollbar()
+                                .child(request.detail.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child("Shortcuts: [Y] Allow once · [A] Always · [N] Deny · [Esc] Close"),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(action_button(
+                                            "details-deny",
+                                            "Deny [N]",
+                                            threadlane_session::PermissionDecision::Deny,
+                                            false,
+                                            true,
+                                        ))
+                                        .child(action_button(
+                                            "details-allow-once",
+                                            "Allow once [Y]",
+                                            threadlane_session::PermissionDecision::AllowOnce,
+                                            true,
+                                            false,
+                                        ))
+                                        .child(action_button(
+                                            "details-allow-always",
+                                            "Always [A]",
+                                            threadlane_session::PermissionDecision::AllowAlways,
+                                            false,
+                                            false,
+                                        )),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn render_permission_prompt(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let state = self.model.read(cx);
         let session_id = state.active_session_id.as_ref()?;
@@ -3525,31 +3894,49 @@ impl ChatListView {
                                 )
                                 .child(
                                     div()
+                                        .id("permission-prompt-detail-text")
                                         .min_w_0()
                                         .text_color(theme.muted_foreground)
                                         .truncate()
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|this, _event, _window, cx| {
+                                            this.permission_details_open = true;
+                                            cx.notify();
+                                        }))
                                         .child(request.detail),
                                 ),
                         )
+                        .child(
+                            Button::new("permission-details-btn")
+                                .icon(IconName::Maximize)
+                                .label("Details")
+                                .ghost()
+                                .xsmall()
+                                .tooltip("View full command & arguments")
+                                .on_click(cx.listener(|this, _event, _window, cx| {
+                                    this.permission_details_open = true;
+                                    cx.notify();
+                                })),
+                        )
                         .child(action_button(
                             "permission-deny",
-                            "Deny",
+                            "Deny [N]",
                             threadlane_session::PermissionDecision::Deny,
                             false,
                             true,
                         ))
                         .child(action_button(
                             "permission-allow-once",
-                            "Allow once",
+                            "Allow once [Y]",
                             threadlane_session::PermissionDecision::AllowOnce,
-                            false,
+                            true,
                             false,
                         ))
                         .child(action_button(
                             "permission-allow-always",
-                            "Always",
+                            "Always [A]",
                             threadlane_session::PermissionDecision::AllowAlways,
-                            true,
+                            false,
                             false,
                         )),
                 )
@@ -4442,100 +4829,135 @@ impl ChatListView {
             });
 
         let input_value = self.input_state.read(cx).value().to_string();
-        let command_menu = if input_value.starts_with('/') {
-            let query = input_value[1..]
-                .split_whitespace()
-                .next()
-                .unwrap_or_default();
-            let commands = self
-                .cached_slash_commands(project_root.as_deref())
-                .into_iter()
-                .filter(|command| query.is_empty() || command.name.starts_with(query))
-                .collect::<Vec<_>>();
-            let command_count = commands.len();
-            let shown_count = command_count.min(8);
-            let has_commands = command_count > 0;
-            let input_state = self.input_state.clone();
-            div()
-                .absolute()
-                .left(px(16.0))
-                .bottom(px(128.0))
-                .w_full()
-                .max_w(px(620.0))
-                .max_h(px(286.0))
-                .flex()
-                .flex_col()
-                .rounded_lg()
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.title_bar)
-                .shadow_lg()
-                .p_1()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .h(px(28.0))
-                        .px_2()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child("COMMANDS")
-                        .child(format!("{shown_count}/{command_count}")),
-                )
-                .child(
-                    div()
-                        .when(!has_commands, |list| {
-                            list.child(
+        let command_menu = if let Some(query) = active_slash_command_query(&input_value) {
+            if self.dismiss_slash_menu {
+                div().into_any_element()
+            } else {
+                let commands = self
+                    .cached_slash_commands(project_root.as_deref())
+                    .into_iter()
+                    .filter(|command| query.is_empty() || command.name.starts_with(query))
+                    .collect::<Vec<_>>();
+                let command_count = commands.len();
+                let shown_count = command_count.min(8);
+                let has_commands = command_count > 0;
+                let selected_idx = self.selected_slash_index.min(shown_count.saturating_sub(1));
+                let input_state = self.input_state.clone();
+                div()
+                    .absolute()
+                    .bottom_full()
+                    .left(px(0.0))
+                    .mb(px(8.0))
+                    .w_full()
+                    .max_w(px(640.0))
+                    .max_h(px(320.0))
+                    .flex()
+                    .flex_col()
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.title_bar)
+                    .shadow_xl()
+                    .p_1p5()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .h(px(26.0))
+                            .px_2()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(
                                 div()
-                                    .h(px(36.0))
                                     .flex()
                                     .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child("COMMANDS"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_color(theme.muted_foreground)
+                                            .child("↑↓ navigate · Tab/Enter select · Esc dismiss"),
+                                    ),
+                            )
+                            .child(format!("{shown_count}/{command_count}")),
+                    )
+                    .child(
+                        div()
+                            .when(!has_commands, |list| {
+                                list.child(
+                                    div()
+                                        .h(px(36.0))
+                                        .flex()
+                                        .items_center()
+                                        .px_2()
+                                        .text_sm()
+                                        .text_color(theme.muted_foreground)
+                                        .child("No matching commands"),
+                                )
+                            })
+                            .children(commands.into_iter().take(8).enumerate().map(|(idx, command)| {
+                                let input_state = input_state.clone();
+                                let is_active = idx == selected_idx;
+                                let value = format!("/{} ", command.name);
+                                div()
+                                    .id(SharedString::from(format!(
+                                        "composer-command-{}",
+                                        command.name
+                                    )))
+                                    .h(px(30.0))
+                                    .flex()
+                                    .items_center()
+                                    .rounded_md()
                                     .px_2()
                                     .text_sm()
-                                    .text_color(theme.muted_foreground)
-                                    .child("No matching commands"),
-                            )
-                        })
-                        .children(commands.into_iter().take(8).map(|command| {
-                            let input_state = input_state.clone();
-                            let value = format!("/{} ", command.name);
-                            div()
-                                .id(SharedString::from(format!(
-                                    "composer-command-{}",
-                                    command.name
-                                )))
-                                .h(px(30.0))
-                                .flex()
-                                .items_center()
-                                .rounded_md()
-                                .px_2()
-                                .text_sm()
-                                .hover(|style| style.bg(theme.list_hover))
-                                .cursor_pointer()
-                                .child(
-                                    div()
-                                        .w(px(112.0))
-                                        .flex_none()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(theme.foreground)
-                                        .child(format!("/{}", command.name)),
-                                )
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .text_color(theme.muted_foreground)
-                                        .child(command.description),
-                                )
-                                .on_click(move |_event, window, cx| {
-                                    input_state.update(cx, |state, cx| {
-                                        state.set_value(&value, window, cx);
-                                    });
-                                })
-                        })),
-                )
-                .into_any_element()
+                                    .bg(if is_active {
+                                        theme.accent.opacity(0.16)
+                                    } else {
+                                        hsla(0.0, 0.0, 0.0, 0.0)
+                                    })
+                                    .hover(|style| style.bg(theme.list_hover))
+                                    .cursor_pointer()
+                                    .child(
+                                        div()
+                                            .w(px(112.0))
+                                            .flex_none()
+                                            .font_weight(if is_active {
+                                                FontWeight::BOLD
+                                            } else {
+                                                FontWeight::SEMIBOLD
+                                            })
+                                            .text_color(if is_active {
+                                                theme.primary
+                                            } else {
+                                                theme.foreground
+                                            })
+                                            .child(format!("/{}", command.name)),
+                                    )
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .text_color(if is_active {
+                                                theme.foreground
+                                            } else {
+                                                theme.muted_foreground
+                                            })
+                                            .child(command.description),
+                                    )
+                                    .on_click(move |_event, window, cx| {
+                                        input_state.update(cx, |state, cx| {
+                                            state.set_value(&value, window, cx);
+                                        });
+                                    })
+                            })),
+                    )
+                    .into_any_element()
+            }
         } else {
             div().into_any_element()
         };
@@ -5100,6 +5522,9 @@ impl Render for ChatListView {
             self.trajectory_raw_json = None;
             self.subagents_popover_open = false;
             self.selected_subagent_run_id = None;
+            self.selected_slash_index = 0;
+            self.dismiss_slash_menu = false;
+            self.permission_details_open = false;
             self.trajectory_search_input.update(cx, |state, cx| {
                 state.set_value("", window, cx);
             });
@@ -5128,6 +5553,7 @@ impl Render for ChatListView {
             .min_w_0()
             .min_h_0()
             .bg(theme.background)
+            .on_key_down(cx.listener(Self::handle_key_down))
             .child(self.render_header(cx))
             .child(match self.current_tab {
                 CentralTab::Editor => self.editor.clone().into_any_element(),
@@ -5234,22 +5660,27 @@ impl Render for ChatListView {
                     .flatten(),
             )
             .children((self.current_tab == CentralTab::Chat).then(|| self.render_composer(cx)))
+            .children(
+                (self.current_tab == CentralTab::Chat && self.permission_details_open)
+                    .then(|| self.render_permission_details_dialog(cx))
+                    .flatten(),
+            )
     }
 }
 
 #[cfg(test)]
 mod hot_path_tests {
     use super::{
-        build_trajectory_rows, build_transcript_rows, classify_chat_link, classify_markdown_update,
-        contains_case_insensitive, context_meter_view_model, extend_trajectory_facets,
-        extend_trajectory_previews, extend_trajectory_rows, extend_trajectory_summary,
-        extract_markdown_segments, format_trajectory_raw_json, grouped_tool_activities,
-        is_terminal_runnable_language, markdown_cache_exceeded, next_chat_stream_batch,
-        normalize_terminal_command, reconcile_trajectory_entries,
-        reconcile_trajectory_entries_by_epoch, subagent_popover_counts, summarize_trajectory,
-        ChatLinkTarget, ContextMeterContext, ContextMeterMetrics, MarkdownSegment, MarkdownUpdate,
-        TrajectoryCacheKey, TrajectoryMode, TrajectoryRow, TranscriptRow,
-        MARKDOWN_CACHE_ENTRY_LIMIT,
+        active_slash_command_query, build_trajectory_rows, build_transcript_rows,
+        classify_chat_link, classify_markdown_update, contains_case_insensitive,
+        context_meter_view_model, extend_trajectory_facets, extend_trajectory_previews,
+        extend_trajectory_rows, extend_trajectory_summary, extract_markdown_segments,
+        format_trajectory_raw_json, grouped_tool_activities, is_terminal_runnable_language,
+        markdown_cache_exceeded, next_chat_stream_batch, normalize_terminal_command,
+        reconcile_trajectory_entries, reconcile_trajectory_entries_by_epoch,
+        subagent_popover_counts, summarize_trajectory, ChatLinkTarget, ContextMeterContext,
+        ContextMeterMetrics, MarkdownSegment, MarkdownUpdate, TrajectoryCacheKey, TrajectoryMode,
+        TrajectoryRow, TranscriptRow, MARKDOWN_CACHE_ENTRY_LIMIT,
     };
     use crate::state::{
         reported_session_shape_state, ChatMessageInfo, ChatStreamEvent, MessageRole,
@@ -5970,5 +6401,16 @@ mod hot_path_tests {
         assert!(!is_terminal_runnable_language("rust"));
         assert!(!is_terminal_runnable_language("python"));
         assert!(!is_terminal_runnable_language("json"));
+    }
+
+    #[test]
+    fn active_slash_command_query_identifies_autocomplete_prefixes() {
+        assert_eq!(active_slash_command_query("/"), Some(""));
+        assert_eq!(active_slash_command_query("/com"), Some("com"));
+        assert_eq!(active_slash_command_query("  /help"), Some("help"));
+        assert_eq!(active_slash_command_query("/commit message"), None);
+        assert_eq!(active_slash_command_query("/commit "), None);
+        assert_eq!(active_slash_command_query("hello /help"), None);
+        assert_eq!(active_slash_command_query("plain text"), None);
     }
 }
