@@ -175,6 +175,27 @@ impl RpcDispatcher {
                     .map(|res| serde_json::to_value(res).unwrap()),
                 Err(e) => Err(format!("Invalid params: {e}")),
             },
+            "project/unregister" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .project_service
+                    .unregister_project(req)
+                    .map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "project/select" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .project_service
+                    .select_project(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "project/browse" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .project_service
+                    .browse_directories(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
             "project/list_dir" => match serde_json::from_value(params) {
                 Ok(req) => self
                     .project_service

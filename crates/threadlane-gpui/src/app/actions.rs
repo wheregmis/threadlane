@@ -55,4 +55,5 @@ pub enum AppAction {
     ToggleReasoningExpanded(String),
     OpenFileInEditor(String),
     RunTerminalCommand(String),
+    OpenProjectPicker,
 }

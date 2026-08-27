@@ -156,6 +156,14 @@ pub struct WorkspaceView {
     bottom_panel_visible: bool,
     command_palette_open: bool,
     command_state: Entity<CommandState>,
+    project_picker_open: bool,
+    project_picker_current_path: Option<String>,
+    project_picker_display_path: String,
+    project_picker_parent_path: Option<String>,
+    project_picker_entries: Vec<threadlane_protocol::project::HostDirectoryInfo>,
+    project_picker_selected_index: usize,
+    project_picker_scroll_handle: ScrollHandle,
+    project_picker_focus: FocusHandle,
     last_git_work_dir: Option<PathBuf>,
     last_git_pr_targets: HashSet<(PathBuf, String)>,
     sidebar_resizable_state: Entity<ResizableState>,
@@ -320,6 +328,16 @@ impl WorkspaceView {
                         term.send_input(&format!("{trimmed}\n"));
                     });
                 }
+                if model.update(cx, |state, _cx| {
+                    if state.requested_project_picker {
+                        state.requested_project_picker = false;
+                        true
+                    } else {
+                        false
+                    }
+                }) {
+                    this.open_project_picker(None, cx);
+                }
                 let _ = model_wake_tx.send(());
                 cx.notify();
             });
@@ -410,6 +428,14 @@ impl WorkspaceView {
                 bottom_panel_visible: false,
                 command_palette_open: false,
                 command_state,
+                project_picker_open: false,
+                project_picker_current_path: None,
+                project_picker_display_path: String::new(),
+                project_picker_parent_path: None,
+                project_picker_entries: Vec::new(),
+                project_picker_selected_index: 0,
+                project_picker_scroll_handle: ScrollHandle::new(),
+                project_picker_focus: cx.focus_handle(),
                 last_git_work_dir: None,
                 last_git_pr_targets: HashSet::new(),
                 sidebar_resizable_state,
@@ -635,17 +661,7 @@ impl WorkspaceView {
                 });
             }
             "attach" => {
-                cx.spawn(async move |_this, cx| {
-                    let Some(folder) = rfd::AsyncFileDialog::new().pick_folder().await else {
-                        return;
-                    };
-                    let path = folder.path().to_path_buf();
-                    let _ = model.update(cx, |state, cx| {
-                        controller::dispatch(state, AppAction::AttachProject(path));
-                        cx.notify();
-                    });
-                })
-                .detach();
+                self.open_project_picker(Some(window), cx);
             }
             "git" => self.open_git_review(cx),
             "git_branch" => self.open_git_branches(cx),
@@ -1192,6 +1208,522 @@ impl WorkspaceView {
                                 });
                             }),
                     ),
+            )
+            .into_any_element()
+    }
+
+    pub(crate) fn open_project_picker(
+        &mut self,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
+        self.project_picker_open = true;
+        self.command_palette_open = false;
+        if let Some(window) = window {
+            self.project_picker_focus.focus(window, cx);
+        }
+        self.browse_project_picker_dir(None, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn browse_project_picker_dir(
+        &mut self,
+        path: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let view = cx.weak_entity();
+        cx.spawn(async move |_this, cx| {
+            // First attempt daemon RPC
+            let daemon_res = match crate::services::daemon_client::get_daemon_client().await {
+                Ok(client) => client.browse_directories(path.as_deref()).await,
+                Err(e) => Err(e),
+            };
+
+            let resp = match daemon_res {
+                Ok(resp) => resp,
+                Err(_) => {
+                    // Fallback to direct host filesystem browse
+                    let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+                    let target = match path.as_deref() {
+                        Some(p) if !p.is_empty() => {
+                            if p == "~" || p.starts_with("~/") {
+                                if p == "~" {
+                                    home_dir.clone()
+                                } else {
+                                    home_dir.join(&p[2..])
+                                }
+                            } else {
+                                PathBuf::from(p)
+                            }
+                        }
+                        _ => home_dir.clone(),
+                    };
+
+                    let canonical = target.canonicalize().unwrap_or(target);
+                    let current_path = canonical.to_string_lossy().to_string();
+                    let display_path = if let Ok(rel) = canonical.strip_prefix(&home_dir) {
+                        if rel.as_os_str().is_empty() {
+                            "~/".to_string()
+                        } else {
+                            format!("~/{}/", rel.to_string_lossy())
+                        }
+                    } else {
+                        format!("{}/", current_path)
+                    };
+                    let parent_path = canonical.parent().map(|p| p.to_string_lossy().to_string());
+
+                    let mut entries = Vec::new();
+                    if let Ok(read_dir) = std::fs::read_dir(&canonical) {
+                        for item in read_dir.flatten() {
+                            let Ok(ft) = item.file_type() else { continue };
+                            let is_dir = ft.is_dir() || (ft.is_symlink() && item.path().is_dir());
+                            if !is_dir {
+                                continue;
+                            }
+                            let name = item.file_name().to_string_lossy().to_string();
+                            if name.starts_with('.') {
+                                continue;
+                            }
+                            let p = item.path();
+                            let is_git = p.join(".git").exists();
+                            let is_project = p.join(".threadlane").exists();
+                            entries.push(threadlane_protocol::project::HostDirectoryInfo {
+                                name,
+                                path: p.to_string_lossy().to_string(),
+                                is_dir: true,
+                                is_git,
+                                is_project,
+                            });
+                        }
+                    }
+                    entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
+                    threadlane_protocol::project::BrowseDirectoriesResponse {
+                        current_path,
+                        display_path,
+                        parent_path,
+                        entries,
+                    }
+                }
+            };
+
+            let _ = view.update(cx, |this, cx| {
+                this.project_picker_current_path = Some(resp.current_path);
+                this.project_picker_display_path = resp.display_path;
+                this.project_picker_parent_path = resp.parent_path;
+                this.project_picker_entries = resp.entries;
+                this.project_picker_selected_index = 0;
+                this.project_picker_scroll_handle.scroll_to_item(0);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn render_project_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().colors;
+
+        let display_path = if self.project_picker_display_path.is_empty() {
+            "~/".to_string()
+        } else {
+            self.project_picker_display_path.clone()
+        };
+
+        let has_parent = self.project_picker_parent_path.is_some();
+        let entries = self.project_picker_entries.clone();
+        let selected_index = self.project_picker_selected_index;
+
+        div()
+            .id("project-picker-backdrop")
+            .track_focus(&self.project_picker_focus)
+            .key_context("ProjectPicker")
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _window, cx| {
+                let has_parent = this.project_picker_parent_path.is_some();
+                let entries_count = this.project_picker_entries.len();
+                let max_index = if has_parent { entries_count } else { entries_count.saturating_sub(1) };
+
+                match event.keystroke.key.as_str() {
+                    "escape" => {
+                        this.project_picker_open = false;
+                        cx.notify();
+                    }
+                    "up" => {
+                        if this.project_picker_selected_index > 0 {
+                            this.project_picker_selected_index -= 1;
+                            this.project_picker_scroll_handle
+                                .scroll_to_item(this.project_picker_selected_index);
+                            cx.notify();
+                        }
+                    }
+                    "down" => {
+                        if this.project_picker_selected_index < max_index {
+                            this.project_picker_selected_index += 1;
+                            this.project_picker_scroll_handle
+                                .scroll_to_item(this.project_picker_selected_index);
+                            cx.notify();
+                        }
+                    }
+                    "backspace" => {
+                        if let Some(parent) = this.project_picker_parent_path.clone() {
+                            this.browse_project_picker_dir(Some(parent), cx);
+                        }
+                    }
+                    "enter" => {
+                        if event.keystroke.modifiers.platform || event.keystroke.modifiers.control {
+                            // Cmd+Enter / Ctrl+Enter: Attach current or selected directory
+                            let target = if has_parent && this.project_picker_selected_index > 0 {
+                                this.project_picker_entries
+                                    .get(this.project_picker_selected_index - 1)
+                                    .map(|e| PathBuf::from(&e.path))
+                            } else if !has_parent {
+                                this.project_picker_entries
+                                    .get(this.project_picker_selected_index)
+                                    .map(|e| PathBuf::from(&e.path))
+                            } else {
+                                None
+                            }
+                            .or_else(|| this.project_picker_current_path.clone().map(PathBuf::from));
+
+                            if let Some(target) = target {
+                                this.project_picker_open = false;
+                                let model = this.model.clone();
+                                model.update(cx, |state, cx| {
+                                    controller::dispatch(state, AppAction::AttachProject(target));
+                                    cx.notify();
+                                });
+                                cx.notify();
+                            }
+                        } else {
+                            // Enter: Navigate into selected directory
+                            if has_parent && this.project_picker_selected_index == 0 {
+                                if let Some(parent) = this.project_picker_parent_path.clone() {
+                                    this.browse_project_picker_dir(Some(parent), cx);
+                                }
+                            } else {
+                                let entry_idx = if has_parent {
+                                    this.project_picker_selected_index - 1
+                                } else {
+                                    this.project_picker_selected_index
+                                };
+                                if let Some(entry) = this.project_picker_entries.get(entry_idx) {
+                                    let entry_path = entry.path.clone();
+                                    this.browse_project_picker_dir(Some(entry_path), cx);
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }))
+            .absolute()
+            .inset_0()
+            .bg(theme.background.opacity(0.5))
+            .flex()
+            .items_start()
+            .justify_center()
+            .pt(px(80.0))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _event, _window, cx| {
+                    this.project_picker_open = false;
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .id("project-picker-modal")
+                    .w(px(560.0))
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.title_bar)
+                    .shadow_lg()
+                    .overflow_hidden()
+                    .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
+                        cx.stop_propagation();
+                    })
+                    .child(
+                        // Header
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .px_4()
+                            .py_3()
+                            .border_b_1()
+                            .border_color(theme.border)
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .children(has_parent.then(|| {
+                                        Button::new("project-picker-back")
+                                            .icon(IconName::ArrowLeft)
+                                            .tooltip("Go up to parent directory (Backspace)")
+                                            .ghost()
+                                            .xsmall()
+                                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                                if let Some(parent) = this.project_picker_parent_path.clone() {
+                                                    this.browse_project_picker_dir(Some(parent), cx);
+                                                }
+                                            }))
+                                    }))
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme.foreground)
+                                            .child(display_path)
+                                    )
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        Button::new("project-picker-add-btn")
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_1p5()
+                                                    .child("Add Project")
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(theme.muted_foreground)
+                                                            .child("Cmd+Enter")
+                                                    )
+                                            )
+                                            .small()
+                                            .primary()
+                                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                                let has_parent = this.project_picker_parent_path.is_some();
+                                                let target = if has_parent && this.project_picker_selected_index > 0 {
+                                                    this.project_picker_entries
+                                                        .get(this.project_picker_selected_index - 1)
+                                                        .map(|e| PathBuf::from(&e.path))
+                                                } else if !has_parent {
+                                                    this.project_picker_entries
+                                                        .get(this.project_picker_selected_index)
+                                                        .map(|e| PathBuf::from(&e.path))
+                                                } else {
+                                                    None
+                                                }
+                                                .or_else(|| this.project_picker_current_path.clone().map(PathBuf::from));
+
+                                                if let Some(target) = target {
+                                                    this.project_picker_open = false;
+                                                    let model = this.model.clone();
+                                                    model.update(cx, |state, cx| {
+                                                        controller::dispatch(state, AppAction::AttachProject(target));
+                                                        cx.notify();
+                                                    });
+                                                    cx.notify();
+                                                }
+                                            }))
+                                    )
+                            )
+                    )
+                    .child(
+                        // Subtitle
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .px_4()
+                            .pt_3()
+                            .pb_1()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.muted_foreground)
+                            .child("Directories")
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(format!("{} items", entries.len()))
+                            )
+                    )
+                    .child(
+                        // Directory list
+                        div()
+                            .id("project-picker-list")
+                            .flex_col()
+                            .relative()
+                            .track_scroll(&self.project_picker_scroll_handle)
+                            .overflow_y_scroll()
+                            .vertical_scrollbar(&self.project_picker_scroll_handle)
+                            .max_h(px(340.0))
+                            .px_2()
+                            .py_1()
+                            // Parent directory row
+                            .children(has_parent.then(|| {
+                                let is_selected = selected_index == 0;
+                                let parent_path = self.project_picker_parent_path.clone();
+
+                                div()
+                                    .id("dir-item-parent")
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .bg(if is_selected { theme.selection } else { gpui::transparent_black() })
+                                    .hover(|s| s.bg(theme.accent.opacity(0.1)))
+                                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _event, _window, cx| {
+                                        this.project_picker_selected_index = 0;
+                                        if let Some(p) = parent_path.clone() {
+                                            this.browse_project_picker_dir(Some(p), cx);
+                                        }
+                                    }))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(
+                                                Icon::new(IconName::Folder)
+                                                    .size(px(16.0))
+                                                    .text_color(theme.muted_foreground)
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .text_color(theme.muted_foreground)
+                                                    .child(".. (Parent Directory)")
+                                            )
+                                    )
+                            }))
+                            // Directory entries
+                            .children(entries.iter().enumerate().map(|(i, entry)| {
+                                let list_idx = if has_parent { i + 1 } else { i };
+                                let is_selected = list_idx == selected_index;
+                                let entry_path = entry.path.clone();
+                                let entry_name = entry.name.clone();
+                                let is_git = entry.is_git;
+                                let is_project = entry.is_project;
+
+                                let click_path = entry_path.clone();
+                                let arrow_path = entry_path.clone();
+
+                                div()
+                                    .id(SharedString::from(format!("dir-item-{i}")))
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .bg(if is_selected { theme.selection } else { gpui::transparent_black() })
+                                    .hover(|s| s.bg(theme.accent.opacity(0.1)))
+                                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _event, _window, cx| {
+                                        this.browse_project_picker_dir(Some(click_path.clone()), cx);
+                                    }))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(
+                                                Icon::new(IconName::Folder)
+                                                    .size(px(16.0))
+                                                    .text_color(if is_selected { theme.accent } else { theme.muted_foreground })
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .font_weight(if is_selected { FontWeight::MEDIUM } else { FontWeight::NORMAL })
+                                                    .text_color(theme.foreground)
+                                                    .child(entry_name)
+                                            )
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .children((is_git || is_project).then(|| {
+                                                div()
+                                                    .px_1p5()
+                                                    .py_0p5()
+                                                    .rounded_sm()
+                                                    .bg(theme.accent.opacity(0.15))
+                                                    .text_xs()
+                                                    .text_color(theme.accent)
+                                                    .child(if is_project { "project" } else { "git" })
+                                            }))
+                                            .child(
+                                                Button::new(SharedString::from(format!("open-dir-{i}")))
+                                                    .icon(IconName::ArrowRight)
+                                                    .tooltip("Open folder")
+                                                    .ghost()
+                                                    .xsmall()
+                                                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                                                        this.browse_project_picker_dir(Some(arrow_path.clone()), cx);
+                                                    }))
+                                            )
+                                    )
+                            }))
+                            // Empty state
+                            .children((entries.is_empty() && !has_parent).then(|| {
+                                div()
+                                    .px_4()
+                                    .py_6()
+                                    .flex()
+                                    .flex_col()
+                                    .items_center()
+                                    .justify_center()
+                                    .gap_2()
+                                    .child(
+                                        Icon::new(IconName::Folder)
+                                            .size(px(24.0))
+                                            .text_color(theme.muted_foreground)
+                                    )
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(theme.muted_foreground)
+                                            .child("No subdirectories found")
+                                    )
+                            }))
+                    )
+                    .child(
+                        // Footer
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .px_4()
+                            .py_2()
+                            .border_t_1()
+                            .border_color(theme.border)
+                            .bg(theme.background)
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child("↑ ↓ Select")
+                                    .child("Enter Open")
+                                    .child("Backspace Back")
+                                    .child("Cmd+Enter Add")
+                                    .child("Esc Close")
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child("Daemon Host")
+                            )
+                    )
             )
             .into_any_element()
     }
@@ -1893,6 +2425,10 @@ impl Render for WorkspaceView {
             .children(
                 self.command_palette_open
                     .then(|| self.render_command_palette(cx)),
+            )
+            .children(
+                self.project_picker_open
+                    .then(|| self.render_project_picker(cx)),
             )
             .children(git_dialog_layer)
             .children(self.render_update_notice(cx))

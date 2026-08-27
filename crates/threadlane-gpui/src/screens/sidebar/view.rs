@@ -469,19 +469,10 @@ impl SidebarView {
                     .ghost()
                     .xsmall()
                     .on_click(move |_event, _window, cx| {
-                        let model = attach_model.clone();
-                        cx.spawn(async move |cx| {
-                            let Some(folder) = rfd::AsyncFileDialog::new().pick_folder().await
-                            else {
-                                return;
-                            };
-                            let path = folder.path().to_path_buf();
-                            let _ = model.update(cx, |state, cx| {
-                                controller::dispatch(state, AppAction::AttachProject(path));
-                                cx.notify();
-                            });
-                        })
-                        .detach();
+                        attach_model.update(cx, |state, cx| {
+                            controller::dispatch(state, AppAction::OpenProjectPicker);
+                            cx.notify();
+                        });
                     }),
             )
             .bg(theme.title_bar)

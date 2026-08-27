@@ -188,6 +188,7 @@ pub struct AppState {
     pub(crate) requested_editor_target: Option<RequestedEditorTarget>,
     pub(crate) requested_composer_prompt: Option<String>,
     pub(crate) requested_terminal_command: Option<String>,
+    pub(crate) requested_project_picker: bool,
     stream_tx: tokio::sync::mpsc::UnboundedSender<ChatStreamEvent>,
     pub(crate) stream_rx: Option<tokio::sync::mpsc::UnboundedReceiver<ChatStreamEvent>>,
     session_refresh_tx: Sender<PathBuf>,
@@ -868,14 +869,21 @@ impl AppState {
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| "project".to_string());
+                let curr_str = curr.to_string_lossy().to_string();
                 let project = AttachedProject {
-                    path: curr.to_string_lossy().to_string(),
+                    path: curr_str.clone(),
                     name,
                     last_opened_at: None,
                     last_session_id: None,
                 };
-                registry_projects.push(project.clone());
-                let _ = threadlane_protocol::project::save_project_registry(&registry_projects);
+                registry_projects.push(project);
+                if let Ok(executor) = crate::services::chat::executor() {
+                    executor.spawn(async move {
+                        if let Ok(client) = crate::services::daemon_client::get_daemon_client().await {
+                            let _ = client.register_project(&curr_str).await;
+                        }
+                    });
+                }
             }
         }
 
@@ -997,6 +1005,7 @@ impl AppState {
             requested_editor_target: None,
             requested_composer_prompt: None,
             requested_terminal_command: None,
+            requested_project_picker: false,
             stream_tx,
             stream_rx: Some(stream_rx),
             session_refresh_tx,
@@ -1343,7 +1352,19 @@ impl AppState {
         });
     }
 
-    fn persist_project_selection(&self, _work_dir: &Path, _session_id: Option<&str>) {}
+    fn persist_project_selection(&self, work_dir: &Path, session_id: Option<&str>) {
+        let work_dir_str = work_dir.to_string_lossy().to_string();
+        let session_id_opt = session_id.map(String::from);
+        if let Ok(executor) = crate::services::chat::executor() {
+            executor.spawn(async move {
+                if let Ok(client) = crate::services::daemon_client::get_daemon_client().await {
+                    let _ = client
+                        .select_project(&work_dir_str, session_id_opt.as_deref())
+                        .await;
+                }
+            });
+        }
+    }
 
     pub(crate) fn select_draft_project(&mut self, work_dir: PathBuf) {
         if self
@@ -1719,7 +1740,20 @@ impl AppState {
             return Err("Selected path is not a directory".into());
         }
 
-        let record = threadlane_protocol::project::register_project(&canonical)?;
+        let canonical_str = canonical.to_string_lossy().to_string();
+        let name = canonical
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "project".to_string());
+
+        if let Ok(executor) = crate::services::chat::executor() {
+            let path_for_daemon = canonical_str.clone();
+            executor.spawn(async move {
+                if let Ok(client) = crate::services::daemon_client::get_daemon_client().await {
+                    let _ = client.register_project(&path_for_daemon).await;
+                }
+            });
+        }
 
         let discovered_sessions = discover_sessions_in_project(&canonical);
         let session_to_restore = discovered_sessions
@@ -1731,12 +1765,12 @@ impl AppState {
             .iter_mut()
             .find(|project| project.work_dir == canonical)
         {
-            project.name = record.name;
+            project.name = name;
             project.sessions = discovered_sessions;
             project.is_expanded = true;
         } else {
             self.projects.push(ProjectInfo {
-                name: record.name,
+                name,
                 sessions: discovered_sessions,
                 work_dir: canonical.clone(),
                 is_expanded: true,
@@ -1754,6 +1788,45 @@ impl AppState {
             self.is_generating = false;
             self.session_status = None;
             self.refresh_available_models();
+        }
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn detach_project(&mut self, work_dir: &Path) -> Result<(), String> {
+        let canonical = std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
+        let canonical_str = canonical.to_string_lossy().to_string();
+
+        if let Ok(executor) = crate::services::chat::executor() {
+            let path_for_daemon = canonical_str.clone();
+            executor.spawn(async move {
+                if let Ok(client) = crate::services::daemon_client::get_daemon_client().await {
+                    let _ = client.unregister_project(&path_for_daemon).await;
+                }
+            });
+        }
+
+        self.projects.retain(|p| p.work_dir != canonical);
+        if self.active_work_dir.as_deref() == Some(&canonical) {
+            if let Some(first) = self.projects.first() {
+                let first_dir = first.work_dir.clone();
+                let first_session = first.sessions.first().map(|s| s.id.clone());
+                if let Some(session_id) = first_session {
+                    self.select_session(first_dir, session_id);
+                } else {
+                    self.active_work_dir = Some(first_dir);
+                    self.active_session_id = None;
+                    self.is_new_task = true;
+                    self.messages = Arc::new(Vec::new());
+                    self.active_plan = SessionPlan::default();
+                }
+            } else {
+                self.active_work_dir = None;
+                self.active_session_id = None;
+                self.is_new_task = true;
+                self.messages = Arc::new(Vec::new());
+                self.active_plan = SessionPlan::default();
+            }
         }
         Ok(())
     }

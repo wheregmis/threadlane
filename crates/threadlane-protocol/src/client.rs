@@ -162,6 +162,44 @@ impl DaemonClient {
         .await
     }
 
+    pub async fn unregister_project(&self, path: &str) -> Result<(), String> {
+        self.request(
+            "project/unregister",
+            UnregisterProjectRequest {
+                path: path.to_string(),
+            },
+        )
+        .await
+    }
+
+    pub async fn select_project(
+        &self,
+        path: &str,
+        session_id: Option<&str>,
+    ) -> Result<ProjectRecord, String> {
+        self.request(
+            "project/select",
+            SelectProjectRequest {
+                path: path.to_string(),
+                session_id: session_id.map(String::from),
+            },
+        )
+        .await
+    }
+
+    pub async fn browse_directories(
+        &self,
+        path: Option<&str>,
+    ) -> Result<BrowseDirectoriesResponse, String> {
+        self.request(
+            "project/browse",
+            BrowseDirectoriesRequest {
+                path: path.map(String::from),
+            },
+        )
+        .await
+    }
+
     pub async fn create_session(
         &self,
         req: CreateSessionRequest,

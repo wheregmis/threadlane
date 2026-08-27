@@ -100,4 +100,22 @@ async fn test_dispatcher_session_lifecycle() {
     );
     let list_res = dispatcher.dispatch(list_req).await;
     assert!(list_res.error.is_none());
+
+    // Browse directories
+    let subfolder = temp_dir.path().join("subfolder");
+    std::fs::create_dir_all(&subfolder).unwrap();
+    let browse_req = RpcRequest::new(
+        3u64,
+        "project/browse",
+        Some(json!({
+            "path": project_path
+        })),
+    );
+    let browse_res = dispatcher.dispatch(browse_req).await;
+    assert!(browse_res.error.is_none(), "browse error: {:?}", browse_res.error);
+    let browse_val = browse_res.result.unwrap();
+    assert!(browse_val.get("entries").unwrap().is_array());
+    let entries = browse_val.get("entries").unwrap().as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].get("name").unwrap(), "subfolder");
 }
