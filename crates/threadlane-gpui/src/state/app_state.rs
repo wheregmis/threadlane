@@ -30,6 +30,7 @@ pub struct SessionInfo {
     pub(crate) session_file: PathBuf,
     pub(crate) updated_at: u64,
     pub(crate) health: SessionHealth,
+    pub(crate) git_branch: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -289,6 +290,7 @@ pub struct AppState {
     pub(crate) pending_permissions: HashMap<String, threadlane_session::PermissionRequest>,
     pub(crate) pending_hydrations: Vec<SessionHydrationRequest>,
     pub(crate) git_statuses: HashMap<PathBuf, threadlane_git::GitStatus>,
+    pub(crate) git_prs: HashMap<(PathBuf, String), Option<threadlane_git::GitHubPrInfo>>,
 
     pub(crate) selected_model: String,
     pub(crate) model_roles: threadlane_session::ModelRoles,
@@ -402,6 +404,7 @@ fn discover_session_stubs_in_project(work_dir: &Path) -> Vec<SessionInfo> {
                 updated_at: file_mtime(&path),
                 session_file: path,
                 health: SessionHealth::Healthy,
+                git_branch: None,
             })
         })
         .collect::<Vec<_>>();
@@ -448,18 +451,21 @@ fn discover_sessions_in_project_cached(
                     .file_stem()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| "session".into());
-                let (title, health, updated_at) = match JsonlStore::open_read_only(&path) {
-                    Ok(store) => (
-                        extract_session_title(&store, &id),
-                        SessionHealth::Healthy,
-                        file_mtime(&path),
-                    ),
-                    Err(_) => (
-                        "Unreadable session".to_string(),
-                        SessionHealth::Warning,
-                        file_mtime(&path),
-                    ),
-                };
+                let (title, health, updated_at, git_branch) =
+                    match JsonlStore::open_read_only(&path) {
+                        Ok(store) => (
+                            extract_session_title(&store, &id),
+                            SessionHealth::Healthy,
+                            file_mtime(&path),
+                            store.facts().get("git_branch").cloned(),
+                        ),
+                        Err(_) => (
+                            "Unreadable session".to_string(),
+                            SessionHealth::Warning,
+                            file_mtime(&path),
+                            None,
+                        ),
+                    };
                 let info = SessionInfo {
                     id,
                     title,
@@ -467,6 +473,7 @@ fn discover_sessions_in_project_cached(
                     session_file: path.clone(),
                     updated_at,
                     health,
+                    git_branch,
                 };
                 cache.entries.insert(
                     path.clone(),
@@ -1017,6 +1024,7 @@ impl AppState {
             pending_permissions: HashMap::new(),
             pending_hydrations: Vec::new(),
             git_statuses: HashMap::new(),
+            git_prs: HashMap::new(),
         };
         if let (Some(session_id), Some(session_file)) = (
             state.active_session_id.clone(),
@@ -3910,6 +3918,27 @@ mod tests {
     }
 
     #[test]
+    fn session_discovery_restores_its_last_git_branch() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let work_dir = std::env::temp_dir().join(format!("threadlane-session-branch-{unique}"));
+        let session_file = work_dir.join(".threadlane/sessions/session.jsonl");
+        std::fs::create_dir_all(session_file.parent().unwrap()).unwrap();
+        let mut store = JsonlStore::open(&session_file).unwrap();
+        store
+            .append_fact("main", "git_branch", "feature/session", None)
+            .unwrap();
+        drop(store);
+
+        let sessions = discover_sessions_in_project(&work_dir);
+
+        assert_eq!(sessions[0].git_branch.as_deref(), Some("feature/session"));
+        std::fs::remove_dir_all(work_dir).ok();
+    }
+
+    #[test]
     fn cache_hit_rounding_uses_wide_intermediates_at_u64_max() {
         let metrics = SessionMetricsInfo {
             cache_read_tokens: u64::MAX,
@@ -4523,6 +4552,7 @@ mod tests {
                 session_file: session_file.to_path_buf(),
                 updated_at: 0,
                 health: SessionHealth::Healthy,
+                git_branch: None,
             }],
             is_expanded: true,
         });
@@ -5419,6 +5449,7 @@ mod tests {
                 session_file: session_file.clone(),
                 updated_at: 0,
                 health: SessionHealth::Working,
+                git_branch: None,
             }],
             is_expanded: true,
         });

@@ -226,7 +226,35 @@ fn sidebar_fingerprint(state: &AppState, now: u64) -> u64 {
             pr.passing_checks.hash(&mut hasher);
         }
     }
+    let mut git_prs: Vec<_> = state.git_prs.iter().collect();
+    git_prs.sort_by(|left, right| left.0.cmp(right.0));
+    for ((work_dir, branch), pr) in git_prs {
+        work_dir.hash(&mut hasher);
+        branch.hash(&mut hasher);
+        if let Some(pr) = pr {
+            pr.number.hash(&mut hasher);
+            pr.state.hash(&mut hasher);
+            pr.is_draft.hash(&mut hasher);
+            pr.total_checks.hash(&mut hasher);
+            pr.failing_checks.hash(&mut hasher);
+            pr.pending_checks.hash(&mut hasher);
+            pr.passing_checks.hash(&mut hasher);
+            pr.comments_count.hash(&mut hasher);
+        }
+    }
     hasher.finish()
+}
+
+fn session_pr_info<'a>(
+    session: &SessionInfo,
+    prs: &'a std::collections::HashMap<
+        (std::path::PathBuf, String),
+        Option<threadlane_git::GitHubPrInfo>,
+    >,
+) -> Option<&'a threadlane_git::GitHubPrInfo> {
+    let branch = session.git_branch.as_ref()?;
+    prs.get(&(session.work_dir.clone(), branch.clone()))
+        .and_then(Option::as_ref)
 }
 
 impl SidebarView {
@@ -463,13 +491,7 @@ impl SidebarView {
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_else(|| "Project".to_string());
 
-        let pr_info = self
-            .model
-            .read(cx)
-            .git_statuses
-            .get(&session.work_dir)
-            .and_then(|g| g.pr.as_ref())
-            .cloned();
+        let pr_info = session_pr_info(session, &self.model.read(cx).git_prs).cloned();
 
         let pr_meta = pr_info.map(|pr| {
             let state_upper = pr.state.to_uppercase();
@@ -1209,8 +1231,11 @@ impl SidebarView {
 mod tests {
     use super::{
         DateGroup, HistoryRow, flatten_history_groups, format_time_ago, same_history_row_identity,
+        session_pr_info,
     };
     use crate::state::{SessionHealth, SessionInfo};
+    use std::collections::HashMap;
+    use threadlane_git::GitHubPrInfo;
 
     fn session(id: &str) -> SessionInfo {
         SessionInfo {
@@ -1220,6 +1245,7 @@ mod tests {
             session_file: format!("/project/{id}.jsonl").into(),
             updated_at: 0,
             health: SessionHealth::Healthy,
+            git_branch: None,
         }
     }
 
@@ -1247,6 +1273,33 @@ mod tests {
         assert_eq!(format_time_ago(100, 100), "Just now");
         assert_eq!(format_time_ago(41, 100), "Just now");
         assert_eq!(format_time_ago(40, 100), "1m ago");
+    }
+
+    #[test]
+    fn sessions_in_one_project_use_their_own_branch_pr() {
+        let mut first = session("first");
+        first.git_branch = Some("feature/one".into());
+        let mut second = session("second");
+        second.git_branch = Some("feature/two".into());
+        let prs = HashMap::from([
+            (
+                (first.work_dir.clone(), "feature/one".into()),
+                Some(GitHubPrInfo {
+                    number: 11,
+                    ..Default::default()
+                }),
+            ),
+            (
+                (second.work_dir.clone(), "feature/two".into()),
+                Some(GitHubPrInfo {
+                    number: 22,
+                    ..Default::default()
+                }),
+            ),
+        ]);
+
+        assert_eq!(session_pr_info(&first, &prs).unwrap().number, 11);
+        assert_eq!(session_pr_info(&second, &prs).unwrap().number, 22);
     }
 }
 

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use gpui::*;
@@ -76,6 +76,11 @@ enum GitEvent {
         work_dir: PathBuf,
         result: Result<GitStatus, String>,
     },
+    PrLoaded {
+        work_dir: PathBuf,
+        branch: String,
+        result: Result<Option<threadlane_git::GitHubPrInfo>, String>,
+    },
 }
 
 enum WorkspacePumpEvent {
@@ -145,6 +150,7 @@ pub struct WorkspaceView {
     command_palette_open: bool,
     command_state: Entity<CommandState>,
     last_git_work_dir: Option<PathBuf>,
+    last_git_pr_targets: HashSet<(PathBuf, String)>,
     sidebar_resizable_state: Entity<ResizableState>,
     right_panel_resizable_state: Entity<ResizableState>,
     bottom_panel_resizable_state: Entity<ResizableState>,
@@ -367,6 +373,7 @@ impl WorkspaceView {
                 command_palette_open: false,
                 command_state,
                 last_git_work_dir: None,
+                last_git_pr_targets: HashSet::new(),
                 sidebar_resizable_state,
                 right_panel_resizable_state,
                 bottom_panel_resizable_state,
@@ -635,6 +642,7 @@ impl WorkspaceView {
     }
 
     fn sync_git_status_with_active_project(&mut self, cx: &App) {
+        self.sync_session_prs(cx);
         let active_work_dir = self.model.read(cx).active_work_dir.clone();
         if self.last_git_work_dir == active_work_dir {
             return;
@@ -644,6 +652,40 @@ impl WorkspaceView {
 
         if let Some(work_dir) = active_work_dir {
             self.spawn_git_status_refresh(work_dir);
+        }
+    }
+
+    fn sync_session_prs(&mut self, cx: &App) {
+        let targets = self
+            .model
+            .read(cx)
+            .projects
+            .iter()
+            .flat_map(|project| {
+                project.sessions.iter().filter_map(|session| {
+                    session
+                        .git_branch
+                        .as_ref()
+                        .map(|branch| (session.work_dir.clone(), branch.clone()))
+                })
+            })
+            .collect::<HashSet<_>>();
+        let new_targets = targets
+            .difference(&self.last_git_pr_targets)
+            .cloned()
+            .collect::<Vec<_>>();
+        self.last_git_pr_targets = targets;
+        for (work_dir, branch) in new_targets {
+            let tx = self.git_event_tx.clone();
+            std::thread::spawn(move || {
+                let result = threadlane_git::inspect_pr_for_branch(&work_dir, &branch)
+                    .map_err(|error| error.to_string());
+                let _ = tx.send(GitEvent::PrLoaded {
+                    work_dir,
+                    branch,
+                    result,
+                });
+            });
         }
     }
 
@@ -669,7 +711,22 @@ impl WorkspaceView {
     }
 
     fn apply_git_event(&mut self, event: GitEvent, cx: &mut Context<Self>) {
-        let GitEvent::Loaded { work_dir, result } = event;
+        let (work_dir, result) = match event {
+            GitEvent::PrLoaded {
+                work_dir,
+                branch,
+                result,
+            } => {
+                if let Ok(pr) = result {
+                    self.model.update(cx, |state, cx| {
+                        state.git_prs.insert((work_dir, branch), pr);
+                        cx.notify();
+                    });
+                }
+                return;
+            }
+            GitEvent::Loaded { work_dir, result } => (work_dir, result),
+        };
         let Some(active_work_dir) = self.model.read(cx).active_work_dir.clone() else {
             return;
         };
@@ -680,6 +737,11 @@ impl WorkspaceView {
         if let Ok(status) = &result {
             self.model.update(cx, |state, cx| {
                 state.git_statuses.insert(work_dir.clone(), status.clone());
+                if let Some(branch) = status.branch.as_ref() {
+                    state
+                        .git_prs
+                        .insert((work_dir.clone(), branch.clone()), status.pr.clone());
+                }
                 cx.notify();
             });
         }

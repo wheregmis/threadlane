@@ -70,7 +70,33 @@ pub(crate) fn execute_prompt(
             stream_tx: task_stream_tx.clone(),
             error: None,
         };
+        let work_dir = task_runtime
+            .session_file
+            .parent()
+            .and_then(std::path::Path::parent)
+            .and_then(std::path::Path::parent)
+            .map(std::path::Path::to_path_buf);
+        let git_branch = match work_dir {
+            Some(work_dir) => tokio::task::spawn_blocking(move || {
+                threadlane_git::current_branch(&work_dir)
+            })
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .flatten(),
+            None => None,
+        };
         let mut agent = task_runtime.agent.lock().await;
+        if let Some(branch) = git_branch {
+            if let Err(error) = agent.set_fact("git_branch", &branch) {
+                cleanup.error = Some(error.clone());
+                let _ = task_stream_tx.send(ChatStreamEvent::Agent {
+                    session_id: task_session_id,
+                    event: AgentEvent::AgentError { error },
+                });
+                return;
+            }
+        }
         agent.set_reasoning_effort(reasoning_effort).await;
         let mut events = agent.subscribe();
         let run_error = {
