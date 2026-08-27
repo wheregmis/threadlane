@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use threadlane_protocol::{
     client::DaemonClient, ConnectProviderRequest, DisconnectProviderRequest,
-    GetProviderAuthRequest, ProviderKind,
+    GetProviderAuthRequest, ListCodexAccountsResponse, ProviderKind, RemoveCodexAccountRequest,
+    SetActiveCodexAccountRequest,
 };
 use tokio::sync::mpsc::UnboundedSender as Sender;
 
@@ -90,13 +91,17 @@ fn connect(provider: ProviderKind, api_key: Option<String>, tx: Sender<ProviderA
                 .await
             {
                 Ok(res) => {
+                    let status = res.status;
                     if let Some(url) = res.auth_url {
                         let _ = tx.send(ProviderAuthEvent::AuthUrl(url));
+                        if status != "pending" {
+                            let _ = tx.send(ProviderAuthEvent::Status(status));
+                        }
                         if matches!(provider, ProviderKind::Antigravity | ProviderKind::OpenAi) {
                             wait_for_oauth_completion(client, provider, tx.clone()).await;
                         }
                     } else {
-                        let _ = tx.send(ProviderAuthEvent::Connected(res.status));
+                        let _ = tx.send(ProviderAuthEvent::Connected(status));
                     }
                 }
                 Err(e) => {
@@ -268,8 +273,6 @@ pub(crate) fn has_opencode_credentials() -> bool {
 }
 
 // ── Codex account helpers (OpenAI multi-account) ──────────────────────────────
-// These stubs are preserved for call-site compatibility; they will be wired
-// to the daemon's auth/codex_accounts endpoint in a follow-up.
 
 #[derive(Clone, Debug)]
 pub struct CodexAccountInfo {
@@ -278,24 +281,68 @@ pub struct CodexAccountInfo {
     pub source: String,
 }
 
-pub(crate) fn load_all_codex_accounts() -> Vec<CodexAccountInfo> {
-    Vec::new()
+fn codex_accounts_snapshot() -> Option<ListCodexAccountsResponse> {
+    executor().ok().and_then(|rt| {
+        rt.block_on(async {
+            let client = crate::services::daemon_client::get_daemon_client().await?;
+            client.list_codex_accounts().await
+        })
+        .ok()
+    })
 }
 
-pub(crate) fn is_own_source(_source: &str) -> bool {
-    true
+pub(crate) fn load_all_codex_accounts() -> Vec<CodexAccountInfo> {
+    codex_accounts_snapshot()
+        .map(|snapshot| {
+            snapshot
+                .accounts
+                .into_iter()
+                .map(|account| CodexAccountInfo {
+                    id: account.id,
+                    name: account.name,
+                    source: account.source,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub(crate) fn is_own_source(source: &str) -> bool {
+    source == "~/.threadlane/credentials.json"
 }
 
 pub(crate) fn get_active_codex_account() -> Option<CodexAccountInfo> {
-    None
+    let snapshot = codex_accounts_snapshot()?;
+    let active_id = snapshot.active_account_id?;
+    snapshot
+        .accounts
+        .into_iter()
+        .find(|account| account.id == active_id)
+        .map(|account| CodexAccountInfo {
+            id: account.id,
+            name: account.name,
+            source: account.source,
+        })
 }
 
-pub(crate) fn set_active_codex_account(_id: &str) -> Result<(), String> {
-    Ok(())
+pub(crate) fn set_active_codex_account(id: &str) -> Result<(), String> {
+    let id = id.to_string();
+    executor()?.block_on(async {
+        let client = crate::services::daemon_client::get_daemon_client().await?;
+        client
+            .set_active_codex_account(SetActiveCodexAccountRequest { id })
+            .await
+    })
 }
 
-pub(crate) fn remove_codex_account(_id: &str) -> Result<(), String> {
-    Ok(())
+pub(crate) fn remove_codex_account(id: &str) -> Result<(), String> {
+    let id = id.to_string();
+    executor()?.block_on(async {
+        let client = crate::services::daemon_client::get_daemon_client().await?;
+        client
+            .remove_codex_account(RemoveCodexAccountRequest { id })
+            .await
+    })
 }
 
 #[derive(Clone, Debug)]

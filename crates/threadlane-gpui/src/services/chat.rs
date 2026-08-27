@@ -62,6 +62,7 @@ pub(crate) fn execute_prompt(
         };
 
         let mut events = client.subscribe_session_events();
+        let _ = client.subscribe_session(&task_session_id).await;
         let prompt_res = client
             .send_prompt(SendPromptRequest {
                 session_id: task_session_id.clone(),
@@ -137,14 +138,10 @@ pub(crate) fn cancel_prompt(
 }
 
 /// Generate a session title via the daemon and notify the UI on completion.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn maybe_generate_session_title(
     session_file: PathBuf,
     session_id: String,
     submitted_prompt: String,
-    _api_key: String,
-    _account_id: Option<String>,
-    _model: String,
     work_dir: PathBuf,
     stream_tx: Sender<ChatStreamEvent>,
 ) {

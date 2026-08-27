@@ -142,10 +142,7 @@ impl RpcDispatcher {
                 Err(e) => Err(format!("Invalid params: {e}")),
             },
             "terminal/input" => match serde_json::from_value(params) {
-                Ok(req) => self
-                    .terminal_service
-                    .write_input(req)
-                    .map(|_| Value::Null),
+                Ok(req) => self.terminal_service.write_input(req).map(|_| Value::Null),
                 Err(e) => Err(format!("Invalid params: {e}")),
             },
             "terminal/resize" => match serde_json::from_value(params) {
@@ -211,10 +208,7 @@ impl RpcDispatcher {
                 Err(e) => Err(format!("Invalid params: {e}")),
             },
             "project/write_file" => match serde_json::from_value(params) {
-                Ok(req) => self
-                    .project_service
-                    .write_file(req)
-                    .map(|_| Value::Null),
+                Ok(req) => self.project_service.write_file(req).map(|_| Value::Null),
                 Err(e) => Err(format!("Invalid params: {e}")),
             },
 
@@ -241,17 +235,11 @@ impl RpcDispatcher {
                 Err(e) => Err(format!("Invalid params: {e}")),
             },
             "git/checkout" => match serde_json::from_value(params) {
-                Ok(req) => self
-                    .git_service
-                    .checkout(req)
-                    .map(|_| Value::Null),
+                Ok(req) => self.git_service.checkout(req).map(|_| Value::Null),
                 Err(e) => Err(format!("Invalid params: {e}")),
             },
             "git/stage_file" => match serde_json::from_value(params) {
-                Ok(req) => self
-                    .git_service
-                    .stage_file(req)
-                    .map(|_| Value::Null),
+                Ok(req) => self.git_service.stage_file(req).map(|_| Value::Null),
                 Err(e) => Err(format!("Invalid params: {e}")),
             },
             "git/commit" => match serde_json::from_value(params) {
@@ -262,52 +250,31 @@ impl RpcDispatcher {
                 Err(e) => Err(format!("Invalid params: {e}")),
             },
             "git/push" => match serde_json::from_value(params) {
-                Ok(req) => self
-                    .git_service
-                    .push(req)
-                    .map(|_| Value::Null),
+                Ok(req) => self.git_service.push(req).map(|_| Value::Null),
                 Err(e) => Err(format!("Invalid params: {e}")),
             },
             "git/pull" => match serde_json::from_value(params) {
-                Ok(req) => self
-                    .git_service
-                    .pull(req)
-                    .map(|_| Value::Null),
+                Ok(req) => self.git_service.pull(req).map(|_| Value::Null),
                 Err(e) => Err(format!("Invalid params: {e}")),
             },
             "git/discard_file" => match serde_json::from_value(params) {
-                Ok(req) => self
-                    .git_service
-                    .discard_file(req)
-                    .map(|_| Value::Null),
+                Ok(req) => self.git_service.discard_file(req).map(|_| Value::Null),
                 Err(e) => Err(format!("Invalid params: {e}")),
             },
             "git/ignore" => match serde_json::from_value(params) {
-                Ok(req) => self
-                    .git_service
-                    .ignore(req)
-                    .map(|_| Value::Null),
+                Ok(req) => self.git_service.ignore(req).map(|_| Value::Null),
                 Err(e) => Err(format!("Invalid params: {e}")),
             },
             "git/merge" => match serde_json::from_value(params) {
-                Ok(req) => self
-                    .git_service
-                    .merge(req)
-                    .map(|_| Value::Null),
+                Ok(req) => self.git_service.merge(req).map(|_| Value::Null),
                 Err(e) => Err(format!("Invalid params: {e}")),
             },
             "git/stash_pop" => match serde_json::from_value(params) {
-                Ok(req) => self
-                    .git_service
-                    .stash_pop(req)
-                    .map(|_| Value::Null),
+                Ok(req) => self.git_service.stash_pop(req).map(|_| Value::Null),
                 Err(e) => Err(format!("Invalid params: {e}")),
             },
             "git/stash_drop" => match serde_json::from_value(params) {
-                Ok(req) => self
-                    .git_service
-                    .stash_drop(req)
-                    .map(|_| Value::Null),
+                Ok(req) => self.git_service.stash_drop(req).map(|_| Value::Null),
                 Err(e) => Err(format!("Invalid params: {e}")),
             },
             "git/commit_diff_message" => {
@@ -337,10 +304,7 @@ impl RpcDispatcher {
                 Err(e) => Err(format!("Invalid params: {e}")),
             },
             "tasks/cancel" => match serde_json::from_value(params) {
-                Ok(req) => self
-                    .task_service
-                    .cancel_task(req)
-                    .map(|_| Value::Null),
+                Ok(req) => self.task_service.cancel_task(req).map(|_| Value::Null),
                 Err(e) => Err(format!("Invalid params: {e}")),
             },
 
@@ -435,13 +399,29 @@ impl RpcDispatcher {
                 Ok(req) => self
                     .auth_service
                     .connect(req)
+                    .await
                     .map(|res| serde_json::to_value(res).unwrap()),
                 Err(e) => Err(format!("Invalid params: {e}")),
             },
             "auth/disconnect" => match serde_json::from_value(params) {
+                Ok(req) => self.auth_service.disconnect(req).map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "auth/codex_accounts" => self
+                .auth_service
+                .list_codex_accounts()
+                .map(|res| serde_json::to_value(res).unwrap()),
+            "auth/codex_accounts/set_active" => match serde_json::from_value(params) {
                 Ok(req) => self
                     .auth_service
-                    .disconnect(req)
+                    .set_active_codex_account(req)
+                    .map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "auth/codex_accounts/remove" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .auth_service
+                    .remove_codex_account(req)
                     .map(|_| Value::Null),
                 Err(e) => Err(format!("Invalid params: {e}")),
             },
@@ -462,10 +442,7 @@ impl RpcDispatcher {
                 Err(e) => Err(format!("Invalid params: {e}")),
             },
             "update/install" => match serde_json::from_value(params) {
-                Ok(req) => self
-                    .update_service
-                    .install(req)
-                    .map(|_| Value::Null),
+                Ok(req) => self.update_service.install(req).map(|_| Value::Null),
                 Err(e) => Err(format!("Invalid params: {e}")),
             },
 

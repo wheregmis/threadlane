@@ -11,8 +11,40 @@ use threadlane_session::{CodingAgent, CodingAgentOptions};
 use tokio::sync::broadcast;
 use tracing::info;
 
+fn active_openai_credentials(
+    store: &threadlane_auth::openai_auth::CodexAccountsStore,
+) -> Option<(String, Option<String>)> {
+    store
+        .active_account()
+        .map(|account| (account.access_token.clone(), Some(account.id.clone())))
+}
+
+fn resolve_provider_credentials(model: &str) -> (String, Option<String>) {
+    if model.starts_with("antigravity/") {
+        if let Some(creds) = threadlane_auth::antigravity_auth::load_antigravity_credentials() {
+            return (creds.access_token, creds.account_email);
+        }
+    } else if model.starts_with("opencode-go/") {
+        if let Some(key) = threadlane_auth::opencode_auth::load_opencode_api_key() {
+            return (key, None);
+        }
+    } else if threadlane_protocol::is_acp_model(model) {
+        return (String::new(), None);
+    } else {
+        // OpenAI models
+        if let Some(key) = threadlane_auth::openai_auth::load_openai_api_key() {
+            return (key, None);
+        }
+        let store = threadlane_auth::openai_auth::load_credentials_store();
+        if let Some(credentials) = active_openai_credentials(&store) {
+            return credentials;
+        }
+    }
+    (String::new(), None)
+}
+
 struct ActiveSession {
-    agent: CodingAgent,
+    agent: Arc<tokio::sync::Mutex<CodingAgent>>,
     summary: SessionSummary,
     broadcaster: broadcast::Sender<SessionEvent>,
 }
@@ -35,6 +67,84 @@ impl SessionService {
         }
     }
 
+    async fn get_or_load_session(
+        &self,
+        session_id: &str,
+        project_path: Option<&Path>,
+    ) -> Option<ActiveSession> {
+        let mut lock = self.sessions.lock().await;
+        if let Some(session) = lock.get(session_id) {
+            return Some(ActiveSession {
+                agent: session.agent.clone(),
+                summary: session.summary.clone(),
+                broadcaster: session.broadcaster.clone(),
+            });
+        }
+
+        let project_dir = project_path.map(PathBuf::from).or_else(|| {
+            let canonical = threadlane_session::project_registry::load_project_registry();
+            for record in canonical {
+                let dir = PathBuf::from(&record.path);
+                if dir
+                    .join(".threadlane")
+                    .join("sessions")
+                    .join(format!("{session_id}.jsonl"))
+                    .exists()
+                {
+                    return Some(dir);
+                }
+            }
+            None
+        })?;
+
+        let session_file = project_dir
+            .join(".threadlane")
+            .join("sessions")
+            .join(format!("{session_id}.jsonl"));
+        let model = "antigravity/gemini-3.7-flash".to_string();
+        let (api_key, account_id) = resolve_provider_credentials(&model);
+
+        let options = CodingAgentOptions {
+            api_key,
+            account_id,
+            model: model.clone(),
+            work_dir: project_dir.clone(),
+            session_file: Some(session_file),
+            system_prompt: SystemPromptConfig::default(),
+            agent_config: None,
+            coding_config: None,
+        };
+
+        let agent = Arc::new(tokio::sync::Mutex::new(CodingAgent::new(options)));
+        let (broadcaster, _) = broadcast::channel(1024);
+        let summary = SessionSummary {
+            session_id: session_id.to_string(),
+            project_path: project_dir.to_string_lossy().to_string(),
+            title: format!("Session {session_id}"),
+            model,
+            created_at: chrono_iso_now(),
+            updated_at: chrono_iso_now(),
+            is_active: true,
+        };
+
+        let active = ActiveSession {
+            agent,
+            summary,
+            broadcaster,
+        };
+
+        lock.insert(
+            session_id.to_string(),
+            ActiveSession {
+                agent: active.agent.clone(),
+                summary: active.summary.clone(),
+                broadcaster: active.broadcaster.clone(),
+            },
+        );
+
+        Some(active)
+    }
+
     pub async fn create_session(
         &self,
         req: CreateSessionRequest,
@@ -54,9 +164,11 @@ impl SessionService {
         let _ = std::fs::create_dir_all(&sessions_dir);
         let session_file = sessions_dir.join(format!("{session_id}.jsonl"));
 
+        let (api_key, account_id) = resolve_provider_credentials(&model);
+
         let options = CodingAgentOptions {
-            api_key: String::new(),
-            account_id: None,
+            api_key,
+            account_id,
             model: model.clone(),
             work_dir: project_path.clone(),
             session_file: Some(session_file),
@@ -65,7 +177,7 @@ impl SessionService {
             coding_config: None,
         };
 
-        let agent = CodingAgent::new(options);
+        let agent = Arc::new(tokio::sync::Mutex::new(CodingAgent::new(options)));
         let (broadcaster, _) = broadcast::channel(1024);
 
         let summary = SessionSummary {
@@ -304,7 +416,8 @@ impl SessionService {
     pub async fn delete_session(&self, req: DeleteSessionRequest) -> Result<(), String> {
         let mut lock = self.sessions.lock().await;
         if let Some(session) = lock.remove(&req.session_id) {
-            if let Some(ref path) = session.agent.session_file {
+            let agent = session.agent.lock().await;
+            if let Some(ref path) = agent.session_file {
                 let _ = std::fs::remove_file(path);
             }
         }
@@ -315,8 +428,7 @@ impl SessionService {
         &self,
         session_id: &str,
     ) -> Result<broadcast::Receiver<SessionEvent>, String> {
-        let lock = self.sessions.lock().await;
-        if let Some(session) = lock.get(session_id) {
+        if let Some(session) = self.get_or_load_session(session_id, None).await {
             Ok(session.broadcaster.subscribe())
         } else {
             Err(format!("Session '{session_id}' not found"))
@@ -327,30 +439,47 @@ impl SessionService {
         &self,
         req: SendPromptRequest,
     ) -> Result<PromptAcceptedResponse, String> {
-        let mut lock = self.sessions.lock().await;
-        let session = lock
-            .get_mut(&req.session_id)
+        let session = self
+            .get_or_load_session(&req.session_id, None)
+            .await
             .ok_or_else(|| format!("Session '{}' not found", req.session_id))?;
 
         let run_id = format!("run_{}", uuid_v4_like());
         let session_id = req.session_id.clone();
         let prompt = req.prompt;
+        let images: Vec<threadlane_runtime::ImageAttachment> = req
+            .images
+            .into_iter()
+            .map(|img| threadlane_runtime::ImageAttachment {
+                display_name: img.display_name.unwrap_or_default(),
+                data_url: img.data_url.unwrap_or_default(),
+            })
+            .collect();
         let event_broadcaster = session.broadcaster.clone();
+        let agent_arc = session.agent.clone();
 
         // Subscribe to internal agent events
-        let mut agent_events = session.agent.subscribe();
+        let mut agent_events = {
+            let agent = agent_arc.lock().await;
+            agent.subscribe()
+        };
 
         // Forward agent events to protocol session events
         let event_broadcaster_clone = event_broadcaster.clone();
         let session_id_clone = session_id.clone();
         tokio::spawn(async move {
             while let Ok(agent_event) = agent_events.recv().await {
+                let is_agent_end =
+                    matches!(agent_event, threadlane_runtime::AgentEvent::AgentEnd { .. });
+                let is_agent_error = matches!(
+                    agent_event,
+                    threadlane_runtime::AgentEvent::AgentError { .. }
+                );
+
                 let session_event = match agent_event {
-                    threadlane_runtime::AgentEvent::AgentStart => {
-                        SessionEvent::SessionStarted {
-                            session_id: session_id_clone.clone(),
-                        }
-                    }
+                    threadlane_runtime::AgentEvent::AgentStart => SessionEvent::SessionStarted {
+                        session_id: session_id_clone.clone(),
+                    },
                     threadlane_runtime::AgentEvent::TurnStart { turn_number } => {
                         SessionEvent::TurnStarted { turn_number }
                     }
@@ -419,6 +548,18 @@ impl SessionService {
                             },
                         }
                     }
+                    threadlane_runtime::AgentEvent::AgentEnd { usage } => {
+                        SessionEvent::SessionCompleted {
+                            session_id: session_id_clone.clone(),
+                            total_usage: TokenUsageSummary {
+                                input_tokens: usage.input_tokens as u64,
+                                output_tokens: usage.output_tokens as u64,
+                                cache_read_tokens: usage.cache_read_tokens as u64,
+                                cache_write_tokens: usage.cache_write_tokens as u64,
+                                total_tokens: usage.total_tokens as u64,
+                            },
+                        }
+                    }
                     threadlane_runtime::AgentEvent::AgentError { error } => {
                         SessionEvent::Error { message: error }
                     }
@@ -426,14 +567,24 @@ impl SessionService {
                 };
 
                 let _ = event_broadcaster_clone.send(session_event);
+
+                if is_agent_end || is_agent_error {
+                    break;
+                }
             }
         });
 
         // Execute prompt on agent
-        let handle = session.agent.work_handle();
+        let agent_for_run = agent_arc.clone();
+        let session_id_for_run = session_id.clone();
+        let broadcaster_for_run = event_broadcaster.clone();
         tokio::spawn(async move {
-            info!("Running prompt for session {session_id}");
-            let _ = handle.try_queue_follow_up_with_images(&prompt, Vec::new());
+            info!("Running prompt on CodingAgent for session {session_id_for_run}");
+            let mut agent = agent_for_run.lock().await;
+            if let Some(Err(e)) = agent.handle_input_with_images(&prompt, images).await {
+                tracing::error!("Agent error in session {session_id_for_run}: {e}");
+                let _ = broadcaster_for_run.send(SessionEvent::Error { message: e });
+            }
         });
 
         Ok(PromptAcceptedResponse {
@@ -450,26 +601,26 @@ impl SessionService {
         let lock = self.sessions.lock().await;
         let mut resolved = false;
 
-        for session in lock.values() {
-            let decision = match req.decision {
-                PermissionDecision::Allow { scope } => match scope {
-                    PermissionScope::Once => threadlane_session::PermissionDecision::AllowOnce,
-                    PermissionScope::Always => threadlane_session::PermissionDecision::AllowAlways,
-                },
-                PermissionDecision::AllowOnce => threadlane_session::PermissionDecision::AllowOnce,
-                PermissionDecision::AllowAlways => threadlane_session::PermissionDecision::AllowAlways,
-                PermissionDecision::Deny | PermissionDecision::DenyWithReason { .. } => {
-                    threadlane_session::PermissionDecision::Deny
-                }
-                PermissionDecision::AllowWithModifications { .. } => {
-                    threadlane_session::PermissionDecision::AllowOnce
-                }
-            };
+        let decision = match req.decision {
+            PermissionDecision::Allow { scope } => match scope {
+                PermissionScope::Once => threadlane_session::PermissionDecision::AllowOnce,
+                PermissionScope::Always => threadlane_session::PermissionDecision::AllowAlways,
+            },
+            PermissionDecision::AllowOnce => threadlane_session::PermissionDecision::AllowOnce,
+            PermissionDecision::AllowAlways => threadlane_session::PermissionDecision::AllowAlways,
+            PermissionDecision::Deny | PermissionDecision::DenyWithReason { .. } => {
+                threadlane_session::PermissionDecision::Deny
+            }
+            PermissionDecision::AllowWithModifications { .. } => {
+                threadlane_session::PermissionDecision::AllowOnce
+            }
+        };
 
-            if session
-                .agent
+        for session in lock.values() {
+            let agent = session.agent.lock().await;
+            if agent
                 .permission_handle()
-                .resolve(&req.request_id, decision)
+                .resolve(&req.request_id, decision.clone())
             {
                 resolved = true;
                 break;
@@ -484,9 +635,10 @@ impl SessionService {
     }
 
     pub async fn cancel_run(&self, req: CancelRunRequest) -> Result<(), String> {
-        let lock = self.sessions.lock().await;
-        if let Some(session) = lock.get(&req.session_id) {
-            let _ = session.agent.cancellation_handle().cancel();
+        let session = self.get_or_load_session(&req.session_id, None).await;
+        if let Some(session) = session {
+            let agent = session.agent.lock().await;
+            let _ = agent.cancellation_handle().cancel();
             Ok(())
         } else {
             Err(format!("Session '{}' not found", req.session_id))
@@ -494,9 +646,14 @@ impl SessionService {
     }
 
     pub async fn set_model(&self, req: SetSessionModelRequest) -> Result<(), String> {
-        let mut lock = self.sessions.lock().await;
-        if let Some(session) = lock.get_mut(&req.session_id) {
-            session.summary.model = req.model.clone();
+        let session = self.get_or_load_session(&req.session_id, None).await;
+        if let Some(session) = session {
+            let mut agent = session.agent.lock().await;
+            agent.set_model(req.model.clone()).await?;
+            let mut lock = self.sessions.lock().await;
+            if let Some(s) = lock.get_mut(&req.session_id) {
+                s.summary.model = req.model;
+            }
             Ok(())
         } else {
             Err(format!("Session '{}' not found", req.session_id))
@@ -597,9 +754,7 @@ fn extract_session_title(store: &impl SessionStore, fallback_id: &str) -> String
     fallback_id.to_string()
 }
 
-fn compute_session_messages_from_file(
-    session_file: &Path,
-) -> Result<Vec<ChatMessageInfo>, String> {
+fn compute_session_messages_from_file(session_file: &Path) -> Result<Vec<ChatMessageInfo>, String> {
     use threadlane_runtime::harness::{read_transcript_page, TranscriptItem};
 
     let mut cursor = None;
@@ -645,8 +800,7 @@ fn compute_session_messages_from_file(
                     role: MessageRole::ContextMarker,
                     content: format!(
                         "Context compacted · {} → {}",
-                        marker.pre_tokens,
-                        marker.post_tokens,
+                        marker.pre_tokens, marker.post_tokens,
                     ),
                     tool_activities: Vec::new(),
                     streaming: false,
@@ -706,9 +860,7 @@ fn project_agent_messages_to_protocol(
         .collect()
 }
 
-fn convert_diagnostics(
-    d: threadlane_runtime::harness::SessionDiagnostics,
-) -> SessionDiagnostics {
+fn convert_diagnostics(d: threadlane_runtime::harness::SessionDiagnostics) -> SessionDiagnostics {
     SessionDiagnostics {
         total_turns: d.recovery.iter().map(|r| r.attempts as usize).sum(),
         total_tokens: 0,
@@ -860,9 +1012,7 @@ fn project_trajectory_from_store(
     (trajectory, metrics, durable_usage, None)
 }
 
-fn project_subagents_from_store(
-    store: &impl SessionStore,
-) -> Vec<SubagentActivityInfo> {
+fn project_subagents_from_store(store: &impl SessionStore) -> Vec<SubagentActivityInfo> {
     use threadlane_runtime::harness::Record;
 
     let mut rows = Vec::new();
@@ -906,4 +1056,41 @@ fn chrono_iso_now() -> String {
     let now = std::time::SystemTime::now();
     let datetime: chrono::DateTime<chrono::Utc> = now.into();
     datetime.to_rfc3339()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use threadlane_auth::openai_auth::{CodexAccount, CodexAccountsStore};
+
+    #[test]
+    fn provider_credentials_use_selected_codex_account() {
+        let store = CodexAccountsStore {
+            active_account_id: Some("fresh".into()),
+            accounts: vec![
+                CodexAccount {
+                    id: "old".into(),
+                    label: "Old".into(),
+                    account_id: None,
+                    access_token: "invalidated".into(),
+                    refresh_token: None,
+                    expires_at: None,
+                    source: "~/.threadlane/credentials.json".into(),
+                },
+                CodexAccount {
+                    id: "fresh".into(),
+                    label: "Fresh".into(),
+                    account_id: None,
+                    access_token: "valid".into(),
+                    refresh_token: None,
+                    expires_at: None,
+                    source: "~/.threadlane/credentials.json".into(),
+                },
+            ],
+        };
+
+        let credentials = active_openai_credentials(&store).unwrap();
+        assert_eq!(credentials.0, "valid");
+        assert_eq!(credentials.1.as_deref(), Some("fresh"));
+    }
 }

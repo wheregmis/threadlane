@@ -304,6 +304,30 @@ pub struct DisconnectProviderRequest {
     pub provider: ProviderKind,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexAccountRecord {
+    pub id: String,
+    pub name: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListCodexAccountsResponse {
+    pub accounts: Vec<CodexAccountRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_account_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetActiveCodexAccountRequest {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoveCodexAccountRequest {
+    pub id: String,
+}
+
 // ── Git extended operations ───────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

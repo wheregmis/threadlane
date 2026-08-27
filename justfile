@@ -1,3 +1,7 @@
+run_full:
+    scripts/run-gpui-macos.sh --restart-daemon 2>&1 | tee /tmp/threadlane-debug.log
+
+
 hawkcheck:
     cargo +1.98.0 hawk check
 

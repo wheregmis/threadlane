@@ -3820,28 +3820,7 @@ impl AppState {
             return Err("A generation is already running for this session".into());
         }
 
-        // Resolve credentials using the same provider routing as the runtime and title task.
         let model = self.selected_model.clone();
-        let (api_key, account_id) = provider_credentials(&model);
-
-        // An external ACP agent authenticates itself — Claude Code uses its own
-        // CLI login — so it has no Threadlane provider credential to check, and
-        // gating it on one blocks every ACP turn before it starts.
-        if api_key.is_empty() && !threadlane_protocol::is_acp_model(&model) {
-            self.messages_mut().push(ChatMessageInfo {
-                id: format!("credential-error-{session_id}"),
-                role: MessageRole::Error,
-                content: format!(
-                    "No API key configured for model `{model}`. Open Settings and save the provider credential."
-                ),
-                tool_activities: Vec::new(),
-                streaming: false,
-                reasoning_content: None,
-                reasoning_expanded: false,
-            });
-            return Ok(());
-        }
-
         let runtime = self.ensure_session_runtime(runtime_work_dir, session_file.clone());
         crate::services::chat::execute_prompt(
             runtime,
@@ -3879,9 +3858,6 @@ impl AppState {
                 session_file,
                 session_id.clone(),
                 text.clone(),
-                api_key,
-                account_id,
-                model,
                 work_dir.clone(),
                 self.stream_tx.clone(),
             );

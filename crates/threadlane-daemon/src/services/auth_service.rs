@@ -102,7 +102,10 @@ impl AuthService {
         })
     }
 
-    pub fn connect(&self, req: ConnectProviderRequest) -> Result<ConnectProviderResponse, String> {
+    pub async fn connect(
+        &self,
+        req: ConnectProviderRequest,
+    ) -> Result<ConnectProviderResponse, String> {
         match req.provider {
             ProviderKind::Antigravity => {
                 // Build a PKCE challenge and return the browser URL.
@@ -153,26 +156,37 @@ impl AuthService {
                         auth_url: None,
                     })
                 } else {
-                    // Codex OAuth device-code flow: generate PKCE and return browser URL.
-                    let (verifier, challenge) = antigravity_auth::generate_pkce_pair();
-                    let state = antigravity_auth::generate_oauth_state();
-                    let url = openai_auth::build_browser_oauth_url(&challenge, &state);
+                    let device = openai_auth::start_device_login().await?;
+                    let auth_url = device.verification_uri;
+                    let device_auth_id = device.device_auth_id;
+                    let user_code = device.user_code;
+                    let poll_interval = device.interval.max(1);
 
                     Self::mark_pending(&self.openai_flow);
-                    let expected_state = state.clone();
-                    let verifier_clone = verifier.clone();
                     let flow = self.openai_flow.clone();
+                    let polling_code = user_code.clone();
                     tokio::spawn(async move {
-                        tracing::info!("OpenAI OAuth listener starting on port 1455...");
-                        let result = async {
-                            let code =
-                                openai_auth::listen_for_browser_oauth_callback(expected_state)
-                                    .await?;
-                            tracing::info!("Received OpenAI OAuth code, exchanging tokens...");
-                            openai_auth::exchange_browser_code_for_tokens(&code, &verifier_clone)
+                        tracing::info!("OpenAI device authorization polling started");
+                        let deadline =
+                            tokio::time::Instant::now() + std::time::Duration::from_secs(600);
+                        let result = loop {
+                            if tokio::time::Instant::now() >= deadline {
+                                break Err("OpenAI device authorization timed out".to_string());
+                            }
+
+                            match openai_auth::poll_device_token(&device_auth_id, &polling_code)
                                 .await
-                        }
-                        .await;
+                            {
+                                Ok(tokens) => break Ok(tokens),
+                                Err(error) if error == "authorization_pending" => {
+                                    tokio::time::sleep(std::time::Duration::from_secs(
+                                        poll_interval,
+                                    ))
+                                    .await;
+                                }
+                                Err(error) => break Err(error),
+                            }
+                        };
 
                         match result {
                             Ok(_) => {
@@ -187,8 +201,10 @@ impl AuthService {
                     });
 
                     Ok(ConnectProviderResponse {
-                        status: "pending".to_string(),
-                        auth_url: Some(url),
+                        status: format!(
+                            "Enter code {user_code} in the ChatGPT authorization page."
+                        ),
+                        auth_url: Some(auth_url),
                     })
                 }
             }
@@ -222,6 +238,35 @@ impl AuthService {
                 auth_url: Some("https://gitlab.com/-/profile/personal_access_tokens".to_string()),
             }),
         }
+    }
+
+    pub fn list_codex_accounts(&self) -> Result<ListCodexAccountsResponse, String> {
+        let store = openai_auth::load_credentials_store();
+        let active_account_id = store.active_account().map(|account| account.id.clone());
+        let accounts = store
+            .accounts
+            .into_iter()
+            .map(|account| CodexAccountRecord {
+                id: account.id,
+                name: account.label,
+                source: account.source,
+            })
+            .collect();
+        Ok(ListCodexAccountsResponse {
+            accounts,
+            active_account_id,
+        })
+    }
+
+    pub fn set_active_codex_account(
+        &self,
+        req: SetActiveCodexAccountRequest,
+    ) -> Result<(), String> {
+        openai_auth::set_active_codex_account(&req.id)
+    }
+
+    pub fn remove_codex_account(&self, req: RemoveCodexAccountRequest) -> Result<(), String> {
+        openai_auth::remove_codex_account(&req.id)
     }
 
     pub fn disconnect(&self, req: DisconnectProviderRequest) -> Result<(), String> {

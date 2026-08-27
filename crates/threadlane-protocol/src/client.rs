@@ -1,10 +1,10 @@
+use serde::de::DeserializeOwned;
+use serde::Serialize;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use serde::de::DeserializeOwned;
-use serde::Serialize;
-use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::{broadcast, oneshot, Mutex};
@@ -30,9 +30,12 @@ pub struct DaemonClient {
 impl DaemonClient {
     /// Connects to the daemon over a Unix Domain Socket.
     pub async fn connect_uds(socket_path: &Path) -> Result<Self, String> {
-        let stream = UnixStream::connect(socket_path)
-            .await
-            .map_err(|e| format!("Failed to connect to daemon at {}: {e}", socket_path.display()))?;
+        let stream = UnixStream::connect(socket_path).await.map_err(|e| {
+            format!(
+                "Failed to connect to daemon at {}: {e}",
+                socket_path.display()
+            )
+        })?;
 
         let (reader, mut writer) = stream.into_split();
         let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<String>(128);
@@ -79,7 +82,8 @@ impl DaemonClient {
                         }
                     } else if notif.method == "terminal/event" {
                         if let Some(params) = notif.params {
-                            if let Ok(event) = serde_json::from_value::<TerminalOutputEvent>(params) {
+                            if let Ok(event) = serde_json::from_value::<TerminalOutputEvent>(params)
+                            {
                                 let _ = terminal_events_clone.send(event);
                             }
                         }
@@ -207,10 +211,7 @@ impl DaemonClient {
         self.request("session/create", req).await
     }
 
-    pub async fn list_sessions(
-        &self,
-        project_path: &str,
-    ) -> Result<Vec<SessionSummary>, String> {
+    pub async fn list_sessions(&self, project_path: &str) -> Result<Vec<SessionSummary>, String> {
         self.request(
             "session/list",
             ListSessionsRequest {
@@ -220,10 +221,7 @@ impl DaemonClient {
         .await
     }
 
-    pub async fn list_session_infos(
-        &self,
-        project_path: &str,
-    ) -> Result<Vec<SessionInfo>, String> {
+    pub async fn list_session_infos(&self, project_path: &str) -> Result<Vec<SessionInfo>, String> {
         self.request(
             "session/list_infos",
             ListSessionsRequest {
@@ -240,17 +238,11 @@ impl DaemonClient {
         self.request("session/hydrate", req).await
     }
 
-    pub async fn archive_session(
-        &self,
-        req: ArchiveSessionRequest,
-    ) -> Result<(), String> {
+    pub async fn archive_session(&self, req: ArchiveSessionRequest) -> Result<(), String> {
         self.request("session/archive", req).await
     }
 
-    pub async fn delete_session(
-        &self,
-        req: DeleteSessionRequest,
-    ) -> Result<(), String> {
+    pub async fn delete_session(&self, req: DeleteSessionRequest) -> Result<(), String> {
         self.request("session/delete", req).await
     }
 
@@ -271,10 +263,7 @@ impl DaemonClient {
         .await
     }
 
-    pub async fn submit_permission(
-        &self,
-        req: SubmitPermissionRequest,
-    ) -> Result<(), String> {
+    pub async fn submit_permission(&self, req: SubmitPermissionRequest) -> Result<(), String> {
         self.request("session/submit_permission", req).await
     }
 
@@ -285,10 +274,7 @@ impl DaemonClient {
         self.request("session/queue_follow_up", req).await
     }
 
-    pub async fn queue_steer(
-        &self,
-        req: crate::session::QueueSteerRequest,
-    ) -> Result<(), String> {
+    pub async fn queue_steer(&self, req: crate::session::QueueSteerRequest) -> Result<(), String> {
         self.request("session/queue_steer", req).await
     }
 
@@ -299,11 +285,7 @@ impl DaemonClient {
         self.request("terminal/spawn", req).await
     }
 
-    pub async fn write_terminal_input(
-        &self,
-        terminal_id: &str,
-        data: &str,
-    ) -> Result<(), String> {
+    pub async fn write_terminal_input(&self, terminal_id: &str, data: &str) -> Result<(), String> {
         self.request(
             "terminal/input",
             TerminalInputRequest {
@@ -324,6 +306,15 @@ impl DaemonClient {
         .await
     }
 
+    pub async fn subscribe_session(&self, session_id: &str) -> Result<(), String> {
+        self.request::<_, bool>(
+            "session/subscribe",
+            serde_json::json!({ "session_id": session_id }),
+        )
+        .await
+        .map(|_| ())
+    }
+
     pub fn subscribe_session_events(&self) -> broadcast::Receiver<SessionEvent> {
         self.session_events.subscribe()
     }
@@ -334,10 +325,7 @@ impl DaemonClient {
 
     // ── Skills ─────────────────────────────────────────────────────────────
 
-    pub async fn list_skills(
-        &self,
-        req: ListSkillsRequest,
-    ) -> Result<ListSkillsResponse, String> {
+    pub async fn list_skills(&self, req: ListSkillsRequest) -> Result<ListSkillsResponse, String> {
         self.request("capabilities/skills", req).await
     }
 
@@ -384,6 +372,22 @@ impl DaemonClient {
 
     pub async fn disconnect_provider(&self, req: DisconnectProviderRequest) -> Result<(), String> {
         self.request("auth/disconnect", req).await
+    }
+
+    pub async fn list_codex_accounts(&self) -> Result<ListCodexAccountsResponse, String> {
+        self.request("auth/codex_accounts", serde_json::Value::Null)
+            .await
+    }
+
+    pub async fn set_active_codex_account(
+        &self,
+        req: SetActiveCodexAccountRequest,
+    ) -> Result<(), String> {
+        self.request("auth/codex_accounts/set_active", req).await
+    }
+
+    pub async fn remove_codex_account(&self, req: RemoveCodexAccountRequest) -> Result<(), String> {
+        self.request("auth/codex_accounts/remove", req).await
     }
 
     // ── Settings ───────────────────────────────────────────────────────────
