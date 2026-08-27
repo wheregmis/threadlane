@@ -4089,21 +4089,19 @@ impl ChatListView {
             is_new_task,
             draft_work_mode,
             active_session_is_worktree,
+            active_session_project_name,
         ) = {
             let state = self.model.read(cx);
             let active_dir = state.active_work_dir.clone();
-            let session_is_wt = state
-                .active_session_id
-                .as_ref()
-                .and_then(|sid| {
-                    state
-                        .projects
+            let active_session = state.active_session_id.as_ref().and_then(|sid| {
+                state.projects.iter().find_map(|project| {
+                    project
+                        .sessions
                         .iter()
-                        .flat_map(|p| p.sessions.iter())
-                        .find(|s| &s.id == sid)
-                        .map(|s| s.is_worktree)
+                        .find(|session| &session.id == sid)
+                        .map(|session| (project.name.clone(), session.is_worktree))
                 })
-                .unwrap_or(false);
+            });
             (
                 state
                     .projects
@@ -4113,7 +4111,10 @@ impl ChatListView {
                 active_dir,
                 state.is_new_task,
                 state.draft_work_mode,
-                session_is_wt,
+                active_session
+                    .as_ref()
+                    .is_some_and(|(_, is_worktree)| *is_worktree),
+                active_session.map(|(project_name, _)| project_name),
             )
         };
 
@@ -4125,11 +4126,18 @@ impl ChatListView {
             WorkMode::Local
         };
 
-        let selected_project_name = projects_list
-            .iter()
-            .find(|(_, work_dir)| active_work_dir.as_ref() == Some(work_dir))
-            .map(|(name, _)| name.clone())
-            .unwrap_or_else(|| "Select project".to_string());
+        let selected_project_name = if is_new_task {
+            None
+        } else {
+            active_session_project_name
+        }
+        .or_else(|| {
+            projects_list
+                .iter()
+                .find(|(_, work_dir)| active_work_dir.as_ref() == Some(work_dir))
+                .map(|(name, _)| name.clone())
+        })
+        .unwrap_or_else(|| "Select project".to_string());
 
         let project_chip_model = self.model.clone();
         let project_chip = Button::new("composer-project-chip")
