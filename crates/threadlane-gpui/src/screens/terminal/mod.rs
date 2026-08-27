@@ -330,6 +330,13 @@ impl TerminalView {
         terminal
     }
 
+    /// Sends raw input bytes into the terminal PTY.
+    pub fn send_input(&self, input: &str) {
+        if let Some(session) = &self.session {
+            session.write(input.as_bytes());
+        }
+    }
+
     /// Switches the shell to another project, restarting it in the new cwd.
     pub fn set_project(&mut self, project: PathBuf, cx: &mut Context<Self>) {
         if self.project != project {

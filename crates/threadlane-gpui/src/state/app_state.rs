@@ -224,6 +224,12 @@ pub enum RequestedEditorTarget {
     },
 }
 
+#[derive(Clone, Debug)]
+struct PendingComposerMessage {
+    text: String,
+    images: Vec<ImageAttachment>,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum WorkspacePage {
     #[default]
@@ -263,7 +269,7 @@ pub struct AppState {
     pub(crate) is_generating: bool,
     composer_text: String,
     pub(crate) session_status: Option<String>,
-    pending_composer_messages: HashMap<String, String>,
+    pending_composer_messages: HashMap<String, PendingComposerMessage>,
     session_token_usage: HashMap<SessionProjectionKey, TokenUsage>,
     trajectory_by_session: HashMap<SessionProjectionKey, Vec<TrajectoryEntry>>,
     subagents_by_session: HashMap<SessionProjectionKey, Vec<SubagentActivityInfo>>,
@@ -296,6 +302,7 @@ pub struct AppState {
     pub(crate) update_notice_dismissed: bool,
     pub(crate) requested_editor_target: Option<RequestedEditorTarget>,
     pub(crate) requested_composer_prompt: Option<String>,
+    pub(crate) requested_terminal_command: Option<String>,
     stream_tx: tokio::sync::mpsc::UnboundedSender<ChatStreamEvent>,
     pub(crate) stream_rx: Option<tokio::sync::mpsc::UnboundedReceiver<ChatStreamEvent>>,
     session_refresh_tx: Sender<PathBuf>,
@@ -1000,6 +1007,7 @@ impl AppState {
             update_notice_dismissed: false,
             requested_editor_target: None,
             requested_composer_prompt: None,
+            requested_terminal_command: None,
             stream_tx,
             stream_rx: Some(stream_rx),
             session_refresh_tx,
@@ -1267,7 +1275,31 @@ impl AppState {
     }
 
     pub(crate) fn request_open_file(&mut self, relative_path: String) {
-        self.requested_editor_target = Some(RequestedEditorTarget::File(relative_path));
+        let Some(root) = self.active_work_dir.clone() else { return };
+        let path = match threadlane_tools::validate_path_in_workspace(&relative_path, &root) {
+            Ok(path) => path,
+            Err(error) => {
+                self.session_status = Some(error);
+                return;
+            }
+        };
+        let canonical_root = match root.canonicalize() {
+            Ok(root) => root,
+            Err(error) => {
+                self.session_status = Some(format!("Invalid workspace root: {error}"));
+                return;
+            }
+        };
+        let relative = match path.strip_prefix(canonical_root) {
+            Ok(relative) => relative,
+            Err(error) => {
+                self.session_status = Some(format!("File is outside the workspace: {error}"));
+                return;
+            }
+        };
+        self.requested_editor_target = Some(RequestedEditorTarget::File(
+            relative.to_string_lossy().into_owned(),
+        ));
     }
 
     pub(crate) fn request_open_diff(
@@ -1285,6 +1317,10 @@ impl AppState {
 
     pub(crate) fn request_composer_prompt(&mut self, prompt: String) {
         self.requested_composer_prompt = Some(prompt);
+    }
+
+    pub(crate) fn request_run_terminal_command(&mut self, command: String) {
+        self.requested_terminal_command = Some(command);
     }
 
     pub(crate) fn select_session(
@@ -3544,10 +3580,10 @@ impl AppState {
         self.active_session_id
             .as_ref()
             .and_then(|session_id| self.pending_composer_messages.get(session_id))
-            .map(String::as_str)
+            .map(|message| message.text.as_str())
     }
 
-    pub(crate) fn stage_busy_message(&mut self, text: String) -> Result<(), String> {
+    pub(crate) fn stage_busy_message(&mut self, text: String, images: Vec<ImageAttachment>) -> Result<(), String> {
         let text = text.trim().to_string();
         if text.is_empty() {
             return Ok(());
@@ -3559,28 +3595,29 @@ impl AppState {
         if !self.is_generating {
             return Err("The session is no longer generating".into());
         }
-        self.pending_composer_messages.insert(session_id, text);
+        self.pending_composer_messages
+            .insert(session_id, PendingComposerMessage { text, images });
         Ok(())
     }
 
     pub(crate) fn queue_pending_message(&mut self) -> Result<(), String> {
-        let (runtime, session_id, text) = self.pending_runtime_message()?;
+        let (runtime, session_id, text, images) = self.pending_runtime_message()?;
         runtime
             .work_handle
-            .try_queue_follow_up_with_images(text.clone(), Vec::new())?;
+            .try_queue_follow_up_with_images(text.clone(), images)?;
         self.pending_composer_messages.remove(&session_id);
-        self.push_optimistic_follow_up(&session_id, text);
+        self.push_optimistic_follow_up(&session_id, text, "queued-user");
         self.session_status = Some("Message queued…".into());
         Ok(())
     }
 
     pub(crate) fn steer_pending_message(&mut self) -> Result<(), String> {
-        let (runtime, session_id, text) = self.pending_runtime_message()?;
+        let (runtime, session_id, text, images) = self.pending_runtime_message()?;
         runtime
             .work_handle
-            .queue_steer_with_images(text.clone(), Vec::new())?;
+            .queue_steer_with_images(text.clone(), images)?;
         self.pending_composer_messages.remove(&session_id);
-        self.push_optimistic_follow_up(&session_id, text);
+        self.push_optimistic_follow_up(&session_id, text, "steered-user");
         self.session_status = Some("Steering current turn…".into());
         Ok(())
     }
@@ -3591,7 +3628,7 @@ impl AppState {
         }
     }
 
-    fn pending_runtime_message(&self) -> Result<(Arc<SessionRuntime>, String, String), String> {
+    fn pending_runtime_message(&self) -> Result<(Arc<SessionRuntime>, String, String, Vec<ImageAttachment>), String> {
         let session_id = self
             .active_session_id
             .clone()
@@ -3608,19 +3645,19 @@ impl AppState {
             .get(&session_file)
             .cloned()
             .ok_or_else(|| "Session runtime is unavailable".to_string())?;
-        let text = self
+        let pending = self
             .pending_composer_messages
             .get(&session_id)
             .cloned()
             .ok_or_else(|| "No pending composer message".to_string())?;
-        Ok((runtime, session_id, text))
+        Ok((runtime, session_id, pending.text, pending.images))
     }
 
-    fn push_optimistic_follow_up(&mut self, session_id: &str, text: String) {
+    fn push_optimistic_follow_up(&mut self, session_id: &str, text: String, prefix: &str) {
         if self.active_session_id.as_deref() == Some(session_id) {
             let new_len = self.messages.len();
             self.messages_mut().push(ChatMessageInfo {
-                id: format!("queued-user-{session_id}-{new_len}"),
+                id: format!("{prefix}-{session_id}-{new_len}"),
                 role: MessageRole::User,
                 content: text,
                 tool_activities: Vec::new(),

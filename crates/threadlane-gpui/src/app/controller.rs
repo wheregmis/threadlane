@@ -45,8 +45,10 @@ pub(crate) fn dispatch(state: &mut AppState, action: AppAction) -> Option<Sessio
                 state.session_status = Some(error);
             }
         }
-        AppAction::StageBusyMessage(text) => {
-            let _ = state.stage_busy_message(text);
+        AppAction::StageBusyMessage { text, images } => {
+            if let Err(error) = state.stage_busy_message(text, images) {
+                state.session_status = Some(error);
+            }
         }
         AppAction::QueuePendingMessage => {
             let _ = state.queue_pending_message();
@@ -92,6 +94,7 @@ pub(crate) fn dispatch(state: &mut AppState, action: AppAction) -> Option<Sessio
             }
         }
         AppAction::OpenFileInEditor(path) => state.request_open_file(path),
+        AppAction::RunTerminalCommand(cmd) => state.request_run_terminal_command(cmd),
     }
     None
 }

@@ -20,6 +20,10 @@ actions!(
         BeginNewTask,
         OpenSettings,
         CancelActiveGeneration,
+        SelectChatTab,
+        SelectTrajectoryTab,
+        SelectEditorTab,
+        FocusComposer,
     ]
 );
 use threadlane_git::GitStatus;
@@ -51,6 +55,14 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-j", ToggleTerminal, None),
         KeyBinding::new("cmd-n", BeginNewTask, None),
         KeyBinding::new("ctrl-n", BeginNewTask, None),
+        KeyBinding::new("cmd-1", SelectChatTab, None),
+        KeyBinding::new("ctrl-1", SelectChatTab, None),
+        KeyBinding::new("cmd-2", SelectTrajectoryTab, None),
+        KeyBinding::new("ctrl-2", SelectTrajectoryTab, None),
+        KeyBinding::new("cmd-3", SelectEditorTab, None),
+        KeyBinding::new("ctrl-3", SelectEditorTab, None),
+        KeyBinding::new("cmd-l", FocusComposer, None),
+        KeyBinding::new("ctrl-l", FocusComposer, None),
         KeyBinding::new("cmd-,", OpenSettings, None),
         KeyBinding::new("ctrl-,", OpenSettings, None),
         KeyBinding::new("escape", CancelActiveGeneration, None),
@@ -248,8 +260,22 @@ impl WorkspaceView {
 
         let model_clone = model.clone();
         let view = cx.new(|cx| {
-            let sub = cx.observe(&model_clone, move |this: &mut Self, _model, cx| {
+            let sub = cx.observe(&model_clone, move |this: &mut Self, model, cx| {
                 this.sync_git_status_with_active_project(cx);
+                if let Some(cmd) =
+                    model.update(cx, |state, _cx| state.requested_terminal_command.take())
+                {
+                    this.bottom_panel_visible = true;
+                    let term = if let Some(work_dir) = model.read(cx).active_work_dir.clone() {
+                        this.get_or_create_active_terminal(&work_dir, cx)
+                    } else {
+                        this.fallback_terminal(cx)
+                    };
+                    term.update(cx, |term, _cx| {
+                        let trimmed = cmd.trim_end();
+                        term.send_input(&format!("{trimmed}\n"));
+                    });
+                }
                 let _ = model_wake_tx.send(());
                 cx.notify();
             });
@@ -419,6 +445,37 @@ impl WorkspaceView {
         });
         self.refresh_git_status(cx);
         cx.notify();
+    }
+
+    fn get_or_create_active_terminal(
+        &mut self,
+        project: &PathBuf,
+        cx: &mut Context<Self>,
+    ) -> Entity<TerminalView> {
+        let group = self.get_or_create_terminal_group(project, cx);
+        group.tabs[group.active_tab].clone()
+    }
+
+    fn get_or_create_terminal_group(
+        &mut self,
+        project: &PathBuf,
+        cx: &mut Context<Self>,
+    ) -> &mut TerminalGroup {
+        let group = self
+            .terminal_groups
+            .entry(project.clone())
+            .or_insert_with(|| TerminalGroup {
+                tabs: vec![cx.new(|cx| TerminalView::new(project.clone(), cx))],
+                active_tab: 0,
+            });
+        if group.tabs.is_empty() {
+            group
+                .tabs
+                .push(cx.new(|cx| TerminalView::new(project.clone(), cx)));
+            group.active_tab = 0;
+        }
+        group.active_tab = group.active_tab.min(group.tabs.len().saturating_sub(1));
+        group
     }
 
     fn add_terminal_tab(&mut self, project: PathBuf, cx: &mut Context<Self>) {
@@ -1268,6 +1325,50 @@ impl WorkspaceView {
             });
         }
     }
+
+    fn select_chat_tab_action(
+        &mut self,
+        _: &SelectChatTab,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.chat_list.update(cx, |chat, cx| {
+            chat.set_tab(crate::screens::chat::CentralTab::Chat, cx);
+        });
+    }
+
+    fn select_trajectory_tab_action(
+        &mut self,
+        _: &SelectTrajectoryTab,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.chat_list.update(cx, |chat, cx| {
+            chat.set_tab(crate::screens::chat::CentralTab::Trajectory, cx);
+        });
+    }
+
+    fn select_editor_tab_action(
+        &mut self,
+        _: &SelectEditorTab,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.chat_list.update(cx, |chat, cx| {
+            chat.set_tab(crate::screens::chat::CentralTab::Editor, cx);
+        });
+    }
+
+    fn focus_composer_action(
+        &mut self,
+        _: &FocusComposer,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.chat_list.update(cx, |chat, cx| {
+            chat.focus_composer(window, cx);
+        });
+    }
 }
 
 impl Render for WorkspaceView {
@@ -1276,14 +1377,7 @@ impl Render for WorkspaceView {
         let terminal_project = self.model.read(cx).active_work_dir.clone();
         let (terminal_tabs, active_terminal_tab, active_terminal) =
             if let Some(project) = &terminal_project {
-                let group = self
-                    .terminal_groups
-                    .entry(project.clone())
-                    .or_insert_with(|| TerminalGroup {
-                        tabs: vec![cx.new(|cx| TerminalView::new(project.clone(), cx))],
-                        active_tab: 0,
-                    });
-                group.active_tab = group.active_tab.min(group.tabs.len().saturating_sub(1));
+                let group = self.get_or_create_terminal_group(project, cx);
                 (
                     group.tabs.clone(),
                     group.active_tab,
@@ -1588,6 +1682,10 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::begin_new_task_action))
             .on_action(cx.listener(Self::open_settings_action))
             .on_action(cx.listener(Self::cancel_active_generation_action))
+            .on_action(cx.listener(Self::select_chat_tab_action))
+            .on_action(cx.listener(Self::select_trajectory_tab_action))
+            .on_action(cx.listener(Self::select_editor_tab_action))
+            .on_action(cx.listener(Self::focus_composer_action))
             .bg(theme.background)
             .child(view_with_status_bar)
             .children((workspace_page == WorkspacePage::Chat).then(|| {

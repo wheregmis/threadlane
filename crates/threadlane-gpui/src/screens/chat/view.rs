@@ -288,6 +288,180 @@ fn classify_chat_link(link: &str) -> ChatLinkTarget {
         ChatLinkTarget::ProjectFile(normalized.to_string_lossy().into_owned())
     }
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MarkdownSegment {
+    Markdown(String),
+    CodeBlock {
+        language: String,
+        header_path: Option<String>,
+        code: String,
+    },
+}
+
+fn is_terminal_runnable_language(lang: &str) -> bool {
+    matches!(
+        lang.to_lowercase().as_str(),
+        "bash" | "sh" | "zsh" | "shell" | "terminal" | "console" | "cmd" | "powershell"
+    )
+}
+
+fn active_shell_supports_language(lang: &str) -> bool {
+    let shell = std::env::var("SHELL")
+        .ok()
+        .and_then(|path| Path::new(&path).file_name().and_then(|name| name.to_str()).map(str::to_ascii_lowercase))
+        .unwrap_or_else(|| "sh".into());
+    match lang.trim().to_ascii_lowercase().as_str() {
+        "bash" => shell == "bash",
+        "zsh" => shell == "zsh",
+        "sh" => matches!(shell.as_str(), "sh" | "bash" | "zsh"),
+        "cmd" => matches!(shell.as_str(), "cmd" | "cmd.exe"),
+        "powershell" => matches!(shell.as_str(), "pwsh" | "powershell"),
+        "shell" | "terminal" | "console" => true,
+        _ => false,
+    }
+}
+
+fn normalize_terminal_command(command: &str) -> String {
+    command
+        .lines()
+        .map(|line| {
+            line.strip_prefix("$ ")
+                .or_else(|| line.strip_prefix(">>> "))
+                .or_else(|| line.strip_prefix("> "))
+                .unwrap_or(line)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+fn is_fence_line(raw: &str, idx: usize) -> bool {
+    let line_start = raw[..idx].rfind('\n').map_or(0, |p| p + 1);
+    raw[line_start..idx].len() <= 3 && raw[line_start..idx].bytes().all(|b| b == b' ')
+}
+
+fn parse_code_block_header(header: &str, code: &str) -> (String, Option<String>) {
+    let header_trimmed = header.trim();
+    let parts: Vec<&str> = header_trimmed.split_whitespace().collect();
+    let language = parts.first().copied().unwrap_or("text").to_lowercase();
+
+    let mut detected_path = if parts.len() > 1 {
+        Some(parts[1].to_string())
+    } else if let Some((_, path)) = language.split_once(':') {
+        Some(path.to_string())
+    } else {
+        None
+    };
+
+    let clean_language = language.split(':').next().unwrap_or("text").to_string();
+
+    if detected_path.is_none() {
+        if let Some(first_line) = code.lines().next() {
+            let trimmed = first_line.trim();
+            let comment_content = trimmed
+                .strip_prefix("//")
+                .or_else(|| trimmed.strip_prefix('#'))
+                .or_else(|| trimmed.strip_prefix("/*").and_then(|s| s.strip_suffix("*/")))
+                .or_else(|| trimmed.strip_prefix("<!--").and_then(|s| s.strip_suffix("-->")));
+
+            if let Some(candidate) = comment_content {
+                let candidate = candidate.trim();
+                if candidate.contains('/')
+                    && !candidate.contains(' ')
+                    && candidate.len() < 120
+                    && !candidate.starts_with("http")
+                    && !candidate.starts_with('!')
+                {
+                    detected_path = Some(candidate.to_string());
+                }
+            }
+        }
+    }
+
+    (clean_language, detected_path)
+}
+
+pub fn extract_markdown_segments(raw: &str) -> Vec<MarkdownSegment> {
+    let mut segments = Vec::new();
+    let mut current_pos = 0;
+    let mut search_from = 0;
+
+    while let Some(start_fence) = raw[search_from..].find("```") {
+        let fence_start_idx = search_from + start_fence;
+
+        if !is_fence_line(raw, fence_start_idx) {
+            search_from = fence_start_idx + 3;
+            continue;
+        }
+
+        if fence_start_idx > current_pos {
+            let text = &raw[current_pos..fence_start_idx];
+            if !text.is_empty() {
+                segments.push(MarkdownSegment::Markdown(text.to_string()));
+            }
+        }
+
+        let header_start = fence_start_idx + 3;
+        let Some(header_newline) = raw[header_start..].find('\n') else {
+            segments.push(MarkdownSegment::Markdown(raw[fence_start_idx..].to_string()));
+            return segments;
+        };
+
+        let header_line = raw[header_start..header_start + header_newline].trim();
+        let code_start = header_start + header_newline + 1;
+
+        let mut close_fence_idx = None;
+        let mut search_pos = code_start;
+        while let Some(close_pos) = raw[search_pos..].find("```") {
+            let candidate_idx = search_pos + close_pos;
+            if is_fence_line(raw, candidate_idx) {
+                close_fence_idx = Some(candidate_idx);
+                break;
+            }
+            search_pos = candidate_idx + 3;
+        }
+
+        if let Some(close_idx) = close_fence_idx {
+            let code = &raw[code_start..close_idx];
+            let (language, header_path) = parse_code_block_header(header_line, code);
+            segments.push(MarkdownSegment::CodeBlock {
+                language,
+                header_path,
+                code: code.to_string(),
+            });
+            let after_close = close_idx + 3;
+            let next_pos = if after_close < raw.len() && raw.as_bytes()[after_close] == b'\n' {
+                after_close + 1
+            } else {
+                after_close
+            };
+            current_pos = next_pos;
+            search_from = current_pos;
+        } else {
+            let code = &raw[code_start..];
+            let (language, header_path) = parse_code_block_header(header_line, code);
+            segments.push(MarkdownSegment::CodeBlock {
+                language,
+                header_path,
+                code: code.to_string(),
+            });
+            return segments;
+        }
+    }
+
+    if current_pos < raw.len() {
+        let remainder = &raw[current_pos..];
+        if !remainder.is_empty() {
+            segments.push(MarkdownSegment::Markdown(remainder.to_string()));
+        }
+    }
+
+    if segments.is_empty() && !raw.is_empty() {
+        segments.push(MarkdownSegment::Markdown(raw.to_string()));
+    }
+
+    segments
+}
+
 struct MarkdownRenderState {
     source: String,
     state: Entity<TextViewState>,
@@ -734,26 +908,25 @@ impl ChatListView {
             window,
             move |this, input_state, event: &InputEvent, window, cx| {
                 cx.notify();
-                if matches!(
-                    event,
-                    InputEvent::PressEnter {
-                        secondary: false,
-                        shift: false
-                    }
-                ) {
+                if let InputEvent::PressEnter {
+                    secondary,
+                    shift: false,
+                } = event
+                {
                     let text = input_state.read(cx).value().to_string();
                     let is_generating = model_clone.read(cx).is_generating;
                     if !text.trim().is_empty() || (!is_generating && !this.pasted_images.is_empty())
                     {
-                        let images = if is_generating {
-                            Vec::new()
-                        } else {
-                            std::mem::take(&mut this.pasted_images)
-                        };
+                        let images = std::mem::take(&mut this.pasted_images);
+                        let is_steer = *secondary;
                         model_clone.update(cx, |state, cx| {
                             if is_generating {
-                                controller::dispatch(state, AppAction::StageBusyMessage(text));
-                                controller::dispatch(state, AppAction::QueuePendingMessage);
+                                controller::dispatch(state, AppAction::StageBusyMessage { text, images });
+                                if is_steer {
+                                    controller::dispatch(state, AppAction::SteerPendingMessage);
+                                } else {
+                                    controller::dispatch(state, AppAction::QueuePendingMessage);
+                                }
                             } else {
                                 controller::dispatch(
                                     state,
@@ -871,6 +1044,19 @@ impl ChatListView {
         if pasted > 0 {
             cx.notify();
         }
+    }
+
+    pub(crate) fn set_tab(&mut self, tab: CentralTab, cx: &mut Context<Self>) {
+        self.current_tab = tab;
+        cx.notify();
+    }
+
+    pub(crate) fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.current_tab = CentralTab::Chat;
+        self.input_state.update(cx, |input, cx| {
+            input.focus(window, cx);
+        });
+        cx.notify();
     }
 
     pub(crate) fn set_composer_text(
@@ -2589,6 +2775,173 @@ impl ChatListView {
             })
     }
 
+    fn render_interactive_code_block(
+        &mut self,
+        msg_id: &str,
+        block_index: usize,
+        language: &str,
+        header_path: Option<&str>,
+        code: &str,
+        streaming: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme().colors;
+        let model = self.model.clone();
+        let code_str = code.to_string();
+        let copy_code = code.to_string();
+        let is_runnable =
+            !streaming && is_terminal_runnable_language(language) && active_shell_supports_language(language);
+        let path_opt = header_path.and_then(|path| match classify_chat_link(path) {
+            ChatLinkTarget::ProjectFile(path) => Some(path), _ => None,
+        });
+        let path_for_open = (!streaming).then(|| path_opt.clone()).flatten();
+
+        let display_lang = if language.trim().is_empty() {
+            "code"
+        } else {
+            language.trim()
+        };
+
+        div()
+            .w_full()
+            .my_2()
+            .rounded_lg()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.title_bar)
+            .overflow_hidden()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_3()
+                    .py_1p5()
+                    .bg(theme.secondary)
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .min_w_0()
+                            .child(
+                                Tag::new()
+                                    .child(display_lang.to_string())
+                                    .with_variant(TagVariant::Secondary)
+                                    .small(),
+                            )
+                            .children(path_opt.map(|path| {
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .truncate()
+                                    .child(path)
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .children(is_runnable.then(|| {
+                                let cmd = code_str.clone();
+                                let model = model.clone();
+                                Button::new(SharedString::from(format!(
+                                    "run-term-{msg_id}-{block_index}"
+                                )))
+                                .icon(IconName::SquareTerminal)
+                                .label("Run in Terminal")
+                                .xsmall()
+                                .secondary()
+                                .tooltip("Run in active project terminal")
+                                .on_click(move |_event, _window, cx| {
+                                    let cmd = normalize_terminal_command(&cmd);
+                                    if cmd.lines().filter(|line| !line.trim().is_empty()).count() > 1 {
+                                        let model = model.clone();
+                                        cx.spawn(async move |cx| {
+                                            let result = rfd::AsyncMessageDialog::new()
+                                                .set_title("Run multiple terminal commands?")
+                                                .set_description("This code block contains multiple commands. Run them in the active terminal?")
+                                                .set_buttons(rfd::MessageButtons::YesNo)
+                                                .show()
+                                                .await;
+                                            if matches!(result, rfd::MessageDialogResult::Yes) {
+                                                let _ = model.update(cx, |state, cx| {
+                                                    controller::dispatch(state, AppAction::RunTerminalCommand(cmd));
+                                                    cx.notify();
+                                                });
+                                            }
+                                        }).detach();
+                                    } else {
+                                        model.update(cx, |state, cx| {
+                                            controller::dispatch(state, AppAction::RunTerminalCommand(cmd));
+                                            cx.notify();
+                                        });
+                                    }
+                                })
+                            }))
+                            .children(path_for_open.map(|path| {
+                                let model = model.clone();
+                                Button::new(SharedString::from(format!(
+                                    "open-edit-{msg_id}-{block_index}"
+                                )))
+                                .icon(IconName::File)
+                                .label("Open in Editor")
+                                .xsmall()
+                                .ghost()
+                                .tooltip("Open file in central editor")
+                                .on_click(move |_event, _window, cx| {
+                                    let path = path.clone();
+                                    model.update(cx, |state, cx| {
+                                        controller::dispatch(
+                                            state,
+                                            AppAction::OpenFileInEditor(path),
+                                        );
+                                        cx.notify();
+                                    });
+                                })
+                            }))
+                            .when(!streaming, |actions| {
+                                actions.child(
+                                    Button::new(SharedString::from(format!(
+                                        "copy-code-{msg_id}-{block_index}"
+                                    )))
+                                    .icon(IconName::Copy)
+                                    .xsmall()
+                                    .ghost()
+                                    .tooltip("Copy code to clipboard")
+                                    .on_click(move |_event, window, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            copy_code.clone(),
+                                        ));
+                                        window.push_notification(
+                                            Notification::info("Code copied to clipboard"),
+                                            cx,
+                                        );
+                                    }),
+                                )
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .overflow_x_scrollbar()
+                    .p_3()
+                    .font_family("monospace")
+                    .text_xs()
+                    .text_color(theme.foreground)
+                    .child(
+                        TextView::markdown(
+                            format!("code-{msg_id}-{block_index}"),
+                            format!("```{language}\n{}\n```", code.trim_end()),
+                        )
+                        .selectable(true),
+                    ),
+            )
+    }
+
     fn render_reasoning_block(
         &mut self,
         msg: &ChatMessageInfo,
@@ -2695,45 +3048,66 @@ impl ChatListView {
     fn render_message(&mut self, msg: &ChatMessageInfo, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().colors;
         match msg.role {
-            MessageRole::User => div()
-                .w_full()
-                .min_w_0()
-                .flex()
-                .justify_end()
-                .my_2()
-                .px_4()
-                .child(
-                    div()
-                        .min_w_0()
-                        .max_w(px(USER_BUBBLE_MAX_WIDTH))
-                        .p_3()
-                        .rounded_lg()
-                        .bg(theme.secondary)
-                        .text_sm()
-                        .text_color(theme.secondary_foreground)
-                        .child({
-                            let markdown_state =
-                                self.markdown_state(msg.id.clone(), &msg.content, cx);
-                            self.chat_markdown_view(&markdown_state)
-                        })
-                        .context_menu({
-                            let content = msg.content.clone();
-                            move |menu, _window, _cx| {
-                                let text = content.clone();
-                                menu.item(PopupMenuItem::new("Copy Message").on_click(
-                                    move |_event, window, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            text.clone(),
-                                        ));
-                                        window.push_notification(
-                                            Notification::info("Copied to clipboard"),
-                                            cx,
-                                        );
-                                    },
-                                ))
-                            }
-                        }),
-                ),
+            MessageRole::User => {
+                let is_queued = msg.id.starts_with("queued-user-") && self.model.read(cx).is_generating;
+                let is_steered = msg.id.starts_with("steered-user-") && self.model.read(cx).is_generating;
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .my_2()
+                    .px_4()
+                    .when(is_queued, |el| {
+                        el.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .mb_1()
+                                .child(
+                                    Tag::new()
+                                        .child("Queued for next turn")
+                                        .with_variant(TagVariant::Secondary)
+                                        .small(),
+                                ),
+                        )
+                    })
+                    .when(is_steered, |el| el.child(div().child(Tag::new().child("Steering current turn").with_variant(TagVariant::Primary).small())))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .max_w(px(USER_BUBBLE_MAX_WIDTH))
+                            .p_3()
+                            .rounded_lg()
+                            .bg(theme.secondary)
+                            .text_sm()
+                            .text_color(theme.secondary_foreground)
+                            .child({
+                                let markdown_state =
+                                    self.markdown_state(msg.id.clone(), &msg.content, cx);
+                                self.chat_markdown_view(&markdown_state)
+                            })
+                            .context_menu({
+                                let content = msg.content.clone();
+                                move |menu, _window, _cx| {
+                                    let text = content.clone();
+                                    menu.item(PopupMenuItem::new("Copy Message").on_click(
+                                        move |_event, window, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                text.clone(),
+                                            ));
+                                            window.push_notification(
+                                                Notification::info("Copied to clipboard"),
+                                                cx,
+                                            );
+                                        },
+                                    ))
+                                }
+                            }),
+                    )
+            }
             MessageRole::Assistant => {
                 let reasoning_element = self.render_reasoning_block(msg, cx);
                 let tool_elements: Vec<_> = msg
@@ -2759,16 +3133,55 @@ impl ChatListView {
                             .gap_2()
                             .children(reasoning_element)
                             .children(if !msg.content.is_empty() {
-                                let content = div().w_full().text_sm().text_color(theme.foreground);
-                                Some(if msg.streaming {
-                                    content.child(msg.content.clone()).into_any_element()
-                                } else {
-                                    let markdown_state =
-                                        self.markdown_state(msg.id.clone(), &msg.content, cx);
-                                    content
-                                        .child(self.chat_markdown_view(&markdown_state))
-                                        .into_any_element()
-                                })
+                                let segments = extract_markdown_segments(&msg.content);
+                                let rendered_segments: Vec<AnyElement> = segments
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(|(idx, seg)| match seg {
+                                        MarkdownSegment::Markdown(text) => {
+                                            if msg.streaming {
+                                                div()
+                                                    .w_full()
+                                                    .text_sm()
+                                                    .text_color(theme.foreground)
+                                                    .child(text)
+                                                    .into_any_element()
+                                            } else {
+                                                let markdown_state = self.markdown_state(
+                                                    format!("{}-seg-{}", msg.id, idx),
+                                                    &text,
+                                                    cx,
+                                                );
+                                                self.chat_markdown_view(&markdown_state)
+                                                    .into_any_element()
+                                            }
+                                        }
+                                        MarkdownSegment::CodeBlock {
+                                            language,
+                                            header_path,
+                                            code,
+                                        } => self
+                                            .render_interactive_code_block(
+                                                &msg.id,
+                                                idx,
+                                                &language,
+                                                header_path.as_deref(),
+                                                &code,
+                                                msg.streaming,
+                                                cx,
+                                            )
+                                            .into_any_element(),
+                                    })
+                                    .collect();
+
+                                Some(
+                                    div()
+                                        .w_full()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .children(rendered_segments),
+                                )
                             } else {
                                 None
                             })
@@ -3487,8 +3900,6 @@ impl ChatListView {
 
     fn render_composer(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
-        let model = self.model.clone();
-        let input_state = self.input_state.clone();
         let (
             selected_model,
             reasoning_effort,
@@ -3523,6 +3934,7 @@ impl ChatListView {
             (state.active_session_metrics(), context_window)
         };
         let subagent_count = self.model.read(cx).active_subagents().len();
+        let has_composer_text = !self.input_state.read(cx).value().trim().is_empty();
         let has_prompt =
             !self.input_state.read(cx).value().trim().is_empty() || !self.pasted_images.is_empty();
         let (model_options, selected_option, project_root) = {
@@ -3564,6 +3976,13 @@ impl ChatListView {
         let steer_model = self.model.clone();
         let dismiss_model = self.model.clone();
         let dismiss_input = self.input_state.clone();
+        let cancel_model = self.model.clone();
+        let queue_prompt_model = self.model.clone();
+        let queue_prompt_input = self.input_state.clone();
+        let steer_prompt_model = self.model.clone();
+        let steer_prompt_input = self.input_state.clone();
+        let send_model = self.model.clone();
+        let send_input = self.input_state.clone();
 
         let image_chips = self
             .pasted_images
@@ -4306,60 +4725,111 @@ impl ChatListView {
                             .child(stash_button)
                             .children(subagent_popover)
                             .child(context_meter)
-                            .child(
-                                Button::new("send-btn")
-                                    .w(px(40.0))
-                                    .h(px(40.0))
-                                    .icon(if is_generating {
-                                        IconName::CircleX
-                                    } else {
-                                        IconName::ArrowUp
-                                    })
-                                    .tooltip(if is_generating {
-                                        "Stop generation (Esc)"
-                                    } else if needs_provider {
-                                        "Connect a model provider in Settings before sending"
-                                    } else if has_prompt {
-                                        "Send message (Enter)"
-                                    } else {
-                                        "Type a message to send"
-                                    })
-                                    .when(is_generating, |button| button.danger())
-                                    .when(!is_generating, |button| button.primary())
-                                    .disabled(!is_generating && (!has_prompt || needs_provider))
-                                    .on_click(cx.listener(move |this, _event, window, cx| {
-                                        if is_generating {
-                                            model.update(cx, |state, cx| {
-                                                controller::dispatch(
-                                                    state,
-                                                    AppAction::CancelGeneration,
-                                                );
+                            .children(if is_generating {
+                                    vec![
+                                        Button::new("composer-queue-btn")
+                                            .icon(IconName::Plus)
+                                            .label("Queue")
+                                            .small()
+                                            .secondary()
+                                            .disabled(!has_composer_text)
+                                            .tooltip("Queue for next turn (Enter)")
+                                            .on_click(cx.listener(move |this, _event, window, cx| {
+                                                let text = queue_prompt_input.read(cx).value().to_string();
+                                                if !text.trim().is_empty() {
+                                                    queue_prompt_model.update(cx, |state, cx| {
+                                                        let images = std::mem::take(&mut this.pasted_images);
+                                                        controller::dispatch(state, AppAction::StageBusyMessage { text, images });
+                                                        controller::dispatch(state, AppAction::QueuePendingMessage);
+                                                        cx.notify();
+                                                    });
+                                                    queue_prompt_input.update(cx, |state, cx| {
+                                                        state.set_value("", window, cx);
+                                                    });
+                                                    this.transcript_list_state.scroll_to_end();
+                                                    cx.notify();
+                                                }
+                                            }))
+                                            .into_any_element(),
+                                        Button::new("composer-steer-btn")
+                                            .icon(IconName::ArrowRight)
+                                            .label("Steer")
+                                            .small()
+                                            .primary()
+                                            .disabled(!has_composer_text)
+                                            .tooltip("Steer current turn immediately (Cmd+Enter)")
+                                            .on_click(cx.listener(move |this, _event, window, cx| {
+                                                let text = steer_prompt_input.read(cx).value().to_string();
+                                                if !text.trim().is_empty() {
+                                                    steer_prompt_model.update(cx, |state, cx| {
+                                                        let images = std::mem::take(&mut this.pasted_images);
+                                                        controller::dispatch(state, AppAction::StageBusyMessage { text, images });
+                                                        controller::dispatch(state, AppAction::SteerPendingMessage);
+                                                        cx.notify();
+                                                    });
+                                                    steer_prompt_input.update(cx, |state, cx| {
+                                                        state.set_value("", window, cx);
+                                                    });
+                                                    this.transcript_list_state.scroll_to_end();
+                                                    cx.notify();
+                                                }
+                                            }))
+                                            .into_any_element(),
+                                        Button::new("composer-stop-btn")
+                                            .icon(IconName::CircleX)
+                                            .small()
+                                            .danger()
+                                            .tooltip("Stop generation (Esc)")
+                                            .on_click(cx.listener(move |_this, _event, _window, cx| {
+                                                cancel_model.update(cx, |state, cx| {
+                                                    controller::dispatch(
+                                                        state,
+                                                        AppAction::CancelGeneration,
+                                                    );
+                                                    cx.notify();
+                                                });
+                                            }))
+                                            .into_any_element(),
+                                    ]
+                            } else {
+                                vec![
+                                    Button::new("send-btn")
+                                        .w(px(40.0))
+                                        .h(px(40.0))
+                                        .icon(IconName::ArrowUp)
+                                        .tooltip(if needs_provider {
+                                            "Connect a model provider in Settings before sending"
+                                        } else if has_prompt {
+                                            "Send message (Enter)"
+                                        } else {
+                                            "Type a message to send"
+                                        })
+                                        .primary()
+                                        .disabled(!has_prompt || needs_provider)
+                                        .on_click(cx.listener(move |this, _event, window, cx| {
+                                            let text = send_input.read(cx).value().to_string();
+                                            if !text.trim().is_empty() || !this.pasted_images.is_empty() {
+                                                let images = std::mem::take(&mut this.pasted_images);
+                                                send_model.update(cx, |state, cx| {
+                                                    controller::dispatch(
+                                                        state,
+                                                        AppAction::SendPromptWithImages {
+                                                            text,
+                                                            images,
+                                                        },
+                                                    );
+                                                    cx.notify();
+                                                });
+                                                send_input.update(cx, |state, cx| {
+                                                    state.set_value("", window, cx);
+                                                });
+                                                this.transcript_list_state.scroll_to_end();
                                                 cx.notify();
-                                            });
-                                            return;
-                                        }
-                                        let text = input_state.read(cx).value().to_string();
-                                        if !text.trim().is_empty() || !this.pasted_images.is_empty()
-                                        {
-                                            let images = std::mem::take(&mut this.pasted_images);
-                                            model.update(cx, |state, cx| {
-                                                controller::dispatch(
-                                                    state,
-                                                    AppAction::SendPromptWithImages {
-                                                        text,
-                                                        images,
-                                                    },
-                                                );
-                                                cx.notify();
-                                            });
-                                            input_state.update(cx, |state, cx| {
-                                                state.set_value("", window, cx);
-                                            });
-                                            this.transcript_list_state.scroll_to_end();
-                                            cx.notify();
-                                        }
-                                    })),
-                            ),
+                                            }
+                                        }))
+                                        .into_any_element(),
+                                ]
+                            }),
                     ),
             )
             .when(
@@ -4576,17 +5046,18 @@ impl Render for ChatListView {
 mod hot_path_tests {
     use super::{
         ChatLinkTarget, ContextMeterContext, ContextMeterMetrics, MARKDOWN_CACHE_ENTRY_LIMIT,
-        MarkdownUpdate, TrajectoryCacheKey, TrajectoryMode, TrajectoryRow, TranscriptRow,
-        build_trajectory_rows, build_transcript_rows, classify_chat_link, classify_markdown_update,
-        contains_case_insensitive, context_meter_view_model, extend_trajectory_facets,
-        extend_trajectory_previews, extend_trajectory_rows, extend_trajectory_summary,
-        format_trajectory_raw_json, grouped_tool_activities, markdown_cache_exceeded,
-        next_chat_stream_batch, reconcile_trajectory_entries,
+        MarkdownSegment, MarkdownUpdate, TrajectoryCacheKey, TrajectoryMode, TrajectoryRow,
+        TranscriptRow, build_trajectory_rows, build_transcript_rows, classify_chat_link,
+        classify_markdown_update, contains_case_insensitive, context_meter_view_model,
+        extend_trajectory_facets, extend_trajectory_previews, extend_trajectory_rows,
+        extend_trajectory_summary, extract_markdown_segments, format_trajectory_raw_json,
+        grouped_tool_activities, is_terminal_runnable_language, markdown_cache_exceeded,
+        next_chat_stream_batch, normalize_terminal_command, reconcile_trajectory_entries,
         reconcile_trajectory_entries_by_epoch, subagent_popover_counts, summarize_trajectory,
     };
     use crate::state::{
-        ChatMessageInfo, ChatStreamEvent, MessageRole, SubagentActivityStatus, ToolActivityInfo,
-        TrajectoryDiagnostics, TrajectoryEntry,
+        reported_session_shape_state, ChatMessageInfo, ChatStreamEvent, MessageRole,
+        SubagentActivityStatus, ToolActivityInfo, TrajectoryDiagnostics, TrajectoryEntry,
     };
 
     #[test]
@@ -5207,5 +5678,91 @@ mod hot_path_tests {
         let mut changed = base.clone();
         changed.query = "provider".into();
         assert_ne!(base, changed);
+    }
+
+    #[test]
+    fn extract_markdown_segments_parses_mixed_content_with_paths() {
+        let input = "Here is the command:\n```bash\ncargo build --workspace\n```\nAnd code in file:\n```rust src/main.rs\n// src/main.rs\nfn main() {}\n```\nFinished!";
+        let segments = extract_markdown_segments(input);
+        assert_eq!(segments.len(), 5);
+        assert_eq!(
+            segments[0],
+            MarkdownSegment::Markdown("Here is the command:\n".into())
+        );
+        assert_eq!(
+            segments[1],
+            MarkdownSegment::CodeBlock {
+                language: "bash".into(),
+                header_path: None,
+                code: "cargo build --workspace\n".into(),
+            }
+        );
+        assert_eq!(
+            segments[2],
+            MarkdownSegment::Markdown("And code in file:\n".into())
+        );
+        assert_eq!(
+            segments[3],
+            MarkdownSegment::CodeBlock {
+                language: "rust".into(),
+                header_path: Some("src/main.rs".into()),
+                code: "// src/main.rs\nfn main() {}\n".into(),
+            }
+        );
+        assert_eq!(
+            segments[4],
+            MarkdownSegment::Markdown("Finished!".into())
+        );
+    }
+
+    #[test]
+    fn extract_markdown_segments_handles_comment_path_heuristic() {
+        let input = "```typescript\n// app/routes/index.tsx\nexport default function Home() {}\n```";
+        let segments = extract_markdown_segments(input);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(
+            segments[0],
+            MarkdownSegment::CodeBlock {
+                language: "typescript".into(),
+                header_path: Some("app/routes/index.tsx".into()),
+                code: "// app/routes/index.tsx\nexport default function Home() {}\n".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn extract_markdown_segments_rejects_version_and_shebang_as_paths() {
+        for input in ["```sh\n#!/bin/sh\necho hi\n```", "```rust\n// v1.2\nfn main() {}\n```"] {
+            let segments = extract_markdown_segments(input);
+            assert!(matches!(segments.as_slice(), [MarkdownSegment::CodeBlock { header_path: None, .. }]));
+        }
+    }
+
+    #[test]
+    fn extract_markdown_segments_accepts_indented_closing_fence() {
+        let segments = extract_markdown_segments("```rust\nlet x = 1;\n  ```\nAfter");
+        assert!(matches!(segments.as_slice(), [MarkdownSegment::CodeBlock { .. }, MarkdownSegment::Markdown(text)] if text == "After"));
+    }
+
+    #[test]
+    fn extract_markdown_segments_keeps_text_before_mid_line_backticks() {
+        let segments = extract_markdown_segments("Prefix ```inline\n```rust\ncode\n```");
+        assert!(matches!(segments.as_slice(), [MarkdownSegment::Markdown(text), MarkdownSegment::CodeBlock { language, .. }] if text == "Prefix ```inline\n" && language == "rust"));
+    }
+
+    #[test]
+    fn normalize_terminal_command_removes_prompt_markers() {
+        assert_eq!(normalize_terminal_command("$ echo one\n>>> echo two\n> echo three"), "echo one\necho two\necho three");
+    }
+
+    #[test]
+    fn terminal_runnable_language_identifies_shell_flavors() {
+        assert!(is_terminal_runnable_language("bash"));
+        assert!(is_terminal_runnable_language("sh"));
+        assert!(is_terminal_runnable_language("zsh"));
+        assert!(is_terminal_runnable_language("shell"));
+        assert!(!is_terminal_runnable_language("rust"));
+        assert!(!is_terminal_runnable_language("python"));
+        assert!(!is_terminal_runnable_language("json"));
     }
 }
