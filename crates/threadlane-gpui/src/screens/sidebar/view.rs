@@ -606,8 +606,8 @@ impl SidebarView {
 
             let (pr_bg, pr_fg, pr_label) = if is_merged {
                 (
-                    theme.accent.opacity(0.15),
-                    theme.accent,
+                    theme.success.opacity(0.18),
+                    theme.success,
                     format!("#{} merged", pr.number),
                 )
             } else if is_draft {

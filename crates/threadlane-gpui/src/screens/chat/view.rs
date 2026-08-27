@@ -3579,6 +3579,12 @@ impl ChatListView {
         let project_root = self.model.read(cx).active_work_dir.clone();
         if let Some(query) = active_slash_command_query(&text) {
             if !self.dismiss_slash_menu {
+                if key == "escape" {
+                    self.dismiss_slash_menu = true;
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
                 let matching = self
                     .cached_slash_commands(project_root.as_deref())
                     .into_iter()
@@ -3617,23 +3623,21 @@ impl ChatListView {
                             cx.notify();
                             return;
                         }
-                        "escape" => {
-                            self.dismiss_slash_menu = true;
-                            cx.stop_propagation();
-                            cx.notify();
-                            return;
-                        }
                         _ => {}
                     }
                 }
             }
         }
 
+        let permission_shortcuts_active = self.current_tab == CentralTab::Chat
+            && self.input_state.focus_handle(cx).is_focused(window)
+            && !event.keystroke.modifiers.modified()
+            && text.trim().is_empty();
         let state = self.model.read(cx);
-        if let Some(session_id) = state.active_session_id.as_ref() {
-            if let Some(request) = state.pending_permissions.get(session_id).cloned() {
-                let request_id = request.id.clone();
-                if text.trim().is_empty() {
+        if permission_shortcuts_active {
+            if let Some(session_id) = state.active_session_id.as_ref() {
+                if let Some(request) = state.pending_permissions.get(session_id).cloned() {
+                    let request_id = request.id.clone();
                     match key {
                         "y" | "Y" => {
                             self.model.update(cx, |state, cx| {
