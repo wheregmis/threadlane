@@ -26,7 +26,7 @@ impl WorkspaceWatcher {
         root: PathBuf,
         _debounce_duration: std::time::Duration,
         _on_change: F,
-    ) -> Result<Self, notify::Error>
+    ) -> Result<Self, String>
     where
         F: Fn(WorkspaceChangeEvent) + Send + 'static,
     {
@@ -81,6 +81,3 @@ impl Drop for WorkspaceWatcher {
         }
     }
 }
-
-// Re-export notify::Error so existing call-sites compile without needing `notify`.
-pub use notify::Error as NotifyError;

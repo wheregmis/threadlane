@@ -336,12 +336,3 @@ pub(crate) fn remove_codex_account(id: &str) -> Result<(), String> {
             .await
     })
 }
-
-#[derive(Clone, Debug)]
-pub struct GithubCredentials {
-    pub token: String,
-}
-
-pub(crate) fn load_github_credentials() -> Option<GithubCredentials> {
-    None
-}

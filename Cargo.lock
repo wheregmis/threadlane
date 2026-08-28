@@ -7418,7 +7418,6 @@ dependencies = [
  "gpui-component-assets",
  "gpui_platform",
  "hotpath",
- "notify 8.2.0",
  "rfd",
  "robius-open",
  "serde",

@@ -139,13 +139,9 @@ impl SettingsView {
                 .default_value(&opencode_key)
                 .masked(true)
         });
-        let github_token = crate::services::provider_auth::load_github_credentials()
-            .map(|c| c.token)
-            .unwrap_or_default();
         let github_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("ghp_... / github_pat_...")
-                .default_value(&github_token)
                 .masked(true)
         });
         let acp_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("Claude Code"));
