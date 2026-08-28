@@ -1,13 +1,14 @@
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use threadlane_protocol::terminal::*;
 use tokio::sync::broadcast;
 
 struct ActiveTerminal {
-    writer: Box<dyn Write + Send>,
+    session_token: Arc<()>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Box<dyn MasterPty + Send>,
     _child: Box<dyn portable_pty::Child + Send + Sync>,
 }
@@ -37,8 +38,22 @@ impl TerminalService {
         self.output_broadcaster.subscribe()
     }
 
-    pub fn spawn_terminal(&self, req: SpawnTerminalRequest) -> Result<TerminalSpawnedResponse, String> {
-        let terminal_id = req.terminal_id.unwrap_or_else(|| format!("term_{}", uuid_v4_like()));
+    pub fn spawn_terminal(
+        &self,
+        req: SpawnTerminalRequest,
+    ) -> Result<TerminalSpawnedResponse, String> {
+        let terminal_id = req
+            .terminal_id
+            .unwrap_or_else(|| format!("term_{}", uuid_v4_like()));
+        if self
+            .terminals
+            .lock()
+            .map_err(|e| e.to_string())?
+            .contains_key(&terminal_id)
+        {
+            return Err(format!("Terminal '{}' already exists", terminal_id));
+        }
+
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -52,6 +67,8 @@ impl TerminalService {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
         let mut cmd = CommandBuilder::new(shell);
         cmd.cwd(Path::new(&req.project_path));
+        cmd.env("TERM", "xterm-256color");
+        cmd.arg("-i");
 
         let child = pair
             .slave
@@ -69,8 +86,25 @@ impl TerminalService {
             .try_clone_reader()
             .map_err(|e| format!("Failed to clone PTY reader: {e}"))?;
 
+        let mut lock = self.terminals.lock().map_err(|e| e.to_string())?;
+        if lock.contains_key(&terminal_id) {
+            return Err(format!("Terminal '{}' already exists", terminal_id));
+        }
+        let session_token = Arc::new(());
+        lock.insert(
+            terminal_id.clone(),
+            ActiveTerminal {
+                session_token: session_token.clone(),
+                writer: Arc::new(Mutex::new(writer)),
+                master: pair.master,
+                _child: child,
+            },
+        );
+        drop(lock);
+
         let output_tx = self.output_broadcaster.clone();
         let term_id_clone = terminal_id.clone();
+        let terminals = self.terminals.clone();
 
         // Spawn background reader thread for PTY output
         std::thread::spawn(move || {
@@ -82,6 +116,7 @@ impl TerminalService {
                             terminal_id: term_id_clone.clone(),
                             data: String::new(),
                             exit_code: Some(0),
+                            error: None,
                         });
                         break;
                     }
@@ -91,42 +126,50 @@ impl TerminalService {
                             terminal_id: term_id_clone.clone(),
                             data,
                             exit_code: None,
+                            error: None,
                         });
                     }
-                    Err(_) => {
+                    Err(error) => {
+                        let _ = output_tx.send(TerminalOutputEvent {
+                            terminal_id: term_id_clone.clone(),
+                            data: String::new(),
+                            exit_code: None,
+                            error: Some(format!("Failed to read terminal: {error}")),
+                        });
                         break;
                     }
                 }
             }
+            if let Ok(mut terminals) = terminals.lock() {
+                let should_remove = terminals
+                    .get(&term_id_clone)
+                    .map(|terminal| Arc::ptr_eq(&terminal.session_token, &session_token))
+                    .unwrap_or(false);
+                if should_remove {
+                    let _ = terminals.remove(&term_id_clone);
+                }
+            }
         });
 
-        let mut lock = self.terminals.lock().map_err(|e| e.to_string())?;
-        lock.insert(
-            terminal_id.clone(),
-            ActiveTerminal {
-                writer,
-                master: pair.master,
-                _child: child,
-            },
-        );
-
-        Ok(TerminalSpawnedResponse {
-            terminal_id,
-            pid,
-        })
+        Ok(TerminalSpawnedResponse { terminal_id, pid })
     }
 
     pub fn write_input(&self, req: TerminalInputRequest) -> Result<(), String> {
-        let mut lock = self.terminals.lock().map_err(|e| e.to_string())?;
-        if let Some(term) = lock.get_mut(&req.terminal_id) {
-            term.writer
-                .write_all(req.data.as_bytes())
-                .map_err(|e| format!("Failed to write to terminal: {e}"))?;
-            term.writer.flush().map_err(|e| format!("Failed to flush terminal: {e}"))?;
-            Ok(())
-        } else {
-            Err(format!("Terminal '{}' not found", req.terminal_id))
-        }
+        let writer = self
+            .terminals
+            .lock()
+            .map_err(|e| e.to_string())?
+            .get(&req.terminal_id)
+            .map(|term| term.writer.clone())
+            .ok_or_else(|| format!("Terminal '{}' not found", req.terminal_id))?;
+        let mut writer = writer.lock().map_err(|e| e.to_string())?;
+        writer
+            .write_all(req.data.as_bytes())
+            .map_err(|e| format!("Failed to write to terminal: {e}"))?;
+        writer
+            .flush()
+            .map_err(|e| format!("Failed to flush terminal: {e}"))?;
+        Ok(())
     }
 
     pub fn resize_terminal(&self, req: ResizeTerminalRequest) -> Result<(), String> {
@@ -146,9 +189,16 @@ impl TerminalService {
         }
     }
 
-    pub fn close_terminal(&self, req: CloseTerminalRequest) -> Result<TerminalClosedResponse, String> {
-        let mut lock = self.terminals.lock().map_err(|e| e.to_string())?;
-        if lock.remove(&req.terminal_id).is_some() {
+    pub fn close_terminal(
+        &self,
+        req: CloseTerminalRequest,
+    ) -> Result<TerminalClosedResponse, String> {
+        let removed = self
+            .terminals
+            .lock()
+            .map_err(|e| e.to_string())?
+            .remove(&req.terminal_id);
+        if removed.is_some() {
             Ok(TerminalClosedResponse {
                 terminal_id: req.terminal_id,
                 exit_code: Some(0),

@@ -22,6 +22,7 @@ use threadlane_protocol::git::{GitBranchInfo, GitCommitInfo, GitFile, GitStatus}
 use crate::screens::next_event_batch;
 use crate::services::watcher::WorkspaceWatcher;
 use crate::state::AppState;
+use threadlane_protocol::project::{DirectoryEntry, DirectoryEntryKind};
 
 fn can_publish_branch(status: Option<&GitStatus>) -> bool {
     status.is_some_and(|status| {
@@ -429,30 +430,54 @@ impl RightPanelView {
             return;
         };
         let tx = self.event_tx.clone();
-        std::thread::spawn(move || match surface {
+        match surface {
             Surface::Files => {
-                let nodes = scan_project_tree(&project, 500);
-                let _ = tx.send(PanelEvent::FilesLoaded { project, nodes });
+                let project_path = project.to_string_lossy().into_owned();
+                let task = async move {
+                    let result = async {
+                        let client = crate::services::daemon_client::get_daemon_client().await?;
+                        let response = client
+                            .list_project_directory(threadlane_protocol::project::ListDirectoryRequest {
+                                project_path,
+                                relative_path: None,
+                                max_depth: Some(6),
+                            })
+                            .await?;
+                        Ok::<_, String>(build_file_tree(response.entries, 500))
+                    }
+                    .await;
+                    match result {
+                        Ok(nodes) => {
+                            let _ = tx.send(PanelEvent::FilesLoaded { project, nodes });
+                        }
+                        Err(error) => tracing::error!("Failed to load project files from daemon: {error}"),
+                    }
+                };
+                if let Ok(executor) = crate::services::chat::executor() {
+                    executor.spawn(task);
+                }
             }
             Surface::Review => {
-                // Keep ahead/behind and PR checks current when the user refreshes Review.
-                // Fetch failures are tolerated so local status remains available offline.
-                let _ = crate::services::git::sync_remote(&project);
-                let (status, files, error) = match crate::services::git::inspect(&project) {
-                    Ok(status) => {
-                        let files = status.files.clone();
-                        (Some(status), files, None)
-                    }
-                    Err(error) => (None, Vec::new(), Some(error.to_string())),
-                };
-                let _ = tx.send(PanelEvent::ReviewLoaded {
-                    project,
-                    status,
-                    files,
-                    error,
+                std::thread::spawn(move || {
+                    // Keep ahead/behind and PR checks current when the user refreshes Review.
+                    // Fetch failures are tolerated so local status remains available offline.
+                    let _ = crate::services::git::sync_remote(&project);
+                    let (status, files, error) = match crate::services::git::inspect(&project) {
+                        Ok(status) => {
+                            let files = status.files.clone();
+                            (Some(status), files, None)
+                        }
+                        Err(error) => (None, Vec::new(), Some(error.to_string())),
+                    };
+                    let _ = tx.send(PanelEvent::ReviewLoaded {
+                        project,
+                        status,
+                        files,
+                        error,
+                    });
                 });
             }
-        });
+        }
     }
 
     fn close_document(&mut self, cx: &mut Context<Self>) {
@@ -520,13 +545,36 @@ impl RightPanelView {
         let Some(project) = self.project.as_ref() else {
             return;
         };
-        let target_path = project.join(title);
+        let project_path = project.to_string_lossy().into_owned();
+        let relative_path = title.clone();
         let content = editor.read(cx).value().to_string();
-        if std::fs::write(&target_path, &content).is_ok() {
-            self.saved_content = content;
-            self.is_dirty = false;
-            cx.notify();
-        }
+        cx.spawn(async move |this, cx| {
+            let result = async {
+                let client = crate::services::daemon_client::get_daemon_client().await?;
+                client
+                    .write_project_file(threadlane_protocol::project::WriteFileRequest {
+                        project_path,
+                        relative_path,
+                        content: content.clone(),
+                        overwrite: true,
+                    })
+                    .await
+            }
+            .await;
+            let _ = this.update(cx, |this, cx| {
+                if let Ok(()) = result {
+                    this.saved_content = content;
+                    this.is_dirty = this
+                        .editor_state
+                        .as_ref()
+                        .is_some_and(|editor| editor.read(cx).value().as_str() != this.saved_content);
+                } else if let Err(error) = result {
+                    tracing::error!("Failed to save document through daemon: {error}");
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn apply_event(&mut self, event: PanelEvent, cx: &mut Context<Self>) {
@@ -3966,69 +4014,144 @@ fn convert_node_to_tree_item(node: FileNode, expanded_paths: &HashSet<String>) -
     }
 }
 
-fn scan_project_tree(root: &Path, limit: usize) -> Vec<FileNode> {
-    fn visit(
-        root: &Path,
-        relative: &Path,
-        depth: usize,
-        limit: usize,
-        count: &mut usize,
-    ) -> Vec<FileNode> {
-        if *count >= limit || depth > 6 {
-            return Vec::new();
-        }
-        let Ok(read_dir) = std::fs::read_dir(root.join(relative)) else {
-            return Vec::new();
-        };
-        let mut children = read_dir
-            .filter_map(Result::ok)
-            .filter_map(|entry| {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if name == ".git" || name == "target" || name == ".threadlane" {
-                    return None;
-                }
-                Some((name, entry.file_type().ok()?.is_dir()))
-            })
-            .collect::<Vec<_>>();
-        children.sort_by_key(|(name, is_dir)| (!*is_dir, name.to_ascii_lowercase()));
-
-        let mut nodes = Vec::new();
-        for (name, is_dir) in children {
-            if *count >= limit {
-                break;
-            }
-            *count += 1;
-            let path = relative.join(&name);
-            let rel_str = path.to_string_lossy().into_owned();
-            if is_dir {
-                let sub_children = visit(root, &path, depth + 1, limit, count);
-                nodes.push(FileNode {
-                    relative_path: rel_str,
-                    name,
-                    is_dir: true,
-                    children: sub_children,
-                });
-            } else {
-                nodes.push(FileNode {
-                    relative_path: rel_str,
-                    name,
-                    is_dir: false,
-                    children: Vec::new(),
-                });
-            }
-        }
-        nodes
+fn build_file_tree(entries: Vec<DirectoryEntry>, limit: usize) -> Vec<FileNode> {
+    struct NodeData {
+        node: FileNode,
+        children: Vec<String>,
     }
 
+    fn excluded(path: &str) -> bool {
+        path.split(['/', '\\'])
+            .any(|part| matches!(part, ".git" | "target" | ".threadlane"))
+    }
+
+    let mut nodes = std::collections::HashMap::<String, NodeData>::new();
+    let mut roots = Vec::new();
+    for entry in entries {
+        if entry.path.is_empty() || excluded(&entry.path) {
+            continue;
+        }
+        let path = entry.path.replace('\\', "/");
+        let name = entry.name;
+        let is_dir = entry.kind == DirectoryEntryKind::Directory;
+        nodes.entry(path.clone()).or_insert_with(|| NodeData {
+            node: FileNode {
+                relative_path: path.clone(),
+                name,
+                is_dir,
+                children: Vec::new(),
+            },
+            children: Vec::new(),
+        });
+
+        let parent = Path::new(&path)
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(|parent| parent.to_string_lossy().into_owned());
+        if let Some(parent) = parent {
+            if excluded(&parent) {
+                continue;
+            }
+            let parent_name = Path::new(&parent)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| parent.clone());
+            let parent_data = nodes.entry(parent.clone()).or_insert_with(|| NodeData {
+                node: FileNode {
+                    relative_path: parent.clone(),
+                    name: parent_name,
+                    is_dir: true,
+                    children: Vec::new(),
+                },
+                children: Vec::new(),
+            });
+            parent_data.children.push(path);
+        } else {
+            roots.push(path);
+        }
+    }
+
+    fn materialize(
+        path: String,
+        nodes: &mut std::collections::HashMap<String, NodeData>,
+        count: &mut usize,
+        limit: usize,
+    ) -> Option<FileNode> {
+        if *count >= limit {
+            return None;
+        }
+        let NodeData {
+            mut node,
+            mut children,
+        } = nodes.remove(&path)?;
+        children.sort_by_key(|child| {
+            let is_dir = nodes
+                .get(child)
+                .is_some_and(|data| data.node.is_dir);
+            (!is_dir, child.to_ascii_lowercase())
+        });
+        *count += 1;
+        node.children = children
+            .into_iter()
+            .filter_map(|child| materialize(child, nodes, count, limit))
+            .collect();
+        Some(node)
+    }
+
+    roots.sort();
+    roots.dedup();
+    roots.sort_by_key(|root| {
+        let is_dir = nodes.get(root).is_some_and(|data| data.node.is_dir);
+        (!is_dir, root.to_ascii_lowercase())
+    });
     let mut count = 0;
-    visit(root, Path::new(""), 0, limit, &mut count)
+    roots
+        .into_iter()
+        .filter_map(|path| materialize(path, &mut nodes, &mut count, limit))
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{can_create_pull_request, can_publish_branch, scan_project_tree};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use super::{build_file_tree, can_create_pull_request, can_publish_branch};
     use threadlane_protocol::git::GitStatus;
+    use threadlane_protocol::project::{DirectoryEntry, DirectoryEntryKind};
+
+    #[test]
+    fn daemon_entries_become_a_filtered_nested_tree() {
+        let entries = vec![
+            DirectoryEntry {
+                name: "src".into(),
+                path: "src".into(),
+                kind: DirectoryEntryKind::Directory,
+                size_bytes: None,
+            },
+            DirectoryEntry {
+                name: "nested".into(),
+                path: "src/nested".into(),
+                kind: DirectoryEntryKind::Directory,
+                size_bytes: None,
+            },
+            DirectoryEntry {
+                name: "lib.rs".into(),
+                path: "src/nested/lib.rs".into(),
+                kind: DirectoryEntryKind::File,
+                size_bytes: Some(16),
+            },
+            DirectoryEntry {
+                name: "target".into(),
+                path: "target".into(),
+                kind: DirectoryEntryKind::Directory,
+                size_bytes: None,
+            },
+        ];
+
+        let tree = build_file_tree(entries, 500);
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].relative_path, "src");
+        assert_eq!(tree[0].children[0].relative_path, "src/nested");
+        assert_eq!(tree[0].children[0].children[0].relative_path, "src/nested/lib.rs");
+    }
 
     #[test]
     fn only_publishable_branches_without_upstreams_use_the_publish_action() {
@@ -4094,20 +4217,42 @@ mod tests {
     }
 
     #[test]
-    fn project_scan_is_bounded_and_skips_generated_roots() {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("threadlane-panel-{nonce}"));
-        std::fs::create_dir_all(root.join("src/nested")).unwrap();
-        std::fs::create_dir_all(root.join("target/debug")).unwrap();
-        std::fs::create_dir_all(root.join(".threadlane/sessions")).unwrap();
-        std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
-        std::fs::write(root.join("src/nested/lib.rs"), "pub fn value() {}\n").unwrap();
-        std::fs::write(root.join("target/debug/generated"), "ignored").unwrap();
-
-        let items = scan_project_tree(&root, 10);
+    fn project_tree_is_bounded_and_skips_generated_roots() {
+        let items = build_file_tree(
+            vec![
+                DirectoryEntry {
+                    name: "src".into(),
+                    path: "src".into(),
+                    kind: DirectoryEntryKind::Directory,
+                    size_bytes: None,
+                },
+                DirectoryEntry {
+                    name: "main.rs".into(),
+                    path: "src/main.rs".into(),
+                    kind: DirectoryEntryKind::File,
+                    size_bytes: None,
+                },
+                DirectoryEntry {
+                    name: "nested".into(),
+                    path: "src/nested".into(),
+                    kind: DirectoryEntryKind::Directory,
+                    size_bytes: None,
+                },
+                DirectoryEntry {
+                    name: "lib.rs".into(),
+                    path: "src/nested/lib.rs".into(),
+                    kind: DirectoryEntryKind::File,
+                    size_bytes: None,
+                },
+                DirectoryEntry {
+                    name: "generated".into(),
+                    path: "target/debug/generated".into(),
+                    kind: DirectoryEntryKind::File,
+                    size_bytes: None,
+                },
+            ],
+            10,
+        );
         assert_eq!(
             items
                 .iter()
@@ -4124,6 +4269,5 @@ mod tests {
             .iter()
             .any(|item| item.relative_path == "src/nested"));
 
-        std::fs::remove_dir_all(root).unwrap();
     }
 }

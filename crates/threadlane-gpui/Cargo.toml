@@ -27,7 +27,6 @@ anyhow = "1.0"
 base64 = "0.22"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
-portable-pty = "0.9"
 vt100 = "0.16"
 # notify is kept only for the re-export in watcher.rs (notify::Error); the actual
 # watcher implementation now lives in the daemon. This dep will be removed once all
@@ -45,4 +44,3 @@ async-trait = "0.1"
 threadlane-provider = { version = "0.1.0", path = "../threadlane-provider" }
 tempfile = "3.8"
 threadlane-protocol = { version = "0.1.0", path = "../threadlane-protocol" }
-

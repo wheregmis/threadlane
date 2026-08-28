@@ -3,7 +3,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -25,6 +25,7 @@ pub struct DaemonClient {
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<RpcResponse>>>>,
     session_events: broadcast::Sender<SessionEvent>,
     terminal_events: broadcast::Sender<TerminalOutputEvent>,
+    terminal_subscribed: AtomicBool,
 }
 
 impl DaemonClient {
@@ -105,6 +106,7 @@ impl DaemonClient {
             pending,
             session_events,
             terminal_events,
+            terminal_subscribed: AtomicBool::new(false),
         })
     }
 
@@ -204,6 +206,24 @@ impl DaemonClient {
         .await
     }
 
+    pub async fn list_project_directory(
+        &self,
+        req: ListDirectoryRequest,
+    ) -> Result<ListDirectoryResponse, String> {
+        self.request("project/list_dir", req).await
+    }
+
+    pub async fn read_project_file(
+        &self,
+        req: ReadFileRequest,
+    ) -> Result<ReadFileResponse, String> {
+        self.request("project/read_file", req).await
+    }
+
+    pub async fn write_project_file(&self, req: WriteFileRequest) -> Result<(), String> {
+        self.request("project/write_file", req).await
+    }
+
     pub async fn create_session(
         &self,
         req: CreateSessionRequest,
@@ -296,6 +316,17 @@ impl DaemonClient {
         .await
     }
 
+    pub async fn resize_terminal(&self, req: ResizeTerminalRequest) -> Result<(), String> {
+        self.request("terminal/resize", req).await
+    }
+
+    pub async fn close_terminal(
+        &self,
+        req: CloseTerminalRequest,
+    ) -> Result<TerminalClosedResponse, String> {
+        self.request("terminal/close", req).await
+    }
+
     pub async fn git_status(&self, project_path: &str) -> Result<GitStatusResponse, String> {
         self.request(
             "git/status",
@@ -306,6 +337,21 @@ impl DaemonClient {
         .await
     }
 
+    pub async fn git_branches(
+        &self,
+        req: GitBranchesRequest,
+    ) -> Result<GitBranchesResponse, String> {
+        self.request("git/branches", req).await
+    }
+
+    pub async fn git_diff(&self, req: GitDiffRequest) -> Result<GitDiffResponse, String> {
+        self.request("git/diff", req).await
+    }
+
+    pub async fn git_checkout(&self, req: GitCheckoutRequest) -> Result<(), String> {
+        self.request("git/checkout", req).await
+    }
+
     pub async fn subscribe_session(&self, session_id: &str) -> Result<(), String> {
         self.request::<_, bool>(
             "session/subscribe",
@@ -313,6 +359,28 @@ impl DaemonClient {
         )
         .await
         .map(|_| ())
+    }
+
+    pub async fn subscribe_terminal(&self) -> Result<(), String> {
+        if self.terminal_subscribed.load(Ordering::Acquire)
+            || self
+                .terminal_subscribed
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
+            return Ok(());
+        }
+
+        match self
+            .request::<_, bool>("terminal/subscribe", Value::Null)
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                self.terminal_subscribed.store(false, Ordering::Release);
+                Err(error)
+            }
+        }
     }
 
     pub fn subscribe_session_events(&self) -> broadcast::Receiver<SessionEvent> {

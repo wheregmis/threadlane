@@ -137,10 +137,16 @@ mod tests {
             terminal_id: "term_1".to_string(),
             data: "ls -la\r\n".to_string(),
             exit_code: None,
+            error: Some("reader failed".to_string()),
         };
         let json_str = serde_json::to_string(&term_out).expect("serialize terminal output");
         let parsed: TerminalOutputEvent = serde_json::from_str(&json_str).expect("deserialize terminal output");
         assert_eq!(parsed, term_out);
+
+        let legacy: TerminalOutputEvent =
+            serde_json::from_str(r#"{"terminal_id":"term_legacy","data":"ok","exit_code":null}"#)
+                .expect("deserialize legacy terminal output");
+        assert_eq!(legacy.error, None);
     }
 
     #[test]

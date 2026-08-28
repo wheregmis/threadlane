@@ -833,6 +833,33 @@ impl Default for AppState {
     }
 }
 
+fn normalize_project_relative_path(path: &str) -> Result<String, String> {
+    let path = Path::new(path);
+    if path.is_absolute() {
+        return Err("File path must be relative to the project".into());
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(part) => normalized.push(part),
+            std::path::Component::ParentDir if normalized.pop() => {}
+            std::path::Component::ParentDir => {
+                return Err("File path is outside the project".into());
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                return Err("File path must be relative to the project".into());
+            }
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        return Err("File path is empty".into());
+    }
+    Ok(normalized.to_string_lossy().into_owned())
+}
+
 impl AppState {
     pub(crate) fn load() -> Self {
         Self::load_from_registry(load_project_registry())
@@ -949,9 +976,7 @@ impl AppState {
         for project in &project_infos {
             let _ = session_refresh_tx.send(project.work_dir.clone());
         }
-        let selected_model =
-            crate::model_catalog::default_model_for_project(active_work_dir.as_deref())
-                .unwrap_or_default();
+        let selected_model = String::new();
 
         let model_roles = ModelRoles::default();
         let session_runtimes = HashMap::new();
@@ -963,8 +988,7 @@ impl AppState {
             _ => Vec::new(),
         };
 
-        let available_models =
-            crate::model_catalog::available_models_for_project(active_work_dir.as_deref());
+        let available_models = Vec::new();
 
         let mut state = Self {
             projects: project_infos,
@@ -1043,11 +1067,6 @@ impl AppState {
 
     pub(crate) fn available_models(&self) -> &[crate::model_catalog::ModelOption] {
         &self.available_models
-    }
-
-    pub(crate) fn refresh_available_models(&mut self) {
-        self.available_models =
-            crate::model_catalog::available_models_for_project(self.active_work_dir.as_deref());
     }
 
     /// Replaces the startup snapshot with the daemon's authoritative project,
@@ -1214,7 +1233,6 @@ impl AppState {
     }
 
     pub(crate) fn reconcile_selected_model(&mut self) {
-        self.refresh_available_models();
         if !self
             .available_models
             .iter()
@@ -1381,40 +1399,22 @@ impl AppState {
             self.is_generating = false;
             self.session_status = None;
             self.persist_project_selection(&work_dir, None);
-            self.refresh_available_models();
             self.request_session_refresh(&work_dir);
         }
     }
 
     pub(crate) fn request_open_file(&mut self, relative_path: String) {
-        let Some(root) = self.active_work_dir.clone() else {
+        if self.active_work_dir.is_none() {
             return;
-        };
-        let path =
-            match threadlane_protocol::project::validate_path_in_workspace(&relative_path, &root) {
-                Ok(path) => path,
-                Err(error) => {
-                    self.session_status = Some(error);
-                    return;
-                }
-            };
-        let canonical_root = match root.canonicalize() {
-            Ok(root) => root,
-            Err(error) => {
-                self.session_status = Some(format!("Invalid workspace root: {error}"));
-                return;
-            }
-        };
-        let relative = match path.strip_prefix(canonical_root) {
+        }
+        let relative = match normalize_project_relative_path(&relative_path) {
             Ok(relative) => relative,
             Err(error) => {
-                self.session_status = Some(format!("File is outside the workspace: {error}"));
+                self.session_status = Some(error);
                 return;
             }
         };
-        self.requested_editor_target = Some(RequestedEditorTarget::File(
-            relative.to_string_lossy().into_owned(),
-        ));
+        self.requested_editor_target = Some(RequestedEditorTarget::File(relative));
     }
 
     pub(crate) fn request_open_diff(
@@ -1475,7 +1475,6 @@ impl AppState {
             .map(|project| project.work_dir.as_path())
             .unwrap_or(&work_dir);
         self.persist_project_selection(project_work_dir, Some(&session_id));
-        self.refresh_available_models();
         let completed_events = self
             .deferred_stream_events
             .remove(&session_id)
@@ -1787,7 +1786,6 @@ impl AppState {
             self.active_plan = SessionPlan::default();
             self.is_generating = false;
             self.session_status = None;
-            self.refresh_available_models();
         }
         Ok(())
     }
@@ -6347,5 +6345,20 @@ mod tests {
             .any(|t| t.run_id.as_deref() == Some("run-branch-b")));
 
         let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod file_path_tests {
+    use super::normalize_project_relative_path;
+
+    #[test]
+    fn normalizes_relative_paths_without_touching_the_client_filesystem() {
+        assert_eq!(
+            normalize_project_relative_path("src/../main.rs").unwrap(),
+            "main.rs"
+        );
+        assert!(normalize_project_relative_path("../outside.txt").is_err());
+        assert!(normalize_project_relative_path("/tmp/outside.txt").is_err());
     }
 }

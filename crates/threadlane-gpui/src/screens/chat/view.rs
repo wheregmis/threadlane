@@ -4202,8 +4202,11 @@ impl ChatListView {
                                     .text_xs()
                                     .text_color(theme.muted_foreground)
                                     .child(
-                                        crate::model_catalog::label_for(model)
-                                            .unwrap_or_else(|| model.clone()),
+                                        crate::model_catalog::label_for(
+                                            self.model.read(cx).available_models(),
+                                            model,
+                                        )
+                                        .unwrap_or_else(|| model.clone()),
                                     )
                             }))
                             .child(
@@ -4345,8 +4348,11 @@ impl ChatListView {
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.muted_foreground)
                                 .child(
-                                    crate::model_catalog::label_for(model)
-                                        .unwrap_or_else(|| model.clone()),
+                                    crate::model_catalog::label_for(
+                                        self.model.read(cx).available_models(),
+                                        model,
+                                    )
+                                    .unwrap_or_else(|| model.clone()),
                                 ),
                         )
                     })

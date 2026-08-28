@@ -30,7 +30,10 @@ impl ProjectService {
     pub fn register_project(&self, req: RegisterProjectRequest) -> Result<ProjectRecord, String> {
         let path = PathBuf::from(&req.path);
         if !path.exists() || !path.is_dir() {
-            return Err(format!("Path '{}' does not exist or is not a directory", req.path));
+            return Err(format!(
+                "Path '{}' does not exist or is not a directory",
+                req.path
+            ));
         }
 
         let record = register_project(&path).map_err(|e| e.to_string())?;
@@ -104,8 +107,7 @@ impl ProjectService {
                 let Ok(file_type) = item.file_type() else {
                     continue;
                 };
-                let is_dir =
-                    file_type.is_dir() || (file_type.is_symlink() && item.path().is_dir());
+                let is_dir = file_type.is_dir() || (file_type.is_symlink() && item.path().is_dir());
                 if !is_dir {
                     continue;
                 }
@@ -138,69 +140,93 @@ impl ProjectService {
         })
     }
 
-    pub fn list_directory(&self, req: ListDirectoryRequest) -> Result<ListDirectoryResponse, String> {
+    pub fn list_directory(
+        &self,
+        req: ListDirectoryRequest,
+    ) -> Result<ListDirectoryResponse, String> {
         let base = Path::new(&req.project_path);
-        if !base.exists() {
-            return Err(format!("Project path '{}' does not exist", req.project_path));
+        if !base.is_dir() {
+            return Err(format!(
+                "Project path '{}' does not exist or is not a directory",
+                req.project_path
+            ));
         }
 
-        let target = match req.relative_path {
-            Some(ref rel) if !rel.is_empty() => base.join(rel),
-            _ => base.to_path_buf(),
+        let base = base
+            .canonicalize()
+            .map_err(|e| format!("Failed to resolve project path: {e}"))?;
+        let target = match req.relative_path.as_deref() {
+            Some(rel) if !rel.is_empty() => validate_path_in_workspace(rel, &base)?
+                .canonicalize()
+                .map_err(|e| format!("Failed to resolve directory '{}': {e}", rel))?,
+            _ => base.clone(),
         };
 
-        if !target.exists() {
+        if !target.is_dir() {
             return Err(format!("Directory '{}' does not exist", target.display()));
         }
 
-        let read_dir = fs::read_dir(&target).map_err(|e| e.to_string())?;
+        let max_depth = req.max_depth.unwrap_or(0);
         let mut entries = Vec::new();
 
-        for item in read_dir.flatten() {
-            let file_type = item.file_type().map_err(|e| e.to_string())?;
-            let name = item.file_name().to_string_lossy().to_string();
-            
-            // Skip hidden dotfiles like .git by default in top level
-            if name.starts_with('.') && name != ".threadlane" {
-                continue;
+        fn visit(
+            base: &Path,
+            directory: &Path,
+            depth: usize,
+            max_depth: usize,
+            entries: &mut Vec<DirectoryEntry>,
+        ) -> Result<(), String> {
+            let mut items = fs::read_dir(directory)
+                .map_err(|e| format!("Failed to read directory '{}': {e}", directory.display()))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            items.sort_by_key(|item| item.file_name());
+
+            for item in items {
+                let file_type = item.file_type().map_err(|e| e.to_string())?;
+                let name = item.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') && name != ".threadlane" {
+                    continue;
+                }
+
+                let kind = if file_type.is_dir() {
+                    DirectoryEntryKind::Directory
+                } else if file_type.is_symlink() {
+                    DirectoryEntryKind::Symlink
+                } else {
+                    DirectoryEntryKind::File
+                };
+                let size_bytes = (kind == DirectoryEntryKind::File)
+                    .then(|| item.metadata().ok().map(|metadata| metadata.len()))
+                    .flatten();
+                let item_path = item.path();
+                let relative_item_path = item_path
+                    .strip_prefix(base)
+                    .unwrap_or(&item_path)
+                    .to_string_lossy()
+                    .to_string();
+
+                entries.push(DirectoryEntry {
+                    name,
+                    path: relative_item_path,
+                    kind,
+                    size_bytes,
+                });
+
+                if kind == DirectoryEntryKind::Directory && depth < max_depth {
+                    visit(base, &item_path, depth + 1, max_depth, entries)?;
+                }
             }
-
-            let kind = if file_type.is_dir() {
-                DirectoryEntryKind::Directory
-            } else if file_type.is_symlink() {
-                DirectoryEntryKind::Symlink
-            } else {
-                DirectoryEntryKind::File
-            };
-
-            let size_bytes = if kind == DirectoryEntryKind::File {
-                item.metadata().ok().map(|m| m.len())
-            } else {
-                None
-            };
-
-            let item_path = item.path();
-            let relative_item_path = item_path
-                .strip_prefix(base)
-                .unwrap_or(&item_path)
-                .to_string_lossy()
-                .to_string();
-
-            entries.push(DirectoryEntry {
-                name,
-                path: relative_item_path,
-                kind,
-                size_bytes,
-            });
+            Ok(())
         }
 
-        entries.sort_by(|a, b| {
-            match (a.kind, b.kind) {
-                (DirectoryEntryKind::Directory, DirectoryEntryKind::Directory) => a.name.cmp(&b.name),
-                (DirectoryEntryKind::Directory, _) => std::cmp::Ordering::Less,
-                (_, DirectoryEntryKind::Directory) => std::cmp::Ordering::Greater,
-                _ => a.name.cmp(&b.name),
-            }
+        visit(&base, &target, 0, max_depth, &mut entries)?;
+
+        entries.sort_by(|a, b| match (a.kind, b.kind) {
+            (DirectoryEntryKind::Directory, DirectoryEntryKind::Directory) => a.name.cmp(&b.name),
+            (DirectoryEntryKind::Directory, _) => std::cmp::Ordering::Less,
+            (_, DirectoryEntryKind::Directory) => std::cmp::Ordering::Greater,
+            _ => a.name.cmp(&b.name),
         });
 
         Ok(ListDirectoryResponse { entries })
@@ -208,9 +234,15 @@ impl ProjectService {
 
     pub fn read_file(&self, req: ReadFileRequest) -> Result<ReadFileResponse, String> {
         let base = Path::new(&req.project_path);
-        let path = base.join(&req.relative_path);
+        if !base.is_dir() {
+            return Err(format!(
+                "Project path '{}' does not exist or is not a directory",
+                req.project_path
+            ));
+        }
+        let path = validate_path_in_workspace(&req.relative_path, base)?;
 
-        if !path.exists() {
+        if !path.is_file() {
             return Err(format!("File '{}' does not exist", path.display()));
         }
 
@@ -225,17 +257,28 @@ impl ProjectService {
 
     pub fn write_file(&self, req: WriteFileRequest) -> Result<(), String> {
         let base = Path::new(&req.project_path);
-        let path = base.join(&req.relative_path);
+        if !base.is_dir() {
+            return Err(format!(
+                "Project path '{}' does not exist or is not a directory",
+                req.project_path
+            ));
+        }
+        let path = validate_path_in_workspace(&req.relative_path, base)?;
 
         if path.exists() && !req.overwrite {
-            return Err(format!("File '{}' already exists and overwrite is false", path.display()));
+            return Err(format!(
+                "File '{}' already exists and overwrite is false",
+                path.display()
+            ));
         }
 
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| format!("Failed to create parent directories: {e}"))?;
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create parent directories: {e}"))?;
         }
 
-        fs::write(&path, req.content.as_bytes()).map_err(|e| format!("Failed to write file: {e}"))?;
+        fs::write(&path, req.content.as_bytes())
+            .map_err(|e| format!("Failed to write file: {e}"))?;
         Ok(())
     }
 }

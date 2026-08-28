@@ -1,5 +1,9 @@
 use std::path::Path;
-use threadlane_git::{inspect, list_branches_detailed};
+use threadlane_git::{
+    checkout as git_checkout, create_branch as git_create_branch, diff_file as git_diff_file,
+    inspect, list_branches_detailed, normalize_branch_for_checkout, stage_file as git_stage_file,
+    unstage_file as git_unstage_file,
+};
 use threadlane_protocol::capabilities::*;
 use threadlane_protocol::git::*;
 
@@ -46,9 +50,17 @@ impl GitService {
 
     pub fn diff(&self, req: GitDiffRequest) -> Result<GitDiffResponse, String> {
         let work_dir = Path::new(&req.project_path);
+        if !req.staged {
+            if let Some(file) = req.file_path.as_deref() {
+                return git_diff_file(work_dir, file)
+                    .map(|diff| GitDiffResponse { diff })
+                    .map_err(|e| e.to_string());
+            }
+        }
+
         let mut args = vec!["diff"];
         if req.staged {
-            args.push("--staged");
+            args.push("--cached");
         }
         if let Some(ref file) = req.file_path {
             args.push("--");
@@ -78,8 +90,11 @@ impl GitService {
             .map(|b| GitBranchInfo {
                 name: b.name,
                 is_current: b.is_current,
+                is_default: b.is_default,
                 is_remote: b.is_remote,
-                ..Default::default()
+                relative_time: b.relative_time,
+                committer_date_unix: b.committer_date_unix,
+                upstream: b.upstream,
             })
             .collect();
 
@@ -88,24 +103,17 @@ impl GitService {
 
     pub fn checkout(&self, req: GitCheckoutRequest) -> Result<(), String> {
         let work_dir = Path::new(&req.project_path);
-        let mut args = vec!["checkout"];
         if req.create_if_missing {
-            args.push("-B");
+            let branch = normalize_branch_for_checkout(&req.branch);
+            let exists = list_branches_detailed(work_dir, None)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .any(|candidate| !candidate.is_remote && candidate.name == branch);
+            if !exists {
+                return git_create_branch(work_dir, branch).map_err(|e| e.to_string());
+            }
         }
-        args.push(&req.branch);
-
-        let output = std::process::Command::new("git")
-            .args(&args)
-            .current_dir(work_dir)
-            .output()
-            .map_err(|e| format!("Failed to execute git checkout: {e}"))?;
-
-        if !output.status.success() {
-            let err = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("git checkout failed: {err}"));
-        }
-
-        Ok(())
+        git_checkout(work_dir, &req.branch).map_err(|e| e.to_string())
     }
 
     // ── Extended git operations ────────────────────────────────────────────
@@ -126,16 +134,16 @@ impl GitService {
     pub fn stage_file(&self, req: GitStageFileRequest) -> Result<(), String> {
         let work_dir = Path::new(&req.project_path);
         if req.stage {
-            Self::run_git(&["add", "--", &req.file_path], work_dir)?;
+            git_stage_file(work_dir, &req.file_path).map_err(|e| e.to_string())?;
         } else {
-            Self::run_git(&["restore", "--staged", "--", &req.file_path], work_dir)?;
+            git_unstage_file(work_dir, &req.file_path).map_err(|e| e.to_string())?;
         }
         Ok(())
     }
 
     pub fn commit(&self, req: GitCommitRequest) -> Result<GitCommitResponse, String> {
         let work_dir = Path::new(&req.project_path);
-        Self::run_git(&["commit", "-m", &req.message], work_dir)?;
+        threadlane_git::commit_staged(work_dir, &req.message).map_err(|e| e.to_string())?;
         let sha = Self::run_git(&["rev-parse", "HEAD"], work_dir)?;
         Ok(GitCommitResponse { sha })
     }
@@ -181,7 +189,7 @@ impl GitService {
     pub fn stash_pop(&self, req: GitStashActionRequest) -> Result<(), String> {
         let work_dir = Path::new(&req.project_path);
         if let Some(idx) = req.index {
-            Self::run_git(&["stash", "pop", &format!("stash@{{{idx}}}") ], work_dir)?;
+            Self::run_git(&["stash", "pop", &format!("stash@{{{idx}}}")], work_dir)?;
         } else {
             Self::run_git(&["stash", "pop"], work_dir)?;
         }
@@ -191,7 +199,7 @@ impl GitService {
     pub fn stash_drop(&self, req: GitStashActionRequest) -> Result<(), String> {
         let work_dir = Path::new(&req.project_path);
         if let Some(idx) = req.index {
-            Self::run_git(&["stash", "drop", &format!("stash@{{{idx}}}") ], work_dir)?;
+            Self::run_git(&["stash", "drop", &format!("stash@{{{idx}}}")], work_dir)?;
         } else {
             Self::run_git(&["stash", "drop"], work_dir)?;
         }
@@ -208,11 +216,7 @@ impl GitService {
         let message = if diff.is_empty() {
             String::new()
         } else {
-            diff.lines()
-                .last()
-                .unwrap_or("")
-                .trim()
-                .to_string()
+            diff.lines().last().unwrap_or("").trim().to_string()
         };
         Ok(GitCommitDiffMessageResponse { message })
     }

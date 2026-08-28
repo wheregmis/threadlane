@@ -1,5 +1,6 @@
 pub mod connection;
 pub mod dispatcher;
+pub mod model_catalog;
 pub mod server;
 pub mod services;
 

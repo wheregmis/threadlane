@@ -2,8 +2,8 @@
 
 use std::path::Path;
 use threadlane_protocol::project::default_global_threadlane_dir;
-use threadlane_protocol::settings::*;
 use threadlane_protocol::session::ReasoningEffort;
+use threadlane_protocol::settings::*;
 
 #[derive(Clone, Default)]
 pub struct SettingsService;

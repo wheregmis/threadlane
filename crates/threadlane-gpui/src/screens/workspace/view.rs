@@ -598,13 +598,16 @@ impl WorkspaceView {
                 return;
             }
             if group.tabs.len() > 1 {
-                group.tabs.remove(tab);
+                let terminal = group.tabs.remove(tab);
+                terminal.update(cx, |terminal, cx| terminal.close(cx));
                 if tab < group.active_tab {
                     group.active_tab -= 1;
                 } else if tab == group.active_tab {
                     group.active_tab = group.active_tab.min(group.tabs.len() - 1);
                 }
             } else {
+                let terminal = group.tabs.pop().expect("terminal tab exists");
+                terminal.update(cx, |terminal, cx| terminal.close(cx));
                 group.tabs = vec![cx.new(|cx| TerminalView::new(project.clone(), cx))];
                 group.active_tab = 0;
                 self.bottom_panel_visible = false;
@@ -622,7 +625,10 @@ impl WorkspaceView {
         if let Some(group) = self.terminal_groups.get_mut(project) {
             if keep_tab < group.tabs.len() && group.tabs.len() > 1 {
                 let keep_elem = group.tabs.remove(keep_tab);
-                group.tabs = vec![keep_elem];
+                let removed = std::mem::replace(&mut group.tabs, vec![keep_elem]);
+                for terminal in removed {
+                    terminal.update(cx, |terminal, cx| terminal.close(cx));
+                }
                 group.active_tab = 0;
                 cx.notify();
             }

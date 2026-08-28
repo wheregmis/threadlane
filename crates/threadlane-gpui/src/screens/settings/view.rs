@@ -58,8 +58,7 @@ impl ProvidersStatusSnapshot {
                 .collect(),
             active_codex_account_id: crate::services::provider_auth::get_active_codex_account()
                 .map(|account| account.id),
-            antigravity_connected:
-                crate::services::provider_auth::has_antigravity_credentials(),
+            antigravity_connected: crate::services::provider_auth::has_antigravity_credentials(),
         }
     }
 }
@@ -556,7 +555,11 @@ impl SettingsView {
     fn render_subagents(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().colors;
         let state = self.model.read(cx);
-        let Some(project) = state.active_work_dir.as_ref().map(|p| std::path::PathBuf::from(p)) else {
+        let Some(project) = state
+            .active_work_dir
+            .as_ref()
+            .map(|p| std::path::PathBuf::from(p))
+        else {
             return Self::empty_state("Attach a project to configure subagents.", theme);
         };
         let preferences = crate::services::subagent_settings::load(&project);
@@ -564,12 +567,12 @@ impl SettingsView {
         let selected_reasoning = preferences.reasoning_effort;
         let model_label = selected_model
             .as_deref()
-            .and_then(crate::model_catalog::label_for)
+            .and_then(|model| crate::model_catalog::label_for(state.available_models(), model))
             .unwrap_or_else(|| "Same as parent".into());
         let reasoning_label = selected_reasoning
             .map(|effort| effort.label())
             .unwrap_or("Same as parent");
-        let available = crate::model_catalog::available_models_for_project(Some(&project));
+        let available = state.available_models().to_vec();
         let model_entity = self.model.clone();
         let project_for_models = project.clone();
         let model_picker = Button::new("subagent-model-picker")

@@ -6,7 +6,6 @@ use threadlane_protocol::rpc::*;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio_tungstenite::tungstenite::Message;
 
-
 pub struct ConnectionHandler {
     dispatcher: Arc<RpcDispatcher>,
 }
@@ -55,10 +54,19 @@ impl ConnectionHandler {
 
                     if method == "session/subscribe" {
                         let session_id = params
-                            .and_then(|p| p.get("session_id").and_then(Value::as_str).map(str::to_owned))
+                            .and_then(|p| {
+                                p.get("session_id")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_owned)
+                            })
                             .unwrap_or_default();
 
-                        match self.dispatcher.session_service.subscribe_session(&session_id).await {
+                        match self
+                            .dispatcher
+                            .session_service
+                            .subscribe_session(&session_id)
+                            .await
+                        {
                             Ok(mut event_rx) => {
                                 let out_tx_clone = out_tx.clone();
                                 tokio::spawn(async move {
@@ -77,7 +85,10 @@ impl ConnectionHandler {
                                 let _ = out_tx.send(serde_json::to_string(&res).unwrap()).await;
                             }
                             Err(err) => {
-                                let res = RpcResponse::error(req_id, RpcError::new(ERROR_SESSION_NOT_FOUND, err));
+                                let res = RpcResponse::error(
+                                    req_id,
+                                    RpcError::new(ERROR_SESSION_NOT_FOUND, err),
+                                );
                                 let _ = out_tx.send(serde_json::to_string(&res).unwrap()).await;
                             }
                         }
@@ -109,7 +120,10 @@ impl ConnectionHandler {
                 Err(err) => {
                     let res = RpcResponse::error(
                         0u64,
-                        RpcError::new(ERROR_PARSE_ERROR, format!("Failed to parse JSON-RPC: {err}")),
+                        RpcError::new(
+                            ERROR_PARSE_ERROR,
+                            format!("Failed to parse JSON-RPC: {err}"),
+                        ),
                     );
                     let _ = out_tx.send(serde_json::to_string(&res).unwrap()).await;
                 }
@@ -146,10 +160,19 @@ impl ConnectionHandler {
 
                         if method == "session/subscribe" {
                             let session_id = params
-                                .and_then(|p| p.get("session_id").and_then(Value::as_str).map(str::to_owned))
+                                .and_then(|p| {
+                                    p.get("session_id")
+                                        .and_then(Value::as_str)
+                                        .map(str::to_owned)
+                                })
                                 .unwrap_or_default();
 
-                            match self.dispatcher.session_service.subscribe_session(&session_id).await {
+                            match self
+                                .dispatcher
+                                .session_service
+                                .subscribe_session(&session_id)
+                                .await
+                            {
                                 Ok(mut event_rx) => {
                                     let out_tx_clone = out_tx.clone();
                                     tokio::spawn(async move {
@@ -168,10 +191,30 @@ impl ConnectionHandler {
                                     let _ = out_tx.send(serde_json::to_string(&res).unwrap()).await;
                                 }
                                 Err(err) => {
-                                    let res = RpcResponse::error(req_id, RpcError::new(ERROR_SESSION_NOT_FOUND, err));
+                                    let res = RpcResponse::error(
+                                        req_id,
+                                        RpcError::new(ERROR_SESSION_NOT_FOUND, err),
+                                    );
                                     let _ = out_tx.send(serde_json::to_string(&res).unwrap()).await;
                                 }
                             }
+                        } else if method == "terminal/subscribe" {
+                            let mut term_rx = self.dispatcher.terminal_service.subscribe_output();
+                            let out_tx_clone = out_tx.clone();
+                            tokio::spawn(async move {
+                                while let Ok(event) = term_rx.recv().await {
+                                    let notif = RpcNotification::new(
+                                        "terminal/event",
+                                        Some(serde_json::to_value(&event).unwrap()),
+                                    );
+                                    let json = serde_json::to_string(&notif).unwrap();
+                                    if out_tx_clone.send(json).await.is_err() {
+                                        break;
+                                    }
+                                }
+                            });
+                            let res = RpcResponse::success(req_id, Value::Bool(true));
+                            let _ = out_tx.send(serde_json::to_string(&res).unwrap()).await;
                         } else {
                             let response = self.dispatcher.dispatch(req).await;
                             let json = serde_json::to_string(&response).unwrap();

@@ -27,7 +27,10 @@ impl DaemonServer {
         let listener = UnixListener::bind(&socket_path)
             .map_err(|e| format!("Failed to bind UDS at {}: {e}", socket_path.display()))?;
 
-        info!("Daemon listening on Unix Domain Socket: {}", socket_path.display());
+        info!(
+            "Daemon listening on Unix Domain Socket: {}",
+            socket_path.display()
+        );
 
         let dispatcher = self.dispatcher.clone();
         tokio::spawn(async move {

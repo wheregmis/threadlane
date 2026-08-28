@@ -7419,7 +7419,6 @@ dependencies = [
  "gpui_platform",
  "hotpath",
  "notify 8.2.0",
- "portable-pty",
  "rfd",
  "robius-open",
  "serde",

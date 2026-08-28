@@ -12,38 +12,9 @@ impl CapabilitiesService {
     }
 
     pub fn list_models(&self) -> Result<ListModelsResponse, String> {
-        let models = vec![
-            ModelDescriptor {
-                id: "antigravity/gemini-3.7-flash".to_string(),
-                name: "Gemini 3.7 Flash".to_string(),
-                provider: "antigravity".to_string(),
-                supports_reasoning: true,
-                context_window: Some(1_000_000),
-            },
-            ModelDescriptor {
-                id: "antigravity/gemini-3.7-pro".to_string(),
-                name: "Gemini 3.7 Pro".to_string(),
-                provider: "antigravity".to_string(),
-                supports_reasoning: true,
-                context_window: Some(2_000_000),
-            },
-            ModelDescriptor {
-                id: "gpt-4o".to_string(),
-                name: "GPT-4o".to_string(),
-                provider: "openai".to_string(),
-                supports_reasoning: false,
-                context_window: Some(128_000),
-            },
-            ModelDescriptor {
-                id: "o3-mini".to_string(),
-                name: "o3-mini".to_string(),
-                provider: "openai".to_string(),
-                supports_reasoning: true,
-                context_window: Some(200_000),
-            },
-        ];
-
-        Ok(ListModelsResponse { models })
+        Ok(ListModelsResponse {
+            models: crate::model_catalog::models(),
+        })
     }
 
     pub fn list_skills(&self, req: ListSkillsRequest) -> Result<ListSkillsResponse, String> {
@@ -193,5 +164,18 @@ impl CapabilitiesService {
         // A full implementation would call the model provider.
         let title = threadlane_protocol::normalize_session_title(&req.prompt);
         Ok(GenerateTitleResponse { title })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_models_uses_the_daemon_catalog() {
+        assert_eq!(
+            CapabilitiesService::new().list_models().unwrap().models,
+            crate::model_catalog::models(),
+        );
     }
 }
