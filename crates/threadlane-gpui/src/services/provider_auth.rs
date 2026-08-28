@@ -264,14 +264,6 @@ pub(crate) fn has_antigravity_credentials() -> bool {
     has_credentials(ProviderKind::Antigravity)
 }
 
-pub(crate) fn has_openai_credentials() -> bool {
-    has_credentials(ProviderKind::OpenAi)
-}
-
-pub(crate) fn has_opencode_credentials() -> bool {
-    has_credentials(ProviderKind::OpenCode)
-}
-
 // ── Codex account helpers (OpenAI multi-account) ──────────────────────────────
 
 #[derive(Clone, Debug)]

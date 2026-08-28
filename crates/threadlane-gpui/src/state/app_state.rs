@@ -1,16 +1,16 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+#[cfg(all(test, feature = "legacy-api-tests"))]
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use threadlane_protocol::git::{GitHubPrInfo, GitStatus};
-use threadlane_protocol::harness::{
-    AdvisorSeverity, JsonlStore, SessionDiagnostics, SessionStore, TranscriptItem, UiMessageRole,
-};
+use threadlane_protocol::harness::{JsonlStore, SessionDiagnostics, SessionStore};
 use threadlane_protocol::permission::{PermissionDecision, PermissionRequest};
 use threadlane_protocol::{
-    AcpConfigOption, AgentEvent, AgentMessage, ImageAttachment, ModelRoles, ProjectRecord,
-    ReasoningEffort, SessionEvent, SessionPlan, SubagentProgressUpdate, TokenUsage,
+    AcpConfigOption, AgentMessage, ImageAttachment, ModelRoles, ProjectRecord,
+    ReasoningEffort, SessionEvent, SessionPlan, TokenUsage,
 };
 
 use crate::adapters::agent_events::{adapt_agent_event, ChatAgentUpdate};
@@ -466,12 +466,6 @@ fn discover_sessions_in_project_cached(
     sessions
 }
 
-pub fn load_session_plan(session_file: &Path) -> SessionPlan {
-    JsonlStore::open_read_only(session_file)
-        .map(|store| store.plan())
-        .unwrap_or_default()
-}
-
 pub fn load_session_messages(session_file: &Path) -> Vec<ChatMessageInfo> {
     compute_session_messages(session_file).unwrap_or_default()
 }
@@ -541,6 +535,7 @@ pub(crate) fn compute_session_messages(
 }
 
 /// Opens a session JSONL once and builds every UI projection required after hydration.
+#[cfg(all(test, feature = "legacy-api-tests"))]
 pub(crate) fn compute_full_session_projection(
     session_file: &Path,
 ) -> Result<SessionProjectionResult, String> {
@@ -561,6 +556,7 @@ pub(crate) fn compute_full_session_projection(
     })
 }
 
+#[cfg(all(test, feature = "legacy-api-tests"))]
 fn project_subagents_from_store(store: &impl SessionStore) -> Vec<SubagentActivityInfo> {
     use threadlane_protocol::harness::{Record, SubagentLifecyclePhase};
 
@@ -796,37 +792,6 @@ pub(crate) fn runtime_status_text(status: SessionRuntimeStatus) -> Option<String
     }
 }
 
-pub(crate) fn provider_credentials(_model: &str) -> (String, Option<String>) {
-    (String::new(), None)
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct CodingAgentOptions {
-    pub api_key: String,
-    pub account_id: Option<String>,
-    pub model: String,
-    pub work_dir: PathBuf,
-    pub session_file: Option<PathBuf>,
-    pub system_prompt: String,
-}
-
-pub(crate) fn coding_agent_options(
-    work_dir: PathBuf,
-    session_file: PathBuf,
-    model: String,
-    _model_roles: ModelRoles,
-) -> CodingAgentOptions {
-    let (api_key, account_id) = provider_credentials(&model);
-    CodingAgentOptions {
-        api_key,
-        account_id,
-        model,
-        work_dir,
-        session_file: Some(session_file),
-        system_prompt: Default::default(),
-    }
-}
-
 impl Default for AppState {
     fn default() -> Self {
         Self::load()
@@ -885,12 +850,12 @@ impl AppState {
 
     fn load_from_registry_with_options(
         registry_projects: Vec<AttachedProject>,
-        allow_current_directory_fallback: bool,
+        _allow_current_directory_fallback: bool,
     ) -> Self {
         #[cfg(not(test))]
         let mut registry_projects = registry_projects;
         #[cfg(not(test))]
-        if allow_current_directory_fallback && registry_projects.is_empty() {
+        if _allow_current_directory_fallback && registry_projects.is_empty() {
             if let Ok(curr) = std::env::current_dir().and_then(std::fs::canonicalize) {
                 let name = curr
                     .file_name()
@@ -1162,6 +1127,7 @@ impl AppState {
         Ok(())
     }
 
+    #[cfg(all(test, feature = "legacy-api-tests"))]
     pub(crate) fn current_session_token_usage(&self) -> TokenUsage {
         if let Some(key) = self.active_session_projection_key() {
             if let Some(usage) = self.session_token_usage.get(&key) {
@@ -1873,6 +1839,7 @@ impl AppState {
     }
 
     /// Hydrates trajectory, token usage, and metrics projections from durable harness records.
+    #[cfg(all(test, feature = "legacy-api-tests"))]
     fn hydrate_session_projection(
         &mut self,
         session_id: &str,
@@ -1900,6 +1867,7 @@ impl AppState {
     }
 
     /// Projects trajectory entries, token usage, and metrics from an already-open store.
+    #[cfg(all(test, feature = "legacy-api-tests"))]
     fn project_trajectory_from_store(
         store: &JsonlStore,
     ) -> (
@@ -2748,6 +2716,7 @@ impl AppState {
         (trajectory, metrics, durable_usage, context_window)
     }
 
+    #[cfg(all(test, feature = "legacy-api-tests"))]
     fn project_context_window(store: &JsonlStore) -> Option<ContextWindowInfo> {
         use threadlane_protocol::harness::Record;
         let manifest = store
@@ -3035,12 +3004,12 @@ impl AppState {
     fn record_trajectory(&mut self, session_id: &str, event: &SessionEvent) {
         let entry = match event {
             SessionEvent::ToolCallStarted {
-                tool_call_id,
+                tool_call_id: _,
                 name,
                 arguments,
             } => Some(("Tool", format!("{name} running"), arguments.clone(), None)),
             SessionEvent::ToolCallFinished {
-                tool_call_id,
+                tool_call_id: _,
                 name,
                 result,
             } => Some((

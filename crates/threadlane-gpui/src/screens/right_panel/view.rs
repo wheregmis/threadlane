@@ -404,10 +404,6 @@ impl RightPanelView {
         cx.notify();
     }
 
-    pub(crate) fn open_files(&mut self, cx: &mut Context<Self>) {
-        self.open_surface(Surface::Files, cx);
-    }
-
     fn open_surface(&mut self, surface: Surface, cx: &mut Context<Self>) {
         if self.active_surface != Some(surface) {
             self.document_title = None;
@@ -723,10 +719,6 @@ impl RightPanelView {
         }
     }
 
-    pub(crate) fn refresh_review(&mut self, _cx: &mut Context<Self>) {
-        self.refresh_surface(Surface::Review);
-    }
-
     pub(crate) fn restore_current_stash(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(index) = self
             .git_status
@@ -762,7 +754,6 @@ impl RightPanelView {
             cx.notify();
             return;
         }
-        let (api_key, account_id) = crate::state::provider_credentials(&model);
         let tx = self.event_tx.clone();
         let Ok(executor) = crate::services::chat::executor() else {
             self.git_feedback = Some("Unable to start the model runtime.".into());

@@ -15,7 +15,7 @@ fn dump_config(args: &[String]) -> Result<(), String> {
     let project = args
         .get(project_index + 1)
         .ok_or_else(|| "--project requires a path".to_string())?;
-    let project = PathBuf::from(project)
+    let _project = PathBuf::from(project)
         .canonicalize()
         .map_err(|error| error.to_string())?;
     let session_file = args

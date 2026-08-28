@@ -1,11 +1,9 @@
 mod app_state;
 
-pub(crate) use app_state::provider_credentials;
-
 #[cfg(all(test, feature = "legacy-api-tests"))]
 pub(crate) use app_state::reported_session_shape_state;
 pub(crate) use app_state::{
-    coding_agent_options, runtime_status_text, SessionHydrationRequest, SessionProjectionResult,
+    runtime_status_text, SessionHydrationRequest, SessionProjectionResult,
 };
 
 pub use app_state::{

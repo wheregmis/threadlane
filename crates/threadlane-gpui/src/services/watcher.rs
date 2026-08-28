@@ -4,7 +4,7 @@
 //! The daemon's `WatcherService` owns the actual `RecommendedWatcher`; GPUI
 //! just asks the daemon to start watching a project and then receives events.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Summary of a workspace-change notification received from the daemon.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -25,7 +25,7 @@ impl WorkspaceWatcher {
     pub fn start<F>(
         root: PathBuf,
         _debounce_duration: std::time::Duration,
-        on_change: F,
+        _on_change: F,
     ) -> Result<Self, notify::Error>
     where
         F: Fn(WorkspaceChangeEvent) + Send + 'static,

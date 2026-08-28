@@ -3,9 +3,8 @@
 use tokio::sync::mpsc::UnboundedSender as Sender;
 
 use threadlane_protocol::{
-    AcpAgentRecord, AcpAgentStatus, AcpScope, ExtensionRecord, ExtensionScope, SkillMetadata,
-    SkillScope, AddAcpAgentRequest, RemoveAcpAgentRequest, SetAcpEnabledRequest,
-    GetSubagentSettingsRequest,
+    AcpAgentRecord, AcpScope, AddAcpAgentRequest, ExtensionRecord, ExtensionScope,
+    RemoveAcpAgentRequest, SetAcpEnabledRequest, SkillMetadata,
 };
 
 pub use threadlane_protocol::{
@@ -79,7 +78,7 @@ pub(crate) fn remove_extension(
 
 // ── Skills ────────────────────────────────────────────────────────────────────
 
-pub(crate) fn discover_skills(project_root: Option<&std::path::Path>) -> Vec<SkillMetadata> {
+pub(crate) fn discover_skills(_project_root: Option<&std::path::Path>) -> Vec<SkillMetadata> {
     // Skills are enumerated by the daemon via capabilities/skills.
     // Return empty; the GPUI settings panel should call the daemon async.
     Vec::new()

@@ -33,6 +33,7 @@ pub(crate) fn label_for(models: &[ModelOption], model_id: &str) -> Option<String
 
 pub const UNKNOWN_MODEL_CONTEXT_LIMIT: usize = 128_000;
 
+#[cfg(test)]
 pub(crate) fn model_context_limit(model: &str) -> Option<usize> {
     if model.contains("gemini-3.1-pro") || model.contains("gemini-1.5-pro") {
         Some(2_000_000)
@@ -45,6 +46,7 @@ pub(crate) fn model_context_limit(model: &str) -> Option<usize> {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn model_context_window(model: &str) -> u32 {
     model_context_limit(model)
         .unwrap_or(UNKNOWN_MODEL_CONTEXT_LIMIT)

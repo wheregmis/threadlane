@@ -561,14 +561,6 @@ fn format_trajectory_raw_json(entry: &TrajectoryEntry) -> String {
     serde_json::to_string_pretty(entry).unwrap_or_else(|_| entry.detail.clone())
 }
 
-#[cfg(test)]
-fn reconcile_trajectory_entries(
-    cached: Vec<TrajectoryEntry>,
-    source: &[TrajectoryEntry],
-) -> Vec<TrajectoryEntry> {
-    reconcile_trajectory_entries_with_append(cached, source).0
-}
-
 fn reconcile_trajectory_entries_with_append(
     mut cached: Vec<TrajectoryEntry>,
     source: &[TrajectoryEntry],
@@ -1147,19 +1139,6 @@ impl ChatListView {
         self.current_tab = CentralTab::Chat;
         self.input_state.update(cx, |input, cx| {
             input.focus(window, cx);
-        });
-        cx.notify();
-    }
-
-    pub(crate) fn set_composer_text(
-        &mut self,
-        text: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.current_tab = CentralTab::Chat;
-        self.input_state.update(cx, |input, cx| {
-            input.set_value(text, window, cx);
         });
         cx.notify();
     }
@@ -5793,6 +5772,13 @@ mod hot_path_tests {
         reported_session_shape_state, ChatMessageInfo, ChatStreamEvent, MessageRole,
         SubagentActivityStatus, ToolActivityInfo, TrajectoryDiagnostics, TrajectoryEntry,
     };
+
+    fn reconcile_trajectory_entries(
+        cached: Vec<TrajectoryEntry>,
+        source: &[TrajectoryEntry],
+    ) -> Vec<TrajectoryEntry> {
+        reconcile_trajectory_entries_with_append(cached, source).0
+    }
 
     #[test]
     fn markdown_cache_resets_only_after_its_limit() {

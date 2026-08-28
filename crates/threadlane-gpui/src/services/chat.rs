@@ -176,6 +176,7 @@ pub(crate) fn maybe_generate_session_title(
 }
 
 /// Normalise an LLM-generated title. Delegates to the shared protocol helper.
+#[cfg(test)]
 pub fn normalize_session_title(value: &str) -> String {
     threadlane_protocol::normalize_session_title(value)
 }
