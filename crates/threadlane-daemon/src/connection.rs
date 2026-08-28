@@ -3,6 +3,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use std::sync::Arc;
 use threadlane_protocol::rpc::*;
+use threadlane_protocol::workspace::*;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio_tungstenite::tungstenite::Message;
 
@@ -109,6 +110,54 @@ impl ConnectionHandler {
                         });
                         let res = RpcResponse::success(req_id, Value::Bool(true));
                         let _ = out_tx.send(serde_json::to_string(&res).unwrap()).await;
+                    } else if method == "workspace/watch" {
+                        let project_path = params
+                            .and_then(|p| serde_json::from_value::<WatchWorkspaceRequest>(p).ok())
+                            .map(|req| req.project_path)
+                            .unwrap_or_default();
+                        match self
+                            .dispatcher
+                            .watcher_service
+                            .watch_project(project_path, self.dispatcher.workspace_events.clone())
+                        {
+                            Ok(()) => {
+                                let mut workspace_rx = self.dispatcher.workspace_events.subscribe();
+                                let out_tx_clone = out_tx.clone();
+                                tokio::spawn(async move {
+                                    while let Ok(event) = workspace_rx.recv().await {
+                                        let notif = RpcNotification::new(
+                                            "workspace/changed",
+                                            Some(serde_json::to_value(event).unwrap()),
+                                        );
+                                        let Ok(json) = serde_json::to_string(&notif) else {
+                                            break;
+                                        };
+                                        if out_tx_clone.send(json).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                });
+                                let res = RpcResponse::success(req_id, Value::Null);
+                                let _ = out_tx.send(serde_json::to_string(&res).unwrap()).await;
+                            }
+                            Err(error) => {
+                                let res = RpcResponse::error(
+                                    req_id,
+                                    RpcError::new(ERROR_WORKSPACE_ERROR, error),
+                                );
+                                let _ = out_tx.send(serde_json::to_string(&res).unwrap()).await;
+                            }
+                        }
+                    } else if method == "workspace/unwatch" {
+                        if let Some(req) = params
+                            .and_then(|p| serde_json::from_value::<UnwatchWorkspaceRequest>(p).ok())
+                        {
+                            self.dispatcher
+                                .watcher_service
+                                .unwatch_project(&req.project_path);
+                        }
+                        let res = RpcResponse::success(req_id, Value::Null);
+                        let _ = out_tx.send(serde_json::to_string(&res).unwrap()).await;
                     } else {
                         let response = self.dispatcher.dispatch(req).await;
                         let json = serde_json::to_string(&response).unwrap();
@@ -214,6 +263,56 @@ impl ConnectionHandler {
                                 }
                             });
                             let res = RpcResponse::success(req_id, Value::Bool(true));
+                            let _ = out_tx.send(serde_json::to_string(&res).unwrap()).await;
+                        } else if method == "workspace/watch" {
+                            let project_path = params
+                                .and_then(|p| {
+                                    serde_json::from_value::<WatchWorkspaceRequest>(p).ok()
+                                })
+                                .map(|req| req.project_path)
+                                .unwrap_or_default();
+                            match self.dispatcher.watcher_service.watch_project(
+                                project_path,
+                                self.dispatcher.workspace_events.clone(),
+                            ) {
+                                Ok(()) => {
+                                    let mut workspace_rx =
+                                        self.dispatcher.workspace_events.subscribe();
+                                    let out_tx_clone = out_tx.clone();
+                                    tokio::spawn(async move {
+                                        while let Ok(event) = workspace_rx.recv().await {
+                                            let notif = RpcNotification::new(
+                                                "workspace/changed",
+                                                Some(serde_json::to_value(event).unwrap()),
+                                            );
+                                            let Ok(json) = serde_json::to_string(&notif) else {
+                                                break;
+                                            };
+                                            if out_tx_clone.send(json).await.is_err() {
+                                                break;
+                                            }
+                                        }
+                                    });
+                                    let res = RpcResponse::success(req_id, Value::Null);
+                                    let _ = out_tx.send(serde_json::to_string(&res).unwrap()).await;
+                                }
+                                Err(error) => {
+                                    let res = RpcResponse::error(
+                                        req_id,
+                                        RpcError::new(ERROR_WORKSPACE_ERROR, error),
+                                    );
+                                    let _ = out_tx.send(serde_json::to_string(&res).unwrap()).await;
+                                }
+                            }
+                        } else if method == "workspace/unwatch" {
+                            if let Some(req) = params.and_then(|p| {
+                                serde_json::from_value::<UnwatchWorkspaceRequest>(p).ok()
+                            }) {
+                                self.dispatcher
+                                    .watcher_service
+                                    .unwatch_project(&req.project_path);
+                            }
+                            let res = RpcResponse::success(req_id, Value::Null);
                             let _ = out_tx.send(serde_json::to_string(&res).unwrap()).await;
                         } else {
                             let response = self.dispatcher.dispatch(req).await;

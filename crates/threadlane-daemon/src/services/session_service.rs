@@ -327,6 +327,23 @@ impl SessionService {
         Ok(sessions)
     }
 
+    pub async fn read_session_log(
+        &self,
+        req: ReadSessionLogRequest,
+    ) -> Result<ReadSessionLogResponse, String> {
+        let session = self
+            .list_session_infos(ListSessionsRequest {
+                project_path: req.project_path,
+            })
+            .await?
+            .into_iter()
+            .find(|session| session.id == req.session_id)
+            .ok_or_else(|| format!("Session '{}' not found", req.session_id))?;
+        let content = std::fs::read_to_string(&session.session_file)
+            .map_err(|e| format!("Failed to read session log: {e}"))?;
+        Ok(ReadSessionLogResponse { content })
+    }
+
     pub async fn hydrate_session(
         &self,
         req: HydrateSessionRequest,

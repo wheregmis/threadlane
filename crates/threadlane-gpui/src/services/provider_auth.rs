@@ -224,6 +224,24 @@ pub(crate) fn remove_openai_credentials() -> Result<(), String> {
     disconnect(ProviderKind::OpenAi)
 }
 
+pub(crate) fn save_api_key(provider: ProviderKind, key: &str) -> Result<(), String> {
+    executor()?.block_on(async {
+        let client = crate::services::daemon_client::get_daemon_client().await?;
+        if key.trim().is_empty() {
+            return client
+                .disconnect_provider(DisconnectProviderRequest { provider })
+                .await;
+        }
+        client
+            .connect_provider(ConnectProviderRequest {
+                provider,
+                api_key: Some(key.trim().to_owned()),
+            })
+            .await
+            .map(|_| ())
+    })
+}
+
 pub(crate) fn get_github_auth_status() -> Option<String> {
     executor()
         .ok()

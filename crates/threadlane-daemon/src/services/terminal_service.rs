@@ -10,7 +10,7 @@ struct ActiveTerminal {
     session_token: Arc<()>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Box<dyn MasterPty + Send>,
-    _child: Box<dyn portable_pty::Child + Send + Sync>,
+    child: Box<dyn portable_pty::Child + Send + Sync>,
 }
 
 #[derive(Clone)]
@@ -97,7 +97,7 @@ impl TerminalService {
                 session_token: session_token.clone(),
                 writer: Arc::new(Mutex::new(writer)),
                 master: pair.master,
-                _child: child,
+                child,
             },
         );
         drop(lock);
@@ -146,7 +146,9 @@ impl TerminalService {
                     .map(|terminal| Arc::ptr_eq(&terminal.session_token, &session_token))
                     .unwrap_or(false);
                 if should_remove {
-                    let _ = terminals.remove(&term_id_clone);
+                    if let Some(mut terminal) = terminals.remove(&term_id_clone) {
+                        let _ = terminal.child.kill();
+                    }
                 }
             }
         });
@@ -198,7 +200,8 @@ impl TerminalService {
             .lock()
             .map_err(|e| e.to_string())?
             .remove(&req.terminal_id);
-        if removed.is_some() {
+        if let Some(mut terminal) = removed {
+            let _ = terminal.child.kill();
             Ok(TerminalClosedResponse {
                 terminal_id: req.terminal_id,
                 exit_code: Some(0),

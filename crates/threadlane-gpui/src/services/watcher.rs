@@ -25,13 +25,15 @@ impl WorkspaceWatcher {
     pub fn start<F>(
         root: PathBuf,
         _debounce_duration: std::time::Duration,
-        _on_change: F,
+        on_change: F,
     ) -> Result<Self, String>
     where
         F: Fn(WorkspaceChangeEvent) + Send + 'static,
     {
         let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
         let root_str = root.to_string_lossy().to_string();
+        let watch_path = root_str.clone();
+        let callback_path = root_str.clone();
 
         // Spawn an async task on the shared daemon-client Tokio runtime.
         if let Ok(rt) = crate::services::chat::executor() {
@@ -45,23 +47,24 @@ impl WorkspaceWatcher {
                     }
                 };
 
-                // Register the project with the daemon watcher service via project/register.
-                // The watcher_service auto-starts watching on register when configured.
-                let _ = client.register_project(&root_str).await;
-
-                // Subscribe to workspace/changed notifications.
-                // These arrive as terminal events with method "workspace/changed" — for now
-                // we poll the session-events bus for project-specific dirty signals.
-                // TODO: add dedicated workspace/changed notification channel to the protocol.
-                let mut events = client.subscribe_session_events();
+                let mut events = client.subscribe_workspace_events();
+                if let Err(error) = client.watch_workspace(&watch_path).await {
+                    tracing::warn!("WorkspaceWatcher: cannot watch {watch_path}: {error}");
+                    return;
+                }
                 loop {
                     tokio::select! {
-                        _ = &mut stop_rx => break,
+                        _ = &mut stop_rx => {
+                            let _ = client.unwatch_workspace(&watch_path).await;
+                            break;
+                        }
                         Ok(event) = events.recv() => {
-                            // The daemon broadcasts workspace/changed info as part of
-                            // SessionEvent::SessionStarted for now; a dedicated event
-                            // type will be added to the protocol in a follow-up.
-                            let _ = event; // placeholder until workspace/changed is in protocol
+                            if event.project_path == callback_path {
+                                on_change(WorkspaceChangeEvent {
+                                    git_dirty: event.git_dirty,
+                                    files_dirty: event.files_dirty,
+                                });
+                            }
                         }
                     }
                 }

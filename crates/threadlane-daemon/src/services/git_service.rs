@@ -1,8 +1,10 @@
 use std::path::Path;
 use threadlane_git::{
-    checkout as git_checkout, create_branch as git_create_branch, diff_file as git_diff_file,
-    inspect, list_branches_detailed, normalize_branch_for_checkout, stage_file as git_stage_file,
-    unstage_file as git_unstage_file,
+    checkout as git_checkout, checkout_carrying_changes, checkout_with_stash,
+    create_branch as git_create_branch, create_pull_request, diff_commit_file,
+    diff_file as git_diff_file, diff_stash_file, fetch, inspect, inspect_commit_files, inspect_pr,
+    inspect_pr_for_branch, inspect_stash_files, list_branches_detailed,
+    normalize_branch_for_checkout, stage_file as git_stage_file, unstage_file as git_unstage_file,
 };
 use threadlane_protocol::capabilities::*;
 use threadlane_protocol::git::*;
@@ -46,6 +48,16 @@ impl GitService {
             ahead: status.ahead,
             behind: status.behind,
         })
+    }
+
+    pub fn inspect(&self, req: GitInspectRequest) -> Result<GitInspectResponse, String> {
+        let status = inspect(Path::new(&req.project_path)).map_err(|e| e.to_string())?;
+        let status = serde_json::from_value(
+            serde_json::to_value(status)
+                .map_err(|e| format!("Failed to encode git status: {e}"))?,
+        )
+        .map_err(|e| format!("Failed to encode git status: {e}"))?;
+        Ok(GitInspectResponse { status })
     }
 
     pub fn diff(&self, req: GitDiffRequest) -> Result<GitDiffResponse, String> {
@@ -113,7 +125,86 @@ impl GitService {
                 return git_create_branch(work_dir, branch).map_err(|e| e.to_string());
             }
         }
-        git_checkout(work_dir, &req.branch).map_err(|e| e.to_string())
+        match req.mode {
+            GitCheckoutMode::Direct => git_checkout(work_dir, &req.branch),
+            GitCheckoutMode::Stash => checkout_with_stash(work_dir, &req.branch),
+            GitCheckoutMode::Carry => checkout_carrying_changes(work_dir, &req.branch),
+        }
+        .map_err(|e| e.to_string())
+    }
+
+    pub fn fetch(&self, req: GitFetchRequest) -> Result<(), String> {
+        fetch(Path::new(&req.project_path)).map_err(|e| e.to_string())
+    }
+
+    pub fn create_pull_request(
+        &self,
+        req: GitPushPullRequest,
+    ) -> Result<GitCreatePullRequestResponse, String> {
+        let url = create_pull_request(Path::new(&req.project_path)).map_err(|e| e.to_string())?;
+        Ok(GitCreatePullRequestResponse { url })
+    }
+
+    pub fn inspect_pr(&self, req: GitInspectPrRequest) -> Result<GitInspectPrResponse, String> {
+        let work_dir = Path::new(&req.project_path);
+        let pr = match req.branch.as_deref() {
+            Some(branch) => inspect_pr_for_branch(work_dir, branch),
+            None => inspect_pr(work_dir),
+        }
+        .map_err(|e| e.to_string())?;
+        let pr = pr
+            .map(|value| {
+                serde_json::from_value(serde_json::to_value(value).map_err(|e| e.to_string())?)
+                    .map_err(|e| e.to_string())
+            })
+            .transpose()?;
+        Ok(GitInspectPrResponse { pr })
+    }
+
+    pub fn inspect_stash_files(
+        &self,
+        req: GitStashFilesRequest,
+    ) -> Result<GitStashFilesResponse, String> {
+        Ok(GitStashFilesResponse {
+            files: serde_json::from_value(
+                serde_json::to_value(inspect_stash_files(Path::new(&req.project_path), req.index))
+                    .map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?,
+        })
+    }
+
+    pub fn diff_stash_file(
+        &self,
+        req: GitStashDiffRequest,
+    ) -> Result<GitStashDiffResponse, String> {
+        Ok(GitStashDiffResponse {
+            diff: diff_stash_file(Path::new(&req.project_path), req.index, &req.file_path)
+                .map_err(|e| e.to_string())?,
+        })
+    }
+
+    pub fn inspect_commit_files(
+        &self,
+        req: GitCommitFilesRequest,
+    ) -> Result<GitCommitFilesResponse, String> {
+        Ok(GitCommitFilesResponse {
+            files: serde_json::from_value(
+                serde_json::to_value(inspect_commit_files(Path::new(&req.project_path), &req.sha))
+                    .map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?,
+        })
+    }
+
+    pub fn diff_commit_file(
+        &self,
+        req: GitCommitDiffRequest,
+    ) -> Result<GitCommitDiffResponse, String> {
+        Ok(GitCommitDiffResponse {
+            diff: diff_commit_file(Path::new(&req.project_path), &req.sha, &req.file_path)
+                .map_err(|e| e.to_string())?,
+        })
     }
 
     // ── Extended git operations ────────────────────────────────────────────

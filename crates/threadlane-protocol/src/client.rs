@@ -18,6 +18,7 @@ use crate::session::*;
 use crate::settings::*;
 use crate::terminal::*;
 use crate::update::*;
+use crate::workspace::*;
 
 pub struct DaemonClient {
     next_id: AtomicU64,
@@ -25,6 +26,7 @@ pub struct DaemonClient {
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<RpcResponse>>>>,
     session_events: broadcast::Sender<SessionEvent>,
     terminal_events: broadcast::Sender<TerminalOutputEvent>,
+    workspace_events: broadcast::Sender<WorkspaceChangedEvent>,
     terminal_subscribed: AtomicBool,
 }
 
@@ -44,6 +46,7 @@ impl DaemonClient {
             Arc::new(Mutex::new(HashMap::new()));
         let (session_events, _) = broadcast::channel(1024);
         let (terminal_events, _) = broadcast::channel(1024);
+        let (workspace_events, _) = broadcast::channel(1024);
 
         // Background writer pump
         tokio::spawn(async move {
@@ -64,6 +67,7 @@ impl DaemonClient {
         let pending_clone = pending.clone();
         let session_events_clone = session_events.clone();
         let terminal_events_clone = terminal_events.clone();
+        let workspace_events_clone = workspace_events.clone();
 
         tokio::spawn(async move {
             let mut lines = BufReader::new(reader).lines();
@@ -88,6 +92,14 @@ impl DaemonClient {
                                 let _ = terminal_events_clone.send(event);
                             }
                         }
+                    } else if notif.method == "workspace/changed" {
+                        if let Some(params) = notif.params {
+                            if let Ok(event) =
+                                serde_json::from_value::<WorkspaceChangedEvent>(params)
+                            {
+                                let _ = workspace_events_clone.send(event);
+                            }
+                        }
                     }
                 } else if let Ok(res) = serde_json::from_str::<RpcResponse>(line) {
                     if let RequestId::Number(id) = res.id {
@@ -106,6 +118,7 @@ impl DaemonClient {
             pending,
             session_events,
             terminal_events,
+            workspace_events,
             terminal_subscribed: AtomicBool::new(false),
         })
     }
@@ -251,6 +264,13 @@ impl DaemonClient {
         .await
     }
 
+    pub async fn read_session_log(
+        &self,
+        req: ReadSessionLogRequest,
+    ) -> Result<ReadSessionLogResponse, String> {
+        self.request("session/read_log", req).await
+    }
+
     pub async fn hydrate_session(
         &self,
         req: HydrateSessionRequest,
@@ -337,6 +357,16 @@ impl DaemonClient {
         .await
     }
 
+    pub async fn git_inspect(&self, project_path: &str) -> Result<GitInspectResponse, String> {
+        self.request(
+            "git/inspect",
+            GitInspectRequest {
+                project_path: project_path.to_string(),
+            },
+        )
+        .await
+    }
+
     pub async fn git_branches(
         &self,
         req: GitBranchesRequest,
@@ -350,6 +380,52 @@ impl DaemonClient {
 
     pub async fn git_checkout(&self, req: GitCheckoutRequest) -> Result<(), String> {
         self.request("git/checkout", req).await
+    }
+
+    pub async fn git_fetch(&self, req: GitFetchRequest) -> Result<(), String> {
+        self.request("git/fetch", req).await
+    }
+
+    pub async fn git_create_pull_request(
+        &self,
+        req: GitPushPullRequest,
+    ) -> Result<GitCreatePullRequestResponse, String> {
+        self.request("git/create_pull_request", req).await
+    }
+
+    pub async fn git_inspect_pr(
+        &self,
+        req: GitInspectPrRequest,
+    ) -> Result<GitInspectPrResponse, String> {
+        self.request("git/inspect_pr", req).await
+    }
+
+    pub async fn git_inspect_stash_files(
+        &self,
+        req: GitStashFilesRequest,
+    ) -> Result<GitStashFilesResponse, String> {
+        self.request("git/stash_files", req).await
+    }
+
+    pub async fn git_diff_stash_file(
+        &self,
+        req: GitStashDiffRequest,
+    ) -> Result<GitStashDiffResponse, String> {
+        self.request("git/stash_diff", req).await
+    }
+
+    pub async fn git_inspect_commit_files(
+        &self,
+        req: GitCommitFilesRequest,
+    ) -> Result<GitCommitFilesResponse, String> {
+        self.request("git/commit_files", req).await
+    }
+
+    pub async fn git_diff_commit_file(
+        &self,
+        req: GitCommitDiffRequest,
+    ) -> Result<GitCommitDiffResponse, String> {
+        self.request("git/commit_diff", req).await
     }
 
     pub async fn subscribe_session(&self, session_id: &str) -> Result<(), String> {
@@ -383,12 +459,36 @@ impl DaemonClient {
         }
     }
 
+    pub async fn watch_workspace(&self, project_path: &str) -> Result<(), String> {
+        self.request(
+            "workspace/watch",
+            WatchWorkspaceRequest {
+                project_path: project_path.to_string(),
+            },
+        )
+        .await
+    }
+
+    pub async fn unwatch_workspace(&self, project_path: &str) -> Result<(), String> {
+        self.request(
+            "workspace/unwatch",
+            UnwatchWorkspaceRequest {
+                project_path: project_path.to_string(),
+            },
+        )
+        .await
+    }
+
     pub fn subscribe_session_events(&self) -> broadcast::Receiver<SessionEvent> {
         self.session_events.subscribe()
     }
 
     pub fn subscribe_terminal_events(&self) -> broadcast::Receiver<TerminalOutputEvent> {
         self.terminal_events.subscribe()
+    }
+
+    pub fn subscribe_workspace_events(&self) -> broadcast::Receiver<WorkspaceChangedEvent> {
+        self.workspace_events.subscribe()
     }
 
     // ── Skills ─────────────────────────────────────────────────────────────
@@ -399,6 +499,32 @@ impl DaemonClient {
 
     pub async fn toggle_skill(&self, req: ToggleSkillRequest) -> Result<(), String> {
         self.request("capabilities/toggle_skill", req).await
+    }
+
+    pub async fn list_extensions(
+        &self,
+        req: ListExtensionsRequest,
+    ) -> Result<ListExtensionsResponse, String> {
+        self.request("capabilities/extensions/list", req).await
+    }
+
+    pub async fn install_extension(
+        &self,
+        req: InstallExtensionRequest,
+    ) -> Result<InstallExtensionResponse, String> {
+        self.request("capabilities/extensions/install", req).await
+    }
+
+    pub async fn set_extension_enabled(
+        &self,
+        req: SetExtensionEnabledRequest,
+    ) -> Result<(), String> {
+        self.request("capabilities/extensions/set_enabled", req)
+            .await
+    }
+
+    pub async fn remove_extension(&self, req: RemoveExtensionRequest) -> Result<(), String> {
+        self.request("capabilities/extensions/remove", req).await
     }
 
     // ── ACP Agent CRUD ─────────────────────────────────────────────────────

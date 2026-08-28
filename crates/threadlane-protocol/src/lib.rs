@@ -12,6 +12,7 @@ pub mod settings;
 pub mod tasks;
 pub mod terminal;
 pub mod update;
+pub mod workspace;
 
 // Re-export provider types for backward compatibility across the workspace
 pub use capabilities::*;
@@ -28,6 +29,7 @@ pub use settings::*;
 pub use tasks::*;
 pub use terminal::*;
 pub use update::*;
+pub use workspace::*;
 
 /// Normalise an LLM-generated session title by stripping surrounding quotes,
 /// leading "Title:" prefixes, collapsing whitespace, and capping at 42 chars.
@@ -147,6 +149,24 @@ mod tests {
             serde_json::from_str(r#"{"terminal_id":"term_legacy","data":"ok","exit_code":null}"#)
                 .expect("deserialize legacy terminal output");
         assert_eq!(legacy.error, None);
+    }
+
+    #[test]
+    fn test_workspace_and_git_capability_serialization() {
+        let event = WorkspaceChangedEvent {
+            project_path: "/workspace/project".into(),
+            git_dirty: true,
+            files_dirty: false,
+        };
+        assert_eq!(serde_json::from_value::<WorkspaceChangedEvent>(serde_json::to_value(&event).unwrap()).unwrap(), event);
+
+        let checkout = GitCheckoutRequest {
+            project_path: "/workspace/project".into(),
+            branch: "feature/test".into(),
+            create_if_missing: false,
+            mode: GitCheckoutMode::Carry,
+        };
+        assert_eq!(serde_json::from_value::<GitCheckoutRequest>(serde_json::to_value(&checkout).unwrap()).unwrap(), checkout);
     }
 
     #[test]

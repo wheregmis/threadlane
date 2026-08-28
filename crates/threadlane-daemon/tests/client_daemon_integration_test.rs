@@ -29,6 +29,50 @@ async fn wait_for_terminal_marker(
 }
 
 #[tokio::test]
+async fn test_workspace_changes_are_forwarded_by_daemon() {
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let socket_path = temp_dir.path().join("workspace_daemon.sock");
+    let project_path = temp_dir.path().join("workspace_project");
+    std::fs::create_dir_all(&project_path).expect("create project dir");
+
+    let dispatcher = Arc::new(RpcDispatcher::new());
+    DaemonServer::new(dispatcher)
+        .serve_uds(socket_path.clone())
+        .await
+        .expect("serve UDS");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let client = DaemonClient::connect_uds(&socket_path)
+        .await
+        .expect("connect client");
+    let project_path = project_path.to_string_lossy().into_owned();
+    let mut events = client.subscribe_workspace_events();
+    client
+        .watch_workspace(&project_path)
+        .await
+        .expect("watch workspace");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    std::fs::write(std::path::Path::new(&project_path).join("changed.txt"), "changed")
+        .expect("write changed file");
+
+    let event = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let event = events.recv().await.expect("workspace event");
+            if event.project_path == project_path && event.files_dirty {
+                break event;
+            }
+        }
+    })
+    .await
+    .expect("workspace change event");
+    assert!(event.files_dirty);
+    client
+        .unwatch_workspace(&project_path)
+        .await
+        .expect("unwatch workspace");
+}
+
+#[tokio::test]
 async fn test_end_to_end_client_daemon_uds() {
     let temp_dir = tempfile::tempdir().expect("create temp dir");
     let socket_path = temp_dir.path().join("test_daemon.sock");
@@ -153,6 +197,20 @@ async fn test_end_to_end_client_daemon_uds() {
     assert!(sessions
         .iter()
         .any(|s| s.session_id == "session_integration_1"));
+    let _log = client
+        .read_session_log(ReadSessionLogRequest {
+            project_path: project_str.clone(),
+            session_id: "session_integration_1".into(),
+        })
+        .await
+        .expect("read session log");
+    assert!(client
+        .read_session_log(ReadSessionLogRequest {
+            project_path: project_str.clone(),
+            session_id: "missing".into(),
+        })
+        .await
+        .is_err());
 
     // 8. Test terminal spawn and write
     let term = client
@@ -315,6 +373,12 @@ async fn test_git_core_operations_through_daemon() {
     let status = client.git_status(&project_path).await.expect("git status");
     assert!(status.branch.is_some());
     assert!(status.files.iter().any(|file| file.path == "README.md"));
+    let inspected = client
+        .git_inspect(&project_path)
+        .await
+        .expect("full git inspect");
+    assert!(inspected.status.has_changes);
+    assert!(inspected.status.files.iter().any(|file| file.path == "README.md"));
 
     let branches = client
         .git_branches(GitBranchesRequest {
@@ -346,6 +410,7 @@ async fn test_git_core_operations_through_daemon() {
             project_path: project_path.clone(),
             branch: "feature/test".into(),
             create_if_missing: true,
+            mode: Default::default(),
         })
         .await
         .expect("create and checkout branch");

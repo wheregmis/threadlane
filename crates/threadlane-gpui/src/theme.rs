@@ -5,7 +5,13 @@ use gpui::{App, SharedString};
 use gpui_component::{ActiveTheme, Theme, ThemeConfig, ThemeMode, ThemeRegistry};
 use serde::{Deserialize, Serialize};
 
-use crate::persistence::global_threadlane_dir;
+fn global_threadlane_dir() -> PathBuf {
+    threadlane_protocol::project::default_global_threadlane_dir().unwrap_or_else(|| {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".threadlane")
+    })
+}
 
 const DEFAULT_THEME_NAME: &str = "Threadlane Dark";
 const BUNDLED_THEMES: &str = include_str!("../themes/threadlane.json");

@@ -32,9 +32,8 @@ enum SettingsPage {
     AcpAgents,
 }
 
-/// Provider auth state shown on the Providers page. Reading it hits disk
-/// (`gh auth status` even spawns a subprocess), so it is snapshotted when
-/// the page opens or an auth action runs instead of on every render frame.
+/// Provider auth state shown on the Providers page. It is snapshotted when the
+/// page opens or an auth action runs instead of on every render frame.
 #[derive(Clone, Debug, Default)]
 struct ProvidersStatusSnapshot {
     github_status: Option<String>,
@@ -122,21 +121,14 @@ impl SettingsView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let (openai_key, opencode_key) = {
-            let state = model.read(cx);
-            (state.openai_key.clone(), state.opencode_key.clone())
-        };
-
         let openai_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("sk-proj-...")
-                .default_value(&openai_key)
                 .masked(true)
         });
         let opencode_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("opencode-key-...")
-                .default_value(&opencode_key)
                 .masked(true)
         });
         let github_input = cx.new(|cx| {

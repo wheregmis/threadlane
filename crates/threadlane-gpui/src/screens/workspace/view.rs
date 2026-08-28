@@ -1214,85 +1214,25 @@ impl WorkspaceView {
     ) {
         let view = cx.weak_entity();
         cx.spawn(async move |_this, cx| {
-            // First attempt daemon RPC
             let daemon_res = match crate::services::daemon_client::get_daemon_client().await {
                 Ok(client) => client.browse_directories(path.as_deref()).await,
                 Err(e) => Err(e),
             };
-
-            let resp = match daemon_res {
-                Ok(resp) => resp,
-                Err(_) => {
-                    // Fallback to direct host filesystem browse
-                    let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
-                    let target = match path.as_deref() {
-                        Some(p) if !p.is_empty() => {
-                            if p == "~" || p.starts_with("~/") {
-                                if p == "~" {
-                                    home_dir.clone()
-                                } else {
-                                    home_dir.join(&p[2..])
-                                }
-                            } else {
-                                PathBuf::from(p)
-                            }
-                        }
-                        _ => home_dir.clone(),
-                    };
-
-                    let canonical = target.canonicalize().unwrap_or(target);
-                    let current_path = canonical.to_string_lossy().to_string();
-                    let display_path = if let Ok(rel) = canonical.strip_prefix(&home_dir) {
-                        if rel.as_os_str().is_empty() {
-                            "~/".to_string()
-                        } else {
-                            format!("~/{}/", rel.to_string_lossy())
-                        }
-                    } else {
-                        format!("{}/", current_path)
-                    };
-                    let parent_path = canonical.parent().map(|p| p.to_string_lossy().to_string());
-
-                    let mut entries = Vec::new();
-                    if let Ok(read_dir) = std::fs::read_dir(&canonical) {
-                        for item in read_dir.flatten() {
-                            let Ok(ft) = item.file_type() else { continue };
-                            let is_dir = ft.is_dir() || (ft.is_symlink() && item.path().is_dir());
-                            if !is_dir {
-                                continue;
-                            }
-                            let name = item.file_name().to_string_lossy().to_string();
-                            if name.starts_with('.') {
-                                continue;
-                            }
-                            let p = item.path();
-                            let is_git = p.join(".git").exists();
-                            let is_project = p.join(".threadlane").exists();
-                            entries.push(threadlane_protocol::project::HostDirectoryInfo {
-                                name,
-                                path: p.to_string_lossy().to_string(),
-                                is_dir: true,
-                                is_git,
-                                is_project,
-                            });
-                        }
+            let _ = view.update(cx, |this, cx| {
+                match daemon_res {
+                    Ok(resp) => {
+                        this.project_picker_current_path = Some(resp.current_path);
+                        this.project_picker_display_path = resp.display_path;
+                        this.project_picker_parent_path = resp.parent_path;
+                        this.project_picker_entries = resp.entries;
                     }
-                    entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-
-                    threadlane_protocol::project::BrowseDirectoriesResponse {
-                        current_path,
-                        display_path,
-                        parent_path,
-                        entries,
+                    Err(error) => {
+                        this.project_picker_current_path = None;
+                        this.project_picker_display_path = format!("Daemon unavailable: {error}");
+                        this.project_picker_parent_path = None;
+                        this.project_picker_entries.clear();
                     }
                 }
-            };
-
-            let _ = view.update(cx, |this, cx| {
-                this.project_picker_current_path = Some(resp.current_path);
-                this.project_picker_display_path = resp.display_path;
-                this.project_picker_parent_path = resp.parent_path;
-                this.project_picker_entries = resp.entries;
                 this.project_picker_selected_index = 0;
                 this.project_picker_scroll_handle.scroll_to_item(0);
                 cx.notify();

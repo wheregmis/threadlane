@@ -1,8 +1,10 @@
 use crate::services::*;
 use serde_json::Value;
 use threadlane_protocol::rpc::*;
+use threadlane_protocol::workspace::*;
+use tokio::sync::broadcast;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct RpcDispatcher {
     pub session_service: SessionService,
     pub terminal_service: TerminalService,
@@ -10,13 +12,17 @@ pub struct RpcDispatcher {
     pub git_service: GitService,
     pub task_service: TaskService,
     pub capabilities_service: CapabilitiesService,
+    pub extension_service: ExtensionService,
     pub settings_service: SettingsService,
     pub auth_service: AuthService,
     pub update_service: UpdateService,
+    pub watcher_service: WatcherService,
+    pub workspace_events: broadcast::Sender<WorkspaceChangedEvent>,
 }
 
 impl RpcDispatcher {
     pub fn new() -> Self {
+        let (workspace_events, _) = broadcast::channel(1024);
         Self {
             session_service: SessionService::new(),
             terminal_service: TerminalService::new(),
@@ -24,9 +30,12 @@ impl RpcDispatcher {
             git_service: GitService::new(),
             task_service: TaskService::new(),
             capabilities_service: CapabilitiesService::new(),
+            extension_service: ExtensionService::new(),
             settings_service: SettingsService::new(),
             auth_service: AuthService::new(),
             update_service: UpdateService::new(),
+            watcher_service: WatcherService::new(),
+            workspace_events,
         }
     }
 
@@ -57,6 +66,14 @@ impl RpcDispatcher {
                 Ok(req) => self
                     .session_service
                     .list_session_infos(req)
+                    .await
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "session/read_log" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .session_service
+                    .read_session_log(req)
                     .await
                     .map(|res| serde_json::to_value(res).unwrap()),
                 Err(e) => Err(format!("Invalid params: {e}")),
@@ -211,12 +228,35 @@ impl RpcDispatcher {
                 Ok(req) => self.project_service.write_file(req).map(|_| Value::Null),
                 Err(e) => Err(format!("Invalid params: {e}")),
             },
+            "workspace/watch" => match serde_json::from_value::<WatchWorkspaceRequest>(params) {
+                Ok(req) => self
+                    .watcher_service
+                    .watch_project(req.project_path, self.workspace_events.clone())
+                    .map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "workspace/unwatch" => {
+                match serde_json::from_value::<UnwatchWorkspaceRequest>(params) {
+                    Ok(req) => {
+                        self.watcher_service.unwatch_project(&req.project_path);
+                        Ok(Value::Null)
+                    }
+                    Err(e) => Err(format!("Invalid params: {e}")),
+                }
+            }
 
             // ── Git Methods ──────────────────────────────────────────────
             "git/status" => match serde_json::from_value(params) {
                 Ok(req) => self
                     .git_service
                     .status(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "git/inspect" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .git_service
+                    .inspect(req)
                     .map(|res| serde_json::to_value(res).unwrap()),
                 Err(e) => Err(format!("Invalid params: {e}")),
             },
@@ -236,6 +276,52 @@ impl RpcDispatcher {
             },
             "git/checkout" => match serde_json::from_value(params) {
                 Ok(req) => self.git_service.checkout(req).map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "git/fetch" => match serde_json::from_value(params) {
+                Ok(req) => self.git_service.fetch(req).map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "git/create_pull_request" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .git_service
+                    .create_pull_request(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "git/inspect_pr" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .git_service
+                    .inspect_pr(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "git/stash_files" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .git_service
+                    .inspect_stash_files(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "git/stash_diff" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .git_service
+                    .diff_stash_file(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "git/commit_files" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .git_service
+                    .inspect_commit_files(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "git/commit_diff" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .git_service
+                    .diff_commit_file(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
                 Err(e) => Err(format!("Invalid params: {e}")),
             },
             "git/stage_file" => match serde_json::from_value(params) {
@@ -325,6 +411,28 @@ impl RpcDispatcher {
                     .capabilities_service
                     .toggle_skill(req)
                     .map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "capabilities/extensions/list" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .extension_service
+                    .list(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "capabilities/extensions/install" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .extension_service
+                    .install(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "capabilities/extensions/set_enabled" => match serde_json::from_value(params) {
+                Ok(req) => self.extension_service.set_enabled(req).map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "capabilities/extensions/remove" => match serde_json::from_value(params) {
+                Ok(req) => self.extension_service.remove(req).map(|_| Value::Null),
                 Err(e) => Err(format!("Invalid params: {e}")),
             },
             "capabilities/acp/list" => match serde_json::from_value(params) {
@@ -453,5 +561,11 @@ impl RpcDispatcher {
             Ok(value) => RpcResponse::success(id, value),
             Err(err) => RpcResponse::error(id, RpcError::new(ERROR_INTERNAL_ERROR, err)),
         }
+    }
+}
+
+impl Default for RpcDispatcher {
+    fn default() -> Self {
+        Self::new()
     }
 }

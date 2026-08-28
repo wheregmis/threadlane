@@ -8,21 +8,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
-use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
+use threadlane_protocol::WorkspaceChangedEvent;
 use tracing::info;
-
-/// Event pushed as a `workspace/changed` notification over the RPC connection.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkspaceChangedEvent {
-    pub project_path: String,
-    pub git_dirty: bool,
-    pub files_dirty: bool,
-}
 
 type NotifySender = tokio::sync::broadcast::Sender<WorkspaceChangedEvent>;
 
 /// Classify a file-system event path relative to a project root.
 fn is_relevant(root: &std::path::Path, path: &std::path::Path) -> (bool, bool) {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let Ok(rel) = path.strip_prefix(root) else {
         return (false, false);
     };
@@ -72,6 +66,7 @@ fn is_relevant(root: &std::path::Path, path: &std::path::Path) -> (bool, bool) {
 
 struct WatchedProject {
     _watcher: RecommendedWatcher,
+    stop: Arc<AtomicBool>,
 }
 
 #[derive(Clone, Default)]
@@ -92,12 +87,19 @@ impl WatcherService {
         project_path: String,
         event_tx: NotifySender,
     ) -> Result<(), String> {
-        let root = PathBuf::from(&project_path);
+        let root = PathBuf::from(&project_path)
+            .canonicalize()
+            .map_err(|e| format!("Failed to resolve '{}': {e}", project_path))?;
+        if !root.is_dir() {
+            return Err(format!("'{}' is not a directory", root.display()));
+        }
         let root_clone = root.clone();
         let path_clone = project_path.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_thread = stop.clone();
 
         let (raw_tx, raw_rx) = std::sync::mpsc::channel::<Result<Event, notify::Error>>();
-        let mut watcher = notify::recommended_watcher(move |res| {
+        let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
             let _ = raw_tx.send(res);
         })
         .map_err(|e| format!("Failed to create watcher: {e}"))?;
@@ -119,7 +121,7 @@ impl WatcherService {
                 let mut has_pending = false;
                 let mut settle = 0usize;
 
-                loop {
+                while !stop_thread.load(Ordering::Acquire) {
                     let mut received = false;
                     while let Ok(event_res) = raw_rx.try_recv() {
                         received = true;
@@ -158,14 +160,23 @@ impl WatcherService {
             .map_err(|e| format!("Failed to spawn watcher thread: {e}"))?;
 
         let mut lock = self.projects.lock().unwrap();
-        lock.insert(project_path, WatchedProject { _watcher: watcher });
+        if let Some(previous) = lock.insert(
+            project_path,
+            WatchedProject {
+                _watcher: watcher,
+                stop,
+            },
+        ) {
+            previous.stop.store(true, Ordering::Release);
+        }
         info!("Watching project: {}", root.display());
         Ok(())
     }
 
     pub fn unwatch_project(&self, project_path: &str) {
         let mut lock = self.projects.lock().unwrap();
-        if lock.remove(project_path).is_some() {
+        if let Some(project) = lock.remove(project_path) {
+            project.stop.store(true, Ordering::Release);
             info!("Stopped watching project: {project_path}");
         }
     }

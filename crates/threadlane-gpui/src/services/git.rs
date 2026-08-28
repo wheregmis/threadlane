@@ -2,7 +2,7 @@
 
 use std::path::Path;
 use threadlane_protocol::capabilities::*;
-use threadlane_protocol::git::{GitBranchesRequest, GitFile, GitHubPrInfo, GitStatus};
+use threadlane_protocol::git::{GitFile, GitHubPrInfo, GitStatus};
 
 fn executor() -> Result<&'static tokio::runtime::Runtime, String> {
     crate::services::chat::executor()
@@ -19,76 +19,15 @@ async fn client() -> Result<std::sync::Arc<threadlane_protocol::DaemonClient>, S
     crate::services::daemon_client::get_daemon_client().await
 }
 
-pub fn sync_remote(_project: &Path) -> Result<(), String> {
-    Ok(())
+pub fn sync_remote(project: &Path) -> Result<(), String> {
+    fetch(project)
 }
 
 pub fn inspect(project: &Path) -> Result<GitStatus, String> {
     let project_str = project.to_string_lossy().to_string();
     block(async move {
         let c = client().await?;
-        let res = c.git_status(&project_str).await?;
-        let branch_details = c
-            .git_branches(GitBranchesRequest {
-                project_path: project_str.clone(),
-            })
-            .await?
-            .branches;
-        let files: Vec<GitFile> = res
-            .files
-            .into_iter()
-            .map(|f| {
-                let status_char = match &f.status {
-                    threadlane_protocol::git::GitFileStatusCode::Added => 'A',
-                    threadlane_protocol::git::GitFileStatusCode::Deleted => 'D',
-                    threadlane_protocol::git::GitFileStatusCode::Renamed => 'R',
-                    threadlane_protocol::git::GitFileStatusCode::Typechange => 'T',
-                    threadlane_protocol::git::GitFileStatusCode::Conflicted => 'U',
-                    threadlane_protocol::git::GitFileStatusCode::Untracked => '?',
-                    threadlane_protocol::git::GitFileStatusCode::Modified => 'M',
-                };
-                GitFile {
-                    path: f.path,
-                    status: status_char.to_string(),
-                    index_status: if f.staged { status_char } else { ' ' },
-                    worktree_status: if f.staged { ' ' } else { status_char },
-                    staged: f.staged,
-                    unstaged: !f.staged,
-                    ..Default::default()
-                }
-            })
-            .collect();
-        let branches = branch_details
-            .iter()
-            .filter(|branch| !branch.is_remote)
-            .map(|branch| branch.name.clone())
-            .collect::<Vec<_>>();
-        let current_branch = res.branch.clone();
-        let has_upstream = current_branch.as_deref().is_some_and(|current| {
-            branch_details
-                .iter()
-                .any(|branch| branch.name == current && branch.upstream.is_some())
-        });
-        let staged_changes = files.iter().any(|file| file.staged);
-        let unstaged_changes = files.iter().any(|file| file.unstaged);
-        Ok(GitStatus {
-            branch: res.branch,
-            files,
-            ahead: res.ahead,
-            behind: res.behind,
-            default_branch: branch_details
-                .iter()
-                .find(|branch| branch.is_default && !branch.is_remote)
-                .map(|branch| branch.name.clone()),
-            detached: current_branch.is_none(),
-            has_upstream,
-            has_changes: staged_changes || unstaged_changes,
-            staged_changes,
-            unstaged_changes,
-            branches,
-            branch_details,
-            ..Default::default()
-        })
+        Ok(c.git_inspect(&project_str).await?.status)
     })
 }
 
@@ -158,12 +97,24 @@ pub fn pull(project: &Path) -> Result<(), String> {
     block(async move { client().await?.git_pull(req).await })
 }
 
-pub fn fetch(_project: &Path) -> Result<(), String> {
-    Ok(())
+pub fn fetch(project: &Path) -> Result<(), String> {
+    let req = threadlane_protocol::GitFetchRequest {
+        project_path: project.to_string_lossy().to_string(),
+    };
+    block(async move { client().await?.git_fetch(req).await })
 }
 
-pub fn create_pull_request(_project: &Path) -> Result<String, String> {
-    Ok(String::new())
+pub fn create_pull_request(project: &Path) -> Result<String, String> {
+    let req = GitPushPullRequest {
+        project_path: project.to_string_lossy().to_string(),
+    };
+    block(async move {
+        client()
+            .await?
+            .git_create_pull_request(req)
+            .await
+            .map(|r| r.url)
+    })
 }
 
 pub fn checkout(project: &Path, branch: &str) -> Result<(), String> {
@@ -171,16 +122,29 @@ pub fn checkout(project: &Path, branch: &str) -> Result<(), String> {
         project_path: project.to_string_lossy().to_string(),
         branch: branch.to_string(),
         create_if_missing: false,
+        mode: threadlane_protocol::GitCheckoutMode::Direct,
     };
     block(async move { client().await?.git_checkout(req).await })
 }
 
 pub fn checkout_with_stash(project: &Path, branch: &str) -> Result<(), String> {
-    checkout(project, branch)
+    let req = threadlane_protocol::GitCheckoutRequest {
+        project_path: project.to_string_lossy().to_string(),
+        branch: branch.to_string(),
+        create_if_missing: false,
+        mode: threadlane_protocol::GitCheckoutMode::Stash,
+    };
+    block(async move { client().await?.git_checkout(req).await })
 }
 
 pub fn checkout_carrying_changes(project: &Path, branch: &str) -> Result<(), String> {
-    checkout(project, branch)
+    let req = threadlane_protocol::GitCheckoutRequest {
+        project_path: project.to_string_lossy().to_string(),
+        branch: branch.to_string(),
+        create_if_missing: false,
+        mode: threadlane_protocol::GitCheckoutMode::Carry,
+    };
+    block(async move { client().await?.git_checkout(req).await })
 }
 
 pub fn create_branch(project: &Path, branch: &str) -> Result<(), String> {
@@ -188,6 +152,7 @@ pub fn create_branch(project: &Path, branch: &str) -> Result<(), String> {
         project_path: project.to_string_lossy().to_string(),
         branch: branch.to_string(),
         create_if_missing: true,
+        mode: threadlane_protocol::GitCheckoutMode::Direct,
     };
     block(async move { client().await?.git_checkout(req).await })
 }
@@ -252,25 +217,68 @@ pub fn reveal_in_file_manager(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub fn inspect_stash_files(_project: &Path, _idx: usize) -> Result<Vec<GitFile>, String> {
-    Ok(Vec::new())
+pub fn inspect_stash_files(project: &Path, idx: usize) -> Result<Vec<GitFile>, String> {
+    let req = threadlane_protocol::GitStashFilesRequest {
+        project_path: project.to_string_lossy().to_string(),
+        index: idx,
+    };
+    block(async move {
+        client()
+            .await?
+            .git_inspect_stash_files(req)
+            .await
+            .map(|r| r.files)
+    })
 }
 
-pub fn diff_stash_file(_project: &Path, _idx: usize, _path: &str) -> Result<String, String> {
-    Ok(String::new())
+pub fn diff_stash_file(project: &Path, idx: usize, path: &str) -> Result<String, String> {
+    let req = threadlane_protocol::GitStashDiffRequest {
+        project_path: project.to_string_lossy().to_string(),
+        index: idx,
+        file_path: path.to_string(),
+    };
+    block(async move {
+        client()
+            .await?
+            .git_diff_stash_file(req)
+            .await
+            .map(|r| r.diff)
+    })
 }
 
-pub fn inspect_commit_files(_project: &Path, _sha: &str) -> Result<Vec<GitFile>, String> {
-    Ok(Vec::new())
+pub fn inspect_commit_files(project: &Path, sha: &str) -> Result<Vec<GitFile>, String> {
+    let req = threadlane_protocol::GitCommitFilesRequest {
+        project_path: project.to_string_lossy().to_string(),
+        sha: sha.to_string(),
+    };
+    block(async move {
+        client()
+            .await?
+            .git_inspect_commit_files(req)
+            .await
+            .map(|r| r.files)
+    })
 }
 
-pub fn diff_commit_file(_project: &Path, _sha: &str, _path: &str) -> Result<String, String> {
-    Ok(String::new())
+pub fn diff_commit_file(project: &Path, sha: &str, path: &str) -> Result<String, String> {
+    let req = threadlane_protocol::GitCommitDiffRequest {
+        project_path: project.to_string_lossy().to_string(),
+        sha: sha.to_string(),
+        file_path: path.to_string(),
+    };
+    block(async move {
+        client()
+            .await?
+            .git_diff_commit_file(req)
+            .await
+            .map(|r| r.diff)
+    })
 }
 
-pub fn inspect_pr_for_branch(
-    _project: &Path,
-    _branch: &str,
-) -> Result<Option<GitHubPrInfo>, String> {
-    Ok(None)
+pub fn inspect_pr_for_branch(project: &Path, branch: &str) -> Result<Option<GitHubPrInfo>, String> {
+    let req = threadlane_protocol::GitInspectPrRequest {
+        project_path: project.to_string_lossy().to_string(),
+        branch: Some(branch.to_string()),
+    };
+    block(async move { client().await?.git_inspect_pr(req).await.map(|r| r.pr) })
 }

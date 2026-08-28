@@ -1,6 +1,7 @@
 pub mod auth_service;
 pub mod capabilities_service;
 pub mod git_service;
+pub mod extension_service;
 pub mod project_service;
 pub mod session_service;
 pub mod settings_service;
@@ -12,6 +13,7 @@ pub mod watcher_service;
 pub use auth_service::AuthService;
 pub use capabilities_service::CapabilitiesService;
 pub use git_service::GitService;
+pub use extension_service::ExtensionService;
 pub use project_service::ProjectService;
 pub use session_service::SessionService;
 pub use settings_service::SettingsService;

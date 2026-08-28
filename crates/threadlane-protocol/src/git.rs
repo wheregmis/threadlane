@@ -163,6 +163,16 @@ pub struct GitStatusResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitInspectRequest {
+    pub project_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitInspectResponse {
+    pub status: GitStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitDiffRequest {
     pub project_path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -190,4 +200,82 @@ pub struct GitCheckoutRequest {
     pub project_path: String,
     pub branch: String,
     pub create_if_missing: bool,
+    #[serde(default)]
+    pub mode: GitCheckoutMode,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitCheckoutMode {
+    #[default]
+    Direct,
+    Stash,
+    Carry,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitFetchRequest {
+    pub project_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitCreatePullRequestResponse {
+    pub url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitInspectPrRequest {
+    pub project_path: String,
+    pub branch: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitInspectPrResponse {
+    pub pr: Option<GitHubPrInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitStashFilesRequest {
+    pub project_path: String,
+    pub index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitStashFilesResponse {
+    pub files: Vec<GitFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitStashDiffRequest {
+    pub project_path: String,
+    pub index: usize,
+    pub file_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitStashDiffResponse {
+    pub diff: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitCommitFilesRequest {
+    pub project_path: String,
+    pub sha: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitCommitFilesResponse {
+    pub files: Vec<GitFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitCommitDiffRequest {
+    pub project_path: String,
+    pub sha: String,
+    pub file_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitCommitDiffResponse {
+    pub diff: String,
 }

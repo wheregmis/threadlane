@@ -4,15 +4,15 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
-#[cfg(test)]
+#[cfg(all(test, feature = "legacy-api-tests"))]
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 use threadlane_protocol::git::{GitHubPrInfo, GitStatus};
 use threadlane_protocol::harness::SessionDiagnostics;
-#[cfg(any(test, feature = "legacy-api-tests"))]
+#[cfg(all(test, feature = "legacy-api-tests"))]
 use threadlane_protocol::harness::{JsonlStore, SessionStore};
 use threadlane_protocol::permission::{PermissionDecision, PermissionRequest};
-#[cfg(any(test, feature = "legacy-api-tests"))]
+#[cfg(test)]
 use threadlane_protocol::AgentMessage;
 use threadlane_protocol::{
     AcpConfigOption, ImageAttachment, ModelRoles, ProjectRecord, ReasoningEffort, SessionEvent,
@@ -185,8 +185,6 @@ pub struct AppState {
     pub(crate) model_roles: ModelRoles,
     pub(crate) reasoning_effort: ReasoningEffort,
     pub(crate) workspace_page: WorkspacePage,
-    pub(crate) openai_key: String,
-    pub(crate) opencode_key: String,
     pub(crate) needle_enabled: bool,
     pub(crate) auth_status_msg: Option<String>,
     pub(crate) update_status: threadlane_protocol::UpdateStatus,
@@ -215,14 +213,6 @@ pub fn discover_sessions_in_project(work_dir: &Path) -> Vec<SessionInfo> {
             client.list_session_infos(&work_dir).await
         })
         .unwrap_or_default()
-}
-
-fn discover_session_stubs_in_project(work_dir: &Path) -> Vec<SessionInfo> {
-    discover_sessions_in_project(work_dir)
-}
-
-fn discover_sessions_in_project_cached(work_dir: &Path) -> Vec<SessionInfo> {
-    discover_sessions_in_project(work_dir)
 }
 
 #[cfg(test)]
@@ -607,7 +597,7 @@ impl AppState {
         state
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "legacy-api-tests"))]
     fn load_from_registry(registry_projects: Vec<AttachedProject>) -> Self {
         Self::load_from_registry_with_options(registry_projects, true)
     }
@@ -632,7 +622,7 @@ impl AppState {
 
         for (i, p) in registry_projects.iter().enumerate() {
             let path = PathBuf::from(&p.path);
-            let sessions = discover_session_stubs_in_project(&path);
+            let sessions = discover_sessions_in_project(&path);
             let is_active = i == active_project_index;
 
             if is_active {
@@ -656,16 +646,13 @@ impl AppState {
                 is_expanded: true,
             });
         }
-        let openai_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
-        let opencode_key = std::env::var("OPENCODE_API_KEY").unwrap_or_default();
-
         let (stream_tx, stream_rx) = tokio::sync::mpsc::unbounded_channel();
         let (session_refresh_tx, session_refresh_requests) = mpsc::channel::<PathBuf>();
         let (session_refresh_results_tx, session_refresh_rx) =
             tokio::sync::mpsc::unbounded_channel();
         std::thread::spawn(move || {
             while let Ok(work_dir) = session_refresh_requests.recv() {
-                let sessions = discover_sessions_in_project_cached(&work_dir);
+                let sessions = discover_sessions_in_project(&work_dir);
                 if session_refresh_results_tx
                     .send((work_dir, sessions))
                     .is_err()
@@ -721,8 +708,6 @@ impl AppState {
             model_roles,
             reasoning_effort: ReasoningEffort::default(),
             workspace_page: WorkspacePage::Chat,
-            openai_key,
-            opencode_key,
             needle_enabled: crate::services::settings::load_needle_enabled(),
             auth_status_msg: None,
             update_status: threadlane_protocol::UpdateStatus::Idle,
@@ -886,13 +871,15 @@ impl AppState {
 
     pub(crate) fn save_openai_key(&mut self, key: String) -> Result<(), String> {
         let key = key.trim().to_string();
-        if !key.is_empty() {
-            self.openai_key = key;
-            self.auth_status_msg = Some("OpenAI API key saved successfully!".into());
+        crate::services::provider_auth::save_api_key(
+            threadlane_protocol::ProviderKind::OpenAi,
+            &key,
+        )?;
+        self.auth_status_msg = Some(if key.is_empty() {
+            "OpenAI API key removed.".into()
         } else {
-            self.openai_key.clear();
-            self.auth_status_msg = Some("OpenAI API key removed.".into());
-        }
+            "OpenAI API key saved successfully!".into()
+        });
         self.invalidate_idle_runtimes();
         self.reconcile_selected_model();
         Ok(())
@@ -900,13 +887,15 @@ impl AppState {
 
     pub(crate) fn save_opencode_key(&mut self, key: String) -> Result<(), String> {
         let key = key.trim().to_string();
-        if !key.is_empty() {
-            self.opencode_key = key;
-            self.auth_status_msg = Some("Opencode API key saved successfully!".into());
+        crate::services::provider_auth::save_api_key(
+            threadlane_protocol::ProviderKind::OpenCode,
+            &key,
+        )?;
+        self.auth_status_msg = Some(if key.is_empty() {
+            "Opencode API key removed.".into()
         } else {
-            self.opencode_key.clear();
-            self.auth_status_msg = Some("Opencode API key removed.".into());
-        }
+            "Opencode API key saved successfully!".into()
+        });
         self.invalidate_idle_runtimes();
         self.reconcile_selected_model();
         Ok(())
@@ -5763,7 +5752,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_hydration_from_project_registry_populates_all_views() {
+    fn startup_hydration_from_daemon_snapshot_populates_all_views() {
         let unique = std::time::SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()

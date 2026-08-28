@@ -102,6 +102,8 @@ pub struct ExtensionRecord {
     pub scope: ExtensionScope,
     pub module_path: PathBuf,
     pub enabled: bool,
+    #[serde(default)]
+    pub effective: bool,
 }
 
 impl ExtensionRecord {
@@ -124,7 +126,7 @@ impl ExtensionRecord {
         self.enabled
     }
     pub fn is_effective(&self) -> bool {
-        self.enabled
+        self.effective
     }
 }
 
@@ -172,6 +174,8 @@ pub struct SkillDescriptor {
     pub description: String,
     pub enabled: bool,
     pub scope: String,
+    #[serde(default)]
+    pub is_valid: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,6 +206,43 @@ pub struct ToggleSkillRequest {
     pub project_path: String,
     pub skill_id: String,
     pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListExtensionsRequest {
+    pub project_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListExtensionsResponse {
+    pub extensions: Vec<ExtensionRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallExtensionRequest {
+    pub project_path: Option<String>,
+    pub scope: ExtensionScope,
+    pub wasm_bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallExtensionResponse {
+    pub extension: ExtensionRecord,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetExtensionEnabledRequest {
+    pub project_path: Option<String>,
+    pub scope: ExtensionScope,
+    pub id: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoveExtensionRequest {
+    pub project_path: Option<String>,
+    pub scope: ExtensionScope,
+    pub id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

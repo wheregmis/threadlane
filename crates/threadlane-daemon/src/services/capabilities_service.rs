@@ -30,6 +30,7 @@ impl CapabilitiesService {
                 description: s.description,
                 enabled: s.enabled,
                 scope: format!("{:?}", s.scope).to_lowercase(),
+                is_valid: s.is_valid,
             })
             .collect();
 
