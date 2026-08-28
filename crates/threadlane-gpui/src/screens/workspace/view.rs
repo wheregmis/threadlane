@@ -251,7 +251,7 @@ impl WorkspaceView {
                 for project in &projects {
                     sessions.push((
                         project.path.clone(),
-                        client.list_sessions(&project.path).await?,
+                        client.list_session_infos(&project.path).await?,
                     ));
                 }
                 let models = client.list_models().await?.models;
@@ -1321,7 +1321,11 @@ impl WorkspaceView {
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _window, cx| {
                 let has_parent = this.project_picker_parent_path.is_some();
                 let entries_count = this.project_picker_entries.len();
-                let max_index = if has_parent { entries_count } else { entries_count.saturating_sub(1) };
+                let max_index = if has_parent {
+                    entries_count
+                } else {
+                    entries_count.saturating_sub(1)
+                };
 
                 match event.keystroke.key.as_str() {
                     "escape" => {
@@ -1363,7 +1367,9 @@ impl WorkspaceView {
                             } else {
                                 None
                             }
-                            .or_else(|| this.project_picker_current_path.clone().map(PathBuf::from));
+                            .or_else(|| {
+                                this.project_picker_current_path.clone().map(PathBuf::from)
+                            });
 
                             if let Some(target) = target {
                                 this.project_picker_open = false;
@@ -1445,8 +1451,13 @@ impl WorkspaceView {
                                             .ghost()
                                             .xsmall()
                                             .on_click(cx.listener(|this, _event, _window, cx| {
-                                                if let Some(parent) = this.project_picker_parent_path.clone() {
-                                                    this.browse_project_picker_dir(Some(parent), cx);
+                                                if let Some(parent) =
+                                                    this.project_picker_parent_path.clone()
+                                                {
+                                                    this.browse_project_picker_dir(
+                                                        Some(parent),
+                                                        cx,
+                                                    );
                                                 }
                                             }))
                                     }))
@@ -1455,58 +1466,64 @@ impl WorkspaceView {
                                             .text_sm()
                                             .font_weight(FontWeight::MEDIUM)
                                             .text_color(theme.foreground)
-                                            .child(display_path)
-                                    )
+                                            .child(display_path),
+                                    ),
                             )
                             .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        Button::new("project-picker-add-btn")
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap_1p5()
-                                                    .child("Add Project")
-                                                    .child(
-                                                        div()
-                                                            .text_xs()
-                                                            .text_color(theme.muted_foreground)
-                                                            .child("Cmd+Enter")
-                                                    )
-                                            )
-                                            .small()
-                                            .primary()
-                                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                                let has_parent = this.project_picker_parent_path.is_some();
-                                                let target = if has_parent && this.project_picker_selected_index > 0 {
-                                                    this.project_picker_entries
-                                                        .get(this.project_picker_selected_index - 1)
-                                                        .map(|e| PathBuf::from(&e.path))
-                                                } else if !has_parent {
-                                                    this.project_picker_entries
-                                                        .get(this.project_picker_selected_index)
-                                                        .map(|e| PathBuf::from(&e.path))
-                                                } else {
-                                                    None
-                                                }
-                                                .or_else(|| this.project_picker_current_path.clone().map(PathBuf::from));
+                                div().flex().items_center().gap_2().child(
+                                    Button::new("project-picker-add-btn")
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_1p5()
+                                                .child("Add Project")
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(theme.muted_foreground)
+                                                        .child("Cmd+Enter"),
+                                                ),
+                                        )
+                                        .small()
+                                        .primary()
+                                        .on_click(cx.listener(|this, _event, _window, cx| {
+                                            let has_parent =
+                                                this.project_picker_parent_path.is_some();
+                                            let target = if has_parent
+                                                && this.project_picker_selected_index > 0
+                                            {
+                                                this.project_picker_entries
+                                                    .get(this.project_picker_selected_index - 1)
+                                                    .map(|e| PathBuf::from(&e.path))
+                                            } else if !has_parent {
+                                                this.project_picker_entries
+                                                    .get(this.project_picker_selected_index)
+                                                    .map(|e| PathBuf::from(&e.path))
+                                            } else {
+                                                None
+                                            }
+                                            .or_else(|| {
+                                                this.project_picker_current_path
+                                                    .clone()
+                                                    .map(PathBuf::from)
+                                            });
 
-                                                if let Some(target) = target {
-                                                    this.project_picker_open = false;
-                                                    let model = this.model.clone();
-                                                    model.update(cx, |state, cx| {
-                                                        controller::dispatch(state, AppAction::AttachProject(target));
-                                                        cx.notify();
-                                                    });
+                                            if let Some(target) = target {
+                                                this.project_picker_open = false;
+                                                let model = this.model.clone();
+                                                model.update(cx, |state, cx| {
+                                                    controller::dispatch(
+                                                        state,
+                                                        AppAction::AttachProject(target),
+                                                    );
                                                     cx.notify();
-                                                }
-                                            }))
-                                    )
-                            )
+                                                });
+                                                cx.notify();
+                                            }
+                                        })),
+                                ),
+                            ),
                     )
                     .child(
                         // Subtitle
@@ -1525,8 +1542,8 @@ impl WorkspaceView {
                                 div()
                                     .text_xs()
                                     .text_color(theme.muted_foreground)
-                                    .child(format!("{} items", entries.len()))
-                            )
+                                    .child(format!("{} items", entries.len())),
+                            ),
                     )
                     .child(
                         // Directory list
@@ -1554,14 +1571,21 @@ impl WorkspaceView {
                                     .py_2()
                                     .rounded_md()
                                     .cursor_pointer()
-                                    .bg(if is_selected { theme.selection } else { gpui::transparent_black() })
+                                    .bg(if is_selected {
+                                        theme.selection
+                                    } else {
+                                        gpui::transparent_black()
+                                    })
                                     .hover(|s| s.bg(theme.accent.opacity(0.1)))
-                                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _event, _window, cx| {
-                                        this.project_picker_selected_index = 0;
-                                        if let Some(p) = parent_path.clone() {
-                                            this.browse_project_picker_dir(Some(p), cx);
-                                        }
-                                    }))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, _event, _window, cx| {
+                                            this.project_picker_selected_index = 0;
+                                            if let Some(p) = parent_path.clone() {
+                                                this.browse_project_picker_dir(Some(p), cx);
+                                            }
+                                        }),
+                                    )
                                     .child(
                                         div()
                                             .flex()
@@ -1570,14 +1594,14 @@ impl WorkspaceView {
                                             .child(
                                                 Icon::new(IconName::Folder)
                                                     .size(px(16.0))
-                                                    .text_color(theme.muted_foreground)
+                                                    .text_color(theme.muted_foreground),
                                             )
                                             .child(
                                                 div()
                                                     .text_sm()
                                                     .text_color(theme.muted_foreground)
-                                                    .child(".. (Parent Directory)")
-                                            )
+                                                    .child(".. (Parent Directory)"),
+                                            ),
                                     )
                             }))
                             // Directory entries
@@ -1601,11 +1625,21 @@ impl WorkspaceView {
                                     .py_2()
                                     .rounded_md()
                                     .cursor_pointer()
-                                    .bg(if is_selected { theme.selection } else { gpui::transparent_black() })
+                                    .bg(if is_selected {
+                                        theme.selection
+                                    } else {
+                                        gpui::transparent_black()
+                                    })
                                     .hover(|s| s.bg(theme.accent.opacity(0.1)))
-                                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _event, _window, cx| {
-                                        this.browse_project_picker_dir(Some(click_path.clone()), cx);
-                                    }))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, _event, _window, cx| {
+                                            this.browse_project_picker_dir(
+                                                Some(click_path.clone()),
+                                                cx,
+                                            );
+                                        }),
+                                    )
                                     .child(
                                         div()
                                             .flex()
@@ -1614,15 +1648,23 @@ impl WorkspaceView {
                                             .child(
                                                 Icon::new(IconName::Folder)
                                                     .size(px(16.0))
-                                                    .text_color(if is_selected { theme.accent } else { theme.muted_foreground })
+                                                    .text_color(if is_selected {
+                                                        theme.accent
+                                                    } else {
+                                                        theme.muted_foreground
+                                                    }),
                                             )
                                             .child(
                                                 div()
                                                     .text_sm()
-                                                    .font_weight(if is_selected { FontWeight::MEDIUM } else { FontWeight::NORMAL })
+                                                    .font_weight(if is_selected {
+                                                        FontWeight::MEDIUM
+                                                    } else {
+                                                        FontWeight::NORMAL
+                                                    })
                                                     .text_color(theme.foreground)
-                                                    .child(entry_name)
-                                            )
+                                                    .child(entry_name),
+                                            ),
                                     )
                                     .child(
                                         div()
@@ -1637,18 +1679,29 @@ impl WorkspaceView {
                                                     .bg(theme.accent.opacity(0.15))
                                                     .text_xs()
                                                     .text_color(theme.accent)
-                                                    .child(if is_project { "project" } else { "git" })
+                                                    .child(if is_project {
+                                                        "project"
+                                                    } else {
+                                                        "git"
+                                                    })
                                             }))
                                             .child(
-                                                Button::new(SharedString::from(format!("open-dir-{i}")))
-                                                    .icon(IconName::ArrowRight)
-                                                    .tooltip("Open folder")
-                                                    .ghost()
-                                                    .xsmall()
-                                                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                                                        this.browse_project_picker_dir(Some(arrow_path.clone()), cx);
-                                                    }))
-                                            )
+                                                Button::new(SharedString::from(format!(
+                                                    "open-dir-{i}"
+                                                )))
+                                                .icon(IconName::ArrowRight)
+                                                .tooltip("Open folder")
+                                                .ghost()
+                                                .xsmall()
+                                                .on_click(cx.listener(
+                                                    move |this, _event, _window, cx| {
+                                                        this.browse_project_picker_dir(
+                                                            Some(arrow_path.clone()),
+                                                            cx,
+                                                        );
+                                                    },
+                                                )),
+                                            ),
                                     )
                             }))
                             // Empty state
@@ -1664,15 +1717,15 @@ impl WorkspaceView {
                                     .child(
                                         Icon::new(IconName::Folder)
                                             .size(px(24.0))
-                                            .text_color(theme.muted_foreground)
+                                            .text_color(theme.muted_foreground),
                                     )
                                     .child(
                                         div()
                                             .text_sm()
                                             .text_color(theme.muted_foreground)
-                                            .child("No subdirectories found")
+                                            .child("No subdirectories found"),
                                     )
-                            }))
+                            })),
                     )
                     .child(
                         // Footer
@@ -1696,15 +1749,15 @@ impl WorkspaceView {
                                     .child("Enter Open")
                                     .child("Backspace Back")
                                     .child("Cmd+Enter Add")
-                                    .child("Esc Close")
+                                    .child("Esc Close"),
                             )
                             .child(
                                 div()
                                     .text_xs()
                                     .text_color(theme.muted_foreground)
-                                    .child("Daemon Host")
-                            )
-                    )
+                                    .child("Daemon Host"),
+                            ),
+                    ),
             )
             .into_any_element()
     }

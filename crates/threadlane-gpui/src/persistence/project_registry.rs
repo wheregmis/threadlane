@@ -7,5 +7,3 @@ pub(crate) fn global_threadlane_dir() -> PathBuf {
             .join(".threadlane")
     })
 }
-
-pub(crate) use threadlane_protocol::project::load_project_registry;

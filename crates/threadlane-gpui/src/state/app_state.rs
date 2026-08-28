@@ -4,17 +4,23 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(test)]
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 use threadlane_protocol::git::{GitHubPrInfo, GitStatus};
-use threadlane_protocol::harness::{JsonlStore, SessionDiagnostics, SessionStore};
+use threadlane_protocol::harness::SessionDiagnostics;
+#[cfg(any(test, feature = "legacy-api-tests"))]
+use threadlane_protocol::harness::{JsonlStore, SessionStore};
 use threadlane_protocol::permission::{PermissionDecision, PermissionRequest};
+#[cfg(any(test, feature = "legacy-api-tests"))]
+use threadlane_protocol::AgentMessage;
 use threadlane_protocol::{
-    AcpConfigOption, AgentMessage, ImageAttachment, ModelRoles, ProjectRecord,
-    ReasoningEffort, SessionEvent, SessionPlan, TokenUsage,
+    AcpConfigOption, ImageAttachment, ModelRoles, ProjectRecord, ReasoningEffort, SessionEvent,
+    SessionPlan, TokenUsage,
 };
 
 use crate::adapters::agent_events::{adapt_agent_event, ChatAgentUpdate};
-use crate::persistence::load_project_registry;
+
 use crate::services::sessions::{SessionRuntime, SessionRuntimeStatus};
 
 pub type AttachedProject = ProjectRecord;
@@ -198,278 +204,33 @@ pub struct AppState {
     deferred_stream_events: HashMap<String, Vec<ChatStreamEvent>>,
 }
 
-#[derive(Default)]
-struct SessionDiscoveryCache {
-    entries: HashMap<PathBuf, SessionDiscoveryCacheEntry>,
-}
-
-struct SessionDiscoveryCacheEntry {
-    len: u64,
-    modified: Option<SystemTime>,
-    info: SessionInfo,
-}
-fn file_mtime(path: &Path) -> u64 {
-    std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
-fn extract_session_title(store: &impl SessionStore, fallback_id: &str) -> String {
-    if let Some(name) = store.name() {
-        if !name.trim().is_empty() {
-            return name;
-        }
-    }
-    let messages = {
-        let active = store.active_branch_messages("main");
-        if active.is_empty() {
-            store.get_persisted_messages()
-        } else {
-            active
-        }
-    };
-
-    for msg in &messages {
-        match msg {
-            AgentMessage::User { content } | AgentMessage::UserWithImages { content, .. } => {
-                let trimmed = content.trim();
-                if !trimmed.is_empty() {
-                    let first_line = trimmed.lines().next().unwrap_or(trimmed);
-                    let mut char_count = 0;
-                    let mut result = String::new();
-                    for ch in first_line.chars() {
-                        if char_count >= 40 {
-                            result.push('…');
-                            break;
-                        }
-                        result.push(ch);
-                        char_count += 1;
-                    }
-                    return result;
-                }
-            }
-            _ => {}
-        }
-    }
-    fallback_id.to_string()
-}
-
 pub fn discover_sessions_in_project(work_dir: &Path) -> Vec<SessionInfo> {
-    let mut cache = SessionDiscoveryCache::default();
-    discover_sessions_in_project_cached(work_dir, &mut cache)
-}
-
-fn effective_session_work_dir(
-    canonical_work_dir: &Path,
-    id: &str,
-    facts: &std::collections::HashMap<String, String>,
-) -> PathBuf {
-    if facts
-        .get("is_worktree")
-        .is_some_and(|value| value == "true")
-    {
-        facts
-            .get("worktree_path")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                let inferred = canonical_work_dir.join(".threadlane/worktrees").join(id);
-                if inferred.exists() {
-                    inferred
-                } else {
-                    canonical_work_dir.to_path_buf()
-                }
-            })
-    } else {
-        canonical_work_dir.to_path_buf()
-    }
-}
-
-fn resolve_session_transcript_file(
-    stub_file: &Path,
-    runtime_work_dir: &Path,
-    session_id: &str,
-    is_worktree: bool,
-) -> PathBuf {
-    let worktree_file = runtime_work_dir
-        .join(".threadlane/sessions")
-        .join(format!("{session_id}.jsonl"));
-    if is_worktree && worktree_file.is_file() {
-        worktree_file
-    } else {
-        stub_file.to_path_buf()
-    }
+    let Ok(executor) = crate::services::chat::executor() else {
+        return Vec::new();
+    };
+    let work_dir = work_dir.to_string_lossy().into_owned();
+    executor
+        .block_on(async move {
+            let client = crate::services::daemon_client::get_daemon_client().await?;
+            client.list_session_infos(&work_dir).await
+        })
+        .unwrap_or_default()
 }
 
 fn discover_session_stubs_in_project(work_dir: &Path) -> Vec<SessionInfo> {
-    let Ok(entries) = std::fs::read_dir(work_dir.join(".threadlane/sessions")) else {
-        return Vec::new();
-    };
-    let canonical_work_dir =
-        std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
-    let mut sessions = entries
-        .flatten()
-        .filter_map(|entry| {
-            let path = std::fs::canonicalize(entry.path()).unwrap_or_else(|_| entry.path());
-            if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl")
-                || path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.ends_with(".harness.jsonl"))
-            {
-                return None;
-            }
-            let id = path.file_stem()?.to_string_lossy().to_string();
-            let (runtime_work_dir, git_branch, is_worktree) = JsonlStore::open_read_only(&path)
-                .ok()
-                .map(|store| {
-                    let facts = store.facts();
-                    (
-                        effective_session_work_dir(&canonical_work_dir, &id, &facts),
-                        facts.get("git_branch").cloned(),
-                        facts
-                            .get("is_worktree")
-                            .is_some_and(|value| value == "true"),
-                    )
-                })
-                .unwrap_or((canonical_work_dir.clone(), None, false));
-            let session_file =
-                resolve_session_transcript_file(&path, &runtime_work_dir, &id, is_worktree);
-            let worktree_available = !is_worktree || runtime_work_dir.is_dir();
-            Some(SessionInfo {
-                title: id.clone(),
-                id,
-                work_dir: canonical_work_dir.clone(),
-                runtime_work_dir,
-                updated_at: file_mtime(&session_file),
-                session_file,
-                health: SessionHealth::Healthy,
-                git_branch,
-                is_worktree,
-                worktree_available,
-            })
-        })
-        .collect::<Vec<_>>();
-    sessions.sort_by(|a, b| {
-        b.updated_at
-            .cmp(&a.updated_at)
-            .then_with(|| a.title.cmp(&b.title))
-    });
-    sessions
+    discover_sessions_in_project(work_dir)
 }
 
-fn discover_sessions_in_project_cached(
-    work_dir: &Path,
-    cache: &mut SessionDiscoveryCache,
-) -> Vec<SessionInfo> {
-    let sessions_dir = work_dir.join(".threadlane/sessions");
-    let Ok(entries) = std::fs::read_dir(&sessions_dir) else {
-        return Vec::new();
-    };
-
-    let canonical_work_dir =
-        std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
-    let mut sessions = Vec::new();
-    let mut seen_paths = std::collections::HashSet::new();
-
-    for entry in entries.flatten() {
-        let path = std::fs::canonicalize(entry.path()).unwrap_or_else(|_| entry.path());
-        if path.extension().and_then(|e| e.to_str()) != Some("jsonl")
-            || path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.ends_with(".harness.jsonl"))
-        {
-            continue;
-        }
-        seen_paths.insert(path.clone());
-        let cached_data_path = cache
-            .entries
-            .get(&path)
-            .map(|cached| cached.info.session_file.as_path())
-            .unwrap_or(path.as_path());
-        let metadata = std::fs::metadata(cached_data_path).ok();
-        let len = metadata.as_ref().map_or(0, |metadata| metadata.len());
-        let modified = metadata.and_then(|metadata| metadata.modified().ok());
-        let info = match cache.entries.get(&path) {
-            Some(cached) if cached.len == len && cached.modified == modified => cached.info.clone(),
-            _ => {
-                let id = path
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "session".into());
-                let (runtime_work_dir, is_worktree, stub_branch) =
-                    match JsonlStore::open_read_only(&path) {
-                        Ok(store) => {
-                            let facts = store.facts();
-                            let is_worktree = facts
-                                .get("is_worktree")
-                                .is_some_and(|value| value == "true");
-                            let work_dir =
-                                effective_session_work_dir(&canonical_work_dir, &id, &facts);
-                            (work_dir, is_worktree, facts.get("git_branch").cloned())
-                        }
-                        Err(_) => (canonical_work_dir.clone(), false, None),
-                    };
-                let session_file =
-                    resolve_session_transcript_file(&path, &runtime_work_dir, &id, is_worktree);
-                let (title, health, git_branch) = match JsonlStore::open_read_only(&session_file) {
-                    Ok(store) => (
-                        extract_session_title(&store, &id),
-                        SessionHealth::Healthy,
-                        store.facts().get("git_branch").cloned().or(stub_branch),
-                    ),
-                    Err(_) => (
-                        "Unreadable session".to_string(),
-                        SessionHealth::Warning,
-                        stub_branch,
-                    ),
-                };
-                let metadata = std::fs::metadata(&session_file).ok();
-                let len = metadata.as_ref().map_or(0, |metadata| metadata.len());
-                let modified = metadata.and_then(|metadata| metadata.modified().ok());
-                let worktree_available = !is_worktree || runtime_work_dir.is_dir();
-                let info = SessionInfo {
-                    id,
-                    title,
-                    work_dir: canonical_work_dir.clone(),
-                    runtime_work_dir,
-                    updated_at: file_mtime(&session_file),
-                    session_file,
-                    health,
-                    git_branch,
-                    is_worktree,
-                    worktree_available,
-                };
-                cache.entries.insert(
-                    path.clone(),
-                    SessionDiscoveryCacheEntry {
-                        len,
-                        modified,
-                        info: info.clone(),
-                    },
-                );
-                info
-            }
-        };
-        sessions.push(info);
-    }
-
-    cache.entries.retain(|path, _| seen_paths.contains(path));
-    sessions.sort_by(|a, b| {
-        b.updated_at
-            .cmp(&a.updated_at)
-            .then_with(|| a.title.cmp(&b.title))
-    });
-    sessions
+fn discover_sessions_in_project_cached(work_dir: &Path) -> Vec<SessionInfo> {
+    discover_sessions_in_project(work_dir)
 }
 
+#[cfg(test)]
 pub fn load_session_messages(session_file: &Path) -> Vec<ChatMessageInfo> {
     compute_session_messages(session_file).unwrap_or_default()
 }
 
+#[cfg(test)]
 pub(crate) fn compute_session_messages(
     session_file: &Path,
 ) -> Result<Vec<ChatMessageInfo>, String> {
@@ -738,11 +499,13 @@ fn tool_activity_display_summary(summary: &str) -> String {
     }
 }
 
+#[cfg(test)]
 fn format_context_marker_tokens(tokens: usize) -> String {
     let formatted = crate::model_catalog::format_tokens(tokens.min(u32::MAX as usize) as u32);
     formatted.replace(".0k", "k").replace(".0M", "M")
 }
 
+#[cfg(test)]
 fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageInfo> {
     threadlane_protocol::harness::project_chat_messages(&agent_messages)
         .into_iter()
@@ -827,7 +590,7 @@ fn normalize_project_relative_path(path: &str) -> Result<String, String> {
 
 impl AppState {
     pub(crate) fn load() -> Self {
-        Self::load_from_registry(load_project_registry())
+        Self::loading()
     }
 
     /// Constructs the UI before the daemon snapshot arrives. This deliberately
@@ -844,6 +607,7 @@ impl AppState {
         state
     }
 
+    #[cfg(test)]
     fn load_from_registry(registry_projects: Vec<AttachedProject>) -> Self {
         Self::load_from_registry_with_options(registry_projects, true)
     }
@@ -852,33 +616,6 @@ impl AppState {
         registry_projects: Vec<AttachedProject>,
         _allow_current_directory_fallback: bool,
     ) -> Self {
-        #[cfg(not(test))]
-        let mut registry_projects = registry_projects;
-        #[cfg(not(test))]
-        if _allow_current_directory_fallback && registry_projects.is_empty() {
-            if let Ok(curr) = std::env::current_dir().and_then(std::fs::canonicalize) {
-                let name = curr
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "project".to_string());
-                let curr_str = curr.to_string_lossy().to_string();
-                let project = AttachedProject {
-                    path: curr_str.clone(),
-                    name,
-                    last_opened_at: None,
-                    last_session_id: None,
-                };
-                registry_projects.push(project);
-                if let Ok(executor) = crate::services::chat::executor() {
-                    executor.spawn(async move {
-                        if let Ok(client) = crate::services::daemon_client::get_daemon_client().await {
-                            let _ = client.register_project(&curr_str).await;
-                        }
-                    });
-                }
-            }
-        }
-
         let mut project_infos = Vec::new();
         let mut active_work_dir = None;
         let mut active_session_id = None;
@@ -927,9 +664,8 @@ impl AppState {
         let (session_refresh_results_tx, session_refresh_rx) =
             tokio::sync::mpsc::unbounded_channel();
         std::thread::spawn(move || {
-            let mut discovery_cache = SessionDiscoveryCache::default();
             while let Ok(work_dir) = session_refresh_requests.recv() {
-                let sessions = discover_sessions_in_project_cached(&work_dir, &mut discovery_cache);
+                let sessions = discover_sessions_in_project_cached(&work_dir);
                 if session_refresh_results_tx
                     .send((work_dir, sessions))
                     .is_err()
@@ -1040,7 +776,7 @@ impl AppState {
     pub(crate) fn apply_daemon_snapshot(
         &mut self,
         projects: Vec<threadlane_protocol::ProjectRecord>,
-        sessions: Vec<(String, Vec<threadlane_protocol::SessionSummary>)>,
+        sessions: Vec<(String, Vec<threadlane_protocol::SessionInfo>)>,
         models: Vec<threadlane_protocol::ModelDescriptor>,
     ) {
         let mut project_infos = Vec::with_capacity(projects.len());
@@ -1049,29 +785,7 @@ impl AppState {
             let project_sessions = sessions
                 .iter()
                 .find(|(path, _)| path == &project.path)
-                .map(|(_, summaries)| {
-                    summaries
-                        .iter()
-                        .map(|summary| SessionInfo {
-                            id: summary.session_id.clone(),
-                            title: summary.title.clone(),
-                            work_dir: work_dir.clone(),
-                            runtime_work_dir: work_dir.clone(),
-                            session_file: work_dir
-                                .join(".threadlane/sessions")
-                                .join(format!("{}.jsonl", summary.session_id)),
-                            updated_at: summary.updated_at.parse().unwrap_or_default(),
-                            health: if summary.is_active {
-                                SessionHealth::Working
-                            } else {
-                                SessionHealth::Healthy
-                            },
-                            git_branch: None,
-                            is_worktree: false,
-                            worktree_available: true,
-                        })
-                        .collect()
-                })
+                .map(|(_, infos)| infos.clone())
                 .unwrap_or_default();
             project_infos.push(ProjectInfo {
                 name: project.name,
@@ -1700,11 +1414,7 @@ impl AppState {
     }
 
     pub(crate) fn attach_project(&mut self, raw_path: PathBuf) -> Result<(), String> {
-        let canonical = std::fs::canonicalize(&raw_path).map_err(|e| e.to_string())?;
-        if !canonical.is_dir() {
-            return Err("Selected path is not a directory".into());
-        }
-
+        let canonical = raw_path;
         let canonical_str = canonical.to_string_lossy().to_string();
         let name = canonical
             .file_name()
@@ -1758,7 +1468,7 @@ impl AppState {
 
     #[allow(dead_code)]
     pub(crate) fn detach_project(&mut self, work_dir: &Path) -> Result<(), String> {
-        let canonical = std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
+        let canonical = work_dir.to_path_buf();
         let canonical_str = canonical.to_string_lossy().to_string();
 
         if let Ok(executor) = crate::services::chat::executor() {
@@ -1799,9 +1509,6 @@ impl AppState {
         let Some(work_dir) = self.active_work_dir.clone() else {
             return Err("No active project directory".into());
         };
-        let sessions_dir = work_dir.join(".threadlane/sessions");
-        let _ = std::fs::create_dir_all(&sessions_dir);
-
         let now_nanos = std::time::SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
