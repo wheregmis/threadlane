@@ -1,4 +1,4 @@
-use std::collections::{hash_map::DefaultHasher, HashMap};
+use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::path::PathBuf;
@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_component::link::Link;
 use gpui_component::resizable::{h_resizable, resizable_panel, ResizableState};
 use gpui_component::scroll::{ScrollableElement, Scrollbar};
@@ -195,6 +195,207 @@ impl PrWorkspaceSelections {
         }
         state.selected_file = files.first().map(|file| file.path.clone());
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PrCommentAttempt {
+    token: u64,
+    key: PrWorkspaceKey,
+    body: String,
+    pr_url: String,
+    pre_write_ids: HashSet<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum PrCommentPhase {
+    #[default]
+    Idle,
+    Publishing,
+    Checking,
+    Present,
+    Absent,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct PrCommentPublish {
+    phase: PrCommentPhase,
+    attempt: Option<PrCommentAttempt>,
+    error: Option<String>,
+}
+
+impl PrCommentPublish {
+    fn is_active(&self) -> bool {
+        matches!(
+            self.phase,
+            PrCommentPhase::Publishing | PrCommentPhase::Checking
+        )
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct PrCommentDraft {
+    body: String,
+    publish: PrCommentPublish,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct PrCommentDrafts {
+    by_pr: HashMap<PrWorkspaceKey, PrCommentDraft>,
+    next_attempt_token: u64,
+}
+
+impl PrCommentDrafts {
+    fn get(&self, key: &PrWorkspaceKey) -> Option<&PrCommentDraft> {
+        self.by_pr.get(key)
+    }
+
+    fn set_body(&mut self, key: PrWorkspaceKey, body: String) {
+        self.by_pr.entry(key).or_default().body = body;
+    }
+
+    fn begin(
+        &mut self,
+        key: &PrWorkspaceKey,
+        pr_url: String,
+        pre_write_ids: HashSet<String>,
+    ) -> Option<PrCommentAttempt> {
+        let draft = self.by_pr.entry(key.clone()).or_default();
+        if draft.publish.is_active() || draft.body.trim().is_empty() {
+            return None;
+        }
+        self.next_attempt_token = self.next_attempt_token.saturating_add(1);
+        let attempt = PrCommentAttempt {
+            token: self.next_attempt_token,
+            key: key.clone(),
+            body: draft.body.clone(),
+            pr_url,
+            pre_write_ids,
+        };
+        draft.publish = PrCommentPublish {
+            phase: PrCommentPhase::Publishing,
+            attempt: Some(attempt.clone()),
+            error: None,
+        };
+        Some(attempt)
+    }
+
+    fn matching_publish_mut(
+        &mut self,
+        attempt: &PrCommentAttempt,
+    ) -> Option<&mut PrCommentPublish> {
+        let publish = &mut self.by_pr.get_mut(&attempt.key)?.publish;
+        publish
+            .attempt
+            .as_ref()
+            .is_some_and(|current| current.token == attempt.token)
+            .then_some(publish)
+    }
+
+    fn mark_checking(&mut self, attempt: &PrCommentAttempt, error: String) -> bool {
+        let Some(publish) = self.matching_publish_mut(attempt) else {
+            return false;
+        };
+        publish.phase = PrCommentPhase::Checking;
+        publish.error = Some(error);
+        true
+    }
+
+    fn complete_success(&mut self, attempt: &PrCommentAttempt) -> bool {
+        let Some(draft) = self.by_pr.get_mut(&attempt.key) else {
+            return false;
+        };
+        if !draft
+            .publish
+            .attempt
+            .as_ref()
+            .is_some_and(|current| current.token == attempt.token)
+        {
+            return false;
+        }
+        if draft.body == attempt.body {
+            draft.body.clear();
+        }
+        draft.publish = PrCommentPublish::default();
+        true
+    }
+
+    fn begin_recheck(&mut self, key: &PrWorkspaceKey) -> Option<PrCommentAttempt> {
+        let publish = &self.by_pr.get(key)?.publish;
+        if publish.phase != PrCommentPhase::Unknown {
+            return None;
+        }
+        let mut attempt = publish.attempt.clone()?;
+        self.next_attempt_token = self.next_attempt_token.saturating_add(1);
+        attempt.token = self.next_attempt_token;
+        let publish = &mut self.by_pr.get_mut(key)?.publish;
+        publish.phase = PrCommentPhase::Checking;
+        publish.attempt = Some(attempt.clone());
+        Some(attempt)
+    }
+
+    fn complete_readback(
+        &mut self,
+        attempt: &PrCommentAttempt,
+        outcome: PrReadback,
+        error: String,
+    ) -> bool {
+        let Some(publish) = self.matching_publish_mut(attempt) else {
+            return false;
+        };
+        publish.phase = match outcome {
+            PrReadback::Present => PrCommentPhase::Present,
+            PrReadback::Absent => PrCommentPhase::Absent,
+            PrReadback::Unknown => PrCommentPhase::Unknown,
+        };
+        publish.error = Some(error);
+        true
+    }
+
+    fn clear(&mut self, key: &PrWorkspaceKey) {
+        let draft = self.by_pr.entry(key.clone()).or_default();
+        draft.body.clear();
+        draft.publish = PrCommentPublish::default();
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrReadback {
+    Present,
+    Absent,
+    Unknown,
+}
+
+fn normalized_pr_body(body: &str) -> String {
+    body.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn classify_pr_readback(
+    attempt: &PrCommentAttempt,
+    detail: Result<&GitHubPrInfo, &str>,
+) -> PrReadback {
+    let Ok(detail) = detail else {
+        return PrReadback::Unknown;
+    };
+    if detail.number != attempt.key.number {
+        return PrReadback::Unknown;
+    }
+    let expected = normalized_pr_body(&attempt.body);
+    if detail.issue_comments.iter().any(|comment| {
+        !attempt.pre_write_ids.contains(&comment.remote_id)
+            && normalized_pr_body(&comment.body) == expected
+    }) {
+        PrReadback::Present
+    } else {
+        PrReadback::Absent
+    }
+}
+
+fn pr_publish_refresh_matches_selection(
+    attempt: &PrCommentAttempt,
+    selected: Option<&PrWorkspaceKey>,
+) -> bool {
+    selected == Some(&attempt.key)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1062,6 +1263,9 @@ pub struct GitHubView {
     pr_file_list_state: ListState,
     pr_diff_body: Entity<TextViewState>,
     pr_selections: PrWorkspaceSelections,
+    pr_drafts: PrCommentDrafts,
+    pr_comment_input: Entity<TextareaState>,
+    pr_comment_input_key: Option<PrWorkspaceKey>,
     active_diff_request: Option<PrDiffRequest>,
     diff_revision: u64,
     diff_loading: bool,
@@ -1098,6 +1302,12 @@ impl GitHubView {
         let query_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search issues…"));
         let detail_body = cx.new(|cx| TextViewState::markdown("", cx));
         let pr_diff_body = cx.new(|cx| TextViewState::markdown("", cx));
+        let pr_comment_input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .placeholder("Add a comment…")
+                .auto_grow(2, 6)
+                .soft_wrap(true)
+        });
         let detail_split_state = cx.new(|_| ResizableState::default());
         let linked_sessions_fingerprint = github_link_fingerprint(model.read(cx));
 
@@ -1134,6 +1344,16 @@ impl GitHubView {
                 _ => {}
             },
         );
+        let comment_draft_subscription =
+            cx.subscribe(&pr_comment_input, |this, input, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    if let Some(key) = this.pr_comment_input_key.clone() {
+                        let body = input.read(cx).value().to_string();
+                        this.pr_drafts.set_body(key, body);
+                        cx.notify();
+                    }
+                }
+            });
 
         Self {
             model,
@@ -1157,6 +1377,9 @@ impl GitHubView {
             pr_file_list_state: ListState::new(0, ListAlignment::Top, px(52.0)),
             pr_diff_body,
             pr_selections: PrWorkspaceSelections::default(),
+            pr_drafts: PrCommentDrafts::default(),
+            pr_comment_input,
+            pr_comment_input_key: None,
             active_diff_request: None,
             diff_revision: 0,
             diff_loading: false,
@@ -1181,7 +1404,11 @@ impl GitHubView {
             issue_comment_draft: String::new(),
             pr_review_draft: String::new(),
             linked_sessions_fingerprint,
-            _subscriptions: vec![model_subscription, input_subscription],
+            _subscriptions: vec![
+                model_subscription,
+                input_subscription,
+                comment_draft_subscription,
+            ],
         }
     }
 
@@ -1219,6 +1446,7 @@ impl GitHubView {
         self.pr_has_more = false;
         self.active_list_request = None;
         self.active_detail_request = None;
+        self.pr_comment_input_key = None;
         self.issue_comment_draft.clear();
         self.pr_review_draft.clear();
         self.issue_list_state.reset(0);
@@ -1585,6 +1813,156 @@ impl GitHubView {
     fn current_pr_file(&self) -> Option<&str> {
         let key = self.current_pr_key()?;
         self.pr_selections.selected_file(&key)
+    }
+
+    fn current_pr_draft_value(&self) -> (Option<PrWorkspaceKey>, String) {
+        let key = self.current_pr_key();
+        let body = key
+            .as_ref()
+            .and_then(|key| self.pr_drafts.get(key))
+            .map(|draft| draft.body.clone())
+            .unwrap_or_default();
+        (key, body)
+    }
+
+    fn pr_draft_inputs_match(&self, cx: &App) -> bool {
+        let (key, body) = self.current_pr_draft_value();
+        self.pr_comment_input_key == key && self.pr_comment_input.read(cx).value().as_str() == body
+    }
+
+    fn sync_pr_draft_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (key, body) = self.current_pr_draft_value();
+        self.pr_comment_input_key = key;
+        if self.pr_comment_input.read(cx).value().as_str() != body {
+            self.pr_comment_input
+                .update(cx, |input, cx| input.set_value(&body, window, cx));
+        }
+    }
+
+    fn clear_pr_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(key) = self.current_pr_key() else {
+            return;
+        };
+        self.pr_drafts.clear(&key);
+        self.sync_pr_draft_inputs(window, cx);
+        cx.notify();
+    }
+
+    fn publish_pr_comment(&mut self, cx: &mut Context<Self>) {
+        let Some(key) = self.current_pr_key() else {
+            return;
+        };
+        let Some(detail) = self
+            .pr_detail
+            .as_ref()
+            .filter(|detail| detail.number == key.number)
+        else {
+            return;
+        };
+        let Some(attempt) = self.pr_drafts.begin(
+            &key,
+            detail.url.clone(),
+            detail
+                .issue_comments
+                .iter()
+                .map(|comment| comment.remote_id.clone())
+                .collect(),
+        ) else {
+            return;
+        };
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let project = attempt.key.project.clone();
+            let number = attempt.key.number;
+            let body = attempt.body.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    threadlane_git::comment_on_pull_request(&project, number, &body)
+                        .map_err(|error| error.message)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(_) => {
+                    if this.pr_drafts.complete_success(&attempt)
+                        && pr_publish_refresh_matches_selection(
+                            &attempt,
+                            this.current_pr_key().as_ref(),
+                        )
+                    {
+                        this.fetch_detail(cx);
+                    }
+                    cx.notify();
+                }
+                Err(error) => {
+                    if this.pr_drafts.mark_checking(&attempt, error.clone()) {
+                        cx.notify();
+                        this.check_pr_comment_attempt(attempt.clone(), error, cx);
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn check_pr_comment_attempt(
+        &mut self,
+        attempt: PrCommentAttempt,
+        write_error: String,
+        cx: &mut Context<Self>,
+    ) {
+        let project = attempt.key.project.clone();
+        let number = attempt.key.number;
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    threadlane_git::inspect_pr_number(&project, number)
+                        .map_err(|error| error.message)
+                })
+                .await;
+            let outcome = classify_pr_readback(&attempt, result.as_ref().map_err(String::as_str));
+            let error = result
+                .as_ref()
+                .err()
+                .map(|check_error| format!("{write_error} GitHub check failed: {check_error}"))
+                .unwrap_or(write_error);
+            let _ = this.update(cx, |this, cx| {
+                if !this.pr_drafts.complete_readback(&attempt, outcome, error) {
+                    return;
+                }
+                if let Ok(detail) = result {
+                    if pr_publish_refresh_matches_selection(
+                        &attempt,
+                        this.current_pr_key().as_ref(),
+                    ) {
+                        this.pr_timeline_rows = merge_pr_timeline(&detail);
+                        this.pr_timeline_list_state
+                            .reset(this.pr_timeline_rows.len());
+                        this.pr_detail = Some(detail);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn check_pr_comment_again(&mut self, cx: &mut Context<Self>) {
+        let Some(key) = self.current_pr_key() else {
+            return;
+        };
+        let write_error = self
+            .pr_drafts
+            .get(&key)
+            .and_then(|draft| draft.publish.error.clone())
+            .unwrap_or_else(|| "GitHub did not confirm the earlier write.".into());
+        let Some(attempt) = self.pr_drafts.begin_recheck(&key) else {
+            return;
+        };
+        cx.notify();
+        self.check_pr_comment_attempt(attempt, write_error, cx);
     }
 
     fn select_pr_tab(&mut self, tab: PrDetailTab, cx: &mut Context<Self>) {
@@ -2324,6 +2702,113 @@ impl GitHubView {
         });
     }
 
+    fn render_pr_comment_editor(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().colors;
+        let draft = self
+            .current_pr_key()
+            .as_ref()
+            .and_then(|key| self.pr_drafts.get(key))
+            .cloned()
+            .unwrap_or_default();
+        let body = draft.body.clone();
+        let publish = draft.publish.clone();
+        let status = match publish.phase {
+            PrCommentPhase::Idle => None,
+            PrCommentPhase::Publishing => Some("Publishing…"),
+            PrCommentPhase::Checking => Some("Checking GitHub…"),
+            PrCommentPhase::Present => {
+                Some("A matching new GitHub comment was found. Draft retained.")
+            }
+            PrCommentPhase::Absent => {
+                Some("No matching new GitHub comment was found. Draft retained.")
+            }
+            PrCommentPhase::Unknown => {
+                Some("GitHub could not confirm whether this was published. Draft retained.")
+            }
+        };
+        let action = match publish.phase {
+            PrCommentPhase::Idle
+            | PrCommentPhase::Publishing
+            | PrCommentPhase::Checking
+            | PrCommentPhase::Absent => Button::new("github-pr-comment-publish")
+                .label(if publish.phase == PrCommentPhase::Absent {
+                    "Retry"
+                } else {
+                    "Post comment"
+                })
+                .small()
+                .disabled(publish.is_active() || body.trim().is_empty())
+                .on_click(cx.listener(|this, _, _, cx| this.publish_pr_comment(cx)))
+                .into_any_element(),
+            PrCommentPhase::Unknown => Button::new("github-pr-comment-check-again")
+                .label("Check again")
+                .small()
+                .on_click(cx.listener(|this, _, _, cx| this.check_pr_comment_again(cx)))
+                .into_any_element(),
+            PrCommentPhase::Present => div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .children(publish.attempt.as_ref().map(|attempt| {
+                    Link::new("github-pr-comment-open-present")
+                        .href(attempt.pr_url.clone())
+                        .child("Open on GitHub")
+                }))
+                .child(
+                    Button::new("github-pr-comment-clear")
+                        .label("Clear draft")
+                        .ghost()
+                        .small()
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.clear_pr_draft(window, cx);
+                        })),
+                )
+                .into_any_element(),
+        };
+        div()
+            .flex_none()
+            .p_3()
+            .border_b_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child("Draft · Not published"),
+            )
+            .child(div().mt_2().child(Textarea::new(&self.pr_comment_input)))
+            .children(status.map(|status| {
+                div()
+                    .mt_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_xs()
+                    .text_color(
+                        if matches!(
+                            publish.phase,
+                            PrCommentPhase::Absent | PrCommentPhase::Unknown
+                        ) {
+                            theme.danger
+                        } else {
+                            theme.muted_foreground
+                        },
+                    )
+                    .children(publish.is_active().then(|| Spinner::new().xsmall()))
+                    .child(status)
+            }))
+            .children(publish.error.map(|error| {
+                div()
+                    .mt_2()
+                    .text_xs()
+                    .text_color(theme.danger)
+                    .whitespace_normal()
+                    .child(error)
+            }))
+            .child(div().mt_2().child(action))
+            .into_any_element()
+    }
+
     fn render_pr_timeline_row(
         &mut self,
         ix: usize,
@@ -2542,26 +3027,42 @@ impl GitHubView {
     }
 
     fn render_pr_timeline(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        if self.pr_timeline_rows.is_empty() {
-            return self.render_empty("No pull-request conversation yet.", cx);
-        }
+        let theme = cx.theme().colors;
         div()
-            .relative()
             .size_full()
             .min_h_0()
-            .child(
-                list(
-                    self.pr_timeline_list_state.clone(),
-                    cx.processor(Self::render_pr_timeline_row),
-                )
-                .size_full()
-                .with_sizing_behavior(ListSizingBehavior::Infer),
-            )
+            .flex()
+            .flex_col()
+            .child(self.render_pr_comment_editor(cx))
             .child(
                 div()
-                    .absolute()
-                    .inset_0()
-                    .child(Scrollbar::vertical(&self.pr_timeline_list_state)),
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .children(self.pr_timeline_rows.is_empty().then(|| {
+                        div()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child("No pull-request conversation yet.")
+                    }))
+                    .children((!self.pr_timeline_rows.is_empty()).then(|| {
+                        list(
+                            self.pr_timeline_list_state.clone(),
+                            cx.processor(Self::render_pr_timeline_row),
+                        )
+                        .size_full()
+                        .with_sizing_behavior(ListSizingBehavior::Infer)
+                    }))
+                    .children((!self.pr_timeline_rows.is_empty()).then(|| {
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .child(Scrollbar::vertical(&self.pr_timeline_list_state))
+                    })),
             )
             .into_any_element()
     }
@@ -2646,7 +3147,14 @@ impl GitHubView {
             .into_any_element()
     }
 
-    fn render_pr_detail(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_pr_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if !self.pr_draft_inputs_match(cx) {
+            cx.defer_in(window, |this, window, cx| {
+                if !this.pr_draft_inputs_match(cx) {
+                    this.sync_pr_draft_inputs(window, cx);
+                }
+            });
+        }
         let theme = cx.theme().colors;
         let (number, title, url, state, author, head_ref, base_ref, updated_at) = {
             let Some(detail) = self
@@ -2744,7 +3252,7 @@ impl GitHubView {
             .into_any_element()
     }
 
-    fn render_detail(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().colors;
         if self.selected_ix().is_none() {
             return self.render_empty("Select an item to see details.", cx);
@@ -2753,7 +3261,7 @@ impl GitHubView {
             return self.render_empty(error, cx);
         }
         if self.tab == GitHubTab::PullRequests {
-            return self.render_pr_detail(cx);
+            return self.render_pr_detail(window, cx);
         }
 
         let (title, metadata, url, issue) = match self.tab {
@@ -3022,7 +3530,7 @@ impl Render for GitHubView {
             .flex_col()
             .child(self.render_filters(cx))
             .child(div().flex_1().min_h_0().child(self.render_list(window, cx)));
-        let detail = self.render_detail(cx);
+        let detail = self.render_detail(window, cx);
         let content = if narrow {
             div()
                 .size_full()
@@ -3072,9 +3580,10 @@ mod tests {
         issue_start_dialog_result, linked_pr_session, linked_session_fingerprint,
         linked_session_ids, linked_session_status, linked_sessions_across_projects,
         list_count_splice, merge_pr_timeline, pr_check_label, pr_diff_result_matches_request,
-        pr_file_action_ix, prepare_selected_diff, selected_file_diff, selected_issue_after_refresh,
-        GitHubQueryMode, GitHubRequest, GitHubTab, GitHubView, PrDetailTab, PrDiffRequest,
-        PrFileAction, PrTimelineKind, PrWorkspaceKey, PrWorkspaceSelections,
+        pr_file_action_ix, pr_publish_refresh_matches_selection, prepare_selected_diff,
+        selected_file_diff, selected_issue_after_refresh, GitHubQueryMode, GitHubRequest,
+        GitHubTab, GitHubView, PrCommentDrafts, PrCommentPhase, PrDetailTab, PrDiffRequest,
+        PrFileAction, PrReadback, PrTimelineKind, PrWorkspaceKey, PrWorkspaceSelections,
     };
     use crate::state::{AppState, SessionHealth, SessionInfo};
     use gpui::AppContext as _;
@@ -3154,6 +3663,221 @@ mod tests {
         view.pr_list_state.reset(1);
         view.pr_file_list_state.reset(files.len());
         cx.notify();
+    }
+
+    fn pr_key(project: &str, number: u64) -> PrWorkspaceKey {
+        PrWorkspaceKey {
+            project: PathBuf::from(project),
+            number,
+        }
+    }
+
+    #[test]
+    fn github_pr_draft_switching_prs_and_projects_retains_exact_bodies() {
+        let mut drafts = PrCommentDrafts::default();
+        let first = pr_key("/projects/app", 42);
+        let second = pr_key("/projects/app", 43);
+        let other_project = pr_key("/projects/other", 42);
+        drafts.set_body(first.clone(), " first comment \n".into());
+        drafts.set_body(second.clone(), "second comment".into());
+        drafts.set_body(other_project.clone(), "other project".into());
+        assert_eq!(drafts.get(&first).unwrap().body, " first comment \n");
+        assert_eq!(drafts.get(&second).unwrap().body, "second comment");
+        assert_eq!(drafts.get(&other_project).unwrap().body, "other project");
+    }
+
+    #[test]
+    fn github_pr_conversation_readback_outcomes_retain_exact_body() {
+        for (outcome, phase) in [
+            (PrReadback::Present, PrCommentPhase::Present),
+            (PrReadback::Absent, PrCommentPhase::Absent),
+            (PrReadback::Unknown, PrCommentPhase::Unknown),
+        ] {
+            let mut drafts = PrCommentDrafts::default();
+            let key = pr_key("/projects/app", 42);
+            drafts.set_body(key.clone(), "  exact comment\n\n".into());
+            let attempt = drafts
+                .begin(
+                    &key,
+                    "https://github.com/threadlane/app/pull/42".into(),
+                    ["old".to_string()].into_iter().collect(),
+                )
+                .unwrap();
+            drafts.mark_checking(&attempt, "POST result was ambiguous".into());
+            drafts.complete_readback(&attempt, outcome, "POST failed".into());
+            let draft = drafts.get(&key).unwrap();
+            assert_eq!(draft.body, "  exact comment\n\n");
+            assert_eq!(draft.publish.phase, phase);
+        }
+    }
+
+    #[test]
+    fn github_pr_conversation_trusted_success_clears_only_matching_published_snapshot() {
+        let key = pr_key("/projects/app", 42);
+        let mut exact = PrCommentDrafts::default();
+        exact.set_body(key.clone(), "publish me".into());
+        let exact_attempt = exact
+            .begin(
+                &key,
+                "https://github.com/threadlane/app/pull/42".into(),
+                Default::default(),
+            )
+            .unwrap();
+        assert!(exact.complete_success(&exact_attempt));
+        assert_eq!(exact.get(&key).unwrap().body, "");
+
+        let mut edited = PrCommentDrafts::default();
+        edited.set_body(key.clone(), "published snapshot".into());
+        let old_attempt = edited
+            .begin(
+                &key,
+                "https://github.com/threadlane/app/pull/42".into(),
+                Default::default(),
+            )
+            .unwrap();
+        edited.set_body(key.clone(), "newer local edit".into());
+        assert!(edited.complete_success(&old_attempt));
+        assert_eq!(edited.get(&key).unwrap().body, "newer local edit");
+    }
+
+    #[test]
+    fn github_pr_conversation_preexisting_same_body_is_not_present_without_new_remote_id() {
+        let key = pr_key("/projects/app", 42);
+        let mut drafts = PrCommentDrafts::default();
+        drafts.set_body(key.clone(), " same\nbody ".into());
+        let attempt = drafts
+            .begin(
+                &key,
+                "https://github.com/threadlane/app/pull/42".into(),
+                ["old".to_string()].into_iter().collect(),
+            )
+            .unwrap();
+        let old_only = GitHubPrInfo {
+            number: 42,
+            issue_comments: vec![PrConversationComment {
+                remote_id: "old".into(),
+                body: "same body".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            super::classify_pr_readback(&attempt, Ok(&old_only)),
+            PrReadback::Absent
+        );
+
+        let with_new = GitHubPrInfo {
+            issue_comments: vec![
+                old_only.issue_comments[0].clone(),
+                PrConversationComment {
+                    remote_id: "new".into(),
+                    body: "same\n body".into(),
+                    ..Default::default()
+                },
+            ],
+            ..old_only
+        };
+        assert_eq!(
+            super::classify_pr_readback(&attempt, Ok(&with_new)),
+            PrReadback::Present
+        );
+    }
+
+    #[test]
+    fn github_pr_conversation_stale_attempt_cannot_mutate_newer_state() {
+        let key = pr_key("/projects/app", 42);
+        let mut drafts = PrCommentDrafts::default();
+        drafts.set_body(key.clone(), "keep me".into());
+        let old = drafts
+            .begin(
+                &key,
+                "https://github.com/threadlane/app/pull/42".into(),
+                Default::default(),
+            )
+            .unwrap();
+        drafts.mark_checking(&old, "ambiguous".into());
+        drafts.complete_readback(&old, PrReadback::Unknown, "ambiguous".into());
+        let current = drafts.begin_recheck(&key).unwrap();
+
+        assert!(current.token > old.token);
+        assert!(!drafts.complete_success(&old));
+        assert_eq!(drafts.get(&key).unwrap().body, "keep me");
+        assert_eq!(
+            drafts
+                .get(&key)
+                .unwrap()
+                .publish
+                .attempt
+                .as_ref()
+                .unwrap()
+                .token,
+            current.token
+        );
+    }
+
+    #[test]
+    fn github_pr_conversation_completion_targets_captured_key_not_visible_selection() {
+        let first = pr_key("/projects/app", 42);
+        let visible = pr_key("/projects/app", 43);
+        let mut drafts = PrCommentDrafts::default();
+        drafts.set_body(first.clone(), "first body".into());
+        drafts.set_body(visible.clone(), "visible body".into());
+        let attempt = drafts
+            .begin(
+                &first,
+                "https://github.com/threadlane/app/pull/42".into(),
+                Default::default(),
+            )
+            .unwrap();
+
+        assert!(!pr_publish_refresh_matches_selection(
+            &attempt,
+            Some(&visible)
+        ));
+        assert!(drafts.complete_success(&attempt));
+        assert_eq!(drafts.get(&visible).unwrap().body, "visible body");
+        assert_eq!(drafts.get(&first).unwrap().body, "");
+    }
+
+    #[gpui::test]
+    fn github_pr_draft_inputs_mirror_the_active_pr_without_overwriting_other_keys(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let model = cx.new(|_| AppState::default());
+            GitHubView::new(model, window, cx)
+        });
+        view.update_in(cx, |view, window, cx| {
+            configure_pr_workspace(view, cx);
+            let first = pr_key("/projects/app", 42);
+            view.pr_drafts.set_body(first, " first comment\n".into());
+            view.sync_pr_draft_inputs(window, cx);
+        });
+        assert_eq!(
+            view.read_with(cx, |view, cx| view.pr_comment_input.read(cx).value()),
+            " first comment\n"
+        );
+        view.update_in(cx, |view, window, cx| {
+            let second = pr_key("/projects/app", 43);
+            view.selected_pr = Some(43);
+            view.pr_drafts.set_body(second, "second comment".into());
+            view.sync_pr_draft_inputs(window, cx);
+        });
+        assert_eq!(
+            view.read_with(cx, |view, cx| view.pr_comment_input.read(cx).value()),
+            "second comment"
+        );
+        assert_eq!(
+            view.read_with(cx, |view, _| {
+                view.pr_drafts
+                    .get(&pr_key("/projects/app", 42))
+                    .unwrap()
+                    .body
+                    .clone()
+            }),
+            " first comment\n"
+        );
     }
 
     #[test]
