@@ -231,7 +231,6 @@ fn sidebar_session_identity(session: &SessionInfo) -> SidebarSessionIdentity {
         .strip_prefix(&prefix)
         .filter(|rest| rest.is_empty() || rest.chars().next().is_some_and(char::is_whitespace))
         .map(str::trim_start)
-        .filter(|title| !title.is_empty())
         .unwrap_or(title);
     let title = if issue_title.is_empty() {
         prefix.clone()
@@ -1625,6 +1624,9 @@ mod tests {
             sidebar_session_identity(&item).title,
             "#42 Fix linked task browser"
         );
+
+        item.title = "#42".into();
+        assert_eq!(sidebar_session_identity(&item).title, "#42");
 
         item.github_issue = Some(threadlane_git::GitHubIssueRef {
             number: 43,

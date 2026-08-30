@@ -271,10 +271,13 @@ fn github_link_fingerprint(state: &AppState) -> u64 {
             issue.owner.hash(&mut hasher);
             issue.repo.hash(&mut hasher);
             issue.number.hash(&mut hasher);
-            session.id.hash(&mut hasher);
-            session.title.hash(&mut hasher);
-            session.health.hash(&mut hasher);
-            session.worktree_available.hash(&mut hasher);
+            let pr = session.git_branch.as_ref().and_then(|branch| {
+                state
+                    .git_prs
+                    .get(&(session.work_dir.clone(), branch.clone()))
+                    .and_then(|pr| pr.as_ref())
+            });
+            linked_session_fingerprint(session, pr).hash(&mut hasher);
             state
                 .pending_permissions
                 .contains_key(&session.id)
@@ -283,6 +286,28 @@ fn github_link_fingerprint(state: &AppState) -> u64 {
                 .session_is_generating(&session.session_file)
                 .hash(&mut hasher);
         }
+    }
+    hasher.finish()
+}
+
+fn linked_session_fingerprint(session: &SessionInfo, pr: Option<&GitHubPrInfo>) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    session.id.hash(&mut hasher);
+    session.title.hash(&mut hasher);
+    session.health.hash(&mut hasher);
+    session.worktree_available.hash(&mut hasher);
+    session.is_worktree.hash(&mut hasher);
+    session.git_branch.hash(&mut hasher);
+    match pr {
+        Some(pr) => {
+            true.hash(&mut hasher);
+            pr.number.hash(&mut hasher);
+            pr.state.hash(&mut hasher);
+            pr.is_draft.hash(&mut hasher);
+            pr.head_ref.hash(&mut hasher);
+            pr.base_ref.hash(&mut hasher);
+        }
+        None => false.hash(&mut hasher),
     }
     hasher.finish()
 }
@@ -380,6 +405,16 @@ fn issue_start_confirmation(
     }
 }
 
+fn issue_start_activation(
+    start_enabled: bool,
+    start: impl FnOnce() -> Result<(), String>,
+) -> Result<bool, String> {
+    if !start_enabled {
+        return Ok(false);
+    }
+    start().map(|()| true)
+}
+
 struct IssueStartDialog {
     model: Entity<AppState>,
     work_dir: PathBuf,
@@ -391,20 +426,19 @@ struct IssueStartDialog {
 
 impl IssueStartDialog {
     fn start(&mut self, cx: &mut Context<Self>) -> bool {
-        if !self.confirmation.start_enabled {
-            return false;
-        }
-        let result = self.model.update(cx, |state, cx| {
-            let result = state.start_issue_work(
-                self.work_dir.clone(),
-                self.issue.clone(),
-                self.title.clone(),
-            );
-            if let Err(error) = &result {
-                state.session_status = Some(error.clone());
-            }
-            cx.notify();
-            result
+        let result = issue_start_activation(self.confirmation.start_enabled, || {
+            self.model.update(cx, |state, cx| {
+                let result = state.start_issue_work(
+                    self.work_dir.clone(),
+                    self.issue.clone(),
+                    self.title.clone(),
+                );
+                if let Err(error) = &result {
+                    state.session_status = Some(error.clone());
+                }
+                cx.notify();
+                result.map(|_| ())
+            })
         });
         match result {
             Ok(_) => true,
@@ -415,6 +449,10 @@ impl IssueStartDialog {
             }
         }
     }
+}
+
+fn activate_issue_start_dialog(dialog: &Entity<IssueStartDialog>, cx: &mut App) -> bool {
+    dialog.update(cx, |dialog, cx| dialog.start(cx))
 }
 
 impl Render for IssueStartDialog {
@@ -516,6 +554,7 @@ fn open_issue_start_dialog(
     });
     window.open_dialog(cx, move |dialog, _window, _cx| {
         let confirm_state = dialog_state.clone();
+        let on_ok_state = dialog_state.clone();
         dialog
             .title("Start local task?")
             .child(dialog_state.clone())
@@ -536,13 +575,13 @@ fn open_issue_start_dialog(
                             .disabled(!start_enabled)
                             .tooltip(disabled_reason.clone().unwrap_or_default())
                             .on_click(move |_, window, cx| {
-                                if confirm_state.update(cx, |dialog, cx| dialog.start(cx)) {
+                                if activate_issue_start_dialog(&confirm_state, cx) {
                                     window.close_dialog(cx);
                                 }
                             }),
                     ),
             )
-            .on_ok(|_, _, _| false)
+            .on_ok(move |_, _, cx| activate_issue_start_dialog(&on_ok_state, cx))
     });
 }
 
@@ -1871,13 +1910,14 @@ impl Render for GitHubView {
 mod tests {
     use super::{
         detail_result_matches_list, github_query_mode, github_result_matches_request,
-        github_server_query, issue_filter_matches, issue_start_confirmation, linked_session_ids,
+        github_server_query, issue_filter_matches, issue_start_activation,
+        issue_start_confirmation, linked_session_fingerprint, linked_session_ids,
         linked_session_status, linked_sessions_across_projects, list_count_splice,
         selected_issue_after_refresh, GitHubQueryMode, GitHubRequest, GitHubTab,
     };
     use crate::state::{SessionHealth, SessionInfo};
     use std::path::PathBuf;
-    use threadlane_git::{GitHubIssueRef, GitHubIssueSummary};
+    use threadlane_git::{GitHubIssueRef, GitHubIssueSummary, GitHubPrInfo};
 
     fn issue(number: u64) -> GitHubIssueSummary {
         GitHubIssueSummary {
@@ -2115,6 +2155,47 @@ mod tests {
 
         assert!(confirmation.show_open_task);
         assert_eq!(confirmation.start_label, "Start another");
+    }
+
+    #[test]
+    fn issue_start_activation_runs_only_when_enabled_and_reports_its_outcome() {
+        assert_eq!(
+            issue_start_activation(false, || -> Result<(), String> { panic!("must not start") }),
+            Ok(false)
+        );
+        assert_eq!(issue_start_activation(true, || Ok(())), Ok(true));
+        assert_eq!(
+            issue_start_activation(true, || Err("worktree failed".into())),
+            Err("worktree failed".into())
+        );
+    }
+
+    #[test]
+    fn linked_session_fingerprint_tracks_rendered_worktree_branch_and_pr_status() {
+        let mut linked = session("linked", Some(issue(42).issue));
+        linked.git_branch = Some("issue/42-fix-xxxxxx".into());
+        let pr = GitHubPrInfo {
+            number: 42,
+            state: "OPEN".into(),
+            head_ref: linked.git_branch.clone().unwrap(),
+            base_ref: "main".into(),
+            ..Default::default()
+        };
+        let first = linked_session_fingerprint(&linked, Some(&pr));
+
+        linked.is_worktree = true;
+        assert_ne!(first, linked_session_fingerprint(&linked, Some(&pr)));
+
+        linked.is_worktree = false;
+        linked.git_branch = Some("issue/42-other-xxxxxx".into());
+        assert_ne!(first, linked_session_fingerprint(&linked, Some(&pr)));
+
+        linked.git_branch = Some("issue/42-fix-xxxxxx".into());
+        let closed = GitHubPrInfo {
+            state: "CLOSED".into(),
+            ..pr
+        };
+        assert_ne!(first, linked_session_fingerprint(&linked, Some(&closed)));
     }
 
     #[test]
