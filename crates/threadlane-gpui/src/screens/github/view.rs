@@ -217,6 +217,15 @@ enum PrCommentPhase {
     Unknown,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrCommentControl {
+    Post,
+    ClearDraft,
+    Retry,
+    CheckAgain,
+    PostNewDraft,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct PrCommentPublish {
     phase: PrCommentPhase,
@@ -237,6 +246,29 @@ impl PrCommentPublish {
 struct PrCommentDraft {
     body: String,
     publish: PrCommentPublish,
+}
+
+fn pr_comment_control(draft: &PrCommentDraft) -> PrCommentControl {
+    let phase = draft.publish.phase;
+    if matches!(
+        phase,
+        PrCommentPhase::Present | PrCommentPhase::Absent | PrCommentPhase::Unknown
+    ) && draft
+        .publish
+        .attempt
+        .as_ref()
+        .is_some_and(|attempt| attempt.body != draft.body)
+    {
+        return PrCommentControl::PostNewDraft;
+    }
+    match phase {
+        PrCommentPhase::Idle | PrCommentPhase::Publishing | PrCommentPhase::Checking => {
+            PrCommentControl::Post
+        }
+        PrCommentPhase::Present => PrCommentControl::ClearDraft,
+        PrCommentPhase::Absent => PrCommentControl::Retry,
+        PrCommentPhase::Unknown => PrCommentControl::CheckAgain,
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1798,6 +1830,9 @@ impl GitHubView {
     }
 
     fn current_pr_key(&self) -> Option<PrWorkspaceKey> {
+        if self.tab != GitHubTab::PullRequests {
+            return None;
+        }
         Some(PrWorkspaceKey {
             project: self.project_work_dir.clone()?,
             number: self.selected_pr?,
@@ -2712,57 +2747,46 @@ impl GitHubView {
             .unwrap_or_default();
         let body = draft.body.clone();
         let publish = draft.publish.clone();
+        let control = pr_comment_control(&draft);
         let status = match publish.phase {
             PrCommentPhase::Idle => None,
             PrCommentPhase::Publishing => Some("Publishing…"),
             PrCommentPhase::Checking => Some("Checking GitHub…"),
             PrCommentPhase::Present => {
-                Some("A matching new GitHub comment was found. Draft retained.")
+                Some("A matching new GitHub comment was found for the submitted draft. Draft retained.")
             }
             PrCommentPhase::Absent => {
-                Some("No matching new GitHub comment was found. Draft retained.")
+                Some("No matching new GitHub comment was found for the submitted draft. Draft retained.")
             }
             PrCommentPhase::Unknown => {
-                Some("GitHub could not confirm whether this was published. Draft retained.")
+                Some("GitHub could not confirm whether the submitted draft was published. Draft retained.")
             }
         };
-        let action = match publish.phase {
-            PrCommentPhase::Idle
-            | PrCommentPhase::Publishing
-            | PrCommentPhase::Checking
-            | PrCommentPhase::Absent => Button::new("github-pr-comment-publish")
-                .label(if publish.phase == PrCommentPhase::Absent {
-                    "Retry"
-                } else {
-                    "Post comment"
-                })
-                .small()
-                .disabled(publish.is_active() || body.trim().is_empty())
-                .on_click(cx.listener(|this, _, _, cx| this.publish_pr_comment(cx)))
-                .into_any_element(),
-            PrCommentPhase::Unknown => Button::new("github-pr-comment-check-again")
+        let action = match control {
+            PrCommentControl::Post | PrCommentControl::Retry | PrCommentControl::PostNewDraft => {
+                Button::new("github-pr-comment-publish")
+                    .label(match control {
+                        PrCommentControl::Retry => "Retry",
+                        PrCommentControl::PostNewDraft => "Post new draft",
+                        _ => "Post comment",
+                    })
+                    .small()
+                    .disabled(publish.is_active() || body.trim().is_empty())
+                    .on_click(cx.listener(|this, _, _, cx| this.publish_pr_comment(cx)))
+                    .into_any_element()
+            }
+            PrCommentControl::CheckAgain => Button::new("github-pr-comment-check-again")
                 .label("Check again")
                 .small()
                 .on_click(cx.listener(|this, _, _, cx| this.check_pr_comment_again(cx)))
                 .into_any_element(),
-            PrCommentPhase::Present => div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .children(publish.attempt.as_ref().map(|attempt| {
-                    Link::new("github-pr-comment-open-present")
-                        .href(attempt.pr_url.clone())
-                        .child("Open on GitHub")
+            PrCommentControl::ClearDraft => Button::new("github-pr-comment-clear")
+                .label("Clear draft")
+                .ghost()
+                .small()
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.clear_pr_draft(window, cx);
                 }))
-                .child(
-                    Button::new("github-pr-comment-clear")
-                        .label("Clear draft")
-                        .ghost()
-                        .small()
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.clear_pr_draft(window, cx);
-                        })),
-                )
                 .into_any_element(),
         };
         div()
@@ -2805,7 +2829,25 @@ impl GitHubView {
                     .whitespace_normal()
                     .child(error)
             }))
-            .child(div().mt_2().child(action))
+            .child(
+                div()
+                    .mt_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .children(
+                        publish
+                            .attempt
+                            .as_ref()
+                            .filter(|_| publish.phase == PrCommentPhase::Present)
+                            .map(|attempt| {
+                                Link::new("github-pr-comment-open-present")
+                                    .href(attempt.pr_url.clone())
+                                    .child("Open on GitHub")
+                            }),
+                    )
+                    .child(action),
+            )
             .into_any_element()
     }
 
@@ -3579,11 +3621,12 @@ mod tests {
         issue_filter_matches, issue_start_activation, issue_start_confirmation,
         issue_start_dialog_result, linked_pr_session, linked_session_fingerprint,
         linked_session_ids, linked_session_status, linked_sessions_across_projects,
-        list_count_splice, merge_pr_timeline, pr_check_label, pr_diff_result_matches_request,
-        pr_file_action_ix, pr_publish_refresh_matches_selection, prepare_selected_diff,
-        selected_file_diff, selected_issue_after_refresh, GitHubQueryMode, GitHubRequest,
-        GitHubTab, GitHubView, PrCommentDrafts, PrCommentPhase, PrDetailTab, PrDiffRequest,
-        PrFileAction, PrReadback, PrTimelineKind, PrWorkspaceKey, PrWorkspaceSelections,
+        list_count_splice, merge_pr_timeline, pr_check_label, pr_comment_control,
+        pr_diff_result_matches_request, pr_file_action_ix, pr_publish_refresh_matches_selection,
+        prepare_selected_diff, selected_file_diff, selected_issue_after_refresh, GitHubQueryMode,
+        GitHubRequest, GitHubTab, GitHubView, PrCommentControl, PrCommentDrafts, PrCommentPhase,
+        PrDetailTab, PrDiffRequest, PrFileAction, PrReadback, PrTimelineKind, PrWorkspaceKey,
+        PrWorkspaceSelections,
     };
     use crate::state::{AppState, SessionHealth, SessionInfo};
     use gpui::AppContext as _;
@@ -3708,6 +3751,72 @@ mod tests {
             let draft = drafts.get(&key).unwrap();
             assert_eq!(draft.body, "  exact comment\n\n");
             assert_eq!(draft.publish.phase, phase);
+        }
+    }
+
+    #[test]
+    fn github_pr_conversation_newer_draft_is_postable_without_discarding_old_evidence() {
+        for (outcome, phase, old_control) in [
+            (
+                PrReadback::Present,
+                PrCommentPhase::Present,
+                PrCommentControl::ClearDraft,
+            ),
+            (
+                PrReadback::Absent,
+                PrCommentPhase::Absent,
+                PrCommentControl::Retry,
+            ),
+            (
+                PrReadback::Unknown,
+                PrCommentPhase::Unknown,
+                PrCommentControl::CheckAgain,
+            ),
+        ] {
+            let key = pr_key("/projects/app", 42);
+            let mut drafts = PrCommentDrafts::default();
+            drafts.set_body(key.clone(), "submitted A".into());
+            let attempt = drafts
+                .begin(
+                    &key,
+                    "https://github.com/threadlane/app/pull/42".into(),
+                    Default::default(),
+                )
+                .unwrap();
+            drafts.mark_checking(&attempt, "ambiguous".into());
+
+            let mut unchanged = drafts.clone();
+            unchanged.complete_readback(&attempt, outcome, "ambiguous".into());
+            assert_eq!(
+                pr_comment_control(unchanged.get(&key).unwrap()),
+                old_control
+            );
+
+            drafts.set_body(key.clone(), "newer B".into());
+            drafts.complete_readback(&attempt, outcome, "ambiguous".into());
+            let draft = drafts.get(&key).unwrap();
+            assert_eq!(draft.body, "newer B");
+            assert_eq!(draft.publish.phase, phase);
+            assert_eq!(draft.publish.attempt.as_ref().unwrap().body, "submitted A");
+            assert_eq!(
+                draft.publish.attempt.as_ref().unwrap().pr_url,
+                "https://github.com/threadlane/app/pull/42"
+            );
+            assert_eq!(pr_comment_control(draft), PrCommentControl::PostNewDraft);
+
+            let mut stale_completion = drafts.clone();
+            assert!(stale_completion.complete_success(&attempt));
+            assert_eq!(stale_completion.get(&key).unwrap().body, "newer B");
+
+            let next = drafts
+                .begin(
+                    &key,
+                    "https://github.com/threadlane/app/pull/42".into(),
+                    Default::default(),
+                )
+                .unwrap();
+            assert!(next.token > attempt.token);
+            assert_eq!(next.body, "newer B");
         }
     }
 
@@ -3837,6 +3946,40 @@ mod tests {
         assert!(drafts.complete_success(&attempt));
         assert_eq!(drafts.get(&visible).unwrap().body, "visible body");
         assert_eq!(drafts.get(&first).unwrap().body, "");
+    }
+
+    #[gpui::test]
+    fn github_pr_conversation_completion_does_not_match_hidden_pr_on_issues_tab(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let model = cx.new(|_| AppState::default());
+            GitHubView::new(model, window, cx)
+        });
+        let attempt = view.update_in(cx, |view, _, cx| {
+            configure_pr_workspace(view, cx);
+            let key = pr_key("/projects/app", 42);
+            view.pr_drafts.set_body(key.clone(), "submitted".into());
+            let attempt = view
+                .pr_drafts
+                .begin(
+                    &key,
+                    "https://example.com/pull/42".into(),
+                    Default::default(),
+                )
+                .unwrap();
+            view.tab = GitHubTab::Issues;
+            attempt
+        });
+
+        assert!(view.read_with(cx, |view, _| view.current_pr_key().is_none()));
+        assert!(
+            !view.read_with(cx, |view, _| pr_publish_refresh_matches_selection(
+                &attempt,
+                view.current_pr_key().as_ref(),
+            ))
+        );
     }
 
     #[gpui::test]
