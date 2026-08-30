@@ -1430,6 +1430,7 @@ mod tests {
             updated_at: 0,
             health: SessionHealth::Healthy,
             git_branch: None,
+            github_issue: None,
             is_worktree: false,
             worktree_available: true,
         }
