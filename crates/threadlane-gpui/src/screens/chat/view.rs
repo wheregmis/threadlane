@@ -29,6 +29,10 @@ use crate::state::{
     SubagentActivityStatus, ToolActivityInfo, TrajectoryEntry, WorkMode,
 };
 
+fn editor_target_matches_active_work_dir(target: &Path, active: Option<&Path>) -> bool {
+    active == Some(target)
+}
+
 #[derive(Clone, Debug)]
 struct ContextMeterContext {
     current_tokens: u64,
@@ -927,19 +931,36 @@ impl ChatListView {
             if let Some(target) =
                 model.update(cx, |state, _cx| state.requested_editor_target.take())
             {
-                this.current_tab = CentralTab::Editor;
                 match target {
-                    crate::state::RequestedEditorTarget::File(path) => {
-                        this.editor.update(cx, |editor, cx| {
-                            editor.open_file(&path, cx);
-                        });
+                    crate::state::RequestedEditorTarget::File { project, path } => {
+                        let is_active = {
+                            let state = model.read(cx);
+                            editor_target_matches_active_work_dir(
+                                &project,
+                                state.active_git_work_dir().as_deref(),
+                            )
+                        };
+                        if is_active {
+                            this.current_tab = CentralTab::Editor;
+                            this.editor.update(cx, |editor, cx| {
+                                editor.open_file(project, &path, cx);
+                            });
+                        }
                     }
                     crate::state::RequestedEditorTarget::Diff {
                         project,
                         path,
                         content,
                     } => {
-                        if model.read(cx).active_work_dir.as_ref() == Some(&project) {
+                        let is_active = {
+                            let state = model.read(cx);
+                            editor_target_matches_active_work_dir(
+                                &project,
+                                state.active_git_work_dir().as_deref(),
+                            )
+                        };
+                        if is_active {
+                            this.current_tab = CentralTab::Editor;
                             this.editor.update(cx, |editor, cx| {
                                 editor.open_diff(&path, &content, cx);
                             });
@@ -5774,9 +5795,19 @@ mod hot_path_tests {
         reconcile_trajectory_entries, reconcile_trajectory_entries_by_epoch,
         subagent_popover_counts, summarize_trajectory, ChatLinkTarget, ContextMeterContext,
         ContextMeterMetrics, MarkdownSegment, MarkdownUpdate, TrajectoryCacheKey, TrajectoryMode,
-        TrajectoryRow, TranscriptRow, INPUT_KEY_CONTEXT, MARKDOWN_CACHE_ENTRY_LIMIT,
+        TrajectoryRow, TranscriptRow, editor_target_matches_active_work_dir, INPUT_KEY_CONTEXT, MARKDOWN_CACHE_ENTRY_LIMIT,
         SLASH_COMMAND_BINDING_CONTEXT, SLASH_COMMAND_KEY_CONTEXT,
     };
+
+    #[test]
+    fn editor_targets_only_open_for_the_active_git_checkout() {
+        let worktree = std::path::Path::new("/projects/app/.threadlane/worktrees/session");
+        let canonical = std::path::Path::new("/projects/app");
+
+        assert!(editor_target_matches_active_work_dir(worktree, Some(worktree)));
+        assert!(!editor_target_matches_active_work_dir(worktree, Some(canonical)));
+        assert!(!editor_target_matches_active_work_dir(worktree, None));
+    }
     use crate::state::{
         reported_session_shape_state, ChatMessageInfo, ChatStreamEvent, MessageRole,
         SubagentActivityStatus, ToolActivityInfo, TrajectoryDiagnostics, TrajectoryEntry,

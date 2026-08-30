@@ -45,6 +45,10 @@ fn can_create_pull_request(worktree_available: bool, status: Option<&GitStatus>)
         })
 }
 
+fn message_generated_matches_active_project(origin: &Path, active: Option<&Path>) -> bool {
+    active == Some(origin)
+}
+
 fn normalize_generated_commit_message(raw: &str) -> String {
     let trimmed = raw.trim();
     let unquoted = trimmed
@@ -175,7 +179,10 @@ enum PanelEvent {
         git_dirty: bool,
         files_dirty: bool,
     },
-    MessageGenerated(Result<String, String>),
+    MessageGenerated {
+        project: PathBuf,
+        result: Result<String, String>,
+    },
     ActionFinished {
         project: PathBuf,
         status: Result<GitStatus, String>,
@@ -366,6 +373,7 @@ impl RightPanelView {
         self.git_status = None;
         self.review_error = None;
         self.git_feedback = None;
+        self.git_message_pending = false;
         self.generated_commit_message = None;
         self.should_clear_commit_message = false;
         self.selected_commit_sha = None;
@@ -609,7 +617,12 @@ impl RightPanelView {
                 self.stash_files = None;
                 self.loading_stash_index = None;
             }
-            PanelEvent::MessageGenerated(result) => {
+            PanelEvent::MessageGenerated { project, result }
+                if message_generated_matches_active_project(
+                    &project,
+                    self.model.read(cx).active_git_work_dir().as_deref(),
+                ) =>
+            {
                 self.git_message_pending = false;
                 match result {
                     Ok(message) => {
@@ -778,7 +791,10 @@ impl RightPanelView {
                 }
             }
             .await;
-            let _ = tx.send(PanelEvent::MessageGenerated(result));
+            let _ = tx.send(PanelEvent::MessageGenerated {
+                project: work_dir,
+                result,
+            });
         });
         cx.notify();
     }
@@ -3938,6 +3954,7 @@ impl RightPanelView {
 
 impl Render for RightPanelView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_project(cx);
         if let Some(message) = self.generated_commit_message.take() {
             self.commit_message_input
                 .update(cx, |input, cx| input.set_value(message, window, cx));
@@ -3947,7 +3964,6 @@ impl Render for RightPanelView {
             self.commit_message_input
                 .update(cx, |input, cx| input.set_value("", window, cx));
         }
-        self.sync_project(cx);
         self.sync_pending_document(window, cx);
         let theme = cx.theme().colors;
         let body = if self.worktree_unavailable {
@@ -4051,9 +4067,22 @@ fn scan_project_tree(root: &Path, limit: usize) -> Vec<FileNode> {
 
 #[cfg(test)]
 mod tests {
-    use super::{can_create_pull_request, can_publish_branch, scan_project_tree};
+    use super::{
+        can_create_pull_request, can_publish_branch, message_generated_matches_active_project,
+        scan_project_tree,
+    };
     use std::time::{SystemTime, UNIX_EPOCH};
     use threadlane_git::GitStatus;
+
+    #[test]
+    fn generated_commit_messages_only_apply_to_the_originating_checkout() {
+        let origin = std::path::Path::new("/projects/app/.threadlane/worktrees/session-a");
+        let other = std::path::Path::new("/projects/app/.threadlane/worktrees/session-b");
+
+        assert!(message_generated_matches_active_project(origin, Some(origin)));
+        assert!(!message_generated_matches_active_project(origin, Some(other)));
+        assert!(!message_generated_matches_active_project(origin, None));
+    }
 
     #[test]
     fn only_publishable_branches_without_upstreams_use_the_publish_action() {

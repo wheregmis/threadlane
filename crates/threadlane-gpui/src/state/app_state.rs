@@ -238,7 +238,10 @@ pub enum ChatStreamEvent {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RequestedEditorTarget {
-    File(String),
+    File {
+        project: PathBuf,
+        path: String,
+    },
     Diff {
         project: PathBuf,
         path: String,
@@ -1015,7 +1018,7 @@ impl AppState {
         match session {
             Some(session) if session.worktree_available => Some(session.runtime_work_dir.clone()),
             Some(_) => None,
-            None => Some(work_dir.clone()),
+            None => None,
         }
     }
 
@@ -1468,9 +1471,10 @@ impl AppState {
                 return;
             }
         };
-        self.requested_editor_target = Some(RequestedEditorTarget::File(
-            relative.to_string_lossy().into_owned(),
-        ));
+        self.requested_editor_target = Some(RequestedEditorTarget::File {
+            project: root,
+            path: relative.to_string_lossy().into_owned(),
+        });
     }
 
     pub(crate) fn request_open_diff(
@@ -4176,6 +4180,53 @@ mod tests {
         state.projects[0].sessions[0].worktree_available = false;
 
         assert_eq!(state.active_git_work_dir(), None);
+
+        state.projects[0].sessions.clear();
+        state.active_session_id = Some("missing-session".into());
+
+        assert_eq!(state.active_git_work_dir(), None);
+    }
+
+    #[test]
+    fn opening_a_file_targets_the_active_session_checkout() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        let worktree = temp.path().join("worktree");
+        std::fs::create_dir_all(project.join(".threadlane/sessions")).unwrap();
+        std::fs::create_dir_all(worktree.join("src")).unwrap();
+        std::fs::write(worktree.join("src/lib.rs"), "pub fn worktree() {}\n").unwrap();
+        let project = project.canonicalize().unwrap();
+        let worktree = worktree.canonicalize().unwrap();
+        let mut state = AppState::load_from_registry(Vec::new());
+        state.projects = vec![ProjectInfo {
+            name: "Project".into(),
+            work_dir: project.clone(),
+            sessions: vec![SessionInfo {
+                id: "session".into(),
+                title: "Session".into(),
+                work_dir: project.clone(),
+                runtime_work_dir: worktree.clone(),
+                session_file: project.join(".threadlane/sessions/session.jsonl"),
+                updated_at: 0,
+                health: SessionHealth::Healthy,
+                git_branch: None,
+                is_worktree: true,
+                worktree_available: true,
+            }],
+            is_expanded: true,
+        }];
+        state.active_work_dir = Some(project);
+        state.active_session_id = Some("session".into());
+
+        state.request_open_file("src/lib.rs".into());
+
+        assert_eq!(
+            state.requested_editor_target,
+            Some(RequestedEditorTarget::File {
+                project: worktree,
+                path: "src/lib.rs".into(),
+            })
+        );
     }
 
     fn take_stream_events(state: &mut AppState, limit: usize) -> Vec<ChatStreamEvent> {
