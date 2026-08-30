@@ -228,16 +228,16 @@ struct PrTimelineRow {
 }
 
 impl PrTimelineRow {
-    fn label(&self) -> &'static str {
+    fn label(&self) -> String {
         match self.kind {
-            PrTimelineKind::IssueComment => "Comment",
+            PrTimelineKind::IssueComment => "Comment".into(),
             PrTimelineKind::Review
                 if self
                     .review_state
                     .as_deref()
                     .is_some_and(|state| state.eq_ignore_ascii_case("APPROVED")) =>
             {
-                "Approved"
+                "Approved".into()
             }
             PrTimelineKind::Review
                 if self
@@ -245,10 +245,14 @@ impl PrTimelineRow {
                     .as_deref()
                     .is_some_and(|state| state.eq_ignore_ascii_case("CHANGES_REQUESTED")) =>
             {
-                "Changes requested"
+                "Changes requested".into()
             }
-            PrTimelineKind::Review => "Review",
-            PrTimelineKind::InlineReviewComment => "Inline comment",
+            PrTimelineKind::Review => self
+                .review_state
+                .as_deref()
+                .and_then(review_state_label)
+                .unwrap_or_else(|| "Review".into()),
+            PrTimelineKind::InlineReviewComment => "Inline comment".into(),
         }
     }
 
@@ -258,6 +262,13 @@ impl PrTimelineRow {
             None => path.clone(),
         })
     }
+}
+
+fn review_state_label(state: &str) -> Option<String> {
+    let normalized = state.trim().replace('_', " ").to_ascii_lowercase();
+    let mut characters = normalized.chars();
+    let first = characters.next()?;
+    Some(first.to_uppercase().chain(characters).collect())
 }
 
 fn merge_pr_timeline(pr: &GitHubPrInfo) -> Vec<PrTimelineRow> {
@@ -1675,8 +1686,6 @@ impl GitHubView {
         self.active_diff_request = Some(request.clone());
         self.diff_loading = true;
         self.diff_error = None;
-        self.pr_diff_body
-            .update(cx, |body, cx| body.set_text("", cx));
         cx.notify();
 
         cx.spawn(async move |this, cx| {
@@ -2626,7 +2635,7 @@ impl GitHubView {
                     .min_h_0()
                     .flex_1()
                     .children(diff_status)
-                    .children((!self.diff_loading && self.diff_error.is_none()).then(|| {
+                    .children(self.diff_error.is_none().then(|| {
                         TextView::new(&self.pr_diff_body)
                             .selectable(true)
                             .scrollable(true)
@@ -3064,14 +3073,15 @@ mod tests {
         linked_session_ids, linked_session_status, linked_sessions_across_projects,
         list_count_splice, merge_pr_timeline, pr_check_label, pr_diff_result_matches_request,
         pr_file_action_ix, prepare_selected_diff, selected_file_diff, selected_issue_after_refresh,
-        GitHubQueryMode, GitHubRequest, GitHubTab, PrDetailTab, PrDiffRequest, PrFileAction,
-        PrTimelineKind, PrWorkspaceKey, PrWorkspaceSelections,
+        GitHubQueryMode, GitHubRequest, GitHubTab, GitHubView, PrDetailTab, PrDiffRequest,
+        PrFileAction, PrTimelineKind, PrWorkspaceKey, PrWorkspaceSelections,
     };
-    use crate::state::{SessionHealth, SessionInfo};
+    use crate::state::{AppState, SessionHealth, SessionInfo};
+    use gpui::AppContext as _;
     use std::path::PathBuf;
     use threadlane_git::{
-        GitHubIssueRef, GitHubIssueSummary, GitHubPrFile, GitHubPrInfo, PrCheckStatus,
-        PrConversationComment, PrReview, PrReviewComment,
+        GitHubIssueRef, GitHubIssueSummary, GitHubPrFile, GitHubPrInfo, GitHubPullRequestSummary,
+        PrCheckStatus, PrConversationComment, PrReview, PrReviewComment,
     };
 
     fn issue(number: u64) -> GitHubIssueSummary {
@@ -3108,6 +3118,42 @@ mod tests {
             is_worktree: false,
             worktree_available: true,
         }
+    }
+
+    fn configure_pr_workspace(view: &mut GitHubView, cx: &mut gpui::Context<GitHubView>) {
+        let project = PathBuf::from("/projects/app");
+        let key = PrWorkspaceKey {
+            project: project.clone(),
+            number: 42,
+        };
+        let files = vec![
+            GitHubPrFile {
+                path: "src/lib.rs".into(),
+                ..Default::default()
+            },
+            GitHubPrFile {
+                path: "src/view.rs".into(),
+                ..Default::default()
+            },
+        ];
+        view.project_work_dir = Some(project);
+        view.tab = GitHubTab::PullRequests;
+        view.selected_pr = Some(key.number);
+        view.pull_requests = vec![GitHubPullRequestSummary {
+            number: key.number,
+            title: "Inspect PR".into(),
+            ..Default::default()
+        }];
+        view.pr_detail = Some(GitHubPrInfo {
+            number: key.number,
+            title: "Inspect PR".into(),
+            files: files.clone(),
+            ..Default::default()
+        });
+        view.pr_selections.reconcile_files(&key, &files);
+        view.pr_list_state.reset(1);
+        view.pr_file_list_state.reset(files.len());
+        cx.notify();
     }
 
     #[test]
@@ -3437,6 +3483,42 @@ mod tests {
     }
 
     #[test]
+    fn github_pr_timeline_preserves_every_review_state_in_labels_and_prompts() {
+        let pr = GitHubPrInfo {
+            url: "https://github.com/threadlane/app/pull/42".into(),
+            reviews: ["COMMENTED", "DISMISSED", "pending", "NEEDS_TRIAGE"]
+                .into_iter()
+                .enumerate()
+                .map(|(ix, state)| PrReview {
+                    remote_id: format!("review-{ix}"),
+                    state: state.into(),
+                    submitted_at: format!("2026-08-30T12:0{ix}:00Z"),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+
+        let rows = merge_pr_timeline(&pr);
+        for (row, expected) in
+            rows.iter()
+                .zip(["Commented", "Dismissed", "Pending", "Needs triage"])
+        {
+            assert_eq!(row.label(), expected);
+            assert!(
+                draft_reply_prompt(row).contains(&format!("Review state: {expected}")),
+                "prompt omitted review state {expected}"
+            );
+        }
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.review_state.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["COMMENTED", "DISMISSED", "pending", "NEEDS_TRIAGE"]
+        );
+    }
+
+    #[test]
     fn github_pr_link_fingerprint_tracks_branch_only_sessions_and_active_task() {
         let project = PathBuf::from("/projects/app");
         let mut first = session("first", None);
@@ -3502,6 +3584,86 @@ mod tests {
         assert_eq!(pr_file_action_ix(Some(2), 3, PrFileAction::Next), Some(2));
         assert_eq!(pr_file_action_ix(Some(1), 3, PrFileAction::Open), Some(1));
         assert_eq!(pr_file_action_ix(None, 0, PrFileAction::Open), None);
+    }
+
+    #[gpui::test]
+    fn github_pr_keyboard_actions_follow_rendered_focus_contexts(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            super::init(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let model = cx.new(|_| AppState::default());
+            GitHubView::new(model, window, cx)
+        });
+        view.update(cx, configure_pr_workspace);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let tabs_focus = view.read_with(cx, |view, _| view.pr_tabs_focus.clone());
+        cx.update(|window, cx| {
+            window.focus(&tabs_focus, cx);
+            window.draw(cx).clear(cx);
+        });
+        cx.simulate_keystrokes("right");
+        assert_eq!(
+            view.read_with(cx, |view, _| view.current_pr_tab()),
+            PrDetailTab::Timeline
+        );
+
+        view.update(cx, |view, cx| {
+            let key = view.current_pr_key().unwrap();
+            view.pr_selections.select_tab(key, PrDetailTab::Code);
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let files_focus = view.read_with(cx, |view, _| view.pr_file_focus.clone());
+        cx.update(|window, cx| {
+            window.focus(&files_focus, cx);
+            window.draw(cx).clear(cx);
+        });
+        cx.simulate_keystrokes("down");
+        assert_eq!(
+            view.read_with(cx, |view, _| view.current_pr_file().map(str::to_owned)),
+            Some("src/view.rs".into())
+        );
+    }
+
+    #[gpui::test]
+    fn github_pr_same_file_reload_preserves_retained_diff_state(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let model = cx.new(|_| AppState::default());
+            GitHubView::new(model, window, cx)
+        });
+        let original_body = view.update(cx, |view, cx| {
+            configure_pr_workspace(view, cx);
+            view.pr_diff_body
+                .update(cx, |body, cx| body.set_text("retained diff", cx));
+            view.pr_diff_body.update(cx, |body, cx| body.select_all(cx));
+            view.pr_diff_body.clone()
+        });
+        assert_eq!(
+            original_body.read_with(cx, |body, _| body.selected_text()),
+            "retained diff\n"
+        );
+
+        view.update(cx, |view, cx| view.select_pr_file("src/lib.rs".into(), cx));
+        assert_eq!(
+            view.read_with(cx, |view, _| view.pr_diff_body.entity_id()),
+            original_body.entity_id()
+        );
+        assert_eq!(
+            original_body.read_with(cx, |body, _| body.selected_text()),
+            "retained diff\n",
+            "same-file refresh must not clear retained text or its view state"
+        );
+
+        view.update(cx, |view, cx| view.select_pr_file("src/view.rs".into(), cx));
+        assert_ne!(
+            view.read_with(cx, |view, _| view.pr_diff_body.entity_id()),
+            original_body.entity_id(),
+            "a new selected-file identity must reset the retained TextView"
+        );
     }
 
     #[test]
