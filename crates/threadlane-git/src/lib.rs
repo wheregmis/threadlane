@@ -360,8 +360,12 @@ fn command(work_dir: &Path, args: &[&str]) -> Result<String, GitError> {
 }
 
 fn gh_command(work_dir: &Path, args: &[&str]) -> Command {
+    gh_command_with_captured_token(work_dir, args).0
+}
+
+fn gh_command_with_captured_token(work_dir: &Path, args: &[&str]) -> (Command, Option<String>) {
     let stored_token = stored_github_token();
-    gh_command_with_token(work_dir, args, stored_token.as_deref())
+    gh_command_with_token_capture(work_dir, args, stored_token)
 }
 
 fn stored_github_token() -> Option<String> {
@@ -380,6 +384,15 @@ fn gh_command_with_token(work_dir: &Path, args: &[&str], stored_token: Option<&s
         command.env("GH_TOKEN", token);
     }
     command
+}
+
+fn gh_command_with_token_capture(
+    work_dir: &Path,
+    args: &[&str],
+    stored_token: Option<String>,
+) -> (Command, Option<String>) {
+    let command = gh_command_with_token(work_dir, args, stored_token.as_deref());
+    (command, stored_token)
 }
 
 fn redact_gh_failure(message: &str, stored_token: Option<&str>) -> String {
@@ -401,9 +414,17 @@ fn redact_gh_failure(message: &str, stored_token: Option<&str>) -> String {
     redacted
 }
 
-fn gh_failure(work_dir: &Path, status: std::process::ExitStatus, stderr: &str) -> GitError {
-    let stored_token = stored_github_token();
-    let stderr = redact_gh_failure(stderr.trim(), stored_token.as_deref());
+fn gh_failure_message(stderr: &str, stored_token: Option<&str>) -> String {
+    redact_gh_failure(stderr.trim(), stored_token)
+}
+
+fn gh_failure(
+    work_dir: &Path,
+    status: std::process::ExitStatus,
+    stderr: &str,
+    stored_token: Option<&str>,
+) -> GitError {
+    let stderr = gh_failure_message(stderr, stored_token);
     GitError {
         work_dir: work_dir.to_path_buf(),
         message: if stderr.is_empty() {
@@ -1379,7 +1400,7 @@ fn parse_github_issue_json(json_str: &str) -> Result<GitHubIssueDetail, String> 
 }
 
 fn inspect_pr_uncached(work_dir: &Path, branch: &str) -> Result<Option<GitHubPrInfo>, GitError> {
-    let output = gh_command(
+    let (mut command, stored_token) = gh_command_with_captured_token(
         work_dir,
         &[
             "pr",
@@ -1388,9 +1409,8 @@ fn inspect_pr_uncached(work_dir: &Path, branch: &str) -> Result<Option<GitHubPrI
             "--json",
             "number,title,url,state,isDraft,body,comments,reviews,files,statusCheckRollup,headRefName,headRefOid,baseRefName,updatedAt,author,reviewDecision",
         ],
-    )
-    .output()
-    .map_err(|error| GitError {
+    );
+    let output = command.output().map_err(|error| GitError {
         work_dir: work_dir.to_path_buf(),
         message: format!("could not start gh: {error}"),
     })?;
@@ -1400,7 +1420,12 @@ fn inspect_pr_uncached(work_dir: &Path, branch: &str) -> Result<Option<GitHubPrI
         if stderr.to_ascii_lowercase().contains("no pull request") {
             return Ok(None);
         }
-        return Err(gh_failure(work_dir, output.status, &stderr));
+        return Err(gh_failure(
+            work_dir,
+            output.status,
+            &stderr,
+            stored_token.as_deref(),
+        ));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1615,17 +1640,21 @@ fn review_comment_payload(
 
 fn execute_gh(work_dir: &Path, args: &[String]) -> Result<String, GitError> {
     let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
-    let output = gh_command(work_dir, &refs)
-        .output()
-        .map_err(|error| GitError {
-            work_dir: work_dir.to_path_buf(),
-            message: format!("could not start gh: {error}"),
-        })?;
+    let (mut command, stored_token) = gh_command_with_captured_token(work_dir, &refs);
+    let output = command.output().map_err(|error| GitError {
+        work_dir: work_dir.to_path_buf(),
+        message: format!("could not start gh: {error}"),
+    })?;
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned());
     }
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    Err(gh_failure(work_dir, output.status, &stderr))
+    Err(gh_failure(
+        work_dir,
+        output.status,
+        &stderr,
+        stored_token.as_deref(),
+    ))
 }
 
 pub fn list_github_issues(work_dir: &Path) -> Result<Vec<GitHubIssueSummary>, GitError> {
@@ -1909,16 +1938,21 @@ pub fn create_pull_request(work_dir: &Path) -> Result<String, GitError> {
     push(work_dir)?;
     invalidate_pr_cache(work_dir, &branch);
 
-    let output = gh_command(work_dir, &["pr", "create", "--fill"])
-        .output()
-        .map_err(|error| GitError {
-            work_dir: work_dir.to_path_buf(),
-            message: format!("could not start gh: {error}"),
-        })?;
+    let (mut command, stored_token) =
+        gh_command_with_captured_token(work_dir, &["pr", "create", "--fill"]);
+    let output = command.output().map_err(|error| GitError {
+        work_dir: work_dir.to_path_buf(),
+        message: format!("could not start gh: {error}"),
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(gh_failure(work_dir, output.status, &stderr));
+        return Err(gh_failure(
+            work_dir,
+            output.status,
+            &stderr,
+            stored_token.as_deref(),
+        ));
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
@@ -2087,7 +2121,7 @@ pub fn submit_pull_request_review(
             message,
         },
     )?;
-    let mut command = gh_command(
+    let (mut command, stored_token) = gh_command_with_captured_token(
         work_dir,
         &["api", "--method", "POST", &endpoint, "--input", "-"],
     );
@@ -2119,7 +2153,12 @@ pub fn submit_pull_request_review(
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        Err(gh_failure(work_dir, output.status, &stderr))
+        Err(gh_failure(
+            work_dir,
+            output.status,
+            &stderr,
+            stored_token.as_deref(),
+        ))
     }
 }
 
@@ -3057,6 +3096,26 @@ mod tests {
         assert!(!redacted.contains("stored-token"));
         assert!(!redacted.contains("GH_TOKEN="));
         assert!(redacted.contains("<redacted>"));
+    }
+
+    #[test]
+    fn github_mutation_args_failure_uses_the_token_captured_for_its_command() {
+        let (command, captured_token) = gh_command_with_token_capture(
+            Path::new("/tmp/project"),
+            &["issue", "list"],
+            Some("injected-token".to_owned()),
+        );
+
+        assert!(command
+            .get_envs()
+            .any(|(key, value)| key == "GH_TOKEN" && value == Some("injected-token".as_ref())));
+        assert_eq!(
+            gh_failure_message(
+                "remote said bearer injected-token",
+                captured_token.as_deref()
+            ),
+            "remote said bearer <redacted>"
+        );
     }
 
     #[test]
