@@ -3022,6 +3022,10 @@ mod tests {
 
     #[test]
     fn github_mutation_args_match_gh_contract_and_reject_invalid_input() {
+        let plain_issue_args = github_issue_list_args("open", None, 50).unwrap();
+        assert!(!plain_issue_args
+            .iter()
+            .any(|argument| argument == "--search"));
         assert_eq!(
             github_issue_list_args("closed", Some("bug label:desktop"), 100).unwrap(),
             vec![

@@ -44,6 +44,11 @@ use crate::state::{
 };
 use threadlane_updater::UpdateStatus;
 
+fn open_github_from_palette(state: &mut AppState, notify: impl FnOnce()) {
+    controller::dispatch(state, AppAction::OpenGitHub);
+    notify();
+}
+
 pub fn init(cx: &mut App) {
     crate::screens::github::view::init(cx);
     cx.bind_keys([
@@ -628,8 +633,8 @@ impl WorkspaceView {
             }
             "git" => self.open_git_review(cx),
             "github" => {
-                model.update(cx, |state, _cx| {
-                    controller::dispatch(state, AppAction::OpenGitHub);
+                model.update(cx, |state, cx| {
+                    open_github_from_palette(state, || cx.notify());
                 });
             }
             "git_branch" => self.open_git_branches(cx),
@@ -1896,10 +1901,11 @@ impl Render for WorkspaceView {
 mod tests {
     use super::{
         active_project_git_status, git_result_matches_active, next_workspace_event,
-        session_pr_target_is_active, GitEvent, WorkspacePumpEvent,
+        open_github_from_palette, session_pr_target_is_active, GitEvent, WorkspacePumpEvent,
     };
     use crate::services::updater::UpdaterEvent;
-    use crate::state::SessionInfo;
+    use crate::state::{AppState, SessionInfo, WorkspacePage};
+    use std::cell::Cell;
     use std::collections::{HashMap, HashSet};
     use std::path::{Path, PathBuf};
     use threadlane_git::GitStatus;
@@ -1942,6 +1948,19 @@ mod tests {
 
         assert!(session_pr_target_is_active(&targets, &target));
         assert!(!session_pr_target_is_active(&HashSet::new(), &target));
+    }
+
+    #[test]
+    fn github_palette_action_notifies_model_observers() {
+        let notification_count = Cell::new(0);
+        let mut state = AppState::default();
+
+        open_github_from_palette(&mut state, || {
+            notification_count.set(notification_count.get() + 1)
+        });
+
+        assert_eq!(state.workspace_page, WorkspacePage::GitHub);
+        assert_eq!(notification_count.get(), 1);
     }
 
     #[tokio::test]

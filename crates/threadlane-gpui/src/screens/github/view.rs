@@ -1,3 +1,6 @@
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::ops::Range;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -82,6 +85,79 @@ pub(crate) fn github_result_matches_request(
     result == current
 }
 
+pub(crate) fn detail_result_matches_list(
+    detail: &GitHubRequest,
+    list: &GitHubRequest,
+    selected: Option<u64>,
+) -> bool {
+    list.item_number.is_none()
+        && detail.work_dir == list.work_dir
+        && detail.tab == list.tab
+        && detail.query_revision == list.query_revision
+        && detail.item_number == selected
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GitHubQueryMode {
+    Local,
+    Advanced,
+}
+
+pub(crate) fn github_query_mode(query: &str) -> GitHubQueryMode {
+    const QUALIFIERS: &[&str] = &[
+        "archived",
+        "assignee",
+        "author",
+        "base",
+        "closed",
+        "comments",
+        "created",
+        "draft",
+        "head",
+        "interactions",
+        "involves",
+        "is",
+        "label",
+        "linked",
+        "mentions",
+        "milestone",
+        "no",
+        "org",
+        "project",
+        "reactions",
+        "repo",
+        "review",
+        "review-requested",
+        "reviewed-by",
+        "sort",
+        "state",
+        "status",
+        "team-review-requested",
+        "type",
+        "updated",
+        "user",
+    ];
+
+    if query.split_whitespace().any(|token| {
+        let token = token.trim_start_matches('-');
+        let Some((key, value)) = token.split_once(':') else {
+            return false;
+        };
+        !value.is_empty()
+            && QUALIFIERS
+                .iter()
+                .any(|qualifier| key.eq_ignore_ascii_case(qualifier))
+    }) {
+        GitHubQueryMode::Advanced
+    } else {
+        GitHubQueryMode::Local
+    }
+}
+
+fn github_server_query(query: &str) -> Option<&str> {
+    (github_query_mode(query) == GitHubQueryMode::Advanced).then_some(query)
+}
+
 pub(crate) fn issue_filter_matches(issue: &GitHubIssueSummary, query: &str) -> bool {
     let query = query.trim().to_lowercase();
     query.is_empty()
@@ -127,6 +203,88 @@ pub(crate) fn linked_session_ids<'a>(
         })
         .map(|session| session.id.as_str())
         .collect()
+}
+
+fn linked_sessions_across_projects<'a>(
+    projects: &[(&'a str, &'a [SessionInfo])],
+    issue: &GitHubIssueRef,
+) -> Vec<(&'a str, &'a SessionInfo)> {
+    projects
+        .iter()
+        .flat_map(|(project_name, sessions)| {
+            sessions.iter().filter_map(|session| {
+                session
+                    .github_issue
+                    .as_ref()
+                    .is_some_and(|linked| same_issue(linked, issue))
+                    .then_some((*project_name, session))
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn linked_session_status(
+    session: &SessionInfo,
+    has_pending_permission: bool,
+    is_generating: bool,
+) -> &'static str {
+    if has_pending_permission {
+        "Needs permission"
+    } else if !session.worktree_available {
+        "Not checked out"
+    } else if is_generating || session.health == crate::state::SessionHealth::Working {
+        "Working"
+    } else if session.health == crate::state::SessionHealth::Warning {
+        "Needs attention"
+    } else {
+        "Ready"
+    }
+}
+
+pub(crate) fn list_count_splice(
+    old_count: usize,
+    new_count: usize,
+) -> Option<(Range<usize>, usize)> {
+    match new_count.cmp(&old_count) {
+        std::cmp::Ordering::Greater => Some((old_count..old_count, new_count - old_count)),
+        std::cmp::Ordering::Less => Some((new_count..old_count, 0)),
+        std::cmp::Ordering::Equal => None,
+    }
+}
+
+fn reconcile_list_count(state: &ListState, old_count: usize, new_count: usize) {
+    if let Some((range, replacement_count)) = list_count_splice(old_count, new_count) {
+        state.splice(range, replacement_count);
+    }
+}
+
+fn github_link_fingerprint(state: &AppState) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for project in &state.projects {
+        project.name.hash(&mut hasher);
+        project.work_dir.hash(&mut hasher);
+        for session in &project.sessions {
+            let Some(issue) = session.github_issue.as_ref() else {
+                continue;
+            };
+            issue.host.hash(&mut hasher);
+            issue.owner.hash(&mut hasher);
+            issue.repo.hash(&mut hasher);
+            issue.number.hash(&mut hasher);
+            session.id.hash(&mut hasher);
+            session.title.hash(&mut hasher);
+            session.health.hash(&mut hasher);
+            session.worktree_available.hash(&mut hasher);
+            state
+                .pending_permissions
+                .contains_key(&session.id)
+                .hash(&mut hasher);
+            state
+                .session_is_generating(&session.session_file)
+                .hash(&mut hasher);
+        }
+    }
+    hasher.finish()
 }
 
 fn selected_number_after_refresh<T>(
@@ -175,6 +333,12 @@ enum GitHubDetailResult {
     PullRequest(Result<GitHubPrInfo, String>),
 }
 
+struct LinkedSession {
+    project_name: String,
+    session: SessionInfo,
+    status: &'static str,
+}
+
 pub struct GitHubView {
     model: Entity<AppState>,
     project_work_dir: Option<PathBuf>,
@@ -209,6 +373,7 @@ pub struct GitHubView {
     debounce_task: Option<Task<()>>,
     issue_comment_draft: String,
     pr_review_draft: String,
+    linked_sessions_fingerprint: u64,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -221,11 +386,18 @@ impl GitHubView {
         let query_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search issues…"));
         let detail_body = cx.new(|cx| TextViewState::markdown("", cx));
         let detail_split_state = cx.new(|_| ResizableState::default());
+        let linked_sessions_fingerprint = github_link_fingerprint(model.read(cx));
 
         let model_subscription = cx.observe(&model, |this, model, cx| {
-            let work_dir = model.read(cx).active_work_dir.clone();
+            let state = model.read(cx);
+            let work_dir = state.active_work_dir.clone();
+            let linked_sessions_fingerprint = github_link_fingerprint(state);
             if this.project_work_dir != work_dir {
                 this.switch_project(work_dir, cx);
+            }
+            if this.linked_sessions_fingerprint != linked_sessions_fingerprint {
+                this.linked_sessions_fingerprint = linked_sessions_fingerprint;
+                cx.notify();
             }
         });
         let input_subscription = cx.subscribe_in(
@@ -235,11 +407,15 @@ impl GitHubView {
                 InputEvent::Change => {
                     let query = input.read(cx).value().to_string();
                     this.query_revision = this.query_revision.saturating_add(1);
+                    this.clear_selection();
+                    this.invalidate_detail(cx);
                     this.schedule_query(query, cx);
                 }
                 InputEvent::PressEnter { .. } => {
                     this.debounce_task.take();
                     this.query_revision = this.query_revision.saturating_add(1);
+                    this.clear_selection();
+                    this.invalidate_detail(cx);
                     this.fetch_list(cx);
                 }
                 _ => {}
@@ -280,6 +456,7 @@ impl GitHubView {
             debounce_task: None,
             issue_comment_draft: String::new(),
             pr_review_draft: String::new(),
+            linked_sessions_fingerprint,
             _subscriptions: vec![model_subscription, input_subscription],
         }
     }
@@ -344,6 +521,25 @@ impl GitHubView {
         self.query_input.read(cx).value().trim().to_string()
     }
 
+    fn clear_selection(&mut self) {
+        match self.tab {
+            GitHubTab::Issues => self.selected_issue = None,
+            GitHubTab::PullRequests => self.selected_pr = None,
+        }
+    }
+
+    fn invalidate_detail(&mut self, cx: &mut Context<Self>) {
+        self.active_detail_request = None;
+        self.detail_loading = false;
+        self.detail_error = None;
+        self.issue_detail = None;
+        self.pr_detail = None;
+        self.comment_rows.clear();
+        self.comment_list_state.reset(0);
+        self.detail_body
+            .update(cx, |body, cx| body.set_text("", cx));
+    }
+
     fn fetch_list(&mut self, cx: &mut Context<Self>) {
         let Some(work_dir) = self.project_work_dir.clone() else {
             return;
@@ -361,6 +557,7 @@ impl GitHubView {
             query_revision: self.query_revision,
             item_number: None,
         };
+        self.invalidate_detail(cx);
         self.active_list_request = Some(request.clone());
         self.list_loading = true;
         self.list_error = None;
@@ -370,15 +567,23 @@ impl GitHubView {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let query = (!query.is_empty()).then_some(query.as_str());
+                    let server_query = github_server_query(&query);
                     match tab {
                         GitHubTab::Issues => GitHubListResult::Issues(
-                            threadlane_git::list_github_issues(&work_dir, &state, query, limit)
-                                .map_err(|error| error.message),
+                            threadlane_git::list_github_issues(
+                                &work_dir,
+                                &state,
+                                server_query,
+                                limit,
+                            )
+                            .map_err(|error| error.message),
                         ),
                         GitHubTab::PullRequests => GitHubListResult::PullRequests(
                             threadlane_git::list_github_pull_requests(
-                                &work_dir, &state, query, limit,
+                                &work_dir,
+                                &state,
+                                server_query,
+                                limit,
                             )
                             .map_err(|error| error.message),
                         ),
@@ -396,6 +601,8 @@ impl GitHubView {
                 this.list_loading = false;
                 match result {
                     GitHubListResult::Issues(Ok(rows)) => {
+                        let previous_selected = this.selected_issue;
+                        let old_count = this.issues.len() + usize::from(this.issue_has_more);
                         this.issue_has_more = rows.len() == limit;
                         this.repository = rows.first().map(|row| GitHubRepository {
                             host: row.issue.host.clone(),
@@ -403,31 +610,51 @@ impl GitHubView {
                             repo: row.issue.repo.clone(),
                         });
                         let query = this.query(cx);
+                        let query_mode = github_query_mode(&query);
                         this.issues = rows
                             .into_iter()
-                            .filter(|row| query.contains(':') || issue_filter_matches(row, &query))
+                            .filter(|row| {
+                                query_mode == GitHubQueryMode::Advanced
+                                    || issue_filter_matches(row, &query)
+                            })
                             .collect();
                         this.selected_issue =
                             selected_issue_after_refresh(this.selected_issue, &this.issues);
-                        this.issue_list_state
-                            .reset(this.issues.len() + usize::from(this.issue_has_more));
+                        let new_count = this.issues.len() + usize::from(this.issue_has_more);
+                        reconcile_list_count(&this.issue_list_state, old_count, new_count);
+                        if previous_selected != this.selected_issue {
+                            if let Some(ix) = this.selected_ix() {
+                                this.issue_list_state.scroll_to_reveal_item(ix);
+                            }
+                        }
                         this.fetch_detail(cx);
                     }
                     GitHubListResult::PullRequests(Ok(rows)) => {
+                        let previous_selected = this.selected_pr;
+                        let old_count = this.pull_requests.len() + usize::from(this.pr_has_more);
                         this.pr_has_more = rows.len() == limit;
                         this.repository = rows.first().map(|row| row.repository.clone());
                         let query = this.query(cx);
+                        let query_mode = github_query_mode(&query);
                         this.pull_requests = rows
                             .into_iter()
-                            .filter(|row| query.contains(':') || pr_filter_matches(row, &query))
+                            .filter(|row| {
+                                query_mode == GitHubQueryMode::Advanced
+                                    || pr_filter_matches(row, &query)
+                            })
                             .collect();
                         this.selected_pr = selected_number_after_refresh(
                             this.selected_pr,
                             &this.pull_requests,
                             |row| row.number,
                         );
-                        this.pr_list_state
-                            .reset(this.pull_requests.len() + usize::from(this.pr_has_more));
+                        let new_count = this.pull_requests.len() + usize::from(this.pr_has_more);
+                        reconcile_list_count(&this.pr_list_state, old_count, new_count);
+                        if previous_selected != this.selected_pr {
+                            if let Some(ix) = this.selected_ix() {
+                                this.pr_list_state.scroll_to_reveal_item(ix);
+                            }
+                        }
                         this.fetch_detail(cx);
                     }
                     GitHubListResult::Issues(Err(error))
@@ -482,11 +709,14 @@ impl GitHubView {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if !this
+                let detail_matches = this
                     .active_detail_request
                     .as_ref()
-                    .is_some_and(|current| github_result_matches_request(&request, current))
-                {
+                    .is_some_and(|current| github_result_matches_request(&request, current));
+                let list_matches = this.active_list_request.as_ref().is_some_and(|list| {
+                    detail_result_matches_list(&request, list, this.selected_number())
+                });
+                if !detail_matches || !list_matches {
                     return;
                 }
                 this.detail_loading = false;
@@ -549,6 +779,7 @@ impl GitHubView {
         }
         self.tab = tab;
         self.query_revision = self.query_revision.saturating_add(1);
+        self.clear_selection();
         self.fetch_list(cx);
     }
 
@@ -558,6 +789,7 @@ impl GitHubView {
         }
         self.state_filter = state;
         self.query_revision = self.query_revision.saturating_add(1);
+        self.clear_selection();
         self.fetch_list(cx);
     }
 
@@ -587,6 +819,13 @@ impl GitHubView {
                     .iter()
                     .position(|row| row.number == number)
             }),
+        }
+    }
+
+    fn selected_number(&self) -> Option<u64> {
+        match self.tab {
+            GitHubTab::Issues => self.selected_issue,
+            GitHubTab::PullRequests => self.selected_pr,
         }
     }
 
@@ -643,25 +882,25 @@ impl GitHubView {
         }
     }
 
-    fn linked_sessions(&self, issue: &GitHubIssueRef, cx: &App) -> Vec<SessionInfo> {
-        let Some(work_dir) = self.project_work_dir.as_ref() else {
-            return Vec::new();
-        };
-        self.model
-            .read(cx)
+    fn linked_sessions(&self, issue: &GitHubIssueRef, cx: &App) -> Vec<LinkedSession> {
+        let state = self.model.read(cx);
+        let projects = state
             .projects
             .iter()
-            .find(|project| &project.work_dir == work_dir)
-            .map(|project| {
-                let linked_ids = linked_session_ids(&project.sessions, issue);
-                project
-                    .sessions
-                    .iter()
-                    .filter(|session| linked_ids.contains(&session.id.as_str()))
-                    .cloned()
-                    .collect()
+            .map(|project| (project.name.as_str(), project.sessions.as_slice()))
+            .collect::<Vec<_>>();
+        linked_sessions_across_projects(&projects, issue)
+            .into_iter()
+            .map(|(project_name, session)| LinkedSession {
+                project_name: project_name.to_owned(),
+                status: linked_session_status(
+                    session,
+                    state.pending_permissions.contains_key(&session.id),
+                    state.session_is_generating(&session.session_file),
+                ),
+                session: session.clone(),
             })
-            .unwrap_or_default()
+            .collect()
     }
 
     fn render_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1233,11 +1472,27 @@ impl GitHubView {
                             .font_weight(FontWeight::SEMIBOLD)
                             .child("Linked tasks"),
                     )
-                    .children(linked_sessions.into_iter().map(|session| {
+                    .children(linked_sessions.into_iter().map(|linked| {
                         div()
                             .mt_2()
+                            .flex()
+                            .items_center()
+                            .gap_2()
                             .text_sm()
-                            .child(session.title)
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .truncate()
+                                    .child(linked.session.title),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(linked.project_name),
+                            )
+                            .child(Tag::new().small().child(linked.status))
                             .into_any_element()
                     }))
             }))
@@ -1361,8 +1616,10 @@ impl Render for GitHubView {
 #[cfg(test)]
 mod tests {
     use super::{
-        github_result_matches_request, issue_filter_matches, linked_session_ids,
-        selected_issue_after_refresh, GitHubRequest, GitHubTab,
+        detail_result_matches_list, github_query_mode, github_result_matches_request,
+        github_server_query, issue_filter_matches, linked_session_ids, linked_session_status,
+        linked_sessions_across_projects, list_count_splice, selected_issue_after_refresh,
+        GitHubQueryMode, GitHubRequest, GitHubTab,
     };
     use crate::state::{SessionHealth, SessionInfo};
     use std::path::PathBuf;
@@ -1437,6 +1694,43 @@ mod tests {
     }
 
     #[test]
+    fn stale_detail_is_rejected_after_a_new_list_request() {
+        let old_detail = GitHubRequest {
+            work_dir: PathBuf::from("/projects/current"),
+            tab: GitHubTab::Issues,
+            query_revision: 4,
+            item_number: Some(42),
+        };
+        let new_list = GitHubRequest {
+            query_revision: 5,
+            item_number: None,
+            ..old_detail.clone()
+        };
+
+        assert!(!detail_result_matches_list(
+            &old_detail,
+            &new_list,
+            Some(42)
+        ));
+        assert!(!detail_result_matches_list(&old_detail, &new_list, None));
+    }
+
+    #[test]
+    fn github_query_mode_keeps_plain_text_local_and_sends_qualifiers_remote() {
+        for query in ["linked task", "42", "desktop maintainer"] {
+            assert_eq!(github_query_mode(query), GitHubQueryMode::Local);
+        }
+        for query in ["label:desktop", "is:open linked", "-author:octocat"] {
+            assert_eq!(github_query_mode(query), GitHubQueryMode::Advanced);
+            assert_eq!(github_server_query(query), Some(query));
+        }
+        for query in ["https://github.com", "note:", ":value", "unknown:value"] {
+            assert_eq!(github_query_mode(query), GitHubQueryMode::Local);
+            assert_eq!(github_server_query(query), None);
+        }
+    }
+
+    #[test]
     fn issue_filter_matches_title_number_label_and_assignee() {
         let issue = issue(42);
 
@@ -1483,5 +1777,52 @@ mod tests {
             linked_session_ids(&sessions, &issue(42).issue),
             vec!["match"]
         );
+    }
+
+    #[test]
+    fn linked_tasks_scan_all_projects_and_expose_live_status() {
+        let target = issue(42).issue;
+        let first_project = vec![session("unlinked", None)];
+        let second_project = vec![session("match", Some(target.clone()))];
+
+        assert_eq!(
+            linked_sessions_across_projects(
+                &[
+                    ("first", first_project.as_slice()),
+                    ("second", second_project.as_slice()),
+                ],
+                &target,
+            )
+            .into_iter()
+            .map(|(project, session)| (project, session.id.as_str()))
+            .collect::<Vec<_>>(),
+            vec![("second", "match")]
+        );
+
+        let mut linked = second_project[0].clone();
+        assert_eq!(linked_session_status(&linked, false, false), "Ready");
+        linked.health = SessionHealth::Working;
+        assert_eq!(linked_session_status(&linked, false, false), "Working");
+        assert_eq!(
+            linked_session_status(&linked, true, true),
+            "Needs permission"
+        );
+        linked.health = SessionHealth::Warning;
+        assert_eq!(
+            linked_session_status(&linked, false, false),
+            "Needs attention"
+        );
+        linked.worktree_available = false;
+        assert_eq!(
+            linked_session_status(&linked, false, false),
+            "Not checked out"
+        );
+    }
+
+    #[test]
+    fn list_count_reconciliation_appends_without_resetting_the_scroll_anchor() {
+        assert_eq!(list_count_splice(50, 101), Some((50..50, 51)));
+        assert_eq!(list_count_splice(101, 40), Some((40..101, 0)));
+        assert_eq!(list_count_splice(40, 40), None);
     }
 }
