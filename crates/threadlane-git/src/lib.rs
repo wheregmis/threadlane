@@ -360,10 +360,14 @@ fn command(work_dir: &Path, args: &[&str]) -> Result<String, GitError> {
 }
 
 fn gh_command(work_dir: &Path, args: &[&str]) -> Command {
-    let stored_token = threadlane_auth::load_github_credentials()
-        .map(|credentials| credentials.token)
-        .filter(|token| !token.trim().is_empty());
+    let stored_token = stored_github_token();
     gh_command_with_token(work_dir, args, stored_token.as_deref())
+}
+
+fn stored_github_token() -> Option<String> {
+    threadlane_auth::load_github_credentials()
+        .map(|credentials| credentials.token)
+        .filter(|token| !token.trim().is_empty())
 }
 
 fn gh_command_with_token(work_dir: &Path, args: &[&str], stored_token: Option<&str>) -> Command {
@@ -376,6 +380,38 @@ fn gh_command_with_token(work_dir: &Path, args: &[&str], stored_token: Option<&s
         command.env("GH_TOKEN", token);
     }
     command
+}
+
+fn redact_gh_failure(message: &str, stored_token: Option<&str>) -> String {
+    let mut redacted = message.to_owned();
+    if let Some(token) = stored_token.filter(|token| !token.is_empty()) {
+        redacted = redacted.replace(token, "<redacted>");
+    }
+    for name in ["GH_TOKEN", "GITHUB_TOKEN"] {
+        let prefix = format!("{name}=");
+        while let Some(start) = redacted.find(&prefix) {
+            let value_start = start + prefix.len();
+            let value_end = redacted[value_start..]
+                .find(char::is_whitespace)
+                .map(|offset| value_start + offset)
+                .unwrap_or(redacted.len());
+            redacted.replace_range(start..value_end, &format!("{name} <redacted>"));
+        }
+    }
+    redacted
+}
+
+fn gh_failure(work_dir: &Path, status: std::process::ExitStatus, stderr: &str) -> GitError {
+    let stored_token = stored_github_token();
+    let stderr = redact_gh_failure(stderr.trim(), stored_token.as_deref());
+    GitError {
+        work_dir: work_dir.to_path_buf(),
+        message: if stderr.is_empty() {
+            format!("gh exited with {status}")
+        } else {
+            stderr
+        },
+    }
 }
 
 fn parse_status(_work_dir: &Path, porcelain: &str) -> GitStatus {
@@ -1097,29 +1133,8 @@ pub fn parse_gh_pr_json(json_str: &str) -> Result<GitHubPrInfo, String> {
     let review_decision = val["reviewDecision"].as_str().map(str::to_owned);
     let head_oid = val["headRefOid"].as_str().unwrap_or("").to_string();
 
-    let mut review_comments = Vec::new();
-    if let Some(comments_arr) = val["comments"].as_array() {
-        for item in comments_arr {
-            let author = item["author"]["login"]
-                .as_str()
-                .or_else(|| item["author"].as_str())
-                .unwrap_or("unknown")
-                .to_string();
-            let body = item["body"].as_str().unwrap_or("").to_string();
-            let created_at = item["createdAt"].as_str().unwrap_or("").to_string();
-            let path = item["path"].as_str().map(|s| s.to_string());
-            let line = item["line"].as_u64();
-            review_comments.push(PrReviewComment {
-                remote_id: github_id(&item["id"]),
-                author,
-                body,
-                path,
-                line,
-                created_at,
-            });
-        }
-    }
-    let comments_count = review_comments.len();
+    let issue_comments = parse_pr_conversation_comments(&val["comments"]);
+    let comments_count = issue_comments.len();
 
     let mut checks = Vec::new();
     let mut failing_checks = 0;
@@ -1176,7 +1191,6 @@ pub fn parse_gh_pr_json(json_str: &str) -> Result<GitHubPrInfo, String> {
 
     let total_checks = checks.len();
 
-    let issue_comments = parse_pr_conversation_comments(&val["comments"]);
     let reviews = val["reviews"]
         .as_array()
         .into_iter()
@@ -1210,7 +1224,7 @@ pub fn parse_gh_pr_json(json_str: &str) -> Result<GitHubPrInfo, String> {
         head_ref,
         base_ref,
         comments_count,
-        review_comments,
+        review_comments: Vec::new(),
         checks,
         total_checks,
         failing_checks,
@@ -1256,6 +1270,32 @@ fn parse_pr_conversation_comments(value: &serde_json::Value) -> Vec<PrConversati
             url: comment["url"].as_str().unwrap_or("").to_owned(),
         })
         .collect()
+}
+
+fn enrich_pr_review_comments(info: &mut GitHubPrInfo, json: &str) -> Result<(), String> {
+    let value: serde_json::Value = serde_json::from_str(json).map_err(|error| error.to_string())?;
+    let items = value
+        .as_array()
+        .ok_or_else(|| "GitHub review comments response must be an array".to_owned())?;
+    for item in items {
+        let page = item
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or(std::slice::from_ref(item));
+        for comment in page {
+            info.review_comments.push(PrReviewComment {
+                remote_id: github_id(&comment["id"]),
+                author: github_login(&comment["user"]),
+                body: comment["body"].as_str().unwrap_or("").to_owned(),
+                path: comment["path"].as_str().map(str::to_owned),
+                line: comment["line"]
+                    .as_u64()
+                    .or_else(|| comment["original_line"].as_u64()),
+                created_at: comment["created_at"].as_str().unwrap_or("").to_owned(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn parse_github_repository(url: &str) -> Result<GitHubRepository, String> {
@@ -1360,14 +1400,7 @@ fn inspect_pr_uncached(work_dir: &Path, branch: &str) -> Result<Option<GitHubPrI
         if stderr.to_ascii_lowercase().contains("no pull request") {
             return Ok(None);
         }
-        return Err(GitError {
-            work_dir: work_dir.to_path_buf(),
-            message: if stderr.is_empty() {
-                format!("gh exited with {}", output.status)
-            } else {
-                stderr
-            },
-        });
+        return Err(gh_failure(work_dir, output.status, &stderr));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1393,24 +1426,7 @@ fn inspect_pr_uncached(work_dir: &Path, branch: &str) -> Result<Option<GitHubPrI
         {
             if review_output.status.success() {
                 let pages = String::from_utf8_lossy(&review_output.stdout);
-                if let Ok(pages) = serde_json::from_str::<Vec<Vec<serde_json::Value>>>(&pages) {
-                    for item in pages.into_iter().flatten() {
-                        info.review_comments.push(PrReviewComment {
-                            remote_id: github_id(&item["id"]),
-                            author: item["user"]["login"]
-                                .as_str()
-                                .unwrap_or("unknown")
-                                .to_string(),
-                            body: item["body"].as_str().unwrap_or("").to_string(),
-                            path: item["path"].as_str().map(str::to_string),
-                            line: item["line"]
-                                .as_u64()
-                                .or_else(|| item["original_line"].as_u64()),
-                            created_at: item["created_at"].as_str().unwrap_or("").to_string(),
-                        });
-                    }
-                    info.comments_count = info.review_comments.len();
-                }
+                let _ = enrich_pr_review_comments(&mut info, &pages);
             }
         }
     }
@@ -1609,14 +1625,7 @@ fn execute_gh(work_dir: &Path, args: &[String]) -> Result<String, GitError> {
         return Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned());
     }
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    Err(GitError {
-        work_dir: work_dir.to_path_buf(),
-        message: if stderr.is_empty() {
-            format!("gh exited with {}", output.status)
-        } else {
-            stderr
-        },
-    })
+    Err(gh_failure(work_dir, output.status, &stderr))
 }
 
 pub fn list_github_issues(work_dir: &Path) -> Result<Vec<GitHubIssueSummary>, GitError> {
@@ -1909,14 +1918,7 @@ pub fn create_pull_request(work_dir: &Path) -> Result<String, GitError> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(GitError {
-            work_dir: work_dir.to_path_buf(),
-            message: if stderr.is_empty() {
-                format!("gh exited with {}", output.status)
-            } else {
-                stderr
-            },
-        });
+        return Err(gh_failure(work_dir, output.status, &stderr));
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
@@ -2000,7 +2002,22 @@ fn parse_pull_request_url(url: &str) -> Result<(GitHubRepository, u64), String> 
         .rsplit_once("/pull/")
         .and_then(|(_, number)| number.parse().ok())
         .ok_or_else(|| format!("invalid GitHub pull request URL: {url}"))?;
+    validate_github_number(number, "pull request")?;
     Ok((repository, number))
+}
+
+fn validated_review_endpoint(pull_request: &GitHubPrInfo) -> Result<String, String> {
+    let (repository, number) = parse_pull_request_url(&pull_request.url)?;
+    if number != pull_request.number {
+        return Err(format!(
+            "pull request URL number #{number} does not match DTO number #{}",
+            pull_request.number
+        ));
+    }
+    Ok(format!(
+        "repos/{}/{}/pulls/{number}/reviews",
+        repository.owner, repository.repo
+    ))
 }
 
 pub fn reply_to_pull_request_review_comment(
@@ -2060,21 +2077,16 @@ pub fn submit_pull_request_review(
             })?;
         return execute_gh(work_dir, &args);
     }
+    let endpoint = validated_review_endpoint(pull_request).map_err(|message| GitError {
+        work_dir: work_dir.to_path_buf(),
+        message,
+    })?;
     let payload = review_comment_payload(&pull_request.head_oid, verdict, body, comments).map_err(
         |message| GitError {
             work_dir: work_dir.to_path_buf(),
             message,
         },
     )?;
-    let (repository, number) =
-        parse_pull_request_url(&pull_request.url).map_err(|message| GitError {
-            work_dir: work_dir.to_path_buf(),
-            message,
-        })?;
-    let endpoint = format!(
-        "repos/{}/{}/pulls/{number}/reviews",
-        repository.owner, repository.repo
-    );
     let mut command = gh_command(
         work_dir,
         &["api", "--method", "POST", &endpoint, "--input", "-"],
@@ -2107,14 +2119,7 @@ pub fn submit_pull_request_review(
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        Err(GitError {
-            work_dir: work_dir.to_path_buf(),
-            message: if stderr.is_empty() {
-                format!("gh exited with {}", output.status)
-            } else {
-                stderr
-            },
-        })
+        Err(gh_failure(work_dir, output.status, &stderr))
     }
 }
 
@@ -2792,8 +2797,9 @@ mod tests {
         assert_eq!(pr.base_ref, "main");
         assert!(!pr.is_draft);
         assert_eq!(pr.comments_count, 3);
-        assert_eq!(pr.review_comments.len(), 3);
-        assert_eq!(pr.review_comments[0].author, "reviewer1");
+        assert_eq!(pr.issue_comments.len(), 3);
+        assert_eq!(pr.issue_comments[0].author, "reviewer1");
+        assert!(pr.review_comments.is_empty());
         assert_eq!(pr.total_checks, 3);
         assert_eq!(pr.failing_checks, 1);
         assert_eq!(pr.passing_checks, 1);
@@ -2900,6 +2906,33 @@ mod tests {
         assert_eq!(pr.reviews[0].remote_id, "PRR_1");
         assert_eq!(pr.files[0].path, "src/lib.rs");
         assert_eq!(pr.checks[0].name, "check");
+    }
+
+    #[test]
+    fn github_issue_keeps_conversation_and_review_comments_separate() {
+        let mut pr = parse_gh_pr_json(
+            r#"{
+                "number": 42,
+                "url": "https://github.com/threadlane/threadlane/pull/42",
+                "comments": [{ "id": "IC_2", "author": { "login": "commenter" }, "body": "Issue comment", "createdAt": "2026-08-30T12:01:00Z", "url": "https://github.com/threadlane/threadlane/pull/42#issuecomment-2" }]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(pr.issue_comments.len(), 1);
+        assert_eq!(pr.comments_count, 1);
+        assert!(pr.review_comments.is_empty());
+
+        enrich_pr_review_comments(
+            &mut pr,
+            r#"[{"id": 99, "user": { "login": "reviewer" }, "body": "Inline note", "path": "src/lib.rs", "line": 12, "created_at": "2026-08-30T12:02:00Z"}]"#,
+        )
+        .unwrap();
+
+        assert_eq!(pr.issue_comments.len(), 1);
+        assert_eq!(pr.comments_count, 1);
+        assert_eq!(pr.review_comments.len(), 1);
+        assert_eq!(pr.review_comments[0].remote_id, "99");
     }
 
     #[test]
@@ -3012,6 +3045,35 @@ mod tests {
         assert!(command
             .get_envs()
             .any(|(key, value)| key == "GH_TOKEN" && value == Some("stored-token".as_ref())));
+    }
+
+    #[test]
+    fn github_mutation_args_redacts_tokens_from_gh_failures() {
+        let redacted = redact_gh_failure(
+            "gh failed: GH_TOKEN=stored-token and bearer stored-token",
+            Some("stored-token"),
+        );
+
+        assert!(!redacted.contains("stored-token"));
+        assert!(!redacted.contains("GH_TOKEN="));
+        assert!(redacted.contains("<redacted>"));
+    }
+
+    #[test]
+    fn github_mutation_args_rejects_zero_or_mismatched_review_url_numbers() {
+        let mismatched = GitHubPrInfo {
+            number: 42,
+            url: "https://github.com/threadlane/threadlane/pull/41".into(),
+            ..Default::default()
+        };
+        let zero = GitHubPrInfo {
+            number: 42,
+            url: "https://github.com/threadlane/threadlane/pull/0".into(),
+            ..Default::default()
+        };
+
+        assert!(validated_review_endpoint(&mismatched).is_err());
+        assert!(validated_review_endpoint(&zero).is_err());
     }
 
     #[test]
