@@ -996,6 +996,29 @@ impl AppState {
         Self::load_from_registry(load_project_registry())
     }
 
+    pub(crate) fn active_git_work_dir(&self) -> Option<PathBuf> {
+        let work_dir = self.active_work_dir.as_ref()?;
+        let Some(session_id) = self.active_session_id.as_ref() else {
+            return Some(work_dir.clone());
+        };
+        let session = self
+            .projects
+            .iter()
+            .find(|project| project.work_dir == *work_dir)
+            .and_then(|project| {
+                project
+                    .sessions
+                    .iter()
+                    .find(|session| session.id == *session_id)
+            });
+
+        match session {
+            Some(session) if session.worktree_available => Some(session.runtime_work_dir.clone()),
+            Some(_) => None,
+            None => Some(work_dir.clone()),
+        }
+    }
+
     fn load_from_registry(registry_projects: Vec<AttachedProject>) -> Self {
         #[cfg(not(test))]
         let mut registry_projects = registry_projects;
@@ -1421,7 +1444,7 @@ impl AppState {
     }
 
     pub(crate) fn request_open_file(&mut self, relative_path: String) {
-        let Some(root) = self.active_work_dir.clone() else {
+        let Some(root) = self.active_git_work_dir() else {
             return;
         };
         let path = match threadlane_tools::validate_path_in_workspace(&relative_path, &root) {
@@ -4118,6 +4141,42 @@ mod tests {
     use threadlane_session::harness::{
         OperationIntent, OperationOutcome, ProviderOutcome, Record, SessionStore, TraceString,
     };
+
+    #[test]
+    fn active_git_work_dir_uses_the_active_session_checkout_when_available() {
+        let local_project = PathBuf::from("/projects/local");
+        let worktree = PathBuf::from("/projects/local/.threadlane/worktrees/session");
+        let mut state = AppState::load_from_registry(Vec::new());
+        state.projects = vec![ProjectInfo {
+            name: "Local".into(),
+            work_dir: local_project.clone(),
+            sessions: Vec::new(),
+            is_expanded: true,
+        }];
+        state.active_work_dir = Some(local_project.clone());
+
+        assert_eq!(state.active_git_work_dir(), Some(local_project.clone()));
+
+        state.projects[0].sessions.push(SessionInfo {
+            id: "session".into(),
+            title: "Session".into(),
+            work_dir: local_project.clone(),
+            runtime_work_dir: worktree.clone(),
+            session_file: local_project.join(".threadlane/sessions/session.jsonl"),
+            updated_at: 0,
+            health: SessionHealth::Healthy,
+            git_branch: Some("feature/session".into()),
+            is_worktree: true,
+            worktree_available: true,
+        });
+        state.active_session_id = Some("session".into());
+
+        assert_eq!(state.active_git_work_dir(), Some(worktree.clone()));
+
+        state.projects[0].sessions[0].worktree_available = false;
+
+        assert_eq!(state.active_git_work_dir(), None);
+    }
 
     fn take_stream_events(state: &mut AppState, limit: usize) -> Vec<ChatStreamEvent> {
         let receiver = state.stream_rx.as_mut().unwrap();

@@ -23,24 +23,26 @@ use crate::screens::next_event_batch;
 use crate::services::watcher::WorkspaceWatcher;
 use crate::state::AppState;
 
-fn can_publish_branch(status: Option<&GitStatus>) -> bool {
-    status.is_some_and(|status| {
-        !status.has_upstream
-            && !status.detached
-            && status.branch.is_some()
-            && status.remote.is_some()
-    })
+fn can_publish_branch(worktree_available: bool, status: Option<&GitStatus>) -> bool {
+    worktree_available
+        && status.is_some_and(|status| {
+            !status.has_upstream
+                && !status.detached
+                && status.branch.is_some()
+                && status.remote.is_some()
+        })
 }
 
-fn can_create_pull_request(status: Option<&GitStatus>) -> bool {
-    status.is_some_and(|status| {
-        status.pr_ready
-            && !status.detached
-            && status.branch.is_some()
-            && status.remote.is_some()
-            && status.pr_lookup_available
-            && status.pr.is_none()
-    })
+fn can_create_pull_request(worktree_available: bool, status: Option<&GitStatus>) -> bool {
+    worktree_available
+        && status.is_some_and(|status| {
+            status.pr_ready
+                && !status.detached
+                && status.branch.is_some()
+                && status.remote.is_some()
+                && status.pr_lookup_available
+                && status.pr.is_none()
+        })
 }
 
 fn normalize_generated_commit_message(raw: &str) -> String {
@@ -195,6 +197,7 @@ pub struct RightPanelView {
     model: Entity<AppState>,
     active_surface: Option<Surface>,
     project: Option<PathBuf>,
+    worktree_unavailable: bool,
     tree_state: Entity<TreeState>,
     expanded_paths: HashSet<String>,
     review_tab: ReviewTab,
@@ -292,6 +295,7 @@ impl RightPanelView {
             model,
             active_surface: None,
             project: None,
+            worktree_unavailable: false,
             tree_state,
             expanded_paths: HashSet::new(),
             review_tab: ReviewTab::Changes,
@@ -341,17 +345,32 @@ impl RightPanelView {
     }
 
     fn sync_project(&mut self, cx: &mut Context<Self>) {
-        let project = self.model.read(cx).active_work_dir.clone();
-        if self.project == project {
+        let (project, worktree_unavailable) = {
+            let state = self.model.read(cx);
+            let project = state.active_git_work_dir();
+            let unavailable = state.active_work_dir.is_some()
+                && state.active_session_id.is_some()
+                && project.is_none();
+            (project, unavailable)
+        };
+        if self.project == project && self.worktree_unavailable == worktree_unavailable {
             return;
         }
         self.project = project.clone();
+        self.worktree_unavailable = worktree_unavailable;
         self.tree_state
             .update(cx, |state, cx| state.set_items(Vec::new(), cx));
         self.expanded_paths.clear();
         self.review_files.clear();
         self.selected_files.clear();
+        self.git_status = None;
         self.review_error = None;
+        self.git_feedback = None;
+        self.generated_commit_message = None;
+        self.should_clear_commit_message = false;
+        self.selected_commit_sha = None;
+        self.selected_commit_files.clear();
+        self.loading_commit_sha = None;
         self.stash_files = None;
         self.loading_stash_index = None;
         self.stash_expanded = false;
@@ -1583,8 +1602,8 @@ impl RightPanelView {
         let status = self.git_status.as_ref();
         let behind = status.map_or(0, |s| s.behind);
         let ahead = status.map_or(0, |s| s.ahead);
-        let can_publish = can_publish_branch(status);
-        let can_create_pr = can_create_pull_request(status);
+        let can_publish = can_publish_branch(self.project.is_some(), status);
+        let can_create_pr = can_create_pull_request(self.project.is_some(), status);
 
         let sync_button = if can_publish {
             Button::new("git-sync-action-btn")
@@ -3931,10 +3950,18 @@ impl Render for RightPanelView {
         self.sync_project(cx);
         self.sync_pending_document(window, cx);
         let theme = cx.theme().colors;
-        let body = match self.active_surface {
-            None => self.render_chooser(cx).into_any_element(),
-            Some(Surface::Review) => self.render_review(cx),
-            Some(Surface::Files) => self.render_files(cx),
+        let body = if self.worktree_unavailable {
+            self.render_empty(
+                "Worktree unavailable",
+                "This worktree is not checked out",
+                cx,
+            )
+        } else {
+            match self.active_surface {
+                None => self.render_chooser(cx).into_any_element(),
+                Some(Surface::Review) => self.render_review(cx),
+                Some(Surface::Files) => self.render_files(cx),
+            }
         };
         div()
             .w_full()
@@ -4036,21 +4063,22 @@ mod tests {
             ahead: 731,
             ..GitStatus::default()
         };
-        assert!(can_publish_branch(Some(&unpublished)));
+        assert!(can_publish_branch(true, Some(&unpublished)));
+        assert!(!can_publish_branch(false, Some(&unpublished)));
 
         let published = GitStatus {
             has_upstream: true,
             ..unpublished.clone()
         };
-        assert!(!can_publish_branch(Some(&published)));
+        assert!(!can_publish_branch(true, Some(&published)));
 
         let detached = GitStatus {
             detached: true,
             branch: None,
             ..unpublished
         };
-        assert!(!can_publish_branch(Some(&detached)));
-        assert!(!can_publish_branch(None));
+        assert!(!can_publish_branch(true, Some(&detached)));
+        assert!(!can_publish_branch(true, None));
     }
 
     #[test]
@@ -4062,33 +4090,34 @@ mod tests {
             pr_lookup_available: true,
             ..GitStatus::default()
         };
-        assert!(can_create_pull_request(Some(&ready)));
+        assert!(can_create_pull_request(true, Some(&ready)));
+        assert!(!can_create_pull_request(false, Some(&ready)));
 
         let unavailable = GitStatus {
             pr_lookup_available: false,
             ..ready.clone()
         };
-        assert!(!can_create_pull_request(Some(&unavailable)));
+        assert!(!can_create_pull_request(true, Some(&unavailable)));
 
         let with_pr = GitStatus {
             pr: Some(Default::default()),
             ..ready.clone()
         };
-        assert!(!can_create_pull_request(Some(&with_pr)));
+        assert!(!can_create_pull_request(true, Some(&with_pr)));
 
         let not_ready = GitStatus {
             pr_ready: false,
             ..ready.clone()
         };
-        assert!(!can_create_pull_request(Some(&not_ready)));
+        assert!(!can_create_pull_request(true, Some(&not_ready)));
 
         let detached = GitStatus {
             detached: true,
             branch: None,
             ..ready
         };
-        assert!(!can_create_pull_request(Some(&detached)));
-        assert!(!can_create_pull_request(None));
+        assert!(!can_create_pull_request(true, Some(&detached)));
+        assert!(!can_create_pull_request(true, None));
     }
 
     #[test]

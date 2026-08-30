@@ -665,14 +665,14 @@ impl WorkspaceView {
 
     fn sync_git_status_with_active_project(&mut self, cx: &App) {
         self.sync_session_prs(cx);
-        let active_work_dir = self.model.read(cx).active_work_dir.clone();
-        if self.last_git_work_dir == active_work_dir {
+        let active_git_work_dir = self.model.read(cx).active_git_work_dir();
+        if self.last_git_work_dir == active_git_work_dir {
             return;
         }
 
-        self.last_git_work_dir = active_work_dir.clone();
+        self.last_git_work_dir = active_git_work_dir.clone();
 
-        if let Some(work_dir) = active_work_dir {
+        if let Some(work_dir) = active_git_work_dir {
             self.spawn_git_status_refresh(work_dir);
         }
     }
@@ -730,7 +730,7 @@ impl WorkspaceView {
     }
 
     fn refresh_git_status(&mut self, cx: &App) {
-        let Some(work_dir) = self.model.read(cx).active_work_dir.clone() else {
+        let Some(work_dir) = self.model.read(cx).active_git_work_dir() else {
             self.last_git_work_dir = None;
             return;
         };
@@ -769,7 +769,7 @@ impl WorkspaceView {
             }
             GitEvent::Loaded { work_dir, result } => (work_dir, result),
         };
-        let Some(active_work_dir) = self.model.read(cx).active_work_dir.clone() else {
+        let Some(active_work_dir) = self.model.read(cx).active_git_work_dir() else {
             return;
         };
         if !git_result_matches_active(&work_dir, &active_work_dir) {
@@ -1172,7 +1172,7 @@ impl WorkspaceView {
         let theme = cx.theme().colors;
 
         let git_status =
-            active_project_git_status(state.active_work_dir.as_deref(), &state.git_statuses);
+            active_project_git_status(state.active_git_work_dir().as_deref(), &state.git_statuses);
 
         let branch = git_status
             .and_then(|s| s.branch.clone())
