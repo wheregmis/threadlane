@@ -12,12 +12,13 @@ use gpui_component::resizable::{h_resizable, resizable_panel, ResizableState};
 use gpui_component::scroll::{ScrollableElement, Scrollbar};
 use gpui_component::spinner::Spinner;
 use gpui_component::status_bar::StatusBar;
+use gpui_component::tab::{Tab, TabBar};
 use gpui_component::tag::Tag;
 use gpui_component::text::{TextView, TextViewState};
 use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable, WindowExt};
 use threadlane_git::{
     GitHubIssueDetail, GitHubIssueRef, GitHubIssueSummary, GitHubPrFile, GitHubPrInfo,
-    GitHubPullRequestSummary, GitHubRepository,
+    GitHubPullRequestSummary, GitHubRepository, PrCheckStatus,
 };
 
 use crate::app::actions::AppAction;
@@ -30,6 +31,8 @@ actions!(
 );
 
 const GITHUB_LIST_CONTEXT: &str = "GitHubList";
+const GITHUB_PR_TABS_CONTEXT: &str = "GitHubPullRequestTabs";
+const GITHUB_PR_FILE_LIST_CONTEXT: &str = "GitHubPullRequestFiles";
 const PAGE_SIZE: usize = 50;
 
 pub fn init(cx: &mut App) {
@@ -37,6 +40,11 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("up", SelectPrevious, Some(GITHUB_LIST_CONTEXT)),
         KeyBinding::new("down", SelectNext, Some(GITHUB_LIST_CONTEXT)),
         KeyBinding::new("enter", OpenSelected, Some(GITHUB_LIST_CONTEXT)),
+        KeyBinding::new("left", SelectPrevious, Some(GITHUB_PR_TABS_CONTEXT)),
+        KeyBinding::new("right", SelectNext, Some(GITHUB_PR_TABS_CONTEXT)),
+        KeyBinding::new("up", SelectPrevious, Some(GITHUB_PR_FILE_LIST_CONTEXT)),
+        KeyBinding::new("down", SelectNext, Some(GITHUB_PR_FILE_LIST_CONTEXT)),
+        KeyBinding::new("enter", OpenSelected, Some(GITHUB_PR_FILE_LIST_CONTEXT)),
     ]);
 }
 
@@ -106,12 +114,29 @@ enum PrDetailTab {
 }
 
 impl PrDetailTab {
+    const ALL: [Self; 3] = [Self::Summary, Self::Timeline, Self::Code];
+
     fn label(self) -> &'static str {
         match self {
             Self::Summary => "Summary",
             Self::Timeline => "Timeline",
             Self::Code => "Code",
         }
+    }
+
+    fn ix(self) -> usize {
+        match self {
+            Self::Summary => 0,
+            Self::Timeline => 1,
+            Self::Code => 2,
+        }
+    }
+
+    fn adjacent(self, delta: isize) -> Self {
+        Self::ALL[self
+            .ix()
+            .saturating_add_signed(delta)
+            .min(Self::ALL.len() - 1)]
     }
 }
 
@@ -150,8 +175,13 @@ impl PrWorkspaceSelections {
             .and_then(|state| state.selected_file.as_deref())
     }
 
-    fn select_file(&mut self, key: PrWorkspaceKey, path: String) {
-        self.by_pr.entry(key).or_default().selected_file = Some(path);
+    fn select_file(&mut self, key: PrWorkspaceKey, path: String) -> bool {
+        let selected = &mut self.by_pr.entry(key).or_default().selected_file;
+        if selected.as_deref() == Some(path.as_str()) {
+            return false;
+        }
+        *selected = Some(path);
+        true
     }
 
     fn reconcile_files(&mut self, key: &PrWorkspaceKey, files: &[GitHubPrFile]) {
@@ -192,7 +222,42 @@ struct PrTimelineRow {
     body: String,
     timestamp: String,
     url: String,
+    review_state: Option<String>,
     path: Option<String>,
+    line: Option<u64>,
+}
+
+impl PrTimelineRow {
+    fn label(&self) -> &'static str {
+        match self.kind {
+            PrTimelineKind::IssueComment => "Comment",
+            PrTimelineKind::Review
+                if self
+                    .review_state
+                    .as_deref()
+                    .is_some_and(|state| state.eq_ignore_ascii_case("APPROVED")) =>
+            {
+                "Approved"
+            }
+            PrTimelineKind::Review
+                if self
+                    .review_state
+                    .as_deref()
+                    .is_some_and(|state| state.eq_ignore_ascii_case("CHANGES_REQUESTED")) =>
+            {
+                "Changes requested"
+            }
+            PrTimelineKind::Review => "Review",
+            PrTimelineKind::InlineReviewComment => "Inline comment",
+        }
+    }
+
+    fn location(&self) -> Option<String> {
+        self.path.as_ref().map(|path| match self.line {
+            Some(line) => format!("{path}:{line}"),
+            None => path.clone(),
+        })
+    }
 }
 
 fn merge_pr_timeline(pr: &GitHubPrInfo) -> Vec<PrTimelineRow> {
@@ -210,7 +275,9 @@ fn merge_pr_timeline(pr: &GitHubPrInfo) -> Vec<PrTimelineRow> {
             } else {
                 comment.url.clone()
             },
+            review_state: None,
             path: None,
+            line: None,
         })
         .chain(pr.reviews.iter().map(|review| PrTimelineRow {
             remote_id: review.remote_id.clone(),
@@ -219,7 +286,9 @@ fn merge_pr_timeline(pr: &GitHubPrInfo) -> Vec<PrTimelineRow> {
             body: review.body.clone(),
             timestamp: review.submitted_at.clone(),
             url: pr.url.clone(),
+            review_state: Some(review.state.clone()),
             path: None,
+            line: None,
         }))
         .chain(pr.review_comments.iter().map(|comment| PrTimelineRow {
             remote_id: comment.remote_id.clone(),
@@ -228,7 +297,9 @@ fn merge_pr_timeline(pr: &GitHubPrInfo) -> Vec<PrTimelineRow> {
             body: comment.body.clone(),
             timestamp: comment.created_at.clone(),
             url: pr.url.clone(),
+            review_state: None,
             path: comment.path.clone(),
+            line: comment.line,
         }))
         .collect::<Vec<_>>();
     rows.sort_by(|left, right| left.timestamp.cmp(&right.timestamp));
@@ -253,26 +324,93 @@ fn pr_diff_result_matches_request(
         && selected_path == Some(result.path.as_str())
 }
 
-fn selected_file_diff(raw: &str, path: &str) -> Option<String> {
-    let mut starts = raw
-        .match_indices("diff --git ")
-        .map(|(start, _)| start)
-        .peekable();
-    while let Some(start) = starts.next() {
-        let end = starts.peek().copied().unwrap_or(raw.len());
-        let section = &raw[start..end];
-        let header = section.lines().next().unwrap_or_default();
-        if header.ends_with(&format!(" b/{path}")) || header.ends_with(&format!(" \"b/{path}\"")) {
-            return Some(section.trim_end().to_owned());
+fn decode_git_quoted_path(path: &str) -> Option<String> {
+    let bytes = path.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut ix = 0;
+    while ix < bytes.len() {
+        if bytes[ix] != b'\\' {
+            decoded.push(bytes[ix]);
+            ix += 1;
+            continue;
         }
+        ix += 1;
+        let escaped = *bytes.get(ix)?;
+        if matches!(escaped, b'0'..=b'7') {
+            let mut value = 0u16;
+            let mut digits = 0;
+            while digits < 3 && ix < bytes.len() && matches!(bytes[ix], b'0'..=b'7') {
+                value = value * 8 + u16::from(bytes[ix] - b'0');
+                ix += 1;
+                digits += 1;
+            }
+            decoded.push(u8::try_from(value).ok()?);
+            continue;
+        }
+        decoded.push(match escaped {
+            b'a' => 7,
+            b'b' => 8,
+            b't' => b'\t',
+            b'n' => b'\n',
+            b'v' => 11,
+            b'f' => 12,
+            b'r' => b'\r',
+            other => other,
+        });
+        ix += 1;
     }
-    None
+    String::from_utf8(decoded).ok()
 }
 
-fn draft_reply_prompt(url: &str, body: &str) -> String {
+fn diff_header_matches_path(header: &str, path: &str) -> bool {
+    let Some(rest) = header.strip_prefix("diff --git ") else {
+        return false;
+    };
+    let expected = format!("b/{path}");
+    if rest.ends_with(&format!(" {expected}")) {
+        return true;
+    }
+    rest.rsplit_once(" \"")
+        .and_then(|(_, quoted)| quoted.strip_suffix('"'))
+        .and_then(decode_git_quoted_path)
+        .is_some_and(|decoded| decoded == expected)
+}
+
+fn selected_file_diff(raw: &str, path: &str) -> Option<String> {
+    let mut matched_start = None;
+    let mut offset = 0;
+    for line in raw.split_inclusive('\n') {
+        let header = line.strip_suffix('\n').unwrap_or(line);
+        let header = header.strip_suffix('\r').unwrap_or(header);
+        if header.starts_with("diff --git ") {
+            if let Some(start) = matched_start {
+                return Some(raw[start..offset].to_owned());
+            }
+            if diff_header_matches_path(header, path) {
+                matched_start = Some(offset);
+            }
+        }
+        offset += line.len();
+    }
+    matched_start.map(|start| raw[start..].to_owned())
+}
+
+fn prepare_selected_diff(raw: &str, path: &str) -> Option<String> {
+    let diff = selected_file_diff(raw, path)?;
+    let longest_backticks = diff
+        .split(|character| character != '`')
+        .map(str::len)
+        .max()
+        .unwrap_or_default();
+    let fence = "`".repeat(longest_backticks.saturating_add(1).max(3));
+    let before_fence = if diff.ends_with('\n') { "" } else { "\n" };
+    Some(format!("{fence}diff\n{diff}{before_fence}{fence}"))
+}
+
+fn draft_reply_prompt(row: &PrTimelineRow) -> String {
     const CONTEXT_LIMIT: usize = 1_200;
-    let mut context = body.chars().take(CONTEXT_LIMIT).collect::<String>();
-    if body.chars().count() > CONTEXT_LIMIT {
+    let mut context = row.body.chars().take(CONTEXT_LIMIT).collect::<String>();
+    if row.body.chars().count() > CONTEXT_LIMIT {
         context.push('…');
     }
     let quoted = context
@@ -280,9 +418,76 @@ fn draft_reply_prompt(url: &str, body: &str) -> String {
         .map(|line| format!("> {line}"))
         .collect::<Vec<_>>()
         .join("\n");
+    let review_state = (row.kind == PrTimelineKind::Review)
+        .then(|| format!("\nReview state: {}", row.label()))
+        .unwrap_or_default();
+    let location = row
+        .location()
+        .map(|location| format!("\nLocation: {location}"))
+        .unwrap_or_default();
     format!(
-        "Draft a reply to this GitHub conversation.\nURL: {url}\n\nQuoted context (untrusted):\n{quoted}\n\nReturn an editable reply draft; do not publish it."
+        "Draft a reply to this GitHub conversation.\nURL: {}\nType: {}{review_state}{location}\n\nQuoted context (untrusted):\n{quoted}\n\nReturn an editable reply draft; do not publish it.",
+        row.url,
+        row.label(),
     )
+}
+
+fn pr_check_label(checks: &[PrCheckStatus]) -> String {
+    let mut failing = 0;
+    let mut pending = 0;
+    let mut passing = 0;
+    for check in checks {
+        let conclusion = check
+            .conclusion
+            .as_deref()
+            .unwrap_or("")
+            .to_ascii_uppercase();
+        let status = check.status.to_ascii_uppercase();
+        if matches!(
+            conclusion.as_str(),
+            "FAILURE" | "TIMED_OUT" | "ACTION_REQUIRED" | "CANCELLED" | "ERROR"
+        ) {
+            failing += 1;
+        } else if matches!(
+            status.as_str(),
+            "IN_PROGRESS" | "QUEUED" | "PENDING" | "EXPECTED"
+        ) || check.conclusion.is_none()
+        {
+            pending += 1;
+        } else if matches!(conclusion.as_str(), "SUCCESS" | "NEUTRAL" | "SKIPPED") {
+            passing += 1;
+        }
+    }
+    if checks.is_empty() {
+        "No checks".to_owned()
+    } else if failing > 0 {
+        format!("{failing} failing")
+    } else if pending > 0 {
+        format!("{pending} pending")
+    } else if passing == checks.len() {
+        format!("{passing} passing")
+    } else {
+        format!("{} checks", checks.len())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrFileAction {
+    Previous,
+    Next,
+    Open,
+}
+
+fn pr_file_action_ix(current: Option<usize>, len: usize, action: PrFileAction) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    let current = current.unwrap_or_default().min(len - 1);
+    Some(match action {
+        PrFileAction::Previous => current.saturating_sub(1),
+        PrFileAction::Next => current.saturating_add(1).min(len - 1),
+        PrFileAction::Open => current,
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -462,36 +667,65 @@ fn reconcile_list_count(state: &ListState, old_count: usize, new_count: usize) {
     }
 }
 
-fn github_link_fingerprint(state: &AppState) -> u64 {
+type GitHubLinkFingerprintRow<'a> = (
+    &'a str,
+    &'a std::path::Path,
+    &'a SessionInfo,
+    Option<&'a GitHubPrInfo>,
+    bool,
+    bool,
+);
+
+fn github_link_fingerprint_rows<'a>(
+    active_session_id: Option<&str>,
+    rows: impl IntoIterator<Item = GitHubLinkFingerprintRow<'a>>,
+) -> u64 {
     let mut hasher = DefaultHasher::new();
-    for project in &state.projects {
-        project.name.hash(&mut hasher);
-        project.work_dir.hash(&mut hasher);
-        for session in &project.sessions {
-            let Some(issue) = session.github_issue.as_ref() else {
-                continue;
-            };
+    active_session_id.hash(&mut hasher);
+    for (project_name, project_work_dir, session, pr, pending_permission, is_generating) in rows {
+        if session.github_issue.is_none() && session.git_branch.is_none() {
+            continue;
+        }
+        project_name.hash(&mut hasher);
+        project_work_dir.hash(&mut hasher);
+        if let Some(issue) = session.github_issue.as_ref() {
+            true.hash(&mut hasher);
             issue.host.hash(&mut hasher);
             issue.owner.hash(&mut hasher);
             issue.repo.hash(&mut hasher);
             issue.number.hash(&mut hasher);
-            let pr = session.git_branch.as_ref().and_then(|branch| {
-                state
-                    .git_prs
-                    .get(&(session.work_dir.clone(), branch.clone()))
-                    .and_then(|pr| pr.as_ref())
-            });
-            linked_session_fingerprint(session, pr).hash(&mut hasher);
-            state
-                .pending_permissions
-                .contains_key(&session.id)
-                .hash(&mut hasher);
-            state
-                .session_is_generating(&session.session_file)
-                .hash(&mut hasher);
+        } else {
+            false.hash(&mut hasher);
         }
+        linked_session_fingerprint(session, pr).hash(&mut hasher);
+        pending_permission.hash(&mut hasher);
+        is_generating.hash(&mut hasher);
     }
     hasher.finish()
+}
+
+fn github_link_fingerprint(state: &AppState) -> u64 {
+    github_link_fingerprint_rows(
+        state.active_session_id.as_deref(),
+        state.projects.iter().flat_map(|project| {
+            project.sessions.iter().map(move |session| {
+                let pr = session.git_branch.as_ref().and_then(|branch| {
+                    state
+                        .git_prs
+                        .get(&(session.work_dir.clone(), branch.clone()))
+                        .and_then(|pr| pr.as_ref())
+                });
+                (
+                    project.name.as_str(),
+                    project.work_dir.as_path(),
+                    session,
+                    pr,
+                    state.pending_permissions.contains_key(&session.id),
+                    state.session_is_generating(&session.session_file),
+                )
+            })
+        }),
+    )
 }
 
 fn linked_session_fingerprint(session: &SessionInfo, pr: Option<&GitHubPrInfo>) -> u64 {
@@ -835,6 +1069,8 @@ pub struct GitHubView {
     pr_list_state: ListState,
     detail_split_state: Entity<ResizableState>,
     list_focus: FocusHandle,
+    pr_tabs_focus: FocusHandle,
+    pr_file_focus: FocusHandle,
     debounce_task: Option<Task<()>>,
     issue_comment_draft: String,
     pr_review_draft: String,
@@ -928,6 +1164,8 @@ impl GitHubView {
             pr_list_state: ListState::new(0, ListAlignment::Top, px(78.0)),
             detail_split_state,
             list_focus: cx.focus_handle(),
+            pr_tabs_focus: cx.focus_handle(),
+            pr_file_focus: cx.focus_handle(),
             debounce_task: None,
             issue_comment_draft: String::new(),
             pr_review_draft: String::new(),
@@ -976,8 +1214,7 @@ impl GitHubView {
         self.pr_list_state.reset(0);
         self.detail_body
             .update(cx, |body, cx| body.set_text("", cx));
-        self.pr_diff_body
-            .update(cx, |body, cx| body.set_text("", cx));
+        self.reset_pr_diff_body(cx);
         self.query_revision = self.query_revision.saturating_add(1);
         if self.project_work_dir.is_some() {
             self.fetch_list(cx);
@@ -1027,8 +1264,11 @@ impl GitHubView {
         self.diff_error = None;
         self.detail_body
             .update(cx, |body, cx| body.set_text("", cx));
-        self.pr_diff_body
-            .update(cx, |body, cx| body.set_text("", cx));
+        self.reset_pr_diff_body(cx);
+    }
+
+    fn reset_pr_diff_body(&mut self, cx: &mut Context<Self>) {
+        self.pr_diff_body = cx.new(|cx| TextViewState::markdown("", cx));
     }
 
     fn fetch_list(&mut self, cx: &mut Context<Self>) {
@@ -1234,10 +1474,15 @@ impl GitHubView {
                             project: request.work_dir.clone(),
                             number: detail.number,
                         };
+                        let previous_file =
+                            this.pr_selections.selected_file(&key).map(str::to_owned);
                         this.pr_timeline_rows = merge_pr_timeline(&detail);
                         this.pr_timeline_list_state
                             .reset(this.pr_timeline_rows.len());
                         this.pr_selections.reconcile_files(&key, &detail.files);
+                        if previous_file.as_deref() != this.pr_selections.selected_file(&key) {
+                            this.reset_pr_diff_body(cx);
+                        }
                         this.pr_file_list_state.reset(detail.files.len());
                         this.detail_body
                             .update(cx, |body, cx| body.set_text(&detail.body, cx));
@@ -1342,13 +1587,76 @@ impl GitHubView {
         cx.notify();
     }
 
+    fn select_previous_pr_tab(
+        &mut self,
+        _: &SelectPrevious,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_pr_tab(self.current_pr_tab().adjacent(-1), cx);
+    }
+
+    fn select_next_pr_tab(&mut self, _: &SelectNext, _window: &mut Window, cx: &mut Context<Self>) {
+        self.select_pr_tab(self.current_pr_tab().adjacent(1), cx);
+    }
+
     fn select_pr_file(&mut self, path: String, cx: &mut Context<Self>) {
         let Some(key) = self.current_pr_key() else {
             return;
         };
-        self.pr_selections.select_file(key, path);
+        if self.pr_selections.select_file(key, path) {
+            self.reset_pr_diff_body(cx);
+        }
         self.load_selected_diff(cx);
         cx.notify();
+    }
+
+    fn selected_pr_file_ix(&self) -> Option<usize> {
+        let selected = self.current_pr_file()?;
+        self.pr_detail
+            .as_ref()?
+            .files
+            .iter()
+            .position(|file| file.path == selected)
+    }
+
+    fn apply_pr_file_action(&mut self, action: PrFileAction, cx: &mut Context<Self>) {
+        let Some(files) = self.pr_detail.as_ref().map(|detail| &detail.files) else {
+            return;
+        };
+        let Some(ix) = pr_file_action_ix(self.selected_pr_file_ix(), files.len(), action) else {
+            return;
+        };
+        let path = files[ix].path.clone();
+        self.pr_file_list_state.scroll_to_reveal_item(ix);
+        self.select_pr_file(path, cx);
+    }
+
+    fn select_previous_pr_file(
+        &mut self,
+        _: &SelectPrevious,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.apply_pr_file_action(PrFileAction::Previous, cx);
+    }
+
+    fn select_next_pr_file(
+        &mut self,
+        _: &SelectNext,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.apply_pr_file_action(PrFileAction::Next, cx);
+    }
+
+    fn open_selected_pr_file(
+        &mut self,
+        _: &OpenSelected,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.apply_pr_file_action(PrFileAction::Open, cx);
     }
 
     fn load_selected_diff(&mut self, cx: &mut Context<Self>) {
@@ -1381,7 +1689,7 @@ impl GitHubView {
                     threadlane_git::pull_request_diff(&work_dir, number)
                         .map_err(|error| error.message)
                         .and_then(|raw| {
-                            selected_file_diff(&raw, &selected_path).ok_or_else(|| {
+                            prepare_selected_diff(&raw, &selected_path).ok_or_else(|| {
                                 format!("{selected_path} was not present in the pull request diff")
                             })
                         })
@@ -1402,8 +1710,7 @@ impl GitHubView {
                 }
                 this.diff_loading = false;
                 match result {
-                    Ok(diff) => {
-                        let markdown = format!("```diff\n{}\n```", diff.replace("```", "` ` `"));
+                    Ok(markdown) => {
                         this.pr_diff_body
                             .update(cx, |body, cx| body.set_text(&markdown, cx));
                     }
@@ -1756,30 +2063,7 @@ impl GitHubView {
         let selected = self.selected_pr == Some(pr.number);
         let number = pr.number;
         let linked_task = self.linked_pr_task(&pr.head_ref, cx);
-        let failing_checks = pr
-            .checks
-            .iter()
-            .filter(|check| {
-                check
-                    .conclusion
-                    .as_deref()
-                    .is_some_and(|value| !matches!(value, "SUCCESS" | "NEUTRAL" | "SKIPPED"))
-            })
-            .count();
-        let pending_checks = pr
-            .checks
-            .iter()
-            .filter(|check| check.conclusion.is_none())
-            .count();
-        let checks_label = if pr.checks.is_empty() {
-            "No checks".to_owned()
-        } else if failing_checks > 0 {
-            format!("{failing_checks} failing")
-        } else if pending_checks > 0 {
-            format!("{pending_checks} pending")
-        } else {
-            format!("{} passing", pr.checks.len())
-        };
+        let checks_label = pr_check_label(&pr.checks);
         let theme = cx.theme().colors;
         div()
             .id(SharedString::from(format!("github-pr-{number}")))
@@ -2043,8 +2327,9 @@ impl GitHubView {
         let Some(pr) = self.pr_detail.as_ref() else {
             return div().into_any_element();
         };
-        let prompt = draft_reply_prompt(&row.url, &row.body);
+        let prompt = draft_reply_prompt(&row);
         let head_ref = pr.head_ref.clone();
+        let location = row.location();
         let theme = cx.theme().colors;
         div()
             .id(SharedString::from(format!(
@@ -2061,7 +2346,7 @@ impl GitHubView {
                     .items_center()
                     .gap_2()
                     .text_xs()
-                    .child(Tag::new().small().child(row.kind.label()))
+                    .child(Tag::new().small().child(row.label()))
                     .child(
                         div()
                             .font_weight(FontWeight::MEDIUM)
@@ -2072,7 +2357,7 @@ impl GitHubView {
                             .text_color(theme.muted_foreground)
                             .child(row.timestamp.clone()),
                     )
-                    .children(row.path.clone().map(|path| Tag::new().small().child(path)))
+                    .children(location.map(|location| Tag::new().small().child(location)))
                     .child(div().flex_1())
                     .child(
                         Button::new(SharedString::from(format!(
@@ -2126,7 +2411,8 @@ impl GitHubView {
                 theme.background
             })
             .hover(|style| style.bg(theme.list_hover))
-            .on_click(cx.listener(move |this, _, _, cx| {
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.pr_file_focus.focus(window, cx);
                 this.select_pr_file(path.clone(), cx);
             }))
             .child(div().text_sm().truncate().child(file.path))
@@ -2143,7 +2429,14 @@ impl GitHubView {
             .into_any_element()
     }
 
-    fn render_pr_summary(&self, detail: &GitHubPrInfo, cx: &mut Context<Self>) -> AnyElement {
+    fn render_pr_summary(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(detail) = self
+            .pr_detail
+            .as_ref()
+            .filter(|detail| self.selected_pr == Some(detail.number))
+        else {
+            return self.render_empty("Loading details…", cx);
+        };
         let theme = cx.theme().colors;
         let linked = self.linked_pr_task(&detail.head_ref, cx);
         div()
@@ -2304,8 +2597,14 @@ impl GitHubView {
                     .relative()
                     .w_64()
                     .min_h_0()
-                    .border_r_1()
+                    .border_1()
                     .border_color(theme.border)
+                    .focus(|style| style.border_color(theme.primary))
+                    .track_focus(&self.pr_file_focus)
+                    .key_context(GITHUB_PR_FILE_LIST_CONTEXT)
+                    .on_action(cx.listener(Self::select_previous_pr_file))
+                    .on_action(cx.listener(Self::select_next_pr_file))
+                    .on_action(cx.listener(Self::open_selected_pr_file))
                     .child(
                         list(
                             self.pr_file_list_state.clone(),
@@ -2326,29 +2625,56 @@ impl GitHubView {
                     .min_w_0()
                     .min_h_0()
                     .flex_1()
-                    .overflow_y_scrollbar()
-                    .p_4()
                     .children(diff_status)
-                    .children(
-                        (!self.diff_loading && self.diff_error.is_none())
-                            .then(|| TextView::new(&self.pr_diff_body).selectable(true)),
-                    ),
+                    .children((!self.diff_loading && self.diff_error.is_none()).then(|| {
+                        TextView::new(&self.pr_diff_body)
+                            .selectable(true)
+                            .scrollable(true)
+                            .size_full()
+                            .p_4()
+                    })),
             )
             .into_any_element()
     }
 
     fn render_pr_detail(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().colors;
-        let Some(detail) = self
-            .pr_detail
-            .as_ref()
-            .filter(|detail| self.selected_pr == Some(detail.number))
-            .cloned()
-        else {
-            return self.render_empty("Loading details…", cx);
+        let (number, title, url, state, author, head_ref, base_ref, updated_at) = {
+            let Some(detail) = self
+                .pr_detail
+                .as_ref()
+                .filter(|detail| self.selected_pr == Some(detail.number))
+            else {
+                return self.render_empty("Loading details…", cx);
+            };
+            (
+                detail.number,
+                detail.title.clone(),
+                detail.url.clone(),
+                detail.state.clone(),
+                detail.author.clone(),
+                detail.head_ref.clone(),
+                detail.base_ref.clone(),
+                detail.updated_at.clone(),
+            )
         };
         let tab = self.current_pr_tab();
-        let detail_url = detail.url.clone();
+        let tabs_focus = self.pr_tabs_focus.clone();
+        let tabs = TabBar::new("github-pr-detail-tabs")
+            .underline()
+            .small()
+            .selected_index(tab.ix())
+            .children(
+                PrDetailTab::ALL
+                    .into_iter()
+                    .map(|candidate| Tab::new().label(candidate.label())),
+            )
+            .on_click(cx.listener(move |this, ix, window, cx| {
+                tabs_focus.focus(window, cx);
+                if let Some(candidate) = PrDetailTab::ALL.get(*ix).copied() {
+                    this.select_pr_tab(candidate, cx);
+                }
+            }));
         div()
             .size_full()
             .min_h_0()
@@ -2363,7 +2689,7 @@ impl GitHubView {
                         div()
                             .text_lg()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(detail.title.clone()),
+                            .child(title),
                     )
                     .child(
                         div()
@@ -2372,12 +2698,7 @@ impl GitHubView {
                             .text_color(theme.muted_foreground)
                             .child(format!(
                                 "#{} · {} · {} · {} → {} · {}",
-                                detail.number,
-                                detail.state,
-                                detail.author,
-                                detail.head_ref,
-                                detail.base_ref,
-                                detail.updated_at
+                                number, state, author, head_ref, base_ref, updated_at
                             )),
                     )
                     .child(
@@ -2388,35 +2709,26 @@ impl GitHubView {
                             .gap_2()
                             .child(
                                 Link::new("github-open-pr-browser")
-                                    .href(detail_url)
+                                    .href(url)
                                     .child("Open on GitHub"),
                             )
-                            .children(
-                                [
-                                    PrDetailTab::Summary,
-                                    PrDetailTab::Timeline,
-                                    PrDetailTab::Code,
-                                ]
-                                .into_iter()
-                                .map(|candidate| {
-                                    Button::new(SharedString::from(format!(
-                                        "github-pr-tab-{}",
-                                        candidate.label()
-                                    )))
-                                    .label(candidate.label())
-                                    .ghost()
-                                    .small()
-                                    .selected(tab == candidate)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.select_pr_tab(candidate, cx);
-                                    }))
-                                }),
+                            .child(
+                                div()
+                                    .id("github-pr-detail-tabs-focus")
+                                    .border_1()
+                                    .border_color(theme.background)
+                                    .focus(|style| style.border_color(theme.primary))
+                                    .track_focus(&self.pr_tabs_focus)
+                                    .key_context(GITHUB_PR_TABS_CONTEXT)
+                                    .on_action(cx.listener(Self::select_previous_pr_tab))
+                                    .on_action(cx.listener(Self::select_next_pr_tab))
+                                    .child(tabs),
                             ),
                     )
                     .child(div().mt_3().border_b_1().border_color(theme.border)),
             )
             .child(div().flex_1().min_h_0().child(match tab {
-                PrDetailTab::Summary => self.render_pr_summary(&detail, cx),
+                PrDetailTab::Summary => self.render_pr_summary(cx),
                 PrDetailTab::Timeline => self.render_pr_timeline(cx),
                 PrDetailTab::Code => self.render_pr_code(cx),
             }))
@@ -2745,20 +3057,21 @@ impl Render for GitHubView {
 #[cfg(test)]
 mod tests {
     use super::{
-        detail_result_matches_list, draft_reply_prompt, github_query_mode,
-        github_result_matches_request, github_server_query, issue_filter_matches,
-        issue_start_activation, issue_start_confirmation, issue_start_dialog_result,
-        linked_pr_session, linked_session_fingerprint, linked_session_ids, linked_session_status,
-        linked_sessions_across_projects, list_count_splice, merge_pr_timeline,
-        pr_diff_result_matches_request, selected_file_diff, selected_issue_after_refresh,
-        GitHubQueryMode, GitHubRequest, GitHubTab, PrDetailTab, PrDiffRequest, PrTimelineKind,
-        PrWorkspaceKey, PrWorkspaceSelections,
+        detail_result_matches_list, draft_reply_prompt, github_link_fingerprint_rows,
+        github_query_mode, github_result_matches_request, github_server_query,
+        issue_filter_matches, issue_start_activation, issue_start_confirmation,
+        issue_start_dialog_result, linked_pr_session, linked_session_fingerprint,
+        linked_session_ids, linked_session_status, linked_sessions_across_projects,
+        list_count_splice, merge_pr_timeline, pr_check_label, pr_diff_result_matches_request,
+        pr_file_action_ix, prepare_selected_diff, selected_file_diff, selected_issue_after_refresh,
+        GitHubQueryMode, GitHubRequest, GitHubTab, PrDetailTab, PrDiffRequest, PrFileAction,
+        PrTimelineKind, PrWorkspaceKey, PrWorkspaceSelections,
     };
     use crate::state::{SessionHealth, SessionInfo};
     use std::path::PathBuf;
     use threadlane_git::{
-        GitHubIssueRef, GitHubIssueSummary, GitHubPrFile, GitHubPrInfo, PrConversationComment,
-        PrReview, PrReviewComment,
+        GitHubIssueRef, GitHubIssueSummary, GitHubPrFile, GitHubPrInfo, PrCheckStatus,
+        PrConversationComment, PrReview, PrReviewComment,
     };
 
     fn issue(number: u64) -> GitHubIssueSummary {
@@ -3072,11 +3385,13 @@ mod tests {
             reviews: vec![
                 PrReview {
                     remote_id: "review-first".into(),
+                    state: "APPROVED".into(),
                     submitted_at: "2026-08-30T12:01:00Z".into(),
                     ..Default::default()
                 },
                 PrReview {
                     remote_id: "review-tie".into(),
+                    state: "CHANGES_REQUESTED".into(),
                     submitted_at: "2026-08-30T12:03:00Z".into(),
                     ..Default::default()
                 },
@@ -3085,6 +3400,7 @@ mod tests {
                 remote_id: "inline-tie".into(),
                 created_at: "2026-08-30T12:03:00Z".into(),
                 path: Some("src/lib.rs".into()),
+                line: Some(17),
                 ..Default::default()
             }],
             ..Default::default()
@@ -3105,10 +3421,87 @@ mod tests {
             ]
         );
         assert_eq!(rows[0].kind, PrTimelineKind::Review);
+        assert_eq!(rows[0].label(), "Approved");
+        assert_eq!(rows[3].label(), "Changes requested");
         assert_eq!(rows[4].kind, PrTimelineKind::InlineReviewComment);
         assert_eq!(rows[4].path.as_deref(), Some("src/lib.rs"));
+        assert_eq!(rows[4].line, Some(17));
+        assert_eq!(rows[4].location().as_deref(), Some("src/lib.rs:17"));
         assert_eq!(rows[0].url, "https://github.com/threadlane/app/pull/42");
         assert_eq!(rows[2].url, "https://github.com/threadlane/app/pull/42");
+
+        let review_prompt = draft_reply_prompt(&rows[0]);
+        assert!(review_prompt.contains("Review state: Approved"));
+        let inline_prompt = draft_reply_prompt(&rows[4]);
+        assert!(inline_prompt.contains("Location: src/lib.rs:17"));
+    }
+
+    #[test]
+    fn github_pr_link_fingerprint_tracks_branch_only_sessions_and_active_task() {
+        let project = PathBuf::from("/projects/app");
+        let mut first = session("first", None);
+        first.git_branch = Some("feature/first".into());
+        let mut second = session("second", None);
+        second.git_branch = Some("feature/second".into());
+
+        let fingerprint = |active: Option<&str>, first: &SessionInfo, second: &SessionInfo| {
+            github_link_fingerprint_rows(
+                active,
+                [
+                    ("App", project.as_path(), first, None, false, false),
+                    ("App", project.as_path(), second, None, false, false),
+                ],
+            )
+        };
+
+        let baseline = fingerprint(Some("first"), &first, &second);
+        first.git_branch = Some("feature/renamed".into());
+        assert_ne!(baseline, fingerprint(Some("first"), &first, &second));
+        first.git_branch = Some("feature/first".into());
+        assert_ne!(baseline, fingerprint(Some("second"), &first, &second));
+    }
+
+    #[test]
+    fn github_pr_check_rollup_matches_git_status_classification() {
+        let check = |status: &str, conclusion: Option<&str>| PrCheckStatus {
+            name: status.into(),
+            status: status.into(),
+            conclusion: conclusion.map(str::to_owned),
+            details_url: None,
+        };
+
+        assert_eq!(
+            pr_check_label(&[
+                check("PENDING", Some("PENDING")),
+                check("EXPECTED", Some("EXPECTED")),
+            ]),
+            "2 pending"
+        );
+        assert_eq!(
+            pr_check_label(&[check("COMPLETED", Some("SUCCESS"))]),
+            "1 passing"
+        );
+        assert_eq!(
+            pr_check_label(&[check("COMPLETED", Some("FAILURE"))]),
+            "1 failing"
+        );
+    }
+
+    #[test]
+    fn github_pr_tab_arrows_and_file_actions_keep_bounded_selection() {
+        assert_eq!(PrDetailTab::Summary.adjacent(1), PrDetailTab::Timeline);
+        assert_eq!(PrDetailTab::Timeline.adjacent(1), PrDetailTab::Code);
+        assert_eq!(PrDetailTab::Code.adjacent(1), PrDetailTab::Code);
+        assert_eq!(PrDetailTab::Code.adjacent(-1), PrDetailTab::Timeline);
+
+        assert_eq!(
+            pr_file_action_ix(Some(1), 3, PrFileAction::Previous),
+            Some(0)
+        );
+        assert_eq!(pr_file_action_ix(Some(1), 3, PrFileAction::Next), Some(2));
+        assert_eq!(pr_file_action_ix(Some(2), 3, PrFileAction::Next), Some(2));
+        assert_eq!(pr_file_action_ix(Some(1), 3, PrFileAction::Open), Some(1));
+        assert_eq!(pr_file_action_ix(None, 0, PrFileAction::Open), None);
     }
 
     #[test]
@@ -3206,10 +3599,17 @@ mod tests {
     #[test]
     fn github_pr_reply_prompt_is_bounded_and_keeps_the_publish_boundary() {
         let instruction = "Return an editable reply draft; do not publish it.";
-        let prompt = draft_reply_prompt(
-            "https://github.com/threadlane/app/pull/42#discussion_r7",
-            &"context ".repeat(1_000),
-        );
+        let prompt = draft_reply_prompt(&super::PrTimelineRow {
+            remote_id: "7".into(),
+            kind: PrTimelineKind::InlineReviewComment,
+            author: "reviewer".into(),
+            body: "context ".repeat(1_000),
+            timestamp: "2026-08-30T12:03:00Z".into(),
+            url: "https://github.com/threadlane/app/pull/42#discussion_r7".into(),
+            review_state: None,
+            path: Some("src/lib.rs".into()),
+            line: Some(7),
+        });
 
         assert!(prompt.contains("https://github.com/threadlane/app/pull/42#discussion_r7"));
         assert!(prompt.contains("> context"));
@@ -3242,7 +3642,7 @@ mod tests {
 
     #[test]
     fn github_pr_selected_diff_contains_only_the_requested_file() {
-        let raw = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n+first\ndiff --git a/src/view.rs b/src/view.rs\n--- a/src/view.rs\n+++ b/src/view.rs\n+second\n";
+        let raw = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n+first\n+diff --git a/not-a-header b/not-a-header\n trailing context\ndiff --git a/src/view.rs b/src/view.rs\n--- a/src/view.rs\n+++ b/src/view.rs\n+second\n";
 
         let selected = selected_file_diff(raw, "src/view.rs").expect("selected diff");
 
@@ -3251,5 +3651,57 @@ mod tests {
         assert!(!selected.contains("src/lib.rs"));
         assert!(!selected.contains("+first"));
         assert!(selected_file_diff(raw, "src/missing.rs").is_none());
+
+        let first = selected_file_diff(raw, "src/lib.rs").expect("first diff");
+        assert!(first.contains("+diff --git a/not-a-header b/not-a-header"));
+        assert!(first.contains(" trailing context"));
+    }
+
+    #[test]
+    fn github_pr_diff_handles_git_quoted_unicode_rename_and_binary_sections() {
+        let raw = concat!(
+            "diff --git \"a/src/caf\\303\\251 file.rs\" \"b/src/caf\\303\\251 file.rs\"\n",
+            "--- \"a/src/caf\\303\\251 file.rs\"\n",
+            "+++ \"b/src/caf\\303\\251 file.rs\"\n",
+            "+unicode\n",
+            "diff --git \"a/old name.bin\" \"b/new name.bin\"\n",
+            "similarity index 100%\n",
+            "rename from old name.bin\n",
+            "rename to new name.bin\n",
+            "Binary files a/old name.bin and b/new name.bin differ\n",
+        );
+
+        let unicode = selected_file_diff(raw, "src/café file.rs").expect("unicode diff");
+        assert!(unicode.starts_with("diff --git \"a/src/caf\\303\\251 file.rs\""));
+        assert!(unicode.ends_with("+unicode\n"));
+        let renamed = selected_file_diff(raw, "new name.bin").expect("renamed binary diff");
+        assert!(renamed.contains("rename from old name.bin"));
+        assert!(renamed.ends_with("Binary files a/old name.bin and b/new name.bin differ\n"));
+    }
+
+    #[test]
+    fn github_pr_diff_preparation_preserves_patch_bytes_and_uses_a_safe_fence() {
+        let raw = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n+let ticks = ````;\n";
+        let selected = selected_file_diff(raw, "src/lib.rs").expect("selected diff");
+
+        let prepared = prepare_selected_diff(raw, "src/lib.rs").expect("prepared diff");
+
+        assert_eq!(selected, raw);
+        assert!(prepared.starts_with("`````diff\n"));
+        assert!(prepared.contains(raw));
+        assert!(prepared.ends_with("`````"));
+    }
+
+    #[test]
+    fn github_pr_file_identity_changes_only_for_a_different_path() {
+        let key = PrWorkspaceKey {
+            project: PathBuf::from("/projects/app"),
+            number: 42,
+        };
+        let mut selections = PrWorkspaceSelections::default();
+
+        assert!(selections.select_file(key.clone(), "src/lib.rs".into()));
+        assert!(!selections.select_file(key.clone(), "src/lib.rs".into()));
+        assert!(selections.select_file(key, "src/view.rs".into()));
     }
 }
