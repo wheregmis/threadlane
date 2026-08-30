@@ -1494,7 +1494,9 @@ impl AppState {
         Ok(())
     }
 
-    fn create_new_session(&mut self) -> Result<String, String> {
+    fn create_new_session(
+        &mut self,
+    ) -> Result<threadlane_protocol::session::CreateSessionRequest, String> {
         let Some(work_dir) = self.active_work_dir.clone() else {
             return Err("No active project directory".into());
         };
@@ -1504,34 +1506,20 @@ impl AppState {
             .as_nanos();
         let session_id = format!("session_{now_nanos}");
 
-        let work_dir_str = work_dir.to_string_lossy().to_string();
-        let session_id_clone = session_id.clone();
-        let model = self.selected_model.clone();
-        if let Ok(executor) = crate::services::chat::executor() {
-            executor.spawn(async move {
-                if let Ok(client) = crate::services::daemon_client::get_daemon_client().await {
-                    let _ = client
-                        .create_session(threadlane_protocol::session::CreateSessionRequest {
-                            project_path: work_dir_str,
-                            session_id: Some(session_id_clone),
-                            model: Some(model),
-                            title: None,
-                        })
-                        .await;
-                }
-            });
-        }
-
-        if let Some(project) = self
-            .projects
-            .iter_mut()
-            .find(|project| project.work_dir == work_dir)
-        {
-            project.sessions = discover_sessions_in_project(&work_dir);
-        }
-        let _ = self.select_session(work_dir, session_id.clone());
+        self.active_session_id = Some(session_id.clone());
         self.is_new_task = false;
-        Ok(session_id)
+        self.messages = Arc::new(Vec::new());
+        self.active_plan = SessionPlan::default();
+        self.is_generating = false;
+        self.session_status = None;
+        self.persist_project_selection(&work_dir, Some(&session_id));
+
+        Ok(threadlane_protocol::session::CreateSessionRequest {
+            project_path: work_dir.to_string_lossy().into_owned(),
+            session_id: Some(session_id),
+            model: Some(self.selected_model.clone()),
+            title: None,
+        })
     }
 
     /// Hydrates trajectory, token usage, and metrics projections from durable harness records.
@@ -3464,9 +3452,9 @@ impl AppState {
             return Ok(());
         }
 
-        if self.active_session_id.is_none() || self.active_work_dir.is_none() {
-            self.create_new_session()?;
-        }
+        let create_session = (self.active_session_id.is_none() || self.active_work_dir.is_none())
+            .then(|| self.create_new_session())
+            .transpose()?;
 
         let (work_dir, session_id) =
             match (self.active_work_dir.clone(), self.active_session_id.clone()) {
@@ -3488,6 +3476,7 @@ impl AppState {
         crate::services::chat::execute_prompt(
             runtime,
             session_id.clone(),
+            create_session,
             text.clone(),
             images.clone(),
             self.reasoning_effort,
@@ -6010,6 +5999,21 @@ mod tests {
             .any(|t| t.run_id.as_deref() == Some("run-branch-b")));
 
         let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod optimistic_prompt_tests {
+    use super::*;
+
+    #[test]
+    fn new_session_does_not_queue_stale_hydration() {
+        let mut state = AppState::load_from_registry_with_options(Vec::new(), false);
+        state.active_work_dir = Some(std::env::temp_dir());
+
+        state.create_new_session().unwrap();
+
+        assert!(state.pending_hydrations.is_empty());
     }
 }
 

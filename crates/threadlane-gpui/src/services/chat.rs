@@ -3,7 +3,8 @@ use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender as Sender;
 
 use threadlane_protocol::{
-    GenerateTitleRequest, ImageAttachment, ReasoningEffort, SendPromptRequest, SessionEvent,
+    CreateSessionRequest, GenerateTitleRequest, ImageAttachment, ReasoningEffort,
+    SendPromptRequest, SessionEvent,
 };
 
 use crate::services::sessions::SessionRuntime;
@@ -26,6 +27,7 @@ pub(crate) fn executor() -> Result<&'static tokio::runtime::Runtime, String> {
 pub(crate) fn execute_prompt(
     runtime: Arc<SessionRuntime>,
     session_id: String,
+    create_session: Option<CreateSessionRequest>,
     text: String,
     images: Vec<ImageAttachment>,
     reasoning_effort: ReasoningEffort,
@@ -62,7 +64,32 @@ pub(crate) fn execute_prompt(
         };
 
         let mut events = client.subscribe_session_events();
-        let _ = client.subscribe_session(&task_session_id).await;
+        if let Some(request) = create_session {
+            if let Err(e) = client.create_session(request).await {
+                task_runtime.finish_generation(Some(e.clone()));
+                let _ = task_stream_tx.send(ChatStreamEvent::Agent {
+                    session_id: task_session_id.clone(),
+                    event: SessionEvent::Error { message: e },
+                });
+                let _ = task_stream_tx.send(ChatStreamEvent::Finished {
+                    session_id: task_session_id,
+                    session_file: task_runtime.session_file.clone(),
+                });
+                return;
+            }
+        }
+        if let Err(e) = client.subscribe_session(&task_session_id).await {
+            task_runtime.finish_generation(Some(e.clone()));
+            let _ = task_stream_tx.send(ChatStreamEvent::Agent {
+                session_id: task_session_id.clone(),
+                event: SessionEvent::Error { message: e },
+            });
+            let _ = task_stream_tx.send(ChatStreamEvent::Finished {
+                session_id: task_session_id,
+                session_file: task_runtime.session_file.clone(),
+            });
+            return;
+        }
         let prompt_res = client
             .send_prompt(SendPromptRequest {
                 session_id: task_session_id.clone(),
