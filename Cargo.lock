@@ -7331,6 +7331,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "threadlane-auth",
 ]
 
 [[package]]
