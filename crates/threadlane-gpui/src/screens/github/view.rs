@@ -14,7 +14,7 @@ use gpui_component::spinner::Spinner;
 use gpui_component::status_bar::StatusBar;
 use gpui_component::tag::Tag;
 use gpui_component::text::{TextView, TextViewState};
-use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable};
+use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable, WindowExt};
 use threadlane_git::{
     GitHubIssueDetail, GitHubIssueRef, GitHubIssueSummary, GitHubPrInfo, GitHubPullRequestSummary,
     GitHubRepository,
@@ -337,6 +337,213 @@ struct LinkedSession {
     project_name: String,
     session: SessionInfo,
     status: &'static str,
+    branch: Option<String>,
+    pr_number: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct IssueStartConfirmation {
+    copy: String,
+    model: String,
+    reasoning_effort: String,
+    branch_preview: String,
+    branch_disclosure: String,
+    start_enabled: bool,
+    start_disabled_reason: Option<String>,
+    show_open_task: bool,
+    start_label: &'static str,
+}
+
+fn issue_start_confirmation(
+    issue: &GitHubIssueRef,
+    title: &str,
+    model: &str,
+    reasoning_effort: &str,
+    is_git_repository: bool,
+    has_linked_task: bool,
+) -> IssueStartConfirmation {
+    IssueStartConfirmation {
+        copy: "Local Threadlane task".into(),
+        model: model.into(),
+        reasoning_effort: reasoning_effort.into(),
+        branch_preview: AppState::issue_branch_name(issue.number, title, "xxxxxx"),
+        branch_disclosure: "A unique six-character suffix is assigned when the task starts.".into(),
+        start_enabled: is_git_repository,
+        start_disabled_reason: (!is_git_repository)
+            .then_some("This project is not a Git repository.".into()),
+        show_open_task: has_linked_task,
+        start_label: if has_linked_task {
+            "Start another"
+        } else {
+            "Start task"
+        },
+    }
+}
+
+struct IssueStartDialog {
+    model: Entity<AppState>,
+    work_dir: PathBuf,
+    issue: GitHubIssueRef,
+    title: String,
+    confirmation: IssueStartConfirmation,
+    error: Option<String>,
+}
+
+impl IssueStartDialog {
+    fn start(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.confirmation.start_enabled {
+            return false;
+        }
+        let result = self.model.update(cx, |state, cx| {
+            let result = state.start_issue_work(
+                self.work_dir.clone(),
+                self.issue.clone(),
+                self.title.clone(),
+            );
+            if let Err(error) = &result {
+                state.session_status = Some(error.clone());
+            }
+            cx.notify();
+            result
+        });
+        match result {
+            Ok(_) => true,
+            Err(error) => {
+                self.error = Some(error);
+                cx.notify();
+                false
+            }
+        }
+    }
+}
+
+impl Render for IssueStartDialog {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().colors;
+        let confirmation = &self.confirmation;
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .text_sm()
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(confirmation.copy.clone()),
+            )
+            .child(format!("Issue: #{} {}", self.issue.number, self.title))
+            .child(format!("Model: {}", confirmation.model))
+            .child(format!(
+                "Reasoning effort: {}",
+                confirmation.reasoning_effort
+            ))
+            .child(format!("Branch preview: {}", confirmation.branch_preview))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(confirmation.branch_disclosure.clone()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .p_2()
+                    .bg(theme.secondary)
+                    .rounded_md()
+                    .child("Isolated worktree")
+                    .child(Tag::new().small().child("Locked")),
+            )
+            .children(confirmation.start_disabled_reason.as_ref().map(|reason| {
+                div()
+                    .text_xs()
+                    .text_color(theme.warning)
+                    .child(reason.clone())
+            }))
+            .children(self.error.as_ref().map(|error| {
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .text_color(theme.danger)
+                    .child(error.clone())
+                    .child(
+                        Button::new("retry-issue-task")
+                            .label("Retry")
+                            .small()
+                            .on_click(cx.listener(|this, _event, window, cx| {
+                                if this.start(cx) {
+                                    window.close_dialog(cx);
+                                }
+                            })),
+                    )
+            }))
+    }
+}
+
+fn open_issue_start_dialog(
+    model: Entity<AppState>,
+    work_dir: PathBuf,
+    issue: GitHubIssueRef,
+    title: String,
+    has_linked_task: bool,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let (selected_model, reasoning_effort) = {
+        let state = model.read(cx);
+        (state.selected_model.clone(), state.reasoning_effort.label())
+    };
+    let confirmation = issue_start_confirmation(
+        &issue,
+        &title,
+        &selected_model,
+        reasoning_effort,
+        threadlane_git::is_git_repo(&work_dir),
+        has_linked_task,
+    );
+    let start_enabled = confirmation.start_enabled;
+    let disabled_reason = confirmation.start_disabled_reason.clone();
+    let dialog_state = cx.new(|_| IssueStartDialog {
+        model,
+        work_dir,
+        issue,
+        title,
+        confirmation,
+        error: None,
+    });
+    window.open_dialog(cx, move |dialog, _window, _cx| {
+        let confirm_state = dialog_state.clone();
+        dialog
+            .title("Start local task?")
+            .child(dialog_state.clone())
+            .footer(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("cancel-issue-task")
+                            .label("Cancel")
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(
+                        Button::new("confirm-issue-task")
+                            .primary()
+                            .label("Start task")
+                            .disabled(!start_enabled)
+                            .tooltip(disabled_reason.clone().unwrap_or_default())
+                            .on_click(move |_, window, cx| {
+                                if confirm_state.update(cx, |dialog, cx| dialog.start(cx)) {
+                                    window.close_dialog(cx);
+                                }
+                            }),
+                    ),
+            )
+            .on_ok(|_, _, _| false)
+    });
 }
 
 pub struct GitHubView {
@@ -898,6 +1105,14 @@ impl GitHubView {
                     state.pending_permissions.contains_key(&session.id),
                     state.session_is_generating(&session.session_file),
                 ),
+                branch: session.git_branch.clone(),
+                pr_number: session.git_branch.as_ref().and_then(|branch| {
+                    state
+                        .git_prs
+                        .get(&(session.work_dir.clone(), branch.clone()))
+                        .and_then(|pr| pr.as_ref())
+                        .map(|pr| pr.number)
+                }),
                 session: session.clone(),
             })
             .collect()
@@ -1398,6 +1613,7 @@ impl GitHubView {
         let start_work_dir = self.project_work_dir.clone();
         let start_issue = issue.clone();
         let start_title = title.clone();
+        let start_has_linked_task = !linked_sessions.is_empty();
 
         div()
             .size_full()
@@ -1437,23 +1653,25 @@ impl GitHubView {
                     .children(start_issue.map(|issue| {
                         Button::new("github-start-agent-task")
                             .icon(IconName::Play)
-                            .label("Start agent task")
+                            .label(if start_has_linked_task {
+                                "Start another"
+                            } else {
+                                "Start task"
+                            })
                             .small()
-                            .on_click(move |_, _, cx| {
+                            .on_click(move |_, window, cx| {
                                 let Some(work_dir) = start_work_dir.clone() else {
                                     return;
                                 };
-                                start_model.update(cx, |state, cx| {
-                                    controller::dispatch(
-                                        state,
-                                        AppAction::StartIssueWork {
-                                            work_dir,
-                                            issue: issue.clone(),
-                                            title: start_title.clone(),
-                                        },
-                                    );
-                                    cx.notify();
-                                });
+                                open_issue_start_dialog(
+                                    start_model.clone(),
+                                    work_dir,
+                                    issue.clone(),
+                                    start_title.clone(),
+                                    start_has_linked_task,
+                                    window,
+                                    cx,
+                                );
                             })
                     })),
             )
@@ -1473,6 +1691,9 @@ impl GitHubView {
                             .child("Linked tasks"),
                     )
                     .children(linked_sessions.into_iter().map(|linked| {
+                        let open_model = self.model.clone();
+                        let open_work_dir = linked.session.work_dir.clone();
+                        let open_session_id = linked.session.id.clone();
                         div()
                             .mt_2()
                             .flex()
@@ -1493,6 +1714,39 @@ impl GitHubView {
                                     .child(linked.project_name),
                             )
                             .child(Tag::new().small().child(linked.status))
+                            .children(
+                                linked
+                                    .session
+                                    .is_worktree
+                                    .then(|| Tag::new().small().child("Worktree")),
+                            )
+                            .children(linked.branch.map(|branch| Tag::new().small().child(branch)))
+                            .children(
+                                linked.pr_number.map(|number| {
+                                    Tag::new().small().child(format!("PR #{number}"))
+                                }),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!(
+                                    "open-linked-task-{}",
+                                    open_session_id
+                                )))
+                                .label("Open task")
+                                .ghost()
+                                .xsmall()
+                                .on_click(move |_, _, cx| {
+                                    open_model.update(cx, |state, cx| {
+                                        controller::dispatch(
+                                            state,
+                                            AppAction::SelectSession {
+                                                work_dir: open_work_dir.clone(),
+                                                session_id: open_session_id.clone(),
+                                            },
+                                        );
+                                        cx.notify();
+                                    });
+                                }),
+                            )
                             .into_any_element()
                     }))
             }))
@@ -1617,9 +1871,9 @@ impl Render for GitHubView {
 mod tests {
     use super::{
         detail_result_matches_list, github_query_mode, github_result_matches_request,
-        github_server_query, issue_filter_matches, linked_session_ids, linked_session_status,
-        linked_sessions_across_projects, list_count_splice, selected_issue_after_refresh,
-        GitHubQueryMode, GitHubRequest, GitHubTab,
+        github_server_query, issue_filter_matches, issue_start_confirmation, linked_session_ids,
+        linked_session_status, linked_sessions_across_projects, list_count_splice,
+        selected_issue_after_refresh, GitHubQueryMode, GitHubRequest, GitHubTab,
     };
     use crate::state::{SessionHealth, SessionInfo};
     use std::path::PathBuf;
@@ -1817,6 +2071,50 @@ mod tests {
             linked_session_status(&linked, false, false),
             "Not checked out"
         );
+    }
+
+    #[test]
+    fn issue_start_confirmation_disables_non_git_projects_and_uses_a_safe_preview() {
+        let issue = issue(42).issue;
+        let confirmation = issue_start_confirmation(
+            &issue,
+            "Fix linked task browser",
+            "gpt-5.6",
+            "High",
+            false,
+            false,
+        );
+
+        assert!(!confirmation.start_enabled);
+        assert_eq!(
+            confirmation.start_disabled_reason.as_deref(),
+            Some("This project is not a Git repository.")
+        );
+        assert_eq!(
+            confirmation.branch_preview,
+            "issue/42-fix-linked-task-browser-xxxxxx"
+        );
+        assert_eq!(confirmation.copy, "Local Threadlane task");
+        assert_eq!(
+            confirmation.branch_disclosure,
+            "A unique six-character suffix is assigned when the task starts."
+        );
+        assert!(!confirmation.copy.to_lowercase().contains("assigned"));
+    }
+
+    #[test]
+    fn issue_start_confirmation_offers_open_and_another_for_linked_tasks() {
+        let confirmation = issue_start_confirmation(
+            &issue(42).issue,
+            "Fix linked task browser",
+            "gpt-5.6",
+            "High",
+            true,
+            true,
+        );
+
+        assert!(confirmation.show_open_task);
+        assert_eq!(confirmation.start_label, "Start another");
     }
 
     #[test]

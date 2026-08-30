@@ -411,26 +411,6 @@ fn file_mtime(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-fn issue_branch_name(number: u64, title: &str, suffix: &str) -> String {
-    let slug = title
-        .chars()
-        .flat_map(char::to_lowercase)
-        .fold(String::new(), |mut slug, character| {
-            if character.is_ascii_alphanumeric() {
-                slug.push(character);
-            } else if !slug.is_empty() && !slug.ends_with('-') {
-                slug.push('-');
-            }
-            slug
-        })
-        .trim_matches('-')
-        .to_string();
-    format!(
-        "issue/{number}-{}-{suffix}",
-        if slug.is_empty() { "task" } else { &slug }
-    )
-}
-
 fn extract_session_title(store: &impl SessionStore, fallback_id: &str) -> String {
     if let Some(name) = store.name() {
         if !name.trim().is_empty() {
@@ -1078,6 +1058,26 @@ impl Default for AppState {
 }
 
 impl AppState {
+    pub(crate) fn issue_branch_name(number: u64, title: &str, suffix: &str) -> String {
+        let slug = title
+            .chars()
+            .flat_map(char::to_lowercase)
+            .fold(String::new(), |mut slug, character| {
+                if character.is_ascii_alphanumeric() {
+                    slug.push(character);
+                } else if !slug.is_empty() && !slug.ends_with('-') {
+                    slug.push('-');
+                }
+                slug
+            })
+            .trim_matches('-')
+            .to_string();
+        format!(
+            "issue/{number}-{}-{suffix}",
+            if slug.is_empty() { "task" } else { &slug }
+        )
+    }
+
     pub(crate) fn load() -> Self {
         Self::load_from_registry(load_project_registry())
     }
@@ -2025,7 +2025,7 @@ impl AppState {
                 .as_nanos()
         );
         let suffix = session_id.rsplit('_').next().unwrap_or(&session_id);
-        let branch = issue_branch_name(
+        let branch = Self::issue_branch_name(
             issue.number,
             &title,
             &suffix[suffix.len().saturating_sub(6)..],
@@ -4608,10 +4608,13 @@ mod tests {
     #[test]
     fn issue_branch_name_slugs_titles_and_uses_the_session_suffix() {
         assert_eq!(
-            issue_branch_name(123, "Fix flaky auth!", "abcdef"),
+            AppState::issue_branch_name(123, "Fix flaky auth!", "abcdef"),
             "issue/123-fix-flaky-auth-abcdef"
         );
-        assert_eq!(issue_branch_name(7, "___", "123456"), "issue/7-task-123456");
+        assert_eq!(
+            AppState::issue_branch_name(7, "___", "123456"),
+            "issue/7-task-123456"
+        );
     }
 
     fn run_git(work_dir: &Path, args: &[&str]) {

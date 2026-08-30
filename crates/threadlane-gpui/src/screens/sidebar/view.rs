@@ -8,6 +8,7 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::theme::ActiveTheme;
+use gpui_component::tooltip::Tooltip;
 use gpui_component::{Icon, IconName, Selectable, Sizable, WindowExt};
 
 use crate::app::{actions::AppAction, controller};
@@ -196,9 +197,51 @@ fn sidebar_session_fingerprint(session: &SessionInfo) -> u64 {
     session.updated_at.hash(&mut hasher);
     session.health.hash(&mut hasher);
     session.git_branch.hash(&mut hasher);
+    match session.github_issue.as_ref() {
+        Some(issue) => {
+            true.hash(&mut hasher);
+            issue.host.hash(&mut hasher);
+            issue.owner.hash(&mut hasher);
+            issue.repo.hash(&mut hasher);
+            issue.number.hash(&mut hasher);
+            issue.url.hash(&mut hasher);
+        }
+        None => false.hash(&mut hasher),
+    }
     session.is_worktree.hash(&mut hasher);
     session.worktree_available.hash(&mut hasher);
     hasher.finish()
+}
+
+struct SidebarSessionIdentity {
+    title: String,
+    tooltip: String,
+}
+
+fn sidebar_session_identity(session: &SessionInfo) -> SidebarSessionIdentity {
+    let Some(issue) = session.github_issue.as_ref() else {
+        return SidebarSessionIdentity {
+            title: session.title.clone(),
+            tooltip: session.title.clone(),
+        };
+    };
+    let prefix = format!("#{}", issue.number);
+    let title = session.title.trim();
+    let issue_title = title
+        .strip_prefix(&prefix)
+        .filter(|rest| rest.is_empty() || rest.chars().next().is_some_and(char::is_whitespace))
+        .map(str::trim_start)
+        .filter(|title| !title.is_empty())
+        .unwrap_or(title);
+    let title = if issue_title.is_empty() {
+        prefix.clone()
+    } else {
+        format!("{prefix} {issue_title}")
+    };
+    SidebarSessionIdentity {
+        tooltip: format!("{}/{}\n{}", issue.owner, issue.repo, title),
+        title,
+    }
 }
 
 /// Hash of every piece of `AppState` the sidebar renders. Streaming deltas
@@ -598,6 +641,9 @@ impl SidebarView {
         } else {
             theme.sidebar_foreground
         };
+        let session_identity = sidebar_session_identity(session);
+        let session_title = session_identity.title;
+        let session_tooltip = session_identity.tooltip;
 
         let work_dir = session.work_dir.clone();
         let session_id = session.id.clone();
@@ -818,6 +864,7 @@ impl SidebarView {
         div()
             .id(SharedString::from(format!("session-card-{}", session.id)))
             .group("session-card")
+            .tooltip(move |window, cx| Tooltip::new(session_tooltip.clone()).build(window, cx))
             .relative()
             .flex()
             .items_stretch()
@@ -888,7 +935,7 @@ impl SidebarView {
                                     })
                                     .text_color(title_color)
                                     .truncate()
-                                    .child(session.title.clone()),
+                                    .child(session_title),
                             )
                             .child(
                                 div()
@@ -1445,8 +1492,8 @@ impl SidebarView {
 mod tests {
     use super::{
         flatten_history_groups, format_time_ago, pr_status_label, pr_status_tooltip,
-        same_history_row_identity, session_pr_info, sidebar_session_fingerprint, DateGroup,
-        HistoryRow,
+        same_history_row_identity, session_pr_info, sidebar_session_fingerprint,
+        sidebar_session_identity, DateGroup, HistoryRow,
     };
     use crate::state::{SessionHealth, SessionInfo};
     use std::collections::HashMap;
@@ -1553,6 +1600,37 @@ mod tests {
         item.git_branch = Some("feature/two".into());
 
         assert_ne!(first, sidebar_session_fingerprint(&item));
+    }
+
+    #[test]
+    fn github_issue_identity_prefixes_titles_once_and_refreshes_sidebar() {
+        let mut item = session("session");
+        item.title = "Fix linked task browser".into();
+        item.github_issue = Some(threadlane_git::GitHubIssueRef {
+            host: "github.com".into(),
+            owner: "threadlane".into(),
+            repo: "app".into(),
+            number: 42,
+            url: "https://github.com/threadlane/app/issues/42".into(),
+        });
+
+        let before = sidebar_session_fingerprint(&item);
+        let identity = sidebar_session_identity(&item);
+        assert_eq!(identity.title, "#42 Fix linked task browser");
+        assert!(identity.tooltip.contains("threadlane/app"));
+        assert!(identity.tooltip.contains("Fix linked task browser"));
+
+        item.title = "#42 Fix linked task browser".into();
+        assert_eq!(
+            sidebar_session_identity(&item).title,
+            "#42 Fix linked task browser"
+        );
+
+        item.github_issue = Some(threadlane_git::GitHubIssueRef {
+            number: 43,
+            ..item.github_issue.clone().unwrap()
+        });
+        assert_ne!(before, sidebar_session_fingerprint(&item));
     }
 }
 
