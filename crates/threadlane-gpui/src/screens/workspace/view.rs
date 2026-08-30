@@ -31,6 +31,7 @@ use threadlane_git::GitStatus;
 use crate::app::actions::AppAction;
 use crate::app::controller;
 use crate::screens::chat::ChatListView;
+use crate::screens::github::GitHubView;
 use crate::screens::right_panel::RightPanelView;
 use crate::screens::settings::SettingsView;
 use crate::screens::sidebar::SidebarView;
@@ -44,6 +45,7 @@ use crate::state::{
 use threadlane_updater::UpdateStatus;
 
 pub fn init(cx: &mut App) {
+    crate::screens::github::view::init(cx);
     cx.bind_keys([
         KeyBinding::new("cmd-k", ToggleCommandPalette, None),
         KeyBinding::new("ctrl-k", ToggleCommandPalette, None),
@@ -147,6 +149,7 @@ pub struct WorkspaceView {
     model: Entity<AppState>,
     sidebar: Entity<SidebarView>,
     chat_list: Entity<ChatListView>,
+    github: Entity<GitHubView>,
     settings: Entity<SettingsView>,
     right_panel: Entity<RightPanelView>,
     fallback_terminal: Option<Entity<TerminalView>>,
@@ -255,6 +258,7 @@ impl WorkspaceView {
         let model = cx.new(|_cx| AppState::load());
         let sidebar = cx.new(|cx| SidebarView::new(model.clone(), window, cx));
         let chat_list = cx.new(|cx| ChatListView::new(model.clone(), window, cx));
+        let github = cx.new(|cx| GitHubView::new(model.clone(), window, cx));
         let settings = cx.new(|cx| SettingsView::new(model.clone(), window, cx));
         let right_panel = cx.new(|cx| RightPanelView::new(model.clone(), window, cx));
         let sidebar_resizable_state = cx.new(|_cx| ResizableState::default());
@@ -373,6 +377,7 @@ impl WorkspaceView {
                 model,
                 sidebar,
                 chat_list,
+                github,
                 settings,
                 right_panel,
                 fallback_terminal: None,
@@ -407,6 +412,8 @@ impl WorkspaceView {
                 .detach();
             }
             view.sync_git_status_with_active_project(cx);
+            view.github
+                .update(cx, |github, cx| github.sync_active_project(cx));
         });
 
         let view_handle = view.downgrade();
@@ -620,6 +627,11 @@ impl WorkspaceView {
                 .detach();
             }
             "git" => self.open_git_review(cx),
+            "github" => {
+                model.update(cx, |state, _cx| {
+                    controller::dispatch(state, AppAction::OpenGitHub);
+                });
+            }
             "git_branch" => self.open_git_branches(cx),
             "git_new_branch" => self.open_git_new_branch(cx),
             "git_merge" => self.open_git_merge(cx),
@@ -929,7 +941,7 @@ impl WorkspaceView {
         let model = self.model.clone();
         let state = model.read(cx);
 
-        let commands: [(&str, &str, &str, IconName, &[&str]); 14] = [
+        let commands: [(&str, &str, &str, IconName, &[&str]); 15] = [
             (
                 "New Task",
                 "Start a fresh session",
@@ -971,6 +983,13 @@ impl WorkspaceView {
                 "git",
                 IconName::Github,
                 &["git", "diff", "review", "commit", "stage"],
+            ),
+            (
+                "GitHub",
+                "Browse project issues and pull requests",
+                "github",
+                IconName::Github,
+                &["github", "issues", "pull requests", "repository"],
             ),
             (
                 "Git: Switch Branch",
@@ -1742,33 +1761,40 @@ impl Render for WorkspaceView {
                 upper_content
             };
 
-            if !self.sidebar_collapsed {
-                h_resizable("workspace-sidebar-main-split")
-                    .with_state(&self.sidebar_resizable_state)
-                    .child(
-                        resizable_panel()
-                            .size(px(240.0))
-                            .size_range(px(160.0)..px(500.0))
-                            .child(self.sidebar.clone()),
-                    )
-                    .child(resizable_panel().child(main_content))
-                    .into_any_element()
-            } else {
-                main_content
-            }
+            main_content
         };
 
-        let page_content = match workspace_page {
+        let central_content = match workspace_page {
             WorkspacePage::Chat => chat_page_content.into_any_element(),
+            WorkspacePage::GitHub => self.github.clone().into_any_element(),
             WorkspacePage::Settings => self.settings.clone().into_any_element(),
         };
+        let page_content = if workspace_page != WorkspacePage::Settings && !self.sidebar_collapsed {
+            h_resizable("workspace-sidebar-main-split")
+                .with_state(&self.sidebar_resizable_state)
+                .child(
+                    resizable_panel()
+                        .size(px(240.0))
+                        .size_range(px(160.0)..px(500.0))
+                        .child(self.sidebar.clone()),
+                )
+                .child(resizable_panel().child(central_content))
+                .into_any_element()
+        } else {
+            central_content
+        };
 
-        let view_with_status_bar = div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .child(div().flex_1().min_h_0().child(page_content))
-            .child(self.render_status_bar(cx));
+        let view_with_status_bar = if workspace_page == WorkspacePage::GitHub {
+            page_content
+        } else {
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(div().flex_1().min_h_0().child(page_content))
+                .child(self.render_status_bar(cx))
+                .into_any_element()
+        };
 
         let git_dialog_layer = self
             .right_panel
@@ -1831,7 +1857,7 @@ impl Render for WorkspaceView {
                         cx.notify();
                     }))
             }))
-            .children((workspace_page == WorkspacePage::Chat).then(|| {
+            .children((workspace_page != WorkspacePage::Settings).then(|| {
                 Button::new("sidebar-collapse-toggle")
                     .icon(IconName::PanelLeft)
                     .tooltip(sidebar_tooltip)

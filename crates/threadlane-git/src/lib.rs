@@ -1493,20 +1493,31 @@ pub fn inspect_pr_for_branch(
     Ok(info)
 }
 
-fn github_issue_list_args() -> Vec<String> {
-    [
-        "issue",
-        "list",
-        "--state",
-        "open",
-        "--limit",
-        "50",
-        "--json",
-        "number,title,state,url,updatedAt,author,assignees,labels,comments",
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect()
+fn github_issue_list_args(
+    state: &str,
+    query: Option<&str>,
+    limit: usize,
+) -> Result<Vec<String>, String> {
+    let state = validated_github_list_state(state)?;
+    if limit == 0 {
+        return Err("GitHub list limit must be greater than zero".into());
+    }
+    let mut args = vec![
+        "issue".into(),
+        "list".into(),
+        "--state".into(),
+        state.into(),
+    ];
+    if let Some(query) = query {
+        args.extend(["--search".into(), validated_text(query, "GitHub query")?]);
+    }
+    args.extend([
+        "--limit".into(),
+        limit.to_string(),
+        "--json".into(),
+        "number,title,state,url,updatedAt,author,assignees,labels,comments".into(),
+    ]);
+    Ok(args)
 }
 
 fn github_issue_view_args(number: u64) -> Result<Vec<String>, String> {
@@ -1520,14 +1531,33 @@ fn github_issue_view_args(number: u64) -> Result<Vec<String>, String> {
     ])
 }
 
-fn github_pr_list_args() -> Vec<String> {
-    [
-        "pr", "list", "--state", "open", "--limit", "50", "--json",
-        "number,title,state,url,isDraft,headRefName,baseRefName,updatedAt,author,reviewDecision,statusCheckRollup",
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect()
+fn github_pr_list_args(
+    state: &str,
+    query: Option<&str>,
+    limit: usize,
+) -> Result<Vec<String>, String> {
+    let state = validated_github_list_state(state)?;
+    if limit == 0 {
+        return Err("GitHub list limit must be greater than zero".into());
+    }
+    let mut args = vec!["pr".into(), "list".into(), "--state".into(), state.into()];
+    if let Some(query) = query {
+        args.extend(["--search".into(), validated_text(query, "GitHub query")?]);
+    }
+    args.extend([
+        "--limit".into(),
+        limit.to_string(),
+        "--json".into(),
+        "number,title,state,url,isDraft,headRefName,baseRefName,updatedAt,author,reviewDecision,statusCheckRollup".into(),
+    ]);
+    Ok(args)
+}
+
+fn validated_github_list_state(state: &str) -> Result<&str, String> {
+    match state {
+        "open" | "closed" => Ok(state),
+        _ => Err("GitHub list state must be open or closed".into()),
+    }
 }
 
 fn create_draft_pr_args(base: &str, title: &str, body: &str) -> Result<Vec<String>, String> {
@@ -1657,8 +1687,17 @@ fn execute_gh(work_dir: &Path, args: &[String]) -> Result<String, GitError> {
     ))
 }
 
-pub fn list_github_issues(work_dir: &Path) -> Result<Vec<GitHubIssueSummary>, GitError> {
-    let output = execute_gh(work_dir, &github_issue_list_args())?;
+pub fn list_github_issues(
+    work_dir: &Path,
+    state: &str,
+    query: Option<&str>,
+    limit: usize,
+) -> Result<Vec<GitHubIssueSummary>, GitError> {
+    let args = github_issue_list_args(state, query, limit).map_err(|message| GitError {
+        work_dir: work_dir.to_path_buf(),
+        message,
+    })?;
+    let output = execute_gh(work_dir, &args)?;
     let values: Vec<serde_json::Value> =
         serde_json::from_str(&output).map_err(|error| GitError {
             work_dir: work_dir.to_path_buf(),
@@ -1688,8 +1727,15 @@ pub fn inspect_github_issue(work_dir: &Path, number: u64) -> Result<GitHubIssueD
 
 pub fn list_github_pull_requests(
     work_dir: &Path,
+    state: &str,
+    query: Option<&str>,
+    limit: usize,
 ) -> Result<Vec<GitHubPullRequestSummary>, GitError> {
-    let output = execute_gh(work_dir, &github_pr_list_args())?;
+    let args = github_pr_list_args(state, query, limit).map_err(|message| GitError {
+        work_dir: work_dir.to_path_buf(),
+        message,
+    })?;
+    let output = execute_gh(work_dir, &args)?;
     let values: Vec<serde_json::Value> =
         serde_json::from_str(&output).map_err(|error| GitError {
             work_dir: work_dir.to_path_buf(),
@@ -2977,14 +3023,16 @@ mod tests {
     #[test]
     fn github_mutation_args_match_gh_contract_and_reject_invalid_input() {
         assert_eq!(
-            github_issue_list_args(),
+            github_issue_list_args("closed", Some("bug label:desktop"), 100).unwrap(),
             vec![
                 "issue",
                 "list",
                 "--state",
-                "open",
+                "closed",
+                "--search",
+                "bug label:desktop",
                 "--limit",
-                "50",
+                "100",
                 "--json",
                 "number,title,state,url,updatedAt,author,assignees,labels,comments"
             ]
@@ -3000,9 +3048,21 @@ mod tests {
             ]
         );
         assert_eq!(
-            github_pr_list_args(),
-            vec!["pr", "list", "--state", "open", "--limit", "50", "--json", "number,title,state,url,isDraft,headRefName,baseRefName,updatedAt,author,reviewDecision,statusCheckRollup"]
+            github_pr_list_args("open", None, 50).unwrap(),
+            vec![
+                "pr",
+                "list",
+                "--state",
+                "open",
+                "--limit",
+                "50",
+                "--json",
+                "number,title,state,url,isDraft,headRefName,baseRefName,updatedAt,author,reviewDecision,statusCheckRollup"
+            ]
         );
+        assert!(github_issue_list_args("all", None, 50).is_err());
+        assert!(github_issue_list_args("open", None, 0).is_err());
+        assert!(github_pr_list_args("closed", Some("\n"), 50).is_err());
         assert_eq!(
             create_draft_pr_args("main", "Title", "Body").unwrap(),
             vec!["pr", "create", "--draft", "--base", "main", "--title", "Title", "--body", "Body"]

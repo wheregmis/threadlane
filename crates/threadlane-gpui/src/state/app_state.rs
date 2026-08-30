@@ -256,10 +256,11 @@ struct PendingComposerMessage {
     images: Vec<ImageAttachment>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum WorkspacePage {
     #[default]
     Chat,
+    GitHub,
     Settings,
 }
 
@@ -1413,6 +1414,14 @@ impl AppState {
     pub(crate) fn open_settings(&mut self) {
         self.workspace_page = WorkspacePage::Settings;
         self.auth_status_msg = None;
+    }
+
+    pub(crate) fn open_github(&mut self) {
+        self.workspace_page = WorkspacePage::GitHub;
+    }
+
+    pub(crate) fn close_github(&mut self) {
+        self.workspace_page = WorkspacePage::Chat;
     }
 
     pub(crate) fn close_settings(&mut self) {

@@ -1,0 +1,1487 @@
+use std::path::PathBuf;
+use std::time::Duration;
+
+use gpui::*;
+use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::link::Link;
+use gpui_component::resizable::{h_resizable, resizable_panel, ResizableState};
+use gpui_component::scroll::{ScrollableElement, Scrollbar};
+use gpui_component::spinner::Spinner;
+use gpui_component::status_bar::StatusBar;
+use gpui_component::tag::Tag;
+use gpui_component::text::{TextView, TextViewState};
+use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable};
+use threadlane_git::{
+    GitHubIssueDetail, GitHubIssueRef, GitHubIssueSummary, GitHubPrInfo, GitHubPullRequestSummary,
+    GitHubRepository,
+};
+
+use crate::app::actions::AppAction;
+use crate::app::controller;
+use crate::state::{AppState, SessionInfo};
+
+actions!(
+    threadlane_github,
+    [SelectPrevious, SelectNext, OpenSelected]
+);
+
+const GITHUB_LIST_CONTEXT: &str = "GitHubList";
+const PAGE_SIZE: usize = 50;
+
+pub fn init(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("up", SelectPrevious, Some(GITHUB_LIST_CONTEXT)),
+        KeyBinding::new("down", SelectNext, Some(GITHUB_LIST_CONTEXT)),
+        KeyBinding::new("enter", OpenSelected, Some(GITHUB_LIST_CONTEXT)),
+    ]);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GitHubTab {
+    Issues,
+    PullRequests,
+}
+
+impl GitHubTab {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Issues => "Issues",
+            Self::PullRequests => "Pull requests",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GitHubStateFilter {
+    Open,
+    Closed,
+}
+
+impl GitHubStateFilter {
+    fn value(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Closed => "closed",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GitHubRequest {
+    pub(crate) work_dir: PathBuf,
+    pub(crate) tab: GitHubTab,
+    pub(crate) query_revision: u64,
+    pub(crate) item_number: Option<u64>,
+}
+
+pub(crate) fn github_result_matches_request(
+    result: &GitHubRequest,
+    current: &GitHubRequest,
+) -> bool {
+    result == current
+}
+
+pub(crate) fn issue_filter_matches(issue: &GitHubIssueSummary, query: &str) -> bool {
+    let query = query.trim().to_lowercase();
+    query.is_empty()
+        || issue.title.to_lowercase().contains(&query)
+        || issue.issue.number.to_string().contains(&query)
+        || issue
+            .labels
+            .iter()
+            .any(|label| label.name.to_lowercase().contains(&query))
+        || issue
+            .assignees
+            .iter()
+            .any(|assignee| assignee.to_lowercase().contains(&query))
+}
+
+pub(crate) fn selected_issue_after_refresh(
+    selected: Option<u64>,
+    issues: &[GitHubIssueSummary],
+) -> Option<u64> {
+    selected
+        .filter(|selected| issues.iter().any(|issue| issue.issue.number == *selected))
+        .or_else(|| issues.first().map(|issue| issue.issue.number))
+}
+
+fn same_issue(left: &GitHubIssueRef, right: &GitHubIssueRef) -> bool {
+    left.host == right.host
+        && left.owner == right.owner
+        && left.repo == right.repo
+        && left.number == right.number
+}
+
+pub(crate) fn linked_session_ids<'a>(
+    sessions: &'a [SessionInfo],
+    issue: &GitHubIssueRef,
+) -> Vec<&'a str> {
+    sessions
+        .iter()
+        .filter(|session| {
+            session
+                .github_issue
+                .as_ref()
+                .is_some_and(|linked| same_issue(linked, issue))
+        })
+        .map(|session| session.id.as_str())
+        .collect()
+}
+
+fn selected_number_after_refresh<T>(
+    selected: Option<u64>,
+    rows: &[T],
+    number: impl Fn(&T) -> u64,
+) -> Option<u64> {
+    selected
+        .filter(|selected| rows.iter().any(|row| number(row) == *selected))
+        .or_else(|| rows.first().map(number))
+}
+
+fn pr_filter_matches(pr: &GitHubPullRequestSummary, query: &str) -> bool {
+    let query = query.trim().to_lowercase();
+    query.is_empty()
+        || pr.title.to_lowercase().contains(&query)
+        || pr.number.to_string().contains(&query)
+        || pr.author.to_lowercase().contains(&query)
+        || pr.head_ref.to_lowercase().contains(&query)
+        || pr.base_ref.to_lowercase().contains(&query)
+}
+
+fn github_error_message(error: &str) -> String {
+    let normalized = error.to_lowercase();
+    if normalized.contains("auth") || normalized.contains("login") {
+        "GitHub authentication is required. Sign in with gh and refresh.".into()
+    } else if normalized.contains("remote") || normalized.contains("repository") {
+        "This project does not have an accessible GitHub remote.".into()
+    } else if normalized.contains("connect")
+        || normalized.contains("network")
+        || normalized.contains("resolve")
+    {
+        "GitHub is offline. Check your connection and refresh.".into()
+    } else {
+        format!("Couldn’t load GitHub: {error}")
+    }
+}
+
+enum GitHubListResult {
+    Issues(Result<Vec<GitHubIssueSummary>, String>),
+    PullRequests(Result<Vec<GitHubPullRequestSummary>, String>),
+}
+
+enum GitHubDetailResult {
+    Issue(Result<GitHubIssueDetail, String>),
+    PullRequest(Result<GitHubPrInfo, String>),
+}
+
+pub struct GitHubView {
+    model: Entity<AppState>,
+    project_work_dir: Option<PathBuf>,
+    repository: Option<GitHubRepository>,
+    tab: GitHubTab,
+    state_filter: GitHubStateFilter,
+    query_input: Entity<InputState>,
+    query_revision: u64,
+    issues: Vec<GitHubIssueSummary>,
+    pull_requests: Vec<GitHubPullRequestSummary>,
+    selected_issue: Option<u64>,
+    selected_pr: Option<u64>,
+    issue_detail: Option<GitHubIssueDetail>,
+    pr_detail: Option<GitHubPrInfo>,
+    detail_body: Entity<TextViewState>,
+    comment_rows: Vec<(String, String, String)>,
+    comment_list_state: ListState,
+    list_loading: bool,
+    detail_loading: bool,
+    list_error: Option<String>,
+    detail_error: Option<String>,
+    issue_limit: usize,
+    pr_limit: usize,
+    issue_has_more: bool,
+    pr_has_more: bool,
+    active_list_request: Option<GitHubRequest>,
+    active_detail_request: Option<GitHubRequest>,
+    issue_list_state: ListState,
+    pr_list_state: ListState,
+    detail_split_state: Entity<ResizableState>,
+    list_focus: FocusHandle,
+    debounce_task: Option<Task<()>>,
+    issue_comment_draft: String,
+    pr_review_draft: String,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl GitHubView {
+    pub(crate) fn new(
+        model: Entity<AppState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let query_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search issues…"));
+        let detail_body = cx.new(|cx| TextViewState::markdown("", cx));
+        let detail_split_state = cx.new(|_| ResizableState::default());
+
+        let model_subscription = cx.observe(&model, |this, model, cx| {
+            let work_dir = model.read(cx).active_work_dir.clone();
+            if this.project_work_dir != work_dir {
+                this.switch_project(work_dir, cx);
+            }
+        });
+        let input_subscription = cx.subscribe_in(
+            &query_input,
+            window,
+            |this, input, event: &InputEvent, _window, cx| match event {
+                InputEvent::Change => {
+                    let query = input.read(cx).value().to_string();
+                    this.query_revision = this.query_revision.saturating_add(1);
+                    this.schedule_query(query, cx);
+                }
+                InputEvent::PressEnter { .. } => {
+                    this.debounce_task.take();
+                    this.query_revision = this.query_revision.saturating_add(1);
+                    this.fetch_list(cx);
+                }
+                _ => {}
+            },
+        );
+
+        Self {
+            model,
+            project_work_dir: None,
+            repository: None,
+            tab: GitHubTab::Issues,
+            state_filter: GitHubStateFilter::Open,
+            query_input,
+            query_revision: 0,
+            issues: Vec::new(),
+            pull_requests: Vec::new(),
+            selected_issue: None,
+            selected_pr: None,
+            issue_detail: None,
+            pr_detail: None,
+            detail_body,
+            comment_rows: Vec::new(),
+            comment_list_state: ListState::new(0, ListAlignment::Top, px(96.0)),
+            list_loading: false,
+            detail_loading: false,
+            list_error: None,
+            detail_error: None,
+            issue_limit: PAGE_SIZE,
+            pr_limit: PAGE_SIZE,
+            issue_has_more: false,
+            pr_has_more: false,
+            active_list_request: None,
+            active_detail_request: None,
+            issue_list_state: ListState::new(0, ListAlignment::Top, px(88.0)),
+            pr_list_state: ListState::new(0, ListAlignment::Top, px(78.0)),
+            detail_split_state,
+            list_focus: cx.focus_handle(),
+            debounce_task: None,
+            issue_comment_draft: String::new(),
+            pr_review_draft: String::new(),
+            _subscriptions: vec![model_subscription, input_subscription],
+        }
+    }
+
+    pub(crate) fn sync_active_project(&mut self, cx: &mut Context<Self>) {
+        let work_dir = self.model.read(cx).active_work_dir.clone();
+        if self.project_work_dir != work_dir {
+            self.switch_project(work_dir, cx);
+        }
+    }
+
+    fn switch_project(&mut self, work_dir: Option<PathBuf>, cx: &mut Context<Self>) {
+        self.project_work_dir = work_dir;
+        self.repository = None;
+        self.issues.clear();
+        self.pull_requests.clear();
+        self.selected_issue = None;
+        self.selected_pr = None;
+        self.issue_detail = None;
+        self.pr_detail = None;
+        self.comment_rows.clear();
+        self.comment_list_state.reset(0);
+        self.list_error = None;
+        self.detail_error = None;
+        self.list_loading = false;
+        self.detail_loading = false;
+        self.issue_limit = PAGE_SIZE;
+        self.pr_limit = PAGE_SIZE;
+        self.issue_has_more = false;
+        self.pr_has_more = false;
+        self.active_list_request = None;
+        self.active_detail_request = None;
+        self.issue_comment_draft.clear();
+        self.pr_review_draft.clear();
+        self.issue_list_state.reset(0);
+        self.pr_list_state.reset(0);
+        self.detail_body
+            .update(cx, |body, cx| body.set_text("", cx));
+        self.query_revision = self.query_revision.saturating_add(1);
+        if self.project_work_dir.is_some() {
+            self.fetch_list(cx);
+        }
+        cx.notify();
+    }
+
+    fn schedule_query(&mut self, _query: String, cx: &mut Context<Self>) {
+        self.debounce_task.take();
+        let revision = self.query_revision;
+        self.debounce_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(250))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.query_revision == revision {
+                    this.fetch_list(cx);
+                }
+            });
+        }));
+    }
+
+    fn query(&self, cx: &App) -> String {
+        self.query_input.read(cx).value().trim().to_string()
+    }
+
+    fn fetch_list(&mut self, cx: &mut Context<Self>) {
+        let Some(work_dir) = self.project_work_dir.clone() else {
+            return;
+        };
+        let tab = self.tab;
+        let state = self.state_filter.value().to_owned();
+        let query = self.query(cx);
+        let limit = match tab {
+            GitHubTab::Issues => self.issue_limit,
+            GitHubTab::PullRequests => self.pr_limit,
+        };
+        let request = GitHubRequest {
+            work_dir: work_dir.clone(),
+            tab,
+            query_revision: self.query_revision,
+            item_number: None,
+        };
+        self.active_list_request = Some(request.clone());
+        self.list_loading = true;
+        self.list_error = None;
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let query = (!query.is_empty()).then_some(query.as_str());
+                    match tab {
+                        GitHubTab::Issues => GitHubListResult::Issues(
+                            threadlane_git::list_github_issues(&work_dir, &state, query, limit)
+                                .map_err(|error| error.message),
+                        ),
+                        GitHubTab::PullRequests => GitHubListResult::PullRequests(
+                            threadlane_git::list_github_pull_requests(
+                                &work_dir, &state, query, limit,
+                            )
+                            .map_err(|error| error.message),
+                        ),
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if !this
+                    .active_list_request
+                    .as_ref()
+                    .is_some_and(|current| github_result_matches_request(&request, current))
+                {
+                    return;
+                }
+                this.list_loading = false;
+                match result {
+                    GitHubListResult::Issues(Ok(rows)) => {
+                        this.issue_has_more = rows.len() == limit;
+                        this.repository = rows.first().map(|row| GitHubRepository {
+                            host: row.issue.host.clone(),
+                            owner: row.issue.owner.clone(),
+                            repo: row.issue.repo.clone(),
+                        });
+                        let query = this.query(cx);
+                        this.issues = rows
+                            .into_iter()
+                            .filter(|row| query.contains(':') || issue_filter_matches(row, &query))
+                            .collect();
+                        this.selected_issue =
+                            selected_issue_after_refresh(this.selected_issue, &this.issues);
+                        this.issue_list_state
+                            .reset(this.issues.len() + usize::from(this.issue_has_more));
+                        this.fetch_detail(cx);
+                    }
+                    GitHubListResult::PullRequests(Ok(rows)) => {
+                        this.pr_has_more = rows.len() == limit;
+                        this.repository = rows.first().map(|row| row.repository.clone());
+                        let query = this.query(cx);
+                        this.pull_requests = rows
+                            .into_iter()
+                            .filter(|row| query.contains(':') || pr_filter_matches(row, &query))
+                            .collect();
+                        this.selected_pr = selected_number_after_refresh(
+                            this.selected_pr,
+                            &this.pull_requests,
+                            |row| row.number,
+                        );
+                        this.pr_list_state
+                            .reset(this.pull_requests.len() + usize::from(this.pr_has_more));
+                        this.fetch_detail(cx);
+                    }
+                    GitHubListResult::Issues(Err(error))
+                    | GitHubListResult::PullRequests(Err(error)) => {
+                        this.list_error = Some(github_error_message(&error));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn fetch_detail(&mut self, cx: &mut Context<Self>) {
+        let Some(work_dir) = self.project_work_dir.clone() else {
+            return;
+        };
+        let number = match self.tab {
+            GitHubTab::Issues => self.selected_issue,
+            GitHubTab::PullRequests => self.selected_pr,
+        };
+        let Some(number) = number else {
+            self.detail_loading = false;
+            return;
+        };
+        let tab = self.tab;
+        let request = GitHubRequest {
+            work_dir: work_dir.clone(),
+            tab,
+            query_revision: self.query_revision,
+            item_number: Some(number),
+        };
+        self.active_detail_request = Some(request.clone());
+        self.detail_loading = true;
+        self.detail_error = None;
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    match tab {
+                        GitHubTab::Issues => GitHubDetailResult::Issue(
+                            threadlane_git::inspect_github_issue(&work_dir, number)
+                                .map_err(|error| error.message),
+                        ),
+                        GitHubTab::PullRequests => GitHubDetailResult::PullRequest(
+                            threadlane_git::inspect_pr_number(&work_dir, number)
+                                .map_err(|error| error.message),
+                        ),
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if !this
+                    .active_detail_request
+                    .as_ref()
+                    .is_some_and(|current| github_result_matches_request(&request, current))
+                {
+                    return;
+                }
+                this.detail_loading = false;
+                match result {
+                    GitHubDetailResult::Issue(Ok(detail)) => {
+                        this.comment_rows = detail
+                            .comments
+                            .iter()
+                            .map(|comment| {
+                                (
+                                    comment.author.clone(),
+                                    comment.created_at.clone(),
+                                    comment.body.clone(),
+                                )
+                            })
+                            .collect();
+                        this.comment_list_state.reset(this.comment_rows.len());
+                        this.detail_body
+                            .update(cx, |body, cx| body.set_text(&detail.body, cx));
+                        this.issue_detail = Some(detail);
+                    }
+                    GitHubDetailResult::PullRequest(Ok(detail)) => {
+                        this.comment_rows = detail
+                            .issue_comments
+                            .iter()
+                            .map(|comment| {
+                                (
+                                    comment.author.clone(),
+                                    comment.created_at.clone(),
+                                    comment.body.clone(),
+                                )
+                            })
+                            .chain(detail.reviews.iter().map(|review| {
+                                (
+                                    review.author.clone(),
+                                    review.submitted_at.clone(),
+                                    review.body.clone(),
+                                )
+                            }))
+                            .collect();
+                        this.comment_list_state.reset(this.comment_rows.len());
+                        this.detail_body
+                            .update(cx, |body, cx| body.set_text(&detail.body, cx));
+                        this.pr_detail = Some(detail);
+                    }
+                    GitHubDetailResult::Issue(Err(error))
+                    | GitHubDetailResult::PullRequest(Err(error)) => {
+                        this.detail_error = Some(github_error_message(&error));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn select_tab(&mut self, tab: GitHubTab, cx: &mut Context<Self>) {
+        if self.tab == tab {
+            return;
+        }
+        self.tab = tab;
+        self.query_revision = self.query_revision.saturating_add(1);
+        self.fetch_list(cx);
+    }
+
+    fn select_state(&mut self, state: GitHubStateFilter, cx: &mut Context<Self>) {
+        if self.state_filter == state {
+            return;
+        }
+        self.state_filter = state;
+        self.query_revision = self.query_revision.saturating_add(1);
+        self.fetch_list(cx);
+    }
+
+    fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.debounce_task.take();
+        self.query_revision = self.query_revision.saturating_add(1);
+        self.fetch_list(cx);
+    }
+
+    fn load_more(&mut self, cx: &mut Context<Self>) {
+        match self.tab {
+            GitHubTab::Issues => self.issue_limit += PAGE_SIZE,
+            GitHubTab::PullRequests => self.pr_limit += PAGE_SIZE,
+        }
+        self.refresh(cx);
+    }
+
+    fn selected_ix(&self) -> Option<usize> {
+        match self.tab {
+            GitHubTab::Issues => self.selected_issue.and_then(|number| {
+                self.issues
+                    .iter()
+                    .position(|row| row.issue.number == number)
+            }),
+            GitHubTab::PullRequests => self.selected_pr.and_then(|number| {
+                self.pull_requests
+                    .iter()
+                    .position(|row| row.number == number)
+            }),
+        }
+    }
+
+    fn select_ix(&mut self, ix: usize, cx: &mut Context<Self>) {
+        match self.tab {
+            GitHubTab::Issues => {
+                let Some(row) = self.issues.get(ix) else {
+                    return;
+                };
+                self.selected_issue = Some(row.issue.number);
+                self.issue_list_state.scroll_to_reveal_item(ix);
+            }
+            GitHubTab::PullRequests => {
+                let Some(row) = self.pull_requests.get(ix) else {
+                    return;
+                };
+                self.selected_pr = Some(row.number);
+                self.pr_list_state.scroll_to_reveal_item(ix);
+            }
+        }
+        self.fetch_detail(cx);
+        cx.notify();
+    }
+
+    fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let len = match self.tab {
+            GitHubTab::Issues => self.issues.len(),
+            GitHubTab::PullRequests => self.pull_requests.len(),
+        };
+        if len == 0 {
+            return;
+        }
+        let current = self.selected_ix().unwrap_or(0);
+        let next = current.saturating_add_signed(delta).min(len - 1);
+        self.select_ix(next, cx);
+    }
+
+    fn select_previous(
+        &mut self,
+        _: &SelectPrevious,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_selection(-1, cx);
+    }
+
+    fn select_next(&mut self, _: &SelectNext, _window: &mut Window, cx: &mut Context<Self>) {
+        self.move_selection(1, cx);
+    }
+
+    fn open_selected(&mut self, _: &OpenSelected, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(ix) = self.selected_ix() {
+            self.select_ix(ix, cx);
+        }
+    }
+
+    fn linked_sessions(&self, issue: &GitHubIssueRef, cx: &App) -> Vec<SessionInfo> {
+        let Some(work_dir) = self.project_work_dir.as_ref() else {
+            return Vec::new();
+        };
+        self.model
+            .read(cx)
+            .projects
+            .iter()
+            .find(|project| &project.work_dir == work_dir)
+            .map(|project| {
+                let linked_ids = linked_session_ids(&project.sessions, issue);
+                project
+                    .sessions
+                    .iter()
+                    .filter(|session| linked_ids.contains(&session.id.as_str()))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn render_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().colors;
+        let close_model = self.model.clone();
+        let repository = self
+            .repository
+            .as_ref()
+            .map(|repo| format!("{}/{}", repo.owner, repo.repo))
+            .or_else(|| {
+                self.project_work_dir
+                    .as_ref()
+                    .and_then(|path| path.file_name())
+                    .and_then(|name| name.to_str())
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| "No project".into());
+
+        div()
+            .flex_none()
+            .border_b_1()
+            .border_color(theme.border)
+            .bg(theme.title_bar)
+            .px_4()
+            .py_2()
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(
+                Button::new("github-close")
+                    .icon(IconName::Close)
+                    .tooltip("Back to chat")
+                    .ghost()
+                    .small()
+                    .on_click(move |_, _, cx| {
+                        close_model.update(cx, |state, cx| {
+                            controller::dispatch(state, AppAction::CloseGitHub);
+                            cx.notify();
+                        });
+                    }),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(format!("GitHub · {repository}")),
+            )
+            .child(
+                Button::new("github-tab-issues")
+                    .label("Issues")
+                    .ghost()
+                    .small()
+                    .selected(self.tab == GitHubTab::Issues)
+                    .on_click(cx.listener(|this, _, _, cx| this.select_tab(GitHubTab::Issues, cx))),
+            )
+            .child(
+                Button::new("github-tab-prs")
+                    .label("Pull requests")
+                    .ghost()
+                    .small()
+                    .selected(self.tab == GitHubTab::PullRequests)
+                    .on_click(
+                        cx.listener(|this, _, _, cx| this.select_tab(GitHubTab::PullRequests, cx)),
+                    ),
+            )
+            .child(
+                Button::new("github-refresh")
+                    .icon(IconName::Redo)
+                    .tooltip("Refresh GitHub")
+                    .ghost()
+                    .small()
+                    .disabled(self.project_work_dir.is_none() || self.list_loading)
+                    .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
+            )
+            .into_any_element()
+    }
+
+    fn render_filters(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().colors;
+        div()
+            .flex_none()
+            .border_b_1()
+            .border_color(theme.border)
+            .px_3()
+            .py_2()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                Button::new("github-state-open")
+                    .label("Open")
+                    .ghost()
+                    .small()
+                    .selected(self.state_filter == GitHubStateFilter::Open)
+                    .on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.select_state(GitHubStateFilter::Open, cx)
+                        }),
+                    ),
+            )
+            .child(
+                Button::new("github-state-closed")
+                    .label("Closed")
+                    .ghost()
+                    .small()
+                    .selected(self.state_filter == GitHubStateFilter::Closed)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.select_state(GitHubStateFilter::Closed, cx)
+                    })),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .child(Input::new(&self.query_input).small()),
+            )
+            .children(self.list_loading.then(|| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(Spinner::new().xsmall())
+                    .child(if self.issues.is_empty() && self.pull_requests.is_empty() {
+                        "Loading…"
+                    } else {
+                        "Refreshing…"
+                    })
+            }))
+            .children(self.list_error.as_ref().map(|error| {
+                div()
+                    .max_w_64()
+                    .text_xs()
+                    .text_color(theme.danger)
+                    .truncate()
+                    .child(error.clone())
+            }))
+            .into_any_element()
+    }
+
+    fn render_issue_row(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        if ix == self.issues.len() && self.issue_has_more {
+            return self.render_load_more(cx);
+        }
+        let Some(issue) = self.issues.get(ix).cloned() else {
+            return div().into_any_element();
+        };
+        let selected = self.selected_issue == Some(issue.issue.number);
+        let linked_count = self.linked_sessions(&issue.issue, cx).len();
+        let number = issue.issue.number;
+        let theme = cx.theme().colors;
+        div()
+            .id(SharedString::from(format!("github-issue-{number}")))
+            .px_3()
+            .py_2()
+            .border_b_1()
+            .border_color(theme.border.opacity(0.6))
+            .bg(if selected {
+                theme.list_active
+            } else {
+                theme.background
+            })
+            .hover(|style| style.bg(theme.list_hover))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.list_focus.focus(window, cx);
+                if let Some(ix) = this
+                    .issues
+                    .iter()
+                    .position(|row| row.issue.number == number)
+                {
+                    this.select_ix(ix, cx);
+                }
+            }))
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap_2()
+                    .child(
+                        Icon::new(if issue.state.eq_ignore_ascii_case("closed") {
+                            IconName::CircleCheck
+                        } else {
+                            IconName::Asterisk
+                        })
+                        .small()
+                        .text_color(
+                            if issue.state.eq_ignore_ascii_case("closed") {
+                                theme.muted_foreground
+                            } else {
+                                theme.success
+                            },
+                        ),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(issue.title.clone()),
+                            )
+                            .child(
+                                div()
+                                    .mt_1()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(format!(
+                                        "#{number} · {} · {} · {} comments",
+                                        issue.author, issue.updated_at, issue.comments_count
+                                    ))
+                                    .children(
+                                        issue.labels.iter().take(3).map(|label| {
+                                            Tag::new().small().child(label.name.clone())
+                                        }),
+                                    )
+                                    .children((linked_count > 0).then(|| {
+                                        Tag::info().small().child(format!(
+                                            "{linked_count} linked task{}",
+                                            if linked_count == 1 { "" } else { "s" }
+                                        ))
+                                    })),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_pr_row(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        if ix == self.pull_requests.len() && self.pr_has_more {
+            return self.render_load_more(cx);
+        }
+        let Some(pr) = self.pull_requests.get(ix).cloned() else {
+            return div().into_any_element();
+        };
+        let selected = self.selected_pr == Some(pr.number);
+        let number = pr.number;
+        let theme = cx.theme().colors;
+        div()
+            .id(SharedString::from(format!("github-pr-{number}")))
+            .px_3()
+            .py_2()
+            .border_b_1()
+            .border_color(theme.border.opacity(0.6))
+            .bg(if selected {
+                theme.list_active
+            } else {
+                theme.background
+            })
+            .hover(|style| style.bg(theme.list_hover))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.list_focus.focus(window, cx);
+                if let Some(ix) = this
+                    .pull_requests
+                    .iter()
+                    .position(|row| row.number == number)
+                {
+                    this.select_ix(ix, cx);
+                }
+            }))
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap_2()
+                    .child(
+                        Icon::new(if pr.state.eq_ignore_ascii_case("closed") {
+                            IconName::CircleCheck
+                        } else {
+                            IconName::Github
+                        })
+                        .small()
+                        .text_color(
+                            if pr.state.eq_ignore_ascii_case("closed") {
+                                theme.muted_foreground
+                            } else {
+                                theme.success
+                            },
+                        ),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(pr.title),
+                            )
+                            .child(
+                                div()
+                                    .mt_1()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(format!(
+                                        "#{number} · {} · {} · {} → {}{}",
+                                        pr.author,
+                                        pr.updated_at,
+                                        pr.head_ref,
+                                        pr.base_ref,
+                                        if pr.is_draft { " · Draft" } else { "" }
+                                    )),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_load_more(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .h_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                Button::new("github-load-more")
+                    .label("Load more")
+                    .ghost()
+                    .small()
+                    .on_click(cx.listener(|this, _, _, cx| this.load_more(cx))),
+            )
+            .into_any_element()
+    }
+
+    fn render_list(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().colors;
+        if self.project_work_dir.is_none() {
+            return self.render_empty("Select a project to browse GitHub.", cx);
+        }
+        let row_count = match self.tab {
+            GitHubTab::Issues => self.issues.len(),
+            GitHubTab::PullRequests => self.pull_requests.len(),
+        };
+        if row_count == 0 && !self.list_loading {
+            if let Some(error) = self.list_error.clone() {
+                return self.render_empty(&error, cx);
+            }
+            return self.render_empty(
+                &format!(
+                    "No {} {}.",
+                    self.state_filter.value(),
+                    self.tab.label().to_lowercase()
+                ),
+                cx,
+            );
+        }
+        let list_state = match self.tab {
+            GitHubTab::Issues => self.issue_list_state.clone(),
+            GitHubTab::PullRequests => self.pr_list_state.clone(),
+        };
+        let tab = self.tab;
+        div()
+            .relative()
+            .size_full()
+            .min_h_0()
+            .border_1()
+            .border_color(if self.list_focus.is_focused(window) {
+                theme.primary
+            } else {
+                theme.border
+            })
+            .track_focus(&self.list_focus)
+            .key_context(GITHUB_LIST_CONTEXT)
+            .on_action(cx.listener(Self::select_previous))
+            .on_action(cx.listener(Self::select_next))
+            .on_action(cx.listener(Self::open_selected))
+            .child(
+                list(
+                    list_state.clone(),
+                    cx.processor(move |this, ix, _window, cx| match tab {
+                        GitHubTab::Issues => this.render_issue_row(ix, cx),
+                        GitHubTab::PullRequests => this.render_pr_row(ix, cx),
+                    }),
+                )
+                .size_full()
+                .with_sizing_behavior(ListSizingBehavior::Infer),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .child(Scrollbar::vertical(&list_state)),
+            )
+            .into_any_element()
+    }
+
+    fn render_empty(&self, message: &str, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().colors;
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .px_6()
+            .text_sm()
+            .text_color(theme.muted_foreground)
+            .children(self.list_loading.then(|| Spinner::new().small()))
+            .child(message.to_owned())
+            .into_any_element()
+    }
+
+    fn render_comment_row(
+        &mut self,
+        ix: usize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some((author, time, body)) = self.comment_rows.get(ix).cloned() else {
+            return div().into_any_element();
+        };
+        let theme = cx.theme().colors;
+        div()
+            .p_3()
+            .border_b_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(format!("{author} · {time}")),
+            )
+            .child(div().mt_2().text_sm().whitespace_normal().child(body))
+            .into_any_element()
+    }
+
+    fn render_detail(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().colors;
+        if self.selected_ix().is_none() {
+            return self.render_empty("Select an item to see details.", cx);
+        }
+        if let Some(error) = &self.detail_error {
+            return self.render_empty(error, cx);
+        }
+
+        let (title, metadata, url, issue) = match self.tab {
+            GitHubTab::Issues => {
+                let Some(detail) = self
+                    .issue_detail
+                    .as_ref()
+                    .filter(|detail| self.selected_issue == Some(detail.summary.issue.number))
+                else {
+                    return self.render_empty("Loading details…", cx);
+                };
+                (
+                    detail.summary.title.clone(),
+                    format!(
+                        "#{} · {} · {} · {}",
+                        detail.summary.issue.number,
+                        detail.summary.state,
+                        detail.summary.author,
+                        detail.summary.updated_at
+                    ),
+                    detail.summary.issue.url.clone(),
+                    Some(detail.summary.issue.clone()),
+                )
+            }
+            GitHubTab::PullRequests => {
+                let Some(detail) = self
+                    .pr_detail
+                    .as_ref()
+                    .filter(|detail| self.selected_pr == Some(detail.number))
+                else {
+                    return self.render_empty("Loading details…", cx);
+                };
+                (
+                    detail.title.clone(),
+                    format!(
+                        "#{} · {} · {} · {} → {}",
+                        detail.number,
+                        detail.state,
+                        detail.author,
+                        detail.head_ref,
+                        detail.base_ref
+                    ),
+                    detail.url.clone(),
+                    None,
+                )
+            }
+        };
+        let linked_sessions = issue
+            .as_ref()
+            .map(|issue| self.linked_sessions(issue, cx))
+            .unwrap_or_default();
+        let start_model = self.model.clone();
+        let start_work_dir = self.project_work_dir.clone();
+        let start_issue = issue.clone();
+        let start_title = title.clone();
+
+        div()
+            .size_full()
+            .min_h_0()
+            .overflow_y_scrollbar()
+            .px_5()
+            .py_4()
+            .child(
+                div()
+                    .text_lg()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(title),
+            )
+            .child(
+                div()
+                    .mt_1()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(metadata),
+            )
+            .child(
+                div()
+                    .mt_3()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Link::new("github-open-browser").href(url).child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(Icon::new(IconName::ExternalLink).small())
+                                .child("Open on GitHub"),
+                        ),
+                    )
+                    .children(start_issue.map(|issue| {
+                        Button::new("github-start-agent-task")
+                            .icon(IconName::Play)
+                            .label("Start agent task")
+                            .small()
+                            .on_click(move |_, _, cx| {
+                                let Some(work_dir) = start_work_dir.clone() else {
+                                    return;
+                                };
+                                start_model.update(cx, |state, cx| {
+                                    controller::dispatch(
+                                        state,
+                                        AppAction::StartIssueWork {
+                                            work_dir,
+                                            issue: issue.clone(),
+                                            title: start_title.clone(),
+                                        },
+                                    );
+                                    cx.notify();
+                                });
+                            })
+                    })),
+            )
+            .child(
+                div()
+                    .mt_5()
+                    .text_sm()
+                    .child(TextView::new(&self.detail_body).selectable(true)),
+            )
+            .children((!linked_sessions.is_empty()).then(|| {
+                div()
+                    .mt_5()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Linked tasks"),
+                    )
+                    .children(linked_sessions.into_iter().map(|session| {
+                        div()
+                            .mt_2()
+                            .text_sm()
+                            .child(session.title)
+                            .into_any_element()
+                    }))
+            }))
+            .children((!self.comment_rows.is_empty()).then(|| {
+                div()
+                    .mt_5()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(format!("Conversation ({})", self.comment_rows.len())),
+                    )
+                    .child(
+                        div()
+                            .relative()
+                            .mt_2()
+                            .h_64()
+                            .border_1()
+                            .border_color(theme.border)
+                            .rounded(cx.theme().radius)
+                            .child(
+                                list(
+                                    self.comment_list_state.clone(),
+                                    cx.processor(Self::render_comment_row),
+                                )
+                                .size_full()
+                                .with_sizing_behavior(ListSizingBehavior::Infer),
+                            )
+                            .child(
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .child(Scrollbar::vertical(&self.comment_list_state)),
+                            ),
+                    )
+            }))
+            .children(self.detail_loading.then(|| {
+                div()
+                    .mt_3()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(Spinner::new().xsmall())
+                    .child("Refreshing details…")
+            }))
+            .into_any_element()
+    }
+
+    fn render_status_bar(&self) -> impl IntoElement {
+        let count = match self.tab {
+            GitHubTab::Issues => self.issues.len(),
+            GitHubTab::PullRequests => self.pull_requests.len(),
+        };
+        let has_draft = match self.tab {
+            GitHubTab::Issues => !self.issue_comment_draft.is_empty(),
+            GitHubTab::PullRequests => !self.pr_review_draft.is_empty(),
+        };
+        StatusBar::new().left(format!(
+            "{} {} · {}{}",
+            count,
+            self.tab.label().to_lowercase(),
+            self.state_filter.value(),
+            if has_draft { " · Unsaved draft" } else { "" }
+        ))
+    }
+}
+
+impl Render for GitHubView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let narrow = window.bounds().size.width < px(900.0);
+        let master = div()
+            .size_full()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(self.render_filters(cx))
+            .child(div().flex_1().min_h_0().child(self.render_list(window, cx)));
+        let detail = self.render_detail(cx);
+        let content = if narrow {
+            div()
+                .size_full()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .child(div().flex_1().min_h_0().child(master))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .border_t_1()
+                        .border_color(cx.theme().border)
+                        .child(detail),
+                )
+                .into_any_element()
+        } else {
+            h_resizable("github-master-detail")
+                .with_state(&self.detail_split_state)
+                .child(
+                    resizable_panel()
+                        .size(window.bounds().size.width * 0.35)
+                        .size_range(px(260.0)..px(640.0))
+                        .child(master),
+                )
+                .child(resizable_panel().child(detail))
+                .into_any_element()
+        };
+
+        div()
+            .size_full()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(self.render_toolbar(cx))
+            .child(div().flex_1().min_h_0().child(content))
+            .child(self.render_status_bar())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        github_result_matches_request, issue_filter_matches, linked_session_ids,
+        selected_issue_after_refresh, GitHubRequest, GitHubTab,
+    };
+    use crate::state::{SessionHealth, SessionInfo};
+    use std::path::PathBuf;
+    use threadlane_git::{GitHubIssueRef, GitHubIssueSummary};
+
+    fn issue(number: u64) -> GitHubIssueSummary {
+        GitHubIssueSummary {
+            issue: GitHubIssueRef {
+                host: "github.com".into(),
+                owner: "threadlane".into(),
+                repo: "app".into(),
+                number,
+                url: format!("https://github.com/threadlane/app/issues/{number}"),
+            },
+            title: "Fix linked task browser".into(),
+            author: "octocat".into(),
+            labels: vec![threadlane_git::GitHubLabel {
+                name: "desktop".into(),
+                ..Default::default()
+            }],
+            assignees: vec!["maintainer".into()],
+            ..Default::default()
+        }
+    }
+
+    fn session(id: &str, github_issue: Option<GitHubIssueRef>) -> SessionInfo {
+        SessionInfo {
+            id: id.into(),
+            title: id.into(),
+            work_dir: "/project".into(),
+            runtime_work_dir: "/project".into(),
+            session_file: format!("/project/{id}.jsonl").into(),
+            updated_at: 0,
+            health: SessionHealth::Healthy,
+            git_branch: None,
+            github_issue,
+            is_worktree: false,
+            worktree_available: true,
+        }
+    }
+
+    #[test]
+    fn github_result_matches_request_rejects_stale_project_tab_query_revision() {
+        let current = GitHubRequest {
+            work_dir: PathBuf::from("/projects/current"),
+            tab: GitHubTab::Issues,
+            query_revision: 4,
+            item_number: Some(12),
+        };
+
+        assert!(github_result_matches_request(&current, &current));
+        for stale in [
+            GitHubRequest {
+                work_dir: PathBuf::from("/projects/old"),
+                ..current.clone()
+            },
+            GitHubRequest {
+                tab: GitHubTab::PullRequests,
+                ..current.clone()
+            },
+            GitHubRequest {
+                query_revision: 3,
+                ..current.clone()
+            },
+            GitHubRequest {
+                item_number: Some(13),
+                ..current.clone()
+            },
+        ] {
+            assert!(!github_result_matches_request(&stale, &current));
+        }
+    }
+
+    #[test]
+    fn issue_filter_matches_title_number_label_and_assignee() {
+        let issue = issue(42);
+
+        for query in ["linked task", "42", "desktop", "maintainer"] {
+            assert!(issue_filter_matches(&issue, query), "query: {query}");
+        }
+        assert!(!issue_filter_matches(&issue, "unrelated"));
+    }
+
+    #[test]
+    fn selected_issue_survives_same_item_refresh() {
+        assert_eq!(
+            selected_issue_after_refresh(Some(42), &[issue(41), issue(42)]),
+            Some(42)
+        );
+        assert_eq!(
+            selected_issue_after_refresh(Some(42), &[issue(41)]),
+            Some(41)
+        );
+        assert_eq!(selected_issue_after_refresh(Some(42), &[]), None);
+    }
+
+    #[test]
+    fn linked_sessions_match_repository_qualified_issue_only() {
+        let target = issue(42).issue;
+        let other_repo = GitHubIssueRef {
+            repo: "other".into(),
+            ..target.clone()
+        };
+        let sessions = vec![
+            session("match", Some(target.clone())),
+            session("other-repo", Some(other_repo)),
+            session(
+                "other-number",
+                Some(GitHubIssueRef {
+                    number: 43,
+                    ..target
+                }),
+            ),
+            session("unlinked", None),
+        ];
+
+        assert_eq!(
+            linked_session_ids(&sessions, &issue(42).issue),
+            vec!["match"]
+        );
+    }
+}

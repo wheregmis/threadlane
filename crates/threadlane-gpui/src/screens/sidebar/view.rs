@@ -211,6 +211,7 @@ fn sidebar_fingerprint(state: &AppState, now: u64) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     state.active_work_dir.hash(&mut hasher);
     state.active_session_id.hash(&mut hasher);
+    state.workspace_page.hash(&mut hasher);
     state.sidebar_project_filter.hash(&mut hasher);
     state.search_query.trim().to_lowercase().hash(&mut hasher);
     (now / 60).hash(&mut hasher);
@@ -1194,32 +1195,63 @@ impl SidebarView {
     }
 
     fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let model = self.model.clone();
+        let github_model = self.model.clone();
+        let settings_model = self.model.clone();
         let theme = cx.theme().colors;
+        let github_selected =
+            self.model.read(cx).workspace_page == crate::state::WorkspacePage::GitHub;
 
-        div().flex_none().px_3().py_2().child(
-            Button::new("sidebar-settings")
-                .child(
-                    div()
-                        .w_full()
-                        .flex()
-                        .items_center()
-                        .justify_start()
-                        .gap_2()
-                        .child(IconName::Settings)
-                        .child("Settings"),
-                )
-                .ghost()
-                .w_full()
-                .justify_start()
-                .text_color(theme.muted_foreground)
-                .on_click(move |_event, _window, cx| {
-                    model.update(cx, |state, cx| {
-                        controller::dispatch(state, AppAction::OpenSettings);
-                        cx.notify();
-                    });
-                }),
-        )
+        div()
+            .flex_none()
+            .px_3()
+            .py_2()
+            .child(
+                Button::new("sidebar-github")
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .justify_start()
+                            .gap_2()
+                            .child(IconName::Github)
+                            .child("GitHub"),
+                    )
+                    .ghost()
+                    .selected(github_selected)
+                    .w_full()
+                    .justify_start()
+                    .text_color(theme.muted_foreground)
+                    .on_click(move |_event, _window, cx| {
+                        github_model.update(cx, |state, cx| {
+                            controller::dispatch(state, AppAction::OpenGitHub);
+                            cx.notify();
+                        });
+                    }),
+            )
+            .child(
+                Button::new("sidebar-settings")
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .justify_start()
+                            .gap_2()
+                            .child(IconName::Settings)
+                            .child("Settings"),
+                    )
+                    .ghost()
+                    .w_full()
+                    .justify_start()
+                    .text_color(theme.muted_foreground)
+                    .on_click(move |_event, _window, cx| {
+                        settings_model.update(cx, |state, cx| {
+                            controller::dispatch(state, AppAction::OpenSettings);
+                            cx.notify();
+                        });
+                    }),
+            )
     }
 
     /// Filter, group, and sort sessions for the history list. Only runs when

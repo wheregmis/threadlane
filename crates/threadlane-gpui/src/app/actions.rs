@@ -52,6 +52,8 @@ pub enum AppAction {
         config_id: String,
         value: String,
     },
+    OpenGitHub,
+    CloseGitHub,
     OpenSettings,
     CloseSettings,
     SaveOpenAiKey(String),

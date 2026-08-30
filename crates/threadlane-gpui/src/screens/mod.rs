@@ -1,5 +1,6 @@
 pub mod chat;
 pub mod editor;
+pub mod github;
 pub mod right_panel;
 pub mod settings;
 pub mod sidebar;
