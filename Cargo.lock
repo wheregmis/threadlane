@@ -7423,6 +7423,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "threadlane-daemon",
  "threadlane-protocol",
  "threadlane-provider",
  "tokio",

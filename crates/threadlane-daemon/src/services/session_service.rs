@@ -7,7 +7,7 @@ use threadlane_protocol::permission::*;
 use threadlane_protocol::session::*;
 use threadlane_runtime::harness::SessionStore;
 use threadlane_session::system_prompt::SystemPromptConfig;
-use threadlane_session::{CodingAgent, CodingAgentOptions};
+use threadlane_session::{CodingAgent, CodingAgentOptions, CodingAgentWorkHandle};
 use tokio::sync::broadcast;
 use tracing::info;
 
@@ -43,8 +43,11 @@ fn resolve_provider_credentials(model: &str) -> (String, Option<String>) {
     (String::new(), None)
 }
 
+#[derive(Clone)]
 struct ActiveSession {
     agent: Arc<tokio::sync::Mutex<CodingAgent>>,
+    // Clonable queueing handle so queued input never waits on the run-held agent lock.
+    work_handle: CodingAgentWorkHandle,
     summary: SessionSummary,
     broadcaster: broadcast::Sender<SessionEvent>,
 }
@@ -74,11 +77,7 @@ impl SessionService {
     ) -> Option<ActiveSession> {
         let mut lock = self.sessions.lock().await;
         if let Some(session) = lock.get(session_id) {
-            return Some(ActiveSession {
-                agent: session.agent.clone(),
-                summary: session.summary.clone(),
-                broadcaster: session.broadcaster.clone(),
-            });
+            return Some(session.clone());
         }
 
         let project_dir = project_path.map(PathBuf::from).or_else(|| {
@@ -109,13 +108,15 @@ impl SessionService {
             account_id,
             model: model.clone(),
             work_dir: project_dir.clone(),
-            session_file: Some(session_file),
+            session_file: Some(session_file.clone()),
             system_prompt: SystemPromptConfig::default(),
             agent_config: None,
             coding_config: None,
         };
 
-        let agent = Arc::new(tokio::sync::Mutex::new(CodingAgent::new(options)));
+        let agent = CodingAgent::new(options);
+        let work_handle = agent.work_handle();
+        let agent = Arc::new(tokio::sync::Mutex::new(agent));
         let (broadcaster, _) = broadcast::channel(1024);
         let summary = SessionSummary {
             session_id: session_id.to_string(),
@@ -125,22 +126,17 @@ impl SessionService {
             created_at: chrono_iso_now(),
             updated_at: chrono_iso_now(),
             is_active: true,
+            session_file: Some(session_file.to_string_lossy().into_owned()),
         };
 
         let active = ActiveSession {
             agent,
+            work_handle,
             summary,
             broadcaster,
         };
 
-        lock.insert(
-            session_id.to_string(),
-            ActiveSession {
-                agent: active.agent.clone(),
-                summary: active.summary.clone(),
-                broadcaster: active.broadcaster.clone(),
-            },
-        );
+        lock.insert(session_id.to_string(), active.clone());
 
         Some(active)
     }
@@ -171,13 +167,15 @@ impl SessionService {
             account_id,
             model: model.clone(),
             work_dir: project_path.clone(),
-            session_file: Some(session_file),
+            session_file: Some(session_file.clone()),
             system_prompt: SystemPromptConfig::default(),
             agent_config: None,
             coding_config: None,
         };
 
-        let agent = Arc::new(tokio::sync::Mutex::new(CodingAgent::new(options)));
+        let agent = CodingAgent::new(options);
+        let work_handle = agent.work_handle();
+        let agent = Arc::new(tokio::sync::Mutex::new(agent));
         let (broadcaster, _) = broadcast::channel(1024);
 
         let summary = SessionSummary {
@@ -188,6 +186,7 @@ impl SessionService {
             created_at: now.clone(),
             updated_at: now,
             is_active: true,
+            session_file: Some(session_file.to_string_lossy().into_owned()),
         };
 
         let mut lock = self.sessions.lock().await;
@@ -195,6 +194,7 @@ impl SessionService {
             session_id.clone(),
             ActiveSession {
                 agent,
+                work_handle,
                 summary: summary.clone(),
                 broadcaster,
             },
@@ -232,6 +232,7 @@ impl SessionService {
                                 created_at: chrono_iso_now(),
                                 updated_at: chrono_iso_now(),
                                 is_active: false,
+                                session_file: Some(path.to_string_lossy().into_owned()),
                             });
                         }
                     }
@@ -464,14 +465,7 @@ impl SessionService {
         let run_id = format!("run_{}", uuid_v4_like());
         let session_id = req.session_id.clone();
         let prompt = req.prompt;
-        let images: Vec<threadlane_runtime::ImageAttachment> = req
-            .images
-            .into_iter()
-            .map(|img| threadlane_runtime::ImageAttachment {
-                display_name: img.display_name.unwrap_or_default(),
-                data_url: img.data_url.unwrap_or_default(),
-            })
-            .collect();
+        let images = protocol_images(req.images);
         let event_broadcaster = session.broadcaster.clone();
         let agent_arc = session.agent.clone();
 
@@ -676,9 +670,44 @@ impl SessionService {
             Err(format!("Session '{}' not found", req.session_id))
         }
     }
+
+    /// Queues a follow-up prompt to run after the current run finishes. Uses the
+    /// clonable work handle so this never waits on the run-held agent lock.
+    pub async fn queue_follow_up(&self, req: QueueFollowUpRequest) -> Result<(), String> {
+        let session = self
+            .get_or_load_session(&req.session_id, None)
+            .await
+            .ok_or_else(|| format!("Session '{}' not found", req.session_id))?;
+        session
+            .work_handle
+            .try_queue_follow_up_with_images(req.prompt, protocol_images(req.images))
+    }
+
+    /// Steers the in-flight run with an additional user message.
+    pub async fn queue_steer(&self, req: QueueSteerRequest) -> Result<(), String> {
+        let session = self
+            .get_or_load_session(&req.session_id, None)
+            .await
+            .ok_or_else(|| format!("Session '{}' not found", req.session_id))?;
+        session
+            .work_handle
+            .queue_steer_with_images(req.prompt, protocol_images(req.images))
+    }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
+
+fn protocol_images(
+    images: Vec<threadlane_protocol::ImageAttachment>,
+) -> Vec<threadlane_runtime::ImageAttachment> {
+    images
+        .into_iter()
+        .map(|img| threadlane_runtime::ImageAttachment {
+            display_name: img.display_name.unwrap_or_default(),
+            data_url: img.data_url.unwrap_or_default(),
+        })
+        .collect()
+}
 
 fn file_mtime(path: &Path) -> u64 {
     std::fs::metadata(path)

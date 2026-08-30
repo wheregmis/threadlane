@@ -1,10 +1,9 @@
 pub(crate) mod chat;
 pub mod daemon_client;
-pub mod projects;
+pub mod git;
 pub mod provider_auth;
 pub mod sessions;
 pub mod settings;
 pub(crate) mod subagent_settings;
-pub mod git;
 pub mod updater;
 pub mod watcher;

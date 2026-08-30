@@ -15,7 +15,7 @@ pub(crate) fn dispatch(state: &mut AppState, action: AppAction) -> Option<Sessio
         AppAction::SelectSession {
             work_dir,
             session_id,
-        } => return Some(state.select_session(work_dir, session_id)),
+        } => return state.select_session(work_dir, session_id),
         AppAction::SettleSession {
             work_dir,
             session_id,

@@ -126,6 +126,22 @@ impl RpcDispatcher {
                     .map(|_| Value::Null),
                 Err(e) => Err(format!("Invalid params: {e}")),
             },
+            "session/queue_follow_up" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .session_service
+                    .queue_follow_up(req)
+                    .await
+                    .map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "session/queue_steer" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .session_service
+                    .queue_steer(req)
+                    .await
+                    .map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
             "session/set_model" => match serde_json::from_value(params) {
                 Ok(req) => self
                     .session_service
@@ -567,5 +583,34 @@ impl RpcDispatcher {
 impl Default for RpcDispatcher {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn queue_methods_route_instead_of_method_not_found() {
+        let dispatcher = RpcDispatcher::new();
+        for method in ["session/queue_follow_up", "session/queue_steer"] {
+            let request = RpcRequest::new(
+                1,
+                method,
+                Some(serde_json::json!({ "session_id": "missing", "prompt": "hi" })),
+            );
+            let response = dispatcher.dispatch(request).await;
+            let error = response.error.expect("expected error response");
+            assert_eq!(error.code, ERROR_INTERNAL_ERROR);
+            assert!(
+                error.message.contains("not found"),
+                "{method} should route to the session service, got: {}",
+                error.message
+            );
+            assert!(
+                !error.message.contains("Method"),
+                "{method} must not fall through to method-not-found"
+            );
+        }
     }
 }

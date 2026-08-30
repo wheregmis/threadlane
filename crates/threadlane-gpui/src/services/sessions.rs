@@ -1,17 +1,15 @@
-//! Session runtime client adapter for the GPUI frontend.
+//! Per-session UI state for the GPUI frontend.
+//!
+//! All session execution lives in the daemon; this record only tracks what the
+//! UI needs locally (the optimistic generating flag and display metadata).
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionRuntimeStatus {
-    Idle,
     Ready,
     Working,
-    Generating,
-    AwaitingApproval,
-    Interrupted,
-    Error(String),
 }
 
 pub struct SessionRuntime {
@@ -41,12 +39,11 @@ impl SessionRuntime {
         self.is_generating.load(Ordering::Relaxed)
     }
 
-    pub fn begin_generation(&self) -> Result<(), String> {
+    pub fn begin_generation(&self) {
         self.is_generating.store(true, Ordering::Relaxed);
-        Ok(())
     }
 
-    pub fn finish_generation(&self, _error: Option<String>) {
+    pub fn finish_generation(&self) {
         self.is_generating.store(false, Ordering::Relaxed);
     }
 
@@ -57,11 +54,4 @@ impl SessionRuntime {
             SessionRuntimeStatus::Ready
         }
     }
-
-    pub fn try_set_needle_enabled(&self, _enabled: bool) -> Result<(), String> {
-        Ok(())
-    }
-
-    pub async fn set_model_roles(&self, _roles: threadlane_protocol::ModelRoles) {}
 }
-

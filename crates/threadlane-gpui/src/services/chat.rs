@@ -3,8 +3,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender as Sender;
 
 use threadlane_protocol::{
-    CreateSessionRequest, GenerateTitleRequest, ImageAttachment, ReasoningEffort,
-    SendPromptRequest, SessionEvent,
+    GenerateTitleRequest, ImageAttachment, ReasoningEffort, SendPromptRequest, SessionEvent,
 };
 
 use crate::services::sessions::SessionRuntime;
@@ -27,17 +26,16 @@ pub(crate) fn executor() -> Result<&'static tokio::runtime::Runtime, String> {
 pub(crate) fn execute_prompt(
     runtime: Arc<SessionRuntime>,
     session_id: String,
-    create_session: Option<CreateSessionRequest>,
     text: String,
     images: Vec<ImageAttachment>,
     reasoning_effort: ReasoningEffort,
     stream_tx: Sender<ChatStreamEvent>,
 ) -> Result<(), String> {
-    runtime.begin_generation()?;
+    runtime.begin_generation();
     let executor = match executor() {
         Ok(executor) => executor,
         Err(error) => {
-            runtime.finish_generation(Some(error.clone()));
+            runtime.finish_generation();
             return Err(error);
         }
     };
@@ -50,7 +48,7 @@ pub(crate) fn execute_prompt(
         let client = match crate::services::daemon_client::get_daemon_client().await {
             Ok(client) => client,
             Err(e) => {
-                task_runtime.finish_generation(Some(e.clone()));
+                task_runtime.finish_generation();
                 let _ = task_stream_tx.send(ChatStreamEvent::Agent {
                     session_id: task_session_id.clone(),
                     event: SessionEvent::Error { message: e },
@@ -64,22 +62,8 @@ pub(crate) fn execute_prompt(
         };
 
         let mut events = client.subscribe_session_events();
-        if let Some(request) = create_session {
-            if let Err(e) = client.create_session(request).await {
-                task_runtime.finish_generation(Some(e.clone()));
-                let _ = task_stream_tx.send(ChatStreamEvent::Agent {
-                    session_id: task_session_id.clone(),
-                    event: SessionEvent::Error { message: e },
-                });
-                let _ = task_stream_tx.send(ChatStreamEvent::Finished {
-                    session_id: task_session_id,
-                    session_file: task_runtime.session_file.clone(),
-                });
-                return;
-            }
-        }
         if let Err(e) = client.subscribe_session(&task_session_id).await {
-            task_runtime.finish_generation(Some(e.clone()));
+            task_runtime.finish_generation();
             let _ = task_stream_tx.send(ChatStreamEvent::Agent {
                 session_id: task_session_id.clone(),
                 event: SessionEvent::Error { message: e },
@@ -100,7 +84,7 @@ pub(crate) fn execute_prompt(
             .await;
 
         if let Err(e) = prompt_res {
-            task_runtime.finish_generation(Some(e.clone()));
+            task_runtime.finish_generation();
             let _ = task_stream_tx.send(ChatStreamEvent::Agent {
                 session_id: task_session_id.clone(),
                 event: SessionEvent::Error { message: e },
@@ -126,7 +110,7 @@ pub(crate) fn execute_prompt(
             }
         }
 
-        task_runtime.finish_generation(None);
+        task_runtime.finish_generation();
         let _ = task_stream_tx.send(ChatStreamEvent::Finished {
             session_id: task_session_id,
             session_file: task_runtime.session_file.clone(),
@@ -141,7 +125,7 @@ pub(crate) fn cancel_prompt(
     session_id: String,
     stream_tx: Sender<ChatStreamEvent>,
 ) -> Result<(), String> {
-    runtime.finish_generation(Some("Generation cancelled".into()));
+    runtime.finish_generation();
     let task_session_id = session_id.clone();
     let task_file = runtime.session_file.clone();
     if let Ok(executor) = executor() {

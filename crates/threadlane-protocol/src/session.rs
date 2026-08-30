@@ -37,7 +37,9 @@ impl AcpConfigOption {
         self.current_value.clone()
     }
     pub fn current_detail_label(&self) -> Option<String> {
-        self.current_value.as_ref().map(|v| format!("{}: {}", self.name, v))
+        self.current_value
+            .as_ref()
+            .map(|v| format!("{}: {}", self.name, v))
     }
 }
 
@@ -155,8 +157,12 @@ impl TokenUsageSummary {
     pub fn accumulate(&mut self, other: &TokenUsageSummary) {
         self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
         self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
-        self.cache_read_tokens = self.cache_read_tokens.saturating_add(other.cache_read_tokens);
-        self.cache_write_tokens = self.cache_write_tokens.saturating_add(other.cache_write_tokens);
+        self.cache_read_tokens = self
+            .cache_read_tokens
+            .saturating_add(other.cache_read_tokens);
+        self.cache_write_tokens = self
+            .cache_write_tokens
+            .saturating_add(other.cache_write_tokens);
         self.total_tokens = self.total_tokens.saturating_add(other.total_tokens);
     }
 }
@@ -448,6 +454,10 @@ pub struct SessionSummary {
     pub created_at: String,
     pub updated_at: String,
     pub is_active: bool,
+    /// Daemon-resolved transcript path, so clients never assume the on-disk
+    /// session layout. Optional for wire compatibility with older daemons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_file: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
