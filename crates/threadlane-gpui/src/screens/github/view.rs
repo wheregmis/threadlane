@@ -415,6 +415,16 @@ fn issue_start_activation(
     start().map(|()| true)
 }
 
+fn issue_start_dialog_result(result: Result<bool, String>, on_error: impl FnOnce(String)) -> bool {
+    match result {
+        Ok(started) => started,
+        Err(error) => {
+            on_error(error);
+            false
+        }
+    }
+}
+
 struct IssueStartDialog {
     model: Entity<AppState>,
     work_dir: PathBuf,
@@ -440,14 +450,10 @@ impl IssueStartDialog {
                 result.map(|_| ())
             })
         });
-        match result {
-            Ok(_) => true,
-            Err(error) => {
-                self.error = Some(error);
-                cx.notify();
-                false
-            }
-        }
+        issue_start_dialog_result(result, |error| {
+            self.error = Some(error);
+            cx.notify();
+        })
     }
 }
 
@@ -1910,8 +1916,9 @@ impl Render for GitHubView {
 mod tests {
     use super::{
         detail_result_matches_list, github_query_mode, github_result_matches_request,
-        github_server_query, issue_filter_matches, issue_start_activation,
-        issue_start_confirmation, linked_session_fingerprint, linked_session_ids,
+        github_server_query, issue_start_activation, issue_start_confirmation,
+        issue_start_dialog_result, issue_filter_matches,
+        linked_session_fingerprint, linked_session_ids,
         linked_session_status, linked_sessions_across_projects, list_count_splice,
         selected_issue_after_refresh, GitHubQueryMode, GitHubRequest, GitHubTab,
     };
@@ -2168,6 +2175,11 @@ mod tests {
             issue_start_activation(true, || Err("worktree failed".into())),
             Err("worktree failed".into())
         );
+    }
+
+    #[test]
+    fn disabled_issue_start_dialog_keeps_the_confirmation_open() {
+        assert!(!issue_start_dialog_result(Ok(false), |_| {}));
     }
 
     #[test]
