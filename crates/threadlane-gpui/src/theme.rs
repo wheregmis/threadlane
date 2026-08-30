@@ -5,7 +5,13 @@ use gpui::{App, SharedString};
 use gpui_component::{ActiveTheme, Theme, ThemeConfig, ThemeMode, ThemeRegistry};
 use serde::{Deserialize, Serialize};
 
-use crate::persistence::global_threadlane_dir;
+fn global_threadlane_dir() -> PathBuf {
+    threadlane_protocol::project::default_global_threadlane_dir().unwrap_or_else(|| {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".threadlane")
+    })
+}
 
 const DEFAULT_THEME_NAME: &str = "Threadlane Dark";
 const BUNDLED_THEMES: &str = include_str!("../themes/threadlane.json");
@@ -36,15 +42,6 @@ pub fn init(cx: &mut App) {
     }) {
         tracing::warn!("failed to watch Threadlane themes: {error}");
     }
-}
-
-pub(crate) fn available_themes(cx: &App) -> Vec<(SharedString, ThemeMode)> {
-    ThemeRegistry::global(cx)
-        .sorted_themes()
-        .into_iter()
-        .filter(|theme| theme.name.starts_with("Threadlane"))
-        .map(|theme| (theme.name.clone(), theme.mode))
-        .collect()
 }
 
 pub(crate) fn active_theme_name(cx: &App) -> SharedString {

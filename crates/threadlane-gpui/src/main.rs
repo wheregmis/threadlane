@@ -1,77 +1,12 @@
 use gpui::*;
 use gpui_component::Root;
-use std::path::PathBuf;
 use threadlane_gpui::assets::Assets;
 use threadlane_gpui::screens::workspace::WorkspaceView;
 use threadlane_gpui::theme;
-use threadlane_session::{CodingAgentOptions, HarnessCompositionSnapshot};
-use threadlane_skills::SkillManager;
-use threadlane_wasi::{packages::default_global_threadlane_dir, WasiExtensionManager};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-
-fn dump_config(args: &[String]) -> Result<(), String> {
-    let project_index = args
-        .iter()
-        .position(|arg| arg == "--project")
-        .ok_or_else(|| "--dump-config requires --project <path>".to_string())?;
-    let project = args
-        .get(project_index + 1)
-        .ok_or_else(|| "--project requires a path".to_string())?;
-    let project = PathBuf::from(project)
-        .canonicalize()
-        .map_err(|error| error.to_string())?;
-    let session_file = args
-        .iter()
-        .position(|arg| arg == "--session")
-        .and_then(|index| args.get(index + 1))
-        .map(PathBuf::from);
-    let model = args
-        .iter()
-        .position(|arg| arg == "--model")
-        .and_then(|index| args.get(index + 1))
-        .cloned()
-        .unwrap_or_else(|| "gpt-4o".into());
-    let options = CodingAgentOptions {
-        api_key: String::new(),
-        account_id: None,
-        model,
-        work_dir: project.clone(),
-        session_file,
-        system_prompt: Default::default(),
-        agent_config: None,
-        coding_config: None,
-    };
-    let mut manager = SkillManager::new();
-    manager.discover_skills(Some(&project));
-    let skills = manager.snapshot();
-    let extensions = WasiExtensionManager::for_project_session(&project, "dump-config");
-    extensions
-        .reload_from_roots(default_global_threadlane_dir().as_deref(), Some(&project))
-        .map_err(|error| error.to_string())?;
-    let snapshot = HarnessCompositionSnapshot::resolved(&options, &skills, &extensions);
-    println!("active_lane={}", snapshot.active_lane);
-    println!(
-        "session_file={}",
-        snapshot.session_file.unwrap_or_else(|| "<none>".into())
-    );
-    println!("model={}", snapshot.model);
-    println!("provider={}", snapshot.provider);
-    println!("skills={}", snapshot.skills.join(","));
-    println!("extensions={}", snapshot.extensions.join(","));
-    println!("sandbox={}", snapshot.sandbox_policy);
-    Ok(())
-}
 
 #[hotpath::main]
 fn main() {
-    let args = std::env::args().collect::<Vec<_>>();
-    if args.iter().any(|arg| arg == "--dump-config") {
-        if let Err(error) = dump_config(&args) {
-            eprintln!("--dump-config: {error}");
-            std::process::exit(2);
-        }
-        return;
-    }
     let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         tracing_subscriber::EnvFilter::new("info,gpui_component::text::format::markdown=error")
     });

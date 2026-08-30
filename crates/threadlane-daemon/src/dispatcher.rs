@@ -1,0 +1,616 @@
+use crate::services::*;
+use serde_json::Value;
+use threadlane_protocol::rpc::*;
+use threadlane_protocol::workspace::*;
+use tokio::sync::broadcast;
+
+#[derive(Clone)]
+pub struct RpcDispatcher {
+    pub session_service: SessionService,
+    pub terminal_service: TerminalService,
+    pub project_service: ProjectService,
+    pub git_service: GitService,
+    pub task_service: TaskService,
+    pub capabilities_service: CapabilitiesService,
+    pub extension_service: ExtensionService,
+    pub settings_service: SettingsService,
+    pub auth_service: AuthService,
+    pub update_service: UpdateService,
+    pub watcher_service: WatcherService,
+    pub workspace_events: broadcast::Sender<WorkspaceChangedEvent>,
+}
+
+impl RpcDispatcher {
+    pub fn new() -> Self {
+        let (workspace_events, _) = broadcast::channel(1024);
+        Self {
+            session_service: SessionService::new(),
+            terminal_service: TerminalService::new(),
+            project_service: ProjectService::new(),
+            git_service: GitService::new(),
+            task_service: TaskService::new(),
+            capabilities_service: CapabilitiesService::new(),
+            extension_service: ExtensionService::new(),
+            settings_service: SettingsService::new(),
+            auth_service: AuthService::new(),
+            update_service: UpdateService::new(),
+            watcher_service: WatcherService::new(),
+            workspace_events,
+        }
+    }
+
+    pub async fn dispatch(&self, request: RpcRequest) -> RpcResponse {
+        let id = request.id.clone();
+        let method = request.method.as_str();
+        let params = request.params.unwrap_or(Value::Null);
+
+        let result = match method {
+            // ── Session Methods ──────────────────────────────────────────
+            "session/create" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .session_service
+                    .create_session(req)
+                    .await
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "session/list" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .session_service
+                    .list_sessions(req)
+                    .await
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "session/list_infos" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .session_service
+                    .list_session_infos(req)
+                    .await
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "session/read_log" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .session_service
+                    .read_session_log(req)
+                    .await
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "session/hydrate" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .session_service
+                    .hydrate_session(req)
+                    .await
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "session/archive" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .session_service
+                    .archive_session(req)
+                    .await
+                    .map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "session/get" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .session_service
+                    .get_session(req)
+                    .await
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "session/delete" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .session_service
+                    .delete_session(req)
+                    .await
+                    .map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "session/send_prompt" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .session_service
+                    .send_prompt(req)
+                    .await
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "session/cancel" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .session_service
+                    .cancel_run(req)
+                    .await
+                    .map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "session/queue_follow_up" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .session_service
+                    .queue_follow_up(req)
+                    .await
+                    .map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "session/queue_steer" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .session_service
+                    .queue_steer(req)
+                    .await
+                    .map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "session/set_model" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .session_service
+                    .set_model(req)
+                    .await
+                    .map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "session/submit_permission" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .session_service
+                    .submit_permission_decision(req)
+                    .await
+                    .map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "session/generate_title" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .capabilities_service
+                    .generate_title(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+
+            // ── Terminal Methods ─────────────────────────────────────────
+            "terminal/spawn" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .terminal_service
+                    .spawn_terminal(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "terminal/input" => match serde_json::from_value(params) {
+                Ok(req) => self.terminal_service.write_input(req).map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "terminal/resize" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .terminal_service
+                    .resize_terminal(req)
+                    .map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "terminal/close" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .terminal_service
+                    .close_terminal(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+
+            // ── Project & Workspace Methods ──────────────────────────────
+            "project/list" => self
+                .project_service
+                .list_projects()
+                .map(|res| serde_json::to_value(res).unwrap()),
+            "project/register" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .project_service
+                    .register_project(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "project/unregister" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .project_service
+                    .unregister_project(req)
+                    .map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "project/select" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .project_service
+                    .select_project(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "project/browse" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .project_service
+                    .browse_directories(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "project/list_dir" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .project_service
+                    .list_directory(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "project/read_file" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .project_service
+                    .read_file(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "project/write_file" => match serde_json::from_value(params) {
+                Ok(req) => self.project_service.write_file(req).map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "workspace/watch" => match serde_json::from_value::<WatchWorkspaceRequest>(params) {
+                Ok(req) => self
+                    .watcher_service
+                    .watch_project(req.project_path, self.workspace_events.clone())
+                    .map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "workspace/unwatch" => {
+                match serde_json::from_value::<UnwatchWorkspaceRequest>(params) {
+                    Ok(req) => {
+                        self.watcher_service.unwatch_project(&req.project_path);
+                        Ok(Value::Null)
+                    }
+                    Err(e) => Err(format!("Invalid params: {e}")),
+                }
+            }
+
+            // ── Git Methods ──────────────────────────────────────────────
+            "git/status" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .git_service
+                    .status(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "git/inspect" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .git_service
+                    .inspect(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "git/diff" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .git_service
+                    .diff(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "git/branches" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .git_service
+                    .list_branches(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "git/checkout" => match serde_json::from_value(params) {
+                Ok(req) => self.git_service.checkout(req).map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "git/fetch" => match serde_json::from_value(params) {
+                Ok(req) => self.git_service.fetch(req).map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "git/create_pull_request" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .git_service
+                    .create_pull_request(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "git/inspect_pr" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .git_service
+                    .inspect_pr(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "git/stash_files" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .git_service
+                    .inspect_stash_files(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "git/stash_diff" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .git_service
+                    .diff_stash_file(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "git/commit_files" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .git_service
+                    .inspect_commit_files(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "git/commit_diff" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .git_service
+                    .diff_commit_file(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "git/stage_file" => match serde_json::from_value(params) {
+                Ok(req) => self.git_service.stage_file(req).map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "git/commit" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .git_service
+                    .commit(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "git/push" => match serde_json::from_value(params) {
+                Ok(req) => self.git_service.push(req).map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "git/pull" => match serde_json::from_value(params) {
+                Ok(req) => self.git_service.pull(req).map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "git/discard_file" => match serde_json::from_value(params) {
+                Ok(req) => self.git_service.discard_file(req).map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "git/ignore" => match serde_json::from_value(params) {
+                Ok(req) => self.git_service.ignore(req).map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "git/merge" => match serde_json::from_value(params) {
+                Ok(req) => self.git_service.merge(req).map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "git/stash_pop" => match serde_json::from_value(params) {
+                Ok(req) => self.git_service.stash_pop(req).map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "git/stash_drop" => match serde_json::from_value(params) {
+                Ok(req) => self.git_service.stash_drop(req).map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "git/commit_diff_message" => {
+                let project_path = params
+                    .get("project_path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                self.git_service
+                    .commit_diff_message(&project_path)
+                    .map(|res| serde_json::to_value(res).unwrap())
+            }
+
+            // ── Tasks Methods ────────────────────────────────────────────
+            "tasks/list" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .task_service
+                    .list_tasks(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "tasks/start" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .task_service
+                    .start_task(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "tasks/cancel" => match serde_json::from_value(params) {
+                Ok(req) => self.task_service.cancel_task(req).map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+
+            // ── Capabilities Methods ─────────────────────────────────────
+            "capabilities/models" => self
+                .capabilities_service
+                .list_models()
+                .map(|res| serde_json::to_value(res).unwrap()),
+            "capabilities/skills" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .capabilities_service
+                    .list_skills(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "capabilities/toggle_skill" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .capabilities_service
+                    .toggle_skill(req)
+                    .map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "capabilities/extensions/list" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .extension_service
+                    .list(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "capabilities/extensions/install" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .extension_service
+                    .install(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "capabilities/extensions/set_enabled" => match serde_json::from_value(params) {
+                Ok(req) => self.extension_service.set_enabled(req).map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "capabilities/extensions/remove" => match serde_json::from_value(params) {
+                Ok(req) => self.extension_service.remove(req).map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "capabilities/acp/list" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .capabilities_service
+                    .list_acp_agents(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "capabilities/acp/add" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .capabilities_service
+                    .add_acp_agent(req)
+                    .map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "capabilities/acp/set_enabled" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .capabilities_service
+                    .set_acp_enabled(req)
+                    .map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "capabilities/acp/remove" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .capabilities_service
+                    .remove_acp_agent(req)
+                    .map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "daemon/info" => self
+                .capabilities_service
+                .get_daemon_info()
+                .map(|res| serde_json::to_value(res).unwrap()),
+
+            // ── Settings Methods ─────────────────────────────────────────
+            "settings/needle_get" => self
+                .settings_service
+                .get_needle_enabled()
+                .map(|res| serde_json::to_value(res).unwrap()),
+            "settings/needle_set" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .settings_service
+                    .set_needle_enabled(req)
+                    .map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "settings/subagent_get" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .settings_service
+                    .get_subagent_settings(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "settings/subagent_set" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .settings_service
+                    .set_subagent_settings(req)
+                    .map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+
+            // ── Auth Methods ─────────────────────────────────────────────
+            "auth/status" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .auth_service
+                    .get_status(req)
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "auth/connect" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .auth_service
+                    .connect(req)
+                    .await
+                    .map(|res| serde_json::to_value(res).unwrap()),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "auth/disconnect" => match serde_json::from_value(params) {
+                Ok(req) => self.auth_service.disconnect(req).map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "auth/codex_accounts" => self
+                .auth_service
+                .list_codex_accounts()
+                .map(|res| serde_json::to_value(res).unwrap()),
+            "auth/codex_accounts/set_active" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .auth_service
+                    .set_active_codex_account(req)
+                    .map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "auth/codex_accounts/remove" => match serde_json::from_value(params) {
+                Ok(req) => self
+                    .auth_service
+                    .remove_codex_account(req)
+                    .map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+
+            // ── Update Methods ───────────────────────────────────────────
+            "update/check" => self
+                .update_service
+                .check()
+                .map(|res| serde_json::to_value(res).unwrap()),
+            "update/download" => match serde_json::from_value(params) {
+                Ok(req) => {
+                    // Create a throwaway broadcast channel; update service pushes
+                    // progress events but the dispatcher doesn't yet forward them
+                    // as notifications (connection layer wires that up separately).
+                    let (tx, _rx) = tokio::sync::broadcast::channel(64);
+                    self.update_service.download(req, tx).map(|_| Value::Null)
+                }
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+            "update/install" => match serde_json::from_value(params) {
+                Ok(req) => self.update_service.install(req).map(|_| Value::Null),
+                Err(e) => Err(format!("Invalid params: {e}")),
+            },
+
+            _ => Err(format!("Method '{method}' not found")),
+        };
+
+        match result {
+            Ok(value) => RpcResponse::success(id, value),
+            Err(err) => RpcResponse::error(id, RpcError::new(ERROR_INTERNAL_ERROR, err)),
+        }
+    }
+}
+
+impl Default for RpcDispatcher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn queue_methods_route_instead_of_method_not_found() {
+        let dispatcher = RpcDispatcher::new();
+        for method in ["session/queue_follow_up", "session/queue_steer"] {
+            let request = RpcRequest::new(
+                1,
+                method,
+                Some(serde_json::json!({ "session_id": "missing", "prompt": "hi" })),
+            );
+            let response = dispatcher.dispatch(request).await;
+            let error = response.error.expect("expected error response");
+            assert_eq!(error.code, ERROR_INTERNAL_ERROR);
+            assert!(
+                error.message.contains("not found"),
+                "{method} should route to the session service, got: {}",
+                error.message
+            );
+            assert!(
+                !error.message.contains("Method"),
+                "{method} must not fall through to method-not-found"
+            );
+        }
+    }
+}

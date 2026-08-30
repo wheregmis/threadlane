@@ -103,6 +103,15 @@ pub fn select_project(raw_path: &Path, session_id: Option<&str>) -> Result<Proje
     Ok(result)
 }
 
+pub fn unregister_project(raw_path: &Path) -> Result<(), String> {
+    let _guard = registry_lock().lock().map_err(|error| error.to_string())?;
+    let canonical = raw_path.canonicalize().unwrap_or_else(|_| raw_path.to_path_buf());
+    let global_dir = default_global_dir();
+    let mut projects = load_project_registry_from(&global_dir);
+    projects.retain(|project| !same_path(&project.path, &canonical));
+    save_project_registry_to(&global_dir, &projects)
+}
+
 pub(crate) fn merge_and_save_project_registry_to(
     global_dir: &Path,
     incoming: &[ProjectRecord],

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use threadlane_session::{ImageAttachment, ReasoningEffort};
+use threadlane_protocol::{ImageAttachment, ReasoningEffort};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AppAction {
@@ -55,4 +55,5 @@ pub enum AppAction {
     ToggleReasoningExpanded(String),
     OpenFileInEditor(String),
     RunTerminalCommand(String),
+    OpenProjectPicker,
 }

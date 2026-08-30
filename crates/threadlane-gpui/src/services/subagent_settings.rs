@@ -1,52 +1,70 @@
-use serde::{Deserialize, Serialize};
-use std::path::Path;
-use threadlane_runtime::ReasoningEffort;
+//! Subagent settings client — delegates file I/O to the daemon.
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+use std::path::Path;
+use threadlane_protocol::{
+    GetSubagentSettingsRequest, ReasoningEffort, SetSubagentSettingsRequest, SubagentSettingsData,
+};
+
+fn executor() -> Result<&'static tokio::runtime::Runtime, String> {
+    crate::services::chat::executor()
+}
+
+// Re-export SubagentSettings as a GPUI-local alias backed by the protocol type.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SubagentSettings {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) reasoning_effort: Option<ReasoningEffort>,
 }
 
-fn path(project_root: &Path) -> std::path::PathBuf {
-    project_root.join(".threadlane").join("subagents.json")
+impl From<SubagentSettingsData> for SubagentSettings {
+    fn from(d: SubagentSettingsData) -> Self {
+        Self {
+            model: d.model,
+            reasoning_effort: d.reasoning_effort,
+        }
+    }
+}
+
+impl From<SubagentSettings> for SubagentSettingsData {
+    fn from(s: SubagentSettings) -> Self {
+        Self {
+            model: s.model,
+            reasoning_effort: s.reasoning_effort,
+        }
+    }
 }
 
 pub(crate) fn load(project_root: &Path) -> SubagentSettings {
-    std::fs::read(path(project_root))
+    executor()
         .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .filter(|settings: &SubagentSettings| {
-            matches!(
-                settings.reasoning_effort,
-                None | Some(ReasoningEffort::Minimal)
-                    | Some(ReasoningEffort::Low)
-                    | Some(ReasoningEffort::Medium)
-                    | Some(ReasoningEffort::High)
-            )
+        .and_then(|rt| {
+            rt.block_on(async {
+                let client = crate::services::daemon_client::get_daemon_client().await?;
+                client
+                    .get_subagent_settings(GetSubagentSettingsRequest {
+                        project_path: project_root.to_string_lossy().to_string(),
+                    })
+                    .await
+            })
+            .ok()
         })
+        .map(SubagentSettings::from)
         .unwrap_or_default()
 }
 
 pub(crate) fn save(project_root: &Path, settings: &SubagentSettings) -> Result<(), String> {
-    if !matches!(
-        settings.reasoning_effort,
-        None | Some(ReasoningEffort::Minimal)
-            | Some(ReasoningEffort::Low)
-            | Some(ReasoningEffort::Medium)
-            | Some(ReasoningEffort::High)
-    ) {
-        return Err("Unsupported subagent reasoning effort.".into());
-    }
-    let target = path(project_root);
-    let parent = target.parent().ok_or("Invalid subagent settings path.")?;
-    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    let temporary = target.with_extension("json.tmp");
-    let bytes = serde_json::to_vec_pretty(settings).map_err(|error| error.to_string())?;
-    std::fs::write(&temporary, bytes).map_err(|error| error.to_string())?;
-    std::fs::rename(temporary, target).map_err(|error| error.to_string())
+    executor()?.block_on(async {
+        let client = crate::services::daemon_client::get_daemon_client().await?;
+        client
+            .set_subagent_settings(SetSubagentSettingsRequest {
+                project_path: project_root.to_string_lossy().to_string(),
+                settings: SubagentSettingsData {
+                    model: settings.model.clone(),
+                    reasoning_effort: settings.reasoning_effort,
+                },
+            })
+            .await
+    })
 }
 
 #[cfg(test)]
@@ -54,28 +72,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn settings_round_trip_and_missing_defaults() {
-        let dir = tempfile::tempdir().unwrap();
-        assert_eq!(load(dir.path()), SubagentSettings::default());
+    fn settings_round_trip_type_conversion() {
         let settings = SubagentSettings {
             model: Some("antigravity/gemini-3.1-pro".into()),
             reasoning_effort: Some(ReasoningEffort::High),
         };
-        save(dir.path(), &settings).unwrap();
-        assert_eq!(load(dir.path()), settings);
-    }
-
-    #[test]
-    fn malformed_and_unsupported_settings_fall_back_safely() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join(".threadlane")).unwrap();
-        std::fs::write(path(dir.path()), b"not-json").unwrap();
-        assert_eq!(load(dir.path()), SubagentSettings::default());
-
-        let unsupported = SubagentSettings {
-            model: None,
-            reasoning_effort: Some(ReasoningEffort::Max),
-        };
-        assert!(save(dir.path(), &unsupported).is_err());
+        let data: SubagentSettingsData = settings.clone().into();
+        let back: SubagentSettings = data.into();
+        assert_eq!(settings, back);
     }
 }

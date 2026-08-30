@@ -1,5 +1,6 @@
 pub(crate) mod chat;
-pub mod projects;
+pub mod daemon_client;
+pub mod git;
 pub mod provider_auth;
 pub mod sessions;
 pub mod settings;

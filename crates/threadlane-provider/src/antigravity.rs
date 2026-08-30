@@ -360,6 +360,7 @@ impl AntigravityClient {
         envelope: &Value,
     ) -> Result<reqwest::Response, String> {
         let mut last_error = "no Antigravity endpoint was available".to_string();
+        let mut quota_error = None;
         for endpoint in endpoint_candidates() {
             let mut headers = antigravity_headers(token);
             if runtime_model.starts_with("claude-") {
@@ -399,11 +400,14 @@ impl AntigravityClient {
                 "Antigravity API error ({status}, runtime model {runtime_model}): {}",
                 safe_error_text(&text)
             );
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS && quota_error.is_none() {
+                quota_error = Some(last_error.clone());
+            }
             if !matches!(status.as_u16(), 403 | 404 | 429 | 500 | 502 | 503 | 504) {
                 break;
             }
         }
-        Err(last_error)
+        Err(quota_error.unwrap_or(last_error))
     }
 
     pub async fn run_diagnostics(&self) -> String {

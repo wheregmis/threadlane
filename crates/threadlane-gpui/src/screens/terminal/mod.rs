@@ -1,7 +1,6 @@
 use std::future::Future;
-use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use gpui::*;
@@ -9,7 +8,12 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::ThemeMode;
 use gpui_component::{ActiveTheme, ElementExt, Icon, IconName, Sizable};
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use threadlane_protocol::client::DaemonClient;
+use threadlane_protocol::terminal::{
+    CloseTerminalRequest, ResizeTerminalRequest, SpawnTerminalRequest,
+};
+
+use crate::services::{chat, daemon_client};
 
 const DEFAULT_ROWS: u16 = 30;
 const DEFAULT_COLS: u16 = 120;
@@ -36,43 +40,19 @@ fn terminal_parse_budget_exhausted(parsed_bytes: usize, parse_budget: usize) -> 
     parsed_bytes >= parse_budget
 }
 
-struct PtySession {
-    master: Box<dyn MasterPty + Send>,
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    child: Box<dyn Child + Send + Sync>,
-}
-
-impl PtySession {
-    fn write(&self, bytes: &[u8]) {
-        if let Ok(mut writer) = self.writer.lock() {
-            if let Err(error) = writer.write_all(bytes).and_then(|_| writer.flush()) {
-                tracing::warn!("failed to write to terminal PTY: {error}");
-            }
-        }
-    }
-
-    fn resize(&self, rows: u16, cols: u16) {
-        if let Err(error) = self.master.resize(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        }) {
-            tracing::warn!("failed to resize terminal PTY: {error}");
-        }
-    }
-}
-
-impl Drop for PtySession {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-    }
+fn terminal_event_matches(current_id: Option<&str>, event_id: &str) -> bool {
+    current_id == Some(event_id)
 }
 
 enum PtyEvent {
     Frame(TerminalFrame),
-    Closed,
-    Error(String),
+    Closed {
+        terminal_id: String,
+    },
+    Error {
+        terminal_id: String,
+        message: String,
+    },
 }
 
 enum TerminalWake {
@@ -255,7 +235,12 @@ pub struct TerminalView {
     focus_handle: FocusHandle,
     screen: vt100::Screen,
     parser_command_tx: Option<mpsc::Sender<ParserCommand>>,
-    session: Option<PtySession>,
+    parser_output_tx: Option<mpsc::SyncSender<Vec<u8>>>,
+    daemon_client: Option<Arc<DaemonClient>>,
+    terminal_id: Option<String>,
+    terminal_generation: u64,
+    daemon_event_task: Option<Task<()>>,
+    input_lock: Arc<tokio::sync::Mutex<()>>,
     event_tx: tokio::sync::mpsc::UnboundedSender<PtyEvent>,
     status: Option<String>,
     rows: u16,
@@ -302,16 +287,30 @@ impl TerminalView {
         })
         .detach();
 
+        let (parser_output_tx, parser_command_tx, parser_error) =
+            match start_parser_worker(DEFAULT_ROWS, DEFAULT_COLS, event_tx.clone()) {
+                Ok((output_tx, command_tx)) => (Some(output_tx), Some(command_tx), None),
+                Err(error) => (
+                    None,
+                    None,
+                    Some(format!("Unable to start terminal parser: {error}")),
+                ),
+            };
         let mut terminal = Self {
             project,
             focus_handle: cx.focus_handle(),
             screen: vt100::Parser::new(DEFAULT_ROWS, DEFAULT_COLS, 0)
                 .screen()
                 .clone(),
-            parser_command_tx: None,
-            session: None,
+            parser_command_tx,
+            parser_output_tx,
+            daemon_client: None,
+            terminal_id: None,
+            terminal_generation: 1,
+            daemon_event_task: None,
+            input_lock: Arc::new(tokio::sync::Mutex::new(())),
             event_tx,
-            status: None,
+            status: parser_error,
             rows: DEFAULT_ROWS,
             cols: DEFAULT_COLS,
             screen_bounds: None,
@@ -322,15 +321,115 @@ impl TerminalView {
             scrollback_offset: 0,
             scroll_accumulator: 0.0,
         };
-        terminal.start();
+        let daemon_event_task = cx.spawn(async move |this, cx| {
+            let client = match daemon_client::get_daemon_client().await {
+                Ok(client) => client,
+                Err(error) => {
+                    let _ = this.update(cx, |terminal, cx| {
+                        terminal.status = Some(format!("Unable to connect to daemon: {error}"));
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let mut events = client.subscribe_terminal_events();
+            if let Err(error) = client.subscribe_terminal().await {
+                let terminal_id = this
+                    .update(cx, |terminal, cx| {
+                        let terminal_id = terminal.terminal_id.take();
+                        terminal.status =
+                            Some(format!("Unable to subscribe to terminal output: {error}"));
+                        cx.notify();
+                        terminal_id
+                    })
+                    .ok()
+                    .flatten();
+                if let Some(terminal_id) = terminal_id {
+                    let _ = client.close_terminal(CloseTerminalRequest { terminal_id }).await;
+                }
+                return;
+            }
+
+            if this
+                .update(cx, |terminal, _cx| {
+                    terminal.daemon_client = Some(client.clone());
+                })
+                .is_err()
+            {
+                return;
+            }
+
+            loop {
+                let event = match events.recv().await {
+                    Ok(event) => event,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        let terminal_id = this
+                            .update(cx, |terminal, cx| {
+                                let terminal_id = terminal.terminal_id.take();
+                                terminal.status = Some(format!(
+                                    "Terminal output overflowed ({skipped} events lost). Restart the shell."
+                                ));
+                                cx.notify();
+                                terminal_id
+                            })
+                            .ok()
+                            .flatten();
+                        if let Some(terminal_id) = terminal_id {
+                            let _ = client.close_terminal(CloseTerminalRequest { terminal_id }).await;
+                        }
+                        break;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        let _ = this.update(cx, |terminal, cx| {
+                            terminal.terminal_id = None;
+                            terminal.status =
+                                Some("Daemon terminal event stream disconnected.".into());
+                            cx.notify();
+                        });
+                        break;
+                    }
+                };
+                let terminal_id = event.terminal_id;
+                let data = event.data;
+                let exit_code = event.exit_code;
+                let error = event.error;
+                let Some((parser_output_tx, event_tx)) = this
+                    .update(cx, |terminal, _cx| {
+                        if !terminal_event_matches(terminal.terminal_id.as_deref(), &terminal_id) {
+                            return None;
+                        }
+                        Some((terminal.parser_output_tx.clone(), terminal.event_tx.clone()))
+                    })
+                    .ok()
+                    .flatten()
+                else {
+                    continue;
+                };
+
+                if let Some(parser_output_tx) = parser_output_tx {
+                    if !data.is_empty() && parser_output_tx.send(data.into_bytes()).is_err() {
+                        break;
+                    }
+                }
+                if let Some(error) = error {
+                    let _ = event_tx.send(PtyEvent::Error {
+                        terminal_id: terminal_id.clone(),
+                        message: error,
+                    });
+                }
+                if exit_code.is_some() {
+                    let _ = event_tx.send(PtyEvent::Closed { terminal_id });
+                }
+            }
+        });
+        terminal.daemon_event_task = Some(daemon_event_task);
+        terminal.start(cx);
         terminal
     }
 
-    /// Sends raw input bytes into the terminal PTY.
+    /// Sends raw input bytes into the daemon-owned terminal PTY.
     pub fn send_input(&self, input: &str) {
-        if let Some(session) = &self.session {
-            session.write(input.as_bytes());
-        }
+        self.send(input.as_bytes());
     }
 
     /// Switches the shell to another project, restarting it in the new cwd.
@@ -343,13 +442,16 @@ impl TerminalView {
 
     /// Terminates the current shell and starts a fresh login-capable interactive shell.
     pub fn restart(&mut self, cx: &mut Context<Self>) {
-        self.session.take();
-        self.parser_command_tx = None;
+        self.terminal_generation = self.terminal_generation.wrapping_add(1);
+        self.close_daemon_terminal();
         self.screen = vt100::Parser::new(self.rows, self.cols, 0).screen().clone();
+        if let Some(parser) = &self.parser_command_tx {
+            let _ = parser.send(ParserCommand::Clear);
+        }
         self.scrollback_offset = 0;
         self.scroll_accumulator = 0.0;
         self.status = None;
-        self.start();
+        self.start(cx);
         cx.notify();
     }
 
@@ -418,9 +520,7 @@ impl TerminalView {
         if let Some(parser) = &self.parser_command_tx {
             let _ = parser.send(ParserCommand::Resize(rows, cols));
         }
-        if let Some(session) = &self.session {
-            session.resize(rows, cols);
-        }
+        self.dispatch_resize(rows, cols);
         cx.notify();
     }
 
@@ -428,30 +528,60 @@ impl TerminalView {
         &self.project
     }
 
-    fn start(&mut self) {
-        let result = start_parser_worker(self.rows, self.cols, self.event_tx.clone())
-            .map_err(anyhow::Error::from)
-            .and_then(|(output_tx, command_tx)| {
-                spawn_shell(
-                    &self.project,
-                    self.rows,
-                    self.cols,
-                    output_tx,
-                    self.event_tx.clone(),
-                )
-                .map(|session| (session, command_tx))
-            });
-        match result {
-            Ok((session, command_tx)) => {
-                self.session = Some(session);
-                self.parser_command_tx = Some(command_tx);
+    fn start(&mut self, cx: &mut Context<Self>) {
+        let generation = self.terminal_generation;
+        let request = SpawnTerminalRequest {
+            project_path: self.project.to_string_lossy().into_owned(),
+            terminal_id: None,
+            cols: self.cols,
+            rows: self.rows,
+        };
+        cx.spawn(async move |this, cx| {
+            let result = async {
+                let client = daemon_client::get_daemon_client().await?;
+                client.subscribe_terminal().await?;
+                let response = client.spawn_terminal(request).await?;
+                Ok::<_, String>((client, response))
             }
-            Err(error) => {
-                self.session = None;
-                self.parser_command_tx = None;
-                self.status = Some(format!("Unable to start terminal: {error}"));
+            .await;
+
+            match result {
+                Ok((client, response)) => {
+                    let terminal_id = response.terminal_id;
+                    let stale_id = match this.update(cx, |terminal, cx| {
+                        terminal.daemon_client = Some(client.clone());
+                        if terminal.terminal_generation != generation {
+                            Some(terminal_id.clone())
+                        } else {
+                            terminal.terminal_id = Some(terminal_id.clone());
+                            terminal.status = None;
+                            cx.notify();
+                            None
+                        }
+                    }) {
+                        Ok(stale_id) => stale_id,
+                        Err(_) => Some(terminal_id.clone()),
+                    };
+                    if let Some(stale_id) = stale_id {
+                        let _ = client
+                            .close_terminal(CloseTerminalRequest {
+                                terminal_id: stale_id,
+                            })
+                            .await;
+                    }
+                }
+                Err(error) => {
+                    let _ = this.update(cx, |terminal, cx| {
+                        if terminal.terminal_generation == generation {
+                            terminal.terminal_id = None;
+                            terminal.status = Some(format!("Unable to start terminal: {error}"));
+                            cx.notify();
+                        }
+                    });
+                }
             }
-        }
+        })
+        .detach();
     }
 
     fn apply_event(&mut self, event: PtyEvent) {
@@ -460,12 +590,21 @@ impl TerminalView {
                 self.screen = frame.screen;
                 self.scrollback_offset = frame.scrollback;
             }
-            PtyEvent::Closed => {
-                if self.session.is_some() {
+            PtyEvent::Closed { terminal_id } => {
+                if self.terminal_id.as_deref() == Some(terminal_id.as_str()) {
+                    self.terminal_id = None;
                     self.status = Some("Shell exited. Select Restart to open a new shell.".into());
                 }
             }
-            PtyEvent::Error(error) => self.status = Some(format!("Terminal read failed: {error}")),
+            PtyEvent::Error {
+                terminal_id,
+                message,
+            } => {
+                if self.terminal_id.as_deref() == Some(terminal_id.as_str()) {
+                    self.terminal_id = None;
+                    self.status = Some(format!("Terminal read failed: {message}"));
+                }
+            }
         }
     }
 
@@ -479,9 +618,72 @@ impl TerminalView {
     }
 
     fn send(&self, bytes: &[u8]) {
-        if let Some(session) = &self.session {
-            session.write(bytes);
-        }
+        let (Some(client), Some(terminal_id)) = (&self.daemon_client, &self.terminal_id) else {
+            return;
+        };
+        let Ok(executor) = chat::executor() else {
+            return;
+        };
+        let client = client.clone();
+        let terminal_id = terminal_id.clone();
+        let data = String::from_utf8_lossy(bytes).into_owned();
+        let input_lock = self.input_lock.clone();
+        executor.spawn(async move {
+            let _guard = input_lock.lock().await;
+            if let Err(error) = client.write_terminal_input(&terminal_id, &data).await {
+                tracing::warn!("failed to write terminal input: {error}");
+            }
+        });
+    }
+
+    fn dispatch_resize(&self, rows: u16, cols: u16) {
+        let (Some(client), Some(terminal_id)) = (&self.daemon_client, &self.terminal_id) else {
+            return;
+        };
+        let Ok(executor) = chat::executor() else {
+            return;
+        };
+        let client = client.clone();
+        let terminal_id = terminal_id.clone();
+        let input_lock = self.input_lock.clone();
+        executor.spawn(async move {
+            let _guard = input_lock.lock().await;
+            if let Err(error) = client
+                .resize_terminal(ResizeTerminalRequest {
+                    terminal_id,
+                    cols,
+                    rows,
+                })
+                .await
+            {
+                tracing::warn!("failed to resize terminal: {error}");
+            }
+        });
+    }
+
+    fn close_daemon_terminal(&mut self) {
+        let Some(terminal_id) = self.terminal_id.take() else {
+            return;
+        };
+        let Some(client) = self.daemon_client.clone() else {
+            return;
+        };
+        let Ok(executor) = chat::executor() else {
+            return;
+        };
+        let input_lock = self.input_lock.clone();
+        executor.spawn(async move {
+            let _guard = input_lock.lock().await;
+            let _ = client
+                .close_terminal(CloseTerminalRequest { terminal_id })
+                .await;
+        });
+    }
+
+    /// Closes the daemon session before a terminal tab is removed.
+    pub fn close(&mut self, _cx: &mut Context<Self>) {
+        self.terminal_generation = self.terminal_generation.wrapping_add(1);
+        self.close_daemon_terminal();
     }
 
     fn paste(&self, text: String) {
@@ -1112,58 +1314,24 @@ impl Render for TerminalView {
     }
 }
 
-fn spawn_shell(
-    project: &PathBuf,
-    rows: u16,
-    cols: u16,
-    output_tx: mpsc::SyncSender<Vec<u8>>,
-    event_tx: tokio::sync::mpsc::UnboundedSender<PtyEvent>,
-) -> anyhow::Result<PtySession> {
-    let pair = native_pty_system().openpty(PtySize {
-        rows,
-        cols,
-        pixel_width: 0,
-        pixel_height: 0,
-    })?;
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-    let mut command = CommandBuilder::new(shell);
-    command.cwd(project);
-    command.env("TERM", "xterm-256color");
-    command.arg("-i");
-
-    let child = pair.slave.spawn_command(command)?;
-    let mut reader = pair.master.try_clone_reader()?;
-    let writer = Arc::new(Mutex::new(pair.master.take_writer()?));
-    drop(pair.slave);
-
-    std::thread::Builder::new()
-        .name("threadlane-gpui-pty-reader".into())
-        .spawn(move || {
-            let mut buffer = [0_u8; TERMINAL_READ_CHUNK_BYTES];
-            loop {
-                match reader.read(&mut buffer) {
-                    Ok(0) => {
-                        let _ = event_tx.send(PtyEvent::Closed);
-                        break;
-                    }
-                    Ok(read) => {
-                        if output_tx.send(buffer[..read].to_vec()).is_err() {
-                            break;
-                        }
-                    }
-                    Err(error) => {
-                        let _ = event_tx.send(PtyEvent::Error(error.to_string()));
-                        break;
-                    }
-                }
-            }
-        })?;
-
-    Ok(PtySession {
-        master: pair.master,
-        writer,
-        child,
-    })
+impl Drop for TerminalView {
+    fn drop(&mut self) {
+        let (Some(client), Some(terminal_id)) =
+            (self.daemon_client.clone(), self.terminal_id.take())
+        else {
+            return;
+        };
+        let Ok(executor) = chat::executor() else {
+            return;
+        };
+        let input_lock = self.input_lock.clone();
+        executor.spawn(async move {
+            let _guard = input_lock.lock().await;
+            let _ = client
+                .close_terminal(CloseTerminalRequest { terminal_id })
+                .await;
+        });
+    }
 }
 
 #[cfg(test)]
@@ -1173,9 +1341,17 @@ mod tests {
 
     use super::{
         ansi_index_to_hsla, next_terminal_wake, rgb_to_hsla, selection_bounds, should_paint_cursor,
-        start_parser_worker, terminal_frame_policy, terminal_parse_budget_exhausted, ParserCommand,
-        PtyEvent, TerminalWake, TERMINAL_PARSE_BUDGET_PER_FRAME,
+        start_parser_worker, terminal_event_matches, terminal_frame_policy,
+        terminal_parse_budget_exhausted, ParserCommand, PtyEvent, TerminalWake,
+        TERMINAL_PARSE_BUDGET_PER_FRAME,
     };
+
+    #[test]
+    fn terminal_events_only_match_the_active_daemon_session() {
+        assert!(terminal_event_matches(Some("term-a"), "term-a"));
+        assert!(!terminal_event_matches(Some("term-a"), "term-b"));
+        assert!(!terminal_event_matches(None, "term-a"));
+    }
 
     #[test]
     fn terminal_parser_yields_at_its_frame_budget() {
@@ -1217,7 +1393,12 @@ mod tests {
                 scrollback: 0,
             }))
             .unwrap();
-        event_tx.send(PtyEvent::Error("closed".into())).unwrap();
+        event_tx
+            .send(PtyEvent::Error {
+                terminal_id: "term-a".into(),
+                message: "closed".into(),
+            })
+            .unwrap();
 
         let TerminalWake::Events(events) = next_terminal_wake(&mut event_rx, pending()).await
         else {
@@ -1228,7 +1409,13 @@ mod tests {
             panic!("expected latest terminal frame");
         };
         assert_eq!(frame.screen.contents(), "new");
-        assert!(matches!(events[1], PtyEvent::Error(_)));
+        assert!(matches!(
+            &events[1],
+            PtyEvent::Error {
+                terminal_id,
+                message
+            } if terminal_id == "term-a" && message == "closed"
+        ));
     }
 
     #[tokio::test]

@@ -78,6 +78,14 @@ pub fn generate_pkce_pair() -> (String, String) {
     (verifier, challenge)
 }
 
+/// Generates an unpredictable OAuth state value for CSRF protection.
+pub fn generate_oauth_state() -> String {
+    let mut random_bytes = [0u8; 32];
+    getrandom::fill(&mut random_bytes)
+        .expect("secure randomness should be available for OAuth state");
+    URL_SAFE_NO_PAD.encode(random_bytes)
+}
+
 fn current_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -156,11 +164,18 @@ async fn exchange_code_for_tokens_without_saving(
         .await
         .map_err(|e| format!("Failed to read OAuth response body: {e}"))?;
 
-    if !status.is_success() {
-        return Err(format!("OAuth token exchange failed ({status})"));
-    }
+    let val: serde_json::Value = match crate::parse_oauth_response(&body) {
+        Ok(value) => value,
+        Err(error) => return Err(format!("OAuth token exchange failed ({status}): {error}")),
+    };
 
-    let val: serde_json::Value = crate::parse_oauth_response(&body)?;
+    if !status.is_success() {
+        let reason = val.get("error").and_then(|value| value.as_str());
+        return Err(match reason {
+            Some(reason) => format!("OAuth token exchange failed ({status}): {reason}"),
+            None => format!("OAuth token exchange failed ({status})"),
+        });
+    }
 
     let access_token = val
         .get("access_token")
@@ -302,6 +317,7 @@ pub async fn get_valid_antigravity_token() -> Result<String, String> {
 /// Helper function to listen locally for the OAuth callback code
 pub async fn listen_for_oauth_callback(expected_state: String) -> Result<String, String> {
     let listener = TcpListener::bind("127.0.0.1:51121")
+        .or_else(|_| TcpListener::bind("0.0.0.0:51121"))
         .map_err(|e| format!("Failed to bind loopback callback listener on port 51121: {e}"))?;
 
     listener
@@ -327,24 +343,34 @@ pub async fn listen_for_oauth_callback(expected_state: String) -> Result<String,
                             {
                                 let mut code = None;
                                 let mut state = None;
+                                let mut oauth_error = None;
                                 for (k, v) in parsed_url.query_pairs() {
                                     if k == "code" {
                                         code = Some(v.to_string());
                                     } else if k == "state" {
                                         state = Some(v.to_string());
+                                    } else if k == "error" {
+                                        oauth_error = Some(v.to_string());
                                     }
                                 }
 
-                                let (res_code, html_response) = if let (Some(code), Some(st)) =
-                                    (code, state)
-                                {
-                                    if st == expected_state {
-                                        (Ok(code), "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<!DOCTYPE html><html><body style='font-family:sans-serif;background:#0d1117;color:#58a6ff;padding:40px;text-align:center;'><h2>Google Antigravity Authentication Successful!</h2><p>You may now close this tab and return to Threadlane.</p></body></html>")
-                                    } else {
-                                        (Err("OAuth state mismatch".to_string()), "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<html><body><h2>Authentication Error</h2><p>State mismatch.</p></body></html>")
-                                    }
-                                } else {
-                                    (Err("Missing code or state in OAuth callback".to_string()), "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<html><body><h2>Authentication Error</h2><p>Missing parameters.</p></body></html>")
+                                let (res_code, html_response) = match (state, code, oauth_error) {
+                                    (Some(st), Some(code), None) if st == expected_state => (
+                                        Ok(code),
+                                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<!DOCTYPE html><html><body style='font-family:sans-serif;background:#0d1117;color:#58a6ff;padding:40px;text-align:center;'><h2>Google Antigravity Authentication Successful!</h2><p>You may now close this tab and return to Threadlane.</p></body></html>",
+                                    ),
+                                    (Some(st), _, _) if st != expected_state => (
+                                        Err("OAuth state mismatch".to_string()),
+                                        "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<html><body><h2>Authentication Error</h2><p>State mismatch.</p></body></html>",
+                                    ),
+                                    (_, _, Some(error)) => (
+                                        Err(format!("Google OAuth callback failed: {error}")),
+                                        "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<html><body><h2>Authentication Error</h2><p>Google sign-in was cancelled or denied.</p></body></html>",
+                                    ),
+                                    _ => (
+                                        Err("Missing code or state in OAuth callback".to_string()),
+                                        "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<html><body><h2>Authentication Error</h2><p>Missing parameters.</p></body></html>",
+                                    ),
                                 };
 
                                 let _ = stream.write_all(html_response.as_bytes());
@@ -471,6 +497,27 @@ mod tests {
     fn test_antigravity_provider_id() {
         let provider = AntigravityAuthProvider;
         assert_eq!(provider.provider_id(), "antigravity");
+    }
+
+    #[test]
+    fn test_generate_oauth_state() {
+        let state = generate_oauth_state();
+        assert_eq!(
+            state.len(),
+            43,
+            "OAuth state should contain 32 random bytes"
+        );
+        assert!(
+            state
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "OAuth state should be URL-safe"
+        );
+        assert_ne!(
+            state,
+            generate_oauth_state(),
+            "OAuth states should be unique"
+        );
     }
 
     #[test]

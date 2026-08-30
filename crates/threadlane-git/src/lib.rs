@@ -134,7 +134,7 @@ pub struct GitWorktreeInfo {
     pub is_locked: bool,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GitStatus {
     pub branch: Option<String>,
     pub default_branch: Option<String>,

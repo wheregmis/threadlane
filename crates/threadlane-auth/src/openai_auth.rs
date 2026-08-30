@@ -239,7 +239,7 @@ pub fn add_or_update_account(tokens: &OAuthTokens) -> Result<CodexAccount, Strin
         source: "~/.threadlane/credentials.json".to_string(),
     };
 
-    if let Some(existing) = store
+    let stored_account = if let Some(existing) = store
         .accounts
         .iter_mut()
         .find(|a| a.id == id || (a.account_id.is_some() && a.account_id == tokens.account_id))
@@ -254,20 +254,29 @@ pub fn add_or_update_account(tokens: &OAuthTokens) -> Result<CodexAccount, Strin
             .account_id
             .clone()
             .or_else(|| existing.account_id.clone());
+        existing.source = account.source.clone();
+        existing.clone()
     } else {
         store.accounts.push(account.clone());
-    }
+        account
+    };
 
     if store.active_account_id.is_none() {
-        store.active_account_id = Some(id);
+        store.active_account_id = Some(stored_account.id.clone());
     }
 
     save_credentials_store(&store)?;
+    Ok(stored_account)
+}
+
+fn add_or_update_active_account(tokens: &OAuthTokens) -> Result<CodexAccount, String> {
+    let account = add_or_update_account(tokens)?;
+    set_active_codex_account(&account.id)?;
     Ok(account)
 }
 
 fn save_credentials(tokens: &OAuthTokens) -> Result<(), String> {
-    add_or_update_account(tokens).map(|_| ())
+    add_or_update_active_account(tokens).map(|_| ())
 }
 
 pub fn is_own_source(source: &str) -> bool {
@@ -640,6 +649,7 @@ pub async fn listen_for_browser_oauth_callback(expected_state: String) -> Result
     use std::net::TcpListener;
 
     let listener = TcpListener::bind("127.0.0.1:1455")
+        .or_else(|_| TcpListener::bind("0.0.0.0:1455"))
         .map_err(|e| format!("Failed to bind loopback callback listener on port 1455: {e}"))?;
 
     listener
@@ -790,7 +800,7 @@ pub async fn exchange_browser_code_for_tokens(
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
         };
-        return add_or_update_account(&tokens);
+        return add_or_update_active_account(&tokens);
     }
 
     Err("Code exchange returned no access token".into())
@@ -1341,6 +1351,33 @@ mod tests {
         assert_eq!(get_active_codex_account().unwrap().id, "acc_work");
 
         let _ = env;
+    }
+
+    #[test]
+    fn test_successful_login_activates_authenticated_account() {
+        let _env = TestHomeGuard::new("login-activates-account");
+
+        add_or_update_account(&OAuthTokens {
+            access_token: "invalidated-old-token".into(),
+            refresh_token: Some("old-refresh".into()),
+            expires_in: Some(3600),
+            id_token: None,
+            account_id: Some("old-account".into()),
+        })
+        .unwrap();
+
+        save_credentials(&OAuthTokens {
+            access_token: "fresh-token".into(),
+            refresh_token: Some("fresh-refresh".into()),
+            expires_in: Some(3600),
+            id_token: None,
+            account_id: Some("fresh-account".into()),
+        })
+        .unwrap();
+
+        let active = get_active_codex_account().unwrap();
+        assert_eq!(active.id, "fresh-account");
+        assert_eq!(active.access_token, "fresh-token");
     }
 
     #[test]

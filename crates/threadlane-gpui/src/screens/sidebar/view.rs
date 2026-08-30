@@ -32,9 +32,8 @@ fn safe_file_stem(title: &str) -> String {
     }
 }
 
-fn read_jsonl_for_export(path: &std::path::Path) -> Result<Vec<serde_json::Value>, String> {
-    let contents = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
-    Ok(contents
+fn parse_jsonl_for_export(contents: &str) -> Vec<serde_json::Value> {
+    contents
         .lines()
         .enumerate()
         .filter(|(_, line)| !line.trim().is_empty())
@@ -48,7 +47,7 @@ fn read_jsonl_for_export(path: &std::path::Path) -> Result<Vec<serde_json::Value
                 }),
             },
         )
-        .collect())
+        .collect()
 }
 
 fn build_diagnostic_export(
@@ -58,7 +57,7 @@ fn build_diagnostic_export(
     work_dir: &std::path::Path,
     runtime: Option<&crate::services::sessions::SessionRuntime>,
     trajectory: Vec<TrajectoryEntry>,
-    include_log: bool,
+    session_log: Option<&str>,
 ) -> Result<serde_json::Value, String> {
     let exported_at_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -68,8 +67,8 @@ fn build_diagnostic_export(
     let system_prompt = runtime.map(|runtime| runtime.system_prompt.clone());
     let harness_error = runtime.and_then(|runtime| runtime.harness_error.clone());
     let runtime_status = runtime.map(|runtime| format!("{:?}", runtime.status()));
-    let log = if include_log {
-        let canonical = read_jsonl_for_export(session_file)?;
+    let log = if let Some(contents) = session_log {
+        let canonical = parse_jsonl_for_export(contents);
         Some(serde_json::json!({
             "canonical_records": canonical,
         }))
@@ -261,15 +260,15 @@ fn session_pr_info<'a>(
     session: &SessionInfo,
     prs: &'a std::collections::HashMap<
         (std::path::PathBuf, String),
-        Option<threadlane_git::GitHubPrInfo>,
+        Option<threadlane_protocol::git::GitHubPrInfo>,
     >,
-) -> Option<&'a threadlane_git::GitHubPrInfo> {
+) -> Option<&'a threadlane_protocol::git::GitHubPrInfo> {
     let branch = session.git_branch.as_ref()?;
     prs.get(&(session.work_dir.clone(), branch.clone()))
         .and_then(Option::as_ref)
 }
 
-fn pr_status_label(pr: &threadlane_git::GitHubPrInfo) -> &'static str {
+fn pr_status_label(pr: &threadlane_protocol::git::GitHubPrInfo) -> &'static str {
     if pr.state.eq_ignore_ascii_case("merged") {
         "Merged"
     } else if pr.is_draft || pr.state.eq_ignore_ascii_case("draft") {
@@ -281,7 +280,7 @@ fn pr_status_label(pr: &threadlane_git::GitHubPrInfo) -> &'static str {
     }
 }
 
-fn pr_status_tooltip(pr: &threadlane_git::GitHubPrInfo) -> String {
+fn pr_status_tooltip(pr: &threadlane_protocol::git::GitHubPrInfo) -> String {
     format!(
         "PR #{} · {}\n{}\n{} → {}\nChecks: {} passed · {} pending · {} failed\nDiscussion: {} comments · {} review comments\n{}",
         pr.number,
@@ -469,19 +468,10 @@ impl SidebarView {
                     .ghost()
                     .xsmall()
                     .on_click(move |_event, _window, cx| {
-                        let model = attach_model.clone();
-                        cx.spawn(async move |cx| {
-                            let Some(folder) = rfd::AsyncFileDialog::new().pick_folder().await
-                            else {
-                                return;
-                            };
-                            let path = folder.path().to_path_buf();
-                            let _ = model.update(cx, |state, cx| {
-                                controller::dispatch(state, AppAction::AttachProject(path));
-                                cx.notify();
-                            });
-                        })
-                        .detach();
+                        attach_model.update(cx, |state, cx| {
+                            controller::dispatch(state, AppAction::OpenProjectPicker);
+                            cx.notify();
+                        });
                     }),
             )
             .bg(theme.title_bar)
@@ -1030,15 +1020,27 @@ impl SidebarView {
                             else {
                                 return;
                             };
-                            let result = build_diagnostic_export(
-                                &source,
-                                &session_id,
-                                &title,
-                                &work_dir,
-                                runtime.as_deref(),
-                                trajectory,
-                                true,
-                            )
+                            let result = match crate::services::daemon_client::get_daemon_client().await {
+                                Ok(client) => client
+                                    .read_session_log(threadlane_protocol::ReadSessionLogRequest {
+                                        project_path: work_dir.to_string_lossy().into_owned(),
+                                        session_id: session_id.clone(),
+                                    })
+                                    .await
+                                    .map(|response| response.content),
+                                Err(error) => Err(error),
+                            }
+                            .and_then(|content| {
+                                build_diagnostic_export(
+                                    &source,
+                                    &session_id,
+                                    &title,
+                                    &work_dir,
+                                    runtime.as_deref(),
+                                    trajectory,
+                                    Some(&content),
+                                )
+                            })
                             .and_then(|value| {
                                 serde_json::to_vec_pretty(&value).map_err(|error| error.to_string())
                             })
@@ -1091,7 +1093,7 @@ impl SidebarView {
                                 &work_dir,
                                 runtime.as_deref(),
                                 trajectory,
-                                false,
+                                None,
                             )
                             .and_then(|value| {
                                 serde_json::to_vec_pretty(&value).map_err(|error| error.to_string())
@@ -1416,9 +1418,10 @@ mod tests {
         same_history_row_identity, session_pr_info, sidebar_session_fingerprint, DateGroup,
         HistoryRow,
     };
-    use crate::state::{SessionHealth, SessionInfo};
     use std::collections::HashMap;
-    use threadlane_git::GitHubPrInfo;
+    use threadlane_protocol::git::GitHubPrInfo;
+
+    use crate::state::{SessionHealth, SessionInfo};
 
     fn session(id: &str) -> SessionInfo {
         SessionInfo {

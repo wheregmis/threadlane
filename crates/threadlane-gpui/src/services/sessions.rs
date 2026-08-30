@@ -1,46 +1,57 @@
-//! Harness-aware session runtime adapter for the GPUI frontend.
+//! Per-session UI state for the GPUI frontend.
+//!
+//! All session execution lives in the daemon; this record only tracks what the
+//! UI needs locally (the optimistic generating flag and display metadata).
 
-pub use threadlane_session::ExecutionMode;
-pub use threadlane_session::SessionController as SessionRuntime;
-pub use threadlane_session::SessionStatus as SessionRuntimeStatus;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
-    use threadlane_session::CodingAgentOptions;
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SessionRuntimeStatus {
+    Ready,
+    Working,
+}
 
-    #[test]
-    fn runtime_opens_harness_in_the_canonical_session_file() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let work_dir = std::env::temp_dir().join(format!("threadlane-gpui-runtime-{unique}"));
-        let session_file = work_dir.join(".threadlane/sessions/session.jsonl");
-        let runtime = SessionRuntime::new(
-            CodingAgentOptions {
-                api_key: "test-key".into(),
-                account_id: None,
-                model: "gpt-4o".into(),
-                work_dir: work_dir.clone(),
-                session_file: Some(session_file.clone()),
-                system_prompt: Default::default(),
-                agent_config: None,
-                coding_config: None,
-            },
-            ExecutionMode::Interactive,
-        );
+pub struct SessionRuntime {
+    pub session_id: String,
+    pub work_dir: PathBuf,
+    pub session_file: PathBuf,
+    pub is_generating: AtomicBool,
+    pub selected_model: String,
+    pub system_prompt: Option<String>,
+    pub harness_error: Option<String>,
+}
 
-        assert_eq!(runtime.session_file, session_file);
-        assert!(runtime.session_file.exists());
-        assert!(runtime.system_prompt.contains("Current working directory:"));
-        assert!(!runtime
-            .session_file
-            .with_file_name("session.harness.jsonl")
-            .exists());
+impl SessionRuntime {
+    pub fn new(session_id: String, work_dir: PathBuf, session_file: PathBuf) -> Self {
+        Self {
+            session_id,
+            work_dir,
+            session_file,
+            is_generating: AtomicBool::new(false),
+            selected_model: String::new(),
+            system_prompt: None,
+            harness_error: None,
+        }
+    }
 
-        drop(runtime);
-        let _ = std::fs::remove_dir_all(work_dir);
+    pub fn is_generating(&self) -> bool {
+        self.is_generating.load(Ordering::Relaxed)
+    }
+
+    pub fn begin_generation(&self) {
+        self.is_generating.store(true, Ordering::Relaxed);
+    }
+
+    pub fn finish_generation(&self) {
+        self.is_generating.store(false, Ordering::Relaxed);
+    }
+
+    pub fn status(&self) -> SessionRuntimeStatus {
+        if self.is_generating() {
+            SessionRuntimeStatus::Working
+        } else {
+            SessionRuntimeStatus::Ready
+        }
     }
 }

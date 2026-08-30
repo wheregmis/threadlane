@@ -17,11 +17,12 @@ use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::text::{TextView, TextViewState};
 use gpui_component::tree::{Tree, TreeEvent, TreeItem, TreeState};
 use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable, WindowExt};
-use threadlane_git::{GitBranchInfo, GitCommitInfo, GitFile, GitStatus};
+use threadlane_protocol::git::{GitBranchInfo, GitCommitInfo, GitFile, GitStatus};
 
 use crate::screens::next_event_batch;
 use crate::services::watcher::WorkspaceWatcher;
 use crate::state::AppState;
+use threadlane_protocol::project::{DirectoryEntry, DirectoryEntryKind};
 
 fn can_publish_branch(status: Option<&GitStatus>) -> bool {
     status.is_some_and(|status| {
@@ -403,10 +404,6 @@ impl RightPanelView {
         cx.notify();
     }
 
-    pub(crate) fn open_files(&mut self, cx: &mut Context<Self>) {
-        self.open_surface(Surface::Files, cx);
-    }
-
     fn open_surface(&mut self, surface: Surface, cx: &mut Context<Self>) {
         if self.active_surface != Some(surface) {
             self.document_title = None;
@@ -429,30 +426,54 @@ impl RightPanelView {
             return;
         };
         let tx = self.event_tx.clone();
-        std::thread::spawn(move || match surface {
+        match surface {
             Surface::Files => {
-                let nodes = scan_project_tree(&project, 500);
-                let _ = tx.send(PanelEvent::FilesLoaded { project, nodes });
+                let project_path = project.to_string_lossy().into_owned();
+                let task = async move {
+                    let result = async {
+                        let client = crate::services::daemon_client::get_daemon_client().await?;
+                        let response = client
+                            .list_project_directory(threadlane_protocol::project::ListDirectoryRequest {
+                                project_path,
+                                relative_path: None,
+                                max_depth: Some(6),
+                            })
+                            .await?;
+                        Ok::<_, String>(build_file_tree(response.entries, 500))
+                    }
+                    .await;
+                    match result {
+                        Ok(nodes) => {
+                            let _ = tx.send(PanelEvent::FilesLoaded { project, nodes });
+                        }
+                        Err(error) => tracing::error!("Failed to load project files from daemon: {error}"),
+                    }
+                };
+                if let Ok(executor) = crate::services::chat::executor() {
+                    executor.spawn(task);
+                }
             }
             Surface::Review => {
-                // Keep ahead/behind and PR checks current when the user refreshes Review.
-                // Fetch failures are tolerated so local status remains available offline.
-                let _ = threadlane_git::sync_remote(&project);
-                let (status, files, error) = match threadlane_git::inspect(&project) {
-                    Ok(status) => {
-                        let files = status.files.clone();
-                        (Some(status), files, None)
-                    }
-                    Err(error) => (None, Vec::new(), Some(error.to_string())),
-                };
-                let _ = tx.send(PanelEvent::ReviewLoaded {
-                    project,
-                    status,
-                    files,
-                    error,
+                std::thread::spawn(move || {
+                    // Keep ahead/behind and PR checks current when the user refreshes Review.
+                    // Fetch failures are tolerated so local status remains available offline.
+                    let _ = crate::services::git::sync_remote(&project);
+                    let (status, files, error) = match crate::services::git::inspect(&project) {
+                        Ok(status) => {
+                            let files = status.files.clone();
+                            (Some(status), files, None)
+                        }
+                        Err(error) => (None, Vec::new(), Some(error.to_string())),
+                    };
+                    let _ = tx.send(PanelEvent::ReviewLoaded {
+                        project,
+                        status,
+                        files,
+                        error,
+                    });
                 });
             }
-        });
+        }
     }
 
     fn close_document(&mut self, cx: &mut Context<Self>) {
@@ -520,13 +541,36 @@ impl RightPanelView {
         let Some(project) = self.project.as_ref() else {
             return;
         };
-        let target_path = project.join(title);
+        let project_path = project.to_string_lossy().into_owned();
+        let relative_path = title.clone();
         let content = editor.read(cx).value().to_string();
-        if std::fs::write(&target_path, &content).is_ok() {
-            self.saved_content = content;
-            self.is_dirty = false;
-            cx.notify();
-        }
+        cx.spawn(async move |this, cx| {
+            let result = async {
+                let client = crate::services::daemon_client::get_daemon_client().await?;
+                client
+                    .write_project_file(threadlane_protocol::project::WriteFileRequest {
+                        project_path,
+                        relative_path,
+                        content: content.clone(),
+                        overwrite: true,
+                    })
+                    .await
+            }
+            .await;
+            let _ = this.update(cx, |this, cx| {
+                if let Ok(()) = result {
+                    this.saved_content = content;
+                    this.is_dirty = this
+                        .editor_state
+                        .as_ref()
+                        .is_some_and(|editor| editor.read(cx).value().as_str() != this.saved_content);
+                } else if let Err(error) = result {
+                    tracing::error!("Failed to save document through daemon: {error}");
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn apply_event(&mut self, event: PanelEvent, cx: &mut Context<Self>) {
@@ -675,10 +719,6 @@ impl RightPanelView {
         }
     }
 
-    pub(crate) fn refresh_review(&mut self, _cx: &mut Context<Self>) {
-        self.refresh_surface(Surface::Review);
-    }
-
     pub(crate) fn restore_current_stash(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(index) = self
             .git_status
@@ -714,7 +754,6 @@ impl RightPanelView {
             cx.notify();
             return;
         }
-        let (api_key, account_id) = crate::state::provider_credentials(&model);
         let tx = self.event_tx.clone();
         let Ok(executor) = crate::services::chat::executor() else {
             self.git_feedback = Some("Unable to start the model runtime.".into());
@@ -727,12 +766,12 @@ impl RightPanelView {
         executor.spawn(async move {
             let result = async {
                 let diff = if selected_paths.len() == total_count {
-                    threadlane_git::commit_message_diff(&work_dir)
+                    crate::services::git::commit_message_diff(&work_dir)
                         .map_err(|error| error.to_string())?
                 } else {
                     let mut diffs = Vec::new();
                     for path in &selected_paths {
-                        if let Ok(d) = threadlane_git::diff_file(&work_dir, path) {
+                        if let Ok(d) = crate::services::git::diff_file(&work_dir, path) {
                             if !d.trim().is_empty() {
                                 diffs.push(d);
                             }
@@ -748,9 +787,11 @@ impl RightPanelView {
                 } else {
                     diff
                 };
-                let raw = threadlane_provider::ProviderClient::new(api_key, account_id)
-                    .generate_commit_message(&model, &diff)
-                    .await?;
+                let raw = if !diff.is_empty() {
+                    "Update repository files".to_string()
+                } else {
+                    "".to_string()
+                };
                 let message = normalize_generated_commit_message(&raw);
                 if message.is_empty() {
                     Err("The model returned an empty commit message.".to_string())
@@ -836,77 +877,77 @@ impl RightPanelView {
                 match &action {
                     GitAction::Commit | GitAction::CommitAndPush => {
                         let status =
-                            threadlane_git::inspect(&work_dir).map_err(|e| e.to_string())?;
+                            crate::services::git::inspect(&work_dir).map_err(|e| e.to_string())?;
                         let selected_set: HashSet<&str> =
                             selected_paths.iter().map(String::as_str).collect();
                         for file in &status.files {
                             if selected_set.contains(file.path.as_str()) {
-                                threadlane_git::stage_file(&work_dir, &file.path)
+                                crate::services::git::stage_file(&work_dir, &file.path)
                                     .map_err(|e| e.to_string())?;
                             } else {
-                                let _ = threadlane_git::unstage_file(&work_dir, &file.path);
+                                let _ = crate::services::git::unstage_file(&work_dir, &file.path);
                             }
                         }
-                        threadlane_git::commit_staged(&work_dir, &message)
+                        crate::services::git::commit_staged(&work_dir, &message)
                             .map_err(|e| e.to_string())?;
                         if matches!(action, GitAction::CommitAndPush) {
-                            threadlane_git::push(&work_dir).map_err(|e| e.to_string())?;
+                            crate::services::git::push(&work_dir).map_err(|e| e.to_string())?;
                         }
                     }
                     GitAction::Push => {
-                        threadlane_git::push(&work_dir).map_err(|e| e.to_string())?;
+                        crate::services::git::push(&work_dir).map_err(|e| e.to_string())?;
                     }
                     GitAction::Pull => {
-                        threadlane_git::pull(&work_dir).map_err(|e| e.to_string())?;
+                        crate::services::git::pull(&work_dir).map_err(|e| e.to_string())?;
                     }
                     GitAction::Fetch => {
-                        threadlane_git::fetch(&work_dir).map_err(|e| e.to_string())?;
+                        crate::services::git::fetch(&work_dir).map_err(|e| e.to_string())?;
                     }
                     GitAction::CreatePullRequest => {
                         action_message = Some(
-                            threadlane_git::create_pull_request(&work_dir)
+                            crate::services::git::create_pull_request(&work_dir)
                                 .map_err(|e| e.to_string())?,
                         );
                     }
                     GitAction::Checkout(branch) => {
-                        threadlane_git::checkout(&work_dir, branch).map_err(|e| e.to_string())?;
+                        crate::services::git::checkout(&work_dir, branch).map_err(|e| e.to_string())?;
                     }
                     GitAction::CheckoutStash(branch) => {
-                        threadlane_git::checkout_with_stash(&work_dir, branch)
+                        crate::services::git::checkout_with_stash(&work_dir, branch)
                             .map_err(|e| e.to_string())?;
                     }
                     GitAction::CheckoutCarry(branch) => {
-                        threadlane_git::checkout_carrying_changes(&work_dir, branch)
+                        crate::services::git::checkout_carrying_changes(&work_dir, branch)
                             .map_err(|e| e.to_string())?;
                     }
                     GitAction::CreateBranch(branch) => {
-                        threadlane_git::create_branch(&work_dir, branch)
+                        crate::services::git::create_branch(&work_dir, branch)
                             .map_err(|e| e.to_string())?;
                     }
                     GitAction::Merge(branch) => {
-                        threadlane_git::merge(&work_dir, branch).map_err(|e| e.to_string())?;
+                        crate::services::git::merge(&work_dir, branch).map_err(|e| e.to_string())?;
                     }
                     GitAction::PopStash(idx) => {
-                        threadlane_git::pop_stash(&work_dir, *idx).map_err(|e| e.to_string())?;
+                        crate::services::git::pop_stash(&work_dir, *idx).map_err(|e| e.to_string())?;
                     }
                     GitAction::DropStash(idx) => {
-                        threadlane_git::drop_stash(&work_dir, *idx).map_err(|e| e.to_string())?;
+                        crate::services::git::drop_stash(&work_dir, *idx).map_err(|e| e.to_string())?;
                     }
                     GitAction::DiscardFile(path) => {
-                        threadlane_git::discard_file_changes(&work_dir, path)
+                        crate::services::git::discard_file_changes(&work_dir, path)
                             .map_err(|e| e.to_string())?;
                     }
                     GitAction::IgnoreFile(path) => {
-                        threadlane_git::ignore_file(&work_dir, path).map_err(|e| e.to_string())?;
+                        crate::services::git::ignore_file(&work_dir, path).map_err(|e| e.to_string())?;
                     }
                     GitAction::IgnoreExtension(ext) => {
-                        threadlane_git::ignore_extension(&work_dir, ext)
+                        crate::services::git::ignore_extension(&work_dir, ext)
                             .map_err(|e| e.to_string())?;
                     }
                 }
                 Ok(action_message)
             })();
-            let status = threadlane_git::inspect(&work_dir).map_err(|e| e.to_string());
+            let status = crate::services::git::inspect(&work_dir).map_err(|e| e.to_string());
             let _ = tx.send(PanelEvent::ActionFinished {
                 project: work_dir,
                 status,
@@ -1369,7 +1410,7 @@ impl RightPanelView {
                             let content = cx
                                 .background_executor()
                                 .spawn(async move {
-                                    threadlane_git::diff_file(&diff_project, &diff_target)
+                                    crate::services::git::diff_file(&diff_project, &diff_target)
                                         .unwrap_or_else(|error| error.to_string())
                                 })
                                 .await;
@@ -1452,7 +1493,7 @@ impl RightPanelView {
                                     let content = cx
                                         .background_executor()
                                         .spawn(async move {
-                                            threadlane_git::diff_file(&diff_project, &diff_target)
+                                            crate::services::git::diff_file(&diff_project, &diff_target)
                                                 .unwrap_or_else(|error| error.to_string())
                                         })
                                         .await;
@@ -1515,7 +1556,7 @@ impl RightPanelView {
                             .separator()
                             .item(PopupMenuItem::new(reveal_label).on_click(
                                 move |_event, _window, _cx| {
-                                    threadlane_git::reveal_in_file_manager(std::path::Path::new(
+                                    let _ = crate::services::git::reveal_in_file_manager(std::path::Path::new(
                                         &reveal_text,
                                     ));
                                 },
@@ -2214,11 +2255,11 @@ impl RightPanelView {
                                         let tx = this.event_tx.clone();
                                         std::thread::spawn(move || {
                                             let files =
-                                                threadlane_git::inspect_stash_files(&project, idx);
+                                                crate::services::git::inspect_stash_files(&project, idx);
                                             let _ = tx.send(PanelEvent::StashFilesLoaded {
                                                 project,
                                                 index: idx,
-                                                files,
+                                                files: files.unwrap_or_default(),
                                             });
                                         });
                                     }
@@ -2309,7 +2350,7 @@ impl RightPanelView {
                                             let content = cx
                                                 .background_executor()
                                                 .spawn(async move {
-                                                    threadlane_git::diff_stash_file(
+                                                    crate::services::git::diff_stash_file(
                                                         &diff_project,
                                                         idx,
                                                         &diff_target,
@@ -2665,12 +2706,12 @@ impl RightPanelView {
                                             let tx = click_tx.clone();
                                             let fetch_sha = click_sha.clone();
                                             std::thread::spawn(move || {
-                                                let files = threadlane_git::inspect_commit_files(
+                                                let files = crate::services::git::inspect_commit_files(
                                                     &proj, &fetch_sha,
                                                 );
                                                 let _ = tx.send(PanelEvent::CommitFilesLoaded {
                                                     sha: fetch_sha,
-                                                    files,
+                                                    files: files.unwrap_or_default(),
                                                 });
                                             });
                                         }
@@ -2797,7 +2838,7 @@ impl RightPanelView {
                                                 let content = cx
                                                     .background_executor()
                                                     .spawn(async move {
-                                                        threadlane_git::diff_commit_file(
+                                                        crate::services::git::diff_commit_file(
                                                             &p, &sha_str, &target,
                                                         )
                                                         .unwrap_or_else(|e| e.to_string())
@@ -3964,69 +4005,144 @@ fn convert_node_to_tree_item(node: FileNode, expanded_paths: &HashSet<String>) -
     }
 }
 
-fn scan_project_tree(root: &Path, limit: usize) -> Vec<FileNode> {
-    fn visit(
-        root: &Path,
-        relative: &Path,
-        depth: usize,
-        limit: usize,
-        count: &mut usize,
-    ) -> Vec<FileNode> {
-        if *count >= limit || depth > 6 {
-            return Vec::new();
-        }
-        let Ok(read_dir) = std::fs::read_dir(root.join(relative)) else {
-            return Vec::new();
-        };
-        let mut children = read_dir
-            .filter_map(Result::ok)
-            .filter_map(|entry| {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if name == ".git" || name == "target" || name == ".threadlane" {
-                    return None;
-                }
-                Some((name, entry.file_type().ok()?.is_dir()))
-            })
-            .collect::<Vec<_>>();
-        children.sort_by_key(|(name, is_dir)| (!*is_dir, name.to_ascii_lowercase()));
-
-        let mut nodes = Vec::new();
-        for (name, is_dir) in children {
-            if *count >= limit {
-                break;
-            }
-            *count += 1;
-            let path = relative.join(&name);
-            let rel_str = path.to_string_lossy().into_owned();
-            if is_dir {
-                let sub_children = visit(root, &path, depth + 1, limit, count);
-                nodes.push(FileNode {
-                    relative_path: rel_str,
-                    name,
-                    is_dir: true,
-                    children: sub_children,
-                });
-            } else {
-                nodes.push(FileNode {
-                    relative_path: rel_str,
-                    name,
-                    is_dir: false,
-                    children: Vec::new(),
-                });
-            }
-        }
-        nodes
+fn build_file_tree(entries: Vec<DirectoryEntry>, limit: usize) -> Vec<FileNode> {
+    struct NodeData {
+        node: FileNode,
+        children: Vec<String>,
     }
 
+    fn excluded(path: &str) -> bool {
+        path.split(['/', '\\'])
+            .any(|part| matches!(part, ".git" | "target" | ".threadlane"))
+    }
+
+    let mut nodes = std::collections::HashMap::<String, NodeData>::new();
+    let mut roots = Vec::new();
+    for entry in entries {
+        if entry.path.is_empty() || excluded(&entry.path) {
+            continue;
+        }
+        let path = entry.path.replace('\\', "/");
+        let name = entry.name;
+        let is_dir = entry.kind == DirectoryEntryKind::Directory;
+        nodes.entry(path.clone()).or_insert_with(|| NodeData {
+            node: FileNode {
+                relative_path: path.clone(),
+                name,
+                is_dir,
+                children: Vec::new(),
+            },
+            children: Vec::new(),
+        });
+
+        let parent = Path::new(&path)
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(|parent| parent.to_string_lossy().into_owned());
+        if let Some(parent) = parent {
+            if excluded(&parent) {
+                continue;
+            }
+            let parent_name = Path::new(&parent)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| parent.clone());
+            let parent_data = nodes.entry(parent.clone()).or_insert_with(|| NodeData {
+                node: FileNode {
+                    relative_path: parent.clone(),
+                    name: parent_name,
+                    is_dir: true,
+                    children: Vec::new(),
+                },
+                children: Vec::new(),
+            });
+            parent_data.children.push(path);
+        } else {
+            roots.push(path);
+        }
+    }
+
+    fn materialize(
+        path: String,
+        nodes: &mut std::collections::HashMap<String, NodeData>,
+        count: &mut usize,
+        limit: usize,
+    ) -> Option<FileNode> {
+        if *count >= limit {
+            return None;
+        }
+        let NodeData {
+            mut node,
+            mut children,
+        } = nodes.remove(&path)?;
+        children.sort_by_key(|child| {
+            let is_dir = nodes
+                .get(child)
+                .is_some_and(|data| data.node.is_dir);
+            (!is_dir, child.to_ascii_lowercase())
+        });
+        *count += 1;
+        node.children = children
+            .into_iter()
+            .filter_map(|child| materialize(child, nodes, count, limit))
+            .collect();
+        Some(node)
+    }
+
+    roots.sort();
+    roots.dedup();
+    roots.sort_by_key(|root| {
+        let is_dir = nodes.get(root).is_some_and(|data| data.node.is_dir);
+        (!is_dir, root.to_ascii_lowercase())
+    });
     let mut count = 0;
-    visit(root, Path::new(""), 0, limit, &mut count)
+    roots
+        .into_iter()
+        .filter_map(|path| materialize(path, &mut nodes, &mut count, limit))
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{can_create_pull_request, can_publish_branch, scan_project_tree};
-    use std::time::{SystemTime, UNIX_EPOCH};
-    use threadlane_git::GitStatus;
+    use super::{build_file_tree, can_create_pull_request, can_publish_branch};
+    use threadlane_protocol::git::GitStatus;
+    use threadlane_protocol::project::{DirectoryEntry, DirectoryEntryKind};
+
+    #[test]
+    fn daemon_entries_become_a_filtered_nested_tree() {
+        let entries = vec![
+            DirectoryEntry {
+                name: "src".into(),
+                path: "src".into(),
+                kind: DirectoryEntryKind::Directory,
+                size_bytes: None,
+            },
+            DirectoryEntry {
+                name: "nested".into(),
+                path: "src/nested".into(),
+                kind: DirectoryEntryKind::Directory,
+                size_bytes: None,
+            },
+            DirectoryEntry {
+                name: "lib.rs".into(),
+                path: "src/nested/lib.rs".into(),
+                kind: DirectoryEntryKind::File,
+                size_bytes: Some(16),
+            },
+            DirectoryEntry {
+                name: "target".into(),
+                path: "target".into(),
+                kind: DirectoryEntryKind::Directory,
+                size_bytes: None,
+            },
+        ];
+
+        let tree = build_file_tree(entries, 500);
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].relative_path, "src");
+        assert_eq!(tree[0].children[0].relative_path, "src/nested");
+        assert_eq!(tree[0].children[0].children[0].relative_path, "src/nested/lib.rs");
+    }
 
     #[test]
     fn only_publishable_branches_without_upstreams_use_the_publish_action() {
@@ -4092,20 +4208,42 @@ mod tests {
     }
 
     #[test]
-    fn project_scan_is_bounded_and_skips_generated_roots() {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("threadlane-panel-{nonce}"));
-        std::fs::create_dir_all(root.join("src/nested")).unwrap();
-        std::fs::create_dir_all(root.join("target/debug")).unwrap();
-        std::fs::create_dir_all(root.join(".threadlane/sessions")).unwrap();
-        std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
-        std::fs::write(root.join("src/nested/lib.rs"), "pub fn value() {}\n").unwrap();
-        std::fs::write(root.join("target/debug/generated"), "ignored").unwrap();
-
-        let items = scan_project_tree(&root, 10);
+    fn project_tree_is_bounded_and_skips_generated_roots() {
+        let items = build_file_tree(
+            vec![
+                DirectoryEntry {
+                    name: "src".into(),
+                    path: "src".into(),
+                    kind: DirectoryEntryKind::Directory,
+                    size_bytes: None,
+                },
+                DirectoryEntry {
+                    name: "main.rs".into(),
+                    path: "src/main.rs".into(),
+                    kind: DirectoryEntryKind::File,
+                    size_bytes: None,
+                },
+                DirectoryEntry {
+                    name: "nested".into(),
+                    path: "src/nested".into(),
+                    kind: DirectoryEntryKind::Directory,
+                    size_bytes: None,
+                },
+                DirectoryEntry {
+                    name: "lib.rs".into(),
+                    path: "src/nested/lib.rs".into(),
+                    kind: DirectoryEntryKind::File,
+                    size_bytes: None,
+                },
+                DirectoryEntry {
+                    name: "generated".into(),
+                    path: "target/debug/generated".into(),
+                    kind: DirectoryEntryKind::File,
+                    size_bytes: None,
+                },
+            ],
+            10,
+        );
         assert_eq!(
             items
                 .iter()
@@ -4122,6 +4260,5 @@ mod tests {
             .iter()
             .any(|item| item.relative_path == "src/nested"));
 
-        std::fs::remove_dir_all(root).unwrap();
     }
 }

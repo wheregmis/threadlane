@@ -106,6 +106,7 @@ pub struct EditorView {
     tabs: Vec<EditorTab>,
     active_tab_index: Option<usize>,
     pending_open: Option<PendingOpen>,
+    pending_file_load: Option<(String, PathBuf, String)>,
     status_msg: Option<(String, bool, std::time::Instant)>,
     _subscriptions: Vec<Subscription>,
 }
@@ -122,6 +123,7 @@ impl EditorView {
             tabs: Vec::new(),
             active_tab_index: None,
             pending_open: None,
+            pending_file_load: None,
             status_msg: None,
             _subscriptions: vec![sub],
         }
@@ -150,11 +152,14 @@ impl EditorView {
     }
 
     fn sync_pending_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((path, base_dir, content)) = self.pending_file_load.take() {
+            self.open_file_with_content(&path, base_dir, &content, window, cx);
+        }
         let Some(pending) = self.pending_open.take() else {
             return;
         };
         match pending {
-            PendingOpen::File(path) => self.open_file_internal(&path, window, cx),
+            PendingOpen::File(path) => self.load_file(&path, cx),
             PendingOpen::Diff { path, content } => {
                 self.open_diff_internal(&path, &content, window, cx)
             }
@@ -224,12 +229,7 @@ impl EditorView {
         cx.notify();
     }
 
-    fn open_file_internal(
-        &mut self,
-        relative_path: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn load_file(&mut self, relative_path: &str, cx: &mut Context<Self>) {
         // If already open, just select the tab
         if let Some(existing_idx) = self
             .tabs
@@ -247,20 +247,58 @@ impl EditorView {
             .active_work_dir
             .clone()
             .unwrap_or_else(|| PathBuf::from("."));
-
-        let full_path = base_dir.join(relative_path);
-        let content = match std::fs::read_to_string(&full_path) {
-            Ok(c) => c,
-            Err(err) => {
-                tracing::error!("Failed to open file {}: {}", full_path.display(), err);
-                self.set_status(format!("Unable to open {}: {err}", relative_path), true);
-                cx.notify();
-                return;
+        let project_path = base_dir.to_string_lossy().into_owned();
+        let relative_path = relative_path.to_string();
+        cx.spawn(async move |this, cx| {
+            let result = async {
+                let client = crate::services::daemon_client::get_daemon_client().await?;
+                client
+                    .read_project_file(threadlane_protocol::project::ReadFileRequest {
+                        project_path,
+                        relative_path: relative_path.clone(),
+                    })
+                    .await
+                    .map(|response| response.content)
             }
-        };
+            .await;
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(content) => {
+                    this.pending_file_load = Some((relative_path, base_dir, content));
+                    cx.notify();
+                }
+                Err(error) => {
+                    tracing::error!("Failed to open file through daemon: {error}");
+                    this.set_status(format!("Unable to open file: {error}"), true);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn open_file_with_content(
+        &mut self,
+        relative_path: &str,
+        base_dir: PathBuf,
+        content: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.model.read(cx).active_work_dir.as_ref() != Some(&base_dir) {
+            return;
+        }
+        if let Some(existing_idx) = self
+            .tabs
+            .iter()
+            .position(|t| t.relative_path == relative_path)
+        {
+            self.active_tab_index = Some(existing_idx);
+            cx.notify();
+            return;
+        }
 
         let lang = detect_language(relative_path);
-        let content_for_sub = content.clone();
+        let content_for_sub = content.to_string();
         let editor = cx.new(|cx| {
             EditorState::new(window, cx)
                 .language(lang)
@@ -271,7 +309,7 @@ impl EditorView {
                     tab_size: 4,
                     hard_tabs: false,
                 })
-                .default_value(&content)
+                .default_value(content)
         });
 
         let target_path = relative_path.to_string();
@@ -505,7 +543,7 @@ impl EditorView {
     }
 
     pub fn save_tab_at(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(tab) = self.tabs.get_mut(index) else {
+        let Some(tab) = self.tabs.get(index) else {
             return;
         };
 
@@ -517,23 +555,49 @@ impl EditorView {
             return;
         };
 
-        let file_path = tab.project_dir.join(&tab.relative_path);
+        let project_path = tab.project_dir.to_string_lossy().into_owned();
+        let relative_path = tab.relative_path.clone();
         let content = editor.read(cx).value().to_string();
         let file_name = tab.file_name.clone();
-
-        match std::fs::write(&file_path, &content) {
-            Ok(_) => {
-                tab.saved_content = content;
-                tab.is_dirty = false;
-                self.set_status(format!("Saved {file_name}"), false);
-                cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = async {
+                let client = crate::services::daemon_client::get_daemon_client().await?;
+                client
+                    .write_project_file(threadlane_protocol::project::WriteFileRequest {
+                        project_path,
+                        relative_path: relative_path.clone(),
+                        content: content.clone(),
+                        overwrite: true,
+                    })
+                    .await
             }
-            Err(err) => {
-                tracing::error!("Failed to save file {}: {}", file_path.display(), err);
-                self.set_status(format!("Error saving {file_name}: {err}"), true);
+            .await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => {
+                        if let Some(tab) = this
+                            .tabs
+                            .iter_mut()
+                            .find(|tab| tab.relative_path == relative_path)
+                        {
+                            let current = tab
+                                .editor_state
+                                .as_ref()
+                                .map(|editor| editor.read(cx).value().to_string());
+                            tab.saved_content = content;
+                            tab.is_dirty = current.is_some_and(|current| current != tab.saved_content);
+                        }
+                        this.set_status(format!("Saved {file_name}"), false);
+                    }
+                    Err(error) => {
+                        tracing::error!("Failed to save file through daemon: {error}");
+                        this.set_status(format!("Error saving {file_name}: {error}"), true);
+                    }
+                }
                 cx.notify();
-            }
-        }
+            });
+        })
+        .detach();
     }
 
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {

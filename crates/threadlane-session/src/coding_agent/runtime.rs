@@ -267,7 +267,7 @@ impl CodingAgent {
         self.mcp_manager.discover_and_connect().await;
     }
 
-    pub(crate) async fn set_model(&mut self, model: String) -> Result<(), String> {
+    pub async fn set_model(&mut self, model: String) -> Result<(), String> {
         let model = model.trim();
         if model.is_empty() {
             return Err("model cannot be empty".into());
@@ -288,7 +288,7 @@ impl CodingAgent {
         Ok(())
     }
 
-    pub(crate) fn set_name(&mut self, name: String) -> Result<(), String> {
+    pub fn set_name(&mut self, name: String) -> Result<(), String> {
         if let Some(journal) = self.harness.as_mut() {
             journal.refresh().map_err(|error| error.to_string())?;
             journal

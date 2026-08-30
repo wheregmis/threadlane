@@ -227,8 +227,14 @@ Threadlane supports multiple provider backends:
 Control console verbosity at launch using `RUST_LOG`:
 
 ```bash
-# Default info logging
+# Debug logging (the macOS development launcher defaults to debug)
 ./scripts/run-gpui-macos.sh
+
+# Restart the development daemon so its logs use this terminal
+./scripts/run-gpui-macos.sh --restart-daemon
+
+# Quiet development run
+RUST_LOG=info ./scripts/run-gpui-macos.sh
 
 # Debug logging for harness events, revision bumps, and UI state
 RUST_LOG=threadlane_gpui=debug ./scripts/run-gpui-macos.sh
@@ -239,6 +245,8 @@ RUST_LOG=threadlane_gpui=debug,threadlane_agent=trace ./scripts/run-gpui-macos.s
 # GPUI frame-time overlay (current, slowest 1%/10%, max, and frame count)
 THREADLANE_GPUI_PROFILE=1 cargo run -p threadlane-gpui --features gpui-profiler
 ```
+
+The macOS development launcher also inherits the daemon's stdout/stderr, so OAuth exchange errors are visible in the same terminal. Use `--restart-daemon` when a daemon from an earlier run is still active; it only stops a daemon launched from the development bundle and refuses to stop another daemon.
 
 On Linux, substitute `cargo run -p threadlane-gpui` for the script in each of the above.
 
