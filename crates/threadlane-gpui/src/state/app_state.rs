@@ -22,6 +22,52 @@ pub enum SessionHealth {
     Warning,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum SessionAttention {
+    NeedsYou,
+    Working,
+    Ready,
+    Idle,
+}
+
+impl SessionAttention {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::NeedsYou => "Needs you",
+            Self::Working => "Working",
+            Self::Ready => "Ready",
+            Self::Idle => "Idle",
+        }
+    }
+}
+
+fn derive_session_attention(
+    has_pending_permission: bool,
+    health: &SessionHealth,
+    runtime_status: Option<&SessionRuntimeStatus>,
+    is_generating: bool,
+    has_ready_work: bool,
+) -> SessionAttention {
+    if has_pending_permission
+        || *health == SessionHealth::Warning
+        || matches!(
+            runtime_status,
+            Some(SessionRuntimeStatus::Interrupted | SessionRuntimeStatus::Error(_))
+        )
+    {
+        SessionAttention::NeedsYou
+    } else if is_generating
+        || *health == SessionHealth::Working
+        || matches!(runtime_status, Some(SessionRuntimeStatus::Working))
+    {
+        SessionAttention::Working
+    } else if has_ready_work {
+        SessionAttention::Ready
+    } else {
+        SessionAttention::Idle
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum WorkMode {
     #[default]
@@ -1638,15 +1684,6 @@ impl AppState {
             self.persist_project_selection(project_work_dir, Some(&session_id));
         }
         self.refresh_available_models();
-        let completed_events = self
-            .deferred_stream_events
-            .remove(&session_id)
-            .unwrap_or_default();
-        for event in completed_events {
-            if let ChatStreamEvent::Agent { event, .. } = event {
-                self.record_trajectory(&session_id, &event);
-            }
-        }
         self.messages = Arc::new(Vec::new());
         self.active_plan = SessionPlan::default();
         self.is_generating = false;
@@ -1661,6 +1698,10 @@ impl AppState {
                 self.model_roles.clone(),
             )),
         };
+        self.drain_chat_stream(Vec::new());
+        self.pending_hydrations.retain(|pending| {
+            pending.session_id != request.session_id || pending.session_file != request.session_file
+        });
         self.pending_hydrations.push(request.clone());
         request
     }
@@ -1817,6 +1858,8 @@ impl AppState {
     fn finish_session_removal(&mut self, work_dir: &Path, session_id: &str) {
         let session_file = self.session_file(work_dir, session_id);
         self.session_runtimes.remove(&session_file);
+        self.pending_permissions.remove(session_id);
+        self.deferred_stream_events.remove(session_id);
         self.pending_composer_messages.remove(session_id);
         self.acp_config_options.remove(session_id);
         if let Some(project) = self
@@ -1854,6 +1897,45 @@ impl AppState {
         self.session_runtimes
             .get(session_file)
             .is_some_and(|runtime| runtime.is_generating())
+    }
+
+    pub(crate) fn session_attention(&self, session: &SessionInfo) -> SessionAttention {
+        let runtime = self.session_runtimes.get(&session.session_file);
+        let runtime_status = runtime.map(|runtime| runtime.status());
+        let is_active = self.active_work_dir.as_ref() == Some(&session.work_dir)
+            && self.active_session_id.as_deref() == Some(session.id.as_str());
+        let git_status = self
+            .git_statuses
+            .get(&session.runtime_work_dir)
+            .or_else(|| self.git_statuses.get(&session.work_dir));
+        let linked_pr = session
+            .git_branch
+            .as_ref()
+            .and_then(|branch| {
+                self.git_prs
+                    .get(&(session.work_dir.clone(), branch.clone()))
+            })
+            .and_then(Option::as_ref)
+            .or_else(|| git_status.and_then(|status| status.pr.as_ref()));
+        let linked_pr_is_active = linked_pr.is_some_and(|pr| {
+            !pr.state.eq_ignore_ascii_case("merged")
+                && !pr.state.eq_ignore_ascii_case("closed")
+                && (pr.is_draft
+                    || pr.state.eq_ignore_ascii_case("open")
+                    || pr.state.eq_ignore_ascii_case("draft"))
+        });
+        let branch_is_actionable =
+            session.git_branch.is_some() && (linked_pr.is_none() || linked_pr_is_active);
+        let actionable_git_work = git_status
+            .is_some_and(|status| status.has_changes || status.ahead > 0 || status.pr_ready);
+        derive_session_attention(
+            self.pending_permissions.contains_key(&session.id),
+            &session.health,
+            runtime_status.as_ref(),
+            runtime.is_some_and(|runtime| runtime.is_generating())
+                || (is_active && self.is_generating),
+            branch_is_actionable || linked_pr_is_active || actionable_git_work,
+        )
     }
 
     pub(crate) fn toggle_project_expanded(&mut self, work_dir: &Path) {
@@ -3748,7 +3830,7 @@ impl AppState {
             .and_then(|session_id| self.deferred_stream_events.remove(session_id))
             .unwrap_or_default()
             .into_iter();
-        let mut active_changed = false;
+        let mut changed = false;
 
         for event in deferred.chain(events) {
             match event {
@@ -3780,7 +3862,7 @@ impl AppState {
                     }
                     match adapt_agent_event(event) {
                         ChatAgentUpdate::TextDelta(delta) => {
-                            active_changed = true;
+                            changed = true;
                             let stream_prefix = format!("streaming-{session_id}-");
                             if let Some(message) =
                                 self.messages_mut().last_mut().filter(|message| {
@@ -3804,7 +3886,7 @@ impl AppState {
                             }
                         }
                         ChatAgentUpdate::ReasoningDelta(delta) => {
-                            active_changed = true;
+                            changed = true;
                             if let Some(message) = self
                                 .messages_mut()
                                 .last_mut()
@@ -3832,7 +3914,7 @@ impl AppState {
                             name,
                             arguments,
                         } => {
-                            active_changed = true;
+                            changed = true;
                             let summary = tool_activity_summary(&name, &arguments);
                             let display_summary = tool_activity_display_summary(&summary);
                             let activity = ToolActivityInfo {
@@ -3867,7 +3949,7 @@ impl AppState {
                             tool_call_id,
                             partial_result,
                         } => {
-                            active_changed = true;
+                            changed = true;
                             if let Some(activity) = self
                                 .messages_mut()
                                 .iter_mut()
@@ -3883,7 +3965,7 @@ impl AppState {
                             content,
                             is_error,
                         } => {
-                            active_changed = true;
+                            changed = true;
                             if let Some(activity) = self
                                 .messages_mut()
                                 .iter_mut()
@@ -3900,11 +3982,11 @@ impl AppState {
                             }
                         }
                         ChatAgentUpdate::PlanUpdated(plan) => {
-                            active_changed = true;
+                            changed = true;
                             self.active_plan = plan;
                         }
                         ChatAgentUpdate::AdvisorNote(note) => {
-                            active_changed = true;
+                            changed = true;
                             let note_id =
                                 format!("advisor-note-{session_id}-{}", self.messages.len());
                             self.messages_mut().push(ChatMessageInfo {
@@ -3918,7 +4000,7 @@ impl AppState {
                             });
                         }
                         ChatAgentUpdate::ModelRolesUpdated(roles) => {
-                            active_changed = true;
+                            changed = true;
                             self.model_roles = roles;
                         }
                         ChatAgentUpdate::Usage(usage) => {
@@ -3926,11 +4008,11 @@ impl AppState {
                             entry.accumulate(&usage);
                         }
                         ChatAgentUpdate::PermissionRequested(request) => {
-                            active_changed = true;
+                            changed = true;
                             self.pending_permissions.insert(session_id.clone(), request);
                         }
                         ChatAgentUpdate::Error(error) => {
-                            active_changed = true;
+                            changed = true;
                             self.messages_mut().push(ChatMessageInfo {
                                 id: format!("stream-error-{session_id}"),
                                 role: MessageRole::Error,
@@ -3950,7 +4032,9 @@ impl AppState {
                     session_id,
                     session_file,
                 } => {
+                    self.pending_permissions.remove(&session_id);
                     if self.active_session_id.as_deref() != Some(&session_id) {
+                        changed = true;
                         self.deferred_stream_events
                             .entry(session_id.clone())
                             .or_default()
@@ -3960,8 +4044,7 @@ impl AppState {
                             });
                         continue;
                     }
-                    active_changed = true;
-                    self.pending_permissions.remove(&session_id);
+                    changed = true;
                     self.is_generating = false;
                     if let Some(subagents) = self.active_subagents_mut() {
                         for subagent in subagents.iter_mut().filter(|subagent| {
@@ -4012,18 +4095,18 @@ impl AppState {
                 } => {
                     if let Some(error) = error {
                         self.session_status = Some(error);
-                        active_changed = true;
+                        changed = true;
                     }
                     if options.is_empty() {
                         if self.acp_config_options.remove(&session_id).is_some()
                             && self.active_session_id.as_deref() == Some(&session_id)
                         {
-                            active_changed = true;
+                            changed = true;
                         }
                     } else if self.acp_config_options.get(&session_id) != Some(&options) {
                         self.acp_config_options.insert(session_id.clone(), options);
                         if self.active_session_id.as_deref() == Some(&session_id) {
-                            active_changed = true;
+                            changed = true;
                         }
                     }
                 }
@@ -4039,11 +4122,20 @@ impl AppState {
                         self.request_session_refresh(work_dir);
                     }
                     if self.active_session_id.as_deref() == Some(&session_id) {
-                        active_changed = true;
+                        changed = true;
                         self.refresh_active_session();
                     }
                 }
                 ChatStreamEvent::Agent { session_id, event } => {
+                    match &event {
+                        AgentEvent::PermissionRequested { request } => {
+                            self.pending_permissions
+                                .insert(session_id.clone(), request.clone());
+                            changed = true;
+                        }
+                        AgentEvent::AgentStart | AgentEvent::AgentError { .. } => changed = true,
+                        _ => {}
+                    }
                     self.deferred_stream_events
                         .entry(session_id.clone())
                         .or_default()
@@ -4051,7 +4143,7 @@ impl AppState {
                 }
             }
         }
-        active_changed
+        changed
     }
 
     pub(crate) fn active_pending_composer_message(&self) -> Option<&str> {
@@ -4476,6 +4568,254 @@ mod tests {
         std::iter::from_fn(|| receiver.try_recv().ok())
             .take(limit)
             .collect()
+    }
+
+    fn permission_request(id: &str) -> threadlane_session::PermissionRequest {
+        threadlane_session::PermissionRequest {
+            id: id.into(),
+            capability: "network".into(),
+            title: "Connect to api.example.test".into(),
+            detail: "https://api.example.test".into(),
+            scopes: vec![threadlane_session::PermissionScope::Once],
+        }
+    }
+
+    fn test_session(id: &str, session_file: &Path) -> SessionInfo {
+        let work_dir = session_file
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .or_else(|| session_file.parent())
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        SessionInfo {
+            id: id.into(),
+            title: id.into(),
+            work_dir: work_dir.clone(),
+            runtime_work_dir: work_dir,
+            session_file: session_file.to_path_buf(),
+            updated_at: 0,
+            health: SessionHealth::Healthy,
+            git_branch: None,
+            github_issue: None,
+            is_worktree: false,
+            worktree_available: true,
+        }
+    }
+
+    #[test]
+    fn inactive_permission_is_visible_before_session_selection() {
+        let mut state = AppState::load_from_registry(Vec::new());
+        state.active_session_id = Some("foreground".into());
+        let session = test_session("background", Path::new("/project/background.jsonl"));
+        let request = permission_request("permission-1");
+
+        let changed = state.drain_chat_stream(vec![ChatStreamEvent::Agent {
+            session_id: session.id.clone(),
+            event: AgentEvent::PermissionRequested {
+                request: request.clone(),
+            },
+        }]);
+
+        assert!(changed);
+        assert_eq!(state.pending_permissions.get(&session.id), Some(&request));
+        assert_eq!(
+            state.session_attention(&session),
+            SessionAttention::NeedsYou
+        );
+        let deferred = &state.deferred_stream_events[&session.id];
+        assert_eq!(deferred.len(), 1);
+        assert!(matches!(
+            &deferred[0],
+            ChatStreamEvent::Agent {
+                session_id,
+                event: AgentEvent::PermissionRequested { request: deferred },
+            } if session_id == &session.id && deferred == &request
+        ));
+    }
+
+    #[test]
+    fn inactive_finished_clears_live_permission_attention() {
+        let mut state = AppState::load_from_registry(Vec::new());
+        state.active_session_id = Some("foreground".into());
+        let session = test_session("background", Path::new("/project/background.jsonl"));
+        let request = permission_request("permission-1");
+        assert!(state.drain_chat_stream(vec![ChatStreamEvent::Agent {
+            session_id: session.id.clone(),
+            event: AgentEvent::PermissionRequested { request },
+        }]));
+
+        let changed = state.drain_chat_stream(vec![ChatStreamEvent::Finished {
+            session_id: session.id.clone(),
+            session_file: session.session_file.clone(),
+        }]);
+
+        assert!(changed);
+        assert!(!state.pending_permissions.contains_key(&session.id));
+        assert_eq!(state.session_attention(&session), SessionAttention::Idle);
+        let deferred = &state.deferred_stream_events[&session.id];
+        assert_eq!(deferred.len(), 2);
+        assert!(matches!(deferred[0], ChatStreamEvent::Agent { .. }));
+        assert!(matches!(deferred[1], ChatStreamEvent::Finished { .. }));
+    }
+
+    #[test]
+    fn session_attention_obeys_blocking_working_ready_idle_precedence() {
+        let error = SessionRuntimeStatus::Error("provider failed".into());
+        let working = SessionRuntimeStatus::Working;
+
+        assert_eq!(
+            derive_session_attention(true, &SessionHealth::Working, Some(&working), true, true),
+            SessionAttention::NeedsYou
+        );
+        assert_eq!(
+            derive_session_attention(false, &SessionHealth::Warning, None, false, true),
+            SessionAttention::NeedsYou
+        );
+        assert_eq!(
+            derive_session_attention(false, &SessionHealth::Healthy, Some(&error), true, true),
+            SessionAttention::NeedsYou
+        );
+        assert_eq!(
+            derive_session_attention(
+                false,
+                &SessionHealth::Healthy,
+                Some(&SessionRuntimeStatus::Interrupted),
+                false,
+                true,
+            ),
+            SessionAttention::NeedsYou
+        );
+        assert_eq!(
+            derive_session_attention(false, &SessionHealth::Healthy, Some(&working), false, true),
+            SessionAttention::Working
+        );
+        assert_eq!(
+            derive_session_attention(false, &SessionHealth::Working, None, false, true),
+            SessionAttention::Working
+        );
+        assert_eq!(
+            derive_session_attention(false, &SessionHealth::Healthy, None, false, true),
+            SessionAttention::Ready
+        );
+        assert_eq!(
+            derive_session_attention(false, &SessionHealth::Healthy, None, false, false),
+            SessionAttention::Idle
+        );
+    }
+
+    #[test]
+    fn completed_pr_and_missing_worktree_are_not_attention_without_other_work() {
+        let mut state = AppState::load_from_registry(Vec::new());
+        let mut session = test_session("session", Path::new("/project/session.jsonl"));
+        session.is_worktree = true;
+        session.worktree_available = false;
+        assert_eq!(state.session_attention(&session), SessionAttention::Idle);
+
+        session.git_branch = Some("feature/session".into());
+        let pr_key = (session.work_dir.clone(), "feature/session".into());
+        for completed_state in ["MERGED", "CLOSED"] {
+            state.git_prs.insert(
+                pr_key.clone(),
+                Some(threadlane_git::GitHubPrInfo {
+                    state: completed_state.into(),
+                    is_draft: true,
+                    ..Default::default()
+                }),
+            );
+            assert_eq!(state.session_attention(&session), SessionAttention::Idle);
+        }
+
+        for active_state in ["OPEN", "DRAFT"] {
+            state.git_prs.insert(
+                pr_key.clone(),
+                Some(threadlane_git::GitHubPrInfo {
+                    state: active_state.into(),
+                    is_draft: active_state == "DRAFT",
+                    ..Default::default()
+                }),
+            );
+            assert_eq!(state.session_attention(&session), SessionAttention::Ready);
+        }
+
+        state.git_prs.insert(
+            pr_key,
+            Some(threadlane_git::GitHubPrInfo {
+                state: "MERGED".into(),
+                ..Default::default()
+            }),
+        );
+        state.git_statuses.insert(
+            session.runtime_work_dir.clone(),
+            threadlane_git::GitStatus {
+                has_changes: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(state.session_attention(&session), SessionAttention::Ready);
+    }
+
+    #[test]
+    fn inactive_start_and_error_wake_attention_observers() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_file = dir.path().join(".threadlane/sessions/background.jsonl");
+        let session = test_session("background", &session_file);
+        let mut state = AppState::load_from_registry(Vec::new());
+        state.active_session_id = Some("foreground".into());
+        let runtime = state.ensure_session_runtime(
+            session.runtime_work_dir.clone(),
+            session.session_file.clone(),
+        );
+        runtime.begin_generation().unwrap();
+
+        assert!(state.drain_chat_stream(vec![ChatStreamEvent::Agent {
+            session_id: session.id.clone(),
+            event: AgentEvent::AgentStart,
+        }]));
+        assert_eq!(state.session_attention(&session), SessionAttention::Working);
+
+        runtime.finish_generation(Some("provider failed".into()));
+        assert!(state.drain_chat_stream(vec![ChatStreamEvent::Agent {
+            session_id: session.id.clone(),
+            event: AgentEvent::AgentError {
+                error: "provider failed".into(),
+            },
+        }]));
+        assert_eq!(
+            state.session_attention(&session),
+            SessionAttention::NeedsYou
+        );
+        assert_eq!(state.deferred_stream_events[&session.id].len(), 2);
+    }
+
+    #[test]
+    fn removed_session_clears_live_and_deferred_attention() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().to_path_buf();
+        let session_file = work_dir.join(".threadlane/sessions/background.jsonl");
+        let session = test_session("background", &session_file);
+        let mut state = AppState::load_from_registry(Vec::new());
+        state.projects.push(ProjectInfo {
+            name: "project".into(),
+            work_dir: work_dir.clone(),
+            sessions: vec![session.clone()],
+            is_expanded: true,
+        });
+        state
+            .pending_permissions
+            .insert(session.id.clone(), permission_request("permission-1"));
+        state.deferred_stream_events.insert(
+            session.id.clone(),
+            vec![ChatStreamEvent::Finished {
+                session_id: session.id.clone(),
+                session_file,
+            }],
+        );
+
+        state.finish_session_removal(&work_dir, &session.id);
+
+        assert!(!state.pending_permissions.contains_key(&session.id));
+        assert!(!state.deferred_stream_events.contains_key(&session.id));
     }
 
     #[test]
@@ -6539,6 +6879,78 @@ mod tests {
         assert!(trajectory.iter().all(|entry| {
             entry.category == "Tool" && entry.correlation_id.as_deref() == Some("call-1")
         }));
+    }
+
+    #[test]
+    fn selecting_attention_session_replays_deferred_events_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().to_path_buf();
+        let session_file = work_dir.join(".threadlane/sessions/background.jsonl");
+        std::fs::create_dir_all(session_file.parent().unwrap()).unwrap();
+        std::fs::write(&session_file, "").unwrap();
+        let session = test_session("background", &session_file);
+        let mut state = AppState::load_from_registry(Vec::new());
+        state.projects.push(ProjectInfo {
+            name: "project".into(),
+            work_dir: work_dir.clone(),
+            sessions: vec![session.clone()],
+            is_expanded: true,
+        });
+        state.active_work_dir = Some(work_dir.clone());
+        state.active_session_id = Some("foreground".into());
+
+        assert!(state.drain_chat_stream(vec![
+            ChatStreamEvent::Agent {
+                session_id: session.id.clone(),
+                event: AgentEvent::AgentError {
+                    error: "background failed".into(),
+                },
+            },
+            ChatStreamEvent::Finished {
+                session_id: session.id.clone(),
+                session_file: session_file.clone(),
+            },
+        ]));
+
+        state.select_session(work_dir, session.id.clone());
+
+        assert!(!state.deferred_stream_events.contains_key(&session.id));
+        assert_eq!(
+            state
+                .active_trajectory()
+                .iter()
+                .filter(|entry| entry.summary == "Agent error")
+                .count(),
+            1
+        );
+        assert_eq!(
+            state
+                .messages
+                .iter()
+                .filter(|message| message.content == "background failed")
+                .count(),
+            1
+        );
+        assert_eq!(
+            state
+                .pending_hydrations
+                .iter()
+                .filter(|request| {
+                    request.session_id == session.id && request.session_file == session_file
+                })
+                .count(),
+            1
+        );
+
+        assert!(!state.drain_chat_stream(Vec::new()));
+        assert_eq!(
+            state
+                .active_trajectory()
+                .iter()
+                .filter(|entry| entry.summary == "Agent error")
+                .count(),
+            1
+        );
     }
 
     #[test]

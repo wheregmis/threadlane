@@ -6,13 +6,12 @@ use gpui_component::button::{Button, ButtonVariant, ButtonVariants};
 use gpui_component::dialog::DialogButtonProps;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
-use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::theme::ActiveTheme;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Icon, IconName, Selectable, Sizable, WindowExt};
 
 use crate::app::{actions::AppAction, controller};
-use crate::state::{AppState, SessionHealth, SessionInfo, TrajectoryEntry};
+use crate::state::{AppState, SessionAttention, SessionInfo, TrajectoryEntry};
 
 fn safe_file_stem(title: &str) -> String {
     let stem = title
@@ -98,6 +97,8 @@ fn build_diagnostic_export(
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DateGroup {
+    NeedsYou,
+    Working,
     Today,
     Yesterday,
     ThisWeek,
@@ -107,37 +108,68 @@ enum DateGroup {
 #[derive(Clone)]
 enum HistoryRow {
     Group(DateGroup),
-    Session(SessionInfo),
+    Session(SessionInfo, SessionAttention),
 }
 
 fn same_history_row_identity(left: &HistoryRow, right: &HistoryRow) -> bool {
     match (left, right) {
         (HistoryRow::Group(left), HistoryRow::Group(right)) => left == right,
-        (HistoryRow::Session(left), HistoryRow::Session(right)) => {
+        (HistoryRow::Session(left, _), HistoryRow::Session(right, _)) => {
             left.id == right.id && left.work_dir == right.work_dir
         }
         _ => false,
     }
 }
 
-fn flatten_history_groups(grouped: Vec<(DateGroup, Vec<SessionInfo>)>) -> Vec<HistoryRow> {
-    grouped
-        .into_iter()
-        .filter(|(_, sessions)| !sessions.is_empty())
-        .flat_map(|(group, sessions)| {
-            std::iter::once(HistoryRow::Group(group))
-                .chain(sessions.into_iter().map(HistoryRow::Session))
-        })
-        .collect()
+fn flatten_history_sessions(
+    mut sessions: Vec<(SessionInfo, SessionAttention)>,
+    now: u64,
+) -> Vec<HistoryRow> {
+    sessions.sort_by(|(left, left_attention), (right, right_attention)| {
+        let left_group = history_group(*left_attention, left.updated_at, now);
+        let right_group = history_group(*right_attention, right.updated_at, now);
+        left_group
+            .rank()
+            .cmp(&right_group.rank())
+            .then_with(|| right.updated_at.cmp(&left.updated_at))
+            .then_with(|| left.title.cmp(&right.title))
+    });
+
+    let mut rows = Vec::with_capacity(sessions.len() + DateGroup::COUNT);
+    let mut previous_group = None;
+    for (session, attention) in sessions {
+        let group = history_group(attention, session.updated_at, now);
+        if previous_group != Some(group) {
+            rows.push(HistoryRow::Group(group));
+            previous_group = Some(group);
+        }
+        rows.push(HistoryRow::Session(session, attention));
+    }
+    rows
 }
 
 impl DateGroup {
+    const COUNT: usize = 6;
+
     fn label(self) -> &'static str {
         match self {
+            Self::NeedsYou => "Needs you",
+            Self::Working => "Working",
             Self::Today => "Today",
             Self::Yesterday => "Yesterday",
             Self::ThisWeek => "This Week",
             Self::Older => "Older",
+        }
+    }
+
+    fn rank(self) -> u8 {
+        match self {
+            Self::NeedsYou => 0,
+            Self::Working => 1,
+            Self::Today => 2,
+            Self::Yesterday => 3,
+            Self::ThisWeek => 4,
+            Self::Older => 5,
         }
     }
 }
@@ -164,6 +196,14 @@ fn get_date_group(timestamp: u64, now: u64) -> DateGroup {
     }
 }
 
+fn history_group(attention: SessionAttention, timestamp: u64, now: u64) -> DateGroup {
+    match attention {
+        SessionAttention::NeedsYou => DateGroup::NeedsYou,
+        SessionAttention::Working => DateGroup::Working,
+        SessionAttention::Ready | SessionAttention::Idle => get_date_group(timestamp, now),
+    }
+}
+
 fn format_time_ago(timestamp: u64, now: u64) -> String {
     let seconds = now.saturating_sub(timestamp);
     match seconds {
@@ -186,7 +226,7 @@ pub struct SidebarView {
     _subscriptions: Vec<Subscription>,
 }
 
-fn sidebar_session_fingerprint(session: &SessionInfo) -> u64 {
+fn sidebar_session_fingerprint(session: &SessionInfo, attention: SessionAttention) -> u64 {
     use std::hash::{Hash, Hasher};
 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -210,6 +250,7 @@ fn sidebar_session_fingerprint(session: &SessionInfo) -> u64 {
     }
     session.is_worktree.hash(&mut hasher);
     session.worktree_available.hash(&mut hasher);
+    attention.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -261,9 +302,7 @@ fn sidebar_fingerprint(state: &AppState, now: u64) -> u64 {
         project.name.hash(&mut hasher);
         project.work_dir.hash(&mut hasher);
         for session in &project.sessions {
-            sidebar_session_fingerprint(session).hash(&mut hasher);
-            state
-                .session_is_generating(&session.session_file)
+            sidebar_session_fingerprint(session, state.session_attention(session))
                 .hash(&mut hasher);
         }
     }
@@ -580,48 +619,47 @@ impl SidebarView {
     fn render_session_card(
         &self,
         session: &SessionInfo,
+        attention: SessionAttention,
         is_active: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme().colors;
-        let health = session.health.clone();
-        let state = self.model.read(cx);
-        let is_generating = state.session_is_generating(&session.session_file)
-            || (is_active && state.is_generating);
-        let is_working = health == SessionHealth::Working || is_generating;
-
-        let status_indicator = if is_working {
-            Some(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(3.0))
-                    .px_1()
-                    .rounded_full()
-                    .bg(theme.primary.opacity(0.1))
-                    .child(gpui_component::spinner::Spinner::new().xsmall())
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.primary)
-                            .child("Running"),
-                    )
-                    .into_any_element(),
-            )
-        } else {
-            match health {
-                SessionHealth::Warning => Some(
-                    Tag::new()
-                        .child("!")
-                        .with_variant(TagVariant::Warning)
-                        .small()
-                        .into_any_element(),
-                ),
-                SessionHealth::Working | SessionHealth::Healthy => None,
+        let status_style = match attention {
+            SessionAttention::NeedsYou => {
+                Some((IconName::Info, theme.warning, theme.warning.opacity(0.12)))
             }
+            SessionAttention::Working => Some((
+                IconName::Asterisk,
+                theme.primary,
+                theme.primary.opacity(0.1),
+            )),
+            SessionAttention::Ready => Some((
+                IconName::CircleCheck,
+                theme.success,
+                theme.success.opacity(0.12),
+            )),
+            SessionAttention::Idle => None,
         };
+        let has_status = status_style.is_some();
+        let status_indicator = status_style.map(|(icon, foreground, background)| {
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(3.0))
+                .px_1()
+                .rounded_full()
+                .bg(background)
+                .child(Icon::new(icon).xsmall().text_color(foreground))
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(foreground)
+                        .child(attention.label()),
+                )
+                .into_any_element()
+        });
 
         let bg_color = if is_active {
             theme.sidebar_accent
@@ -943,7 +981,7 @@ impl SidebarView {
                                     .items_center()
                                     .gap_1()
                                     .children(status_indicator)
-                                    .when(!is_working, |this| {
+                                    .when(!has_status, |this| {
                                         this.child(
                                             div()
                                                 .text_xs()
@@ -1304,15 +1342,8 @@ impl SidebarView {
     /// `sidebar_fingerprint` changes; `render_history` otherwise reuses the
     /// cached result instead of cloning and sorting every row per frame.
     fn build_history_rows(&self, state: &AppState, query: &str, now: u64) -> Vec<HistoryRow> {
-        // Grouping before sorting is equivalent to a global sort because
-        // bucket insertion preserves scan order.
-        let mut grouped: Vec<(DateGroup, Vec<SessionInfo>)> = vec![
-            (DateGroup::Today, Vec::new()),
-            (DateGroup::Yesterday, Vec::new()),
-            (DateGroup::ThisWeek, Vec::new()),
-            (DateGroup::Older, Vec::new()),
-        ];
-        let mut seen_session_ids = std::collections::HashSet::new();
+        let mut sessions = Vec::new();
+        let mut seen_sessions = std::collections::HashSet::new();
         for session in state
             .projects
             .iter()
@@ -1324,7 +1355,7 @@ impl SidebarView {
             })
             .flat_map(|project| project.sessions.iter())
         {
-            if !seen_session_ids.insert(session.id.clone()) {
+            if !seen_sessions.insert((session.work_dir.clone(), session.id.clone())) {
                 continue;
             }
             if !query.is_empty()
@@ -1333,27 +1364,9 @@ impl SidebarView {
             {
                 continue;
             }
-            let mut session = session.clone();
-            if state.session_is_generating(&session.session_file) {
-                session.health = SessionHealth::Working;
-            }
-            let group = get_date_group(session.updated_at, now);
-            if let Some((_, entries)) = grouped
-                .iter_mut()
-                .find(|(candidate, _)| *candidate == group)
-            {
-                entries.push(session);
-            }
+            sessions.push((session.clone(), state.session_attention(session)));
         }
-        for (_, entries) in grouped.iter_mut() {
-            entries.sort_by(|left, right| {
-                right
-                    .updated_at
-                    .cmp(&left.updated_at)
-                    .then_with(|| left.title.cmp(&right.title))
-            });
-        }
-        flatten_history_groups(grouped)
+        flatten_history_sessions(sessions, now)
     }
 
     fn render_history_row(
@@ -1374,11 +1387,7 @@ impl SidebarView {
                 .items_center()
                 .gap_2()
                 .px_3()
-                .pt(if group == DateGroup::Today {
-                    px(4.0)
-                } else {
-                    px(12.0)
-                })
+                .pt(if index == 0 { px(4.0) } else { px(12.0) })
                 .pb_1()
                 .child(
                     div()
@@ -1389,11 +1398,11 @@ impl SidebarView {
                 )
                 .child(div().h(px(1.0)).flex_1().bg(theme.border.opacity(0.35)))
                 .into_any_element(),
-            Some(HistoryRow::Session(session)) => {
+            Some(HistoryRow::Session(session, attention)) => {
                 let state = self.model.read(cx);
                 let is_active = state.active_work_dir.as_ref() == Some(&session.work_dir)
                     && state.active_session_id.as_deref() == Some(session.id.as_str());
-                self.render_session_card(&session, is_active, cx)
+                self.render_session_card(&session, attention, is_active, cx)
                     .into_any_element()
             }
             None => div().into_any_element(),
@@ -1490,11 +1499,11 @@ impl SidebarView {
 #[cfg(test)]
 mod tests {
     use super::{
-        flatten_history_groups, format_time_ago, pr_status_label, pr_status_tooltip,
+        flatten_history_sessions, format_time_ago, pr_status_label, pr_status_tooltip,
         same_history_row_identity, session_pr_info, sidebar_session_fingerprint,
         sidebar_session_identity, DateGroup, HistoryRow,
     };
-    use crate::state::{SessionHealth, SessionInfo};
+    use crate::state::{SessionAttention, SessionHealth, SessionInfo};
     use std::collections::HashMap;
     use threadlane_git::GitHubPrInfo;
 
@@ -1515,22 +1524,54 @@ mod tests {
     }
 
     #[test]
-    fn history_rows_keep_group_headers_and_skip_empty_groups() {
-        let rows = flatten_history_groups(vec![
-            (DateGroup::Today, Vec::new()),
-            (DateGroup::Yesterday, vec![session("one")]),
-            (DateGroup::Older, vec![session("two")]),
-        ]);
+    fn history_rows_prioritize_attention_then_keep_date_order() {
+        let now = 700_000;
+        let mut needs_older = session("needs-older");
+        needs_older.updated_at = now - 200;
+        let mut needs_newer = session("needs-newer");
+        needs_newer.updated_at = now - 100;
+        let mut working = session("working");
+        working.updated_at = now - 300;
+        let mut ready_today = session("ready-today");
+        ready_today.updated_at = now - 400;
+        let mut idle_yesterday = session("idle-yesterday");
+        idle_yesterday.updated_at = now - 90_000;
 
-        assert!(matches!(rows[0], HistoryRow::Group(DateGroup::Yesterday)));
-        assert!(matches!(&rows[1], HistoryRow::Session(item) if item.id == "one"));
-        assert!(matches!(rows[2], HistoryRow::Group(DateGroup::Older)));
-        assert!(matches!(&rows[3], HistoryRow::Session(item) if item.id == "two"));
+        let rows = flatten_history_sessions(
+            vec![
+                (ready_today, SessionAttention::Ready),
+                (needs_older, SessionAttention::NeedsYou),
+                (idle_yesterday, SessionAttention::Idle),
+                (working, SessionAttention::Working),
+                (needs_newer, SessionAttention::NeedsYou),
+            ],
+            now,
+        );
+
+        assert!(matches!(rows[0], HistoryRow::Group(DateGroup::NeedsYou)));
+        assert!(
+            matches!(&rows[1], HistoryRow::Session(item, SessionAttention::NeedsYou) if item.id == "needs-newer")
+        );
+        assert!(
+            matches!(&rows[2], HistoryRow::Session(item, SessionAttention::NeedsYou) if item.id == "needs-older")
+        );
+        assert!(matches!(rows[3], HistoryRow::Group(DateGroup::Working)));
+        assert!(
+            matches!(&rows[4], HistoryRow::Session(item, SessionAttention::Working) if item.id == "working")
+        );
+        assert!(matches!(rows[5], HistoryRow::Group(DateGroup::Today)));
+        assert!(
+            matches!(&rows[6], HistoryRow::Session(item, SessionAttention::Ready) if item.id == "ready-today")
+        );
+        assert!(matches!(rows[7], HistoryRow::Group(DateGroup::Yesterday)));
+        assert!(
+            matches!(&rows[8], HistoryRow::Session(item, SessionAttention::Idle) if item.id == "idle-yesterday")
+        );
         assert!(same_history_row_identity(
             &rows[1],
-            &HistoryRow::Session(session("one"))
+            &HistoryRow::Session(session("needs-newer"), SessionAttention::Idle)
         ));
-        assert!(!same_history_row_identity(&rows[1], &rows[3]));
+        assert!(!same_history_row_identity(&rows[1], &rows[4]));
     }
 
     #[test]
@@ -1594,11 +1635,24 @@ mod tests {
     fn changing_a_session_branch_changes_the_sidebar_fingerprint() {
         let mut item = session("session");
         item.git_branch = Some("feature/one".into());
-        let first = sidebar_session_fingerprint(&item);
+        let first = sidebar_session_fingerprint(&item, SessionAttention::Idle);
 
         item.git_branch = Some("feature/two".into());
 
-        assert_ne!(first, sidebar_session_fingerprint(&item));
+        assert_ne!(
+            first,
+            sidebar_session_fingerprint(&item, SessionAttention::Idle)
+        );
+    }
+
+    #[test]
+    fn attention_changes_the_sidebar_fingerprint() {
+        let item = session("session");
+
+        assert_ne!(
+            sidebar_session_fingerprint(&item, SessionAttention::Idle),
+            sidebar_session_fingerprint(&item, SessionAttention::NeedsYou)
+        );
     }
 
     #[test]
@@ -1613,7 +1667,7 @@ mod tests {
             url: "https://github.com/threadlane/app/issues/42".into(),
         });
 
-        let before = sidebar_session_fingerprint(&item);
+        let before = sidebar_session_fingerprint(&item, SessionAttention::Idle);
         let identity = sidebar_session_identity(&item);
         assert_eq!(identity.title, "#42 Fix linked task browser");
         assert!(identity.tooltip.contains("threadlane/app"));
@@ -1632,7 +1686,10 @@ mod tests {
             number: 43,
             ..item.github_issue.clone().unwrap()
         });
-        assert_ne!(before, sidebar_session_fingerprint(&item));
+        assert_ne!(
+            before,
+            sidebar_session_fingerprint(&item, SessionAttention::Idle)
+        );
     }
 }
 
