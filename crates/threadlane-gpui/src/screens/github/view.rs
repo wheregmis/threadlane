@@ -613,8 +613,9 @@ fn pr_present_action_id(reply: bool, attempt: &PrCommentAttempt) -> SharedString
         PrCommentTarget::Reply(target, _) => target.remote_id.as_str(),
     };
     format!(
-        "github-pr-{}-open-present-{}-{target}",
+        "github-pr-{}-open-present-{}-{}-{target}",
         if reply { "reply" } else { "comment" },
+        attempt.key.project.display(),
         attempt.key.number
     )
     .into()
@@ -3170,6 +3171,32 @@ impl GitHubView {
             }))
             .into_any_element(),
         };
+        let mut controls_before_editor = publish
+            .attempt
+            .as_ref()
+            .filter(|_| publish.phase == PrCommentPhase::Present)
+            .map(|attempt| pr_present_recovery_action(reply, attempt).into_any_element())
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut controls_after_editor = Vec::new();
+        if matches!(
+            control,
+            PrCommentControl::ClearDraft | PrCommentControl::Retry | PrCommentControl::CheckAgain
+        ) {
+            controls_before_editor.push(action);
+        } else {
+            controls_after_editor.push(action);
+        }
+        let controls_row = |controls: Vec<AnyElement>| {
+            (!controls.is_empty()).then(|| {
+                div()
+                    .mt_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .children(controls)
+            })
+        };
         Some(
             div()
                 .tab_group()
@@ -3205,6 +3232,7 @@ impl GitHubView {
                                 .child(target.body),
                         )
                 }))
+                .children(controls_row(controls_before_editor))
                 .child(div().mt_2().child(Textarea::new(if reply {
                     &self.pr_reply_input
                 } else {
@@ -3253,21 +3281,7 @@ impl GitHubView {
                         .whitespace_normal()
                         .child(error)
                 }))
-                .child(
-                    div()
-                        .mt_2()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .children(
-                            publish
-                                .attempt
-                                .as_ref()
-                                .filter(|_| publish.phase == PrCommentPhase::Present)
-                                .map(|attempt| pr_present_recovery_action(reply, attempt)),
-                        )
-                        .child(action),
-                )
+                .children(controls_row(controls_after_editor))
                 .into_any_element(),
         )
     }
@@ -4066,7 +4080,9 @@ mod tests {
         PrWorkspaceKey, PrWorkspaceSelections,
     };
     use crate::state::{AppState, SessionHealth, SessionInfo};
-    use gpui::{AppContext as _, InteractiveElement as _, ParentElement as _, Styled as _};
+    use gpui::{
+        AppContext as _, Focusable as _, InteractiveElement as _, ParentElement as _, Styled as _,
+    };
     use std::path::PathBuf;
     use threadlane_git::{
         GitHubIssueRef, GitHubIssueSummary, GitHubPrFile, GitHubPrInfo, GitHubPullRequestSummary,
@@ -4491,25 +4507,26 @@ mod tests {
     }
 
     #[gpui::test]
-    fn github_pr_reply_present_recovery_is_keyboard_accessible_and_target_namespaced(
+    fn github_pr_reply_editor_reaches_present_recovery_before_the_textarea(
         cx: &mut gpui::TestAppContext,
     ) {
-        struct RecoveryAction(super::PrCommentAttempt);
+        struct ReplyEditor(gpui::Entity<GitHubView>);
 
-        impl gpui::Render for RecoveryAction {
+        impl gpui::Render for ReplyEditor {
             fn render(
                 &mut self,
                 _window: &mut gpui::Window,
-                _cx: &mut gpui::Context<Self>,
+                cx: &mut gpui::Context<Self>,
             ) -> impl gpui::IntoElement {
-                gpui::div()
-                    .tab_group()
-                    .size(gpui::px(100.))
-                    .child(super::pr_present_recovery_action(true, &self.0))
+                self.0
+                    .update(cx, |view, cx| view.render_pr_reply_editor(cx).unwrap())
             }
         }
 
-        cx.update(gpui_component::init);
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            super::init(cx);
+        });
         let key = pr_key("/projects/app", 42);
         let mut drafts = PrCommentDrafts::default();
         let attempt = begin_reply(
@@ -4519,22 +4536,47 @@ mod tests {
             "submitted reply",
             &[],
         );
+        let other_project_attempt = begin_reply(
+            &mut PrCommentDrafts::default(),
+            &pr_key("/projects/other", 42),
+            reply_target("101", "alice"),
+            "submitted reply",
+            &[],
+        );
         assert_ne!(
             super::pr_present_action_id(false, &attempt),
             super::pr_present_action_id(true, &attempt)
         );
-        let expected_url = attempt.pr_url.clone();
-        let (_, cx) = cx.add_window_view(move |_, _| RecoveryAction(attempt));
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        cx.simulate_click(
-            gpui::point(gpui::px(10.), gpui::px(10.)),
-            gpui::Modifiers::default(),
+        assert_ne!(
+            super::pr_present_action_id(true, &attempt),
+            super::pr_present_action_id(true, &other_project_attempt)
         );
-        assert_eq!(cx.opened_url().as_deref(), Some(expected_url.as_str()));
-        cx.update(|_, cx| cx.open_url("test://sentinel"));
+        let expected_url = attempt.pr_url.clone();
+        let (editor, cx) = cx.add_window_view(move |window, cx| {
+            let model = cx.new(|_| AppState::default());
+            let view = cx.new(|cx| {
+                let mut view = GitHubView::new(model, window, cx);
+                configure_pr_workspace(&mut view, cx);
+                view.pr_drafts = drafts;
+                assert!(view
+                    .pr_drafts
+                    .mark_checking(&attempt, "ambiguous write".into()));
+                assert!(view.pr_drafts.complete_readback(
+                    &attempt,
+                    PrReadback::Present,
+                    "relationship unknown".into()
+                ));
+                view
+            });
+            ReplyEditor(view)
+        });
+        let reply_input_focus = editor.read_with(cx, |editor, cx| {
+            editor.0.read(cx).pr_reply_input.read(cx).focus_handle(cx)
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
         cx.update(|window, cx| {
             window.focus_next(cx);
-            assert!(window.focused(cx).is_some());
+            assert_ne!(window.focused(cx).as_ref(), Some(&reply_input_focus));
             window.draw(cx).clear(cx);
         });
         let keystroke = gpui::Keystroke::parse("enter").unwrap();
