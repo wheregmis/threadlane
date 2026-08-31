@@ -213,6 +213,7 @@ const INVALID_PR_REPLY_TARGET: &str =
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PrReplyTarget {
     remote_id: String,
+    reply_to_remote_id: Option<String>,
     author: String,
     body: String,
     path: Option<String>,
@@ -221,7 +222,9 @@ struct PrReplyTarget {
 
 impl PrReplyTarget {
     fn comment_id(&self) -> Result<u64, &'static str> {
-        self.remote_id
+        self.reply_to_remote_id
+            .as_ref()
+            .unwrap_or(&self.remote_id)
             .parse::<u64>()
             .ok()
             .filter(|id| *id > 0)
@@ -330,7 +333,10 @@ impl PrCommentDrafts {
                 reply.blocked = false;
                 return true;
             }
-            if !reply.body.is_empty() {
+            if !reply.body.is_empty()
+                || reply.publish.phase != PrCommentPhase::Idle
+                || reply.publish.attempt.is_some()
+            {
                 reply.blocked = true;
                 return false;
             }
@@ -577,10 +583,15 @@ fn classify_pr_readback(
             !attempt.pre_write_ids.contains(&comment.remote_id)
                 && normalized_pr_body(&comment.body) == expected
         }),
-        PrCommentTarget::Reply(..) => detail.review_comments.iter().any(|comment| {
-            !attempt.pre_write_ids.contains(&comment.remote_id)
-                && normalized_pr_body(&comment.body) == expected
-        }),
+        PrCommentTarget::Reply(..) => {
+            if !detail.review_comments_complete {
+                return PrReadback::Unknown;
+            }
+            detail.review_comments.iter().any(|comment| {
+                !attempt.pre_write_ids.contains(&comment.remote_id)
+                    && normalized_pr_body(&comment.body) == expected
+            })
+        }
     };
     if present {
         PrReadback::Present
@@ -594,6 +605,28 @@ fn pr_publish_refresh_matches_selection(
     selected: Option<&PrWorkspaceKey>,
 ) -> bool {
     selected == Some(&attempt.key)
+}
+
+fn pr_present_action_id(reply: bool, attempt: &PrCommentAttempt) -> SharedString {
+    let target = match &attempt.target {
+        PrCommentTarget::PullRequest => "pull-request",
+        PrCommentTarget::Reply(target, _) => target.remote_id.as_str(),
+    };
+    format!(
+        "github-pr-{}-open-present-{}-{target}",
+        if reply { "reply" } else { "comment" },
+        attempt.key.number
+    )
+    .into()
+}
+
+fn pr_present_recovery_action(reply: bool, attempt: &PrCommentAttempt) -> Button {
+    let url = attempt.pr_url.clone();
+    Button::new(pr_present_action_id(reply, attempt))
+        .link()
+        .small()
+        .label("Open on GitHub")
+        .on_click(move |_, _, cx| cx.open_url(&url))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -624,6 +657,7 @@ struct PrTimelineRow {
     review_state: Option<String>,
     path: Option<String>,
     line: Option<u64>,
+    in_reply_to_id: Option<String>,
 }
 
 impl PrTimelineRow {
@@ -665,6 +699,7 @@ impl PrTimelineRow {
     fn reply_target(&self) -> Option<PrReplyTarget> {
         (self.kind == PrTimelineKind::InlineReviewComment).then(|| PrReplyTarget {
             remote_id: self.remote_id.clone(),
+            reply_to_remote_id: self.in_reply_to_id.clone(),
             author: self.author.clone(),
             body: self.body.clone(),
             path: self.path.clone(),
@@ -698,6 +733,7 @@ fn merge_pr_timeline(pr: &GitHubPrInfo) -> Vec<PrTimelineRow> {
             review_state: None,
             path: None,
             line: None,
+            in_reply_to_id: None,
         })
         .chain(pr.reviews.iter().map(|review| PrTimelineRow {
             remote_id: review.remote_id.clone(),
@@ -709,6 +745,7 @@ fn merge_pr_timeline(pr: &GitHubPrInfo) -> Vec<PrTimelineRow> {
             review_state: Some(review.state.clone()),
             path: None,
             line: None,
+            in_reply_to_id: None,
         }))
         .chain(pr.review_comments.iter().map(|comment| PrTimelineRow {
             remote_id: comment.remote_id.clone(),
@@ -720,6 +757,7 @@ fn merge_pr_timeline(pr: &GitHubPrInfo) -> Vec<PrTimelineRow> {
             review_state: None,
             path: comment.path.clone(),
             line: comment.line,
+            in_reply_to_id: comment.in_reply_to_id.clone(),
         }))
         .collect::<Vec<_>>();
     rows.sort_by(|left, right| left.timestamp.cmp(&right.timestamp));
@@ -3066,7 +3104,7 @@ impl GitHubView {
             PrCommentPhase::Idle => None,
             PrCommentPhase::Publishing => Some("Publishing…"),
             PrCommentPhase::Checking => Some("Checking GitHub…"),
-            PrCommentPhase::Present if reply => Some("A matching new review comment was found, but GitHub cannot confirm its reply relationship. Draft retained."),
+            PrCommentPhase::Present if reply => Some("A matching new review comment was found; this check did not establish its reply relationship. Draft retained."),
             PrCommentPhase::Present => Some("A matching new GitHub comment was found for the submitted draft. Draft retained."),
             PrCommentPhase::Absent => Some("No matching new GitHub comment was found for the submitted draft. Draft retained."),
             PrCommentPhase::Unknown => Some("GitHub could not confirm whether the submitted draft was published. Draft retained."),
@@ -3134,6 +3172,7 @@ impl GitHubView {
         };
         Some(
             div()
+                .tab_group()
                 .flex_none()
                 .p_3()
                 .border_b_1()
@@ -3225,11 +3264,7 @@ impl GitHubView {
                                 .attempt
                                 .as_ref()
                                 .filter(|_| publish.phase == PrCommentPhase::Present)
-                                .map(|attempt| {
-                                    Link::new("github-pr-comment-open-present")
-                                        .href(attempt.pr_url.clone())
-                                        .child("Open on GitHub")
-                                }),
+                                .map(|attempt| pr_present_recovery_action(reply, attempt)),
                         )
                         .child(action),
                 )
@@ -4031,7 +4066,7 @@ mod tests {
         PrWorkspaceKey, PrWorkspaceSelections,
     };
     use crate::state::{AppState, SessionHealth, SessionInfo};
-    use gpui::AppContext as _;
+    use gpui::{AppContext as _, InteractiveElement as _, ParentElement as _, Styled as _};
     use std::path::PathBuf;
     use threadlane_git::{
         GitHubIssueRef, GitHubIssueSummary, GitHubPrFile, GitHubPrInfo, GitHubPullRequestSummary,
@@ -4120,6 +4155,7 @@ mod tests {
     fn reply_target(remote_id: &str, author: &str) -> PrReplyTarget {
         PrReplyTarget {
             remote_id: remote_id.into(),
+            reply_to_remote_id: None,
             author: author.into(),
             body: "remote review context".into(),
             path: Some("src/lib.rs".into()),
@@ -4211,6 +4247,23 @@ mod tests {
                 .attempt
                 .is_none());
         }
+
+        let key = pr_key("/projects/app", 42);
+        let mut drafts = PrCommentDrafts::default();
+        let mut nested = reply_target("101", "alice");
+        nested.reply_to_remote_id = Some("invalid-parent".into());
+        drafts.select_reply_target(key.clone(), nested);
+        drafts.set_reply_body(&key, "reply".into());
+        assert_eq!(
+            drafts
+                .begin_reply(
+                    &key,
+                    "https://example.com/pull/42".into(),
+                    Default::default()
+                )
+                .unwrap_err(),
+            super::INVALID_PR_REPLY_TARGET
+        );
     }
 
     #[test]
@@ -4251,6 +4304,25 @@ mod tests {
     }
 
     #[test]
+    fn github_pr_reply_unresolved_attempt_blocks_an_empty_body_target_switch() {
+        let key = pr_key("/projects/app", 42);
+        let target = reply_target("101", "alice");
+        let mut drafts = PrCommentDrafts::default();
+        let attempt = begin_reply(&mut drafts, &key, target.clone(), "submitted reply", &[]);
+
+        drafts.set_reply_body(&key, String::new());
+        assert!(!drafts.select_reply_target(key.clone(), reply_target("303", "carol")));
+        assert_eq!(
+            drafts.get(&key).unwrap().reply.as_ref().unwrap().target,
+            target
+        );
+        assert!(drafts.mark_checking(&attempt, "ambiguous".into()));
+        assert!(!drafts.select_reply_target(key.clone(), reply_target("303", "carol")));
+        assert!(drafts.complete_readback(&attempt, PrReadback::Absent, "not found".into()));
+        assert!(!drafts.select_reply_target(key, reply_target("303", "carol")));
+    }
+
+    #[test]
     fn github_pr_reply_readback_requires_a_new_review_comment_id_and_retains_context() {
         let key = pr_key("/projects/app", 42);
         let target = reply_target("101", "alice");
@@ -4264,6 +4336,7 @@ mod tests {
         );
         let old_only = GitHubPrInfo {
             number: 42,
+            review_comments_complete: true,
             review_comments: vec![PrReviewComment {
                 remote_id: "old".into(),
                 body: "exact reply".into(),
@@ -4308,6 +4381,8 @@ mod tests {
                 ),
                 (&target, " exact\nreply ", phase)
             );
+            terminal.set_reply_body(&key, String::new());
+            assert!(!terminal.select_reply_target(key.clone(), reply_target("303", "carol")));
             terminal.set_reply_body(&key, "newer B".into());
             assert_eq!(
                 {
@@ -4328,6 +4403,37 @@ mod tests {
     }
 
     #[test]
+    fn github_pr_reply_readback_is_unknown_until_review_comments_are_complete() {
+        let key = pr_key("/projects/app", 42);
+        let mut drafts = PrCommentDrafts::default();
+        let attempt = begin_reply(
+            &mut drafts,
+            &key,
+            reply_target("101", "alice"),
+            "submitted reply",
+            &[],
+        );
+        let incomplete = GitHubPrInfo {
+            number: 42,
+            ..Default::default()
+        };
+        assert_eq!(
+            super::classify_pr_readback(&attempt, Ok(&incomplete)),
+            PrReadback::Unknown
+        );
+        assert_eq!(
+            super::classify_pr_readback(
+                &attempt,
+                Ok(&GitHubPrInfo {
+                    review_comments_complete: true,
+                    ..incomplete
+                })
+            ),
+            PrReadback::Absent
+        );
+    }
+
+    #[test]
     fn github_pr_reply_target_exists_only_for_inline_review_comments() {
         let row = |kind| super::PrTimelineRow {
             remote_id: "101".into(),
@@ -4339,6 +4445,7 @@ mod tests {
             review_state: None,
             path: Some("src/lib.rs".into()),
             line: Some(17),
+            in_reply_to_id: None,
         };
 
         assert_eq!(
@@ -4347,6 +4454,98 @@ mod tests {
         );
         assert!(row(PrTimelineKind::IssueComment).reply_target().is_none());
         assert!(row(PrTimelineKind::Review).reply_target().is_none());
+    }
+
+    #[test]
+    fn github_pr_reply_to_reply_posts_to_the_top_level_parent() {
+        let rows = merge_pr_timeline(&GitHubPrInfo {
+            url: "https://github.com/threadlane/app/pull/42".into(),
+            review_comments: vec![PrReviewComment {
+                remote_id: "101".into(),
+                in_reply_to_id: Some("41".into()),
+                author: "alice".into(),
+                body: "clicked reply context".into(),
+                path: Some("src/lib.rs".into()),
+                line: Some(17),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let target = rows[0].reply_target().unwrap();
+
+        assert_eq!(target.remote_id, "101");
+        assert_eq!(target.body, "clicked reply context");
+        assert_eq!(target.comment_id(), Ok(41));
+        let mut drafts = PrCommentDrafts::default();
+        let attempt = begin_reply(
+            &mut drafts,
+            &pr_key("/projects/app", 42),
+            target,
+            "reply",
+            &[],
+        );
+        assert!(matches!(
+            attempt.target,
+            super::PrCommentTarget::Reply(_, 41)
+        ));
+    }
+
+    #[gpui::test]
+    fn github_pr_reply_present_recovery_is_keyboard_accessible_and_target_namespaced(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        struct RecoveryAction(super::PrCommentAttempt);
+
+        impl gpui::Render for RecoveryAction {
+            fn render(
+                &mut self,
+                _window: &mut gpui::Window,
+                _cx: &mut gpui::Context<Self>,
+            ) -> impl gpui::IntoElement {
+                gpui::div()
+                    .tab_group()
+                    .size(gpui::px(100.))
+                    .child(super::pr_present_recovery_action(true, &self.0))
+            }
+        }
+
+        cx.update(gpui_component::init);
+        let key = pr_key("/projects/app", 42);
+        let mut drafts = PrCommentDrafts::default();
+        let attempt = begin_reply(
+            &mut drafts,
+            &key,
+            reply_target("101", "alice"),
+            "submitted reply",
+            &[],
+        );
+        assert_ne!(
+            super::pr_present_action_id(false, &attempt),
+            super::pr_present_action_id(true, &attempt)
+        );
+        let expected_url = attempt.pr_url.clone();
+        let (_, cx) = cx.add_window_view(move |_, _| RecoveryAction(attempt));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_click(
+            gpui::point(gpui::px(10.), gpui::px(10.)),
+            gpui::Modifiers::default(),
+        );
+        assert_eq!(cx.opened_url().as_deref(), Some(expected_url.as_str()));
+        cx.update(|_, cx| cx.open_url("test://sentinel"));
+        cx.update(|window, cx| {
+            window.focus_next(cx);
+            assert!(window.focused(cx).is_some());
+            window.draw(cx).clear(cx);
+        });
+        let keystroke = gpui::Keystroke::parse("enter").unwrap();
+        cx.simulate_event(gpui::KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        cx.simulate_event(gpui::KeyUpEvent { keystroke });
+
+        assert_eq!(cx.opened_url().as_deref(), Some(expected_url.as_str()));
     }
 
     #[test]
@@ -4620,22 +4819,40 @@ mod tests {
         view.update_in(cx, |view, window, cx| {
             configure_pr_workspace(view, cx);
             let first = pr_key("/projects/app", 42);
-            view.pr_drafts.set_body(first, " first comment\n".into());
+            view.pr_drafts
+                .set_body(first.clone(), " first comment\n".into());
+            view.pr_drafts
+                .select_reply_target(first.clone(), reply_target("101", "alice"));
+            view.pr_drafts
+                .set_reply_body(&first, " first reply\n".into());
             view.sync_pr_draft_inputs(window, cx);
         });
         assert_eq!(
             view.read_with(cx, |view, cx| view.pr_comment_input.read(cx).value()),
             " first comment\n"
         );
+        assert_eq!(
+            view.read_with(cx, |view, cx| view.pr_reply_input.read(cx).value()),
+            " first reply\n"
+        );
         view.update_in(cx, |view, window, cx| {
             let second = pr_key("/projects/app", 43);
             view.selected_pr = Some(43);
-            view.pr_drafts.set_body(second, "second comment".into());
+            view.pr_drafts
+                .set_body(second.clone(), "second comment".into());
+            view.pr_drafts
+                .select_reply_target(second.clone(), reply_target("202", "bob"));
+            view.pr_drafts
+                .set_reply_body(&second, "second reply".into());
             view.sync_pr_draft_inputs(window, cx);
         });
         assert_eq!(
             view.read_with(cx, |view, cx| view.pr_comment_input.read(cx).value()),
             "second comment"
+        );
+        assert_eq!(
+            view.read_with(cx, |view, cx| view.pr_reply_input.read(cx).value()),
+            "second reply"
         );
         assert_eq!(
             view.read_with(cx, |view, _| {
@@ -4646,6 +4863,28 @@ mod tests {
                     .clone()
             }),
             " first comment\n"
+        );
+        view.update_in(cx, |view, window, cx| {
+            view.project_work_dir = Some("/projects/other".into());
+            view.selected_pr = Some(42);
+            let other = pr_key("/projects/other", 42);
+            view.pr_drafts
+                .select_reply_target(other.clone(), reply_target("303", "carol"));
+            view.pr_drafts.set_reply_body(&other, "other reply".into());
+            view.sync_pr_draft_inputs(window, cx);
+        });
+        assert_eq!(
+            view.read_with(cx, |view, cx| view.pr_reply_input.read(cx).value()),
+            "other reply"
+        );
+        view.update_in(cx, |view, window, cx| {
+            view.project_work_dir = Some("/projects/app".into());
+            view.selected_pr = Some(42);
+            view.sync_pr_draft_inputs(window, cx);
+        });
+        assert_eq!(
+            view.read_with(cx, |view, cx| view.pr_reply_input.read(cx).value()),
+            " first reply\n"
         );
     }
 
@@ -5264,6 +5503,7 @@ mod tests {
             review_state: None,
             path: Some("src/lib.rs".into()),
             line: Some(7),
+            in_reply_to_id: None,
         });
 
         assert!(prompt.contains("https://github.com/threadlane/app/pull/42#discussion_r7"));

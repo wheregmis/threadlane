@@ -67,6 +67,8 @@ pub struct GitHubPrInfo {
     pub base_ref: String,
     pub comments_count: usize,
     pub review_comments: Vec<PrReviewComment>,
+    #[serde(default)]
+    pub review_comments_complete: bool,
     pub checks: Vec<PrCheckStatus>,
     pub total_checks: usize,
     pub failing_checks: usize,
@@ -191,6 +193,8 @@ pub enum PullRequestReviewVerdict {
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PrReviewComment {
     pub remote_id: String,
+    #[serde(default)]
+    pub in_reply_to_id: Option<String>,
     pub author: String,
     pub body: String,
     pub path: Option<String>,
@@ -1246,6 +1250,7 @@ pub fn parse_gh_pr_json(json_str: &str) -> Result<GitHubPrInfo, String> {
         base_ref,
         comments_count,
         review_comments: Vec::new(),
+        review_comments_complete: false,
         checks,
         total_checks,
         failing_checks,
@@ -1294,20 +1299,40 @@ fn parse_pr_conversation_comments(value: &serde_json::Value) -> Vec<PrConversati
 }
 
 fn enrich_pr_review_comments(info: &mut GitHubPrInfo, json: &str) -> Result<(), String> {
+    info.review_comments_complete = false;
     let value: serde_json::Value = serde_json::from_str(json).map_err(|error| error.to_string())?;
     let items = value
         .as_array()
         .ok_or_else(|| "GitHub review comments response must be an array".to_owned())?;
+    let mut review_comments = Vec::new();
     for item in items {
         let page = item
             .as_array()
             .map(Vec::as_slice)
             .unwrap_or(std::slice::from_ref(item));
         for comment in page {
-            info.review_comments.push(PrReviewComment {
-                remote_id: github_id(&comment["id"]),
+            let remote_id = github_id(&comment["id"]);
+            if !comment.is_object() || remote_id.is_empty() {
+                return Err("GitHub review comment is missing an ID".to_owned());
+            }
+            let body = comment["body"]
+                .as_str()
+                .ok_or_else(|| "GitHub review comment is missing a body".to_owned())?;
+            let in_reply_to_id = match &comment["in_reply_to_id"] {
+                serde_json::Value::Null => None,
+                value => {
+                    let id = github_id(value);
+                    if id.is_empty() {
+                        return Err("GitHub review comment has an invalid parent ID".to_owned());
+                    }
+                    Some(id)
+                }
+            };
+            review_comments.push(PrReviewComment {
+                remote_id,
+                in_reply_to_id,
                 author: github_login(&comment["user"]),
-                body: comment["body"].as_str().unwrap_or("").to_owned(),
+                body: body.to_owned(),
                 path: comment["path"].as_str().map(str::to_owned),
                 line: comment["line"]
                     .as_u64()
@@ -1316,6 +1341,8 @@ fn enrich_pr_review_comments(info: &mut GitHubPrInfo, json: &str) -> Result<(), 
             });
         }
     }
+    info.review_comments = review_comments;
+    info.review_comments_complete = true;
     Ok(())
 }
 
@@ -3007,10 +3034,11 @@ mod tests {
         assert_eq!(pr.issue_comments.len(), 1);
         assert_eq!(pr.comments_count, 1);
         assert!(pr.review_comments.is_empty());
+        assert!(!pr.review_comments_complete);
 
         enrich_pr_review_comments(
             &mut pr,
-            r#"[{"id": 99, "user": { "login": "reviewer" }, "body": "Inline note", "path": "src/lib.rs", "line": 12, "created_at": "2026-08-30T12:02:00Z"}]"#,
+            r#"[{"id": 99, "in_reply_to_id": 41, "user": { "login": "reviewer" }, "body": "Inline note", "path": "src/lib.rs", "line": 12, "created_at": "2026-08-30T12:02:00Z"}]"#,
         )
         .unwrap();
 
@@ -3018,6 +3046,40 @@ mod tests {
         assert_eq!(pr.comments_count, 1);
         assert_eq!(pr.review_comments.len(), 1);
         assert_eq!(pr.review_comments[0].remote_id, "99");
+        assert_eq!(pr.review_comments[0].in_reply_to_id.as_deref(), Some("41"));
+        assert!(pr.review_comments_complete);
+    }
+
+    #[test]
+    fn github_review_comment_hydration_is_atomic_and_malformed_data_stays_incomplete() {
+        let existing = PrReviewComment {
+            remote_id: "existing".into(),
+            body: "retained".into(),
+            ..Default::default()
+        };
+        let mut pr = GitHubPrInfo {
+            review_comments: vec![existing.clone()],
+            review_comments_complete: true,
+            ..Default::default()
+        };
+        assert!(enrich_pr_review_comments(
+            &mut pr,
+            r#"[{"id": 99, "body": "valid"}, {"id": 100, "body": 17}]"#,
+        )
+        .is_err());
+        assert_eq!(pr.review_comments, [existing]);
+        assert!(!pr.review_comments_complete);
+
+        let mut legacy = serde_json::to_value(GitHubPrInfo::default()).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("review_comments_complete");
+        assert!(
+            !serde_json::from_value::<GitHubPrInfo>(legacy)
+                .unwrap()
+                .review_comments_complete
+        );
     }
 
     #[test]
