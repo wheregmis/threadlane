@@ -366,7 +366,7 @@ pub(crate) fn resolve_context_snapshot(
 mod tests {
     use super::{
         is_local_path, render_compacted_context_index, ContextSnapshotLoadOutcome,
-        ContextSnapshotToolExecutor, JsonlStore, Record, MAX_CONTEXT_LIST_RESULTS,
+        ContextSnapshotToolExecutor, JsonlStore, Record, Reducer, MAX_CONTEXT_LIST_RESULTS,
     };
     use crate::coding_agent::harness::CodingSessionHarness;
     use threadlane_runtime::harness::SessionStore;
@@ -442,6 +442,40 @@ mod tests {
     #[test]
     fn unicode_local_paths_do_not_panic_during_scheme_detection() {
         assert!(is_local_path("ééé"));
+    }
+
+    #[tokio::test]
+    async fn manage_context_lists_no_snapshots_for_a_legacy_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_file = dir.path().join("session.jsonl");
+        std::fs::write(
+            &session_file,
+            serde_json::json!({
+                "id": "legacy-1",
+                "parent_id": null,
+                "timestamp": 1,
+                "message": AgentMessage::user("legacy", vec![]),
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let store = JsonlStore::open(&session_file).unwrap();
+        assert!(Reducer::reduce(&store)
+            .unwrap()
+            .lane("main")
+            .unwrap()
+            .context_snapshots
+            .is_empty());
+        let executor = ContextSnapshotToolExecutor::new(session_file, dir.path().into());
+        assert_eq!(
+            executor
+                .execute_tool("manage_context", r#"{"action":"list"}"#)
+                .await
+                .unwrap()
+                .unwrap(),
+            "No context snapshots."
+        );
     }
 
     #[tokio::test]
