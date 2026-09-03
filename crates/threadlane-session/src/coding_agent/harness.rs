@@ -355,43 +355,50 @@ impl CodingSessionHarness {
             .unwrap_or_default()
     }
 
-    pub(crate) fn record_context_snapshot_load_to_path(
+    pub(crate) async fn record_context_snapshot_load_to_path(
         path: &Path,
         context_id: &str,
         source_lane: &str,
         current_digest: Option<TraceString>,
         outcome: ContextSnapshotLoadOutcome,
     ) -> Result<(), String> {
-        Self::with_path(path, |journal| {
-            journal.ensure_fresh()?;
-            let run_id = Reducer::reduce(journal.store.store())
-                .ok()
-                .and_then(|state| {
-                    state
-                        .lane("main")
-                        .and_then(|lane| lane.open_operation.clone())
-                })
-                .unwrap_or_else(|| "context-load".into());
-            let seq = journal.next_seq();
-            journal
-                .store
-                .append_record_gated(HarnessRecord::ContextSnapshotLoaded {
-                    id: format!("context-snapshot-load-{seq}"),
-                    seq,
-                    lane: "main".into(),
-                    timestamp: timestamp(),
-                    run_id,
-                    context_id: context_id.into(),
-                    source_lane: source_lane.into(),
-                    current_digest,
-                    outcome,
-                })
-                .map_err(|error| error.to_string())?;
-            journal
-                .store
-                .drive_to_completion()
-                .map_err(|error| error.to_string())
+        let path = path.to_path_buf();
+        let context_id = context_id.to_owned();
+        let source_lane = source_lane.to_owned();
+        tokio::task::spawn_blocking(move || {
+            Self::with_path(&path, |journal| {
+                journal.ensure_fresh()?;
+                let run_id = Reducer::reduce(journal.store.store())
+                    .ok()
+                    .and_then(|state| {
+                        state
+                            .lane("main")
+                            .and_then(|lane| lane.open_operation.clone())
+                    })
+                    .unwrap_or_else(|| "context-load".into());
+                let seq = journal.next_seq();
+                journal
+                    .store
+                    .append_record_gated(HarnessRecord::ContextSnapshotLoaded {
+                        id: format!("context-snapshot-load-{seq}"),
+                        seq,
+                        lane: "main".into(),
+                        timestamp: timestamp(),
+                        run_id,
+                        context_id,
+                        source_lane,
+                        current_digest,
+                        outcome,
+                    })
+                    .map_err(|error| error.to_string())?;
+                journal
+                    .store
+                    .drive_to_completion()
+                    .map_err(|error| error.to_string())
+            })
         })
+        .await
+        .map_err(|error| error.to_string())?
     }
 
     pub(crate) fn capture_run_context(
@@ -3891,6 +3898,24 @@ mod tests {
         let result = AgentToolResult::external("missing", "read_file", "result", false);
 
         let _ = CodingSessionHarness::record_tool_result_to_path(&path, "run", &result).await;
+
+        assert_ne!(last_path_operation_thread().unwrap(), caller);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn context_snapshot_load_path_helper_uses_blocking_worker() {
+        let (_dir, path) = temp_session();
+        let caller = std::thread::current().id();
+
+        CodingSessionHarness::record_context_snapshot_load_to_path(
+            &path,
+            "ctx-1",
+            "main",
+            None,
+            ContextSnapshotLoadOutcome::Missing,
+        )
+        .await
+        .unwrap();
 
         assert_ne!(last_path_operation_thread().unwrap(), caller);
     }

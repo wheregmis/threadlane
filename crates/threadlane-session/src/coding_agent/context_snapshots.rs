@@ -69,7 +69,7 @@ impl ContextSnapshotToolExecutor {
             }))
     }
 
-    fn record_load(
+    async fn record_load(
         &self,
         context_id: &str,
         source_lane: &str,
@@ -82,7 +82,9 @@ impl ContextSnapshotToolExecutor {
             source_lane,
             current_digest,
             outcome,
-        ) {
+        )
+        .await
+        {
             log::warn!("failed to persist context snapshot load outcome: {error}");
         }
     }
@@ -102,7 +104,7 @@ impl ContextSnapshotToolExecutor {
         })
     }
 
-    fn load(&self, context_id: &str) -> Result<String, String> {
+    async fn load(&self, context_id: &str) -> Result<String, String> {
         let snapshot = match self.snapshot(context_id) {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -111,7 +113,8 @@ impl ContextSnapshotToolExecutor {
                     "main",
                     None,
                     ContextSnapshotLoadOutcome::Corrupt,
-                );
+                )
+                .await;
                 return Err(error);
             }
         };
@@ -126,7 +129,8 @@ impl ContextSnapshotToolExecutor {
                     &resolved.snapshot.source_lane,
                     Some(resolved.snapshot.file_sha256.clone()),
                     ContextSnapshotLoadOutcome::Loaded,
-                );
+                )
+                .await;
                 Ok(format!(
                     "{}\n{}",
                     snapshot_header(&resolved.snapshot, resolved.snapshot.file_sha256.as_str()),
@@ -146,7 +150,8 @@ impl ContextSnapshotToolExecutor {
                         .ok()
                         .and_then(|path| file_sha256(&path).ok())
                 });
-                self.record_load(context_id, source_lane, current_digest, outcome);
+                self.record_load(context_id, source_lane, current_digest, outcome)
+                    .await;
                 Err(error)
             }
         }
@@ -257,7 +262,7 @@ impl ToolExecutor for ContextSnapshotToolExecutor {
                 Some(_) => Err("Invalid manage_context arguments: path must be a string".into()),
             },
             "load" => match arguments.get("context_id").and_then(Value::as_str) {
-                Some(context_id) if !context_id.is_empty() => self.load(context_id),
+                Some(context_id) if !context_id.is_empty() => self.load(context_id).await,
                 _ => Err("Invalid manage_context arguments: context_id is required".into()),
             },
             _ => Err("Invalid manage_context arguments: action must be list or load".into()),

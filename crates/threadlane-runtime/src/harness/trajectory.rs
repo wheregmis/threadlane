@@ -69,6 +69,19 @@ pub struct ContextManifestTrajectory {
     pub parent_ref: Option<TrajectoryRef>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextSnapshotLoadTrajectory {
+    pub seq: u64,
+    pub context_id: String,
+    pub source_lane: String,
+    pub requesting_lane: String,
+    pub path: String,
+    pub start_line: Option<usize>,
+    pub end_line: Option<usize>,
+    pub outcome: super::ContextSnapshotLoadOutcome,
+    pub duplicate_candidate: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProviderTrajectory {
     pub attempt: u32,
@@ -198,6 +211,7 @@ pub struct DiagnosticAnomaly {
 pub enum TrajectoryItem {
     Request(RequestTrajectory),
     ContextManifest(ContextManifestTrajectory),
+    ContextSnapshotLoad(ContextSnapshotLoadTrajectory),
     Provider(ProviderTrajectory),
     Tool(ToolTrajectory),
     Permission(PermissionTrajectory),
@@ -211,6 +225,7 @@ impl TrajectoryItem {
         match self {
             Self::Request(r) => r.started_seq,
             Self::ContextManifest(c) => c.seq,
+            Self::ContextSnapshotLoad(c) => c.seq,
             Self::Provider(p) => p.started_seq,
             Self::Tool(t) => t.started_seq,
             Self::Permission(p) => p.requested_seq,
@@ -272,6 +287,8 @@ pub fn project_trajectory<S: SessionStore>(store: &S) -> SessionTrajectory {
     let mut context_manifests_by_req_id: HashMap<String, ContextManifestTrajectory> =
         HashMap::new();
     let mut permissions_by_req_id: HashMap<String, PermissionTrajectory> = HashMap::new();
+    let mut context_snapshots_by_id = HashMap::new();
+    let mut latest_snapshot_digest_by_location = HashMap::new();
 
     let mut requests: Vec<RequestTrajectory> = Vec::new();
     let mut current_request: Option<RequestTrajectory> = None;
@@ -488,6 +505,49 @@ pub fn project_trajectory<S: SessionStore>(store: &S) -> SessionTrajectory {
                         };
                         context_manifests_by_req_id
                             .insert(request_id.as_str().to_owned(), manifest);
+                    }
+                    Record::ContextSnapshotIndexed { snapshot, .. } => {
+                        context_snapshots_by_id
+                            .insert(snapshot.context_id.clone(), snapshot.clone());
+                    }
+                    Record::ContextSnapshotLoaded {
+                        seq,
+                        context_id,
+                        source_lane,
+                        current_digest,
+                        outcome,
+                        ..
+                    } => {
+                        if let Some(snapshot) = context_snapshots_by_id.get(context_id) {
+                            let location = (
+                                source_lane.clone(),
+                                snapshot.path.clone(),
+                                snapshot.start_line,
+                                snapshot.end_line,
+                            );
+                            let duplicate_candidate =
+                                current_digest.as_ref().is_some_and(|digest| {
+                                    latest_snapshot_digest_by_location
+                                        .get(&location)
+                                        .is_some_and(|previous| previous == digest)
+                                });
+                            if let Some(digest) = current_digest {
+                                latest_snapshot_digest_by_location.insert(location, digest.clone());
+                            }
+                            items.push(TrajectoryItem::ContextSnapshotLoad(
+                                ContextSnapshotLoadTrajectory {
+                                    seq: *seq,
+                                    context_id: context_id.clone(),
+                                    source_lane: source_lane.clone(),
+                                    requesting_lane: lane.clone(),
+                                    path: snapshot.path.clone(),
+                                    start_line: snapshot.start_line,
+                                    end_line: snapshot.end_line,
+                                    outcome: outcome.clone(),
+                                    duplicate_candidate,
+                                },
+                            ));
+                        }
                     }
                     Record::ProviderRequestStarted {
                         seq,
@@ -1205,6 +1265,108 @@ mod tests {
                 .unwrap();
             assert_eq!(manifest.seq, expected.seq);
         }
+    }
+
+    #[test]
+    fn context_snapshot_loads_project_duplicate_candidates_in_record_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut store = JsonlStore::open(&path).unwrap();
+        let digest_a = TraceString::new("a".repeat(64)).unwrap();
+        let digest_b = TraceString::new("b".repeat(64)).unwrap();
+
+        for (context_id, tool_call_id, digest) in [
+            ("ctx-z", "call-z", digest_a.clone()),
+            ("ctx-a", "call-a", digest_a.clone()),
+            ("ctx-b", "call-b", digest_b.clone()),
+        ] {
+            let entry_id = format!("result-{context_id}");
+            store
+                .append_entry(Entry::new(
+                    entry_id.clone(),
+                    None,
+                    "main",
+                    store.next_sequence(),
+                    1,
+                    AgentMessage::Tool {
+                        tool_call_id: tool_call_id.into(),
+                        name: "read_file".into(),
+                        content: "private snapshot body".into(),
+                        is_error: false,
+                        terminate: false,
+                    },
+                    false,
+                ))
+                .unwrap();
+            store
+                .append_record(Record::ContextSnapshotIndexed {
+                    id: format!("index-{context_id}"),
+                    seq: store.next_sequence(),
+                    lane: "main".into(),
+                    timestamp: 1,
+                    run_id: "run-1".into(),
+                    snapshot: crate::harness::ContextSnapshot {
+                        context_id: context_id.into(),
+                        source_lane: "main".into(),
+                        source_run_id: "run-1".into(),
+                        source_tool_call_id: tool_call_id.into(),
+                        source_entry_id: entry_id,
+                        path: "src/lib.rs".into(),
+                        start_line: Some(10),
+                        end_line: Some(20),
+                        file_sha256: digest,
+                        output_chars: 21,
+                        captured_at: 1,
+                    },
+                })
+                .unwrap();
+        }
+
+        for (context_id, digest) in [
+            ("ctx-z", digest_a.clone()),
+            ("ctx-a", digest_a),
+            ("ctx-b", digest_b),
+        ] {
+            let seq = store.next_sequence();
+            store
+                .append_record(Record::ContextSnapshotLoaded {
+                    id: format!("load-{context_id}"),
+                    seq,
+                    lane: "requester".into(),
+                    timestamp: seq,
+                    run_id: "run-1".into(),
+                    context_id: context_id.into(),
+                    source_lane: "main".into(),
+                    current_digest: Some(digest),
+                    outcome: crate::harness::ContextSnapshotLoadOutcome::Loaded,
+                })
+                .unwrap();
+        }
+
+        let loads: Vec<_> = project_trajectory(&store)
+            .items
+            .into_iter()
+            .filter_map(|item| match item {
+                TrajectoryItem::ContextSnapshotLoad(load) => Some(load),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            loads
+                .iter()
+                .map(|load| load.context_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ctx-z", "ctx-a", "ctx-b"]
+        );
+        assert_eq!(
+            loads
+                .iter()
+                .map(|load| load.duplicate_candidate)
+                .collect::<Vec<_>>(),
+            vec![false, true, false]
+        );
+        assert!(loads.iter().all(|load| load.path == "src/lib.rs"));
     }
 
     #[test]
