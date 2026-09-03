@@ -3214,9 +3214,29 @@ impl AppState {
         &mut self,
         session_id: &str,
         session_file: &Path,
-        messages: Vec<ChatMessageInfo>,
+        mut messages: Vec<ChatMessageInfo>,
     ) {
         if self.active_session_matches(session_id, session_file) {
+            // Session creation queues hydration before the first prompt is
+            // persisted by CodingAgent. Keep the optimistic user row while
+            // that initial, still-empty projection is applied. Once the
+            // durable transcript contains the prompt, the pending row is
+            // naturally replaced by the persisted message.
+            let optimistic_messages: Vec<_> = self
+                .messages
+                .iter()
+                .filter(|message| {
+                    ((message.id.starts_with("pending-user-") && message.role == MessageRole::User)
+                        || (self.is_generating
+                            && message.id.starts_with("streaming-")
+                            && message.role == MessageRole::Assistant))
+                        && !messages.iter().any(|hydrated| {
+                            hydrated.role == message.role && hydrated.content == message.content
+                        })
+                })
+                .cloned()
+                .collect();
+            messages.extend(optimistic_messages);
             self.messages = Arc::new(messages);
         }
     }

@@ -81,6 +81,7 @@ pub struct GitHubPrInfo {
     pub head_oid: String,
     pub issue_comments: Vec<PrConversationComment>,
     pub reviews: Vec<PrReview>,
+    pub commits: Vec<GitHubPrCommit>,
     pub files: Vec<GitHubPrFile>,
 }
 
@@ -149,6 +150,14 @@ pub struct GitHubPullRequestSummary {
     pub updated_at: String,
     pub review_decision: Option<String>,
     pub checks: Vec<PrCheckStatus>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GitHubPrCommit {
+    pub oid: String,
+    pub message: String,
+    pub author: String,
+    pub committed_at: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1228,6 +1237,17 @@ pub fn parse_gh_pr_json(json_str: &str) -> Result<GitHubPrInfo, String> {
             submitted_at: review["submittedAt"].as_str().unwrap_or("").to_owned(),
         })
         .collect();
+    let commits = val["commits"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|commit| GitHubPrCommit {
+            oid: commit["oid"].as_str().unwrap_or("").to_owned(),
+            message: commit["messageHeadline"].as_str().unwrap_or("").to_owned(),
+            author: github_login(&commit["author"]),
+            committed_at: commit["committedDate"].as_str().unwrap_or("").to_owned(),
+        })
+        .collect();
     let files = val["files"]
         .as_array()
         .into_iter()
@@ -1250,6 +1270,7 @@ pub fn parse_gh_pr_json(json_str: &str) -> Result<GitHubPrInfo, String> {
         base_ref,
         comments_count,
         review_comments: Vec::new(),
+        commits,
         review_comments_complete: false,
         checks,
         total_checks,
@@ -1434,7 +1455,7 @@ fn inspect_pr_uncached(work_dir: &Path, branch: &str) -> Result<Option<GitHubPrI
             "view",
             branch,
             "--json",
-            "number,title,url,state,isDraft,body,comments,reviews,files,statusCheckRollup,headRefName,headRefOid,baseRefName,updatedAt,author,reviewDecision",
+            "number,title,url,state,isDraft,body,comments,reviews,commits,files,statusCheckRollup,headRefName,headRefOid,baseRefName,updatedAt,author,reviewDecision",
         ],
     );
     let output = command.output().map_err(|error| GitError {

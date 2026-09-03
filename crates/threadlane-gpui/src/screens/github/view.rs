@@ -1985,8 +1985,7 @@ impl GitHubView {
                         let previous_file =
                             this.pr_selections.selected_file(&key).map(str::to_owned);
                         this.pr_timeline_rows = merge_pr_timeline(&detail);
-                        this.pr_timeline_list_state
-                            .reset(this.pr_timeline_rows.len());
+                        this.pr_timeline_list_state.reset(detail.commits.len());
                         this.pr_selections.reconcile_files(&key, &detail.files);
                         if previous_file.as_deref() != this.pr_selections.selected_file(&key) {
                             this.reset_pr_diff_body(cx);
@@ -2287,8 +2286,7 @@ impl GitHubView {
                         this.current_pr_key().as_ref(),
                     ) {
                         this.pr_timeline_rows = merge_pr_timeline(&detail);
-                        this.pr_timeline_list_state
-                            .reset(this.pr_timeline_rows.len());
+                        this.pr_timeline_list_state.reset(detail.commits.len());
                         this.pr_detail = Some(detail);
                     }
                 }
@@ -3306,12 +3304,7 @@ impl GitHubView {
         )
     }
 
-    fn render_pr_timeline_row(
-        &mut self,
-        ix: usize,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn render_pr_timeline_row(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let Some(row) = self.pr_timeline_rows.get(ix).cloned() else {
             return div().into_any_element();
         };
@@ -3455,7 +3448,7 @@ impl GitHubView {
             .into_any_element()
     }
 
-    fn render_pr_summary(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_pr_summary(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let Some(detail) = self
             .pr_detail
             .as_ref()
@@ -3463,8 +3456,12 @@ impl GitHubView {
         else {
             return self.render_empty("Loading details…", cx);
         };
+        let detail = detail.clone();
         let theme = cx.theme().colors;
         let linked = self.linked_pr_task(&detail.head_ref, cx);
+        let comments = (0..self.pr_timeline_rows.len())
+            .map(|ix| self.render_pr_timeline_row(ix, cx))
+            .collect::<Vec<_>>();
         div()
             .size_full()
             .overflow_y_scrollbar()
@@ -3555,24 +3552,102 @@ impl GitHubView {
                     )
                     .into_any_element()
             }))
+            .child(self.render_pr_comment_editor(cx))
+            .children(self.render_pr_reply_editor(cx))
+            .child(
+                div()
+                    .debug_selector(|| "github-pr-summary-comments".into())
+                    .mt_4()
+                    .children(self.pr_timeline_rows.is_empty().then(|| {
+                        div()
+                            .py_6()
+                            .w_full()
+                            .flex()
+                            .justify_center()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child("No comments yet.")
+                    }))
+                    .children(comments),
+            )
+            .into_any_element()
+    }
+
+    fn render_pr_commit_row(
+        &mut self,
+        ix: usize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(commit) = self
+            .pr_detail
+            .as_ref()
+            .and_then(|detail| detail.commits.get(ix))
+            .cloned()
+        else {
+            return div().into_any_element();
+        };
+        let theme = cx.theme().colors;
+        div()
+            .w_full()
+            .px_5()
+            .py_3()
+            .border_b_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(Tag::new().small().child("Commit"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(commit.message),
+                    ),
+            )
+            .child(
+                div()
+                    .mt_1()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(format!(
+                        "{}  ·  {}  ·  {}",
+                        &commit.oid[..commit.oid.len().min(7)],
+                        commit.author,
+                        commit.committed_at
+                    )),
+            )
             .into_any_element()
     }
 
     fn render_pr_timeline(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().colors;
+        let commit_count = self
+            .pr_detail
+            .as_ref()
+            .map(|detail| detail.commits.len())
+            .unwrap_or_default();
         div()
             .size_full()
             .min_h_0()
             .flex()
             .flex_col()
-            .child(self.render_pr_comment_editor(cx))
-            .children(self.render_pr_reply_editor(cx))
+            .child(
+                div()
+                    .px_5()
+                    .py_3()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child(format!("{} commits", commit_count)),
+            )
             .child(
                 div()
                     .relative()
                     .flex_1()
                     .min_h_0()
-                    .children(self.pr_timeline_rows.is_empty().then(|| {
+                    .children((commit_count == 0).then(|| {
                         div()
                             .size_full()
                             .flex()
@@ -3580,17 +3655,17 @@ impl GitHubView {
                             .justify_center()
                             .text_sm()
                             .text_color(theme.muted_foreground)
-                            .child("No pull-request conversation yet.")
+                            .child("No commits reported.")
                     }))
-                    .children((!self.pr_timeline_rows.is_empty()).then(|| {
+                    .children((commit_count > 0).then(|| {
                         list(
                             self.pr_timeline_list_state.clone(),
-                            cx.processor(Self::render_pr_timeline_row),
+                            cx.processor(Self::render_pr_commit_row),
                         )
                         .size_full()
                         .with_sizing_behavior(ListSizingBehavior::Infer)
                     }))
-                    .children((!self.pr_timeline_rows.is_empty()).then(|| {
+                    .children((commit_count > 0).then(|| {
                         div()
                             .absolute()
                             .inset_0()
@@ -5720,12 +5795,24 @@ mod tests {
                     in_reply_to_id: None,
                 },
             ];
-            view.pr_timeline_list_state.reset(view.pr_timeline_rows.len());
+            view.pr_timeline_list_state
+                .reset(view.pr_timeline_rows.len());
             let key = view.current_pr_key().unwrap();
             view.pr_selections.select_tab(key, PrDetailTab::Timeline);
             cx.notify();
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
+        view.update(cx, |view, cx| {
+            let key = view.current_pr_key().unwrap();
+            view.pr_selections.select_tab(key, PrDetailTab::Summary);
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(
+            cx.debug_bounds("github-pr-summary-comments")
+                .is_some_and(|bounds| bounds.size.height > gpui::px(0.)),
+            "Summary comments should be rendered in the visible scroll flow"
+        );
 
         view.update(cx, |view, cx| {
             view.tab = GitHubTab::Issues;
@@ -5736,7 +5823,11 @@ mod tests {
                 ..Default::default()
             });
             view.comment_rows = vec![
-                ("alice".into(), "10m ago".into(), "### Issue note\nwith `code`".into()),
+                (
+                    "alice".into(),
+                    "10m ago".into(),
+                    "### Issue note\nwith `code`".into(),
+                ),
                 ("bob".into(), "5m ago".into(), "".into()),
             ];
             view.comment_list_state.reset(view.comment_rows.len());
