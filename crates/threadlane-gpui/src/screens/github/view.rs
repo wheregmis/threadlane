@@ -3014,6 +3014,26 @@ impl GitHubView {
             return div().into_any_element();
         };
         let theme = cx.theme().colors;
+        let body_element = if body.trim().is_empty() {
+            div()
+                .mt_2()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child("No comment body")
+                .into_any_element()
+        } else {
+            div()
+                .mt_2()
+                .text_sm()
+                .child(
+                    TextView::markdown(
+                        SharedString::from(format!("github-issue-comment-{ix}")),
+                        body,
+                    )
+                    .selectable(true),
+                )
+                .into_any_element()
+        };
         div()
             .p_3()
             .border_b_1()
@@ -3024,7 +3044,7 @@ impl GitHubView {
                     .font_weight(FontWeight::MEDIUM)
                     .child(format!("{author} · {time}")),
             )
-            .child(div().mt_2().text_sm().whitespace_normal().child(body))
+            .child(body_element)
             .into_any_element()
     }
 
@@ -3359,17 +3379,37 @@ impl GitHubView {
                         })),
                     ),
             )
-            .child(
+            .child(if row.body.trim().is_empty() {
                 div()
                     .mt_2()
                     .text_sm()
-                    .whitespace_normal()
-                    .child(if row.body.is_empty() {
-                        "No review body".to_owned()
+                    .text_color(theme.muted_foreground)
+                    .child(if row.kind == PrTimelineKind::Review {
+                        "No review body"
                     } else {
-                        row.body
-                    }),
-            )
+                        "No comment body"
+                    })
+                    .into_any_element()
+            } else {
+                let body_id = if row.remote_id.is_empty() {
+                    SharedString::from(format!(
+                        "github-pr-timeline-body-{}-{}",
+                        row.kind.label(),
+                        ix
+                    ))
+                } else {
+                    SharedString::from(format!(
+                        "github-pr-timeline-body-{}-{}",
+                        row.kind.label(),
+                        row.remote_id
+                    ))
+                };
+                div()
+                    .mt_2()
+                    .text_sm()
+                    .child(TextView::markdown(body_id, row.body).selectable(true))
+                    .into_any_element()
+            })
             .into_any_element()
     }
 
@@ -5640,5 +5680,68 @@ mod tests {
         assert!(selections.select_file(key.clone(), "src/lib.rs".into()));
         assert!(!selections.select_file(key.clone(), "src/lib.rs".into()));
         assert!(selections.select_file(key, "src/view.rs".into()));
+    }
+
+    #[gpui::test]
+    fn github_pr_timeline_and_issue_comments_render_markdown(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            super::init(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let model = cx.new(|_| AppState::default());
+            GitHubView::new(model, window, cx)
+        });
+        view.update(cx, |view, cx| {
+            configure_pr_workspace(view, cx);
+            view.pr_timeline_rows = vec![
+                super::PrTimelineRow {
+                    remote_id: "comment-1".into(),
+                    kind: super::PrTimelineKind::IssueComment,
+                    author: "alice".into(),
+                    body: "## Performance report\n[workflow](https://github.com)".into(),
+                    timestamp: "2026-09-02T15:00:00Z".into(),
+                    url: "https://github.com".into(),
+                    review_state: None,
+                    path: None,
+                    line: None,
+                    in_reply_to_id: None,
+                },
+                super::PrTimelineRow {
+                    remote_id: "comment-empty".into(),
+                    kind: super::PrTimelineKind::Review,
+                    author: "bob".into(),
+                    body: "".into(),
+                    timestamp: "2026-09-02T15:01:00Z".into(),
+                    url: "https://github.com".into(),
+                    review_state: Some("APPROVED".into()),
+                    path: None,
+                    line: None,
+                    in_reply_to_id: None,
+                },
+            ];
+            view.pr_timeline_list_state.reset(view.pr_timeline_rows.len());
+            let key = view.current_pr_key().unwrap();
+            view.pr_selections.select_tab(key, PrDetailTab::Timeline);
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        view.update(cx, |view, cx| {
+            view.tab = GitHubTab::Issues;
+            view.selected_issue = Some(1);
+            view.issue_detail = Some(threadlane_git::GitHubIssueDetail {
+                summary: issue(1),
+                body: "Body".into(),
+                ..Default::default()
+            });
+            view.comment_rows = vec![
+                ("alice".into(), "10m ago".into(), "### Issue note\nwith `code`".into()),
+                ("bob".into(), "5m ago".into(), "".into()),
+            ];
+            view.comment_list_state.reset(view.comment_rows.len());
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
     }
 }
