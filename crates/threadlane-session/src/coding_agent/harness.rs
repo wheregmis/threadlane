@@ -599,6 +599,36 @@ impl CodingSessionHarness {
             .unwrap_or(0)
     }
 
+    pub(crate) fn compaction_summary_without_indexed_tool_outputs(
+        &self,
+        summary: &str,
+        compacted_messages: usize,
+        config: &AgentConfig,
+    ) -> Result<String, String> {
+        let omitted_tool_call_ids = self
+            .context_snapshots("main")
+            .into_iter()
+            .map(|snapshot| snapshot.source_tool_call_id)
+            .collect::<Vec<_>>();
+        if omitted_tool_call_ids.is_empty() {
+            return Ok(summary.to_owned());
+        }
+        let dropped = self
+            .model_context("main")?
+            .messages()
+            .into_iter()
+            .filter(|message| !matches!(message, AgentMessage::System { .. }))
+            .take(compacted_messages)
+            .collect::<Vec<_>>();
+        Ok(
+            threadlane_runtime::compaction::build_checkpoint_omitting_tool_outputs(
+                &dropped,
+                &omitted_tool_call_ids,
+                config,
+            ),
+        )
+    }
+
     pub(crate) fn checkpoint_open_run_compaction(
         &mut self,
         run_id: &str,
@@ -639,7 +669,11 @@ impl CodingSessionHarness {
                 .iter()
                 .find_map(threadlane_runtime::compaction_summary_text)
                 .ok_or_else(|| "context preparation produced no durable summary".to_string())?;
-            let summary = summary.to_owned();
+            let summary = self.compaction_summary_without_indexed_tool_outputs(
+                summary,
+                prepared.compacted_messages,
+                config,
+            )?;
             let context_snapshot_index =
                 compacted_context_snapshot_index(&self.context_snapshots("main"));
             let mut messages = prepared.messages.clone();
@@ -2884,7 +2918,7 @@ impl CodingSessionHarness {
     pub(crate) fn accept_compaction(&mut self, run_id: &str, summary: &str) -> Result<(), String> {
         self.ensure_fresh()?;
         self.store
-            .accept_compaction(run_id, summary)
+            .accept_compaction(run_id, summary, &[])
             .map_err(|error| error.to_string())?;
         self.store
             .drive_to_completion()
@@ -4892,9 +4926,12 @@ mod tests {
             .unwrap()
             .unwrap();
         harness
+            .append_message(AgentMessage::user("non-indexed evidence", vec![]))
+            .unwrap();
+        harness
             .append_message(AgentMessage::user("continue", vec![]))
             .unwrap();
-        let config = AgentConfig::builder().max_checkpoint_chars(0).build();
+        let config = AgentConfig::default();
         let before = harness.model_context("main").unwrap().messages();
         let prepared = compact_for_budget(&before, None, 1, &config).unwrap();
         harness
@@ -4934,6 +4971,8 @@ mod tests {
                 .to_owned();
         assert!(provider_checkpoint.contains(&context_id));
         assert!(provider_checkpoint.contains("README.md:1-1 sha256="));
+        assert!(!provider_checkpoint.contains("snapshot body"));
+        assert!(provider_checkpoint.contains("non-indexed evidence"));
         assert!(!compacted_messages
             .iter()
             .any(|message| matches!(message, AgentMessage::Tool { content, .. } if content == "snapshot body")));

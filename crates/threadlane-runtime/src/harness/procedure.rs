@@ -987,9 +987,17 @@ impl CompactionProcedure {
         store: &S,
         run_id: &str,
         summary: &str,
+        context_snapshot_index: &[serde_json::Value],
         effects: &mut GatedEffects,
     ) -> Result<(), ProcedureError> {
-        Self::accept_on_lane(store, "main", run_id, summary, effects)
+        Self::accept_on_lane(
+            store,
+            "main",
+            run_id,
+            summary,
+            context_snapshot_index,
+            effects,
+        )
     }
 
     pub fn checkpoint_open_run<S: SessionStore>(
@@ -1062,6 +1070,7 @@ impl CompactionProcedure {
         lane_name: &str,
         run_id: &str,
         summary: &str,
+        context_snapshot_index: &[serde_json::Value],
         effects: &mut GatedEffects,
     ) -> Result<(), ProcedureError> {
         if lane_name.trim().is_empty() {
@@ -1119,7 +1128,7 @@ impl CompactionProcedure {
                             "summary": summary,
                             "checkpoint_kind": "manual",
                             "source_leaf_id": source_leaf_id,
-                            "context_snapshot_index": [],
+                            "context_snapshot_index": context_snapshot_index,
                         }),
                     },
                     surface_op: super::types::SurfaceOperation::Replace {

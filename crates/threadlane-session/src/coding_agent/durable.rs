@@ -744,7 +744,8 @@ impl CodingAgent {
             .iter()
             .rev()
             .find_map(threadlane_runtime::compaction_summary_text)
-            .ok_or_else(|| "compaction produced no durable summary".to_string())?;
+            .ok_or_else(|| "compaction produced no durable summary".to_string())?
+            .to_owned();
         let retained_tail = compaction_retained_tail(&compacted);
         let config = self.agent.config().clone();
         let pre_tokens =
@@ -752,8 +753,16 @@ impl CodingAgent {
         let compacted_messages = before
             .len()
             .saturating_sub(compacted.len().saturating_sub(1));
+        let summary = match self.harness.as_ref() {
+            Some(journal) => journal.compaction_summary_without_indexed_tool_outputs(
+                &summary,
+                compacted_messages,
+                &config,
+            )?,
+            None => summary,
+        };
         let persisted = self.persist_harness_compaction(
-            summary,
+            &summary,
             &retained_tail,
             pre_tokens,
             compacted_messages,
@@ -780,9 +789,12 @@ impl CodingAgent {
         if let Some(journal) = self.harness.as_mut() {
             journal.ensure_fresh()?;
             let run_id = journal.unique_run_id("foreground-compaction")?;
+            let context_snapshot_index = super::context_snapshots::compacted_context_snapshot_index(
+                &journal.context_snapshots("main"),
+            );
             journal
                 .store
-                .accept_compaction(&run_id, summary)
+                .accept_compaction(&run_id, summary, &context_snapshot_index)
                 .map_err(|error| error.to_string())?;
             journal
                 .store

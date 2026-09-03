@@ -528,11 +528,19 @@ pub fn prepare_token_optimal_context(
 }
 
 fn build_checkpoint(messages: &[AgentMessage], config: &AgentConfig) -> String {
+    build_checkpoint_omitting_tool_outputs(messages, &[], config)
+}
+
+pub fn build_checkpoint_omitting_tool_outputs(
+    messages: &[AgentMessage],
+    omitted_tool_call_ids: &[String],
+    config: &AgentConfig,
+) -> String {
     let mut excerpts = Vec::new();
     let mut used_chars = 0;
 
     for message in messages.iter().rev() {
-        let Some(excerpt) = message_excerpt(message) else {
+        let Some(excerpt) = message_excerpt(message, omitted_tool_call_ids) else {
             continue;
         };
         if used_chars + excerpt.len() > config.max_checkpoint_chars {
@@ -550,7 +558,7 @@ fn build_checkpoint(messages: &[AgentMessage], config: &AgentConfig) -> String {
     )
 }
 
-fn message_excerpt(message: &AgentMessage) -> Option<String> {
+fn message_excerpt(message: &AgentMessage, omitted_tool_call_ids: &[String]) -> Option<String> {
     match message {
         AgentMessage::User { content } => Some(format!("User: {content}")),
         AgentMessage::UserWithImages { content, images } => Some(format!(
@@ -561,7 +569,17 @@ fn message_excerpt(message: &AgentMessage) -> Option<String> {
             .as_ref()
             .filter(|content| !content.trim().is_empty())
             .map(|content| format!("Assistant: {content}")),
-        AgentMessage::Tool { name, content, .. } => {
+        AgentMessage::Tool {
+            tool_call_id,
+            name,
+            content,
+            ..
+        } => {
+            if omitted_tool_call_ids.contains(tool_call_id) {
+                return Some(format!(
+                    "Tool {name}: [output stored as an available context snapshot]"
+                ));
+            }
             let truncated_content = if content.len() > 400 {
                 let head: String = content.chars().take(200).collect();
                 let tail_chars: Vec<char> = content.chars().rev().take(150).collect();
