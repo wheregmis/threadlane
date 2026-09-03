@@ -222,23 +222,64 @@ pub(crate) fn render_compacted_context_index(snapshots: &[ContextSnapshot]) -> S
 }
 
 pub(crate) fn strip_compacted_context_indexes(summary: &str) -> String {
-    let mut lines = Vec::new();
-    let summary_lines = summary.lines().collect::<Vec<_>>();
+    let line_at = |offset: usize| {
+        let end = summary[offset..]
+            .find('\n')
+            .map_or(summary.len(), |newline| offset + newline);
+        (end, usize::from(end < summary.len()) + end)
+    };
+    let mut stripped = String::with_capacity(summary.len());
+    let mut copied = 0;
     let mut index = 0;
-    while index < summary_lines.len() {
-        if summary_lines[index] == COMPACTED_CONTEXT_INDEX_BEGIN {
-            if let Some(end) = summary_lines[index + 1..]
-                .iter()
-                .position(|line| *line == COMPACTED_CONTEXT_INDEX_END)
-            {
-                index += end + 2;
+    while index < summary.len() {
+        let (line_end, next_line) = line_at(index);
+        if &summary[index..line_end] == COMPACTED_CONTEXT_INDEX_BEGIN {
+            let (heading_end, after_heading) = line_at(next_line);
+            if &summary[next_line..heading_end] != COMPACTED_CONTEXT_INDEX_HEADING {
+                index = next_line;
+                continue;
+            }
+
+            let mut candidate = after_heading;
+            let mut nested = false;
+            let mut end = None;
+            while candidate < summary.len() {
+                let (candidate_end, candidate_next) = line_at(candidate);
+                match &summary[candidate..candidate_end] {
+                    COMPACTED_CONTEXT_INDEX_BEGIN => {
+                        nested = true;
+                        break;
+                    }
+                    COMPACTED_CONTEXT_INDEX_END => {
+                        end = Some((candidate_end, candidate_next));
+                        break;
+                    }
+                    _ => candidate = candidate_next,
+                }
+            }
+            if nested {
+                while candidate < summary.len() {
+                    let (candidate_end, candidate_next) = line_at(candidate);
+                    if &summary[candidate..candidate_end] == COMPACTED_CONTEXT_INDEX_END {
+                        candidate = candidate_next;
+                        break;
+                    }
+                    candidate = candidate_next;
+                }
+                index = candidate;
+                continue;
+            }
+            if let Some((end, after_end)) = end {
+                stripped.push_str(&summary[copied..index]);
+                copied = end;
+                index = after_end;
                 continue;
             }
         }
-        lines.push(summary_lines[index]);
-        index += 1;
+        index = next_line;
     }
-    lines.join("\n").trim_end().to_owned()
+    stripped.push_str(&summary[copied..]);
+    stripped
 }
 
 #[async_trait]
@@ -495,6 +536,61 @@ mod tests {
         let summary = "User notes:\n\n## Available context snapshots\n- retain this bullet";
 
         assert_eq!(super::strip_compacted_context_indexes(summary), summary);
+    }
+
+    #[test]
+    fn compacted_context_index_stripping_preserves_nested_markers() {
+        let summary = concat!(
+            "before\n",
+            "<!-- threadlane:context-snapshots:index:begin -->\n",
+            "## Available context snapshots\n",
+            "<!-- threadlane:context-snapshots:index:begin -->\n",
+            "## Available context snapshots\n",
+            "<!-- threadlane:context-snapshots:index:end -->\n",
+            "after\n",
+        );
+
+        assert_eq!(super::strip_compacted_context_indexes(summary), summary);
+    }
+
+    #[test]
+    fn compacted_context_index_stripping_preserves_malformed_or_unpaired_markers() {
+        let summaries = [
+            concat!(
+                "before\n",
+                "<!-- threadlane:context-snapshots:index:begin -->\n",
+                "## Available context snapshots (draft)\n",
+                "<!-- threadlane:context-snapshots:index:end -->\n",
+                "after\n",
+            ),
+            concat!(
+                "before\n",
+                "<!-- threadlane:context-snapshots:index:begin -->\n",
+                "## Available context snapshots\n",
+                "after\n\n",
+            ),
+        ];
+
+        for summary in summaries {
+            assert_eq!(super::strip_compacted_context_indexes(summary), summary);
+        }
+    }
+
+    #[test]
+    fn compacted_context_index_stripping_removes_only_a_complete_generated_index() {
+        let summary = concat!(
+            "before\n",
+            "<!-- threadlane:context-snapshots:index:begin -->\n",
+            "## Available context snapshots\n",
+            "- snapshot\n",
+            "<!-- threadlane:context-snapshots:index:end -->\n",
+            "after\n",
+        );
+
+        assert_eq!(
+            super::strip_compacted_context_indexes(summary),
+            "before\n\nafter\n"
+        );
     }
 
     #[test]
