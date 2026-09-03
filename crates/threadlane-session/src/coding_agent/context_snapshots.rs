@@ -44,7 +44,7 @@ impl ContextSnapshotToolExecutor {
         let store = JsonlStore::open(&self.session_file)
             .map_err(|error| format!("Context snapshot corrupt: {error}"))?;
         let mut snapshots = Reducer::reduce(&store)
-            .map_err(|error| error.to_string())?
+            .map_err(|error| format!("Context snapshot corrupt: {error}"))?
             .lane("main")
             .map(|lane| lane.context_snapshots.clone())
             .unwrap_or_default();
@@ -271,19 +271,26 @@ pub(crate) fn resolve_context_snapshot(
 ) -> Result<ResolvedContextSnapshot, String> {
     let store = JsonlStore::open(session_file)
         .map_err(|error| format!("Context snapshot corrupt: {error}"))?;
-    let snapshot = store
+    let raw_snapshot_exists = store
         .records()
         .iter()
-        .rev()
-        .find_map(|record| match record {
-            Record::ContextSnapshotIndexed { snapshot, .. }
-                if snapshot.context_id == context_id =>
-            {
-                Some(snapshot.clone())
-            }
-            _ => None,
+        .any(|record| matches!(record, Record::ContextSnapshotIndexed { snapshot, .. } if snapshot.context_id == context_id));
+    let snapshot = Reducer::reduce(&store)
+        .map_err(|error| format!("Context snapshot corrupt: {error}"))?
+        .lane("main")
+        .and_then(|lane| {
+            lane.context_snapshots
+                .iter()
+                .find(|snapshot| snapshot.context_id == context_id)
         })
-        .ok_or_else(|| format!("Context snapshot missing: {context_id}"))?;
+        .cloned()
+        .ok_or_else(|| {
+            if raw_snapshot_exists {
+                format!("Context snapshot corrupt: {context_id}")
+            } else {
+                format!("Context snapshot missing: {context_id}")
+            }
+        })?;
     let path = threadlane_tools::validate_path_in_workspace(&snapshot.path, work_dir)
         .map_err(|error| format!("Context snapshot corrupt: {error}"))?;
     let digest =
@@ -500,6 +507,55 @@ mod tests {
                     ..
                 }
             )));
+    }
+
+    #[tokio::test]
+    async fn manage_context_rejects_snapshot_metadata_that_fails_reduction() {
+        let (dir, session_file, context_id) = snapshot_session().await;
+        let executor = ContextSnapshotToolExecutor::new(session_file.clone(), dir.path().into());
+        let session = std::fs::read_to_string(&session_file).unwrap();
+        std::fs::write(
+            &session_file,
+            session.replace(r#""source_run_id":""#, r#""source_run_id":"forged-"#),
+        )
+        .unwrap();
+
+        let result = executor
+            .execute_tool(
+                "manage_context",
+                &serde_json::json!({"action": "load", "context_id": context_id}).to_string(),
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(result.starts_with("Context snapshot corrupt:"));
+        assert!(!result.contains("snapshot body"));
+    }
+
+    #[tokio::test]
+    async fn manage_context_rejects_a_snapshot_with_a_missing_source_entry() {
+        let (dir, session_file, context_id) = snapshot_session().await;
+        let executor = ContextSnapshotToolExecutor::new(session_file.clone(), dir.path().into());
+        let session = std::fs::read_to_string(&session_file).unwrap();
+        std::fs::write(
+            &session_file,
+            session.replace(
+                r#""source_entry_id":"v2-tool-result-read-1""#,
+                r#""source_entry_id":"missing-entry""#,
+            ),
+        )
+        .unwrap();
+
+        let result = executor
+            .execute_tool(
+                "manage_context",
+                &serde_json::json!({"action": "load", "context_id": context_id}).to_string(),
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(result.starts_with("Context snapshot corrupt:"));
+        assert!(!result.contains("snapshot body"));
     }
 
     #[tokio::test]
