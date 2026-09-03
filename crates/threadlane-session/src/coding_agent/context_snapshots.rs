@@ -41,7 +41,8 @@ pub(crate) fn is_local_path(path: &str) -> bool {
     !["http:", "https:", "virtual:", "file:"]
         .iter()
         .any(|prefix| {
-            path.len() >= prefix.len() && path[..prefix.len()].eq_ignore_ascii_case(prefix)
+            path.get(..prefix.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
         })
 }
 
@@ -100,4 +101,14 @@ pub(crate) fn resolve_context_snapshot(
         snapshot,
         content: content.clone(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_local_path;
+
+    #[test]
+    fn unicode_local_paths_do_not_panic_during_scheme_detection() {
+        assert!(is_local_path("ééé"));
+    }
 }
