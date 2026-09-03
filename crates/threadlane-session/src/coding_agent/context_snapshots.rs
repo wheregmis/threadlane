@@ -20,6 +20,7 @@ pub(crate) const MAX_SUBAGENT_CONTEXT_REFS: usize = 16;
 pub(crate) const MAX_SUBAGENT_CONTEXT_CHARS: usize = 32_000;
 #[allow(dead_code)]
 pub(crate) const MAX_COMPACTED_CONTEXT_INDEX_CHARS: usize = 4_000;
+const COMPACTED_CONTEXT_INDEX_HEADING: &str = "## Available context snapshots";
 
 #[allow(dead_code)]
 pub(crate) struct ResolvedContextSnapshot {
@@ -180,7 +181,7 @@ pub(crate) fn snapshot_location(snapshot: &ContextSnapshot) -> String {
 }
 
 pub(crate) fn render_compacted_context_index(snapshots: &[ContextSnapshot]) -> String {
-    let mut index = "## Available context snapshots".to_string();
+    let mut index = COMPACTED_CONTEXT_INDEX_HEADING.to_string();
     let mut included = 0;
     for snapshot in snapshots.iter().rev().take(MAX_CONTEXT_LIST_RESULTS) {
         let line = format!(
@@ -203,6 +204,25 @@ pub(crate) fn render_compacted_context_index(snapshots: &[ContextSnapshot]) -> S
         }
     }
     index
+}
+
+pub(crate) fn strip_compacted_context_indexes(summary: &str) -> String {
+    let mut lines = Vec::new();
+    let mut skipping = false;
+    for line in summary.lines() {
+        if line == COMPACTED_CONTEXT_INDEX_HEADING {
+            if lines.last().is_some_and(|line: &&str| line.is_empty()) {
+                lines.pop();
+            }
+            skipping = true;
+        } else if skipping && line.starts_with("- ") {
+            continue;
+        } else {
+            skipping = false;
+            lines.push(line);
+        }
+    }
+    lines.join("\n").trim_end().to_owned()
 }
 
 #[async_trait]

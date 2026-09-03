@@ -8,7 +8,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::context_snapshots::{is_local_path, read_file_request, render_compacted_context_index};
+use super::context_snapshots::{
+    is_local_path, read_file_request, render_compacted_context_index,
+    strip_compacted_context_indexes,
+};
 use crate::permission::PermissionTraceEvent;
 use threadlane_runtime::compaction::{
     compact_for_budget, estimate_request_tokens, PreparedCompaction,
@@ -272,10 +275,10 @@ impl CodingSessionHarness {
         if result_entry_id != source_entry_id {
             return Ok(None);
         }
-        let Some((path, start_line, end_line)) = read_file_request(effective_args) else {
+        let Some((requested_path, start_line, end_line)) = read_file_request(effective_args) else {
             return Ok(None);
         };
-        if !is_local_path(path) {
+        if !is_local_path(requested_path) {
             return Ok(None);
         }
         let Some(entry) = self
@@ -286,7 +289,7 @@ impl CodingSessionHarness {
         else {
             return Ok(None);
         };
-        let digest = match &entry.message {
+        let (digest, path) = match &entry.message {
             AgentMessage::Tool {
                 tool_call_id: entry_call_id,
                 name,
@@ -297,11 +300,17 @@ impl CodingSessionHarness {
                 let Some(digest) = threadlane_tools::read_file_snapshot_digest(content) else {
                     return Ok(None);
                 };
-                TraceString::new(digest.to_owned()).map_err(|error| error.to_string())?
+                let Some(path) = threadlane_tools::read_file_snapshot_path(content) else {
+                    return Ok(None);
+                };
+                (
+                    TraceString::new(digest.to_owned()).map_err(|error| error.to_string())?,
+                    path,
+                )
             }
             _ => return Ok(None),
         };
-        let canonical_path = threadlane_tools::validate_path_in_workspace(path, work_dir)?;
+        let canonical_path = threadlane_tools::validate_path_in_workspace(&path, work_dir)?;
         let canonical_work_dir = work_dir.canonicalize().map_err(|error| error.to_string())?;
         let relative_path = canonical_path
             .strip_prefix(&canonical_work_dir)
@@ -631,8 +640,9 @@ impl CodingSessionHarness {
                 .find_map(threadlane_runtime::compaction_summary_text)
                 .ok_or_else(|| "context preparation produced no durable summary".to_string())?;
             let snapshots = self.context_snapshots("main");
+            let summary = strip_compacted_context_indexes(summary);
             let summary = if snapshots.is_empty() {
-                summary.to_owned()
+                summary
             } else {
                 format!(
                     "{summary}\n\n{}",
@@ -4734,6 +4744,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn context_snapshot_capture_persists_fuzzy_read_actual_path() {
+        let (dir, path) = temp_session();
+        let actual_path = dir.path().join("crates/app/src/view.rs");
+        std::fs::create_dir_all(actual_path.parent().unwrap()).unwrap();
+        std::fs::write(&actual_path, "snapshot body").unwrap();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        let run_id = harness.unique_run_id("snapshot-fuzzy").unwrap();
+        harness
+            .begin_run(&run_id, AgentMessage::user("inspect", vec![]))
+            .unwrap();
+        harness
+            .append_message(AgentMessage::Assistant {
+                content: None,
+                tool_calls: Some(vec![threadlane_provider::openai::ToolCall {
+                    id: "read-fuzzy".into(),
+                    r#type: "function".into(),
+                    function: threadlane_provider::openai::ToolCallFunction {
+                        name: "read_file".into(),
+                        arguments: r#"{\"path\":\"src/view.rs\"}"#.into(),
+                    },
+                    thought_signature: None,
+                }]),
+                stop_reason: None,
+                deferred_handle: None,
+            })
+            .unwrap();
+        harness
+            .append_tool_intent(
+                &run_id,
+                "read-fuzzy",
+                "read_file",
+                serde_json::json!({"path": "src/view.rs"}),
+            )
+            .await
+            .unwrap();
+        let read_output = threadlane_tools::try_execute_tool_in_workspace(
+            "read_file",
+            r#"{"path":"src/view.rs"}"#,
+            dir.path(),
+        )
+        .unwrap();
+        let entry_id = harness
+            .append_message(AgentMessage::Tool {
+                tool_call_id: "read-fuzzy".into(),
+                name: "read_file".into(),
+                content: read_output.clone(),
+                is_error: false,
+                terminate: false,
+            })
+            .unwrap();
+
+        let context_id = harness
+            .index_read_snapshot(
+                &run_id,
+                dir.path(),
+                "read-fuzzy",
+                &entry_id,
+                read_output.chars().count(),
+            )
+            .unwrap()
+            .unwrap();
+        let snapshot = &harness.context_snapshots("main")[0];
+        assert_eq!(snapshot.path, "crates/app/src/view.rs");
+        assert_eq!(
+            super::super::context_snapshots::resolve_context_snapshot(
+                &path,
+                dir.path(),
+                &context_id,
+            )
+            .unwrap()
+            .content,
+            read_output
+        );
+    }
+
+    #[tokio::test]
     async fn compacted_context_snapshot_stays_durable_and_is_indexed_in_checkpoint() {
         let (dir, path) = temp_session();
         std::fs::write(dir.path().join("README.md"), "snapshot body").unwrap();
@@ -4854,15 +4940,16 @@ mod tests {
         harness
             .append_message(AgentMessage::user("continue again", vec![]))
             .unwrap();
+        let second_config = AgentConfig::builder().max_checkpoint_chars(100_000).build();
         let before = harness.model_context("main").unwrap().messages();
-        let prepared = compact_for_budget(&before, None, 1, &config).unwrap();
+        let prepared = compact_for_budget(&before, None, 1, &second_config).unwrap();
         harness
             .commit_prepared_compaction(
                 &run_id,
                 "unknown/test-model",
                 None,
-                &config,
-                context_budget("unknown/test-model", &config),
+                &second_config,
+                context_budget("unknown/test-model", &second_config),
                 CompactionReason::AdaptiveBudget,
                 prepared,
             )
@@ -4877,6 +4964,15 @@ mod tests {
             })
             .unwrap();
         assert!(checkpoint.contains(&context_id), "{checkpoint}");
+        let heading = "## Available context snapshots";
+        assert_eq!(checkpoint.matches(heading).count(), 1, "{checkpoint}");
+        assert!(
+            checkpoint[checkpoint.rfind(heading).unwrap()..]
+                .chars()
+                .count()
+                <= super::super::context_snapshots::MAX_COMPACTED_CONTEXT_INDEX_CHARS,
+            "{checkpoint}"
+        );
     }
 
     #[tokio::test]

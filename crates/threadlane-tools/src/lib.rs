@@ -12,6 +12,7 @@ use std::sync::{LazyLock, Mutex, OnceLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const READ_FILE_SNAPSHOT_PREFIX: &str = "[Threadlane read_file SHA-256: ";
+const READ_FILE_SNAPSHOT_PATH_PREFIX: &str = "[Threadlane read_file path: ";
 
 pub fn read_file_snapshot_digest(output: &str) -> Option<&str> {
     output.lines().take(2).find_map(|line| {
@@ -20,6 +21,15 @@ pub fn read_file_snapshot_digest(output: &str) -> Option<&str> {
             .strip_suffix(']')?;
         (digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
             .then_some(digest)
+    })
+}
+
+pub fn read_file_snapshot_path(output: &str) -> Option<String> {
+    output.lines().take(3).find_map(|line| {
+        let path = line
+            .strip_prefix(READ_FILE_SNAPSHOT_PATH_PREFIX)?
+            .strip_suffix(']')?;
+        serde_json::from_str(path).ok()
     })
 }
 
@@ -585,9 +595,20 @@ pub fn try_execute_tool_in_workspace(
                 })
                 .collect();
             let body = formatted_lines.join("\n");
+            let canonical_root = canonical_workspace_root(workspace_root)?;
+            let snapshot_path = validated_path
+                .strip_prefix(&canonical_root)
+                .map_err(|_| {
+                    format!(
+                        "read path '{}' is outside workspace",
+                        validated_path.display()
+                    )
+                })?
+                .to_string_lossy();
             let snapshot = format!(
-                "{READ_FILE_SNAPSHOT_PREFIX}{:x}]\n",
-                Sha256::digest(content.as_bytes())
+                "{READ_FILE_SNAPSHOT_PREFIX}{:x}]\n{READ_FILE_SNAPSHOT_PATH_PREFIX}{}]\n",
+                Sha256::digest(content.as_bytes()),
+                serde_json::to_string(snapshot_path.as_ref()).map_err(|error| error.to_string())?,
             );
             let output = match auto_resolved_notice {
                 Some(notice) => format!("{notice}{snapshot}{body}"),
