@@ -8,9 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::context_snapshots::{
-    file_sha256, is_local_path, read_file_request, render_compacted_context_index,
-};
+use super::context_snapshots::{is_local_path, read_file_request, render_compacted_context_index};
 use crate::permission::PermissionTraceEvent;
 use threadlane_runtime::compaction::{
     compact_for_budget, estimate_request_tokens, PreparedCompaction,
@@ -288,13 +286,21 @@ impl CodingSessionHarness {
         else {
             return Ok(None);
         };
-        if !matches!(
-            &entry.message,
-            AgentMessage::Tool { tool_call_id: entry_call_id, name, is_error: false, .. }
-                if entry_call_id == tool_call_id && name == "read_file"
-        ) {
-            return Ok(None);
-        }
+        let digest = match &entry.message {
+            AgentMessage::Tool {
+                tool_call_id: entry_call_id,
+                name,
+                content,
+                is_error: false,
+                ..
+            } if entry_call_id == tool_call_id && name == "read_file" => {
+                let Some(digest) = threadlane_tools::read_file_snapshot_digest(content) else {
+                    return Ok(None);
+                };
+                TraceString::new(digest.to_owned()).map_err(|error| error.to_string())?
+            }
+            _ => return Ok(None),
+        };
         let canonical_path = threadlane_tools::validate_path_in_workspace(path, work_dir)?;
         let canonical_work_dir = work_dir.canonicalize().map_err(|error| error.to_string())?;
         let relative_path = canonical_path
@@ -325,7 +331,7 @@ impl CodingSessionHarness {
             path: relative_path,
             start_line,
             end_line,
-            file_sha256: file_sha256(&canonical_path)?,
+            file_sha256: digest,
             output_chars,
             captured_at: timestamp(),
         };
@@ -624,7 +630,7 @@ impl CodingSessionHarness {
                 .iter()
                 .find_map(threadlane_runtime::compaction_summary_text)
                 .ok_or_else(|| "context preparation produced no durable summary".to_string())?;
-            let snapshots = self.compacted_context_snapshots(&prepared);
+            let snapshots = self.context_snapshots("main");
             let summary = if snapshots.is_empty() {
                 summary.to_owned()
             } else {
@@ -705,32 +711,6 @@ impl CodingSessionHarness {
             let _ = self.ensure_fresh();
         }
         result
-    }
-
-    fn compacted_context_snapshots(
-        &mut self,
-        prepared: &PreparedCompaction,
-    ) -> Vec<threadlane_runtime::harness::ContextSnapshot> {
-        let Ok(context) = self.model_context("main") else {
-            return Vec::new();
-        };
-        let retained = super::durable::compaction_retained_tail(&prepared.messages);
-        let compacted_seqs = context
-            .entries
-            .iter()
-            .take(context.entries.len().saturating_sub(retained.len()))
-            .map(|entry| entry.seq)
-            .collect::<std::collections::HashSet<_>>();
-        self.context_snapshots("main")
-            .into_iter()
-            .filter(|snapshot| {
-                context
-                    .entries
-                    .iter()
-                    .find(|entry| entry.id == snapshot.source_entry_id)
-                    .is_some_and(|entry| compacted_seqs.contains(&entry.seq))
-            })
-            .collect()
     }
 
     pub(crate) fn record_manual_compaction(
@@ -4683,23 +4663,44 @@ mod tests {
             )
             .await
             .unwrap();
+        let read_output = threadlane_tools::try_execute_tool_in_workspace(
+            "read_file",
+            r#"{"path":"README.md","start_line":1,"end_line":1}"#,
+            dir.path(),
+        )
+        .unwrap();
+        let output_chars = read_output.chars().count();
         let entry_id = harness
             .append_message(AgentMessage::Tool {
                 tool_call_id: "read-1".into(),
                 name: "read_file".into(),
-                content: "snapshot body".into(),
+                content: read_output.clone(),
                 is_error: false,
                 terminate: false,
             })
             .unwrap();
+        std::fs::write(dir.path().join("README.md"), "changed after read").unwrap();
 
         assert_eq!(
             harness
-                .index_read_snapshot(&run_id, dir.path(), "read-1", &entry_id, 13)
+                .index_read_snapshot(&run_id, dir.path(), "read-1", &entry_id, output_chars)
                 .unwrap(),
             Some("ctx-v2-tool-result-read-1".into())
         );
         assert_eq!(harness.context_snapshots("main").len(), 1);
+        assert_eq!(
+            harness.context_snapshots("main")[0].file_sha256.as_str(),
+            threadlane_tools::read_file_snapshot_digest(&read_output).unwrap()
+        );
+        assert!(super::super::context_snapshots::resolve_context_snapshot(
+            &path,
+            dir.path(),
+            "ctx-v2-tool-result-read-1",
+        )
+        .err()
+        .unwrap()
+        .starts_with("Context snapshot stale:"));
+        std::fs::write(dir.path().join("README.md"), "snapshot body").unwrap();
         assert_eq!(
             harness
                 .store
@@ -4711,7 +4712,7 @@ mod tests {
         );
         assert_eq!(
             harness
-                .index_read_snapshot(&run_id, dir.path(), "read-1", &entry_id, 13)
+                .index_read_snapshot(&run_id, dir.path(), "read-1", &entry_id, output_chars)
                 .unwrap(),
             Some("ctx-v2-tool-result-read-1".into())
         );
@@ -4721,7 +4722,7 @@ mod tests {
             "ctx-v2-tool-result-read-1",
         )
         .unwrap();
-        assert_eq!(resolved.content, "snapshot body");
+        assert_eq!(resolved.content, read_output);
         assert_eq!(resolved.snapshot.source_entry_id, entry_id);
 
         assert_eq!(
@@ -4767,17 +4768,30 @@ mod tests {
             )
             .await
             .unwrap();
+        let read_output = threadlane_tools::try_execute_tool_in_workspace(
+            "read_file",
+            r#"{"path":"README.md","start_line":1,"end_line":1}"#,
+            dir.path(),
+        )
+        .unwrap();
+        let output_chars = read_output.chars().count();
         let source_entry_id = harness
             .append_message(AgentMessage::Tool {
                 tool_call_id: "read-1".into(),
                 name: "read_file".into(),
-                content: "snapshot body".into(),
+                content: read_output.clone(),
                 is_error: false,
                 terminate: false,
             })
             .unwrap();
         let context_id = harness
-            .index_read_snapshot(&run_id, dir.path(), "read-1", &source_entry_id, 13)
+            .index_read_snapshot(
+                &run_id,
+                dir.path(),
+                "read-1",
+                &source_entry_id,
+                output_chars,
+            )
             .unwrap()
             .unwrap();
         harness
@@ -4813,7 +4827,7 @@ mod tests {
             .unwrap()
             .entries()
             .iter()
-            .any(|entry| entry.id == source_entry_id && matches!(&entry.message, AgentMessage::Tool { content, .. } if content == "snapshot body")));
+            .any(|entry| entry.id == source_entry_id && matches!(&entry.message, AgentMessage::Tool { content, .. } if content == &read_output)));
         assert_eq!(
             super::super::context_snapshots::resolve_context_snapshot(
                 &path,
@@ -4822,7 +4836,7 @@ mod tests {
             )
             .unwrap()
             .content,
-            "snapshot body"
+            read_output
         );
         let post_tokens = estimate_request_tokens(&compacted_messages, None, &config);
         assert_eq!(
@@ -4836,6 +4850,33 @@ mod tests {
                 }),
             Some(post_tokens)
         );
+
+        harness
+            .append_message(AgentMessage::user("continue again", vec![]))
+            .unwrap();
+        let before = harness.model_context("main").unwrap().messages();
+        let prepared = compact_for_budget(&before, None, 1, &config).unwrap();
+        harness
+            .commit_prepared_compaction(
+                &run_id,
+                "unknown/test-model",
+                None,
+                &config,
+                context_budget("unknown/test-model", &config),
+                CompactionReason::AdaptiveBudget,
+                prepared,
+            )
+            .unwrap();
+        let checkpoint = harness
+            .model_context("main")
+            .unwrap()
+            .messages()
+            .into_iter()
+            .find_map(|message| {
+                threadlane_runtime::compaction_summary_text(&message).map(str::to_owned)
+            })
+            .unwrap();
+        assert!(checkpoint.contains(&context_id), "{checkpoint}");
     }
 
     #[tokio::test]
@@ -4877,6 +4918,15 @@ mod tests {
                         },
                         thought_signature: None,
                     },
+                    threadlane_provider::openai::ToolCall {
+                        id: "unbound".into(),
+                        r#type: "function".into(),
+                        function: threadlane_provider::openai::ToolCallFunction {
+                            name: "read_file".into(),
+                            arguments: r#"{\"path\":\"README.md\"}"#.into(),
+                        },
+                        thought_signature: None,
+                    },
                 ]),
                 stop_reason: None,
                 deferred_handle: None,
@@ -4889,6 +4939,7 @@ mod tests {
                 serde_json::json!({"path": "virtual://README.md"}),
             ),
             ("remote", serde_json::json!({"path": "https:README.md"})),
+            ("unbound", serde_json::json!({"path": "README.md"})),
         ] {
             harness
                 .append_tool_intent(&run_id, call_id, "read_file", arguments)
@@ -4918,6 +4969,15 @@ mod tests {
                 tool_call_id: "remote".into(),
                 name: "read_file".into(),
                 content: "body".into(),
+                is_error: false,
+                terminate: false,
+            })
+            .unwrap();
+        let unbound_entry = harness
+            .append_message(AgentMessage::Tool {
+                tool_call_id: "unbound".into(),
+                name: "read_file".into(),
+                content: "body without an execution-bound digest".into(),
                 is_error: false,
                 terminate: false,
             })
@@ -4953,6 +5013,12 @@ mod tests {
         assert_eq!(
             harness
                 .index_read_snapshot(&run_id, dir.path(), "unrecorded", &unrecorded_entry, 4)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            harness
+                .index_read_snapshot(&run_id, dir.path(), "unbound", &unbound_entry, 38)
                 .unwrap(),
             None
         );

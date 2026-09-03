@@ -160,17 +160,23 @@ impl ContextSnapshotToolExecutor {
 
 fn snapshot_header(snapshot: &ContextSnapshot, digest: &str) -> String {
     format!(
-        "[Context snapshot {} from {}:{}-{}; digest {}]",
+        "[Context snapshot {} from {}; digest {}]",
         snapshot.context_id,
-        snapshot.path,
-        snapshot
-            .start_line
-            .map_or("?".into(), |line| line.to_string()),
-        snapshot
-            .end_line
-            .map_or("?".into(), |line| line.to_string()),
+        snapshot_location(snapshot),
         digest,
     )
+}
+
+pub(crate) fn snapshot_location(snapshot: &ContextSnapshot) -> String {
+    match (snapshot.start_line, snapshot.end_line) {
+        (None, None) => snapshot.path.clone(),
+        (start, end) => format!(
+            "{}:{}-{}",
+            snapshot.path,
+            start.map_or_else(String::new, |line| line.to_string()),
+            end.map_or_else(String::new, |line| line.to_string())
+        ),
+    }
 }
 
 pub(crate) fn render_compacted_context_index(snapshots: &[ContextSnapshot]) -> String {
@@ -178,15 +184,9 @@ pub(crate) fn render_compacted_context_index(snapshots: &[ContextSnapshot]) -> S
     let mut included = 0;
     for snapshot in snapshots.iter().rev().take(MAX_CONTEXT_LIST_RESULTS) {
         let line = format!(
-            "- {} {}:{}-{} sha256={}",
+            "- {} {} sha256={}",
             snapshot.context_id,
-            snapshot.path,
-            snapshot
-                .start_line
-                .map_or("?".into(), |line| line.to_string()),
-            snapshot
-                .end_line
-                .map_or("?".into(), |line| line.to_string()),
+            snapshot_location(snapshot),
             snapshot.file_sha256.as_str(),
         );
         if index.chars().count() + 1 + line.chars().count() > MAX_COMPACTED_CONTEXT_INDEX_CHARS {
@@ -286,12 +286,14 @@ pub(crate) fn read_file_request(arguments: &Value) -> Option<(&str, Option<usize
 }
 
 pub(crate) fn is_local_path(path: &str) -> bool {
-    !["http:", "https:", "virtual:", "file:"]
-        .iter()
-        .any(|prefix| {
-            path.get(..prefix.len())
-                .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
-        })
+    ![
+        "http:", "https:", "virtual:", "file:", "skill:", "agent:", "pr:", "mr:", "issue:",
+    ]
+    .iter()
+    .any(|prefix| {
+        path.get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+    })
 }
 
 pub(crate) fn file_sha256(path: &Path) -> Result<TraceString, String> {
@@ -330,10 +332,16 @@ pub(crate) fn resolve_context_snapshot(
         })?;
     let path = threadlane_tools::validate_path_in_workspace(&snapshot.path, work_dir)
         .map_err(|error| format!("Context snapshot corrupt: {error}"))?;
-    let digest =
-        file_sha256(&path).map_err(|error| format!("Context snapshot missing: {error}"))?;
+    let location = snapshot_location(&snapshot);
+    let digest = file_sha256(&path).map_err(|error| {
+        format!(
+            "Context snapshot missing: {location}; call read_file for current content ({error})"
+        )
+    })?;
     if digest != snapshot.file_sha256 {
-        return Err(format!("Context snapshot stale: {}", snapshot.path));
+        return Err(format!(
+            "Context snapshot stale: {location}; call read_file for current content"
+        ));
     }
     let entry = store
         .entries()
@@ -407,17 +415,24 @@ mod tests {
             )
             .await
             .unwrap();
+        let read_output = threadlane_tools::try_execute_tool_in_workspace(
+            "read_file",
+            r#"{"path":"README.md","start_line":1,"end_line":1}"#,
+            dir.path(),
+        )
+        .unwrap();
+        let output_chars = read_output.chars().count();
         let entry_id = harness
             .append_message(AgentMessage::Tool {
                 tool_call_id: "read-1".into(),
                 name: "read_file".into(),
-                content: "snapshot body".into(),
+                content: read_output,
                 is_error: false,
                 terminate: false,
             })
             .unwrap();
         let context_id = harness
-            .index_read_snapshot(&run_id, dir.path(), "read-1", &entry_id, 13)
+            .index_read_snapshot(&run_id, dir.path(), "read-1", &entry_id, output_chars)
             .unwrap()
             .unwrap();
         (dir, path, context_id)
@@ -442,6 +457,36 @@ mod tests {
     #[test]
     fn unicode_local_paths_do_not_panic_during_scheme_detection() {
         assert!(is_local_path("ééé"));
+        for path in [
+            "skill://rust",
+            "agent://reviewer",
+            "pr://1",
+            "mr://2",
+            "issue://3",
+            "http://example.com/file",
+            "https://example.com/file",
+        ] {
+            assert!(!is_local_path(path), "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshot_rendering_omits_an_absent_range() {
+        let (dir, session_file, context_id) = snapshot_session().await;
+        let mut snapshot = super::resolve_context_snapshot(&session_file, dir.path(), &context_id)
+            .unwrap()
+            .snapshot;
+        snapshot.start_line = None;
+        snapshot.end_line = None;
+
+        assert_eq!(
+            super::snapshot_header(&snapshot, snapshot.file_sha256.as_str()),
+            format!(
+                "[Context snapshot {context_id} from README.md; digest {}]",
+                snapshot.file_sha256.as_str()
+            )
+        );
+        assert!(render_compacted_context_index(&[snapshot]).contains(" README.md sha256="));
     }
 
     #[tokio::test]
@@ -489,15 +534,13 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(
-            loaded,
-            format!(
-                "[Context snapshot {context_id} from README.md:1-1; digest {}]\nsnapshot body",
-                super::file_sha256(&dir.path().join("README.md"))
-                    .unwrap()
-                    .as_str(),
-            )
-        );
+        assert!(loaded.starts_with(&format!(
+            "[Context snapshot {context_id} from README.md:1-1; digest {}]",
+            super::file_sha256(&dir.path().join("README.md"))
+                .unwrap()
+                .as_str(),
+        )));
+        assert!(loaded.contains("snapshot body"));
 
         std::fs::write(dir.path().join("README.md"), "changed").unwrap();
         let stale = executor
@@ -506,6 +549,8 @@ mod tests {
             .unwrap()
             .unwrap_err();
         assert!(stale.starts_with("Context snapshot stale:"));
+        assert!(stale.contains("README.md:1-1"), "{stale}");
+        assert!(stale.contains("call read_file"), "{stale}");
         assert!(!stale.contains("snapshot body"));
     }
 

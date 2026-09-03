@@ -239,8 +239,16 @@ impl ReductionContext {
             }
         }
         for record in records {
-            ctx.record_guard(record)?;
-            ctx.commit_record(record);
+            match ctx.record_guard(record) {
+                Ok(()) => ctx.commit_record(record),
+                Err(_)
+                    if matches!(
+                        record,
+                        Record::ContextSnapshotIndexed { .. }
+                            | Record::ContextSnapshotLoaded { .. }
+                    ) => {}
+                Err(error) => return Err(error),
+            }
         }
         for ordered in ctx.lane_entries.values_mut() {
             ordered.sort_unstable_by_key(|(seq, _)| *seq);

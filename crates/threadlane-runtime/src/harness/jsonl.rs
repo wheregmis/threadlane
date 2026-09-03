@@ -1461,6 +1461,80 @@ mod tests {
         assert_eq!(reloaded.model_context("main").unwrap(), model_context);
     }
 
+    #[test]
+    fn malformed_context_snapshot_metadata_is_skipped_during_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("malformed-context-snapshot.jsonl");
+        let mut store = JsonlStore::open(&path).unwrap();
+        store
+            .append_entry(crate::harness::Entry::new(
+                "v2-tool-result-call-1",
+                None,
+                "main",
+                1,
+                1,
+                AgentMessage::Tool {
+                    tool_call_id: "call-1".into(),
+                    name: "read_file".into(),
+                    content: "contents".into(),
+                    is_error: false,
+                    terminate: false,
+                },
+                false,
+            ))
+            .unwrap();
+        drop(store);
+        let malformed = Record::ContextSnapshotIndexed {
+            id: "snapshot-index-malformed".into(),
+            seq: 2,
+            lane: "main".into(),
+            timestamp: 1,
+            run_id: "run-1".into(),
+            snapshot: ContextSnapshot {
+                file_sha256: TraceString::new("not-a-digest").unwrap(),
+                ..context_snapshot()
+            },
+        };
+        use std::io::Write as _;
+        writeln!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap(),
+            "{}",
+            serde_json::to_string(&malformed).unwrap()
+        )
+        .unwrap();
+        let malformed_load = Record::ContextSnapshotLoaded {
+            id: "snapshot-load-malformed".into(),
+            seq: 3,
+            lane: "main".into(),
+            timestamp: 1,
+            run_id: "run-1".into(),
+            context_id: String::new(),
+            source_lane: "main".into(),
+            current_digest: None,
+            outcome: ContextSnapshotLoadOutcome::Corrupt,
+        };
+        writeln!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap(),
+            "{}",
+            serde_json::to_string(&malformed_load).unwrap()
+        )
+        .unwrap();
+
+        let reloaded = JsonlStore::open(&path).unwrap();
+        assert!(Reducer::reduce(&reloaded)
+            .unwrap()
+            .lane("main")
+            .unwrap()
+            .context_snapshots
+            .is_empty());
+    }
+
     fn write_transcript(path: &std::path::Path, messages: Vec<AgentMessage>) {
         let data = messages
             .into_iter()

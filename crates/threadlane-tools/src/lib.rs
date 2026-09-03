@@ -3,12 +3,25 @@ pub mod search;
 mod virtual_read;
 
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{LazyLock, Mutex, OnceLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+const READ_FILE_SNAPSHOT_PREFIX: &str = "[Threadlane read_file SHA-256: ";
+
+pub fn read_file_snapshot_digest(output: &str) -> Option<&str> {
+    output.lines().take(2).find_map(|line| {
+        let digest = line
+            .strip_prefix(READ_FILE_SNAPSHOT_PREFIX)?
+            .strip_suffix(']')?;
+        (digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .then_some(digest)
+    })
+}
 
 fn tool_definitions() -> Vec<Value> {
     vec![
@@ -572,9 +585,13 @@ pub fn try_execute_tool_in_workspace(
                 })
                 .collect();
             let body = formatted_lines.join("\n");
+            let snapshot = format!(
+                "{READ_FILE_SNAPSHOT_PREFIX}{:x}]\n",
+                Sha256::digest(content.as_bytes())
+            );
             let output = match auto_resolved_notice {
-                Some(notice) => format!("{notice}{body}"),
-                None => body,
+                Some(notice) => format!("{notice}{snapshot}{body}"),
+                None => format!("{snapshot}{body}"),
             };
             Ok(truncate_tool_output(&output))
         }
@@ -1945,8 +1962,13 @@ mod tests {
         fs::write(dir.path().join("sample.txt"), "contents").unwrap();
 
         let read =
-            try_execute_tool_in_workspace("read_file", r#"{"path":"sample.txt"}"#, dir.path());
-        assert!(read.is_ok(), "{read:?}");
+            try_execute_tool_in_workspace("read_file", r#"{"path":"sample.txt"}"#, dir.path())
+                .unwrap();
+        fs::write(dir.path().join("sample.txt"), "changed after read").unwrap();
+        assert_eq!(
+            read_file_snapshot_digest(&read),
+            Some("d1b2a59fbea7e20077af9f91b27e95e865061b270be03ff539ab3b73587882e8")
+        );
 
         let command =
             try_execute_tool_in_workspace("run_command", r#"{"command":"printf ok"}"#, dir.path());

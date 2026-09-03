@@ -288,6 +288,7 @@ pub fn project_trajectory<S: SessionStore>(store: &S) -> SessionTrajectory {
         HashMap::new();
     let mut permissions_by_req_id: HashMap<String, PermissionTrajectory> = HashMap::new();
     let mut context_snapshots_by_id = HashMap::new();
+    let mut duplicate_candidate_by_context_id = HashMap::new();
     let mut latest_snapshot_digest_by_location = HashMap::new();
 
     let mut requests: Vec<RequestTrajectory> = Vec::new();
@@ -507,6 +508,19 @@ pub fn project_trajectory<S: SessionStore>(store: &S) -> SessionTrajectory {
                             .insert(request_id.as_str().to_owned(), manifest);
                     }
                     Record::ContextSnapshotIndexed { snapshot, .. } => {
+                        let location = (
+                            snapshot.source_lane.clone(),
+                            snapshot.path.clone(),
+                            snapshot.start_line,
+                            snapshot.end_line,
+                        );
+                        let duplicate_candidate = latest_snapshot_digest_by_location
+                            .get(&location)
+                            .is_some_and(|previous| previous == &snapshot.file_sha256);
+                        latest_snapshot_digest_by_location
+                            .insert(location, snapshot.file_sha256.clone());
+                        duplicate_candidate_by_context_id
+                            .insert(snapshot.context_id.clone(), duplicate_candidate);
                         context_snapshots_by_id
                             .insert(snapshot.context_id.clone(), snapshot.clone());
                     }
@@ -514,26 +528,10 @@ pub fn project_trajectory<S: SessionStore>(store: &S) -> SessionTrajectory {
                         seq,
                         context_id,
                         source_lane,
-                        current_digest,
                         outcome,
                         ..
                     } => {
                         if let Some(snapshot) = context_snapshots_by_id.get(context_id) {
-                            let location = (
-                                source_lane.clone(),
-                                snapshot.path.clone(),
-                                snapshot.start_line,
-                                snapshot.end_line,
-                            );
-                            let duplicate_candidate =
-                                current_digest.as_ref().is_some_and(|digest| {
-                                    latest_snapshot_digest_by_location
-                                        .get(&location)
-                                        .is_some_and(|previous| previous == digest)
-                                });
-                            if let Some(digest) = current_digest {
-                                latest_snapshot_digest_by_location.insert(location, digest.clone());
-                            }
                             items.push(TrajectoryItem::ContextSnapshotLoad(
                                 ContextSnapshotLoadTrajectory {
                                     seq: *seq,
@@ -544,7 +542,10 @@ pub fn project_trajectory<S: SessionStore>(store: &S) -> SessionTrajectory {
                                     start_line: snapshot.start_line,
                                     end_line: snapshot.end_line,
                                     outcome: outcome.clone(),
-                                    duplicate_candidate,
+                                    duplicate_candidate: duplicate_candidate_by_context_id
+                                        .get(context_id)
+                                        .copied()
+                                        .unwrap_or(false),
                                 },
                             ));
                         }
@@ -1268,7 +1269,7 @@ mod tests {
     }
 
     #[test]
-    fn context_snapshot_loads_project_duplicate_candidates_in_record_order() {
+    fn context_snapshot_duplicates_follow_capture_order_not_load_order() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.jsonl");
         let mut store = JsonlStore::open(&path).unwrap();
@@ -1322,17 +1323,17 @@ mod tests {
                 .unwrap();
         }
 
-        for (context_id, digest) in [
-            ("ctx-z", digest_a.clone()),
-            ("ctx-a", digest_a),
-            ("ctx-b", digest_b),
+        for (context_id, digest, lane) in [
+            ("ctx-a", digest_a.clone(), "child"),
+            ("ctx-z", digest_a, "main"),
+            ("ctx-b", digest_b, "other-child"),
         ] {
             let seq = store.next_sequence();
             store
                 .append_record(Record::ContextSnapshotLoaded {
                     id: format!("load-{context_id}"),
                     seq,
-                    lane: "requester".into(),
+                    lane: lane.into(),
                     timestamp: seq,
                     run_id: "run-1".into(),
                     context_id: context_id.into(),
@@ -1357,14 +1358,14 @@ mod tests {
                 .iter()
                 .map(|load| load.context_id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["ctx-z", "ctx-a", "ctx-b"]
+            vec!["ctx-a", "ctx-z", "ctx-b"]
         );
         assert_eq!(
             loads
                 .iter()
                 .map(|load| load.duplicate_candidate)
                 .collect::<Vec<_>>(),
-            vec![false, true, false]
+            vec![true, false, false]
         );
         assert!(loads.iter().all(|load| load.path == "src/lib.rs"));
     }
