@@ -114,7 +114,6 @@ pub enum MessageRole {
     User,
     Assistant,
     System,
-    Advisor(threadlane_session::AdvisorSeverity),
     Error,
     ContextMarker,
 }
@@ -719,12 +718,6 @@ fn discover_sessions_in_project_cached(
     sessions
 }
 
-pub fn load_session_plan(session_file: &Path) -> SessionPlan {
-    JsonlStore::open_read_only(session_file)
-        .map(|store| store.plan())
-        .unwrap_or_default()
-}
-
 pub fn load_session_messages(session_file: &Path) -> Vec<ChatMessageInfo> {
     compute_session_messages(session_file).unwrap_or_default()
 }
@@ -1004,9 +997,6 @@ fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageI
                 threadlane_session::harness::UiMessageRole::User => MessageRole::User,
                 threadlane_session::harness::UiMessageRole::Assistant => MessageRole::Assistant,
                 threadlane_session::harness::UiMessageRole::System => MessageRole::System,
-                threadlane_session::harness::UiMessageRole::Advisor(sev) => {
-                    MessageRole::Advisor(sev)
-                }
                 threadlane_session::harness::UiMessageRole::Error => MessageRole::Error,
             },
             content: msg.content,
@@ -1087,6 +1077,7 @@ pub(crate) fn coding_agent_options(
         agent_config.model_roles.fast = subagent_settings.fast_model;
     }
     agent_config.fast_reasoning_effort = subagent_settings.fast_reasoning_effort;
+    agent_config.orchestrator_mode = subagent_settings.orchestrator_mode;
     agent_config.needle_enabled = crate::services::settings::load_needle_enabled();
 
     threadlane_session::CodingAgentOptions {
@@ -3992,24 +3983,6 @@ impl AppState {
                         ChatAgentUpdate::PlanUpdated(plan) => {
                             changed = true;
                             self.active_plan = plan;
-                        }
-                        ChatAgentUpdate::AdvisorNote(note) => {
-                            changed = true;
-                            let note_id =
-                                format!("advisor-note-{session_id}-{}", self.messages.len());
-                            self.messages_mut().push(ChatMessageInfo {
-                                id: note_id,
-                                role: MessageRole::Advisor(note.severity),
-                                content: format!("**{}**\n\n{}", note.summary, note.details),
-                                tool_activities: Vec::new(),
-                                streaming: false,
-                                reasoning_content: None,
-                                reasoning_expanded: false,
-                            });
-                        }
-                        ChatAgentUpdate::ModelRolesUpdated(roles) => {
-                            changed = true;
-                            self.model_roles = roles;
                         }
                         ChatAgentUpdate::Usage(usage) => {
                             let entry = self.session_token_usage.entry(key.clone()).or_default();

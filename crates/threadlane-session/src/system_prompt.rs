@@ -199,17 +199,7 @@ pub(crate) fn build_system_prompt(options: SystemPromptBuildOptions<'_>) -> Stri
                 "When invoking `subagent`, specify clear custom `instructions` and the minimum required `tools` for each subagent.",
             );
         }
-        if available_tool_names.contains("generate_plan") {
-            add_tool_guideline(
-                "FAST-PATH EXECUTION: For localized fixes, UI styling, or single-file edits (<50 lines), proceed directly with read -> edit -> test. Do not create spec files, plan files, or plan overhead for small tasks.",
-            );
-            add_tool_guideline(
-                "Whenever the user asks to plan, formulate an architecture, or start complex multi-step work, generate structured steps using `generate_plan`. Once the plan is created, execute the steps using your implementation tools and keep progress updated with `update_plan`.",
-            );
-        }
-        if available_tool_names.contains("update_plan")
-            && !available_tool_names.contains("generate_plan")
-        {
+        if available_tool_names.contains("update_plan") {
             add_tool_guideline(
                 "For multi-step work, maintain a concise plan with `update_plan`; keep at most one item in progress and skip plans for simple requests.",
             );
@@ -447,10 +437,7 @@ mod tests {
 
     #[test]
     fn test_fast_path_and_plan_guidelines() {
-        let tools = vec![
-            tool("generate_plan", "Generate plan."),
-            tool("update_plan", "Update plan."),
-        ];
+        let tools = vec![tool("update_plan", "Update plan.")];
         let prompt = build_system_prompt(SystemPromptBuildOptions {
             config: &SystemPromptConfig::default(),
             work_dir: Path::new("/workspace"),
@@ -461,7 +448,6 @@ mod tests {
             loaded_extension_count: 0,
         });
 
-        assert!(prompt.contains("FAST-PATH EXECUTION: For localized fixes, UI styling, or single-file edits (<50 lines), proceed directly with read -> edit -> test."));
-        assert!(prompt.contains("Whenever the user asks to plan, formulate an architecture, or start complex multi-step work, generate structured steps using `generate_plan`."));
+        assert!(prompt.contains("For multi-step work, maintain a concise plan with `update_plan`"));
     }
 }

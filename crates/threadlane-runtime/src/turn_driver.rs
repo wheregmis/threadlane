@@ -221,12 +221,9 @@ impl<'a> TurnDriver<'a> {
                 let turn = self.turn.lock().await;
                 // Keep the user-facing base selection unchanged while installing
                 // a concrete route for this and subsequent continuation attempts.
-                effective_model_override.clone().unwrap_or_else(|| {
-                    self.config
-                        .model_roles
-                        .resolve_task(&turn.model)
-                        .to_string()
-                })
+                effective_model_override
+                    .clone()
+                    .unwrap_or_else(|| turn.model.clone())
             };
             let overflow_recovery = std::mem::take(&mut overflow_recovery_pending);
             let configured_tool_definitions = self.tool_dispatcher.configured_tool_definitions();

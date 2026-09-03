@@ -1298,13 +1298,12 @@ mod tests {
             calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         });
         let roles = crate::types::ModelRoles {
-            task: Some("primary-model".into()),
             fallback_chain: vec!["primary-model".into(), "fallback-model".into()],
             ..Default::default()
         };
         let config = AgentConfig::builder().model_roles(roles).build();
         let mut runtime =
-            AgentRuntime::new_with_provider("", None, "base-model", None, config, provider)
+            AgentRuntime::new_with_provider("", None, "primary-model", None, config, provider)
                 .unwrap();
         runtime
             .turn

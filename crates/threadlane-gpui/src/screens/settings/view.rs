@@ -753,6 +753,40 @@ impl SettingsView {
                     )
                 })
             });
+        let selected_orchestrator_mode = preferences.orchestrator_mode;
+        let orchestrator_label = selected_orchestrator_mode.label();
+        let orchestrator_entity = self.model.clone();
+        let project_for_orchestrator = project.clone();
+        let orchestrator_picker = Button::new("orchestrator-picker")
+            .label(orchestrator_label)
+            .dropdown_caret(true)
+            .dropdown_menu(move |menu, _, _| {
+                let entity = orchestrator_entity.clone();
+                let project = project_for_orchestrator.clone();
+                [
+                    threadlane_runtime::OrchestratorMode::Auto,
+                    threadlane_runtime::OrchestratorMode::Always,
+                    threadlane_runtime::OrchestratorMode::Off,
+                ]
+                .into_iter()
+                .fold(menu, |menu, mode| {
+                    let entity = entity.clone();
+                    let project = project.clone();
+                    menu.item(
+                        PopupMenuItem::new(mode.label()).on_click(move |_, _, cx| {
+                            let mut settings = crate::services::subagent_settings::load(&project);
+                            settings.orchestrator_mode = mode;
+                            if crate::services::subagent_settings::save(&project, &settings).is_ok()
+                            {
+                                entity.update(cx, |state, cx| {
+                                    state.invalidate_capability_runtimes();
+                                    cx.notify();
+                                });
+                            }
+                        }),
+                    )
+                })
+            });
         let row = |title: &'static str, description: &'static str, control: AnyElement| {
             div()
                 .rounded_xl()
@@ -802,6 +836,11 @@ impl SettingsView {
                 "Fast model reasoning effort",
                 "Reasoning effort for fast model execution after /prewalk.",
                 fast_reasoning_picker.into_any_element(),
+            ))
+            .child(row(
+                "Auto-Prewalk Orchestrator",
+                "Automatically engages /prewalk on actionable coding tasks when a fast model is configured.",
+                orchestrator_picker.into_any_element(),
             ))
             .into_any_element()
     }

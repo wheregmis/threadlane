@@ -3,7 +3,7 @@
 //! All tunable parameters for the agent execution loop, compaction, and
 //! stream rules live here rather than as scattered `const` items.
 
-use crate::types::{ModelRoles, ReasoningEffort};
+use crate::types::{ModelRoles, OrchestratorMode, ReasoningEffort};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -65,6 +65,10 @@ pub struct AgentConfig {
     #[serde(default)]
     pub fast_reasoning_effort: Option<ReasoningEffort>,
 
+    /// Orchestrator mode governing automatic /prewalk engagement.
+    #[serde(default)]
+    pub orchestrator_mode: OrchestratorMode,
+
     // ── Tool Execution ──────────────────────────────────────────────────
     /// Enable local Needle tool routing when compiled with the `needle` feature.
     #[serde(default)]
@@ -112,6 +116,7 @@ impl Default for AgentConfig {
             subagent_model: None,
             subagent_reasoning_effort: None,
             fast_reasoning_effort: None,
+            orchestrator_mode: OrchestratorMode::default(),
             needle_enabled: false,
             core_tool_schema_mode: true,
             tool_execution_timeout: None,

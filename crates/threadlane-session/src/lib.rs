@@ -13,6 +13,7 @@ mod plan;
 pub mod policy;
 pub mod project_registry;
 pub mod prompt_templates;
+pub mod orchestrator;
 pub mod supervisor;
 pub mod system_prompt;
 

@@ -9,7 +9,7 @@ use crate::extension_broker::{
     BrokerError, CapabilityDispatcher, HostBrokerRequest, BROKER_API_VERSION,
 };
 use crate::permission::{PermissionHandle, PermissionManager};
-use crate::plan::{GeneratePlanToolExecutor, SessionPlanStore, UpdatePlanToolExecutor};
+use crate::plan::{SessionPlanStore, UpdatePlanToolExecutor};
 use crate::policy::ToolPolicy;
 use async_trait::async_trait;
 use log::warn;
@@ -18,17 +18,15 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use threadlane_mcp::McpManager;
-use threadlane_protocol::ProviderPort;
 use threadlane_runtime::harness::{HookContext, HookEffect, HookHandler, HookKind};
 use threadlane_runtime::Capability;
-use threadlane_runtime::{
-    AgentConfig, AgentEvent, AgentToolCall, AgentToolDefinition, ToolExecutor, TurnState,
-};
+use threadlane_runtime::{AgentEvent, AgentToolCall, AgentToolDefinition, ToolExecutor};
 use threadlane_skills::{LoadSkillToolExecutor, SkillRegistry};
 use threadlane_wasi::WasiExtensionManager;
 use tokio::sync::broadcast;
 
 const SUBAGENT_TOOL_NAME: &str = "subagent";
+pub(crate) const PREWALK_HANDOFF_TOOL_NAME: &str = "complete_prewalk";
 
 // ── Capability implementations ─────────────────────────────────────────
 // Each wraps a subsystem and implements [`crate::capability_registry::Capability`]
@@ -63,28 +61,53 @@ impl Capability for SubagentCapability {
 pub(crate) struct PlanCapability {
     pub(crate) plan_store: SessionPlanStore,
     pub(crate) event_tx: broadcast::Sender<AgentEvent>,
-    pub(crate) provider_client: Arc<dyn ProviderPort>,
-    pub(crate) turn: Arc<tokio::sync::Mutex<TurnState>>,
-    pub(crate) config: AgentConfig,
+}
+
+pub(crate) struct PrewalkCapability;
+
+impl Capability for PrewalkCapability {
+    fn id(&self) -> &str {
+        "prewalk"
+    }
+
+    fn tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
+        vec![Arc::new(PrewalkToolExecutor)]
+    }
+}
+
+struct PrewalkToolExecutor;
+
+#[async_trait]
+impl ToolExecutor for PrewalkToolExecutor {
+    fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
+        vec![AgentToolDefinition {
+            name: PREWALK_HANDOFF_TOOL_NAME.into(),
+            description: Some(
+                "Signal that the foundational prewalk change is implemented and verified.".into(),
+            ),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            strict: None,
+        }]
+        .into()
+    }
+
+    async fn execute_tool(&self, name: &str, _args: &str) -> Option<Result<String, String>> {
+        (name == PREWALK_HANDOFF_TOOL_NAME).then(|| Ok("Prewalk handoff requested.".into()))
+    }
 }
 impl Capability for PlanCapability {
     fn id(&self) -> &str {
         "plan"
     }
     fn tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
-        vec![
-            Arc::new(UpdatePlanToolExecutor::new(
-                self.plan_store.clone(),
-                self.event_tx.clone(),
-            )),
-            Arc::new(GeneratePlanToolExecutor::new(
-                self.plan_store.clone(),
-                self.event_tx.clone(),
-                self.provider_client.clone(),
-                self.turn.clone(),
-                self.config.clone(),
-            )),
-        ]
+        vec![Arc::new(UpdatePlanToolExecutor::new(
+            self.plan_store.clone(),
+            self.event_tx.clone(),
+        ))]
     }
 }
 

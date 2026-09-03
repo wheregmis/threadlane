@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use threadlane_runtime::ReasoningEffort;
+use threadlane_runtime::{OrchestratorMode, ReasoningEffort};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SubagentSettings {
@@ -12,6 +12,8 @@ pub(crate) struct SubagentSettings {
     pub(crate) fast_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) fast_reasoning_effort: Option<ReasoningEffort>,
+    #[serde(default)]
+    pub(crate) orchestrator_mode: OrchestratorMode,
 }
 
 fn path(project_root: &Path) -> std::path::PathBuf {
@@ -81,6 +83,7 @@ mod tests {
             reasoning_effort: Some(ReasoningEffort::High),
             fast_model: Some("antigravity/gemini-3-flash".into()),
             fast_reasoning_effort: Some(ReasoningEffort::Low),
+            orchestrator_mode: OrchestratorMode::Auto,
         };
         save(dir.path(), &settings).unwrap();
         assert_eq!(load(dir.path()), settings);
@@ -98,6 +101,7 @@ mod tests {
             reasoning_effort: Some(ReasoningEffort::Max),
             fast_model: None,
             fast_reasoning_effort: None,
+            orchestrator_mode: OrchestratorMode::default(),
         };
         assert!(save(dir.path(), &unsupported).is_err());
     }

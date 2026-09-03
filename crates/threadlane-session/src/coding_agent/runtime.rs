@@ -7,7 +7,7 @@ use super::subagents::*;
 use super::broker::ManagedProcessRegistry;
 use super::capabilities::{
     build_broker_dispatcher, render_agent_catalog, restored_tool_policy, McpCapability,
-    PlanCapability, SkillCapability, SubagentCapability, WasiCapability,
+    PlanCapability, PrewalkCapability, SkillCapability, SubagentCapability, WasiCapability,
 };
 use super::harness::{CodingSessionHarness, HarnessWatch, InterruptedSubagentRecoveryState};
 use crate::commands::{execute_slash_command, parse_slash_command, CommandAction};
@@ -48,15 +48,13 @@ pub struct CodingAgent {
     pub(crate) permission_handle: crate::permission::PermissionHandle,
     pub(crate) agent_work: AgentWorkScheduler,
     pub(crate) mcp_manager: Arc<McpManager>,
-    pub(crate) plan_store: SessionPlanStore,
     pub(crate) prompt_templates: Option<Vec<crate::prompt_templates::PromptTemplate>>,
     pub(crate) dispatch_parent_leaf: Arc<std::sync::Mutex<Option<String>>>,
     pub(crate) completed_subagent_lanes: Arc<std::sync::Mutex<Vec<CompletedSubagentLane>>>,
     pub(crate) harness: Option<CodingSessionHarness>,
     pub(crate) harness_journal_error: Option<String>,
     pub(crate) harness_run_id: Arc<std::sync::Mutex<Option<String>>>,
-    pub(crate) prewalk_target_model: Arc<std::sync::Mutex<Option<String>>>,
-    pub(crate) prewalk_target_reasoning_effort: Arc<std::sync::Mutex<Option<threadlane_runtime::ReasoningEffort>>>,
+    pub(crate) prewalk: Arc<std::sync::Mutex<Option<crate::orchestrator::PrewalkState>>>,
     pub(crate) cancellation: CodingAgentCancellation,
     pub(crate) interrupted_subagent_recovery: InterruptedSubagentRecoveryState,
     /// Connection to an external ACP agent, opened on first use.
@@ -553,10 +551,8 @@ impl CodingAgent {
         registry.register(Box::new(PlanCapability {
             plan_store: plan_store.clone(),
             event_tx: agent.event_tx.clone(),
-            provider_client: agent.provider_client_arc(),
-            turn: agent.turn.clone(),
-            config: agent.config().clone(),
         }));
+        registry.register(Box::new(PrewalkCapability));
 
         registry.register(Box::new(WasiCapability {
             extensions: wasi_extensions.clone(),
@@ -628,15 +624,13 @@ impl CodingAgent {
             permission_handle,
             agent_work,
             mcp_manager,
-            plan_store,
             prompt_templates: None,
             dispatch_parent_leaf,
             completed_subagent_lanes,
             harness,
             harness_journal_error,
             harness_run_id,
-            prewalk_target_model: Arc::new(std::sync::Mutex::new(None)),
-            prewalk_target_reasoning_effort: Arc::new(std::sync::Mutex::new(None)),
+            prewalk: Arc::new(std::sync::Mutex::new(None)),
             cancellation,
             interrupted_subagent_recovery,
             acp,
@@ -832,6 +826,7 @@ impl CodingAgent {
         let templates = self.prompt_templates.as_ref().unwrap();
         let expanded_input = crate::prompt_templates::expand_prompt_template(trimmed, templates);
         let mut effective_input = expanded_input.trim().to_string();
+        let mut architect_directive: Option<String> = None;
 
         if let Some(command_input) = effective_input.strip_prefix('/') {
             let mut parts = command_input.split_whitespace();
@@ -1216,48 +1211,79 @@ impl CodingAgent {
                         .resolve_fast(&active_model)
                         .to_string();
                     let fast_reasoning = self.agent.config().fast_reasoning_effort;
-                    *self.prewalk_target_model.lock().unwrap() = Some(fast_model.clone());
-                    *self.prewalk_target_reasoning_effort.lock().unwrap() = fast_reasoning;
+                    *self.prewalk.lock().unwrap() = Some(crate::orchestrator::PrewalkState {
+                        target_model: fast_model.clone(),
+                        target_reasoning: fast_reasoning,
+                        started_at: std::time::Instant::now(),
+                    });
 
                     let _ = self.agent.event_tx.send(AgentEvent::PrewalkCompleted {
                         model: active_model.clone(),
                         message: format!("Prewalk started with `{active_model}`. Target fast model: `{fast_model}`."),
                     });
 
-                    effective_input = format!(
-                        "[PREWALK MODE ACTIVATED: Frontier Architect -> Fast Model Handoff]\n\
-                         Target Fast Model: {fast_model}\n\n\
-                         You are the Lead Architect. Establish the trajectory and land the pivotal first edit before handing off to {fast_model}.\n\n\
-                         ARCHITECT PROTOCOL:\n\
-                         1. EXPLORE: Read the relevant files using `read_file` to locate the exact lines and types.\n\
-                         2. CONCISE CHECKLIST (Max 3-5 items):\n\
-                            Provide a strict markdown checklist with explicit target files and verification commands:\n\
-                            - [x] 1. <Core architectural change in file:line> (You will execute this now)\n\
-                            - [ ] 2. <Specific follow-up edit in file:line>\n\
-                            - [ ] 3. <Verification: Exact command e.g. `cargo test -p crate test_name`>\n\
-                         3. LAND THE FIRST EDIT:\n\
-                            Execute Item 1 using `edit_file_hashline` or `write_file`. This must be a REAL, working code change (core logic, type change, or reproducing test), not a placeholder.\n\
-                         4. AUTOMATIC HANDOFF:\n\
-                            The instant your edit succeeds, {fast_model} will inherit this exact context and complete the remaining checklist items.\n\
-                         [END PREWALK PROTOCOL]\n\n\
-                         Objective: {task_prompt}"
-                    );
+                    effective_input = task_prompt.to_string();
+                    architect_directive =
+                        Some(crate::orchestrator::build_architect_directive(&fast_model));
                 } else {
-                    if matches!(
-                        cmd_action,
-                        CommandAction::Advisor(_) | CommandAction::Roles(_)
-                    ) {
-                        let output = execute_slash_command(cmd_action, &mut self.agent).await;
-                        let roles = self.agent.model_roles().clone();
-                        let _ = self
-                            .agent
-                            .event_tx
-                            .send(AgentEvent::ModelRolesUpdated { roles });
-                        return Some(Ok(output));
-                    }
                     let output = execute_slash_command(cmd_action, &mut self.agent).await;
                     return Some(Ok(output));
                 }
+            }
+        }
+
+        // --- OMP-style Entrypoint Orchestrator: Intent Classification & Automatic Prewalk ---
+        if architect_directive.is_none() && self.prewalk.lock().unwrap().is_none() {
+            let active_model = self.agent.turn.lock().await.model.clone();
+            let fast_model = self
+                .agent
+                .model_roles()
+                .resolve_fast(&active_model)
+                .to_string();
+            let fast_reasoning = self.agent.config().fast_reasoning_effort;
+            let orchestrator_mode = self.agent.config().orchestrator_mode;
+            let provider_client = Some(self.agent.provider_client_arc());
+
+            let decision = crate::orchestrator::Orchestrator::evaluate(
+                &effective_input,
+                orchestrator_mode,
+                &active_model,
+                &fast_model,
+                fast_reasoning,
+                provider_client,
+            )
+            .await;
+
+            if let crate::orchestrator::OrchestratorDecision::EngagePrewalk {
+                fast_model: target_fast,
+                fast_reasoning: target_effort,
+                architect_system_directive,
+            } = decision
+            {
+                *self.prewalk.lock().unwrap() = Some(crate::orchestrator::PrewalkState {
+                    target_model: target_fast.clone(),
+                    target_reasoning: target_effort,
+                    started_at: std::time::Instant::now(),
+                });
+
+                let _ = self.agent.event_tx.send(AgentEvent::PrewalkCompleted {
+                    model: active_model.clone(),
+                    message: format!(
+                        "Auto-Prewalk engaged: Frontier architect (`{active_model}`) exploring and landing first edit before handoff to `{target_fast}`."
+                    ),
+                });
+
+                architect_directive = Some(architect_system_directive);
+            }
+        }
+
+        if let Some(directive) = architect_directive {
+            let mut turn = self.agent.turn.lock().await;
+            if !turn
+                .system_prompt
+                .contains(crate::orchestrator::ARCHITECT_PROTOCOL_HEADER)
+            {
+                turn.system_prompt.push_str(&directive);
             }
         }
 
