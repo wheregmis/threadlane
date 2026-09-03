@@ -8,7 +8,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::context_snapshots::{file_sha256, is_local_path, read_file_request};
+use super::context_snapshots::{
+    file_sha256, is_local_path, read_file_request, render_compacted_context_index,
+};
 use crate::permission::PermissionTraceEvent;
 use threadlane_runtime::compaction::{
     compact_for_budget, estimate_request_tokens, PreparedCompaction,
@@ -615,11 +617,28 @@ impl CodingSessionHarness {
                 .iter()
                 .find_map(threadlane_runtime::compaction_summary_text)
                 .ok_or_else(|| "context preparation produced no durable summary".to_string())?;
+            let snapshots = self.compacted_context_snapshots(&prepared);
+            let summary = if snapshots.is_empty() {
+                summary.to_owned()
+            } else {
+                format!(
+                    "{summary}\n\n{}",
+                    render_compacted_context_index(&snapshots)
+                )
+            };
+            let mut messages = prepared.messages.clone();
+            let Some(AgentMessage::Custom { payload, .. }) = messages
+                .iter_mut()
+                .find(|message| threadlane_runtime::compaction_summary_text(message).is_some())
+            else {
+                return Err("context preparation produced no durable summary".into());
+            };
+            payload["summary"] = Value::String(summary.clone());
             let first_seq = self.next_seq();
             let summary_id = format!("compaction-{parent_run_id}-{first_seq}-summary");
-            self.stage_open_run_compaction(parent_run_id, summary, reason)?;
+            self.stage_open_run_compaction(parent_run_id, &summary, reason)?;
 
-            let retained = super::durable::compaction_retained_tail(&prepared.messages);
+            let retained = super::durable::compaction_retained_tail(&messages);
             let mut parent_id = summary_id;
             for (index, message) in retained.into_iter().enumerate() {
                 let id = format!("compaction-{parent_run_id}-{first_seq}-tail-{index}");
@@ -649,7 +668,7 @@ impl CodingSessionHarness {
                 parent_id = id;
             }
 
-            let post_tokens = estimate_request_tokens(&prepared.messages, tool_schema_json, config);
+            let post_tokens = estimate_request_tokens(&messages, tool_schema_json, config);
             let generation = self.compaction_generation().saturating_add(1);
             let record = HarnessRecord::ContextCompacted {
                 id: format!("context-compacted-{parent_run_id}-{generation}"),
@@ -679,6 +698,32 @@ impl CodingSessionHarness {
             let _ = self.ensure_fresh();
         }
         result
+    }
+
+    fn compacted_context_snapshots(
+        &mut self,
+        prepared: &PreparedCompaction,
+    ) -> Vec<threadlane_runtime::harness::ContextSnapshot> {
+        let Ok(context) = self.model_context("main") else {
+            return Vec::new();
+        };
+        let retained = super::durable::compaction_retained_tail(&prepared.messages);
+        let compacted_seqs = context
+            .entries
+            .iter()
+            .take(context.entries.len().saturating_sub(retained.len()))
+            .map(|entry| entry.seq)
+            .collect::<std::collections::HashSet<_>>();
+        self.context_snapshots("main")
+            .into_iter()
+            .filter(|snapshot| {
+                context
+                    .entries
+                    .iter()
+                    .find(|entry| entry.id == snapshot.source_entry_id)
+                    .is_some_and(|entry| compacted_seqs.contains(&entry.seq))
+            })
+            .collect()
     }
 
     pub(crate) fn record_manual_compaction(
@@ -4659,6 +4704,112 @@ mod tests {
                 .index_read_snapshot(&run_id, dir.path(), "missing", &entry_id, 13)
                 .unwrap(),
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn compacted_context_snapshot_stays_durable_and_is_indexed_in_checkpoint() {
+        let (dir, path) = temp_session();
+        std::fs::write(dir.path().join("README.md"), "snapshot body").unwrap();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        let run_id = harness.unique_run_id("snapshot-compact").unwrap();
+        harness
+            .begin_run(&run_id, AgentMessage::user("inspect", vec![]))
+            .unwrap();
+        harness
+            .append_message(AgentMessage::Assistant {
+                content: None,
+                tool_calls: Some(vec![threadlane_provider::openai::ToolCall {
+                    id: "read-1".into(),
+                    r#type: "function".into(),
+                    function: threadlane_provider::openai::ToolCallFunction {
+                        name: "read_file".into(),
+                        arguments: r#"{\"path\":\"README.md\",\"start_line\":1,\"end_line\":1}"#
+                            .into(),
+                    },
+                    thought_signature: None,
+                }]),
+                stop_reason: None,
+                deferred_handle: None,
+            })
+            .unwrap();
+        harness
+            .append_tool_intent(
+                &run_id,
+                "read-1",
+                "read_file",
+                serde_json::json!({"path": "README.md", "start_line": 1, "end_line": 1}),
+            )
+            .await
+            .unwrap();
+        let source_entry_id = harness
+            .append_message(AgentMessage::Tool {
+                tool_call_id: "read-1".into(),
+                name: "read_file".into(),
+                content: "snapshot body".into(),
+                is_error: false,
+                terminate: false,
+            })
+            .unwrap();
+        let context_id = harness
+            .index_read_snapshot(&run_id, dir.path(), "read-1", &source_entry_id, 13)
+            .unwrap()
+            .unwrap();
+        harness
+            .append_message(AgentMessage::user("continue", vec![]))
+            .unwrap();
+        let config = AgentConfig::builder().max_checkpoint_chars(0).build();
+        let before = harness.model_context("main").unwrap().messages();
+        let prepared = compact_for_budget(&before, None, 1, &config).unwrap();
+        harness
+            .commit_prepared_compaction(
+                &run_id,
+                "unknown/test-model",
+                None,
+                &config,
+                context_budget("unknown/test-model", &config),
+                CompactionReason::AdaptiveBudget,
+                prepared,
+            )
+            .unwrap();
+
+        let compacted_messages = harness.model_context("main").unwrap().messages();
+        let checkpoint = compacted_messages
+            .iter()
+            .find_map(threadlane_runtime::compaction_summary_text)
+            .unwrap();
+        assert!(checkpoint.contains(&context_id));
+        assert!(checkpoint.contains("README.md:1-1 sha256="));
+        assert!(!checkpoint.contains("snapshot body"));
+        assert!(!compacted_messages
+            .iter()
+            .any(|message| matches!(message, AgentMessage::Tool { content, .. } if content == "snapshot body")));
+        assert!(JsonlStore::open(&path)
+            .unwrap()
+            .entries()
+            .iter()
+            .any(|entry| entry.id == source_entry_id && matches!(&entry.message, AgentMessage::Tool { content, .. } if content == "snapshot body")));
+        assert_eq!(
+            super::super::context_snapshots::resolve_context_snapshot(
+                &path,
+                dir.path(),
+                &context_id
+            )
+            .unwrap()
+            .content,
+            "snapshot body"
+        );
+        let post_tokens = estimate_request_tokens(&compacted_messages, None, &config);
+        assert_eq!(
+            harness
+                .store
+                .records()
+                .iter()
+                .find_map(|record| match record {
+                    HarnessRecord::ContextCompacted { post_tokens, .. } => Some(*post_tokens),
+                    _ => None,
+                }),
+            Some(post_tokens)
         );
     }
 

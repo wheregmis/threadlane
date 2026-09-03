@@ -168,6 +168,38 @@ fn snapshot_header(snapshot: &ContextSnapshot, digest: &str) -> String {
     )
 }
 
+pub(crate) fn render_compacted_context_index(snapshots: &[ContextSnapshot]) -> String {
+    let mut index = "## Available context snapshots".to_string();
+    let mut included = 0;
+    for snapshot in snapshots.iter().rev().take(MAX_CONTEXT_LIST_RESULTS) {
+        let line = format!(
+            "- {} {}:{}-{} sha256={}",
+            snapshot.context_id,
+            snapshot.path,
+            snapshot
+                .start_line
+                .map_or("?".into(), |line| line.to_string()),
+            snapshot
+                .end_line
+                .map_or("?".into(), |line| line.to_string()),
+            snapshot.file_sha256.as_str(),
+        );
+        if index.chars().count() + 1 + line.chars().count() > MAX_COMPACTED_CONTEXT_INDEX_CHARS {
+            break;
+        }
+        index.push('\n');
+        index.push_str(&line);
+        included += 1;
+    }
+    if included < snapshots.len() {
+        let omitted = "\n- … additional snapshots omitted";
+        if index.chars().count() + omitted.chars().count() <= MAX_COMPACTED_CONTEXT_INDEX_CHARS {
+            index.push_str(omitted);
+        }
+    }
+    index
+}
+
 #[async_trait]
 impl ToolExecutor for ContextSnapshotToolExecutor {
     fn executor_id(&self) -> &str {
@@ -328,8 +360,8 @@ pub(crate) fn resolve_context_snapshot(
 #[cfg(test)]
 mod tests {
     use super::{
-        is_local_path, ContextSnapshotLoadOutcome, ContextSnapshotToolExecutor, JsonlStore, Record,
-        MAX_CONTEXT_LIST_RESULTS,
+        is_local_path, render_compacted_context_index, ContextSnapshotLoadOutcome,
+        ContextSnapshotToolExecutor, JsonlStore, Record, MAX_CONTEXT_LIST_RESULTS,
     };
     use crate::coding_agent::harness::CodingSessionHarness;
     use threadlane_runtime::harness::SessionStore;
@@ -384,6 +416,22 @@ mod tests {
             .unwrap()
             .unwrap();
         (dir, path, context_id)
+    }
+
+    #[tokio::test]
+    async fn compacted_context_snapshot_index_keeps_metadata_not_body() {
+        let (dir, session_file, context_id) = snapshot_session().await;
+        let snapshot = ContextSnapshotToolExecutor::new(session_file, dir.path().into())
+            .snapshots()
+            .unwrap()
+            .pop()
+            .unwrap();
+
+        let index = render_compacted_context_index(&[snapshot]);
+
+        assert!(index.contains(&context_id));
+        assert!(index.contains("README.md:1-1 sha256="));
+        assert!(!index.contains("snapshot body"));
     }
 
     #[test]
