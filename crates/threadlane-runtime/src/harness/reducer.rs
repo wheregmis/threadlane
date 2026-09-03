@@ -143,6 +143,7 @@ impl ReductionContext {
                 abort_requested: false,
                 usage: Default::default(),
                 tools: Vec::new(),
+                context_snapshots: Vec::new(),
                 facts: fact_seed,
                 resume_data: Default::default(),
             },
@@ -700,6 +701,70 @@ impl ReductionContext {
             | Record::StreamCheckpoint { run_id, .. } => {
                 require_observation_open(lane, run_id)?;
             }
+            Record::ContextSnapshotIndexed {
+                run_id, snapshot, ..
+            } => {
+                if snapshot.context_id.trim().is_empty()
+                    || snapshot.source_lane.trim().is_empty()
+                    || snapshot.source_run_id.trim().is_empty()
+                    || snapshot.source_tool_call_id.trim().is_empty()
+                    || snapshot.source_entry_id.trim().is_empty()
+                    || snapshot.path.trim().is_empty()
+                    || snapshot.file_sha256.as_str().len() != 64
+                    || !snapshot
+                        .file_sha256
+                        .as_str()
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit())
+                {
+                    return Err(ReduceError::InvalidRecord(
+                        "invalid context snapshot".into(),
+                    ));
+                }
+                if snapshot.source_lane != lane_name || snapshot.source_run_id != *run_id {
+                    return Err(ReduceError::InvalidRecord(
+                        "context snapshot source does not match record".into(),
+                    ));
+                }
+                let source_in_lane =
+                    self.lane_entries
+                        .get(&snapshot.source_lane)
+                        .is_some_and(|entries| {
+                            entries
+                                .iter()
+                                .any(|(_, id)| id == &snapshot.source_entry_id)
+                        });
+                let tool_matches = self
+                    .entry_facts
+                    .get(&snapshot.source_entry_id)
+                    .and_then(|facts| facts.tool_info.as_ref())
+                    .is_some_and(|(call_id, _)| call_id == &snapshot.source_tool_call_id);
+                if !source_in_lane || !tool_matches {
+                    return Err(ReduceError::InvalidRecord(
+                        "context snapshot source entry does not match tool call".into(),
+                    ));
+                }
+            }
+            Record::ContextSnapshotLoaded {
+                run_id,
+                context_id,
+                source_lane,
+                current_digest,
+                ..
+            } => {
+                if run_id.trim().is_empty()
+                    || context_id.trim().is_empty()
+                    || source_lane.trim().is_empty()
+                    || current_digest.as_ref().is_some_and(|digest| {
+                        digest.as_str().len() != 64
+                            || !digest.as_str().bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
+                {
+                    return Err(ReduceError::InvalidRecord(
+                        "invalid context snapshot load".into(),
+                    ));
+                }
+            }
             Record::PermissionRequested {
                 run_id: Some(run_id),
                 ..
@@ -1061,6 +1126,21 @@ impl ReductionContext {
             | Record::ToolExecutionObserved { .. }
             | Record::AbortObserved { .. }
             | Record::StreamCheckpoint { .. } => {}
+            Record::ContextSnapshotIndexed { snapshot, .. } => {
+                let snapshot = snapshot.clone();
+                self.edit_lane(&lane_name, |lane| {
+                    if let Some(index) = lane
+                        .context_snapshots
+                        .iter()
+                        .position(|existing| existing.context_id == snapshot.context_id)
+                    {
+                        lane.context_snapshots[index] = snapshot;
+                    } else {
+                        lane.context_snapshots.push(snapshot);
+                    }
+                });
+            }
+            Record::ContextSnapshotLoaded { .. } => {}
             Record::PermissionRequested { .. }
             | Record::PermissionResolved { .. }
             | Record::SubagentLifecycle { .. } => {}
@@ -1201,6 +1281,7 @@ impl Default for LaneState {
             abort_requested: false,
             usage: Default::default(),
             tools: Vec::new(),
+            context_snapshots: Vec::new(),
             facts: Default::default(),
             resume_data: Default::default(),
         }
