@@ -528,19 +528,37 @@ pub fn prepare_token_optimal_context(
 }
 
 fn build_checkpoint(messages: &[AgentMessage], config: &AgentConfig) -> String {
-    build_checkpoint_omitting_tool_outputs(messages, &[], config)
+    build_checkpoint_from_entries(
+        messages.len(),
+        messages.iter().map(|message| (message, false)),
+        config,
+    )
 }
 
 pub fn build_checkpoint_omitting_tool_outputs(
-    messages: &[AgentMessage],
-    omitted_tool_call_ids: &[String],
+    entries: &[crate::harness::Entry],
+    omitted_source_entry_ids: &[String],
+    config: &AgentConfig,
+) -> String {
+    build_checkpoint_from_entries(
+        entries.len(),
+        entries
+            .iter()
+            .map(|entry| (&entry.message, omitted_source_entry_ids.contains(&entry.id))),
+        config,
+    )
+}
+
+fn build_checkpoint_from_entries<'a>(
+    message_count: usize,
+    entries: impl DoubleEndedIterator<Item = (&'a AgentMessage, bool)>,
     config: &AgentConfig,
 ) -> String {
     let mut excerpts = Vec::new();
     let mut used_chars = 0;
 
-    for message in messages.iter().rev() {
-        let Some(excerpt) = message_excerpt(message, omitted_tool_call_ids) else {
+    for (message, output_omitted) in entries.rev() {
+        let Some(excerpt) = message_excerpt(message, output_omitted) else {
             continue;
         };
         if used_chars + excerpt.len() > config.max_checkpoint_chars {
@@ -553,12 +571,12 @@ pub fn build_checkpoint_omitting_tool_outputs(
 
     format!(
         "Context checkpoint from {} earlier messages. Continue the same task using the retained recent messages and these earlier excerpts:\n\n{}",
-        messages.len(),
+        message_count,
         excerpts.join("\n\n")
     )
 }
 
-fn message_excerpt(message: &AgentMessage, omitted_tool_call_ids: &[String]) -> Option<String> {
+fn message_excerpt(message: &AgentMessage, output_omitted: bool) -> Option<String> {
     match message {
         AgentMessage::User { content } => Some(format!("User: {content}")),
         AgentMessage::UserWithImages { content, images } => Some(format!(
@@ -569,13 +587,8 @@ fn message_excerpt(message: &AgentMessage, omitted_tool_call_ids: &[String]) -> 
             .as_ref()
             .filter(|content| !content.trim().is_empty())
             .map(|content| format!("Assistant: {content}")),
-        AgentMessage::Tool {
-            tool_call_id,
-            name,
-            content,
-            ..
-        } => {
-            if omitted_tool_call_ids.contains(tool_call_id) {
+        AgentMessage::Tool { name, content, .. } => {
+            if output_omitted {
                 return Some(format!(
                     "Tool {name}: [output stored as an available context snapshot]"
                 ));

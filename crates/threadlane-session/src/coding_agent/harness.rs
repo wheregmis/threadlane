@@ -605,25 +605,25 @@ impl CodingSessionHarness {
         compacted_messages: usize,
         config: &AgentConfig,
     ) -> Result<String, String> {
-        let omitted_tool_call_ids = self
+        let omitted_source_entry_ids = self
             .context_snapshots("main")
             .into_iter()
-            .map(|snapshot| snapshot.source_tool_call_id)
+            .map(|snapshot| snapshot.source_entry_id)
             .collect::<Vec<_>>();
-        if omitted_tool_call_ids.is_empty() {
+        if omitted_source_entry_ids.is_empty() {
             return Ok(summary.to_owned());
         }
         let dropped = self
             .model_context("main")?
-            .messages()
+            .entries
             .into_iter()
-            .filter(|message| !matches!(message, AgentMessage::System { .. }))
+            .filter(|entry| !matches!(entry.message, AgentMessage::System { .. }))
             .take(compacted_messages)
             .collect::<Vec<_>>();
         Ok(
             threadlane_runtime::compaction::build_checkpoint_omitting_tool_outputs(
                 &dropped,
-                &omitted_tool_call_ids,
+                &omitted_source_entry_ids,
                 config,
             ),
         )
@@ -4926,6 +4926,26 @@ mod tests {
             .unwrap()
             .unwrap();
         harness
+            .store
+            .append_entry_gated(HarnessEntry {
+                id: "later-non-indexed-duplicate-tool-result".into(),
+                parent_id: Some(source_entry_id.clone()),
+                lane: "main".into(),
+                seq: harness.next_seq(),
+                timestamp: timestamp(),
+                message: AgentMessage::Tool {
+                    tool_call_id: "read-1".into(),
+                    name: "read_file".into(),
+                    content: "later non-indexed duplicate tool body".into(),
+                    is_error: false,
+                    terminate: false,
+                },
+                surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
+                terminate: false,
+            })
+            .unwrap();
+        harness.store.drive_to_completion().unwrap();
+        harness
             .append_message(AgentMessage::user("non-indexed evidence", vec![]))
             .unwrap();
         harness
@@ -4955,6 +4975,7 @@ mod tests {
         assert!(!checkpoint.contains(&context_id));
         assert!(!checkpoint.contains("README.md:1-1 sha256="));
         assert!(!checkpoint.contains("snapshot body"));
+        assert!(checkpoint.contains("later non-indexed duplicate tool body"));
         let AgentMessage::Custom { payload, .. } = checkpoint_message else {
             unreachable!();
         };
