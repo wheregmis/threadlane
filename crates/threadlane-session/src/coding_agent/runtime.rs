@@ -6,8 +6,9 @@ use super::subagents::*;
 
 use super::broker::ManagedProcessRegistry;
 use super::capabilities::{
-    build_broker_dispatcher, render_agent_catalog, restored_tool_policy, McpCapability,
-    PlanCapability, PrewalkCapability, SkillCapability, SubagentCapability, WasiCapability,
+    build_broker_dispatcher, render_agent_catalog, restored_tool_policy, ContextCapability,
+    McpCapability, PlanCapability, PrewalkCapability, SkillCapability, SubagentCapability,
+    WasiCapability,
 };
 use super::harness::{CodingSessionHarness, HarnessWatch, InterruptedSubagentRecoveryState};
 use crate::commands::{execute_slash_command, parse_slash_command, CommandAction};
@@ -552,6 +553,12 @@ impl CodingAgent {
             plan_store: plan_store.clone(),
             event_tx: agent.event_tx.clone(),
         }));
+        if let Some(session_file) = options.session_file.clone() {
+            registry.register(Box::new(ContextCapability {
+                session_file,
+                work_dir: options.work_dir.clone(),
+            }));
+        }
         registry.register(Box::new(PrewalkCapability));
 
         registry.register(Box::new(WasiCapability {

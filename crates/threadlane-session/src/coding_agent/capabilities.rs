@@ -2,6 +2,7 @@ use super::broker::{
     HostCapabilityHandler, ManagedProcessRegistry, MAX_BROKER_CONTINUATION_ROUNDS,
 };
 use super::cancellation::AgentRunTask;
+use super::context_snapshots::ContextSnapshotToolExecutor;
 use super::scheduler::AgentWorkScheduler;
 use super::subagents::{AgentRunner, MAX_SUBAGENT_TASKS};
 use crate::agents::{discover_agents, AgentScope};
@@ -61,6 +62,24 @@ impl Capability for SubagentCapability {
 pub(crate) struct PlanCapability {
     pub(crate) plan_store: SessionPlanStore,
     pub(crate) event_tx: broadcast::Sender<AgentEvent>,
+}
+
+pub(crate) struct ContextCapability {
+    pub(crate) session_file: PathBuf,
+    pub(crate) work_dir: PathBuf,
+}
+
+impl Capability for ContextCapability {
+    fn id(&self) -> &str {
+        "context"
+    }
+
+    fn tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
+        vec![Arc::new(ContextSnapshotToolExecutor::new(
+            self.session_file.clone(),
+            self.work_dir.clone(),
+        ))]
+    }
 }
 
 pub(crate) struct PrewalkCapability;

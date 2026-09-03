@@ -16,12 +16,13 @@ use threadlane_runtime::compaction::{
 pub use threadlane_runtime::harness::Record as HarnessRecord;
 use threadlane_runtime::harness::{
     AbortInitiator, AbortObservation, AbortTarget, AgentHarness, BoundedText, CapabilitySnapshot,
-    CompactionReason, DeferredResolution, Entry as HarnessEntry, ErrorCategory, HarnessEventHub,
-    HookContext, HookKind, HookRegistry, JsonlStore, OperationOutcome, PromptSnapshot,
-    ProviderErrorSummary, ProviderOutcome, ProvisionedEntry, QueueKind, Reducer, RetryPolicy,
-    SessionIdGenerator, SessionStore, Snapshot, SubagentLifecyclePhase, ToolExecutionOutcome,
-    ToolExecutionPhase, ToolReplaySafety as HarnessToolReplaySafety,
-    ToolResult as HarnessToolResult, ToolSpec, TraceString,
+    CompactionReason, ContextSnapshotLoadOutcome, DeferredResolution, Entry as HarnessEntry,
+    ErrorCategory, HarnessEventHub, HookContext, HookKind, HookRegistry, JsonlStore,
+    OperationOutcome, PromptSnapshot, ProviderErrorSummary, ProviderOutcome, ProvisionedEntry,
+    QueueKind, Reducer, RetryPolicy, SessionIdGenerator, SessionStore, Snapshot,
+    SubagentLifecyclePhase, ToolExecutionOutcome, ToolExecutionPhase,
+    ToolReplaySafety as HarnessToolReplaySafety, ToolResult as HarnessToolResult, ToolSpec,
+    TraceString,
 };
 use threadlane_runtime::model_metadata::{context_budget, ContextBudget};
 use threadlane_runtime::{
@@ -350,6 +351,45 @@ impl CodingSessionHarness {
             .ok()
             .and_then(|state| state.lane(lane).map(|lane| lane.context_snapshots.clone()))
             .unwrap_or_default()
+    }
+
+    pub(crate) fn record_context_snapshot_load_to_path(
+        path: &Path,
+        context_id: &str,
+        source_lane: &str,
+        current_digest: Option<TraceString>,
+        outcome: ContextSnapshotLoadOutcome,
+    ) -> Result<(), String> {
+        Self::with_path(path, |journal| {
+            journal.ensure_fresh()?;
+            let run_id = Reducer::reduce(journal.store.store())
+                .ok()
+                .and_then(|state| {
+                    state
+                        .lane("main")
+                        .and_then(|lane| lane.open_operation.clone())
+                })
+                .unwrap_or_else(|| "context-load".into());
+            let seq = journal.next_seq();
+            journal
+                .store
+                .append_record_gated(HarnessRecord::ContextSnapshotLoaded {
+                    id: format!("context-snapshot-load-{seq}"),
+                    seq,
+                    lane: "main".into(),
+                    timestamp: timestamp(),
+                    run_id,
+                    context_id: context_id.into(),
+                    source_lane: source_lane.into(),
+                    current_digest,
+                    outcome,
+                })
+                .map_err(|error| error.to_string())?;
+            journal
+                .store
+                .drive_to_completion()
+                .map_err(|error| error.to_string())
+        })
     }
 
     pub(crate) fn capture_run_context(
