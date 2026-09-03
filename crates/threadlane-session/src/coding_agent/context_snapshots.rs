@@ -38,7 +38,11 @@ pub(crate) fn read_file_request(arguments: &Value) -> Option<(&str, Option<usize
 }
 
 pub(crate) fn is_local_path(path: &str) -> bool {
-    !path.contains("://")
+    !["http:", "https:", "virtual:", "file:"]
+        .iter()
+        .any(|prefix| {
+            path.len() >= prefix.len() && path[..prefix.len()].eq_ignore_ascii_case(prefix)
+        })
 }
 
 pub(crate) fn file_sha256(path: &Path) -> Result<TraceString, String> {

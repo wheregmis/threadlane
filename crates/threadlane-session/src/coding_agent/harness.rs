@@ -4619,6 +4619,15 @@ mod tests {
                         },
                         thought_signature: None,
                     },
+                    threadlane_provider::openai::ToolCall {
+                        id: "remote".into(),
+                        r#type: "function".into(),
+                        function: threadlane_provider::openai::ToolCallFunction {
+                            name: "read_file".into(),
+                            arguments: r#"{\"path\":\"https:README.md\"}"#.into(),
+                        },
+                        thought_signature: None,
+                    },
                 ]),
                 stop_reason: None,
                 deferred_handle: None,
@@ -4630,6 +4639,7 @@ mod tests {
                 "virtual",
                 serde_json::json!({"path": "virtual://README.md"}),
             ),
+            ("remote", serde_json::json!({"path": "https:README.md"})),
         ] {
             harness
                 .append_tool_intent(&run_id, call_id, "read_file", arguments)
@@ -4654,6 +4664,24 @@ mod tests {
                 terminate: false,
             })
             .unwrap();
+        let remote_entry = harness
+            .append_message(AgentMessage::Tool {
+                tool_call_id: "remote".into(),
+                name: "read_file".into(),
+                content: "body".into(),
+                is_error: false,
+                terminate: false,
+            })
+            .unwrap();
+        let unrecorded_entry = harness
+            .append_message(AgentMessage::Tool {
+                tool_call_id: "unrecorded".into(),
+                name: "read_file".into(),
+                content: "body".into(),
+                is_error: false,
+                terminate: false,
+            })
+            .unwrap();
 
         assert_eq!(
             harness
@@ -4664,6 +4692,18 @@ mod tests {
         assert_eq!(
             harness
                 .index_read_snapshot(&run_id, dir.path(), "virtual", &virtual_entry, 4)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            harness
+                .index_read_snapshot(&run_id, dir.path(), "remote", &remote_entry, 4)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            harness
+                .index_read_snapshot(&run_id, dir.path(), "unrecorded", &unrecorded_entry, 4)
                 .unwrap(),
             None
         );
