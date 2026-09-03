@@ -463,11 +463,6 @@ pub(crate) async fn run_subagents_with_context(
         let lane_agent = task.agent.clone();
         let lane_key = lane_key.clone();
         async move {
-            let context_message = resolve_subagent_context(
-                &task,
-                context.session_file.as_deref(),
-                &context.work_dir,
-            )?;
             let parent_leaf_id = context.parent_leaf_id.clone();
             let lane_hint = format!(
                 "subagent-{}-{}:{task_index}",
@@ -479,6 +474,11 @@ pub(crate) async fn run_subagents_with_context(
                 .acquire_owned()
                 .await
                 .map_err(|_| "Subagent concurrency limiter closed".to_string())?;
+            let context_message = resolve_subagent_context(
+                &task,
+                context.session_file.as_deref(),
+                &context.work_dir,
+            )?;
             let start = match context.session_file.as_deref() {
                 Some(path) => {
                     let mut journal = CodingSessionHarness::open(path)?;
@@ -1209,6 +1209,37 @@ mod result_tests {
         .await
         .unwrap_err()
         .contains("stale"));
+        assert!(!observed.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn queued_child_revalidates_context_after_getting_its_permit() {
+        let (dir, session_file, context_ids) = snapshot_session().await;
+        let observed = Arc::new(AtomicBool::new(false));
+        let observed_for_child = observed.clone();
+        let observer: SubagentBoundaryObserver = Arc::new(move || {
+            observed_for_child.store(true, Ordering::SeqCst);
+        });
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = semaphore.clone().acquire_owned().await.unwrap();
+        let mut context = test_context(dir.path().into(), session_file, Some(observer));
+        context.semaphore = semaphore;
+        let mut child = task("worker");
+        child.context_refs = vec![context_ids[0].clone()];
+
+        let queued = tokio::spawn(run_subagents_with_context(
+            vec![child],
+            false,
+            None,
+            context,
+        ));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!queued.is_finished());
+        std::fs::write(dir.path().join("first.rs"), "changed while queued").unwrap();
+        drop(permit);
+
+        let error = queued.await.unwrap().unwrap_err();
+        assert!(error.contains("stale"), "{error}");
         assert!(!observed.load(Ordering::SeqCst));
     }
 

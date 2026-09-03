@@ -73,8 +73,8 @@ impl ContextSnapshotToolExecutor {
         source_lane: &str,
         current_digest: Option<TraceString>,
         outcome: ContextSnapshotLoadOutcome,
-    ) {
-        if let Err(error) = CodingSessionHarness::record_context_snapshot_load_to_path(
+    ) -> Result<(), String> {
+        CodingSessionHarness::record_context_snapshot_load_to_path(
             &self.session_file,
             context_id,
             source_lane,
@@ -82,16 +82,24 @@ impl ContextSnapshotToolExecutor {
             outcome,
         )
         .await
-        {
-            log::warn!("failed to persist context snapshot load outcome: {error}");
-        }
+        .map_err(|error| format!("Context snapshot telemetry persistence failed: {error}"))
     }
 
-    fn list(&self, path: Option<&str>) -> Result<String, String> {
-        let snapshots = self.snapshots()?;
-        let lines = snapshots
+    fn list(&self, path: Option<&str>, before_context_id: Option<&str>) -> Result<String, String> {
+        let mut snapshots = self
+            .snapshots()?
             .into_iter()
             .filter(|snapshot| path.is_none_or(|path| snapshot.path == path))
+            .collect::<Vec<_>>();
+        if let Some(before_context_id) = before_context_id {
+            let index = snapshots
+                .iter()
+                .position(|snapshot| snapshot.context_id == before_context_id)
+                .ok_or_else(|| format!("Context snapshot cursor missing: {before_context_id}"))?;
+            snapshots.drain(..=index);
+        }
+        let lines = snapshots
+            .into_iter()
             .take(MAX_CONTEXT_LIST_RESULTS)
             .map(|snapshot| snapshot_header(&snapshot, snapshot.file_sha256.as_str()))
             .collect::<Vec<_>>();
@@ -106,13 +114,17 @@ impl ContextSnapshotToolExecutor {
         let snapshot = match self.snapshot(context_id) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                self.record_load(
-                    context_id,
-                    "main",
-                    None,
-                    ContextSnapshotLoadOutcome::Corrupt,
-                )
-                .await;
+                if let Err(telemetry_error) = self
+                    .record_load(
+                        context_id,
+                        "main",
+                        None,
+                        ContextSnapshotLoadOutcome::Corrupt,
+                    )
+                    .await
+                {
+                    return Err(format!("{error}; {telemetry_error}"));
+                }
                 return Err(error);
             }
         };
@@ -128,7 +140,7 @@ impl ContextSnapshotToolExecutor {
                     Some(resolved.snapshot.file_sha256.clone()),
                     ContextSnapshotLoadOutcome::Loaded,
                 )
-                .await;
+                .await?;
                 Ok(format!(
                     "{}\n{}",
                     snapshot_header(&resolved.snapshot, resolved.snapshot.file_sha256.as_str()),
@@ -148,9 +160,13 @@ impl ContextSnapshotToolExecutor {
                         .ok()
                         .and_then(|path| file_sha256(&path).ok())
                 });
-                self.record_load(context_id, source_lane, current_digest, outcome)
-                    .await;
-                Err(error)
+                match self
+                    .record_load(context_id, source_lane, current_digest, outcome)
+                    .await
+                {
+                    Ok(()) => Err(error),
+                    Err(telemetry_error) => Err(format!("{error}; {telemetry_error}")),
+                }
             }
         }
     }
@@ -177,13 +193,25 @@ pub(crate) fn snapshot_location(snapshot: &ContextSnapshot) -> String {
     }
 }
 
-pub(crate) fn compacted_context_snapshot_index(
+pub(crate) fn compacted_context_snapshot_index_for_sources(
     snapshots: &[ContextSnapshot],
+    prioritized_source_entry_ids: &[String],
 ) -> Vec<serde_json::Value> {
+    let prioritized = prioritized_source_entry_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::HashSet<_>>();
     let mut index = Vec::new();
     for snapshot in snapshots
         .iter()
         .rev()
+        .filter(|snapshot| prioritized.contains(snapshot.source_entry_id.as_str()))
+        .chain(
+            snapshots
+                .iter()
+                .rev()
+                .filter(|snapshot| !prioritized.contains(snapshot.source_entry_id.as_str())),
+        )
         .take(threadlane_runtime::compaction::MAX_CONTEXT_SNAPSHOT_INDEX_ENTRIES)
     {
         index.push(serde_json::json!({
@@ -218,7 +246,8 @@ impl ToolExecutor for ContextSnapshotToolExecutor {
                 "properties": {
                     "action": {"type": "string", "enum": ["list", "load"]},
                     "context_id": {"type": "string"},
-                    "path": {"type": "string"}
+                    "path": {"type": "string"},
+                    "before_context_id": {"type": "string", "description": "For list pagination, return snapshots older than this context ID."}
                 },
                 "required": ["action"],
                 "additionalProperties": false
@@ -240,10 +269,12 @@ impl ToolExecutor for ContextSnapshotToolExecutor {
                 "Invalid manage_context arguments: expected an object".into()
             ));
         };
-        if arguments
-            .keys()
-            .any(|key| !matches!(key.as_str(), "action" | "context_id" | "path"))
-        {
+        if arguments.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "action" | "context_id" | "path" | "before_context_id"
+            )
+        }) {
             return Some(Err(
                 "Invalid manage_context arguments: unexpected property".into()
             ));
@@ -254,11 +285,27 @@ impl ToolExecutor for ContextSnapshotToolExecutor {
             ));
         };
         Some(match action {
-            "list" => match arguments.get("path") {
-                None => self.list(None),
-                Some(Value::String(path)) => self.list(Some(path)),
-                Some(_) => Err("Invalid manage_context arguments: path must be a string".into()),
-            },
+            "list" => {
+                let path = match arguments.get("path") {
+                    None => None,
+                    Some(Value::String(path)) => Some(path.as_str()),
+                    Some(_) => {
+                        return Some(Err(
+                            "Invalid manage_context arguments: path must be a string".into(),
+                        ))
+                    }
+                };
+                let before_context_id =
+                    match arguments.get("before_context_id") {
+                        None => None,
+                        Some(Value::String(context_id)) => Some(context_id.as_str()),
+                        Some(_) => return Some(Err(
+                            "Invalid manage_context arguments: before_context_id must be a string"
+                                .into(),
+                        )),
+                    };
+                self.list(path, before_context_id)
+            }
             "load" => match arguments.get("context_id").and_then(Value::as_str) {
                 Some(context_id) if !context_id.is_empty() => self.load(context_id).await,
                 _ => Err("Invalid manage_context arguments: context_id is required".into()),
@@ -328,6 +375,61 @@ pub(crate) fn resolve_context_snapshot(
                 format!("Context snapshot missing: {context_id}")
             }
         })?;
+    let corrupt = || format!("Context snapshot corrupt: {}", snapshot.context_id);
+    if snapshot.context_id != format!("ctx-{}", snapshot.source_entry_id) {
+        return Err(corrupt());
+    }
+    let source_intent_matches = store.records().iter().any(|record| {
+        matches!(
+            record,
+            Record::ToolStarted {
+                lane,
+                run_id,
+                tool_call_id,
+                tool_name,
+                effective_args,
+                result_entry_id,
+                ..
+            } if lane == &snapshot.source_lane
+                && run_id == &snapshot.source_run_id
+                && tool_call_id == &snapshot.source_tool_call_id
+                && tool_name == "read_file"
+                && result_entry_id == &snapshot.source_entry_id
+                && read_file_request(effective_args).is_some_and(|(_, start, end)| {
+                    start == snapshot.start_line && end == snapshot.end_line
+                })
+        )
+    });
+    if !source_intent_matches {
+        return Err(corrupt());
+    }
+    let entry = store
+        .entries()
+        .iter()
+        .find(|entry| entry.id == snapshot.source_entry_id)
+        .ok_or_else(&corrupt)?;
+    if entry.lane != snapshot.source_lane {
+        return Err(corrupt());
+    }
+    let AgentMessage::Tool {
+        tool_call_id,
+        name,
+        content,
+        is_error: false,
+        ..
+    } = &entry.message
+    else {
+        return Err(corrupt());
+    };
+    if tool_call_id != &snapshot.source_tool_call_id
+        || name != "read_file"
+        || threadlane_tools::read_file_snapshot_digest(content)
+            != Some(snapshot.file_sha256.as_str())
+        || threadlane_tools::read_file_snapshot_path(content).as_deref()
+            != Some(snapshot.path.as_str())
+    {
+        return Err(corrupt());
+    }
     let path = threadlane_tools::validate_path_in_workspace(&snapshot.path, work_dir)
         .map_err(|error| format!("Context snapshot corrupt: {error}"))?;
     let location = snapshot_location(&snapshot);
@@ -341,27 +443,6 @@ pub(crate) fn resolve_context_snapshot(
             "Context snapshot stale: {location}; call read_file for current content"
         ));
     }
-    let entry = store
-        .entries()
-        .iter()
-        .find(|entry| entry.id == snapshot.source_entry_id)
-        .ok_or_else(|| format!("Context snapshot corrupt: {}", snapshot.context_id))?;
-    if entry.lane != snapshot.source_lane {
-        return Err(format!("Context snapshot corrupt: {}", snapshot.context_id));
-    }
-    let AgentMessage::Tool {
-        tool_call_id,
-        name,
-        content,
-        is_error: false,
-        ..
-    } = &entry.message
-    else {
-        return Err(format!("Context snapshot corrupt: {}", snapshot.context_id));
-    };
-    if tool_call_id != &snapshot.source_tool_call_id || name != "read_file" {
-        return Err(format!("Context snapshot corrupt: {}", snapshot.context_id));
-    }
     Ok(ResolvedContextSnapshot {
         snapshot,
         content: content.clone(),
@@ -371,7 +452,7 @@ pub(crate) fn resolve_context_snapshot(
 #[cfg(test)]
 mod tests {
     use super::{
-        compacted_context_snapshot_index, is_local_path, ContextSnapshotLoadOutcome,
+        compacted_context_snapshot_index_for_sources, is_local_path, ContextSnapshotLoadOutcome,
         ContextSnapshotToolExecutor, JsonlStore, Record, Reducer, MAX_CONTEXT_LIST_RESULTS,
     };
     use crate::coding_agent::harness::CodingSessionHarness;
@@ -436,6 +517,28 @@ mod tests {
         (dir, path, context_id)
     }
 
+    fn rewrite_snapshot(
+        session_file: &std::path::Path,
+        context_id: &str,
+        rewrite: impl FnOnce(&mut serde_json::Value),
+    ) {
+        let mut rewrite = Some(rewrite);
+        let session = std::fs::read_to_string(session_file).unwrap();
+        let lines = session
+            .lines()
+            .map(|line| {
+                let mut value: serde_json::Value = serde_json::from_str(line).unwrap();
+                if value["ContextSnapshotIndexed"]["snapshot"]["context_id"] == context_id {
+                    rewrite.take().unwrap()(&mut value["ContextSnapshotIndexed"]["snapshot"]);
+                }
+                serde_json::to_string(&value).unwrap()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rewrite.is_none(), "snapshot record was not found");
+        std::fs::write(session_file, format!("{lines}\n")).unwrap();
+    }
+
     #[tokio::test]
     async fn compacted_context_snapshot_index_keeps_metadata_not_body() {
         let (dir, session_file, context_id) = snapshot_session().await;
@@ -445,7 +548,7 @@ mod tests {
             .pop()
             .unwrap();
 
-        let index = compacted_context_snapshot_index(&[snapshot]);
+        let index = compacted_context_snapshot_index_for_sources(&[snapshot], &[]);
 
         let value = serde_json::to_value(&index).unwrap();
         let entries = value.as_array().expect("structured snapshot index");
@@ -474,10 +577,93 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let index = compacted_context_snapshot_index(&snapshots);
+        let index = compacted_context_snapshot_index_for_sources(&snapshots, &[]);
         let value = serde_json::to_value(&index).unwrap();
         assert!(value.as_array().expect("structured snapshot index").len() <= 20);
         assert!(value.to_string().chars().count() <= 4_000);
+    }
+
+    #[tokio::test]
+    async fn compacted_context_snapshot_index_prioritizes_sources_dropped_now() {
+        let (dir, session_file, context_id) = snapshot_session().await;
+        let source = super::resolve_context_snapshot(&session_file, dir.path(), &context_id)
+            .unwrap()
+            .snapshot;
+        let snapshots = (0..=MAX_CONTEXT_LIST_RESULTS)
+            .map(|index| {
+                let mut snapshot = source.clone();
+                snapshot.context_id = format!("ctx-{index}");
+                snapshot.source_entry_id = format!("source-{index}");
+                snapshot
+            })
+            .collect::<Vec<_>>();
+
+        let index = compacted_context_snapshot_index_for_sources(
+            &snapshots,
+            &[snapshots[0].source_entry_id.clone()],
+        );
+
+        assert_eq!(index.len(), MAX_CONTEXT_LIST_RESULTS);
+        assert!(index.iter().any(|item| item["context_id"] == "ctx-0"));
+        assert!(!index.iter().any(|item| item["context_id"] == "ctx-1"));
+    }
+
+    #[tokio::test]
+    async fn harness_compaction_index_prioritizes_the_source_leaving_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_file = dir.path().join("session.jsonl");
+        let mut harness = CodingSessionHarness::open(&session_file).unwrap();
+        let run_id = harness.unique_run_id("snapshot-priority").unwrap();
+        harness
+            .begin_run(&run_id, AgentMessage::user("inspect", vec![]))
+            .unwrap();
+        for index in 0..=MAX_CONTEXT_LIST_RESULTS {
+            let tool_call_id = format!("read-{index}");
+            let source_entry_id = harness
+                .append_message(AgentMessage::Tool {
+                    tool_call_id: tool_call_id.clone(),
+                    name: "read_file".into(),
+                    content: format!("body-{index}"),
+                    is_error: false,
+                    terminate: false,
+                })
+                .unwrap();
+            harness
+                .store
+                .append_record_gated(Record::ContextSnapshotIndexed {
+                    id: format!("index-{index}"),
+                    seq: harness.store.store().next_sequence(),
+                    lane: "main".into(),
+                    timestamp: index as u64,
+                    run_id: run_id.clone(),
+                    snapshot: threadlane_runtime::harness::ContextSnapshot {
+                        context_id: format!("ctx-{source_entry_id}"),
+                        source_lane: "main".into(),
+                        source_run_id: run_id.clone(),
+                        source_tool_call_id: tool_call_id,
+                        source_entry_id,
+                        path: "README.md".into(),
+                        start_line: None,
+                        end_line: None,
+                        file_sha256: threadlane_runtime::harness::TraceString::new("a".repeat(64))
+                            .unwrap(),
+                        output_chars: 6,
+                        captured_at: index as u64,
+                    },
+                })
+                .unwrap();
+            harness.store.drive_to_completion().unwrap();
+        }
+
+        let index = harness.context_snapshot_index_for_compaction(2).unwrap();
+
+        assert_eq!(index.len(), MAX_CONTEXT_LIST_RESULTS);
+        assert!(index
+            .iter()
+            .any(|item| item["context_id"] == "ctx-v2-tool-result-read-0"));
+        assert!(!index
+            .iter()
+            .any(|item| item["context_id"] == "ctx-v2-tool-result-read-1"));
     }
 
     #[test]
@@ -513,7 +699,7 @@ mod tests {
             )
         );
         assert_eq!(
-            compacted_context_snapshot_index(&[snapshot])[0]["path"],
+            compacted_context_snapshot_index_for_sources(&[snapshot], &[])[0]["path"],
             "README.md"
         );
     }
@@ -581,6 +767,50 @@ mod tests {
         assert!(stale.contains("README.md:1-1"), "{stale}");
         assert!(stale.contains("call read_file"), "{stale}");
         assert!(!stale.contains("snapshot body"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn parallel_context_loads_each_persist_a_unique_success_record() {
+        const LOADS: usize = 32;
+        let (dir, session_file, context_id) = snapshot_session().await;
+        let executor = std::sync::Arc::new(ContextSnapshotToolExecutor::new(
+            session_file.clone(),
+            dir.path().into(),
+        ));
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(LOADS));
+        let mut tasks = Vec::new();
+        for _ in 0..LOADS {
+            let executor = executor.clone();
+            let barrier = barrier.clone();
+            let load_args =
+                serde_json::json!({"action": "load", "context_id": context_id}).to_string();
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                executor
+                    .execute_tool("manage_context", &load_args)
+                    .await
+                    .unwrap()
+                    .unwrap()
+            }));
+        }
+        for task in tasks {
+            assert!(task.await.unwrap().contains("snapshot body"));
+        }
+
+        let store = JsonlStore::open(&session_file).unwrap();
+        let ids = store
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                Record::ContextSnapshotLoaded {
+                    id,
+                    outcome: ContextSnapshotLoadOutcome::Loaded,
+                    ..
+                } => Some(id),
+                _ => None,
+            })
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(ids.len(), LOADS);
     }
 
     #[tokio::test]
@@ -694,6 +924,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn manage_context_rejects_a_context_id_relabelled_onto_another_source() {
+        let (dir, session_file, context_id) = snapshot_session().await;
+        let forged_id = "ctx-forged";
+        rewrite_snapshot(&session_file, &context_id, |snapshot| {
+            snapshot["context_id"] = forged_id.into();
+        });
+        let executor = ContextSnapshotToolExecutor::new(session_file, dir.path().into());
+
+        let result = executor
+            .execute_tool(
+                "manage_context",
+                &serde_json::json!({"action": "load", "context_id": forged_id}).to_string(),
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+
+        assert!(result.starts_with("Context snapshot corrupt:"), "{result}");
+        assert!(!result.contains("snapshot body"));
+    }
+
+    #[tokio::test]
+    async fn manage_context_rejects_snapshot_metadata_that_disagrees_with_source_output() {
+        let (dir, session_file, context_id) = snapshot_session().await;
+        std::fs::write(dir.path().join("other.rs"), "other body").unwrap();
+        let other_digest = super::file_sha256(&dir.path().join("other.rs")).unwrap();
+        rewrite_snapshot(&session_file, &context_id, |snapshot| {
+            snapshot["path"] = "other.rs".into();
+            snapshot["file_sha256"] = other_digest.as_str().into();
+        });
+        let executor = ContextSnapshotToolExecutor::new(session_file, dir.path().into());
+
+        let result = executor
+            .execute_tool(
+                "manage_context",
+                &serde_json::json!({"action": "load", "context_id": context_id}).to_string(),
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+
+        assert!(result.starts_with("Context snapshot corrupt:"), "{result}");
+        assert!(!result.contains("snapshot body"));
+    }
+
+    #[tokio::test]
+    async fn manage_context_rejects_snapshot_range_that_disagrees_with_durable_intent() {
+        let (dir, session_file, context_id) = snapshot_session().await;
+        rewrite_snapshot(&session_file, &context_id, |snapshot| {
+            snapshot["start_line"] = 2.into();
+            snapshot["end_line"] = 2.into();
+        });
+        let executor = ContextSnapshotToolExecutor::new(session_file, dir.path().into());
+
+        let result = executor
+            .execute_tool(
+                "manage_context",
+                &serde_json::json!({"action": "load", "context_id": context_id}).to_string(),
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+
+        assert!(result.starts_with("Context snapshot corrupt:"), "{result}");
+        assert!(!result.contains("snapshot body"));
+    }
+
+    #[tokio::test]
     async fn manage_context_rejects_a_snapshot_with_a_missing_source_entry() {
         let (dir, session_file, context_id) = snapshot_session().await;
         let executor = ContextSnapshotToolExecutor::new(session_file.clone(), dir.path().into());
@@ -772,5 +1070,16 @@ mod tests {
         assert!(listed.starts_with("[Context snapshot ctx-extra-19"));
         assert!(listed.contains("ctx-extra-0"));
         assert!(!listed.contains(&context_id));
+
+        let older = executor
+            .execute_tool(
+                "manage_context",
+                r#"{"action":"list","path":"README.md","before_context_id":"ctx-extra-0"}"#,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(older.lines().count(), 1);
+        assert!(older.contains(&context_id));
     }
 }

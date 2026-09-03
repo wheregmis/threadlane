@@ -10,7 +10,7 @@ use super::{
 };
 use crate::types::{AgentMessage, TokenUsage};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// A stable pointer to an entry or record in the session journal.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -70,12 +70,30 @@ pub struct ContextManifestTrajectory {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextSnapshotCaptureTrajectory {
+    pub seq: u64,
+    pub context_id: String,
+    pub source_lane: String,
+    pub source_run_id: String,
+    pub source_tool_call_id: String,
+    pub source_entry_id: String,
+    pub path: String,
+    pub start_line: Option<usize>,
+    pub end_line: Option<usize>,
+    pub file_sha256: String,
+    pub output_chars: usize,
+    pub captured_at: u64,
+    pub duplicate_candidate: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextSnapshotLoadTrajectory {
     pub seq: u64,
     pub context_id: String,
     pub source_lane: String,
     pub requesting_lane: String,
-    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     pub start_line: Option<usize>,
     pub end_line: Option<usize>,
     pub outcome: super::ContextSnapshotLoadOutcome,
@@ -211,6 +229,7 @@ pub struct DiagnosticAnomaly {
 pub enum TrajectoryItem {
     Request(RequestTrajectory),
     ContextManifest(ContextManifestTrajectory),
+    ContextSnapshotCapture(ContextSnapshotCaptureTrajectory),
     ContextSnapshotLoad(ContextSnapshotLoadTrajectory),
     Provider(ProviderTrajectory),
     Tool(ToolTrajectory),
@@ -225,6 +244,7 @@ impl TrajectoryItem {
         match self {
             Self::Request(r) => r.started_seq,
             Self::ContextManifest(c) => c.seq,
+            Self::ContextSnapshotCapture(c) => c.seq,
             Self::ContextSnapshotLoad(c) => c.seq,
             Self::Provider(p) => p.started_seq,
             Self::Tool(t) => t.started_seq,
@@ -289,7 +309,7 @@ pub fn project_trajectory<S: SessionStore>(store: &S) -> SessionTrajectory {
     let mut permissions_by_req_id: HashMap<String, PermissionTrajectory> = HashMap::new();
     let mut context_snapshots_by_id = HashMap::new();
     let mut duplicate_candidate_by_context_id = HashMap::new();
-    let mut latest_snapshot_digest_by_location = HashMap::new();
+    let mut seen_snapshot_captures = HashSet::new();
 
     let mut requests: Vec<RequestTrajectory> = Vec::new();
     let mut current_request: Option<RequestTrajectory> = None;
@@ -507,22 +527,36 @@ pub fn project_trajectory<S: SessionStore>(store: &S) -> SessionTrajectory {
                         context_manifests_by_req_id
                             .insert(request_id.as_str().to_owned(), manifest);
                     }
-                    Record::ContextSnapshotIndexed { snapshot, .. } => {
-                        let location = (
+                    Record::ContextSnapshotIndexed { seq, snapshot, .. } => {
+                        let capture = (
                             snapshot.source_lane.clone(),
                             snapshot.path.clone(),
                             snapshot.start_line,
                             snapshot.end_line,
+                            snapshot.file_sha256.as_str().to_owned(),
                         );
-                        let duplicate_candidate = latest_snapshot_digest_by_location
-                            .get(&location)
-                            .is_some_and(|previous| previous == &snapshot.file_sha256);
-                        latest_snapshot_digest_by_location
-                            .insert(location, snapshot.file_sha256.clone());
+                        let duplicate_candidate = !seen_snapshot_captures.insert(capture);
                         duplicate_candidate_by_context_id
                             .insert(snapshot.context_id.clone(), duplicate_candidate);
                         context_snapshots_by_id
                             .insert(snapshot.context_id.clone(), snapshot.clone());
+                        items.push(TrajectoryItem::ContextSnapshotCapture(
+                            ContextSnapshotCaptureTrajectory {
+                                seq: *seq,
+                                context_id: snapshot.context_id.clone(),
+                                source_lane: snapshot.source_lane.clone(),
+                                source_run_id: snapshot.source_run_id.clone(),
+                                source_tool_call_id: snapshot.source_tool_call_id.clone(),
+                                source_entry_id: snapshot.source_entry_id.clone(),
+                                path: snapshot.path.clone(),
+                                start_line: snapshot.start_line,
+                                end_line: snapshot.end_line,
+                                file_sha256: snapshot.file_sha256.as_str().to_owned(),
+                                output_chars: snapshot.output_chars,
+                                captured_at: snapshot.captured_at,
+                                duplicate_candidate,
+                            },
+                        ));
                     }
                     Record::ContextSnapshotLoaded {
                         seq,
@@ -531,24 +565,23 @@ pub fn project_trajectory<S: SessionStore>(store: &S) -> SessionTrajectory {
                         outcome,
                         ..
                     } => {
-                        if let Some(snapshot) = context_snapshots_by_id.get(context_id) {
-                            items.push(TrajectoryItem::ContextSnapshotLoad(
-                                ContextSnapshotLoadTrajectory {
-                                    seq: *seq,
-                                    context_id: context_id.clone(),
-                                    source_lane: source_lane.clone(),
-                                    requesting_lane: lane.clone(),
-                                    path: snapshot.path.clone(),
-                                    start_line: snapshot.start_line,
-                                    end_line: snapshot.end_line,
-                                    outcome: outcome.clone(),
-                                    duplicate_candidate: duplicate_candidate_by_context_id
-                                        .get(context_id)
-                                        .copied()
-                                        .unwrap_or(false),
-                                },
-                            ));
-                        }
+                        let snapshot = context_snapshots_by_id.get(context_id);
+                        items.push(TrajectoryItem::ContextSnapshotLoad(
+                            ContextSnapshotLoadTrajectory {
+                                seq: *seq,
+                                context_id: context_id.clone(),
+                                source_lane: source_lane.clone(),
+                                requesting_lane: lane.clone(),
+                                path: snapshot.map(|snapshot| snapshot.path.clone()),
+                                start_line: snapshot.and_then(|snapshot| snapshot.start_line),
+                                end_line: snapshot.and_then(|snapshot| snapshot.end_line),
+                                outcome: *outcome,
+                                duplicate_candidate: duplicate_candidate_by_context_id
+                                    .get(context_id)
+                                    .copied()
+                                    .unwrap_or(false),
+                            },
+                        ));
                     }
                     Record::ProviderRequestStarted {
                         seq,
@@ -1269,7 +1302,7 @@ mod tests {
     }
 
     #[test]
-    fn context_snapshot_duplicates_follow_capture_order_not_load_order() {
+    fn context_snapshot_trajectory_reports_captures_repeats_and_unknown_loads() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.jsonl");
         let mut store = JsonlStore::open(&path).unwrap();
@@ -1278,8 +1311,8 @@ mod tests {
 
         for (context_id, tool_call_id, digest) in [
             ("ctx-z", "call-z", digest_a.clone()),
-            ("ctx-a", "call-a", digest_a.clone()),
             ("ctx-b", "call-b", digest_b.clone()),
+            ("ctx-a", "call-a", digest_a.clone()),
         ] {
             let entry_id = format!("result-{context_id}");
             store
@@ -1343,10 +1376,48 @@ mod tests {
                 })
                 .unwrap();
         }
+        let seq = store.next_sequence();
+        store
+            .append_record(Record::ContextSnapshotLoaded {
+                id: "load-ctx-unknown".into(),
+                seq,
+                lane: "child".into(),
+                timestamp: seq,
+                run_id: "run-1".into(),
+                context_id: "ctx-unknown".into(),
+                source_lane: "main".into(),
+                current_digest: None,
+                outcome: crate::harness::ContextSnapshotLoadOutcome::Missing,
+            })
+            .unwrap();
 
-        let loads: Vec<_> = project_trajectory(&store)
+        let trajectory = project_trajectory(&store);
+        let captures: Vec<_> = trajectory
             .items
-            .into_iter()
+            .iter()
+            .filter_map(|item| match item {
+                TrajectoryItem::ContextSnapshotCapture(capture) => Some(capture),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            captures
+                .iter()
+                .map(|capture| capture.context_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ctx-z", "ctx-b", "ctx-a"]
+        );
+        assert_eq!(
+            captures
+                .iter()
+                .map(|capture| capture.duplicate_candidate)
+                .collect::<Vec<_>>(),
+            vec![false, false, true]
+        );
+
+        let loads: Vec<_> = trajectory
+            .items
+            .iter()
             .filter_map(|item| match item {
                 TrajectoryItem::ContextSnapshotLoad(load) => Some(load),
                 _ => None,
@@ -1358,16 +1429,19 @@ mod tests {
                 .iter()
                 .map(|load| load.context_id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["ctx-a", "ctx-z", "ctx-b"]
+            vec!["ctx-a", "ctx-z", "ctx-b", "ctx-unknown"]
         );
         assert_eq!(
             loads
                 .iter()
                 .map(|load| load.duplicate_candidate)
                 .collect::<Vec<_>>(),
-            vec![true, false, false]
+            vec![true, false, false, false]
         );
-        assert!(loads.iter().all(|load| load.path == "src/lib.rs"));
+        assert!(loads[..3]
+            .iter()
+            .all(|load| load.path.as_deref() == Some("src/lib.rs")));
+        assert_eq!(loads[3].path, None);
     }
 
     #[test]

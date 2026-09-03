@@ -789,9 +789,8 @@ impl CodingAgent {
         if let Some(journal) = self.harness.as_mut() {
             journal.ensure_fresh()?;
             let run_id = journal.unique_run_id("foreground-compaction")?;
-            let context_snapshot_index = super::context_snapshots::compacted_context_snapshot_index(
-                &journal.context_snapshots("main"),
-            );
+            let context_snapshot_index =
+                journal.context_snapshot_index_for_compaction(compacted_messages)?;
             journal
                 .store
                 .accept_compaction(&run_id, summary, &context_snapshot_index)

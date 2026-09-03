@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -9,7 +9,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::context_snapshots::{
-    compacted_context_snapshot_index, is_local_path, read_file_request,
+    compacted_context_snapshot_index_for_sources, is_local_path, read_file_request,
 };
 use crate::permission::PermissionTraceEvent;
 use threadlane_runtime::compaction::{
@@ -38,6 +38,7 @@ use threadlane_runtime::harness::{EventError, HarnessEvent, OperationIntent, Sub
 #[cfg(test)]
 static LAST_PATH_OPERATION_THREAD: std::sync::Mutex<Option<std::thread::ThreadId>> =
     std::sync::Mutex::new(None);
+static NEXT_CONTEXT_SNAPSHOT_LOAD_ID: AtomicU64 = AtomicU64::new(1);
 
 #[cfg(test)]
 fn last_path_operation_thread() -> Option<std::thread::ThreadId> {
@@ -391,10 +392,16 @@ impl CodingSessionHarness {
                     })
                     .unwrap_or_else(|| "context-load".into());
                 let seq = journal.next_seq();
+                let record_id = format!(
+                    "context-snapshot-load-{}-{}-{}",
+                    std::process::id(),
+                    timestamp(),
+                    NEXT_CONTEXT_SNAPSHOT_LOAD_ID.fetch_add(1, Ordering::Relaxed),
+                );
                 journal
                     .store
                     .append_record_gated(HarnessRecord::ContextSnapshotLoaded {
-                        id: format!("context-snapshot-load-{seq}"),
+                        id: record_id,
                         seq,
                         lane: "main".into(),
                         timestamp: timestamp(),
@@ -629,6 +636,24 @@ impl CodingSessionHarness {
         )
     }
 
+    pub(crate) fn context_snapshot_index_for_compaction(
+        &self,
+        compacted_messages: usize,
+    ) -> Result<Vec<Value>, String> {
+        let dropped_source_entry_ids = self
+            .model_context("main")?
+            .entries
+            .into_iter()
+            .filter(|entry| !matches!(entry.message, AgentMessage::System { .. }))
+            .take(compacted_messages)
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>();
+        Ok(compacted_context_snapshot_index_for_sources(
+            &self.context_snapshots("main"),
+            &dropped_source_entry_ids,
+        ))
+    }
+
     pub(crate) fn checkpoint_open_run_compaction(
         &mut self,
         run_id: &str,
@@ -675,7 +700,7 @@ impl CodingSessionHarness {
                 config,
             )?;
             let context_snapshot_index =
-                compacted_context_snapshot_index(&self.context_snapshots("main"));
+                self.context_snapshot_index_for_compaction(prepared.compacted_messages)?;
             let mut messages = prepared.messages.clone();
             let Some(AgentMessage::Custom { payload, .. }) = messages
                 .iter_mut()
