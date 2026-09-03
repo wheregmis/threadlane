@@ -542,6 +542,7 @@ impl<S: SessionStore> AgentHarness<S> {
         lane: &str,
         run_id: &str,
         summary: &str,
+        context_snapshot_index: &[serde_json::Value],
         reason: super::CompactionReason,
     ) -> Result<(), ProcedureError> {
         CompactionProcedure::checkpoint_open_run(
@@ -549,6 +550,7 @@ impl<S: SessionStore> AgentHarness<S> {
             lane,
             run_id,
             summary,
+            context_snapshot_index,
             reason,
             &mut self.effects,
         )

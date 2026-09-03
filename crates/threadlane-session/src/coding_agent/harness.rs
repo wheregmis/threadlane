@@ -9,8 +9,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::context_snapshots::{
-    is_local_path, read_file_request, render_compacted_context_index,
-    strip_compacted_context_indexes,
+    compacted_context_snapshot_index, is_local_path, read_file_request,
 };
 use crate::permission::PermissionTraceEvent;
 use threadlane_runtime::compaction::{
@@ -606,7 +605,7 @@ impl CodingSessionHarness {
         summary: &str,
         reason: CompactionReason,
     ) -> Result<(), String> {
-        self.stage_open_run_compaction(run_id, summary, reason)?;
+        self.stage_open_run_compaction(run_id, summary, &[], reason)?;
         self.store
             .drive_to_completion()
             .map_err(|error| error.to_string())
@@ -616,10 +615,11 @@ impl CodingSessionHarness {
         &mut self,
         run_id: &str,
         summary: &str,
+        context_snapshot_index: &[Value],
         reason: CompactionReason,
     ) -> Result<(), String> {
         self.store
-            .checkpoint_open_run_compaction("main", run_id, summary, reason)
+            .checkpoint_open_run_compaction("main", run_id, summary, context_snapshot_index, reason)
             .map_err(|error| error.to_string())
     }
 
@@ -639,16 +639,9 @@ impl CodingSessionHarness {
                 .iter()
                 .find_map(threadlane_runtime::compaction_summary_text)
                 .ok_or_else(|| "context preparation produced no durable summary".to_string())?;
-            let snapshots = self.context_snapshots("main");
-            let summary = strip_compacted_context_indexes(summary);
-            let summary = if snapshots.is_empty() {
-                summary
-            } else {
-                format!(
-                    "{summary}\n\n{}",
-                    render_compacted_context_index(&snapshots)
-                )
-            };
+            let summary = summary.to_owned();
+            let context_snapshot_index =
+                compacted_context_snapshot_index(&self.context_snapshots("main"));
             let mut messages = prepared.messages.clone();
             let Some(AgentMessage::Custom { payload, .. }) = messages
                 .iter_mut()
@@ -657,9 +650,15 @@ impl CodingSessionHarness {
                 return Err("context preparation produced no durable summary".into());
             };
             payload["summary"] = Value::String(summary.clone());
+            payload["context_snapshot_index"] = Value::Array(context_snapshot_index.clone());
             let first_seq = self.next_seq();
             let summary_id = format!("compaction-{parent_run_id}-{first_seq}-summary");
-            self.stage_open_run_compaction(parent_run_id, &summary, reason)?;
+            self.stage_open_run_compaction(
+                parent_run_id,
+                &summary,
+                &context_snapshot_index,
+                reason,
+            )?;
 
             let retained = super::durable::compaction_retained_tail(&messages);
             let mut parent_id = summary_id;
@@ -3660,9 +3659,17 @@ mod tests {
             .begin_run("run-compact", AgentMessage::user("old", vec![]))
             .unwrap();
         let repeated = AgentMessage::user("repeat", vec![]);
+        let summary_text = concat!(
+            "before\n",
+            "<!-- threadlane:context-snapshots:index:begin -->\n",
+            "## Available context snapshots\n",
+            "- user-authored marker-looking content\n",
+            "<!-- threadlane:context-snapshots:index:end -->\n",
+            "after",
+        );
         let summary = AgentMessage::Custom {
             custom_type: "compaction_summary".into(),
-            payload: serde_json::json!({ "summary": "summary" }),
+            payload: serde_json::json!({ "summary": summary_text }),
         };
         harness
             .commit_prepared_compaction(
@@ -3685,6 +3692,10 @@ mod tests {
 
         let context = harness.model_context("main").unwrap().messages();
         assert_eq!(context.len(), 3);
+        assert_eq!(
+            threadlane_runtime::compaction_summary_text(&context[0]),
+            Some(summary_text)
+        );
         assert_eq!(context[1], repeated);
         assert_eq!(context[2], repeated);
         let compacted = harness
@@ -4899,13 +4910,30 @@ mod tests {
             .unwrap();
 
         let compacted_messages = harness.model_context("main").unwrap().messages();
-        let checkpoint = compacted_messages
+        let checkpoint_message = compacted_messages
             .iter()
-            .find_map(threadlane_runtime::compaction_summary_text)
+            .find(|message| threadlane_runtime::compaction_summary_text(message).is_some())
             .unwrap();
-        assert!(checkpoint.contains(&context_id));
-        assert!(checkpoint.contains("README.md:1-1 sha256="));
+        let checkpoint = threadlane_runtime::compaction_summary_text(checkpoint_message).unwrap();
+        assert!(!checkpoint.contains(&context_id));
+        assert!(!checkpoint.contains("README.md:1-1 sha256="));
         assert!(!checkpoint.contains("snapshot body"));
+        let AgentMessage::Custom { payload, .. } = checkpoint_message else {
+            unreachable!();
+        };
+        let index = payload["context_snapshot_index"]
+            .as_array()
+            .expect("structured snapshot index");
+        assert_eq!(index.len(), 1);
+        assert_eq!(index[0]["context_id"], context_id);
+        let provider_checkpoint =
+            threadlane_runtime::convert_to_llm(std::slice::from_ref(checkpoint_message))[0]
+                ["content"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+        assert!(provider_checkpoint.contains(&context_id));
+        assert!(provider_checkpoint.contains("README.md:1-1 sha256="));
         assert!(!compacted_messages
             .iter()
             .any(|message| matches!(message, AgentMessage::Tool { content, .. } if content == "snapshot body")));
@@ -4954,28 +4982,36 @@ mod tests {
                 prepared,
             )
             .unwrap();
-        let checkpoint = harness
+        let checkpoint_message = harness
             .model_context("main")
             .unwrap()
             .messages()
             .into_iter()
-            .find_map(|message| {
-                threadlane_runtime::compaction_summary_text(&message).map(str::to_owned)
-            })
+            .find(|message| threadlane_runtime::compaction_summary_text(message).is_some())
             .unwrap();
-        assert!(checkpoint.contains(&context_id), "{checkpoint}");
-        let heading = "## Available context snapshots";
-        assert_eq!(checkpoint.matches(heading).count(), 1, "{checkpoint}");
-        let index_begin = "<!-- threadlane:context-snapshots:index:begin -->";
-        let index_end = "<!-- threadlane:context-snapshots:index:end -->";
-        assert_eq!(checkpoint.matches(index_begin).count(), 1, "{checkpoint}");
-        assert_eq!(checkpoint.matches(index_end).count(), 1, "{checkpoint}");
-        assert!(
-            checkpoint[checkpoint.rfind(index_begin).unwrap()..]
-                .chars()
-                .count()
-                <= super::super::context_snapshots::MAX_COMPACTED_CONTEXT_INDEX_CHARS,
-            "{checkpoint}"
+        let checkpoint = threadlane_runtime::compaction_summary_text(&checkpoint_message).unwrap();
+        assert!(!checkpoint.contains(&context_id), "{checkpoint}");
+        let AgentMessage::Custom { payload, .. } = &checkpoint_message else {
+            unreachable!();
+        };
+        assert_eq!(
+            payload["context_snapshot_index"]
+                .as_array()
+                .expect("structured snapshot index")
+                .len(),
+            1
+        );
+        let provider_checkpoint = threadlane_runtime::convert_to_llm(&[checkpoint_message])[0]
+            ["content"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(provider_checkpoint.matches(&context_id).count(), 1);
+        assert_eq!(
+            provider_checkpoint
+                .matches("## Available context snapshots")
+                .count(),
+            1
         );
     }
 

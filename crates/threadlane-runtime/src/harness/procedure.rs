@@ -997,6 +997,7 @@ impl CompactionProcedure {
         lane_name: &str,
         run_id: &str,
         summary: &str,
+        context_snapshot_index: &[serde_json::Value],
         reason: CompactionReason,
         effects: &mut GatedEffects,
     ) -> Result<(), ProcedureError> {
@@ -1032,6 +1033,7 @@ impl CompactionProcedure {
                         "summary": summary,
                         "checkpoint_kind": reason.as_str(),
                         "source_leaf_id": source_leaf_id,
+                        "context_snapshot_index": context_snapshot_index,
                     }),
                 },
                 surface_op: super::types::SurfaceOperation::Replace {
@@ -1117,6 +1119,7 @@ impl CompactionProcedure {
                             "summary": summary,
                             "checkpoint_kind": "manual",
                             "source_leaf_id": source_leaf_id,
+                            "context_snapshot_index": [],
                         }),
                     },
                     surface_op: super::types::SurfaceOperation::Replace {
@@ -2452,6 +2455,7 @@ mod tests {
             "main",
             "run",
             "summary",
+            &[],
             CompactionReason::AdaptiveBudget,
             &mut effects,
         )
@@ -2463,6 +2467,7 @@ mod tests {
             "main",
             "wrong-run",
             "summary",
+            &[],
             CompactionReason::AdaptiveBudget,
             &mut effects,
         )
@@ -2478,6 +2483,13 @@ mod tests {
             "main",
             "run",
             "durable summary",
+            &[serde_json::json!({
+                "context_id": "ctx-1",
+                "path": "src/lib.rs",
+                "start_line": null,
+                "end_line": null,
+                "file_sha256": "abc123",
+            })],
             CompactionReason::OverflowRecovery,
             &mut effects,
         )
@@ -2494,6 +2506,7 @@ mod tests {
             Some(AgentMessage::Custom { custom_type, payload })
                 if custom_type == "compaction_summary"
                     && payload["checkpoint_kind"] == "overflow_recovery"
+                    && payload["context_snapshot_index"][0]["context_id"] == "ctx-1"
         ));
     }
 }

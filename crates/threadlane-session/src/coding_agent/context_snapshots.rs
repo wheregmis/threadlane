@@ -18,11 +18,6 @@ pub(crate) const MAX_CONTEXT_LIST_RESULTS: usize = 20;
 pub(crate) const MAX_SUBAGENT_CONTEXT_REFS: usize = 16;
 #[allow(dead_code)]
 pub(crate) const MAX_SUBAGENT_CONTEXT_CHARS: usize = 32_000;
-#[allow(dead_code)]
-pub(crate) const MAX_COMPACTED_CONTEXT_INDEX_CHARS: usize = 4_000;
-const COMPACTED_CONTEXT_INDEX_HEADING: &str = "## Available context snapshots";
-const COMPACTED_CONTEXT_INDEX_BEGIN: &str = "<!-- threadlane:context-snapshots:index:begin -->";
-const COMPACTED_CONTEXT_INDEX_END: &str = "<!-- threadlane:context-snapshots:index:end -->";
 
 #[allow(dead_code)]
 pub(crate) struct ResolvedContextSnapshot {
@@ -182,104 +177,30 @@ pub(crate) fn snapshot_location(snapshot: &ContextSnapshot) -> String {
     }
 }
 
-pub(crate) fn render_compacted_context_index(snapshots: &[ContextSnapshot]) -> String {
-    let mut index = format!("{COMPACTED_CONTEXT_INDEX_BEGIN}\n{COMPACTED_CONTEXT_INDEX_HEADING}");
-    let mut included = 0;
-    for snapshot in snapshots.iter().rev().take(MAX_CONTEXT_LIST_RESULTS) {
-        let line = format!(
-            "- {} {} sha256={}",
-            snapshot.context_id,
-            snapshot_location(snapshot),
-            snapshot.file_sha256.as_str(),
-        );
-        if index.chars().count()
-            + 1
-            + line.chars().count()
-            + 1
-            + COMPACTED_CONTEXT_INDEX_END.chars().count()
-            > MAX_COMPACTED_CONTEXT_INDEX_CHARS
+pub(crate) fn compacted_context_snapshot_index(
+    snapshots: &[ContextSnapshot],
+) -> Vec<serde_json::Value> {
+    let mut index = Vec::new();
+    for snapshot in snapshots
+        .iter()
+        .rev()
+        .take(threadlane_runtime::compaction::MAX_CONTEXT_SNAPSHOT_INDEX_ENTRIES)
+    {
+        index.push(serde_json::json!({
+            "context_id": snapshot.context_id,
+            "path": snapshot.path,
+            "start_line": snapshot.start_line,
+            "end_line": snapshot.end_line,
+            "file_sha256": snapshot.file_sha256.as_str(),
+        }));
+        if serde_json::to_string(&index).map_or(usize::MAX, |value| value.chars().count())
+            > threadlane_runtime::compaction::MAX_CONTEXT_SNAPSHOT_INDEX_CHARS
         {
+            index.pop();
             break;
         }
-        index.push('\n');
-        index.push_str(&line);
-        included += 1;
     }
-    if included < snapshots.len() {
-        let omitted = "\n- … additional snapshots omitted";
-        if index.chars().count()
-            + omitted.chars().count()
-            + 1
-            + COMPACTED_CONTEXT_INDEX_END.chars().count()
-            <= MAX_COMPACTED_CONTEXT_INDEX_CHARS
-        {
-            index.push_str(omitted);
-        }
-    }
-    index.push('\n');
-    index.push_str(COMPACTED_CONTEXT_INDEX_END);
     index
-}
-
-pub(crate) fn strip_compacted_context_indexes(summary: &str) -> String {
-    let line_at = |offset: usize| {
-        let end = summary[offset..]
-            .find('\n')
-            .map_or(summary.len(), |newline| offset + newline);
-        (end, usize::from(end < summary.len()) + end)
-    };
-    let mut stripped = String::with_capacity(summary.len());
-    let mut copied = 0;
-    let mut index = 0;
-    while index < summary.len() {
-        let (line_end, next_line) = line_at(index);
-        if &summary[index..line_end] == COMPACTED_CONTEXT_INDEX_BEGIN {
-            let (heading_end, after_heading) = line_at(next_line);
-            if &summary[next_line..heading_end] != COMPACTED_CONTEXT_INDEX_HEADING {
-                index = next_line;
-                continue;
-            }
-
-            let mut candidate = after_heading;
-            let mut nested = false;
-            let mut end = None;
-            while candidate < summary.len() {
-                let (candidate_end, candidate_next) = line_at(candidate);
-                match &summary[candidate..candidate_end] {
-                    COMPACTED_CONTEXT_INDEX_BEGIN => {
-                        nested = true;
-                        break;
-                    }
-                    COMPACTED_CONTEXT_INDEX_END => {
-                        end = Some((candidate_end, candidate_next));
-                        break;
-                    }
-                    _ => candidate = candidate_next,
-                }
-            }
-            if nested {
-                while candidate < summary.len() {
-                    let (candidate_end, candidate_next) = line_at(candidate);
-                    if &summary[candidate..candidate_end] == COMPACTED_CONTEXT_INDEX_END {
-                        candidate = candidate_next;
-                        break;
-                    }
-                    candidate = candidate_next;
-                }
-                index = candidate;
-                continue;
-            }
-            if let Some((end, after_end)) = end {
-                stripped.push_str(&summary[copied..index]);
-                copied = end;
-                index = after_end;
-                continue;
-            }
-        }
-        index = next_line;
-    }
-    stripped.push_str(&summary[copied..]);
-    stripped
 }
 
 #[async_trait]
@@ -450,7 +371,7 @@ pub(crate) fn resolve_context_snapshot(
 #[cfg(test)]
 mod tests {
     use super::{
-        is_local_path, render_compacted_context_index, ContextSnapshotLoadOutcome,
+        compacted_context_snapshot_index, is_local_path, ContextSnapshotLoadOutcome,
         ContextSnapshotToolExecutor, JsonlStore, Record, Reducer, MAX_CONTEXT_LIST_RESULTS,
     };
     use crate::coding_agent::harness::CodingSessionHarness;
@@ -524,73 +445,39 @@ mod tests {
             .pop()
             .unwrap();
 
-        let index = render_compacted_context_index(&[snapshot]);
+        let index = compacted_context_snapshot_index(&[snapshot]);
 
-        assert!(index.contains(&context_id));
-        assert!(index.contains("README.md:1-1 sha256="));
-        assert!(!index.contains("snapshot body"));
+        let value = serde_json::to_value(&index).unwrap();
+        let entries = value.as_array().expect("structured snapshot index");
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["context_id"], context_id);
+        assert_eq!(entries[0]["path"], "README.md");
+        assert_eq!(entries[0]["start_line"], 1);
+        assert_eq!(entries[0]["end_line"], 1);
+        assert!(entries[0]["file_sha256"].is_string());
+        assert!(!value.to_string().contains("snapshot body"));
     }
 
-    #[test]
-    fn compacted_context_index_stripping_preserves_user_heading_and_bullets() {
-        let summary = "User notes:\n\n## Available context snapshots\n- retain this bullet";
+    #[tokio::test]
+    async fn compacted_context_snapshot_index_payload_is_bounded() {
+        let (dir, session_file, context_id) = snapshot_session().await;
+        let source = super::resolve_context_snapshot(&session_file, dir.path(), &context_id)
+            .unwrap()
+            .snapshot;
+        let snapshots = (0..40)
+            .map(|index| {
+                let mut snapshot = source.clone();
+                snapshot.context_id = format!("ctx-{index}");
+                snapshot.path = format!("{}-{index}.rs", "long-path/".repeat(60));
+                snapshot
+            })
+            .collect::<Vec<_>>();
 
-        assert_eq!(super::strip_compacted_context_indexes(summary), summary);
-    }
-
-    #[test]
-    fn compacted_context_index_stripping_preserves_nested_markers() {
-        let summary = concat!(
-            "before\n",
-            "<!-- threadlane:context-snapshots:index:begin -->\n",
-            "## Available context snapshots\n",
-            "<!-- threadlane:context-snapshots:index:begin -->\n",
-            "## Available context snapshots\n",
-            "<!-- threadlane:context-snapshots:index:end -->\n",
-            "after\n",
-        );
-
-        assert_eq!(super::strip_compacted_context_indexes(summary), summary);
-    }
-
-    #[test]
-    fn compacted_context_index_stripping_preserves_malformed_or_unpaired_markers() {
-        let summaries = [
-            concat!(
-                "before\n",
-                "<!-- threadlane:context-snapshots:index:begin -->\n",
-                "## Available context snapshots (draft)\n",
-                "<!-- threadlane:context-snapshots:index:end -->\n",
-                "after\n",
-            ),
-            concat!(
-                "before\n",
-                "<!-- threadlane:context-snapshots:index:begin -->\n",
-                "## Available context snapshots\n",
-                "after\n\n",
-            ),
-        ];
-
-        for summary in summaries {
-            assert_eq!(super::strip_compacted_context_indexes(summary), summary);
-        }
-    }
-
-    #[test]
-    fn compacted_context_index_stripping_removes_only_a_complete_generated_index() {
-        let summary = concat!(
-            "before\n",
-            "<!-- threadlane:context-snapshots:index:begin -->\n",
-            "## Available context snapshots\n",
-            "- snapshot\n",
-            "<!-- threadlane:context-snapshots:index:end -->\n",
-            "after\n",
-        );
-
-        assert_eq!(
-            super::strip_compacted_context_indexes(summary),
-            "before\n\nafter\n"
-        );
+        let index = compacted_context_snapshot_index(&snapshots);
+        let value = serde_json::to_value(&index).unwrap();
+        assert!(value.as_array().expect("structured snapshot index").len() <= 20);
+        assert!(value.to_string().chars().count() <= 4_000);
     }
 
     #[test]
@@ -625,7 +512,10 @@ mod tests {
                 snapshot.file_sha256.as_str()
             )
         );
-        assert!(render_compacted_context_index(&[snapshot]).contains(" README.md sha256="));
+        assert_eq!(
+            compacted_context_snapshot_index(&[snapshot])[0]["path"],
+            "README.md"
+        );
     }
 
     #[tokio::test]
