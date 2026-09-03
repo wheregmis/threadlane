@@ -4966,8 +4966,12 @@ mod tests {
         assert!(checkpoint.contains(&context_id), "{checkpoint}");
         let heading = "## Available context snapshots";
         assert_eq!(checkpoint.matches(heading).count(), 1, "{checkpoint}");
+        let index_begin = "<!-- threadlane:context-snapshots:index:begin -->";
+        let index_end = "<!-- threadlane:context-snapshots:index:end -->";
+        assert_eq!(checkpoint.matches(index_begin).count(), 1, "{checkpoint}");
+        assert_eq!(checkpoint.matches(index_end).count(), 1, "{checkpoint}");
         assert!(
-            checkpoint[checkpoint.rfind(heading).unwrap()..]
+            checkpoint[checkpoint.rfind(index_begin).unwrap()..]
                 .chars()
                 .count()
                 <= super::super::context_snapshots::MAX_COMPACTED_CONTEXT_INDEX_CHARS,

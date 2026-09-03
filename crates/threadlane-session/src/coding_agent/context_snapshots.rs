@@ -21,6 +21,8 @@ pub(crate) const MAX_SUBAGENT_CONTEXT_CHARS: usize = 32_000;
 #[allow(dead_code)]
 pub(crate) const MAX_COMPACTED_CONTEXT_INDEX_CHARS: usize = 4_000;
 const COMPACTED_CONTEXT_INDEX_HEADING: &str = "## Available context snapshots";
+const COMPACTED_CONTEXT_INDEX_BEGIN: &str = "<!-- threadlane:context-snapshots:index:begin -->";
+const COMPACTED_CONTEXT_INDEX_END: &str = "<!-- threadlane:context-snapshots:index:end -->";
 
 #[allow(dead_code)]
 pub(crate) struct ResolvedContextSnapshot {
@@ -181,7 +183,7 @@ pub(crate) fn snapshot_location(snapshot: &ContextSnapshot) -> String {
 }
 
 pub(crate) fn render_compacted_context_index(snapshots: &[ContextSnapshot]) -> String {
-    let mut index = COMPACTED_CONTEXT_INDEX_HEADING.to_string();
+    let mut index = format!("{COMPACTED_CONTEXT_INDEX_BEGIN}\n{COMPACTED_CONTEXT_INDEX_HEADING}");
     let mut included = 0;
     for snapshot in snapshots.iter().rev().take(MAX_CONTEXT_LIST_RESULTS) {
         let line = format!(
@@ -190,7 +192,13 @@ pub(crate) fn render_compacted_context_index(snapshots: &[ContextSnapshot]) -> S
             snapshot_location(snapshot),
             snapshot.file_sha256.as_str(),
         );
-        if index.chars().count() + 1 + line.chars().count() > MAX_COMPACTED_CONTEXT_INDEX_CHARS {
+        if index.chars().count()
+            + 1
+            + line.chars().count()
+            + 1
+            + COMPACTED_CONTEXT_INDEX_END.chars().count()
+            > MAX_COMPACTED_CONTEXT_INDEX_CHARS
+        {
             break;
         }
         index.push('\n');
@@ -199,28 +207,36 @@ pub(crate) fn render_compacted_context_index(snapshots: &[ContextSnapshot]) -> S
     }
     if included < snapshots.len() {
         let omitted = "\n- … additional snapshots omitted";
-        if index.chars().count() + omitted.chars().count() <= MAX_COMPACTED_CONTEXT_INDEX_CHARS {
+        if index.chars().count()
+            + omitted.chars().count()
+            + 1
+            + COMPACTED_CONTEXT_INDEX_END.chars().count()
+            <= MAX_COMPACTED_CONTEXT_INDEX_CHARS
+        {
             index.push_str(omitted);
         }
     }
+    index.push('\n');
+    index.push_str(COMPACTED_CONTEXT_INDEX_END);
     index
 }
 
 pub(crate) fn strip_compacted_context_indexes(summary: &str) -> String {
     let mut lines = Vec::new();
-    let mut skipping = false;
-    for line in summary.lines() {
-        if line == COMPACTED_CONTEXT_INDEX_HEADING {
-            if lines.last().is_some_and(|line: &&str| line.is_empty()) {
-                lines.pop();
+    let summary_lines = summary.lines().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < summary_lines.len() {
+        if summary_lines[index] == COMPACTED_CONTEXT_INDEX_BEGIN {
+            if let Some(end) = summary_lines[index + 1..]
+                .iter()
+                .position(|line| *line == COMPACTED_CONTEXT_INDEX_END)
+            {
+                index += end + 2;
+                continue;
             }
-            skipping = true;
-        } else if skipping && line.starts_with("- ") {
-            continue;
-        } else {
-            skipping = false;
-            lines.push(line);
         }
+        lines.push(summary_lines[index]);
+        index += 1;
     }
     lines.join("\n").trim_end().to_owned()
 }
@@ -472,6 +488,13 @@ mod tests {
         assert!(index.contains(&context_id));
         assert!(index.contains("README.md:1-1 sha256="));
         assert!(!index.contains("snapshot body"));
+    }
+
+    #[test]
+    fn compacted_context_index_stripping_preserves_user_heading_and_bullets() {
+        let summary = "User notes:\n\n## Available context snapshots\n- retain this bullet";
+
+        assert_eq!(super::strip_compacted_context_indexes(summary), summary);
     }
 
     #[test]
