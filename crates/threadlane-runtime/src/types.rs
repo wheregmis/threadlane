@@ -424,6 +424,8 @@ pub struct ModelRoles {
     pub plan: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advisor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fast: Option<String>,
     #[serde(default)]
     pub advisor_enabled: bool,
     /// Ordered alternate models attempted after a pre-output quota/rate-limit failure.
@@ -444,6 +446,10 @@ impl ModelRoles {
             .as_deref()
             .or(self.task.as_deref())
             .unwrap_or(fallback)
+    }
+
+    pub fn resolve_fast<'a>(&'a self, fallback: &'a str) -> &'a str {
+        self.fast.as_deref().unwrap_or(fallback)
     }
 
     pub fn resolve_advisor<'a>(&'a self, fallback: &'a str) -> &'a str {
@@ -484,12 +490,16 @@ pub struct TurnState {
     pub system_prompt: String,
     pub messages: Vec<AgentMessage>,
     pub model: String,
-    pub(crate) reasoning_effort: ReasoningEffort,
+    pub reasoning_effort: ReasoningEffort,
 }
 
 impl TurnState {
     pub fn reasoning_effort(&self) -> ReasoningEffort {
         self.reasoning_effort
+    }
+
+    pub fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {
+        self.reasoning_effort = effort;
     }
 }
 

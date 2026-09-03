@@ -1083,6 +1083,10 @@ pub(crate) fn coding_agent_options(
     let subagent_settings = crate::services::subagent_settings::load(&work_dir);
     agent_config.subagent_model = subagent_settings.model;
     agent_config.subagent_reasoning_effort = subagent_settings.reasoning_effort;
+    if agent_config.model_roles.fast.is_none() {
+        agent_config.model_roles.fast = subagent_settings.fast_model;
+    }
+    agent_config.fast_reasoning_effort = subagent_settings.fast_reasoning_effort;
     agent_config.needle_enabled = crate::services::settings::load_needle_enabled();
 
     threadlane_session::CodingAgentOptions {
@@ -1926,8 +1930,12 @@ impl AppState {
         });
         let branch_is_actionable =
             session.git_branch.is_some() && (linked_pr.is_none() || linked_pr_is_active);
-        let actionable_git_work = git_status
-            .is_some_and(|status| status.has_changes || status.ahead > 0 || status.pr_ready);
+        // Git status belongs to a checkout, not to a session. Only let it
+        // affect the selected session; otherwise every historical local
+        // session sharing the project checkout appears Ready.
+        let actionable_git_work = is_active
+            && git_status
+                .is_some_and(|status| status.has_changes || status.ahead > 0 || status.pr_ready);
         derive_session_attention(
             self.pending_permissions.contains_key(&session.id),
             &session.health,
@@ -4752,9 +4760,32 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert_eq!(state.session_attention(&session), SessionAttention::Ready);
+        assert_eq!(state.session_attention(&session), SessionAttention::Idle);
     }
 
+    #[test]
+    fn project_git_status_only_marks_active_session_ready() {
+        let mut state = AppState::load_from_registry(Vec::new());
+        let session_file = Path::new("/project/.threadlane/sessions/current.jsonl");
+        let active = test_session("current", session_file);
+        let historical = test_session(
+            "historical",
+            Path::new("/project/.threadlane/sessions/old.jsonl"),
+        );
+
+        state.active_work_dir = Some(active.work_dir.clone());
+        state.active_session_id = Some(active.id.clone());
+        state.git_statuses.insert(
+            active.runtime_work_dir.clone(),
+            threadlane_git::GitStatus {
+                has_changes: true,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(state.session_attention(&active), SessionAttention::Ready);
+        assert_eq!(state.session_attention(&historical), SessionAttention::Idle);
+    }
     #[test]
     fn inactive_start_and_error_wake_attention_observers() {
         let dir = tempfile::tempdir().unwrap();

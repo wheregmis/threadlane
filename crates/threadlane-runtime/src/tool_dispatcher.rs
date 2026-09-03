@@ -63,12 +63,22 @@ pub struct ToolDispatcher {
     pub tool_completion_recorder: Option<ToolCompletionRecorder>,
     pub tool_execution_trace_recorder: Option<crate::provider::ToolExecutionTraceRecorder>,
     pub(crate) allowed_tool_names: Option<HashSet<String>>,
+    pub(crate) core_tool_schema_mode: bool,
     pub(crate) work_dir: Option<PathBuf>,
     pub(crate) session_id: String,
 
     tool_executors: Vec<Arc<dyn ToolExecutor>>,
     event_tx: broadcast::Sender<AgentEvent>,
 }
+
+pub const CORE_TOOL_NAMES: &[&str] = &[
+    "read_file",
+    "edit_file_hashline",
+    "edit_files_hashline",
+    "write_file",
+    "run_command",
+    "subagent",
+];
 
 impl ToolDispatcher {
     /// Creates a dispatcher backed by the given event channel and hook registry.
@@ -80,6 +90,7 @@ impl ToolDispatcher {
             tool_completion_recorder: None,
             tool_execution_trace_recorder: None,
             allowed_tool_names: None,
+            core_tool_schema_mode: true,
             work_dir: None,
             session_id: String::new(),
             tool_executors: vec![builtin_tool_executor()],
@@ -95,6 +106,9 @@ impl ToolDispatcher {
         let mut definitions = collect_tool_definitions(&self.tool_executors);
         if let Some(allowed) = &self.allowed_tool_names {
             definitions.retain(|d| allowed.contains(&d.name));
+        }
+        if self.core_tool_schema_mode {
+            definitions.retain(|d| CORE_TOOL_NAMES.contains(&d.name.as_str()));
         }
         definitions
     }
@@ -512,8 +526,8 @@ impl ToolDispatcher {
         }
         let execution_result = execution_result.unwrap_or_else(|| {
             Err(format!(
-                "No registered executor handles tool '{}'",
-                tc.function.name
+                "No registered executor handles tool '{}'. If this is an auxiliary capability, run it via: dyn {} [args]",
+                tc.function.name, tc.function.name
             ))
         });
         let (content, is_error) = match execution_result {
@@ -890,5 +904,32 @@ mod tests {
         assert!(results[0]
             .content
             .contains("No registered executor handles tool"));
+    }
+
+    #[test]
+    fn test_core_tool_schema_mode_filters_definitions() {
+        let (event_tx, _) = broadcast::channel(8);
+        let mut dispatcher = ToolDispatcher::new(event_tx, HookRegistry::default());
+
+        // Default has core_tool_schema_mode: true
+        assert!(dispatcher.core_tool_schema_mode);
+        let defs = dispatcher.configured_tool_definitions();
+        for def in &defs {
+            assert!(
+                CORE_TOOL_NAMES.contains(&def.name.as_str()),
+                "tool '{}' should be in CORE_TOOL_NAMES",
+                def.name
+            );
+        }
+        // Auxiliary tools like list_dir or grep_search should be excluded from configured schemas
+        assert!(!defs.iter().any(|d| d.name == "list_dir"));
+        assert!(!defs.iter().any(|d| d.name == "grep_search"));
+        assert!(!defs.iter().any(|d| d.name == "manage_memory"));
+
+        // When core_tool_schema_mode is disabled, all registered tools appear
+        dispatcher.core_tool_schema_mode = false;
+        let all_defs = dispatcher.configured_tool_definitions();
+        assert!(all_defs.iter().any(|d| d.name == "list_dir"));
+        assert!(all_defs.iter().any(|d| d.name == "grep_search"));
     }
 }

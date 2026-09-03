@@ -564,6 +564,8 @@ impl SettingsView {
             .map(|effort| effort.label())
             .unwrap_or("Same as parent");
         let available = crate::model_catalog::available_models_for_project(Some(&project));
+        let available_for_subagent = available.clone();
+        let available_for_fast = available;
         let model_entity = self.model.clone();
         let project_for_models = project.clone();
         let model_picker = Button::new("subagent-model-picker")
@@ -572,7 +574,7 @@ impl SettingsView {
             .dropdown_menu(move |menu, _, _| {
                 let model_entity_for_parent = model_entity.clone();
                 let project_for_parent = project_for_models.clone();
-                available.iter().cloned().fold(
+                available_for_subagent.iter().cloned().fold(
                     menu.item(
                         PopupMenuItem::new("Same as parent").on_click(move |_, _, cx| {
                             let mut settings =
@@ -653,6 +655,104 @@ impl SettingsView {
                     )
                 })
             });
+        let selected_fast_model = preferences.fast_model.clone();
+        let fast_model_label = selected_fast_model
+            .as_deref()
+            .and_then(crate::model_catalog::label_for)
+            .unwrap_or_else(|| "Same as parent".into());
+        let fast_model_entity = self.model.clone();
+        let project_for_fast = project.clone();
+        let fast_model_picker = Button::new("fast-model-picker")
+            .label(fast_model_label)
+            .dropdown_caret(true)
+            .dropdown_menu(move |menu, _, _| {
+                let model_entity_for_parent = fast_model_entity.clone();
+                let project_for_parent = project_for_fast.clone();
+                available_for_fast.iter().cloned().fold(
+                    menu.item(
+                        PopupMenuItem::new("Same as parent").on_click(move |_, _, cx| {
+                            let mut settings =
+                                crate::services::subagent_settings::load(&project_for_parent);
+                            settings.fast_model = None;
+                            if crate::services::subagent_settings::save(
+                                &project_for_parent,
+                                &settings,
+                            )
+                            .is_ok()
+                            {
+                                model_entity_for_parent.update(cx, |state, cx| {
+                                    state.invalidate_capability_runtimes();
+                                    cx.notify();
+                                });
+                            }
+                        }),
+                    ),
+                    |menu, option| {
+                        let model_entity = fast_model_entity.clone();
+                        let project = project_for_fast.clone();
+                        menu.item(
+                            PopupMenuItem::new(option.label)
+                                .icon(Icon::default().path(option.provider.icon_path()))
+                                .on_click(move |_, _, cx| {
+                                    let mut settings =
+                                        crate::services::subagent_settings::load(&project);
+                                    settings.fast_model = Some(option.id.clone());
+                                    if crate::services::subagent_settings::save(&project, &settings)
+                                        .is_ok()
+                                    {
+                                        model_entity.update(cx, |state, cx| {
+                                            state.invalidate_capability_runtimes();
+                                            cx.notify();
+                                        });
+                                    }
+                                }),
+                        )
+                    },
+                )
+            });
+        let selected_fast_reasoning = preferences.fast_reasoning_effort;
+        let fast_reasoning_label = selected_fast_reasoning
+            .map(|effort| effort.label())
+            .unwrap_or("Same as parent");
+        let fast_reasoning_entity = self.model.clone();
+        let project_for_fast_reasoning = project.clone();
+        let fast_reasoning_picker = Button::new("fast-reasoning-picker")
+            .label(fast_reasoning_label)
+            .dropdown_caret(true)
+            .dropdown_menu(move |menu, _, _| {
+                let entity = fast_reasoning_entity.clone();
+                let project = project_for_fast_reasoning.clone();
+                [
+                    None,
+                    Some(threadlane_runtime::ReasoningEffort::Minimal),
+                    Some(threadlane_runtime::ReasoningEffort::Low),
+                    Some(threadlane_runtime::ReasoningEffort::Medium),
+                    Some(threadlane_runtime::ReasoningEffort::High),
+                ]
+                .into_iter()
+                .fold(menu, |menu, effort| {
+                    let entity = entity.clone();
+                    let project = project.clone();
+                    menu.item(
+                        PopupMenuItem::new(
+                            effort
+                                .map(|value| value.label())
+                                .unwrap_or("Same as parent"),
+                        )
+                        .on_click(move |_, _, cx| {
+                            let mut settings = crate::services::subagent_settings::load(&project);
+                            settings.fast_reasoning_effort = effort;
+                            if crate::services::subagent_settings::save(&project, &settings).is_ok()
+                            {
+                                entity.update(cx, |state, cx| {
+                                    state.invalidate_capability_runtimes();
+                                    cx.notify();
+                                });
+                            }
+                        }),
+                    )
+                })
+            });
         let row = |title: &'static str, description: &'static str, control: AnyElement| {
             div()
                 .rounded_xl()
@@ -684,14 +784,24 @@ impl SettingsView {
             .flex_col()
             .gap_4()
             .child(row(
-                "Model",
+                "Subagent model",
                 "Default model for every delegated child.",
                 model_picker.into_any_element(),
             ))
             .child(row(
-                "Reasoning effort",
+                "Subagent reasoning effort",
                 "Default reasoning effort for every delegated child.",
                 reasoning_picker.into_any_element(),
+            ))
+            .child(row(
+                "Fast model (/prewalk)",
+                "Model used for high-speed execution after /prewalk lands the first working edit.",
+                fast_model_picker.into_any_element(),
+            ))
+            .child(row(
+                "Fast model reasoning effort",
+                "Reasoning effort for fast model execution after /prewalk.",
+                fast_reasoning_picker.into_any_element(),
             ))
             .into_any_element()
     }
@@ -2868,8 +2978,8 @@ impl Render for SettingsView {
                 self.render_providers(cx),
             ),
             SettingsPage::Subagents => (
-                "Subagents",
-                "Choose project defaults for delegated child model and reasoning.",
+                "Subagents & Fast Models",
+                "Choose project defaults for delegated child models and /prewalk fast execution.",
                 self.render_subagents(cx),
             ),
             SettingsPage::Skills => (

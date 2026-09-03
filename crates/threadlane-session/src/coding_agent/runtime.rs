@@ -55,6 +55,8 @@ pub struct CodingAgent {
     pub(crate) harness: Option<CodingSessionHarness>,
     pub(crate) harness_journal_error: Option<String>,
     pub(crate) harness_run_id: Arc<std::sync::Mutex<Option<String>>>,
+    pub(crate) prewalk_target_model: Arc<std::sync::Mutex<Option<String>>>,
+    pub(crate) prewalk_target_reasoning_effort: Arc<std::sync::Mutex<Option<threadlane_runtime::ReasoningEffort>>>,
     pub(crate) cancellation: CodingAgentCancellation,
     pub(crate) interrupted_subagent_recovery: InterruptedSubagentRecoveryState,
     /// Connection to an external ACP agent, opened on first use.
@@ -633,6 +635,8 @@ impl CodingAgent {
             harness,
             harness_journal_error,
             harness_run_id,
+            prewalk_target_model: Arc::new(std::sync::Mutex::new(None)),
+            prewalk_target_reasoning_effort: Arc::new(std::sync::Mutex::new(None)),
             cancellation,
             interrupted_subagent_recovery,
             acp,
@@ -827,7 +831,7 @@ impl CodingAgent {
         }
         let templates = self.prompt_templates.as_ref().unwrap();
         let expanded_input = crate::prompt_templates::expand_prompt_template(trimmed, templates);
-        let effective_input = expanded_input.trim();
+        let mut effective_input = expanded_input.trim().to_string();
 
         if let Some(command_input) = effective_input.strip_prefix('/') {
             let mut parts = command_input.split_whitespace();
@@ -1174,7 +1178,7 @@ impl CodingAgent {
                 };
             }
 
-            if let Some(cmd_action) = parse_slash_command(effective_input) {
+            if let Some(cmd_action) = parse_slash_command(&effective_input) {
                 if cmd_action == CommandAction::Quit {
                     return Some(Ok("quitting".to_string()));
                 }
@@ -1200,68 +1204,60 @@ impl CodingAgent {
                             .map(|_| format!("Session name set to: {name}")),
                     );
                 }
-                if let CommandAction::Plan(objective) = &cmd_action {
+                if let CommandAction::Prewalk(objective) = &cmd_action {
                     let task_prompt = objective.trim();
                     if task_prompt.is_empty() {
-                        return Some(Ok("Usage: /plan <task objective> - generate an implementation plan with the Plan model.".into()));
+                        return Some(Ok("Usage: /prewalk <task objective> - explore with frontier model, land first edit, then transition to fast model.".into()));
                     }
-                    let client = self.agent.provider_client_arc();
                     let active_model = self.agent.turn.lock().await.model.clone();
-                    let plan_model = self
+                    let fast_model = self
                         .agent
                         .model_roles()
-                        .resolve_plan(&active_model)
+                        .resolve_fast(&active_model)
                         .to_string();
-                    match crate::plan::generate_plan_with_model(client, &plan_model, task_prompt)
-                        .await
-                    {
-                        Ok(plan) => {
-                            if let Err(error) = self.plan_store.replace(plan.clone()) {
-                                return Some(Err(format!("Failed to save plan: {error}")));
-                            }
-                            let _ = self
-                                .agent
-                                .event_tx
-                                .send(AgentEvent::PlanUpdated { plan: plan.clone() });
-                            let mut msg = format!(
-                                "Generated implementation plan with model `{}`:\n",
-                                plan_model
-                            );
-                            if let Some(exp) = &plan.explanation {
-                                msg.push_str(&format!("\n> {}\n\n", exp));
-                            }
-                            for (i, item) in plan.items.iter().enumerate() {
-                                let status_icon = match item.status {
-                                    threadlane_runtime::PlanItemStatus::Completed => "[x]",
-                                    threadlane_runtime::PlanItemStatus::InProgress => "[>]",
-                                    threadlane_runtime::PlanItemStatus::Pending => "[ ]",
-                                };
-                                msg.push_str(&format!(
-                                    "{}. {} {}\n",
-                                    i + 1,
-                                    status_icon,
-                                    item.step
-                                ));
-                            }
-                            return Some(Ok(msg));
-                        }
-                        Err(error) => return Some(Err(format!("Plan generation failed: {error}"))),
+                    let fast_reasoning = self.agent.config().fast_reasoning_effort;
+                    *self.prewalk_target_model.lock().unwrap() = Some(fast_model.clone());
+                    *self.prewalk_target_reasoning_effort.lock().unwrap() = fast_reasoning;
+
+                    let _ = self.agent.event_tx.send(AgentEvent::PrewalkCompleted {
+                        model: active_model.clone(),
+                        message: format!("Prewalk started with `{active_model}`. Target fast model: `{fast_model}`."),
+                    });
+
+                    effective_input = format!(
+                        "[PREWALK MODE ACTIVATED: Frontier Architect -> Fast Model Handoff]\n\
+                         Target Fast Model: {fast_model}\n\n\
+                         You are the Lead Architect. Establish the trajectory and land the pivotal first edit before handing off to {fast_model}.\n\n\
+                         ARCHITECT PROTOCOL:\n\
+                         1. EXPLORE: Read the relevant files using `read_file` to locate the exact lines and types.\n\
+                         2. CONCISE CHECKLIST (Max 3-5 items):\n\
+                            Provide a strict markdown checklist with explicit target files and verification commands:\n\
+                            - [x] 1. <Core architectural change in file:line> (You will execute this now)\n\
+                            - [ ] 2. <Specific follow-up edit in file:line>\n\
+                            - [ ] 3. <Verification: Exact command e.g. `cargo test -p crate test_name`>\n\
+                         3. LAND THE FIRST EDIT:\n\
+                            Execute Item 1 using `edit_file_hashline` or `write_file`. This must be a REAL, working code change (core logic, type change, or reproducing test), not a placeholder.\n\
+                         4. AUTOMATIC HANDOFF:\n\
+                            The instant your edit succeeds, {fast_model} will inherit this exact context and complete the remaining checklist items.\n\
+                         [END PREWALK PROTOCOL]\n\n\
+                         Objective: {task_prompt}"
+                    );
+                } else {
+                    if matches!(
+                        cmd_action,
+                        CommandAction::Advisor(_) | CommandAction::Roles(_)
+                    ) {
+                        let output = execute_slash_command(cmd_action, &mut self.agent).await;
+                        let roles = self.agent.model_roles().clone();
+                        let _ = self
+                            .agent
+                            .event_tx
+                            .send(AgentEvent::ModelRolesUpdated { roles });
+                        return Some(Ok(output));
                     }
-                }
-                if matches!(
-                    cmd_action,
-                    CommandAction::Advisor(_) | CommandAction::Roles(_)
-                ) {
                     let output = execute_slash_command(cmd_action, &mut self.agent).await;
-                    let roles = self.agent.model_roles().clone();
-                    let _ = self
-                        .agent
-                        .event_tx
-                        .send(AgentEvent::ModelRolesUpdated { roles });
                     return Some(Ok(output));
                 }
-                let output = execute_slash_command(cmd_action, &mut self.agent).await;
-                return Some(Ok(output));
             }
         }
 
@@ -1270,7 +1266,7 @@ impl CodingAgent {
         // here rather than through the provider run below.
         if let Some(agent_id) = crate::acp_bridge::acp_agent_id(&self.agent.model()) {
             let agent_id = agent_id.to_string();
-            return self.run_acp_turn(&agent_id, effective_input, images).await;
+            return self.run_acp_turn(&agent_id, &effective_input, images).await;
         }
 
         let msg = AgentMessage::user(effective_input, images);

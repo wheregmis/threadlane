@@ -177,11 +177,55 @@ impl CodingAgent {
         }));
         let completion_harness = trace_harness.clone();
         let completion_run_id = run_id.clone();
+        let prewalk_model_arc = self.prewalk_target_model.clone();
+        let prewalk_effort_arc = self.prewalk_target_reasoning_effort.clone();
+        let event_tx = self.agent.event_tx.clone();
+        let turn_arc = self.agent.turn.clone();
         self.agent.tool_dispatcher.tool_completion_recorder = Some(Arc::new(move |result| {
             let harness = completion_harness.clone();
             let run_id = completion_run_id.clone();
             let result = result.clone();
-            Box::pin(async move { harness.lock().await.record_tool_result(&run_id, &result) })
+            let prewalk = prewalk_model_arc.clone();
+            let prewalk_effort = prewalk_effort_arc.clone();
+            let event_tx = event_tx.clone();
+            let turn_arc = turn_arc.clone();
+            Box::pin(async move {
+                if !result.is_error
+                    && (result.name == "edit_file_hashline"
+                        || result.name == "edit_files_hashline"
+                        || result.name == "write_file")
+                {
+                    let target = prewalk.lock().unwrap().take();
+                    let target_effort = prewalk_effort.lock().unwrap().take();
+                    if let Some(target_model) = target {
+                        let mut turn = turn_arc.lock().await;
+                        turn.model = target_model.clone();
+                        if let Some(effort) = target_effort {
+                            turn.reasoning_effort = effort;
+                        }
+                        for msg in turn.messages.iter_mut() {
+                            if let threadlane_runtime::AgentMessage::User { content } = msg {
+                                if content.starts_with("[PREWALK MODE ACTIVATED") {
+                                    if let Some(pos) = content.find("Objective: ") {
+                                        *content = content[pos + "Objective: ".len()..].trim().to_string();
+                                    }
+                                }
+                            }
+                        }
+                        drop(turn);
+                        let effort_info = target_effort
+                            .map(|e| format!(" with reasoning effort `{}`", e.label()))
+                            .unwrap_or_default();
+                        let _ = event_tx.send(threadlane_runtime::AgentEvent::PrewalkCompleted {
+                            model: target_model.clone(),
+                            message: format!(
+                                "Prewalk complete: first edit landed! Switched model to `{target_model}`{effort_info}."
+                            ),
+                        });
+                    }
+                }
+                harness.lock().await.record_tool_result(&run_id, &result)
+            })
         }));
         let permission_harness = trace_harness;
         self.permission_handle

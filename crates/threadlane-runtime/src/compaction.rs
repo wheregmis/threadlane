@@ -133,6 +133,26 @@ pub fn compact_for_context_budget(
     )
 }
 
+/// Returns true if message history exceeds the speculative compaction threshold (~85% of budget).
+pub fn should_speculatively_compact(
+    messages: &[AgentMessage],
+    tool_schema_json: Option<&str>,
+    budget: &ContextBudget,
+    config: &AgentConfig,
+) -> bool {
+    estimate_request_tokens(messages, tool_schema_json, config)
+        >= budget.speculative_trigger_tokens()
+}
+
+/// Applies local deterministic tool output trimming ("tool shaking") to old turns,
+/// preserving recent turns while reclaiming tokens without calling an LLM summarizer.
+pub fn shake_historical_tool_outputs(
+    messages: &[AgentMessage],
+    preserve_recent_turns: usize,
+) -> Vec<AgentMessage> {
+    prune_historical_tool_outputs(messages, preserve_recent_turns)
+}
+
 pub(crate) fn should_auto_compact(messages: &[AgentMessage], config: &AgentConfig) -> bool {
     estimate_context_tokens(messages, config) > config.auto_compaction_threshold_tokens
 }

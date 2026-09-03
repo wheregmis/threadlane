@@ -60,6 +60,11 @@ pub struct AgentConfig {
     #[serde(default)]
     pub subagent_reasoning_effort: Option<ReasoningEffort>,
 
+    /// Project-selected reasoning effort for fast model execution (/prewalk). `None`
+    /// inherits the active parent turn's reasoning effort.
+    #[serde(default)]
+    pub fast_reasoning_effort: Option<ReasoningEffort>,
+
     // ── Tool Execution ──────────────────────────────────────────────────
     /// Enable local Needle tool routing when compiled with the `needle` feature.
     #[serde(default)]
@@ -72,9 +77,19 @@ pub struct AgentConfig {
     /// no limit.
     max_tool_output_bytes: Option<usize>,
 
+    /// When enabled, restricts the model-visible JSON tool schema to the essential core tools
+    /// (read_file, edit_file_hashline, edit_files_hashline, write_file, run_command, subagent).
+    /// Auxiliary tools remain executable directly or via the in-process `dyn` CLI.
+    #[serde(default = "default_core_tool_schema_mode")]
+    pub core_tool_schema_mode: bool,
+
     // ── Event Channel ───────────────────────────────────────────────────
     /// Capacity of the broadcast channel for [`AgentEvent`]s.
     pub(crate) event_channel_capacity: usize,
+}
+
+fn default_core_tool_schema_mode() -> bool {
+    true
 }
 
 impl Default for AgentConfig {
@@ -96,7 +111,9 @@ impl Default for AgentConfig {
             model_roles: ModelRoles::default(),
             subagent_model: None,
             subagent_reasoning_effort: None,
+            fast_reasoning_effort: None,
             needle_enabled: false,
+            core_tool_schema_mode: true,
             tool_execution_timeout: None,
             max_tool_output_bytes: None,
             event_channel_capacity: 500,
@@ -213,6 +230,11 @@ impl AgentConfigBuilder {
 
     pub fn event_channel_capacity(mut self, value: usize) -> Self {
         self.config.event_channel_capacity = value;
+        self
+    }
+
+    pub fn core_tool_schema_mode(mut self, value: bool) -> Self {
+        self.config.core_tool_schema_mode = value;
         self
     }
 

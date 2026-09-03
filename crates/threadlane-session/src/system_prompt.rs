@@ -177,6 +177,11 @@ pub(crate) fn build_system_prompt(options: SystemPromptBuildOptions<'_>) -> Stri
                 "LSP rename and format tools return non-mutating workspace-edit plans. Apply an accepted plan with `apply_workspace_edit_plan`, which validates every workspace path and UTF-16 range before committing files.",
             );
         }
+        if available_tool_names.contains("run_command") {
+            add_tool_guideline(
+                "Auxiliary capabilities can be inspected or executed in-process via `run_command` using `dyn <tool_name> [args]` or `dyn --help` without tool schema overhead.",
+            );
+        }
         if available_tool_names.contains("subagent") {
             add_tool_guideline(
                 "SUBAGENT DELEGATION RULES: Use `subagent` judiciously and only when necessary.",

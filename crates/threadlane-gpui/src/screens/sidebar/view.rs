@@ -6,6 +6,7 @@ use gpui_component::button::{Button, ButtonVariant, ButtonVariants};
 use gpui_component::dialog::DialogButtonProps;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
+use gpui_component::spinner::Spinner;
 use gpui_component::theme::ActiveTheme;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Icon, IconName, Selectable, Sizable, WindowExt};
@@ -624,42 +625,70 @@ impl SidebarView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme().colors;
-        let status_style = match attention {
-            SessionAttention::NeedsYou => {
-                Some((IconName::Info, theme.warning, theme.warning.opacity(0.12)))
-            }
-            SessionAttention::Working => Some((
-                IconName::Asterisk,
-                theme.primary,
-                theme.primary.opacity(0.1),
-            )),
-            SessionAttention::Ready => Some((
-                IconName::CircleCheck,
-                theme.success,
-                theme.success.opacity(0.12),
-            )),
+        let status_indicator = match attention {
+            SessionAttention::NeedsYou => Some(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(3.0))
+                    .px_1()
+                    .rounded_full()
+                    .bg(theme.warning.opacity(0.12))
+                    .text_color(theme.warning)
+                    .child(Icon::new(IconName::Info).xsmall())
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(attention.label()),
+                    )
+                    .group_hover("session-card", |style| style.opacity(0.0))
+                    .into_any_element(),
+            ),
+            SessionAttention::Working => Some(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(4.0))
+                    .px_1()
+                    .rounded_full()
+                    .bg(theme.primary.opacity(0.08))
+                    .text_color(theme.primary)
+                    .child(Spinner::new().xsmall().color(theme.primary))
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(attention.label()),
+                    )
+                    .group_hover("session-card", |style| style.opacity(0.0))
+                    .into_any_element(),
+            ),
+            SessionAttention::Ready => Some(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(3.0))
+                    .px_1()
+                    .rounded_full()
+                    .bg(theme.success.opacity(0.12))
+                    .text_color(theme.success)
+                    .child(Icon::new(IconName::CircleCheck).xsmall())
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(attention.label()),
+                    )
+                    .group_hover("session-card", |style| style.opacity(0.0))
+                    .into_any_element(),
+            ),
             SessionAttention::Idle => None,
         };
-        let has_status = status_style.is_some();
-        let status_indicator = status_style.map(|(icon, foreground, background)| {
-            div()
-                .flex()
-                .flex_none()
-                .items_center()
-                .gap(px(3.0))
-                .px_1()
-                .rounded_full()
-                .bg(background)
-                .child(Icon::new(icon).xsmall().text_color(foreground))
-                .child(
-                    div()
-                        .text_xs()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(foreground)
-                        .child(attention.label()),
-                )
-                .into_any_element()
-        });
+        let has_status = status_indicator.is_some();
 
         let bg_color = if is_active {
             theme.sidebar_accent
@@ -976,34 +1005,43 @@ impl SidebarView {
                             )
                             .child(
                                 div()
+                                    .relative()
                                     .flex_none()
                                     .flex()
+                                    .w(px(76.0))
                                     .items_center()
-                                    .gap_1()
-                                    .children(status_indicator)
-                                    .when(!has_status, |this| {
-                                        this.child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(theme.muted_foreground)
-                                                .group_hover("session-card", |style| {
-                                                    style.opacity(0.0)
-                                                })
-                                                .child(time_ago),
-                                        )
-                                    })
+                                    .justify_end()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .children(status_indicator)
+                                            .when(!has_status, |this| {
+                                                this.child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(theme.muted_foreground)
+                                                        .child(time_ago),
+                                                )
+                                            })
+                                            .group_hover("session-card", |style| {
+                                                style.opacity(0.0)
+                                            }),
+                                    )
                                     .child(
                                         Button::new(SharedString::from(format!(
                                             "settle-session-{}",
                                             session.id
                                         )))
-                                        .icon(IconName::Check)
+                                        .label("Archive")
                                         .ghost()
                                         .xsmall()
                                         .compact()
+                                        .bg(theme.secondary)
                                         .absolute()
-                                        .right(px(10.0))
-                                        .top(px(8.0))
+                                        .right(px(0.0))
+                                        .top(px(0.0))
                                         .opacity(0.0)
                                         .group_hover("session-card", |style| style.opacity(1.0))
                                         .tooltip("Archive session")

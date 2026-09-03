@@ -102,6 +102,10 @@ pub enum AgentEvent {
         matched_text: String,
         reminder: String,
     },
+    PrewalkCompleted {
+        model: String,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

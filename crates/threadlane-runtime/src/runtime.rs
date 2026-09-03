@@ -114,7 +114,8 @@ impl AgentRuntime {
         let (event_tx, _) = broadcast::channel(config.event_channel_capacity);
         let harness_event_hub = harness.events().clone();
         let hooks = harness.hooks().clone();
-        let tool_dispatcher = ToolDispatcher::new(event_tx.clone(), hooks.clone());
+        let mut tool_dispatcher = ToolDispatcher::new(event_tx.clone(), hooks.clone());
+        tool_dispatcher.core_tool_schema_mode = config.core_tool_schema_mode;
         let turn = Arc::new(Mutex::new(TurnState {
             system_prompt: config.default_system_prompt.clone(),
             messages: Vec::new(),

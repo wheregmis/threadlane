@@ -63,6 +63,12 @@ impl ContextBudget {
             strict_retained_tail_tokens,
         }
     }
+
+    /// Speculative trigger token threshold (~85% of trigger_tokens)
+    /// to trigger background pre-compaction / output shaking before hard boundary stalls.
+    pub fn speculative_trigger_tokens(&self) -> usize {
+        self.trigger_tokens.saturating_mul(85) / 100
+    }
 }
 
 pub fn context_budget(model: &str, config: &AgentConfig) -> ContextBudget {

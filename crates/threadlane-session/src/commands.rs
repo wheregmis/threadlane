@@ -13,12 +13,12 @@ pub fn builtin_commands() -> Vec<SlashCommandInfo> {
     [
         ("model", "Switch model, or show the current one"),
         (
-            "plan",
-            "Create or refine an implementation plan using the active model (/plan <objective>)",
+            "prewalk",
+            "Explore and land first working edit, then hand off to fast model (/prewalk <objective>)",
         ),
         (
             "roles",
-            "View or configure model roles (task, plan, advisor)",
+            "View or configure model roles (task, fast, advisor)",
         ),
         ("compact", "Compact the conversation context"),
         ("session", "Show session info"),
@@ -68,7 +68,7 @@ pub fn available_slash_commands(project_root: Option<&Path>) -> Vec<SlashCommand
 pub enum CommandAction {
     SwitchModel(String),
     Advisor(String),
-    Plan(String),
+    Prewalk(String),
     Roles(String),
     Compact,
     ShowSession,
@@ -93,7 +93,7 @@ pub fn parse_slash_command(input: &str) -> Option<CommandAction> {
     match cmd {
         "model" => Some(CommandAction::SwitchModel(arg)),
         "advisor" => Some(CommandAction::Advisor(arg)),
-        "plan" => Some(CommandAction::Plan(arg)),
+        "prewalk" => Some(CommandAction::Prewalk(arg)),
         "roles" => Some(CommandAction::Roles(arg)),
         "compact" => Some(CommandAction::Compact),
         "session" => Some(CommandAction::ShowSession),
@@ -140,11 +140,11 @@ pub async fn execute_slash_command(action: CommandAction, agent: &mut AgentRunti
             };
             format!("Model Configuration:\n  Active Model: {main_model}\n  Rate-limit Failover Chain: {fallbacks}")
         }
-        CommandAction::Plan(objective) => {
+        CommandAction::Prewalk(objective) => {
             if objective.trim().is_empty() {
-                "Usage: /plan <task objective or prompt> to generate a structured implementation plan.".to_string()
+                "Usage: /prewalk <task objective> to explore, land the first edit, and transition to fast model.".to_string()
             } else {
-                format!("Generating implementation plan for: {}", objective.trim())
+                format!("Prewalk initiated for: {}", objective.trim())
             }
         }
         CommandAction::Compact => {
