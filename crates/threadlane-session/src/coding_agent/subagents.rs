@@ -999,6 +999,90 @@ You are an isolated subagent working in {}. Complete only the assigned task and 
 #[cfg(test)]
 mod result_tests {
     use super::*;
+    use threadlane_runtime::harness::JsonlStore;
+
+    async fn snapshot_session() -> (tempfile::TempDir, PathBuf, Vec<String>) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(dir.path().join("first.rs"), "first snapshot").unwrap();
+        std::fs::write(dir.path().join("second.rs"), "second snapshot").unwrap();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        let run_id = harness.unique_run_id("snapshot").unwrap();
+        harness
+            .begin_run(&run_id, AgentMessage::user("parent transcript", vec![]))
+            .unwrap();
+        let mut context_ids = Vec::new();
+        for (index, file) in ["first.rs", "second.rs"].into_iter().enumerate() {
+            let tool_call_id = format!("read-{index}");
+            harness
+                .append_message(AgentMessage::Assistant {
+                    content: None,
+                    tool_calls: Some(vec![threadlane_provider::openai::ToolCall {
+                        id: tool_call_id.clone(),
+                        r#type: "function".into(),
+                        function: threadlane_provider::openai::ToolCallFunction {
+                            name: "read_file".into(),
+                            arguments: format!(
+                                r#"{{\"path\":\"{file}\",\"start_line\":1,\"end_line\":1}}"#
+                            ),
+                        },
+                        thought_signature: None,
+                    }]),
+                    stop_reason: None,
+                    deferred_handle: None,
+                })
+                .unwrap();
+            harness
+                .append_tool_intent(
+                    &run_id,
+                    &tool_call_id,
+                    "read_file",
+                    serde_json::json!({"path": file, "start_line": 1, "end_line": 1}),
+                )
+                .await
+                .unwrap();
+            let entry_id = harness
+                .append_message(AgentMessage::Tool {
+                    tool_call_id: tool_call_id.clone(),
+                    name: "read_file".into(),
+                    content: std::fs::read_to_string(dir.path().join(file)).unwrap(),
+                    is_error: false,
+                    terminate: false,
+                })
+                .unwrap();
+            context_ids.push(
+                harness
+                    .index_read_snapshot(&run_id, dir.path(), &tool_call_id, &entry_id, 14)
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
+        (dir, path, context_ids)
+    }
+
+    fn test_context(
+        work_dir: PathBuf,
+        session_file: PathBuf,
+        observer: Option<SubagentBoundaryObserver>,
+    ) -> SubagentRunContext {
+        let (parent_event_tx, _) = broadcast::channel(8);
+        SubagentRunContext {
+            api_key: String::new(),
+            account_id: None,
+            child_model: "test-model".into(),
+            child_reasoning_effort: threadlane_runtime::ReasoningEffort::Medium,
+            parent_session_id: "parent".into(),
+            work_dir,
+            extensions: Arc::new(WasiExtensionManager::new()),
+            parent_event_tx,
+            parent_leaf_id: None,
+            session_file: Some(session_file),
+            scheduler_observer: Some(Arc::new(std::sync::Mutex::new(Vec::new()))),
+            child_work_observer: observer,
+            child_tool_observer: None,
+            semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
+        }
+    }
 
     fn task(agent: &str) -> AgentRunTask {
         AgentRunTask {
@@ -1052,6 +1136,85 @@ mod result_tests {
         task.context_refs = vec!["ctx-one".into()];
         let error = resolve_subagent_context(&task, None, Path::new(".")).unwrap_err();
         assert!(error.contains("durable parent session"));
+    }
+
+    #[tokio::test]
+    async fn context_refs_handoff_is_ordered_and_excludes_parent_transcript() {
+        let (dir, session_file, context_ids) = snapshot_session().await;
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed_for_child = observed.clone();
+        let path_for_child = session_file.clone();
+        let observer: SubagentBoundaryObserver = Arc::new(move || {
+            let store = JsonlStore::open(&path_for_child).unwrap();
+            *observed_for_child.lock().unwrap() = store
+                .entries()
+                .iter()
+                .filter(|entry| entry.lane != "main")
+                .map(|entry| entry.message.clone())
+                .collect();
+        });
+        let mut child = task("worker");
+        child.context_refs = vec![context_ids[1].clone(), context_ids[0].clone()];
+
+        run_subagents_with_context(
+            vec![child],
+            false,
+            None,
+            test_context(dir.path().into(), session_file, Some(observer)),
+        )
+        .await
+        .unwrap();
+
+        let messages = observed.lock().unwrap();
+        assert!(matches!(&messages[..], [
+            AgentMessage::User { content },
+            AgentMessage::User { .. },
+        ] if content == "worker task"));
+        let AgentMessage::User { content } = &messages[1] else {
+            panic!("expected context handoff");
+        };
+        assert!(content.find(&context_ids[1]).unwrap() < content.find(&context_ids[0]).unwrap());
+        assert!(!content.contains("parent transcript"));
+    }
+
+    #[tokio::test]
+    async fn unknown_and_stale_context_refs_fail_before_child_work() {
+        let (dir, session_file, context_ids) = snapshot_session().await;
+        let observed = Arc::new(AtomicBool::new(false));
+        let observed_for_child = observed.clone();
+        let observer: SubagentBoundaryObserver = Arc::new(move || {
+            observed_for_child.store(true, Ordering::SeqCst);
+        });
+        let mut child = task("worker");
+        child.context_refs = vec!["ctx-missing".into()];
+        assert!(run_subagents_with_context(
+            vec![child],
+            false,
+            None,
+            test_context(
+                dir.path().into(),
+                session_file.clone(),
+                Some(observer.clone())
+            ),
+        )
+        .await
+        .unwrap_err()
+        .contains("missing"));
+        assert!(!observed.load(Ordering::SeqCst));
+
+        std::fs::write(dir.path().join("first.rs"), "stale").unwrap();
+        let mut child = task("worker");
+        child.context_refs = vec![context_ids[0].clone()];
+        assert!(run_subagents_with_context(
+            vec![child],
+            false,
+            None,
+            test_context(dir.path().into(), session_file, Some(observer)),
+        )
+        .await
+        .unwrap_err()
+        .contains("stale"));
+        assert!(!observed.load(Ordering::SeqCst));
     }
 
     fn lane(agent: &str, status: SubagentLaneStatus) -> CompletedSubagentLane {

@@ -18,3 +18,7 @@ cargo test -p threadlane-session --features test-support
 git diff --check
 passed
 ```
+
+Review follow-up: added end-to-end child-lane tests proving caller-order handoff,
+the exact task-plus-context child durable context without parent transcript, and
+unknown/stale reference rejection before the child-work observer.
