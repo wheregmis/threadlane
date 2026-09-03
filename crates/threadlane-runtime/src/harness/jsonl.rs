@@ -988,6 +988,8 @@ impl Record {
     fn sync_policy(&self) -> SyncPolicy {
         match self {
             Self::ContextManifestCaptured { .. }
+            | Self::ContextSnapshotIndexed { .. }
+            | Self::ContextSnapshotLoaded { .. }
             | Self::ContextCompacted { .. }
             | Self::RunContextCaptured { .. }
             | Self::ProviderRequestStarted { .. }
@@ -1332,7 +1334,8 @@ mod tests {
     };
     use crate::harness::{
         AgentHarness, CompactionReason, ContextItemSource, ContextItemStatus, ContextManifestItem,
-        HarnessEventHub, JsonlStore, Record, Reducer, SessionStore, TraceString,
+        ContextSnapshot, ContextSnapshotLoadOutcome, HarnessEventHub, JsonlStore, Record, Reducer,
+        SessionStore, TraceString,
     };
     use crate::types::AgentMessage;
 
@@ -1369,6 +1372,167 @@ mod tests {
             stop_reason: None,
             deferred_handle: None,
         }
+    }
+
+    fn context_snapshot() -> ContextSnapshot {
+        ContextSnapshot {
+            context_id: "ctx-v2-tool-result-call-1".into(),
+            source_lane: "main".into(),
+            source_run_id: "run-1".into(),
+            source_tool_call_id: "call-1".into(),
+            source_entry_id: "v2-tool-result-call-1".into(),
+            path: "src/lib.rs".into(),
+            start_line: Some(10),
+            end_line: Some(20),
+            file_sha256: TraceString::new("a".repeat(64)).unwrap(),
+            output_chars: 123,
+            captured_at: 1,
+        }
+    }
+
+    #[test]
+    fn context_snapshot_records_reload_without_changing_model_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("context-snapshot.jsonl");
+        let mut store = JsonlStore::open(&path).unwrap();
+        store
+            .append_entry(crate::harness::Entry::new(
+                "v2-tool-result-call-1",
+                None,
+                "main",
+                1,
+                1,
+                AgentMessage::Tool {
+                    tool_call_id: "call-1".into(),
+                    name: "read_file".into(),
+                    content: "contents".into(),
+                    is_error: false,
+                    terminate: false,
+                },
+                false,
+            ))
+            .unwrap();
+        let model_context = store.model_context("main").unwrap();
+        let snapshot = context_snapshot();
+        store
+            .append_record(Record::ContextSnapshotIndexed {
+                id: "snapshot-index-1".into(),
+                seq: store.next_sequence(),
+                lane: "main".into(),
+                timestamp: 1,
+                run_id: "run-1".into(),
+                snapshot: snapshot.clone(),
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .append_record(Record::ContextSnapshotIndexed {
+                    id: "snapshot-index-1".into(),
+                    seq: store.next_sequence(),
+                    lane: "main".into(),
+                    timestamp: 1,
+                    run_id: "run-1".into(),
+                    snapshot: snapshot.clone(),
+                })
+                .unwrap_err(),
+            crate::harness::ReduceError::DuplicateId("snapshot-index-1".into())
+        );
+        store
+            .append_record(Record::ContextSnapshotLoaded {
+                id: "snapshot-load-1".into(),
+                seq: store.next_sequence(),
+                lane: "main".into(),
+                timestamp: 1,
+                run_id: "run-1".into(),
+                context_id: snapshot.context_id.clone(),
+                source_lane: snapshot.source_lane.clone(),
+                current_digest: None,
+                outcome: ContextSnapshotLoadOutcome::Loaded,
+            })
+            .unwrap();
+        drop(store);
+
+        let reloaded = JsonlStore::open(&path).unwrap();
+        let state = Reducer::reduce(&reloaded).unwrap();
+        assert_eq!(
+            state.lane("main").unwrap().context_snapshots,
+            vec![snapshot]
+        );
+        assert_eq!(reloaded.model_context("main").unwrap(), model_context);
+    }
+
+    #[test]
+    fn malformed_context_snapshot_metadata_is_skipped_during_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("malformed-context-snapshot.jsonl");
+        let mut store = JsonlStore::open(&path).unwrap();
+        store
+            .append_entry(crate::harness::Entry::new(
+                "v2-tool-result-call-1",
+                None,
+                "main",
+                1,
+                1,
+                AgentMessage::Tool {
+                    tool_call_id: "call-1".into(),
+                    name: "read_file".into(),
+                    content: "contents".into(),
+                    is_error: false,
+                    terminate: false,
+                },
+                false,
+            ))
+            .unwrap();
+        drop(store);
+        let malformed = Record::ContextSnapshotIndexed {
+            id: "snapshot-index-malformed".into(),
+            seq: 2,
+            lane: "main".into(),
+            timestamp: 1,
+            run_id: "run-1".into(),
+            snapshot: ContextSnapshot {
+                file_sha256: TraceString::new("not-a-digest").unwrap(),
+                ..context_snapshot()
+            },
+        };
+        use std::io::Write as _;
+        writeln!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap(),
+            "{}",
+            serde_json::to_string(&malformed).unwrap()
+        )
+        .unwrap();
+        let malformed_load = Record::ContextSnapshotLoaded {
+            id: "snapshot-load-malformed".into(),
+            seq: 3,
+            lane: "main".into(),
+            timestamp: 1,
+            run_id: "run-1".into(),
+            context_id: String::new(),
+            source_lane: "main".into(),
+            current_digest: None,
+            outcome: ContextSnapshotLoadOutcome::Corrupt,
+        };
+        writeln!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap(),
+            "{}",
+            serde_json::to_string(&malformed_load).unwrap()
+        )
+        .unwrap();
+
+        let reloaded = JsonlStore::open(&path).unwrap();
+        assert!(Reducer::reduce(&reloaded)
+            .unwrap()
+            .lane("main")
+            .unwrap()
+            .context_snapshots
+            .is_empty());
     }
 
     fn write_transcript(path: &std::path::Path, messages: Vec<AgentMessage>) {

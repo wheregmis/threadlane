@@ -3,12 +3,35 @@ pub mod search;
 mod virtual_read;
 
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{LazyLock, Mutex, OnceLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+const READ_FILE_SNAPSHOT_PREFIX: &str = "[Threadlane read_file SHA-256: ";
+const READ_FILE_SNAPSHOT_PATH_PREFIX: &str = "[Threadlane read_file path: ";
+
+pub fn read_file_snapshot_digest(output: &str) -> Option<&str> {
+    output.lines().take(2).find_map(|line| {
+        let digest = line
+            .strip_prefix(READ_FILE_SNAPSHOT_PREFIX)?
+            .strip_suffix(']')?;
+        (digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .then_some(digest)
+    })
+}
+
+pub fn read_file_snapshot_path(output: &str) -> Option<String> {
+    output.lines().take(3).find_map(|line| {
+        let path = line
+            .strip_prefix(READ_FILE_SNAPSHOT_PATH_PREFIX)?
+            .strip_suffix(']')?;
+        serde_json::from_str(path).ok()
+    })
+}
 
 fn tool_definitions() -> Vec<Value> {
     vec![
@@ -572,9 +595,24 @@ pub fn try_execute_tool_in_workspace(
                 })
                 .collect();
             let body = formatted_lines.join("\n");
+            let canonical_root = canonical_workspace_root(workspace_root)?;
+            let snapshot_path = validated_path
+                .strip_prefix(&canonical_root)
+                .map_err(|_| {
+                    format!(
+                        "read path '{}' is outside workspace",
+                        validated_path.display()
+                    )
+                })?
+                .to_string_lossy();
+            let snapshot = format!(
+                "{READ_FILE_SNAPSHOT_PREFIX}{:x}]\n{READ_FILE_SNAPSHOT_PATH_PREFIX}{}]\n",
+                Sha256::digest(content.as_bytes()),
+                serde_json::to_string(snapshot_path.as_ref()).map_err(|error| error.to_string())?,
+            );
             let output = match auto_resolved_notice {
-                Some(notice) => format!("{notice}{body}"),
-                None => body,
+                Some(notice) => format!("{notice}{snapshot}{body}"),
+                None => format!("{snapshot}{body}"),
             };
             Ok(truncate_tool_output(&output))
         }
@@ -1945,8 +1983,13 @@ mod tests {
         fs::write(dir.path().join("sample.txt"), "contents").unwrap();
 
         let read =
-            try_execute_tool_in_workspace("read_file", r#"{"path":"sample.txt"}"#, dir.path());
-        assert!(read.is_ok(), "{read:?}");
+            try_execute_tool_in_workspace("read_file", r#"{"path":"sample.txt"}"#, dir.path())
+                .unwrap();
+        fs::write(dir.path().join("sample.txt"), "changed after read").unwrap();
+        assert_eq!(
+            read_file_snapshot_digest(&read),
+            Some("d1b2a59fbea7e20077af9f91b27e95e865061b270be03ff539ab3b73587882e8")
+        );
 
         let command =
             try_execute_tool_in_workspace("run_command", r#"{"command":"printf ok"}"#, dir.path());

@@ -212,6 +212,7 @@ mod tests {
             abort_requested: false,
             usage: TokenUsage::default(),
             tools: Vec::new(),
+            context_snapshots: Vec::new(),
             facts: BTreeMap::new(),
             resume_data: BTreeMap::new(),
         }

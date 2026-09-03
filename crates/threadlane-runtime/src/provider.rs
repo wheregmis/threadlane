@@ -8,7 +8,7 @@
 //! The free functions `convert_to_llm` and `convert_to_codex_llm` live here
 //! and are also re-exported from `loop_engine` for backward compatibility.
 
-use crate::compaction::compaction_summary_text;
+use crate::compaction::compaction_checkpoint_text;
 use crate::types::{AgentMessage, AgentToolDefinition, AgentToolResult, TokenUsage, TurnState};
 use async_trait::async_trait;
 use serde_json::Value;
@@ -314,10 +314,10 @@ pub fn convert_to_llm(messages: &[AgentMessage]) -> Vec<Value> {
                     "content": content
                 }))
             }
-            AgentMessage::Custom { .. } => compaction_summary_text(msg).map(|summary| {
+            AgentMessage::Custom { .. } => compaction_checkpoint_text(msg).map(|checkpoint| {
                 serde_json::json!({
                     "role": "user",
-                    "content": format!("<context-checkpoint>\n{summary}\n</context-checkpoint>")
+                    "content": format!("<context-checkpoint>\n{checkpoint}\n</context-checkpoint>")
                 })
             }),
         })
@@ -403,13 +403,13 @@ pub fn convert_to_codex_llm(messages: &[AgentMessage]) -> (String, Vec<Value>) {
                 }));
             }
             AgentMessage::Custom { .. } => {
-                if let Some(summary) = compaction_summary_text(msg) {
+                if let Some(checkpoint) = compaction_checkpoint_text(msg) {
                     items.push(serde_json::json!({
                         "type": "message",
                         "role": "user",
                         "content": [{
                             "type": "input_text",
-                            "text": format!("<context-checkpoint>\n{summary}\n</context-checkpoint>")
+                            "text": format!("<context-checkpoint>\n{checkpoint}\n</context-checkpoint>")
                         }]
                     }));
                 }
@@ -799,6 +799,33 @@ mod normalize_tool_arguments_tests {
             step.finish().unwrap_err(),
             "provider stream ended without a final response"
         );
+    }
+
+    #[test]
+    fn provider_adapters_render_structured_compaction_index_once() {
+        let message = AgentMessage::Custom {
+            custom_type: "compaction_summary".into(),
+            payload: serde_json::json!({
+                "summary": "summary",
+                "context_snapshot_index": [{
+                    "context_id": "ctx-1",
+                    "path": "src/lib.rs",
+                    "start_line": null,
+                    "end_line": null,
+                    "file_sha256": "abc123",
+                }],
+            }),
+        };
+
+        let chat = convert_to_llm(std::slice::from_ref(&message));
+        let chat_checkpoint = chat[0]["content"].as_str().unwrap();
+        assert_eq!(chat_checkpoint.matches("ctx-1").count(), 1);
+        assert!(chat_checkpoint.contains("ctx-1 src/lib.rs sha256=abc123"));
+
+        let (_, codex) = convert_to_codex_llm(&[message]);
+        let codex_checkpoint = codex[0]["content"][0]["text"].as_str().unwrap();
+        assert_eq!(codex_checkpoint.matches("ctx-1").count(), 1);
+        assert!(codex_checkpoint.contains("ctx-1 src/lib.rs sha256=abc123"));
     }
 
     #[test]

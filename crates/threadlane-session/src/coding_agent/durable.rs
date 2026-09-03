@@ -148,6 +148,8 @@ impl CodingAgent {
                 Box::pin(async move { harness.lock().await.record_provider_trace(&run_id, event) })
             })));
         let message_harness = trace_harness.clone();
+        let message_run_id = run_id.clone();
+        let message_work_dir = self.work_dir.clone();
         let boundary_harness = trace_harness.clone();
         let boundary_run_id = run_id.clone();
         let boundary_config = self.agent.config().clone();
@@ -164,7 +166,42 @@ impl CodingAgent {
         self.agent
             .set_message_recorder(Some(Arc::new(move |message| {
                 let harness = message_harness.clone();
-                Box::pin(async move { harness.lock().await.append_message(message).map(|_| ()) })
+                let run_id = message_run_id.clone();
+                let work_dir = message_work_dir.clone();
+                Box::pin(async move {
+                    let mut harness = harness.lock().await;
+                    let output_chars = match &message {
+                        AgentMessage::Tool {
+                            content,
+                            name,
+                            is_error: false,
+                            ..
+                        } if name == "read_file" => Some(content.chars().count()),
+                        _ => None,
+                    };
+                    let tool_call_id = match &message {
+                        AgentMessage::Tool {
+                            tool_call_id,
+                            name,
+                            is_error: false,
+                            ..
+                        } if name == "read_file" => Some(tool_call_id.clone()),
+                        _ => None,
+                    };
+                    let entry_id = harness.append_message(message)?;
+                    if let (Some(tool_call_id), Some(output_chars)) = (tool_call_id, output_chars) {
+                        if let Err(error) = harness.index_read_snapshot(
+                            &run_id,
+                            &work_dir,
+                            &tool_call_id,
+                            &entry_id,
+                            output_chars,
+                        ) {
+                            warn!("failed to index read_file context snapshot: {error}");
+                        }
+                    }
+                    Ok(())
+                })
             })));
         let intent_harness = trace_harness.clone();
         let intent_run_id = run_id.clone();
@@ -301,6 +338,7 @@ impl CodingAgent {
                         instructions: None,
                         tools: None,
                         model: None,
+                        context_refs: Vec::new(),
                     };
                     let parent_leaf =
                         self.prompt_parent_leaf(AgentMessage::user(prompt, Vec::new()), true);
@@ -706,7 +744,8 @@ impl CodingAgent {
             .iter()
             .rev()
             .find_map(threadlane_runtime::compaction_summary_text)
-            .ok_or_else(|| "compaction produced no durable summary".to_string())?;
+            .ok_or_else(|| "compaction produced no durable summary".to_string())?
+            .to_owned();
         let retained_tail = compaction_retained_tail(&compacted);
         let config = self.agent.config().clone();
         let pre_tokens =
@@ -714,8 +753,16 @@ impl CodingAgent {
         let compacted_messages = before
             .len()
             .saturating_sub(compacted.len().saturating_sub(1));
+        let summary = match self.harness.as_ref() {
+            Some(journal) => journal.compaction_summary_without_indexed_tool_outputs(
+                &summary,
+                compacted_messages,
+                &config,
+            )?,
+            None => summary,
+        };
         let persisted = self.persist_harness_compaction(
-            summary,
+            &summary,
             &retained_tail,
             pre_tokens,
             compacted_messages,
@@ -742,9 +789,11 @@ impl CodingAgent {
         if let Some(journal) = self.harness.as_mut() {
             journal.ensure_fresh()?;
             let run_id = journal.unique_run_id("foreground-compaction")?;
+            let context_snapshot_index =
+                journal.context_snapshot_index_for_compaction(compacted_messages)?;
             journal
                 .store
-                .accept_compaction(&run_id, summary)
+                .accept_compaction(&run_id, summary, &context_snapshot_index)
                 .map_err(|error| error.to_string())?;
             journal
                 .store

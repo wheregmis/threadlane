@@ -532,8 +532,19 @@ impl<S: SessionStore> AgentHarness<S> {
             .map_err(ProcedureError::from)
     }
 
-    pub fn accept_compaction(&mut self, run_id: &str, summary: &str) -> Result<(), ProcedureError> {
-        CompactionProcedure::accept(&self.store, run_id, summary, &mut self.effects)
+    pub fn accept_compaction(
+        &mut self,
+        run_id: &str,
+        summary: &str,
+        context_snapshot_index: &[serde_json::Value],
+    ) -> Result<(), ProcedureError> {
+        CompactionProcedure::accept(
+            &self.store,
+            run_id,
+            summary,
+            context_snapshot_index,
+            &mut self.effects,
+        )
     }
 
     /// Checkpoints canonical context while preserving the caller's open run.
@@ -542,6 +553,7 @@ impl<S: SessionStore> AgentHarness<S> {
         lane: &str,
         run_id: &str,
         summary: &str,
+        context_snapshot_index: &[serde_json::Value],
         reason: super::CompactionReason,
     ) -> Result<(), ProcedureError> {
         CompactionProcedure::checkpoint_open_run(
@@ -549,6 +561,7 @@ impl<S: SessionStore> AgentHarness<S> {
             lane,
             run_id,
             summary,
+            context_snapshot_index,
             reason,
             &mut self.effects,
         )
@@ -567,7 +580,14 @@ impl<S: SessionStore> AgentHarness<S> {
         run_id: &str,
         summary: &str,
     ) -> Result<(), ProcedureError> {
-        CompactionProcedure::accept_on_lane(&self.store, lane, run_id, summary, &mut self.effects)
+        CompactionProcedure::accept_on_lane(
+            &self.store,
+            lane,
+            run_id,
+            summary,
+            &[],
+            &mut self.effects,
+        )
     }
 
     pub fn accept_navigation(

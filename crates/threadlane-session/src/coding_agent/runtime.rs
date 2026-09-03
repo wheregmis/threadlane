@@ -6,8 +6,9 @@ use super::subagents::*;
 
 use super::broker::ManagedProcessRegistry;
 use super::capabilities::{
-    build_broker_dispatcher, render_agent_catalog, restored_tool_policy, McpCapability,
-    PlanCapability, PrewalkCapability, SkillCapability, SubagentCapability, WasiCapability,
+    build_broker_dispatcher, render_agent_catalog, restored_tool_policy, ContextCapability,
+    McpCapability, PlanCapability, PrewalkCapability, SkillCapability, SubagentCapability,
+    WasiCapability,
 };
 use super::harness::{CodingSessionHarness, HarnessWatch, InterruptedSubagentRecoveryState};
 use crate::commands::{execute_slash_command, parse_slash_command, CommandAction};
@@ -552,6 +553,12 @@ impl CodingAgent {
             plan_store: plan_store.clone(),
             event_tx: agent.event_tx.clone(),
         }));
+        if let Some(session_file) = options.session_file.clone() {
+            registry.register(Box::new(ContextCapability {
+                session_file,
+                work_dir: options.work_dir.clone(),
+            }));
+        }
         registry.register(Box::new(PrewalkCapability));
 
         registry.register(Box::new(WasiCapability {
@@ -914,6 +921,7 @@ impl CodingAgent {
                     instructions: None,
                     tools: None,
                     model: None,
+                    context_refs: Vec::new(),
                 };
                 let visible_prompt = AgentMessage::user(input, images.clone());
                 let harness_run_id = match self.begin_harness_run(visible_prompt).await {
@@ -1467,9 +1475,10 @@ mod compaction_sync_tests {
     };
     use threadlane_runtime::{
         harness::{
-            read_transcript_page, CompactionReason, JsonlStore, SessionStore, TranscriptItem,
+            read_transcript_page, CompactionReason, JsonlStore, OperationOutcome, SessionStore,
+            TranscriptItem,
         },
-        AgentConfig, AgentMessage, Record,
+        AgentConfig, AgentMessage, AgentToolResult, Record,
     };
 
     fn summary() -> AgentMessage {
@@ -1520,6 +1529,111 @@ mod compaction_sync_tests {
         });
 
         assert!(!requires_harness_compaction_reset(&durable, &state));
+    }
+
+    #[tokio::test]
+    async fn manual_compaction_preserves_summary_and_structured_snapshot_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(dir.path().join("README.md"), "snapshot body").unwrap();
+        let mut agent = CodingAgent::new(CodingAgentOptions {
+            api_key: "test-key".into(),
+            account_id: None,
+            model: "test-model".into(),
+            work_dir: dir.path().to_path_buf(),
+            session_file: Some(path.clone()),
+            system_prompt: SystemPromptConfig::default(),
+            agent_config: None,
+            coding_config: None,
+        });
+        let harness = agent.harness.as_mut().unwrap();
+        let run_id = harness.unique_run_id("snapshot").unwrap();
+        harness
+            .begin_run(&run_id, AgentMessage::user("inspect", vec![]))
+            .unwrap();
+        harness
+            .append_message(AgentMessage::Assistant {
+                content: None,
+                tool_calls: Some(vec![RuntimeToolCall {
+                    id: "read-1".into(),
+                    r#type: "function".into(),
+                    function: RuntimeToolCallFunction {
+                        name: "read_file".into(),
+                        arguments: r#"{\"path\":\"README.md\",\"start_line\":1,\"end_line\":1}"#
+                            .into(),
+                    },
+                    thought_signature: None,
+                }]),
+                stop_reason: None,
+                deferred_handle: None,
+            })
+            .unwrap();
+        harness
+            .append_tool_intent(
+                &run_id,
+                "read-1",
+                "read_file",
+                serde_json::json!({"path": "README.md", "start_line": 1, "end_line": 1}),
+            )
+            .await
+            .unwrap();
+        let read_output = threadlane_tools::try_execute_tool_in_workspace(
+            "read_file",
+            r#"{"path":"README.md","start_line":1,"end_line":1}"#,
+            dir.path(),
+        )
+        .unwrap();
+        harness
+            .record_tool_result(
+                &run_id,
+                &AgentToolResult::external("read-1", "read_file", &read_output, false),
+            )
+            .unwrap();
+        let source_entry_id = harness.store.entries().last().unwrap().id.clone();
+        let context_id = harness
+            .index_read_snapshot(
+                &run_id,
+                dir.path(),
+                "read-1",
+                &source_entry_id,
+                read_output.chars().count(),
+            )
+            .unwrap()
+            .unwrap();
+        harness
+            .finish_run(&run_id, OperationOutcome::Completed, None)
+            .unwrap();
+
+        let summary = "Keep this user-authored summary exactly.";
+        agent
+            .persist_harness_compaction(summary, &[], 100, 2)
+            .unwrap();
+
+        let store = JsonlStore::open(&path).unwrap();
+        let checkpoint = store
+            .model_context("main")
+            .unwrap()
+            .messages()
+            .into_iter()
+            .find(|message| threadlane_runtime::compaction_summary_text(message).is_some())
+            .unwrap();
+        assert_eq!(
+            threadlane_runtime::compaction_summary_text(&checkpoint),
+            Some(summary)
+        );
+        let AgentMessage::Custom { payload, .. } = checkpoint else {
+            unreachable!();
+        };
+        let index = payload["context_snapshot_index"]
+            .as_array()
+            .expect("structured snapshot index");
+        assert_eq!(index.len(), 1);
+        assert_eq!(index[0]["context_id"], context_id);
+        assert_eq!(index[0]["path"], "README.md");
+        assert_eq!(index[0]["start_line"], 1);
+        assert_eq!(index[0]["end_line"], 1);
+        assert!(index[0]["file_sha256"].is_string());
+        assert!(!payload.to_string().contains("snapshot body"));
     }
 
     #[tokio::test]
