@@ -1383,6 +1383,39 @@ impl CodingSessionHarness {
         Ok(accepted)
     }
 
+    pub(crate) fn append_subagent_context(
+        &mut self,
+        lane: &str,
+        run_id: &str,
+        message: String,
+    ) -> Result<(), String> {
+        self.ensure_fresh()?;
+        let prompt_entry_id = format!("entry-{run_id}-user");
+        if !self
+            .store
+            .entries()
+            .iter()
+            .any(|entry| entry.id == prompt_entry_id && entry.lane == lane)
+        {
+            return Err(format!("Missing accepted subagent task for lane {lane}"));
+        }
+        self.store
+            .append_entry_gated(HarnessEntry {
+                id: format!("entry-{run_id}-context-1"),
+                parent_id: Some(prompt_entry_id),
+                lane: lane.into(),
+                seq: harness_next_seq(self.store.store()),
+                timestamp: timestamp(),
+                message: AgentMessage::user(message, Vec::new()),
+                surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
+                terminate: false,
+            })
+            .map_err(|error| error.to_string())?;
+        self.store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())
+    }
+
     pub(crate) fn finish_subagent_lane(
         &mut self,
         lane: &str,

@@ -15,6 +15,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::time::{timeout, Duration};
 
 use super::cancellation::AgentRunTask;
+use super::capabilities::parse_context_refs;
 use super::scheduler::{enqueue_harness_follow_up, AgentWork, AgentWorkScheduler};
 use super::subagents::{AgentRunner, MAX_SUBAGENT_TASKS, MAX_SUBAGENT_TASK_CHARS};
 
@@ -210,12 +211,14 @@ impl HostCapabilityHandler {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .map(String::from);
+                let context_refs = parse_context_refs(value).map_err(invalid_argument)?;
                 Ok(AgentRunTask {
                     agent: agent.into(),
                     task: task.into(),
                     instructions,
                     tools,
                     model,
+                    context_refs,
                 })
             })
             .collect::<Result<Vec<_>, BrokerError>>()?;

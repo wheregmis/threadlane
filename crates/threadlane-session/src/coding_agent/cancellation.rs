@@ -17,6 +17,8 @@ pub struct AgentRunTask {
     pub(crate) instructions: Option<String>,
     pub(crate) tools: Option<Vec<String>>,
     pub(crate) model: Option<String>,
+    #[serde(default)]
+    pub(crate) context_refs: Vec<String>,
 }
 
 pub(crate) fn recover_v2_subagent_records(

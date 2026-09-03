@@ -921,6 +921,7 @@ impl CodingAgent {
                     instructions: None,
                     tools: None,
                     model: None,
+                    context_refs: Vec::new(),
                 };
                 let visible_prompt = AgentMessage::user(input, images.clone());
                 let harness_run_id = match self.begin_harness_run(visible_prompt).await {

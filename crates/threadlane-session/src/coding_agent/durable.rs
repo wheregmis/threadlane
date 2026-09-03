@@ -338,6 +338,7 @@ impl CodingAgent {
                         instructions: None,
                         tools: None,
                         model: None,
+                        context_refs: Vec::new(),
                     };
                     let parent_leaf =
                         self.prompt_parent_leaf(AgentMessage::user(prompt, Vec::new()), true);

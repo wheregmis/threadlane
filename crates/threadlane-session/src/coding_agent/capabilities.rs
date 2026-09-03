@@ -226,6 +226,12 @@ fn subagent_tool_definition() -> AgentToolDefinition {
                             "model": {
                                 "type": "string",
                                 "description": "Deprecated compatibility field. Accepted but ignored; project settings select the child model, falling back to the parent session model."
+                            },
+                            "context_refs": {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "maxItems": 16,
+                                "description": "Optional ordered context snapshot IDs to pass to this child."
                             }
                         },
                         "required": ["agent", "task"]
@@ -336,6 +342,10 @@ impl SubagentToolExecutor {
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(String::from);
+            let context_refs = match parse_context_refs(val) {
+                Ok(context_refs) => context_refs,
+                Err(error) => return Some(Err(error)),
+            };
 
             tasks.push(AgentRunTask {
                 agent: agent.to_string(),
@@ -343,6 +353,7 @@ impl SubagentToolExecutor {
                 instructions,
                 tools,
                 model,
+                context_refs,
             });
         }
 
@@ -362,6 +373,32 @@ impl SubagentToolExecutor {
             Err(err) => Some(Err(err)),
         }
     }
+}
+
+pub(crate) fn parse_context_refs(value: &Value) -> Result<Vec<String>, String> {
+    let Some(refs) = value.get("context_refs") else {
+        return Ok(Vec::new());
+    };
+    let refs = refs
+        .as_array()
+        .ok_or_else(|| "`context_refs` must be an array".to_string())?;
+    if refs.len() > 16 {
+        return Err("`context_refs` accepts at most 16 IDs".into());
+    }
+    let mut seen = std::collections::HashSet::new();
+    refs.iter()
+        .map(|value| {
+            let id = value
+                .as_str()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| "Each context reference requires a non-empty ID".to_string())?;
+            if !seen.insert(id) {
+                return Err(format!("Duplicate context reference: {id}"));
+            }
+            Ok(id.to_string())
+        })
+        .collect()
 }
 
 #[async_trait]
