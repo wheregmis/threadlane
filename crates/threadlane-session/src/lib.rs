@@ -53,7 +53,7 @@ pub use commands::{
     CommandAction, SlashCommandInfo,
 };
 pub use config::{CodingAgentConfig, CodingAgentConfigBuilder};
-pub use context::{ProjectContext, ProjectInstruction};
+pub use context::ProjectContext;
 pub use permission::{PermissionDecision, PermissionHandle};
 pub use policy::ToolPolicy;
 pub use project_registry::{

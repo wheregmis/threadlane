@@ -1,9 +1,7 @@
 use crate::context::ProjectContext;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
 use threadlane_runtime::AgentToolDefinition;
-
-const MAX_TOOL_DESCRIPTION_CHARS: usize = 240;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SystemPromptConfig {
@@ -29,10 +27,6 @@ fn normalize_line(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn truncate_chars(value: &str, max_chars: usize) -> String {
-    value.chars().take(max_chars).collect()
-}
-
 fn escaped_attribute(value: &Path) -> String {
     value
         .to_string_lossy()
@@ -42,36 +36,24 @@ fn escaped_attribute(value: &Path) -> String {
         .replace('>', "&gt;")
 }
 
-fn visible_tools(tools: &[AgentToolDefinition]) -> Vec<(&str, String)> {
-    let mut tools_by_name = BTreeMap::new();
-    for tool in tools {
-        let name = tool.name.trim();
-        if name.is_empty() {
-            continue;
-        }
-        let description = tool
-            .description
-            .as_deref()
-            .map(normalize_line)
-            .filter(|description| !description.is_empty())
-            .unwrap_or_else(|| "No description provided.".to_string());
-        tools_by_name
-            .entry(name)
-            .or_insert_with(|| truncate_chars(&description, MAX_TOOL_DESCRIPTION_CHARS));
-    }
-    tools_by_name.into_iter().collect()
+fn visible_tool_names(tools: &[AgentToolDefinition]) -> HashSet<&str> {
+    tools
+        .iter()
+        .map(|tool| tool.name.trim())
+        .filter(|name| !name.is_empty())
+        .collect()
 }
 
 fn append_project_context(prompt: &mut String, context: &ProjectContext) {
-    if !context.instructions.is_empty() {
+    if !context.context_files.is_empty() {
         prompt.push_str("\n\n<project_context>\n");
-        prompt.push_str("Project-specific instructions and guidelines:\n\n");
-        for instruction in &context.instructions {
-            prompt.push_str(&format!(
-                "<project_instructions path=\"{}\">\n{}\n</project_instructions>\n\n",
-                escaped_attribute(&instruction.path),
-                instruction.content
-            ));
+        prompt.push_str(
+            "Project instruction files are available in the workspace. Read the relevant file before changing code in its scope:\n",
+        );
+        for path in &context.context_files {
+            prompt.push_str("- ");
+            prompt.push_str(&escaped_attribute(path));
+            prompt.push('\n');
         }
         prompt.push_str("</project_context>");
     }
@@ -92,8 +74,7 @@ fn append_catalog(prompt: &mut String, catalog: Option<&str>) {
 }
 
 pub(crate) fn build_system_prompt(options: SystemPromptBuildOptions<'_>) -> String {
-    let visible_tools = visible_tools(options.tools);
-    let available_tool_names: HashSet<_> = visible_tools.iter().map(|(name, _)| *name).collect();
+    let available_tool_names = visible_tool_names(options.tools);
 
     let mut prompt = if let Some(custom_prompt) = options
         .config
@@ -104,16 +85,6 @@ pub(crate) fn build_system_prompt(options: SystemPromptBuildOptions<'_>) -> Stri
     {
         custom_prompt.to_string()
     } else {
-        let tools = if visible_tools.is_empty() {
-            "(none)".to_string()
-        } else {
-            visible_tools
-                .iter()
-                .map(|(name, description)| format!("- {name}: {description}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-
         let mut tool_guidelines = Vec::new();
         let mut seen = HashSet::new();
         let mut add_tool_guideline = |guideline: &str| {
@@ -244,50 +215,16 @@ pub(crate) fn build_system_prompt(options: SystemPromptBuildOptions<'_>) -> Stri
         };
 
         format!(
-            "You are an expert coding assistant operating inside threadlane, a native coding agent harness. You help users solve software engineering tasks by reading files, executing commands, editing code, and writing new files.\n\n\
-            ## Available Tools\n\
-            {tools}\n\n\
-            Additional custom tools may be available depending on the project.\n\n\
-            ## Delivering Work & Execution Rules\n\
-            - Deliver complete, production-ready work. Act on the actual request without quietly narrowing, widening, or transforming the requested scope.\n\
-            - Do not stop halfway, leave temporary placeholders or TODOs, or report completion until the task is fully finished and verified.\n\
-            - If part of a task is blocked, finish every unblocked part first and state clearly what was left out and why.\n\
-            - Reserve blocking questions for cases where proceeding under any assumption would be unsafe or render the work useless. Make reasonable, documented assumptions and proceed.\n\
-            - Avoid unnecessary self-correction, apologies, or ruminating over past errors; state corrections plainly and continue.\n\
-            - Do not re-derive facts already established in the conversation or re-litigate decisions already made.\n\n\
-            ## Lazy Senior Developer & The Ladder\n\
-            You channel a lazy senior developer. Lazy means efficient, not careless. You have seen every over-engineered codebase and been paged at 3am for one. The best code is the code never written.\n\
-            Before writing code, stop at the first rung that holds:\n\
-            1. Does this need to exist at all? Speculative need = skip it, say so in one line (YAGNI).\n\
-            2. Already in this codebase? A helper, util, type, or pattern that already lives here -> reuse it. Look before you write; re-implementing what already lives a few files over is waste.\n\
-            3. Stdlib does it? Use the standard library.\n\
-            4. Native platform feature covers it? Use native platform features (e.g. CSS over JS, native inputs, DB constraints over app code).\n\
-            5. Already-installed dependency solves it? Reuse existing dependencies; never add a new dependency for what existing code or a few lines can do.\n\
-            6. Can it be one line / simple? Keep it direct and minimal.\n\
-            7. Only then: Write the minimum code that works.\n\
-            The ladder runs *after* understanding the problem, not instead of it: read the relevant code and trace the real flow end-to-end first, then climb. Lazy about the solution, rigorous about understanding.\n\
-            - Bug fix = root cause, not symptom: a report names a symptom. Grep callers before touching a function; fix the shared root cause once so all callers route through the fix, rather than patching only the reported path.\n\
-            - Anti-Over-Engineering Rules: No unrequested abstractions (no interface with one implementation, no factory for one product, no config for a value that never changes); no boilerplate or scaffolding \"for later\"; deletion over addition; boring over clever (clever is what someone decodes at 3am); fewest files possible; shortest working diff wins.\n\
-            - Non-negotiables: Trust-boundary validation, security, data integrity, error handling, and accessibility are never on the chopping block.\n\n\
-            ## Lazy Code Review Guidelines\n\
-            When reviewing code or diffs, focus relentlessly on hunting complexity, bloat, and over-engineering. The diff's best outcome is getting shorter.\n\
-            Output one line per finding: `<file>:<line>: <tag> <what>. <replacement>.`\n\
-            Tags:\n\
-            - `delete:` dead code, unused flexibility, speculative feature. Replacement: nothing.\n\
-            - `stdlib:` hand-rolled code the standard library ships. Name the stdlib function.\n\
-            - `native:` dependency or custom code doing what the platform already does. Name the feature.\n\
-            - `yagni:` abstraction with one implementation, config nobody sets, layer with one caller.\n\
-            - `shrink:` same logic in fewer lines. Show the shorter form.\n\
-            - `root-cause:` symptom band-aid instead of fixing the shared root cause where callers route through.\n\n\
-            ## Tool Strategy & Guidance\
-            {formatted_tool_guidelines}\n\
-            - If a tool call fails or is declined, adjust your strategy based on the error or feedback instead of retrying verbatim.\n\
-            - Independent tool calls can run in parallel in a single response when appropriate.\n\n\
-            ## Code Quality & Verification\n\
-            - Match the surrounding code's idioms, naming, style, and comment density.{validation_rule}\n\
-            - Report outcomes faithfully: state test failures directly with relevant output snippets, and report status without hedging.\n\
-            - Reference code locations as `file_path:line_number` (e.g. `src/main.rs:42`) so they render as clickable links in the harness UI.\n\
-            - Be concise and direct in your responses. Show file paths clearly when working with files.{extension_note}"
+            "You are an expert coding assistant operating inside threadlane. Use the tools exposed by the runtime when relevant.\n\n\
+            ## Execution Guidelines\n\
+            - Match effort to the request and complete the requested scope. Make reasonable assumptions unless proceeding would be unsafe or useless.\n\
+            - Inspect before editing, fix root causes, preserve surrounding idioms, and keep changes minimal. Do not add speculative abstractions or unrelated cleanup.\n\
+            - Do not claim completion or successful validation without evidence. If blocked, finish unblocked work and state what remains.{validation_rule}\n\
+            - Use concise plans only for substantial multi-step work. Avoid redundant reads and tool calls.\n\
+            - If a tool fails, adapt to its error rather than retrying verbatim. Run independent calls in parallel when useful.\n\
+            - Be concise and direct. Cite code as `file_path:line_number` when relevant.\n\n\
+            ## Tool-Specific Guidance\
+            {formatted_tool_guidelines}{extension_note}"
         )
     };
 
@@ -318,7 +255,6 @@ pub(crate) fn build_system_prompt(options: SystemPromptBuildOptions<'_>) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::ProjectInstruction;
     use serde_json::json;
     use std::path::PathBuf;
 
@@ -327,10 +263,10 @@ mod tests {
     }
 
     #[test]
-    fn default_prompt_lists_only_available_tools_and_dynamic_guidelines() {
+    fn default_prompt_uses_runtime_schemas_instead_of_repeating_descriptions() {
         let tools = vec![
             tool("read_file", "Read a file."),
-            tool("custom_search", "Search custom data.\nSafely."),
+            tool("custom_search", "Search data."),
         ];
         let prompt = build_system_prompt(SystemPromptBuildOptions {
             config: &SystemPromptConfig::default(),
@@ -342,160 +278,80 @@ mod tests {
             loaded_extension_count: 0,
         });
 
-        assert!(prompt.contains("- read_file: Read a file."));
-        assert!(prompt.contains("- custom_search: Search custom data. Safely."));
-        assert!(!prompt.contains("write_file:"));
+        assert!(prompt.contains("## Execution Guidelines"));
         assert!(prompt.contains("Inspect relevant files before making changes"));
-        assert!(!prompt.contains("Run focused validation after changes"));
-        assert!(prompt.contains("## Delivering Work & Execution Rules"));
-        assert!(prompt.contains("## Tool Strategy & Guidance"));
-        assert!(prompt.contains("## Code Quality & Verification"));
-        assert!(prompt.ends_with("Current working directory: /workspace"));
+        assert!(!prompt.contains("Read a file."));
+        assert!(!prompt.contains("Search data."));
+        assert!(prompt.len() < 4_000);
     }
 
     #[test]
-    fn test_hashline_system_prompt_guidelines() {
-        let tools = vec![
-            tool("read_file", "Read a file."),
-            tool("edit_file_hashline", "Edit file with hashline."),
-        ];
-        let prompt = build_system_prompt(SystemPromptBuildOptions {
-            config: &SystemPromptConfig::default(),
-            work_dir: Path::new("/workspace"),
-            tools: &tools,
-            project_context: &ProjectContext::default(),
-            skill_catalog: None,
-            agent_catalog: None,
-            loaded_extension_count: 0,
-        });
-
-        assert!(prompt.contains("Prefer `edit_file_hashline` for high-precision edits using line:hash anchors (e.g. '12:a3f') returned from `read_file` or prior `edit_file_hashline` outputs."));
-        assert!(prompt.contains("For multi-line code blocks or deletions, use range edits (start_anchor and end_anchor) rather than per-line edits."));
-        assert!(prompt.contains(
-            "Batch all edits for a file into a single `edit_file_hashline` tool call's edits array."
-        ));
-        assert!(prompt.contains("Successful `edit_file_hashline` calls return the unified diff and updated surrounding line:hash anchors."));
-        assert!(prompt.contains("If a hashline mismatch occurs, re-read the relevant file range with `read_file` to obtain updated line hashes before retrying."));
-    }
-
-    #[test]
-    fn test_run_command_guideline_presence() {
-        let tools = vec![tool("run_command", "Run shell command.")];
-        let prompt = build_system_prompt(SystemPromptBuildOptions {
-            config: &SystemPromptConfig::default(),
-            work_dir: Path::new("/workspace"),
-            tools: &tools,
-            project_context: &ProjectContext::default(),
-            skill_catalog: None,
-            agent_catalog: None,
-            loaded_extension_count: 0,
-        });
-
-        assert!(prompt.contains("Run focused validation after changes when practical, and never claim a command passed unless you ran it successfully and verified the output."));
-    }
-
-    #[test]
-    fn custom_prompt_replaces_defaults_but_keeps_resources_and_append_text() {
+    fn project_instructions_are_referenced_not_embedded() {
         let context = ProjectContext {
             context_files: vec![PathBuf::from("/workspace/AGENTS.md")],
-            instructions: vec![ProjectInstruction {
-                path: PathBuf::from("/workspace/AGENTS.md"),
-                content: "Always test.".into(),
-            }],
-            combined_instructions: "Always test.".into(),
-            memory_content: None,
+            memory_content: Some("Remember this.".into()),
         };
+        let prompt = build_system_prompt(SystemPromptBuildOptions {
+            config: &SystemPromptConfig::default(),
+            work_dir: Path::new("/workspace"),
+            tools: &[tool("read_file", "Read a file.")],
+            project_context: &context,
+            skill_catalog: None,
+            agent_catalog: None,
+            loaded_extension_count: 0,
+        });
+
+        assert!(prompt.contains("/workspace/AGENTS.md"));
+        assert!(prompt.contains("Read the relevant file"));
+        assert!(!prompt.contains("<project_instructions"));
+        assert!(prompt.contains("Remember this."));
+    }
+
+    #[test]
+    fn catalogs_require_corresponding_tools() {
+        let config = SystemPromptConfig::default();
+        let context = ProjectContext::default();
+        let build = |tools: &[AgentToolDefinition]| {
+            build_system_prompt(SystemPromptBuildOptions {
+                config: &config,
+                work_dir: Path::new("/workspace"),
+                tools,
+                project_context: &context,
+                skill_catalog: Some("SKILLS"),
+                agent_catalog: Some("AGENTS"),
+                loaded_extension_count: 0,
+            })
+        };
+
+        assert!(!build(&[]).contains("SKILLS"));
+        assert!(!build(&[]).contains("AGENTS"));
+        assert!(build(&[tool("read_file", "read")]).contains("SKILLS"));
+        assert!(build(&[tool("subagent", "delegate")]).contains("AGENTS"));
+    }
+
+    #[test]
+    fn custom_prompt_keeps_resources_and_append_text() {
         let config = SystemPromptConfig {
-            custom_prompt: Some("Custom identity.".into()),
-            append_prompt: Some("Additional rule.".into()),
-            guidelines: vec!["not rendered for custom prompts".into()],
+            custom_prompt: Some("Custom base".into()),
+            append_prompt: Some("Extra rule".into()),
+            guidelines: vec![],
+        };
+        let context = ProjectContext {
+            context_files: vec![PathBuf::from("/workspace/AGENTS.md")],
+            memory_content: None,
         };
         let prompt = build_system_prompt(SystemPromptBuildOptions {
             config: &config,
             work_dir: Path::new("/workspace"),
-            tools: &[tool("read_file", "Read")],
+            tools: &[],
             project_context: &context,
-            skill_catalog: Some("=== Available Skills ===\n- `review`: Review code"),
-            agent_catalog: None,
-            loaded_extension_count: 0,
-        });
-
-        assert!(prompt.starts_with("Custom identity.\n\nAdditional rule."));
-        assert!(!prompt.contains("Available tools:"));
-        assert!(prompt.contains("<project_instructions path=\"/workspace/AGENTS.md\">"));
-        assert!(prompt.contains("=== Available Skills ==="));
-    }
-
-    #[test]
-    fn catalogs_require_their_corresponding_tools() {
-        let prompt = build_system_prompt(SystemPromptBuildOptions {
-            config: &SystemPromptConfig::default(),
-            work_dir: Path::new("/workspace"),
-            tools: &[],
-            project_context: &ProjectContext::default(),
-            skill_catalog: Some("SKILL_SENTINEL"),
-            agent_catalog: Some("AGENT_SENTINEL"),
-            loaded_extension_count: 0,
-        });
-
-        assert!(!prompt.contains("SKILL_SENTINEL"));
-        assert!(!prompt.contains("AGENT_SENTINEL"));
-    }
-
-    #[test]
-    fn subagent_guidelines_enforce_controlled_delegation() {
-        let tools = vec![tool("subagent", "Invoke a subagent.")];
-        let prompt = build_system_prompt(SystemPromptBuildOptions {
-            config: &SystemPromptConfig::default(),
-            work_dir: Path::new("/workspace"),
-            tools: &tools,
-            project_context: &ProjectContext::default(),
             skill_catalog: None,
             agent_catalog: None,
             loaded_extension_count: 0,
         });
 
-        assert!(prompt.contains(
-            "SUBAGENT DELEGATION RULES: Use `subagent` judiciously and only when necessary."
-        ));
-        assert!(prompt.contains("NEVER spawn a `reviewer` or `tester` subagent concurrently with or before code changes exist."));
-        assert!(!prompt.contains("ALWAYS use the `subagent` tool to fan out work"));
-    }
-
-    #[test]
-    fn test_fast_path_and_plan_guidelines() {
-        let tools = vec![tool("update_plan", "Update plan.")];
-        let prompt = build_system_prompt(SystemPromptBuildOptions {
-            config: &SystemPromptConfig::default(),
-            work_dir: Path::new("/workspace"),
-            tools: &tools,
-            project_context: &ProjectContext::default(),
-            skill_catalog: None,
-            agent_catalog: None,
-            loaded_extension_count: 0,
-        });
-
-        assert!(prompt.contains("For multi-step work, maintain a concise plan with `update_plan`"));
-        assert!(prompt.contains("Plan like a lazy senior developer"));
-    }
-
-    #[test]
-    fn test_lazy_senior_dev_system_prompt_guidelines() {
-        let prompt = build_system_prompt(SystemPromptBuildOptions {
-            config: &SystemPromptConfig::default(),
-            work_dir: Path::new("/workspace"),
-            tools: &[],
-            project_context: &ProjectContext::default(),
-            skill_catalog: None,
-            agent_catalog: None,
-            loaded_extension_count: 0,
-        });
-
-        assert!(prompt.contains("## Lazy Senior Developer & The Ladder"));
-        assert!(prompt.contains("Does this need to exist at all?"));
-        assert!(prompt.contains("Bug fix = root cause, not symptom"));
-        assert!(prompt.contains("## Lazy Code Review Guidelines"));
-        assert!(prompt.contains("<file>:<line>: <tag> <what>. <replacement>."));
-        assert!(prompt.contains("Trust-boundary validation, security"));
+        assert!(prompt.starts_with("Custom base\n\nExtra rule"));
+        assert!(prompt.contains("/workspace/AGENTS.md"));
+        assert!(prompt.ends_with("Current working directory: /workspace"));
     }
 }
