@@ -140,44 +140,11 @@ pub(crate) struct SubagentRunContext {
 }
 
 #[derive(Clone, Debug)]
-pub struct SubagentInnerTool {
-    id: String,
-    name: String,
-    arguments: String,
-    output: String,
-    is_error: bool,
-}
-
-#[derive(Clone, Debug)]
 pub struct SubagentResult {
     output: String,
     thinking: Vec<AgentMessage>,
-    inner_tools: Vec<SubagentInnerTool>,
     pub(crate) error: Option<String>,
     pub(crate) messages: Vec<AgentMessage>,
-}
-
-fn tool_target_preview(name: &str, arguments: &str) -> String {
-    let parsed: Option<serde_json::Value> = serde_json::from_str(arguments).ok();
-    let get_str = |key: &str| {
-        parsed
-            .as_ref()
-            .and_then(|v| v.get(key))
-            .and_then(serde_json::Value::as_str)
-    };
-    let target = match name {
-        "read_file" | "write_file" | "edit_file" | "edit_file_hashline" => get_str("path")
-            .or_else(|| get_str("file_path"))
-            .unwrap_or(arguments),
-        "list_dir" => get_str("path").unwrap_or(arguments),
-        "run_command" => get_str("command").unwrap_or(arguments),
-        _ => arguments,
-    };
-    if target.chars().count() > 60 {
-        target.chars().take(60).collect::<String>()
-    } else {
-        target.to_string()
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -186,16 +153,7 @@ pub struct SubagentSessionData {
     task: String,
     agent: String,
     status: String,
-    thinking: String,
-    inner_tools: Vec<SubagentInnerToolData>,
     output: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SubagentInnerToolData {
-    name: String,
-    target_preview: String,
-    is_error: bool,
 }
 
 fn format_subagent_results(
@@ -209,24 +167,6 @@ fn format_subagent_results(
         .zip(lanes)
         .map(|((task, result), lane)| match result {
             Ok(res) => {
-                let mut thinking = String::new();
-                for think_msg in &res.thinking {
-                    if let AgentMessage::Custom { payload, .. } = think_msg {
-                        if let Some(thought) = payload.get("thought").and_then(|v| v.as_str()) {
-                            thinking.push_str(thought);
-                            thinking.push('\n');
-                        }
-                    }
-                }
-                let inner_tools = res
-                    .inner_tools
-                    .into_iter()
-                    .map(|tool| SubagentInnerToolData {
-                        name: tool.name.clone(),
-                        target_preview: tool_target_preview(&tool.name, &tool.arguments),
-                        is_error: tool.is_error,
-                    })
-                    .collect();
                 let status = match lane.status {
                     SubagentLaneStatus::Completed => "completed",
                     SubagentLaneStatus::Failed => "failed",
@@ -236,8 +176,6 @@ fn format_subagent_results(
                     task: task.task,
                     agent: task.agent,
                     status: status.to_string(),
-                    thinking,
-                    inner_tools,
                     output: res.output,
                 }
             }
@@ -246,8 +184,6 @@ fn format_subagent_results(
                 task: task.task,
                 agent: task.agent,
                 status: "failed".to_string(),
-                thinking: String::new(),
-                inner_tools: Vec::new(),
                 output: format!("Subagent failed to run: {err}"),
             },
         })
@@ -657,8 +593,39 @@ pub(crate) async fn run_subagents_with_context(
     aggregate_subagent_results(tasks, tool_results, lanes)
 }
 
+fn configure_subagent_tools(config: &mut AgentDefinition) -> ToolPolicy {
+    let Some(tools) = config.tools.as_mut() else {
+        return ToolPolicy::FullAccess;
+    };
+    if tools.iter().any(|tool| {
+        matches!(
+            tool.as_str(),
+            "write_file"
+                | "edit_file"
+                | "edit_file_hashline"
+                | "edit_files_hashline"
+                | "apply_workspace_edit_plan"
+                | "write"
+                | "edit"
+        )
+    }) {
+        return ToolPolicy::FullAccess;
+    }
+    // Shell access is blocked by read-only policy. Replace it with the existing
+    // workspace-scoped discovery tools instead of advertising an unusable tool.
+    if tools.iter().any(|tool| tool == "run_command") {
+        tools.retain(|tool| tool != "run_command");
+        for name in ["list_dir", "grep_search"] {
+            if !tools.iter().any(|tool| tool == name) {
+                tools.push(name.into());
+            }
+        }
+    }
+    ToolPolicy::ReadOnly
+}
+
 pub(crate) async fn run_subagent_task(
-    config: AgentDefinition,
+    mut config: AgentDefinition,
     task: String,
     context: SubagentRunContext,
     run_id: u64,
@@ -667,6 +634,7 @@ pub(crate) async fn run_subagent_task(
     accepted: Option<AcceptedRun>,
     resume_messages: Vec<AgentMessage>,
 ) -> Result<SubagentResult, String> {
+    let policy = configure_subagent_tools(&mut config);
     let model = context.child_model.clone();
     let lane_name = identity.lane_name.clone();
     let journal_run_id = identity.run_id.clone();
@@ -679,7 +647,9 @@ pub(crate) async fn run_subagent_task(
         context.account_id.clone(),
         &model,
         Some(&subagent_session),
-        threadlane_runtime::AgentConfig::default(),
+        threadlane_runtime::AgentConfig::builder()
+            .core_tool_schema_mode(config.tools.is_none())
+            .build(),
         Arc::new(threadlane_provider::router::ProviderClient::new(
             context.api_key.clone(),
             context.account_id.clone(),
@@ -719,17 +689,7 @@ You are an isolated subagent working in {}. Complete only the assigned task and 
 
     let session_file_for_checkpoint = context.session_file.clone();
 
-    let policy = Arc::new(tokio::sync::Mutex::new(
-        if config.tools.as_ref().is_some_and(|tools| {
-            !tools
-                .iter()
-                .any(|tool| matches!(tool.as_str(), "write_file" | "edit_file" | "write" | "edit"))
-        }) {
-            ToolPolicy::ReadOnly
-        } else {
-            ToolPolicy::FullAccess
-        },
-    ));
+    let policy = Arc::new(tokio::sync::Mutex::new(policy));
     let agent_work = AgentWorkScheduler::default();
     let (broker_dispatcher, _, _) = build_broker_dispatcher(
         policy.clone(),
@@ -772,7 +732,6 @@ You are an isolated subagent working in {}. Complete only the assigned task and 
             return Ok(SubagentResult {
                 output: "test subagent result".into(),
                 thinking: Vec::new(),
-                inner_tools: Vec::new(),
                 error: None,
                 messages: resume_messages,
             });
@@ -829,7 +788,6 @@ You are an isolated subagent working in {}. Complete only the assigned task and 
         return Ok(SubagentResult {
             output: format!("test subagent result ({observed_model})"),
             thinking: Vec::new(),
-            inner_tools: Vec::new(),
             error: None,
             messages,
         });
@@ -938,37 +896,6 @@ You are an isolated subagent working in {}. Complete only the assigned task and 
         .filter(|message| matches!(message, AgentMessage::Custom { custom_type, .. } if custom_type == "thinking"))
         .cloned()
         .collect();
-    let mut inner_tools = Vec::new();
-    for message in &state.messages {
-        match message {
-            AgentMessage::Assistant {
-                tool_calls: Some(calls),
-                ..
-            } => {
-                for call in calls {
-                    inner_tools.push(SubagentInnerTool {
-                        id: call.id.clone(),
-                        name: call.function.name.clone(),
-                        arguments: call.function.arguments.clone(),
-                        output: String::new(),
-                        is_error: false,
-                    });
-                }
-            }
-            AgentMessage::Tool {
-                tool_call_id,
-                content,
-                is_error,
-                ..
-            } => {
-                if let Some(tool) = inner_tools.iter_mut().find(|t| &t.id == tool_call_id) {
-                    tool.output = content.clone();
-                    tool.is_error = *is_error;
-                }
-            }
-            _ => {}
-        }
-    }
     let completion_error = error
         .map(|error| format!("Subagent '{}' failed: {error}", config.name))
         .or_else(|| {
@@ -982,7 +909,6 @@ You are an isolated subagent working in {}. Complete only the assigned task and 
     Ok(SubagentResult {
         output: completion_error.clone().unwrap_or(output),
         thinking,
-        inner_tools,
         error: completion_error,
         messages: state
             .messages
@@ -1262,10 +1188,138 @@ mod result_tests {
         SubagentResult {
             output: output.into(),
             thinking: Vec::new(),
-            inner_tools: Vec::new(),
             error: None,
             messages: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn read_only_scout_can_discover_files_without_shell_access() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("example.rs"), "fn archive_session() {}\n").unwrap();
+        let mut config = AgentDefinition {
+            name: "scout".into(),
+            description: String::new(),
+            tools: Some(vec!["read_file".into(), "run_command".into()]),
+            model: None,
+            system_prompt: String::new(),
+            source: crate::agents::AgentSource::Project,
+            file_path: dir.path().into(),
+        };
+        let policy = configure_subagent_tools(&mut config);
+        assert_eq!(policy, ToolPolicy::ReadOnly);
+        let mut agent = AgentRuntime::new_with_provider(
+            "",
+            None,
+            "test-model",
+            Some(&dir.path().join("session.jsonl")),
+            threadlane_runtime::AgentConfig::builder()
+                .core_tool_schema_mode(config.tools.is_none())
+                .build(),
+            Arc::new(threadlane_provider::router::ProviderClient::new("", None)),
+        )
+        .unwrap();
+        agent.work_dir = Some(dir.path().into());
+        agent.set_allowed_tool_names(Some(config.tools.clone().unwrap().into_iter().collect()));
+        let names: HashSet<_> = agent
+            .configured_tool_definitions()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert_eq!(
+            names,
+            HashSet::from(["read_file".into(), "list_dir".into(), "grep_search".into()])
+        );
+        let policy = Arc::new(tokio::sync::Mutex::new(policy));
+        let extensions = Arc::new(WasiExtensionManager::new());
+        let (broker, _, _) = build_broker_dispatcher(
+            policy.clone(),
+            extensions.clone(),
+            false,
+            dir.path().into(),
+            agent.event_tx.clone(),
+            AgentWorkScheduler::default(),
+            None,
+            None,
+        );
+        agent
+            .hook_registry
+            .register(
+                HookKind::BeforeTool,
+                "policy",
+                extension_before_tool_hook_handler(policy, extensions, broker),
+            )
+            .unwrap();
+        for (name, args, is_error, expected) in [
+            ("list_dir", r#"{"path":"."}"#, false, "example.rs"),
+            (
+                "grep_search",
+                r#"{"pattern":"archive_session","glob":"*.rs"}"#,
+                false,
+                "archive_session",
+            ),
+            (
+                "read_file",
+                r#"{"path":"example.rs"}"#,
+                false,
+                "archive_session",
+            ),
+            ("run_command", r#"{"command":"touch forbidden"}"#, true, ""),
+            (
+                "write_file",
+                r#"{"path":"forbidden","content":"bad"}"#,
+                true,
+                "",
+            ),
+        ] {
+            let call = threadlane_provider::openai::ToolCall {
+                id: name.into(),
+                r#type: "function".into(),
+                function: threadlane_provider::openai::ToolCallFunction {
+                    name: name.into(),
+                    arguments: args.into(),
+                },
+                thought_signature: None,
+            };
+            let results = agent.execute_tools(&[call]).await;
+            assert_eq!(results[0].is_error, is_error, "{}", results[0].content);
+            assert!(results[0].content.contains(expected));
+        }
+        assert!(!dir.path().join("forbidden").exists());
+        // An explicitly permitted hashline editor must not be mistaken for a scout.
+        config.tools = Some(vec!["edit_files_hashline".into(), "run_command".into()]);
+        assert_eq!(
+            configure_subagent_tools(&mut config),
+            ToolPolicy::FullAccess
+        );
+        assert!(config.tools.unwrap().contains(&"run_command".into()));
+    }
+
+    #[test]
+    fn subagent_report_excludes_activity_but_preserves_lane_history() {
+        let mut result = success("Fix example.rs:1; validation blocked by missing compiler");
+        let history = vec![AgentMessage::Tool {
+            tool_call_id: "read-1".into(),
+            name: "read_file".into(),
+            content: "large child tool output".repeat(1000),
+            is_error: false,
+            terminate: false,
+        }];
+        result.messages = history.clone();
+        let mut completed = lane("scout", SubagentLaneStatus::Completed);
+        completed.messages = history.clone();
+        let (output, _, lanes) =
+            aggregate_subagent_results(vec![task("scout")], vec![Ok(result)], vec![completed])
+                .unwrap();
+        let report: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(
+            report[0]["output"],
+            "Fix example.rs:1; validation blocked by missing compiler"
+        );
+        assert!(report[0].get("inner_tools").is_none());
+        assert!(report[0].get("thinking").is_none());
+        assert!(!output.contains("large child tool output"));
+        assert_eq!(lanes[0].messages, history);
     }
 
     #[test]

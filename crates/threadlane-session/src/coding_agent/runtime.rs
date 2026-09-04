@@ -1718,6 +1718,20 @@ mod compaction_sync_tests {
             request: RuntimeRequest,
             events: tokio::sync::mpsc::Sender<RuntimeStreamEvent>,
         ) {
+            let messages: Vec<AgentMessage> =
+                serde_json::from_value(request.messages.clone()).unwrap();
+            let (instructions, _) = threadlane_runtime::convert_to_codex_llm(&messages);
+            assert!(
+                instructions.contains("You are an expert coding assistant"),
+                "every outgoing request, including after compaction, must retain system instructions"
+            );
+            assert_eq!(
+                messages
+                    .iter()
+                    .filter(|message| matches!(message, AgentMessage::System { .. }))
+                    .count(),
+                1
+            );
             let serialized_request = format!("{}\n{}", request.messages, request.tools);
             let estimate = serialized_request.len().div_ceil(4);
             let cache_read_tokens = {

@@ -527,7 +527,22 @@ impl CodingSessionHarness {
             .unwrap_or(0)
             .saturating_add(1);
         let provider_request_id = format!("provider-request-{run_id}-{provider_attempt}");
-        let mut current = self.model_context("main")?.messages();
+        // System instructions are runtime configuration, not transcript entries.
+        // Reattach them after every durable projection, including compaction reloads.
+        let with_system = |messages: Vec<AgentMessage>| {
+            request
+                .messages
+                .iter()
+                .filter(|message| matches!(message, AgentMessage::System { .. }))
+                .cloned()
+                .chain(
+                    messages
+                        .into_iter()
+                        .filter(|message| !matches!(message, AgentMessage::System { .. })),
+                )
+                .collect::<Vec<_>>()
+        };
+        let mut current = with_system(self.model_context("main")?.messages());
         let pre_tokens =
             estimate_request_tokens(&current, request.tool_schema_json.as_deref(), config);
         if pre_tokens < budget.trigger_tokens && !request.overflow_recovery {
@@ -567,7 +582,7 @@ impl CodingSessionHarness {
                 reason,
                 prepared,
             )?;
-            current = self.model_context("main")?.messages();
+            current = with_system(self.model_context("main")?.messages());
             let post_tokens =
                 estimate_request_tokens(&current, request.tool_schema_json.as_deref(), config);
             if post_tokens < budget.trigger_tokens {
@@ -3440,6 +3455,54 @@ mod tests {
             messages: Vec::new(),
             tool_schema_json: None,
             overflow_recovery,
+        }
+    }
+
+    #[test]
+    fn provider_boundary_retains_and_budgets_current_system_after_reload() {
+        let config = AgentConfig::default();
+        for overflow_recovery in [false, true] {
+            let (_dir, path) = temp_session();
+            let mut harness = open_long_run(&path);
+            let system = AgentMessage::System {
+                content: format!(
+                    "current instructions {overflow_recovery} {}",
+                    "rule ".repeat(1000)
+                ),
+            };
+            let mut request = boundary_request(overflow_recovery);
+            request.messages = vec![
+                system.clone(),
+                AgentMessage::user("stale runtime history", vec![]),
+            ];
+            let prepared = harness
+                .prepare_provider_boundary("run-compact", request, &config)
+                .unwrap();
+            assert_eq!(prepared.messages.first(), Some(&system));
+            assert!(!prepared.messages.iter().any(|message| {
+                matches!(message, AgentMessage::User { content } if content == "stale runtime history")
+            }));
+            let actual = estimate_request_tokens(&prepared.messages, None, &config);
+            assert!(actual < prepared.context_limit);
+            assert_eq!(prepared.provisional_estimated_tokens, Some(actual));
+            drop(harness);
+            harness = CodingSessionHarness::open(&path).unwrap();
+            assert!(!harness
+                .model_context("main")
+                .unwrap()
+                .messages()
+                .iter()
+                .any(|message| { matches!(message, AgentMessage::System { .. }) }));
+            let updated_system = AgentMessage::System {
+                content: "updated instructions after restart".into(),
+            };
+            let mut request = boundary_request(false);
+            request.messages = vec![updated_system.clone()];
+            let resumed = harness
+                .prepare_provider_boundary("run-compact", request, &config)
+                .unwrap();
+            assert_eq!(resumed.messages.first(), Some(&updated_system));
+            assert!(!resumed.messages.contains(&system));
         }
     }
 
