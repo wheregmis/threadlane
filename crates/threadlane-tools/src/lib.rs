@@ -819,13 +819,12 @@ pub fn try_execute_tool_in_workspace(
                 .ok_or_else(|| "Error: 'command' parameter is required".to_string())?;
 
             let trimmed_cmd = cmd_str.trim();
-            if trimmed_cmd == "dyn" || trimmed_cmd.starts_with("dyn ") {
-                let dyn_args = trimmed_cmd.strip_prefix("dyn").unwrap_or("").trim();
-                return execute_dyn_cli(dyn_args, workspace_root);
-            }
-
             let raw_cwd = args.get("cwd").and_then(|v| v.as_str());
             let validated_cwd = validate_cwd_in_workspace(raw_cwd, workspace_root)?;
+            if trimmed_cmd == "dyn" || trimmed_cmd.starts_with("dyn ") {
+                let dyn_args = trimmed_cmd.strip_prefix("dyn").unwrap_or("").trim();
+                return execute_dyn_cli(dyn_args, &validated_cwd);
+            }
 
             let mut cmd = Command::new("sh");
             cmd.arg("-c").arg(cmd_str);
@@ -880,7 +879,7 @@ fn execute_dyn_cli(input: &str, workspace_root: &Path) -> Result<String, String>
     if input.is_empty() || input == "--help" || input == "-h" {
         let mut lines = vec![
             "Threadlane In-Process Tool Runner (dyn)".to_string(),
-            "Usage: dyn <tool_name> [json_args_or_flags] | dyn <tool_name> --help".to_string(),
+            "Usage: dyn <tool_name> [json_args] | dyn <tool_name> --help".to_string(),
             "".to_string(),
             "Available auxiliary tools:".to_string(),
         ];
@@ -914,24 +913,7 @@ fn execute_dyn_cli(input: &str, workspace_root: &Path) -> Result<String, String>
     } else if remaining.is_empty() {
         "{}".to_string()
     } else {
-        let mut obj = serde_json::Map::new();
-        let tokens: Vec<&str> = remaining.split_whitespace().collect();
-        let mut i = 0;
-        while i < tokens.len() {
-            let token = tokens[i];
-            if let Some(key) = token.strip_prefix("--") {
-                if i + 1 < tokens.len() && !tokens[i + 1].starts_with("--") {
-                    obj.insert(key.to_string(), Value::String(tokens[i + 1].to_string()));
-                    i += 2;
-                } else {
-                    obj.insert(key.to_string(), Value::Bool(true));
-                    i += 1;
-                }
-            } else {
-                i += 1;
-            }
-        }
-        serde_json::to_string(&Value::Object(obj)).unwrap_or_else(|_| "{}".to_string())
+        return Err("dyn requires JSON arguments as an object".into());
     };
 
     let result = try_execute_tool_in_workspace(tool_name, &args_json, workspace_root)?;
@@ -2178,10 +2160,18 @@ mod tests {
         let out_help = try_execute_tool_in_workspace("run_command", &args_help, dir.path()).unwrap();
         assert!(out_help.contains("Tool Schema for 'manage_memory'"));
 
-        // 3. "dyn manage_memory --action read"
-        let args_run = json!({ "command": "dyn manage_memory --action read" }).to_string();
+        // 3. JSON arguments preserve the tool schema's types and quoting.
+        let args_run = json!({ "command": "dyn manage_memory {\"action\":\"read\"}" }).to_string();
         let out_run = try_execute_tool_in_workspace("run_command", &args_run, dir.path()).unwrap();
         assert!(out_run.contains("No persistent memory found"));
+
+        let flags = json!({ "command": "dyn manage_memory --action read" }).to_string();
+        assert!(try_execute_tool_in_workspace("run_command", &flags, dir.path())
+            .unwrap_err()
+            .contains("JSON arguments"));
+
+        let escaped_cwd = json!({ "command": "dyn", "cwd": "../outside" }).to_string();
+        assert!(try_execute_tool_in_workspace("run_command", &escaped_cwd, dir.path()).is_err());
     }
 
     #[test]
