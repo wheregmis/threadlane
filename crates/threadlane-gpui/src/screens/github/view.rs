@@ -67,6 +67,7 @@ impl GitHubTab {
 enum GitHubStateFilter {
     Open,
     Closed,
+    Merged,
 }
 
 impl GitHubStateFilter {
@@ -74,7 +75,16 @@ impl GitHubStateFilter {
         match self {
             Self::Open => "open",
             Self::Closed => "closed",
+            Self::Merged => "merged",
         }
+    }
+}
+
+fn github_state_for_tab(state: GitHubStateFilter, tab: GitHubTab) -> GitHubStateFilter {
+    if tab == GitHubTab::Issues && state == GitHubStateFilter::Merged {
+        GitHubStateFilter::Open
+    } else {
+        state
     }
 }
 
@@ -2014,6 +2024,7 @@ impl GitHubView {
             return;
         }
         self.tab = tab;
+        self.state_filter = github_state_for_tab(self.state_filter, tab);
         self.query_revision = self.query_revision.saturating_add(1);
         self.clear_selection();
         self.fetch_list(cx);
@@ -2680,9 +2691,19 @@ impl GitHubView {
                     .small()
                     .selected(self.state_filter == GitHubStateFilter::Closed)
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.select_state(GitHubStateFilter::Closed, cx)
-                    })),
+                    this.select_state(GitHubStateFilter::Closed, cx)
+                })),
             )
+            .children((self.tab == GitHubTab::PullRequests).then(|| {
+                Button::new("github-state-merged")
+                    .label("Merged")
+                    .ghost()
+                    .small()
+                    .selected(self.state_filter == GitHubStateFilter::Merged)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.select_state(GitHubStateFilter::Merged, cx)
+                    }))
+            }))
             .child(
                 div()
                     .min_w_0()
@@ -2932,7 +2953,11 @@ impl GitHubView {
             GitHubTab::Issues => self.issues.len(),
             GitHubTab::PullRequests => self.pull_requests.len(),
         };
-        if row_count == 0 && !self.list_loading {
+        let has_more = match self.tab {
+            GitHubTab::Issues => self.issue_has_more,
+            GitHubTab::PullRequests => self.pr_has_more,
+        };
+        if row_count == 0 && !has_more && !self.list_loading {
             if let Some(error) = self.list_error.clone() {
                 return self.render_empty(&error, cx);
             }
@@ -4183,6 +4208,7 @@ impl Render for GitHubView {
 mod tests {
     use super::{
         detail_result_matches_list, draft_reply_prompt, github_link_fingerprint_rows,
+        github_state_for_tab,
         github_query_mode, github_result_matches_request, github_server_query,
         issue_filter_matches, issue_start_activation, issue_start_confirmation,
         issue_start_dialog_result, linked_pr_session, linked_session_fingerprint,
@@ -4192,7 +4218,7 @@ mod tests {
         prepare_selected_diff, selected_file_diff, selected_issue_after_refresh, GitHubQueryMode,
         GitHubRequest, GitHubTab, GitHubView, PrCommentControl, PrCommentDrafts, PrCommentPhase,
         PrDetailTab, PrDiffRequest, PrFileAction, PrReadback, PrReplyTarget, PrTimelineKind,
-        PrWorkspaceKey, PrWorkspaceSelections,
+        PrWorkspaceKey, PrWorkspaceSelections, GitHubStateFilter,
     };
     use crate::state::{AppState, SessionHealth, SessionInfo};
     use gpui::{
@@ -4274,6 +4300,19 @@ mod tests {
         view.pr_list_state.reset(1);
         view.pr_file_list_state.reset(files.len());
         cx.notify();
+    }
+
+    #[test]
+    fn github_pr_merged_filter_uses_merged_state() {
+        assert_eq!(GitHubStateFilter::Merged.value(), "merged");
+    }
+
+    #[test]
+    fn github_issues_reset_the_pr_only_merged_filter() {
+        assert_eq!(
+            github_state_for_tab(GitHubStateFilter::Merged, GitHubTab::Issues),
+            GitHubStateFilter::Open
+        );
     }
 
     fn pr_key(project: &str, number: u64) -> PrWorkspaceKey {

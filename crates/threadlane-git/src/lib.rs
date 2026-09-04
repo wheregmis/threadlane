@@ -1484,19 +1484,14 @@ fn inspect_pr_uncached(work_dir: &Path, branch: &str) -> Result<Option<GitHubPrI
 
     // `gh pr view --json comments` exposes issue comments only. Inline
     // review comments live on the REST review-comments endpoint.
-    if let Some((repo, number)) = info
-        .url
-        .split_once("/pull/")
-        .and_then(|(repo, number)| number.parse::<u64>().ok().map(|n| (repo, n)))
-    {
+    if let Ok((repository, number)) = parse_pull_request_url(&info.url) {
         let api_path = format!(
-            "repos/{}/pulls/{}/comments",
-            repo.trim_start_matches("https://github.com/"),
-            number
+            "repos/{}/{}/pulls/{number}/comments",
+            repository.owner, repository.repo
         );
-        if let Ok(review_output) =
-            gh_command(work_dir, &["api", &api_path, "--paginate", "--slurp"]).output()
-        {
+        let api_args = github_api_args(&repository.host, &[&api_path, "--paginate", "--slurp"]);
+        let api_args = api_args.iter().map(String::as_str).collect::<Vec<_>>();
+        if let Ok(review_output) = gh_command(work_dir, &api_args).output() {
             if review_output.status.success() {
                 let pages = String::from_utf8_lossy(&review_output.stdout);
                 let _ = enrich_pr_review_comments(&mut info, &pages);
@@ -1584,7 +1579,7 @@ fn github_pr_list_args(
     query: Option<&str>,
     limit: usize,
 ) -> Result<Vec<String>, String> {
-    let state = validated_github_list_state(state)?;
+    let state = validated_github_pr_list_state(state)?;
     if limit == 0 {
         return Err("GitHub list limit must be greater than zero".into());
     }
@@ -1601,10 +1596,23 @@ fn github_pr_list_args(
     Ok(args)
 }
 
+fn github_api_args(host: &str, args: &[&str]) -> Vec<String> {
+    let mut result = vec!["api".into(), "--hostname".into(), host.into()];
+    result.extend(args.iter().map(|arg| (*arg).into()));
+    result
+}
+
 fn validated_github_list_state(state: &str) -> Result<&str, String> {
     match state {
         "open" | "closed" => Ok(state),
         _ => Err("GitHub list state must be open or closed".into()),
+    }
+}
+
+fn validated_github_pr_list_state(state: &str) -> Result<&str, String> {
+    match state {
+        "open" | "closed" | "merged" => Ok(state),
+        _ => Err("GitHub pull request list state must be open, closed, or merged".into()),
     }
 }
 
@@ -2134,7 +2142,9 @@ fn parse_pull_request_url(url: &str) -> Result<(GitHubRepository, u64), String> 
     Ok((repository, number))
 }
 
-fn validated_review_endpoint(pull_request: &GitHubPrInfo) -> Result<String, String> {
+fn validated_review_endpoint(
+    pull_request: &GitHubPrInfo,
+) -> Result<(GitHubRepository, String), String> {
     let (repository, number) = parse_pull_request_url(&pull_request.url)?;
     if number != pull_request.number {
         return Err(format!(
@@ -2142,10 +2152,11 @@ fn validated_review_endpoint(pull_request: &GitHubPrInfo) -> Result<String, Stri
             pull_request.number
         ));
     }
-    Ok(format!(
+    let endpoint = format!(
         "repos/{}/{}/pulls/{number}/reviews",
         repository.owner, repository.repo
-    ))
+    );
+    Ok((repository, endpoint))
 }
 
 pub fn reply_to_pull_request_review_comment(
@@ -2171,16 +2182,13 @@ pub fn reply_to_pull_request_review_comment(
         "repos/{}/{}/pulls/{number}/comments/{comment_id}/replies",
         repository.owner, repository.repo
     );
+    let body = format!("body={body}");
     execute_gh(
         work_dir,
-        &[
-            "api".into(),
-            "--method".into(),
-            "POST".into(),
-            endpoint,
-            "-f".into(),
-            format!("body={body}"),
-        ],
+        &github_api_args(
+            &repository.host,
+            &["--method", "POST", &endpoint, "-f", &body],
+        ),
     )
 }
 
@@ -2205,20 +2213,23 @@ pub fn submit_pull_request_review(
             })?;
         return execute_gh(work_dir, &args);
     }
-    let endpoint = validated_review_endpoint(pull_request).map_err(|message| GitError {
-        work_dir: work_dir.to_path_buf(),
-        message,
-    })?;
+    let (repository, endpoint) =
+        validated_review_endpoint(pull_request).map_err(|message| GitError {
+            work_dir: work_dir.to_path_buf(),
+            message,
+        })?;
     let payload = review_comment_payload(&pull_request.head_oid, verdict, body, comments).map_err(
         |message| GitError {
             work_dir: work_dir.to_path_buf(),
             message,
         },
     )?;
-    let (mut command, stored_token) = gh_command_with_captured_token(
-        work_dir,
-        &["api", "--method", "POST", &endpoint, "--input", "-"],
+    let api_args = github_api_args(
+        &repository.host,
+        &["--method", "POST", &endpoint, "--input", "-"],
     );
+    let api_args = api_args.iter().map(String::as_str).collect::<Vec<_>>();
+    let (mut command, stored_token) = gh_command_with_captured_token(work_dir, &api_args);
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -3147,8 +3158,26 @@ mod tests {
                 "number,title,state,url,isDraft,headRefName,baseRefName,updatedAt,author,reviewDecision,statusCheckRollup"
             ]
         );
+        assert_eq!(
+            github_api_args(
+                "github.example.com",
+                &["GET", "repos/acme/app/pulls/42/comments"]
+            ),
+            vec![
+                "api",
+                "--hostname",
+                "github.example.com",
+                "GET",
+                "repos/acme/app/pulls/42/comments",
+            ]
+        );
+        assert_eq!(
+            github_pr_list_args("merged", None, 50).unwrap()[3],
+            "merged"
+        );
         assert!(github_issue_list_args("all", None, 50).is_err());
         assert!(github_issue_list_args("open", None, 0).is_err());
+        assert!(github_issue_list_args("merged", None, 50).is_err());
         assert!(github_pr_list_args("closed", Some("\n"), 50).is_err());
         assert_eq!(
             create_draft_pr_args("main", "Title", "Body").unwrap(),
