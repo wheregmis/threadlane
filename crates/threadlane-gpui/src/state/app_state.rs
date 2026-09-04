@@ -1911,7 +1911,7 @@ impl AppState {
                     .get(&(session.work_dir.clone(), branch.clone()))
             })
             .and_then(Option::as_ref)
-            .or_else(|| git_status.and_then(|status| status.pr.as_ref()));
+            .or_else(|| is_active.then(|| git_status.and_then(|status| status.pr.as_ref())).flatten());
         let linked_pr_is_active = linked_pr.is_some_and(|pr| {
             !pr.state.eq_ignore_ascii_case("merged")
                 && !pr.state.eq_ignore_ascii_case("closed")
@@ -1926,8 +1926,7 @@ impl AppState {
             && git_status
                 .is_some_and(|status| status.has_changes || status.ahead > 0 || status.pr_ready);
         let branch_is_actionable = session.git_branch.is_some()
-            && (linked_pr.is_none() || linked_pr_is_active)
-            && actionable_git_work;
+            && (linked_pr_is_active || (linked_pr.is_none() && actionable_git_work));
         derive_session_attention(
             self.pending_permissions.contains_key(&session.id),
             &session.health,

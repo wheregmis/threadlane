@@ -2,7 +2,7 @@ use super::broker::{
     HostCapabilityHandler, ManagedProcessRegistry, MAX_BROKER_CONTINUATION_ROUNDS,
 };
 use super::cancellation::AgentRunTask;
-use super::context_snapshots::ContextSnapshotToolExecutor;
+use super::context_snapshots::{ContextSnapshotToolExecutor, MAX_SUBAGENT_CONTEXT_REFS};
 use super::scheduler::AgentWorkScheduler;
 use super::subagents::{AgentRunner, MAX_SUBAGENT_TASKS};
 use crate::agents::{discover_agents, AgentScope};
@@ -230,7 +230,7 @@ fn subagent_tool_definition() -> AgentToolDefinition {
                             "context_refs": {
                                 "type": "array",
                                 "items": { "type": "string" },
-                                "maxItems": 16,
+                                "maxItems": MAX_SUBAGENT_CONTEXT_REFS,
                                 "description": "Optional ordered context snapshot IDs to pass to this child."
                             }
                         },
@@ -382,8 +382,10 @@ pub(crate) fn parse_context_refs(value: &Value) -> Result<Vec<String>, String> {
     let refs = refs
         .as_array()
         .ok_or_else(|| "`context_refs` must be an array".to_string())?;
-    if refs.len() > 16 {
-        return Err("`context_refs` accepts at most 16 IDs".into());
+    if refs.len() > MAX_SUBAGENT_CONTEXT_REFS {
+        return Err(format!(
+            "`context_refs` accepts at most {MAX_SUBAGENT_CONTEXT_REFS} IDs"
+        ));
     }
     let mut seen = std::collections::HashSet::new();
     refs.iter()

@@ -478,9 +478,13 @@ pub(crate) async fn run_subagents_with_context(
                 &task,
                 context.session_file.as_deref(),
                 &context.work_dir,
-            )?;
-            let start = match context.session_file.as_deref() {
-                Some(path) => {
+            );
+            let start = match (context_message, context.session_file.as_deref()) {
+                (Err(error), _) => Err(SubagentStartError {
+                    identity: None,
+                    error,
+                }),
+                (Ok(context_message), Some(path)) => {
                     let mut journal = CodingSessionHarness::open(path)?;
                     let result = journal.start_subagent_lane(
                         &lane_hint,
@@ -521,7 +525,7 @@ pub(crate) async fn run_subagents_with_context(
                         Ok((started.identity, Some(accepted)))
                     })
                 }
-                None => {
+                (Ok(_), None) => {
                     log::warn!(
                         "subagent lane={lane_hint}: no session_file, running without harness"
                     );
