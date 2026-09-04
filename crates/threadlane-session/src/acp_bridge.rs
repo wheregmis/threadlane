@@ -19,7 +19,7 @@ use threadlane_runtime::AgentEvent;
 /// Mirrors the `antigravity/` convention so ACP agents flow through the
 /// existing model picker, `/model` command, and per-session model persistence
 /// without a second selection mechanism.
-pub const ACP_MODEL_PREFIX: &str = "acp/";
+const ACP_MODEL_PREFIX: &str = "acp/";
 
 /// Builds the model id for a configured agent.
 pub fn acp_model_id(agent_id: &str) -> String {
@@ -122,7 +122,7 @@ fn plan_from_entries(entries: Vec<AcpPlanEntry>) -> SessionPlan {
 ///
 /// Updates with no transcript meaning (the echo of our own prompt, command
 /// lists, mode changes) map to nothing rather than to placeholder output.
-pub fn agent_events_for(update: AcpSessionUpdate) -> Vec<AgentEvent> {
+pub(crate) fn agent_events_for(update: AcpSessionUpdate) -> Vec<AgentEvent> {
     match update {
         AcpSessionUpdate::AgentMessageChunk(block) => text_of(&block)
             .map(|text| {

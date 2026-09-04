@@ -341,7 +341,7 @@ pub(crate) fn is_local_path(path: &str) -> bool {
     })
 }
 
-pub(crate) fn file_sha256(path: &Path) -> Result<TraceString, String> {
+fn file_sha256(path: &Path) -> Result<TraceString, String> {
     TraceString::new(sha256_hex(
         &fs::read(path).map_err(|error| error.to_string())?,
     ))

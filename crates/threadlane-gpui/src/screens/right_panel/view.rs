@@ -327,6 +327,7 @@ pub enum GitAction {
     Push,
     Pull,
     Fetch,
+    #[allow(dead_code)]
     CreatePullRequest,
     Checkout(String),
     CheckoutStash(String),
@@ -1011,10 +1012,6 @@ impl RightPanelView {
         base_input.update(cx, |input, cx| input.focus(window, cx));
     }
 
-    pub(crate) fn open_files(&mut self, cx: &mut Context<Self>) {
-        self.open_surface(Surface::Files, cx);
-    }
-
     fn open_surface(&mut self, surface: Surface, cx: &mut Context<Self>) {
         if self.active_surface != Some(surface) {
             self.document_title = None;
@@ -1286,10 +1283,6 @@ impl RightPanelView {
             }
             _ => {}
         }
-    }
-
-    pub(crate) fn refresh_review(&mut self, _cx: &mut Context<Self>) {
-        self.refresh_surface(Surface::Review);
     }
 
     pub(crate) fn restore_current_stash(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3849,7 +3842,7 @@ impl RightPanelView {
             }))
     }
 
-    pub(crate) fn close_all_git_dialogs(&mut self) {
+    fn close_all_git_dialogs(&mut self) {
         self.new_branch_dialog_open = false;
         self.merge_dialog_open = false;
         self.merge_selected_branch = None;

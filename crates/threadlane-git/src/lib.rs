@@ -130,11 +130,11 @@ pub struct GitHubIssueDetail {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GitHubIssueComment {
-    pub remote_id: String,
+    remote_id: String,
     pub author: String,
     pub body: String,
     pub created_at: String,
-    pub url: String,
+    url: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -189,8 +189,8 @@ pub struct GitHubPrFile {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PullRequestReviewCommentDraft {
-    pub path: String,
-    pub body: String,
+    path: String,
+    body: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -234,12 +234,12 @@ pub struct GitBranchInfo {
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GitStashInfo {
     pub index: usize,
-    pub name: String,
+    name: String,
     pub message: String,
     pub relative_time: String,
-    pub timestamp: u64,
-    pub branch: Option<String>,
-    pub files: Vec<GitFile>,
+    timestamp: u64,
+    branch: Option<String>,
+    files: Vec<GitFile>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -256,12 +256,12 @@ pub struct GitCommitInfo {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GitWorktreeInfo {
-    pub path: PathBuf,
-    pub branch: Option<String>,
-    pub head: String,
-    pub is_bare: bool,
-    pub is_detached: bool,
-    pub is_locked: bool,
+    path: PathBuf,
+    branch: Option<String>,
+    head: String,
+    is_bare: bool,
+    is_detached: bool,
+    is_locked: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -291,11 +291,11 @@ pub struct GitStatus {
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GitFile {
     pub path: String,
-    pub status: String,
-    pub index_status: char,
-    pub worktree_status: char,
-    pub staged: bool,
-    pub unstaged: bool,
+    status: String,
+    index_status: char,
+    worktree_status: char,
+    staged: bool,
+    unstaged: bool,
     pub additions: u32,
     pub deletions: u32,
 }
@@ -323,7 +323,7 @@ impl GitFile {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitError {
-    pub work_dir: PathBuf,
+    work_dir: PathBuf,
     pub message: String,
 }
 
@@ -538,7 +538,8 @@ fn parse_status(_work_dir: &Path, porcelain: &str) -> GitStatus {
     status
 }
 
-pub fn inspect_files(work_dir: &Path) -> Result<Vec<GitFile>, GitError> {
+#[cfg(test)]
+fn inspect_files(work_dir: &Path) -> Result<Vec<GitFile>, GitError> {
     let porcelain = command(work_dir, &["status", "--porcelain=v1", "-b", "-z"])?;
     let mut status = parse_status(work_dir, &porcelain);
     apply_numstats(work_dir, &mut status);
@@ -608,7 +609,7 @@ pub fn fetch(work_dir: &Path) -> Result<(), GitError> {
     sync_remote(work_dir)
 }
 
-pub fn list_branches_detailed(
+fn list_branches_detailed(
     work_dir: &Path,
     provided_default_branch: Option<&str>,
 ) -> Result<Vec<GitBranchInfo>, GitError> {
@@ -762,7 +763,7 @@ pub fn inspect(work_dir: &Path) -> Result<GitStatus, GitError> {
     Ok(status)
 }
 
-pub fn list_stashes(work_dir: &Path) -> Result<Vec<GitStashInfo>, GitError> {
+fn list_stashes(work_dir: &Path) -> Result<Vec<GitStashInfo>, GitError> {
     let output = match command(
         work_dir,
         &["stash", "list", "--format=%gd%x1f%gs%x1f%cr%x1f%ct"],
@@ -1152,7 +1153,7 @@ pub fn reveal_in_file_manager(path: &Path) {
     }
 }
 
-pub fn parse_gh_pr_json(json_str: &str) -> Result<GitHubPrInfo, String> {
+fn parse_gh_pr_json(json_str: &str) -> Result<GitHubPrInfo, String> {
     let val: serde_json::Value = serde_json::from_str(json_str).map_err(|e| e.to_string())?;
 
     let number = val["number"].as_u64().unwrap_or(0);
@@ -1509,7 +1510,7 @@ fn inspect_pr_uncached(work_dir: &Path, branch: &str) -> Result<Option<GitHubPrI
     Ok(Some(info))
 }
 
-pub fn inspect_pr(work_dir: &Path) -> Result<Option<GitHubPrInfo>, GitError> {
+fn inspect_pr(work_dir: &Path) -> Result<Option<GitHubPrInfo>, GitError> {
     let Some(branch) = current_branch(work_dir)? else {
         return Ok(None);
     };
@@ -1881,7 +1882,7 @@ pub fn create_branch(work_dir: &Path, name: &str) -> Result<(), GitError> {
     create_branch_from(work_dir, name, None)
 }
 
-pub fn create_branch_from(
+fn create_branch_from(
     work_dir: &Path,
     name: &str,
     start_point: Option<&str>,
@@ -1895,7 +1896,7 @@ pub fn create_branch_from(
     Ok(())
 }
 
-pub fn normalize_branch_for_checkout(name: &str) -> &str {
+fn normalize_branch_for_checkout(name: &str) -> &str {
     let trimmed = name.trim();
     trimmed
         .strip_prefix("origin/")
@@ -1962,7 +1963,8 @@ pub fn checkout_carrying_changes(work_dir: &Path, name: &str) -> Result<(), GitE
 
 /// Describe changed paths in dependency-friendly groups for atomic commit planning.
 /// Source files are emitted before generated/lock files, and lock files are excluded.
-pub fn atomic_commit_groups(work_dir: &Path) -> Result<Vec<Vec<String>>, GitError> {
+#[cfg(test)]
+fn atomic_commit_groups(work_dir: &Path) -> Result<Vec<Vec<String>>, GitError> {
     let mut paths = inspect_files(work_dir)?
         .into_iter()
         .map(|file| file.path)
@@ -1978,7 +1980,8 @@ pub fn atomic_commit_groups(work_dir: &Path) -> Result<Vec<Vec<String>>, GitErro
 /// Stages and commits each planned atomic group. If any group fails, newly
 /// staged paths are reset so a caller can review and retry without an accidental
 /// combined commit. Previously created commits are intentionally retained.
-pub fn commit_atomic_groups(
+#[cfg(test)]
+fn commit_atomic_groups(
     work_dir: &Path,
     message_prefix: &str,
 ) -> Result<Vec<Vec<String>>, GitError> {
@@ -2492,7 +2495,8 @@ pub fn remove_worktree(
 }
 
 /// Lists all worktrees in the repository.
-pub fn list_worktrees(repo_path: &Path) -> Result<Vec<GitWorktreeInfo>, GitError> {
+#[cfg(test)]
+fn list_worktrees(repo_path: &Path) -> Result<Vec<GitWorktreeInfo>, GitError> {
     let output = command(repo_path, &["worktree", "list", "--porcelain"])?;
     let mut worktrees = Vec::new();
     let mut current = GitWorktreeInfo::default();

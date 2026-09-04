@@ -385,7 +385,7 @@ impl OperationProcedure {
 }
 
 impl PromptProcedure {
-    pub fn accept<S: SessionStore>(
+    pub(crate) fn accept<S: SessionStore>(
         store: &S,
         run_id: &str,
         prompt: AgentMessage,
@@ -394,7 +394,7 @@ impl PromptProcedure {
         Self::accept_on_lane(store, "main", run_id, prompt, effects)
     }
 
-    pub fn accept_on_lane<S: SessionStore>(
+    pub(crate) fn accept_on_lane<S: SessionStore>(
         store: &S,
         lane_name: &str,
         run_id: &str,
@@ -983,7 +983,7 @@ impl NavigationProcedure {
 pub struct CompactionProcedure;
 
 impl CompactionProcedure {
-    pub fn accept<S: SessionStore>(
+    pub(crate) fn accept<S: SessionStore>(
         store: &S,
         run_id: &str,
         summary: &str,
@@ -1000,7 +1000,7 @@ impl CompactionProcedure {
         )
     }
 
-    pub fn checkpoint_open_run<S: SessionStore>(
+    pub(crate) fn checkpoint_open_run<S: SessionStore>(
         store: &S,
         lane_name: &str,
         run_id: &str,
@@ -1350,7 +1350,7 @@ impl QueueProcedure {
         Ok(())
     }
 
-    pub fn cancel_unbound<S: SessionStore>(
+    pub(crate) fn cancel_unbound<S: SessionStore>(
         store: &S,
         entry_id: &str,
         effects: &mut GatedEffects,
@@ -1496,7 +1496,7 @@ impl QueueProcedure {
 pub struct AbortProcedure;
 
 impl AbortProcedure {
-    pub fn request<S: SessionStore>(
+    pub(crate) fn request<S: SessionStore>(
         store: &S,
         run_id: &str,
         effects: &mut GatedEffects,
@@ -1531,7 +1531,7 @@ impl AbortProcedure {
         Ok(())
     }
 
-    pub fn reconcile<S: SessionStore>(
+    pub(crate) fn reconcile<S: SessionStore>(
         store: &S,
         run_id: &str,
         assistant_entry_id: &str,
@@ -1759,7 +1759,7 @@ impl DeferredProcedure {
         Ok(())
     }
 
-    pub fn apply_pending<S: SessionStore>(
+    pub(crate) fn apply_pending<S: SessionStore>(
         store: &S,
         run_id: &str,
         effects: &mut GatedEffects,
@@ -1813,7 +1813,7 @@ impl DeferredProcedure {
         Ok(())
     }
 
-    pub fn redeem<S: SessionStore>(
+    pub(crate) fn redeem<S: SessionStore>(
         store: &S,
         run_id: &str,
         resolution: DeferredResolution,
@@ -1948,7 +1948,7 @@ pub enum ToolRecovery {
 }
 
 impl ToolBatchProcedure {
-    pub fn start<S: SessionStore>(
+    pub(crate) fn start<S: SessionStore>(
         store: &S,
         run_id: &str,
         assistant_entry_id: &str,
@@ -2018,7 +2018,7 @@ impl ToolBatchProcedure {
         Ok(())
     }
 
-    pub fn finish<S: SessionStore>(
+    pub(crate) fn finish<S: SessionStore>(
         store: &S,
         run_id: &str,
         result: ToolResult,

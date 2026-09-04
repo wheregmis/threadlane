@@ -1,3 +1,3 @@
 mod view;
 
-pub use view::{GitAction, RightPanelView};
+pub(crate) use view::{GitAction, RightPanelView};

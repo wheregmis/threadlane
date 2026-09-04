@@ -85,7 +85,7 @@ pub struct AgentConfig {
     /// (read_file, edit_file_hashline, edit_files_hashline, write_file, run_command, subagent).
     /// Auxiliary tools remain executable directly or via the in-process `dyn` CLI.
     #[serde(default = "default_core_tool_schema_mode")]
-    pub core_tool_schema_mode: bool,
+    pub(crate) core_tool_schema_mode: bool,
 
     // ── Event Channel ───────────────────────────────────────────────────
     /// Capacity of the broadcast channel for [`AgentEvent`]s.
@@ -153,12 +153,14 @@ pub struct AgentConfigBuilder {
 }
 
 impl AgentConfigBuilder {
-    pub fn auto_compaction_threshold_tokens(mut self, value: usize) -> Self {
+    #[cfg(test)]
+    pub(crate) fn auto_compaction_threshold_tokens(mut self, value: usize) -> Self {
         self.config.auto_compaction_threshold_tokens = value;
         self
     }
 
-    pub fn auto_compaction_keep_recent_tokens(mut self, value: usize) -> Self {
+    #[cfg(test)]
+    pub(crate) fn auto_compaction_keep_recent_tokens(mut self, value: usize) -> Self {
         self.config.auto_compaction_keep_recent_tokens = value;
         self
     }
@@ -168,7 +170,8 @@ impl AgentConfigBuilder {
         self
     }
 
-    pub fn estimated_image_tokens(mut self, value: usize) -> Self {
+    #[cfg(test)]
+    pub(crate) fn estimated_image_tokens(mut self, value: usize) -> Self {
         self.config.estimated_image_tokens = value;
         self
     }
@@ -218,7 +221,8 @@ impl AgentConfigBuilder {
         self
     }
 
-    pub fn model_roles(mut self, value: ModelRoles) -> Self {
+    #[cfg(test)]
+    pub(crate) fn model_roles(mut self, value: ModelRoles) -> Self {
         self.config.model_roles = value;
         self
     }

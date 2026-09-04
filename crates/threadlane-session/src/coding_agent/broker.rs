@@ -19,14 +19,14 @@ use super::capabilities::parse_context_refs;
 use super::scheduler::{enqueue_harness_follow_up, AgentWork, AgentWorkScheduler};
 use super::subagents::{AgentRunner, MAX_SUBAGENT_TASKS, MAX_SUBAGENT_TASK_CHARS};
 
-pub(crate) const CAPABILITY_TIMEOUT: Duration = Duration::from_secs(2);
-pub(crate) const MAX_CAPABILITY_BUFFER_BYTES: usize = 64 * 1024;
+const CAPABILITY_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_CAPABILITY_BUFFER_BYTES: usize = 64 * 1024;
 /// Generous timeout for public web fetches (DNS + TLS + transfer).
 const NETWORK_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 /// Web pages are routinely 100 KiB–1 MiB; the extension truncates after HTML→text.
 const MAX_NETWORK_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
-pub(crate) const MAX_PROCESS_TIMEOUT_MS: u64 = 120_000;
-pub(crate) const MAX_PROCESS_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_PROCESS_TIMEOUT_MS: u64 = 120_000;
+const MAX_PROCESS_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_MANAGED_PROCESSES: usize = 16;
 const DEFAULT_RECV_TIMEOUT_MS: u64 = 5000;
 const MAX_RECV_TIMEOUT_MS: u64 = 30_000;
@@ -926,11 +926,11 @@ async fn read_limited(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ProcessRunLimits {
-    pub(crate) timeout: Duration,
-    pub(crate) max_output_bytes: usize,
+    timeout: Duration,
+    max_output_bytes: usize,
 }
 
-pub(crate) fn process_run_limits(arguments: &Value) -> Result<ProcessRunLimits, BrokerError> {
+fn process_run_limits(arguments: &Value) -> Result<ProcessRunLimits, BrokerError> {
     let timeout_ms = bounded_positive_integer_argument(
         arguments,
         "timeout_ms",

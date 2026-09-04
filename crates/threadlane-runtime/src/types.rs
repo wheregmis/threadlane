@@ -45,7 +45,7 @@ impl AgentToolDefinition {
     }
 
     /// Renders the nested function schema expected by Chat Completions.
-    pub fn to_chat_completions_tool(&self) -> Value {
+    pub(crate) fn to_chat_completions_tool(&self) -> Value {
         let mut function = Map::new();
         function.insert("name".into(), self.name.clone().into());
         if let Some(description) = &self.description {
@@ -193,9 +193,9 @@ pub struct ImageAttachment {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeferredHandle {
-    pub handle_id: String,
-    pub provider: String,
-    pub model: String,
+    handle_id: String,
+    provider: String,
+    model: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -259,7 +259,7 @@ impl AgentMessage {
         }
     }
 
-    pub fn is_user(&self) -> bool {
+    pub(crate) fn is_user(&self) -> bool {
         matches!(self, Self::User { .. } | Self::UserWithImages { .. })
     }
 
@@ -362,10 +362,10 @@ pub struct ModelRoles {
     pub fast: Option<String>,
     /// Ordered alternate models attempted after a pre-output quota/rate-limit failure.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub fallback_chain: Vec<String>,
+    pub(crate) fallback_chain: Vec<String>,
     /// Persisted cooldown markers for temporarily exhausted provider/model routes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub cooldown_models: Vec<String>,
+    pub(crate) cooldown_models: Vec<String>,
 }
 
 impl ModelRoles {
@@ -373,7 +373,7 @@ impl ModelRoles {
         self.fast.as_deref().unwrap_or(fallback)
     }
 
-    pub fn fallback_after<'a>(&'a self, current: &str) -> Option<&'a str> {
+    pub(crate) fn fallback_after<'a>(&'a self, current: &str) -> Option<&'a str> {
         self.fallback_chain
             .iter()
             .map(String::as_str)

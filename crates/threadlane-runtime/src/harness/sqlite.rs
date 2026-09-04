@@ -69,7 +69,7 @@ pub struct SqliteStore {
 unsafe impl Send for SqliteStore {}
 
 impl SqliteStore {
-    pub fn open(
+    fn open(
         path: impl AsRef<Path>,
         session_id: impl Into<String>,
     ) -> Result<Self, ReduceError> {

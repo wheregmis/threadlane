@@ -91,7 +91,7 @@ pub struct AgentRuntime {
     /// Assistant message recorder (for persistence).
     message_recorder: Option<crate::provider::AssistantMessageRecorder>,
     /// Harness event hub for wiring durability events.
-    pub harness_event_hub: HarnessEventHub,
+    harness_event_hub: HarnessEventHub,
 }
 
 impl AgentRuntime {
@@ -235,7 +235,7 @@ impl AgentRuntime {
     }
 
     /// Returns the canonical messages from a specific harness lane projection.
-    pub async fn projected_messages_on_lane(
+    async fn projected_messages_on_lane(
         &self,
         lane: &str,
     ) -> Result<Vec<AgentMessage>, AgentError> {

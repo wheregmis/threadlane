@@ -18,8 +18,8 @@ pub enum SteerPriority {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SteerItem {
-    pub message: AgentMessage,
-    pub priority: SteerPriority,
+    message: AgentMessage,
+    priority: SteerPriority,
     timestamp_ms: u128,
 }
 
@@ -49,8 +49,8 @@ impl Ord for SteerItem {
 /// A per-lane in-memory message queue supporting steering and follow-ups.
 #[derive(Debug, Clone, Default)]
 pub struct LaneQueue {
-    pub steer: Vec<SteerItem>,
-    pub follow_up: VecDeque<AgentMessage>,
+    steer: Vec<SteerItem>,
+    follow_up: VecDeque<AgentMessage>,
     next_run: VecDeque<AgentMessage>,
 }
 
@@ -63,7 +63,7 @@ impl LaneQueue {
         }
     }
 
-    pub fn enqueue_steer_with_priority(&mut self, message: AgentMessage, priority: SteerPriority) {
+    fn enqueue_steer_with_priority(&mut self, message: AgentMessage, priority: SteerPriority) {
         let timestamp_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -76,7 +76,8 @@ impl LaneQueue {
         self.steer.sort();
     }
 
-    pub fn pop_steer(&mut self) -> Option<AgentMessage> {
+    #[cfg(test)]
+    fn pop_steer(&mut self) -> Option<AgentMessage> {
         if self.steer.is_empty() {
             None
         } else {

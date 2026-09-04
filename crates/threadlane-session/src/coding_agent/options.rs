@@ -30,7 +30,7 @@ pub struct HarnessCompositionSnapshot {
 }
 
 impl HarnessCompositionSnapshot {
-    pub fn from_options(options: &CodingAgentOptions) -> Self {
+    fn from_options(options: &CodingAgentOptions) -> Self {
         let provider = if options.model.starts_with("antigravity/") {
             "antigravity"
         } else if options.model.starts_with("opencode-go/") {

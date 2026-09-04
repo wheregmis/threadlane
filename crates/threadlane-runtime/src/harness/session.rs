@@ -35,7 +35,7 @@ impl LaneHandle {
     }
 
     /// The lane name.
-    pub fn name(&self) -> &str {
+    fn name(&self) -> &str {
         &self.name
     }
 }

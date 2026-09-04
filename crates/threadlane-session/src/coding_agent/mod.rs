@@ -2,7 +2,7 @@ pub(crate) mod broker;
 pub mod cancellation;
 pub(crate) mod capabilities;
 pub(crate) mod context_snapshots;
-pub mod durable;
+pub(crate) mod durable;
 pub mod harness;
 pub mod options;
 pub mod runtime;

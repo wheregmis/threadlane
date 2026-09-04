@@ -9,25 +9,25 @@ use tokio::sync::Notify;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct StreamingState {
-    pub lane: String,
-    pub run_id: Option<String>,
-    pub assistant_text: String,
-    pub reasoning: String,
-    pub tool_call_ids: Vec<String>,
+    lane: String,
+    run_id: Option<String>,
+    assistant_text: String,
+    reasoning: String,
+    tool_call_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
-    pub session_id: String,
+    session_id: String,
     pub state: ReducedState,
     pub entries: Vec<Entry>,
     pub records: Vec<Record>,
     #[serde(default)]
-    pub streaming: Option<StreamingState>,
+    pub(crate) streaming: Option<StreamingState>,
 }
 
 impl Snapshot {
-    pub fn from_store<S: SessionStore>(store: &S) -> Result<Self, ReduceError> {
+    pub(crate) fn from_store<S: SessionStore>(store: &S) -> Result<Self, ReduceError> {
         Ok(Self {
             session_id: store.session_id().into(),
             state: super::Reducer::reduce(store)?,
@@ -307,7 +307,7 @@ pub enum EventPayload {
 
 impl EventPayload {
     /// Returns `true` if this payload represents a committed journal fact.
-    pub fn is_durable(&self) -> bool {
+    fn is_durable(&self) -> bool {
         matches!(
             self,
             EventPayload::EntryCommitted(_) | EventPayload::RecordCommitted(_)
@@ -323,7 +323,7 @@ impl EventPayload {
     }
 
     /// Converts this payload into a [`DurablePayload`] if it is durable.
-    pub fn as_durable(&self) -> Option<DurablePayload> {
+    fn as_durable(&self) -> Option<DurablePayload> {
         match self {
             EventPayload::EntryCommitted(entry) => Some(DurablePayload::Entry(entry.clone())),
             EventPayload::RecordCommitted(record) => Some(DurablePayload::Record(record.clone())),
@@ -340,18 +340,18 @@ impl EventPayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DurableEvent {
     /// The durable commit cursor (`HarnessEvent::id`).
-    pub cursor: u64,
-    pub payload: DurablePayload,
+    cursor: u64,
+    payload: DurablePayload,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lane: Option<String>,
+    lane: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_id: Option<String>,
+    run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub turn: Option<u32>,
+    turn: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recovery_id: Option<String>,
+    recovery_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub operation_intent: Option<OperationIntent>,
+    operation_intent: Option<OperationIntent>,
 }
 
 impl DurableEvent {
@@ -369,12 +369,14 @@ impl DurableEvent {
     }
 
     /// Returns `true` if this durable event wraps a [`Record`].
-    pub fn is_record(&self) -> bool {
+    #[cfg(test)]
+    fn is_record(&self) -> bool {
         matches!(self.payload, DurablePayload::Record(_))
     }
 
     /// Returns a reference to the inner [`Entry`], if this is an entry event.
-    pub fn entry(&self) -> Option<&Entry> {
+    #[cfg(test)]
+    fn entry(&self) -> Option<&Entry> {
         match &self.payload {
             DurablePayload::Entry(e) => Some(e),
             _ => None,
@@ -382,7 +384,8 @@ impl DurableEvent {
     }
 
     /// Returns a reference to the inner [`Record`], if this is a record event.
-    pub fn record(&self) -> Option<&Record> {
+    #[cfg(test)]
+    fn record(&self) -> Option<&Record> {
         match &self.payload {
             DurablePayload::Record(r) => Some(r),
             _ => None,
@@ -390,7 +393,7 @@ impl DurableEvent {
     }
 
     /// Project this durable event into an [`AgentEvent`] compatibility lifecycle event.
-    pub fn project_agent_event(&self) -> Option<crate::events::AgentEvent> {
+    fn project_agent_event(&self) -> Option<crate::events::AgentEvent> {
         match &self.payload {
             DurablePayload::Entry(entry) => Some(crate::events::AgentEvent::MessageEnd {
                 message: entry.message.clone(),
@@ -436,7 +439,7 @@ impl DurableEvent {
 
     /// Project into a [`ProjectedAgentEvent`] carrying the commit cursor and
     /// identity fields alongside the inner agent event.
-    pub fn project(&self) -> Option<ProjectedAgentEvent> {
+    fn project(&self) -> Option<ProjectedAgentEvent> {
         self.project_agent_event().map(|event| ProjectedAgentEvent {
             cursor: self.cursor,
             lane: self.lane.clone(),
@@ -450,16 +453,16 @@ impl DurableEvent {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HarnessEvent {
-    pub id: u64,
-    pub payload: EventPayload,
+    id: u64,
+    payload: EventPayload,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lane: Option<String>,
+    lane: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_id: Option<String>,
+    run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub turn: Option<u32>,
+    turn: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recovery_id: Option<String>,
+    recovery_id: Option<String>,
     /// The correlated [`OperationIntent`] for an [`EventPayload::RecordCommitted`]
     /// that wraps a [`Record::OperationFinished`]; resolved by the event hub from
     /// the matching [`Record::OperationStarted`].  `None` for other payloads and
@@ -474,13 +477,13 @@ pub struct HarnessEvent {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProjectedAgentEvent {
     /// The durable commit cursor (`HarnessEvent::id`).
-    pub cursor: u64,
-    pub lane: Option<String>,
-    pub run_id: Option<String>,
-    pub turn: Option<u32>,
+    cursor: u64,
+    lane: Option<String>,
+    run_id: Option<String>,
+    turn: Option<u32>,
     /// The recovery identifier from the originating [`HarnessEvent`].
-    pub recovery_id: Option<String>,
-    pub event: crate::events::AgentEvent,
+    recovery_id: Option<String>,
+    event: crate::events::AgentEvent,
 }
 
 impl HarnessEvent {
@@ -636,15 +639,15 @@ impl HarnessEventHub {
         }
     }
 
-    pub fn publish(&self, payload: EventPayload) -> HarnessEvent {
+    pub(crate) fn publish(&self, payload: EventPayload) -> HarnessEvent {
         self.publish_identified(payload, None, None, None)
     }
 
-    pub fn publish_agent_event(&self, event: crate::events::AgentEvent) -> HarnessEvent {
+    pub(crate) fn publish_agent_event(&self, event: crate::events::AgentEvent) -> HarnessEvent {
         self.publish(EventPayload::Agent(event))
     }
 
-    pub fn publish_identified(
+    pub(crate) fn publish_identified(
         &self,
         payload: EventPayload,
         lane: Option<String>,
@@ -654,7 +657,7 @@ impl HarnessEventHub {
         self.publish_identified_with_turn(payload, lane, run_id, None, recovery_id)
     }
 
-    pub fn publish_identified_with_turn(
+    pub(crate) fn publish_identified_with_turn(
         &self,
         payload: EventPayload,
         lane: Option<String>,
@@ -716,7 +719,8 @@ impl HarnessEventHub {
         event
     }
 
-    pub fn publish_streaming(&self, state: Option<StreamingState>) -> HarnessEvent {
+    #[cfg(test)]
+    fn publish_streaming(&self, state: Option<StreamingState>) -> HarnessEvent {
         let (lane, run_id) = state
             .as_ref()
             .map(|state| (Some(state.lane.clone()), state.run_id.clone()))
@@ -750,11 +754,11 @@ impl HarnessEventHub {
             .clone()
     }
 
-    pub fn subscribe<S: SessionStore>(&self, store: &S) -> Result<Subscription, ReduceError> {
+    pub(crate) fn subscribe<S: SessionStore>(&self, store: &S) -> Result<Subscription, ReduceError> {
         self.subscribe_for_lane(store, None)
     }
 
-    pub fn subscribe_for_lane<S: SessionStore>(
+    pub(crate) fn subscribe_for_lane<S: SessionStore>(
         &self,
         store: &S,
         lane: Option<&str>,
@@ -794,7 +798,7 @@ impl HarnessEventHub {
         self.publish_identified(event_payload, lane, run_id, recovery_id)
     }
 
-    pub fn poll(&self, subscription: &mut Subscription) -> Result<Vec<HarnessEvent>, EventError> {
+    fn poll(&self, subscription: &mut Subscription) -> Result<Vec<HarnessEvent>, EventError> {
         let state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         let Some(oldest) = state.events.front().map(|event| event.id) else {
             return Ok(Vec::new());
@@ -846,7 +850,8 @@ impl HarnessEventHub {
     }
 
     /// Polls only durable events (entry/record commits) from the subscription.
-    pub fn poll_durable(
+    #[cfg(test)]
+    fn poll_durable(
         &self,
         subscription: &mut Subscription,
     ) -> Result<Vec<DurableEvent>, EventError> {

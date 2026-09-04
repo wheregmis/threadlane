@@ -34,8 +34,8 @@ use tokio::time::{timeout, Duration};
 
 pub(crate) const MAX_SUBAGENT_TASKS: usize = 8;
 pub(crate) const MAX_SUBAGENT_TASK_CHARS: usize = 32_000;
-pub(crate) const SUBAGENT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-pub(crate) const SUBAGENT_RECOVERY_PROMPT: &str =
+const SUBAGENT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const SUBAGENT_RECOVERY_PROMPT: &str =
     "Continue from the recovered checkpoint and finish the assigned task.";
 pub(crate) static NEXT_SUBAGENT_UI_RUN_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -141,23 +141,23 @@ pub(crate) struct SubagentRunContext {
 
 #[derive(Clone, Debug)]
 pub struct SubagentInnerTool {
-    pub id: String,
-    pub name: String,
-    pub arguments: String,
-    pub output: String,
-    pub is_error: bool,
+    id: String,
+    name: String,
+    arguments: String,
+    output: String,
+    is_error: bool,
 }
 
 #[derive(Clone, Debug)]
 pub struct SubagentResult {
-    pub output: String,
-    pub thinking: Vec<AgentMessage>,
-    pub inner_tools: Vec<SubagentInnerTool>,
-    pub error: Option<String>,
-    pub messages: Vec<AgentMessage>,
+    output: String,
+    thinking: Vec<AgentMessage>,
+    inner_tools: Vec<SubagentInnerTool>,
+    pub(crate) error: Option<String>,
+    pub(crate) messages: Vec<AgentMessage>,
 }
 
-pub(crate) fn tool_target_preview(name: &str, arguments: &str) -> String {
+fn tool_target_preview(name: &str, arguments: &str) -> String {
     let parsed: Option<serde_json::Value> = serde_json::from_str(arguments).ok();
     let get_str = |key: &str| {
         parsed
@@ -182,23 +182,23 @@ pub(crate) fn tool_target_preview(name: &str, arguments: &str) -> String {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SubagentSessionData {
-    pub run_id: String,
-    pub task: String,
-    pub agent: String,
-    pub status: String,
-    pub thinking: String,
-    pub inner_tools: Vec<SubagentInnerToolData>,
-    pub output: String,
+    run_id: String,
+    task: String,
+    agent: String,
+    status: String,
+    thinking: String,
+    inner_tools: Vec<SubagentInnerToolData>,
+    output: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SubagentInnerToolData {
-    pub name: String,
-    pub target_preview: String,
-    pub is_error: bool,
+    name: String,
+    target_preview: String,
+    is_error: bool,
 }
 
-pub(crate) fn format_subagent_results(
+fn format_subagent_results(
     tasks: Vec<AgentRunTask>,
     results: Vec<Result<SubagentResult, String>>,
     lanes: &[CompletedSubagentLane],
@@ -256,7 +256,7 @@ pub(crate) fn format_subagent_results(
     serde_json::to_string(&sessions).unwrap_or_else(|_| "[]".to_string())
 }
 
-pub(crate) fn aggregate_subagent_results(
+fn aggregate_subagent_results(
     tasks: Vec<AgentRunTask>,
     results: Vec<Result<SubagentResult, String>>,
     lanes: Vec<CompletedSubagentLane>,
@@ -276,7 +276,7 @@ pub(crate) fn aggregate_subagent_results(
         Err(format!("All subagents failed: {output}"))
     }
 }
-pub(crate) fn subagent_ui_event(
+fn subagent_ui_event(
     event: AgentEvent,
     run_id: u64,
     task_index: usize,
@@ -331,7 +331,7 @@ pub(crate) fn subagent_ui_event(
     })
 }
 
-pub(crate) async fn checkpoint_new_subagent_messages(
+async fn checkpoint_new_subagent_messages(
     session_file: Option<&Path>,
     lane_name: &str,
     run_id: &str,
@@ -347,7 +347,7 @@ pub(crate) async fn checkpoint_new_subagent_messages(
     Ok(())
 }
 
-pub(crate) async fn consume_subagent_turn_checkpoints(
+async fn consume_subagent_turn_checkpoints(
     mut events: broadcast::Receiver<AgentEvent>,
     session_file: Option<PathBuf>,
     lane_name: String,
@@ -374,7 +374,7 @@ pub(crate) async fn consume_subagent_turn_checkpoints(
     Ok(checkpoint_cursor)
 }
 
-pub(crate) async fn checkpoint_subagent_final_snapshot(
+async fn checkpoint_subagent_final_snapshot(
     session_file: Option<&Path>,
     lane_name: &str,
     run_id: &str,

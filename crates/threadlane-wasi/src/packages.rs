@@ -672,7 +672,7 @@ fn resolve_threadlane_extensions_dir(
 
 const MAX_EXTENSION_ID_LEN: usize = 128;
 
-pub fn validate_extension_id(id: &str) -> Result<(), String> {
+pub(crate) fn validate_extension_id(id: &str) -> Result<(), String> {
     if id.len() > MAX_EXTENSION_ID_LEN {
         return Err(format!(
             "Extension name must not exceed {MAX_EXTENSION_ID_LEN} ASCII characters"

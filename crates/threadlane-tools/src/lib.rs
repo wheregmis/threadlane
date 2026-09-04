@@ -397,7 +397,7 @@ static FUZZY_PATH_CACHE: LazyLock<RwLock<HashMap<(PathBuf, String), (PathBuf, St
 
 /// Searches the workspace for candidate files matching `path_input` as a relative suffix
 /// or filename when an exact path lookup fails.
-pub fn find_fuzzy_workspace_path(
+fn find_fuzzy_workspace_path(
     path_input: &str,
     workspace_root: &Path,
 ) -> Result<Option<(PathBuf, String)>, String> {
@@ -508,11 +508,13 @@ pub fn find_fuzzy_workspace_path(
     }
 }
 
-pub fn execute_tool(name: &str, args_json: &str) -> String {
+#[cfg(test)]
+fn execute_tool(name: &str, args_json: &str) -> String {
     try_execute_tool(name, args_json).unwrap_or_else(|error| error)
 }
 
-pub fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &Path) -> String {
+#[cfg(test)]
+fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &Path) -> String {
     try_execute_tool_in_workspace(name, args_json, workspace_root).unwrap_or_else(|error| error)
 }
 

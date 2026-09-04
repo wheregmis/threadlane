@@ -70,7 +70,7 @@ struct PermissionManagerInner {
 #[derive(Default, Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct PersistentPermissions {
     #[serde(default)]
-    pub network_hosts: HashSet<String>,
+    network_hosts: HashSet<String>,
 }
 
 impl PermissionManager {
@@ -86,7 +86,7 @@ impl PermissionManager {
         Self::with_session_prefix(project_root, session_prefix, event_tx)
     }
 
-    pub(crate) fn with_session_prefix(
+    fn with_session_prefix(
         project_root: PathBuf,
         session_prefix: impl Into<String>,
         event_tx: tokio::sync::broadcast::Sender<AgentEvent>,
@@ -290,7 +290,7 @@ impl PermissionHandle {
         }
     }
 
-    pub(crate) fn generate_request_id(&self) -> String {
+    fn generate_request_id(&self) -> String {
         format!(
             "permission-{}-{}",
             self.inner.session_prefix,
@@ -298,7 +298,7 @@ impl PermissionHandle {
         )
     }
 
-    pub(crate) async fn record_trace(&self, event: PermissionTraceEvent) -> Result<(), String> {
+    async fn record_trace(&self, event: PermissionTraceEvent) -> Result<(), String> {
         let recorder = self
             .inner
             .trace_recorder
@@ -311,7 +311,7 @@ impl PermissionHandle {
         }
     }
 
-    pub fn is_interactive(&self) -> bool {
+    fn is_interactive(&self) -> bool {
         self.inner.interactive.load(Ordering::SeqCst)
     }
 
@@ -322,7 +322,7 @@ impl PermissionHandle {
     /// persists nothing: it renders a prompt, waits for the answer, and returns
     /// it. Without a UI attached there is no informed consent to give, so the
     /// answer is [`PermissionDecision::Deny`] rather than a silent allow.
-    pub async fn request_external(
+    pub(crate) async fn request_external(
         &self,
         event_tx: &tokio::sync::broadcast::Sender<AgentEvent>,
         capability: &str,

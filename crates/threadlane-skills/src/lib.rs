@@ -179,7 +179,7 @@ pub struct SkillDiscoveryOptions {
     project_root: Option<PathBuf>,
     home_dir: Option<PathBuf>,
     include_pi_compatibility: bool,
-    pub max_skill_bytes: usize,
+    max_skill_bytes: usize,
     max_frontmatter_bytes: usize,
     max_manifest_bytes: usize,
     max_directory_entries: usize,
@@ -187,7 +187,7 @@ pub struct SkillDiscoveryOptions {
 }
 
 impl SkillDiscoveryOptions {
-    pub fn new(project_root: Option<PathBuf>, home_dir: Option<PathBuf>) -> Self {
+    fn new(project_root: Option<PathBuf>, home_dir: Option<PathBuf>) -> Self {
         Self {
             project_root,
             home_dir,
@@ -230,15 +230,15 @@ pub enum SkillDiscoveryWarningKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillDiscoveryWarning {
-    pub kind: SkillDiscoveryWarningKind,
+    kind: SkillDiscoveryWarningKind,
     message: String,
     path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SkillDiscoveryReport {
-    pub skills: Vec<SkillMetadata>,
-    pub warnings: Vec<SkillDiscoveryWarning>,
+    skills: Vec<SkillMetadata>,
+    warnings: Vec<SkillDiscoveryWarning>,
 }
 
 #[derive(Debug, Clone)]
@@ -387,7 +387,7 @@ impl SkillManager {
         self.discover_skills_with_home(project_root, dirs_home().as_deref());
     }
 
-    pub fn discover_skills_with_home(
+    fn discover_skills_with_home(
         &mut self,
         project_root: Option<&Path>,
         home_dir: Option<&Path>,
@@ -399,7 +399,7 @@ impl SkillManager {
         let _ = self.discover_skills_with_options(options);
     }
 
-    pub fn discover_skills_with_options<O>(&mut self, options: O) -> SkillDiscoveryReport
+    fn discover_skills_with_options<O>(&mut self, options: O) -> SkillDiscoveryReport
     where
         O: Into<SkillDiscoveryOptions>,
     {
@@ -421,7 +421,8 @@ impl SkillManager {
         self.registry.get_skill_instructions(skill_id)
     }
 
-    pub fn render_model_catalog(&self) -> String {
+    #[cfg(test)]
+    fn render_model_catalog(&self) -> String {
         self.registry.render_model_catalog()
     }
 }
@@ -447,7 +448,7 @@ impl LoadSkillToolExecutor {
     }
 }
 
-pub fn load_skill_tool_definition() -> AgentToolDefinition {
+fn load_skill_tool_definition() -> AgentToolDefinition {
     AgentToolDefinition {
         name: LOAD_SKILL_TOOL_NAME.to_string(),
         description: Some(

@@ -16,9 +16,9 @@ pub(crate) struct PrewalkState {
     pub(crate) started_at: std::time::Instant,
 }
 
-pub const ARCHITECT_PROTOCOL_HEADER: &str =
+pub(crate) const ARCHITECT_PROTOCOL_HEADER: &str =
     "[ARCHITECT PROTOCOL: Frontier Architect -> Fast Model Handoff]";
-pub const ARCHITECT_PROTOCOL_FOOTER: &str = "[END ARCHITECT PROTOCOL]";
+const ARCHITECT_PROTOCOL_FOOTER: &str = "[END ARCHITECT PROTOCOL]";
 
 /// Orchestrator decision for an incoming prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,10 +33,10 @@ pub enum OrchestratorDecision {
     },
 }
 
-pub struct Orchestrator;
+pub(crate) struct Orchestrator;
 
 impl Orchestrator {
-    pub async fn evaluate(
+    pub(crate) async fn evaluate(
         prompt: &str,
         mode: OrchestratorMode,
         active_model: &str,
@@ -83,7 +83,7 @@ fn parse_classifier_label(text: &str) -> bool {
 }
 
 /// LLM-based intent classifier using the configured fast model.
-pub async fn classify_task_intent_with_model(
+async fn classify_task_intent_with_model(
     provider_client: Arc<dyn ProviderPort>,
     fast_model: &str,
     reasoning_effort: Option<ReasoningEffort>,
@@ -149,7 +149,7 @@ pub async fn classify_task_intent_with_model(
     is_task
 }
 
-pub fn build_architect_directive(fast_model: &str) -> String {
+pub(crate) fn build_architect_directive(fast_model: &str) -> String {
     let handoff_tool = crate::coding_agent::capabilities::PREWALK_HANDOFF_TOOL_NAME;
     format!(
         "\n\n{ARCHITECT_PROTOCOL_HEADER}\n\

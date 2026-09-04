@@ -327,7 +327,7 @@ impl TerminalView {
     }
 
     /// Sends raw input bytes into the terminal PTY.
-    pub fn send_input(&self, input: &str) {
+    pub(crate) fn send_input(&self, input: &str) {
         if let Some(session) = &self.session {
             session.write(input.as_bytes());
         }
@@ -342,7 +342,7 @@ impl TerminalView {
     }
 
     /// Terminates the current shell and starts a fresh login-capable interactive shell.
-    pub fn restart(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn restart(&mut self, cx: &mut Context<Self>) {
         self.session.take();
         self.parser_command_tx = None;
         self.screen = vt100::Parser::new(self.rows, self.cols, 0).screen().clone();
@@ -354,7 +354,7 @@ impl TerminalView {
     }
 
     /// Clears both the emulator scrollback and the visible screen.
-    pub fn clear(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn clear(&mut self, cx: &mut Context<Self>) {
         self.screen = vt100::Parser::new(self.rows, self.cols, 0).screen().clone();
         if let Some(parser) = &self.parser_command_tx {
             let _ = parser.send(ParserCommand::Clear);
@@ -366,7 +366,7 @@ impl TerminalView {
     }
 
     /// Scrolls the terminal view by a number of lines (positive = into scrollback history, negative = towards bottom).
-    pub fn scroll_by(&mut self, lines: f32, cx: &mut Context<Self>) {
+    fn scroll_by(&mut self, lines: f32, cx: &mut Context<Self>) {
         self.scroll_accumulator += lines;
         let whole_lines = self.scroll_accumulator.trunc() as isize;
         if whole_lines != 0 {
@@ -383,7 +383,7 @@ impl TerminalView {
     }
 
     /// Resets scrollback to the bottom (live / auto-scroll mode).
-    pub fn scroll_to_bottom(&mut self, cx: &mut Context<Self>) {
+    fn scroll_to_bottom(&mut self, cx: &mut Context<Self>) {
         if self.scrollback_offset != 0 {
             self.clear_selection();
         }
@@ -394,7 +394,7 @@ impl TerminalView {
     }
 
     /// Scrolls all the way to the top of available scrollback history.
-    pub fn scroll_to_top(&mut self, cx: &mut Context<Self>) {
+    fn scroll_to_top(&mut self, cx: &mut Context<Self>) {
         let previous_offset = self.scrollback_offset;
         self.scroll_accumulator = 0.0;
         self.set_scrollback(SCROLLBACK_ROWS);
@@ -406,7 +406,7 @@ impl TerminalView {
 
     /// Updates the PTY and terminal parser dimensions. Parents can call this when
     /// they have measured cell dimensions for their allocated terminal bounds.
-    pub fn resize(&mut self, rows: u16, cols: u16, cx: &mut Context<Self>) {
+    fn resize(&mut self, rows: u16, cols: u16, cx: &mut Context<Self>) {
         let rows = rows.max(1);
         let cols = cols.max(1);
         if (rows, cols) == (self.rows, self.cols) {
@@ -719,13 +719,13 @@ impl TerminalView {
         pos >= start && pos <= end
     }
 
-    pub fn select_all(&mut self, cx: &mut Context<Self>) {
+    fn select_all(&mut self, cx: &mut Context<Self>) {
         self.selection_anchor = Some((0, 0));
         self.selection_head = Some((self.rows.saturating_sub(1), self.cols.saturating_sub(1)));
         cx.notify();
     }
 
-    pub fn paste_from_clipboard(&mut self, cx: &mut Context<Self>) {
+    fn paste_from_clipboard(&mut self, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             self.paste(text);
         }

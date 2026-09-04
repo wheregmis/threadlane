@@ -28,7 +28,7 @@ pub struct ContextBudget {
 }
 
 impl ContextBudget {
-    pub fn from_limit(limit: Option<usize>, config: &AgentConfig) -> Self {
+    fn from_limit(limit: Option<usize>, config: &AgentConfig) -> Self {
         let minimum_valid = config.context_minimum_headroom_tokens.saturating_mul(2);
         let known = limit.filter(|value| *value >= minimum_valid);
         let fallback = config

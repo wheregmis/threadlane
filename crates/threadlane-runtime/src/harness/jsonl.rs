@@ -142,7 +142,7 @@ pub struct TranscriptCursor {
 }
 
 impl TranscriptCursor {
-    pub(crate) fn new(offset: u64) -> Self {
+    fn new(offset: u64) -> Self {
         Self { offset }
     }
 }
@@ -150,12 +150,12 @@ impl TranscriptCursor {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ContextCompactedMarker {
     pub seq: u64,
-    pub timestamp: u64,
+    timestamp: u64,
     pub pre_tokens: usize,
     pub post_tokens: usize,
     pub reason: super::types::CompactionReason,
-    pub effective_model: String,
-    pub context_limit: usize,
+    effective_model: String,
+    context_limit: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -602,7 +602,7 @@ impl JsonlStore {
 
     /// Projects the streaming reduction context without rebuilding it;
     /// used to assert equivalence against a fresh full reduction in tests.
-    pub(crate) fn reduced_state(&self) -> super::types::ReducedState {
+    fn reduced_state(&self) -> super::types::ReducedState {
         self.reduction.to_reduced_state()
     }
 

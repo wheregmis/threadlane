@@ -9,16 +9,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct GitHubCredentials {
     pub token: String,
     pub username: Option<String>,
-    pub auth_type: String, // "cli", "token", "oauth"
-    pub updated_at: u64,
+    auth_type: String, // "cli", "token", "oauth"
+    updated_at: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GitLabCredentials {
-    pub token: String,
-    pub username: Option<String>,
-    pub host: Option<String>,
-    pub updated_at: u64,
+    token: String,
+    username: Option<String>,
+    host: Option<String>,
+    updated_at: u64,
 }
 
 fn now_secs() -> u64 {
@@ -216,7 +216,7 @@ pub fn sync_from_gh_cli() -> Result<GitHubCredentials, String> {
 
 // ── GitLab ─────────────────────────────────────────────────────────────
 
-pub fn load_gitlab_credentials() -> Option<GitLabCredentials> {
+fn load_gitlab_credentials() -> Option<GitLabCredentials> {
     let path = get_gitlab_credentials_path();
     if !path.exists() {
         return None;

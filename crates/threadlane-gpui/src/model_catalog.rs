@@ -131,7 +131,7 @@ pub(crate) fn default_model_for_project(project_root: Option<&std::path::Path>) 
         .map(|model| model.id.clone())
 }
 
-pub fn option_for(model_id: &str) -> Option<ModelOption> {
+fn option_for(model_id: &str) -> Option<ModelOption> {
     provider_models(OPENAI_MODELS, ModelProvider::OpenAi)
         .into_iter()
         .chain(provider_models(
@@ -142,7 +142,7 @@ pub fn option_for(model_id: &str) -> Option<ModelOption> {
         .find(|model| model.id == model_id)
 }
 
-pub fn label_for(model_id: &str) -> Option<String> {
+pub(crate) fn label_for(model_id: &str) -> Option<String> {
     option_for(model_id).map(|model| model.label)
 }
 
@@ -150,7 +150,7 @@ pub fn available_option(model_id: &str) -> Option<ModelOption> {
     available_option_for_project(model_id, None)
 }
 
-pub(crate) fn available_option_for_project(
+fn available_option_for_project(
     model_id: &str,
     project_root: Option<&std::path::Path>,
 ) -> Option<ModelOption> {
@@ -163,7 +163,7 @@ pub fn is_available(model_id: &str) -> bool {
     is_available_for_project(model_id, None)
 }
 
-pub(crate) fn is_available_for_project(
+fn is_available_for_project(
     model_id: &str,
     project_root: Option<&std::path::Path>,
 ) -> bool {

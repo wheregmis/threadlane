@@ -133,7 +133,7 @@ pub(crate) fn compaction_retained_tail(messages: &[AgentMessage]) -> Vec<AgentMe
 }
 
 impl CodingAgent {
-    pub(crate) fn install_run_trace_recorders(
+    fn install_run_trace_recorders(
         &mut self,
         path: PathBuf,
         run_id: String,
@@ -814,7 +814,7 @@ impl CodingAgent {
         Ok(())
     }
 
-    pub async fn sync_turn_from_model_context(&self) -> Result<(), String> {
+    pub(crate) async fn sync_turn_from_model_context(&self) -> Result<(), String> {
         let Some(harness) = self.harness.as_ref() else {
             return Ok(());
         };
@@ -837,7 +837,7 @@ impl CodingAgent {
         }
     }
 
-    pub(crate) async fn dispatch_assistant_hook(&self, message: &AgentMessage) {
+    async fn dispatch_assistant_hook(&self, message: &AgentMessage) {
         let AgentMessage::Assistant {
             content,
             tool_calls,
