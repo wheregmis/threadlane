@@ -3454,6 +3454,7 @@ impl AppState {
                             activity.detail = result.content.clone();
                         }
                     }
+                    SubagentProgressUpdate::Usage { .. } => {}
                     SubagentProgressUpdate::Error { error } => {
                         subagent.error = Some(error.clone());
                     }
@@ -3872,11 +3873,19 @@ impl AppState {
                         .expect("active stream event must have a projection key");
                     let metrics = self.session_metrics.entry(key.clone()).or_default();
                     match &event {
-                        AgentEvent::AgentStart => metrics.turns = metrics.turns.saturating_add(1),
-                        AgentEvent::ToolExecutionStart { .. } => {
-                            metrics.tool_calls = metrics.tool_calls.saturating_add(1)
+                        AgentEvent::AgentStart | AgentEvent::SubagentStarted { .. } => {
+                            metrics.turns = metrics.turns.saturating_add(1)
                         }
-                        AgentEvent::AgentEnd { usage } => metrics.accumulate_usage(usage),
+                        AgentEvent::ToolExecutionStart { .. }
+                        | AgentEvent::SubagentUpdate {
+                            update: SubagentProgressUpdate::ToolStarted { .. },
+                            ..
+                        } => metrics.tool_calls = metrics.tool_calls.saturating_add(1),
+                        AgentEvent::AgentEnd { usage }
+                        | AgentEvent::SubagentUpdate {
+                            update: SubagentProgressUpdate::Usage { usage },
+                            ..
+                        } => metrics.accumulate_usage(usage),
                         _ => {}
                     }
                     match adapt_agent_event(event) {
@@ -6776,6 +6785,66 @@ mod tests {
         assert_eq!(subagent.task, "inspect");
         assert_eq!(subagent.model.as_deref(), Some("gpt-5.6-luna"));
         assert_eq!(subagent.messages[0].content, "live progress");
+    }
+
+    #[test]
+    fn live_subagent_events_contribute_to_composer_metrics() {
+        let mut state = AppState::load_from_registry(Vec::new());
+        let dir = tempfile::tempdir().unwrap();
+        state.active_work_dir = Some(dir.path().to_path_buf());
+        state.active_session_id = Some("session".into());
+
+        state.drain_chat_stream(vec![
+            ChatStreamEvent::Agent {
+                session_id: "session".into(),
+                event: AgentEvent::SubagentStarted {
+                    run_id: 1,
+                    task_index: 0,
+                    journal_run_id: "child-run".into(),
+                    lane: "child-lane".into(),
+                    agent: "scout".into(),
+                    task: "inspect".into(),
+                    model: "gpt-5.6-luna".into(),
+                },
+            },
+            ChatStreamEvent::Agent {
+                session_id: "session".into(),
+                event: AgentEvent::SubagentUpdate {
+                    run_id: 1,
+                    task_index: 0,
+                    journal_run_id: "child-run".into(),
+                    lane: "child-lane".into(),
+                    update: SubagentProgressUpdate::ToolStarted {
+                        tool_call_id: "call-1".into(),
+                        name: "read_file".into(),
+                        arguments: "{}".into(),
+                    },
+                },
+            },
+            ChatStreamEvent::Agent {
+                session_id: "session".into(),
+                event: AgentEvent::SubagentUpdate {
+                    run_id: 1,
+                    task_index: 0,
+                    journal_run_id: "child-run".into(),
+                    lane: "child-lane".into(),
+                    update: SubagentProgressUpdate::Usage {
+                        usage: TokenUsage {
+                            input_tokens: 100,
+                            output_tokens: 25,
+                            total_tokens: 125,
+                            ..Default::default()
+                        },
+                    },
+                },
+            },
+        ]);
+
+        let metrics = state.active_session_metrics();
+        assert_eq!(metrics.turns, 1);
+        assert_eq!(metrics.tool_calls, 1);
+        assert_eq!(metrics.input_tokens, 100);
+        assert_eq!(metrics.output_tokens, 25);
     }
 
     #[test]

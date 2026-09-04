@@ -2691,8 +2691,8 @@ impl GitHubView {
                     .small()
                     .selected(self.state_filter == GitHubStateFilter::Closed)
                     .on_click(cx.listener(|this, _, _, cx| {
-                    this.select_state(GitHubStateFilter::Closed, cx)
-                })),
+                        this.select_state(GitHubStateFilter::Closed, cx)
+                    })),
             )
             .children((self.tab == GitHubTab::PullRequests).then(|| {
                 Button::new("github-state-merged")
@@ -4208,17 +4208,17 @@ impl Render for GitHubView {
 mod tests {
     use super::{
         detail_result_matches_list, draft_reply_prompt, github_link_fingerprint_rows,
-        github_state_for_tab,
         github_query_mode, github_result_matches_request, github_server_query,
-        issue_filter_matches, issue_start_activation, issue_start_confirmation,
-        issue_start_dialog_result, linked_pr_session, linked_session_fingerprint,
-        linked_session_ids, linked_session_status, linked_sessions_across_projects,
-        list_count_splice, merge_pr_timeline, pr_check_label, pr_diff_result_matches_request,
-        pr_file_action_ix, pr_publish_control, pr_publish_refresh_matches_selection,
-        prepare_selected_diff, selected_file_diff, selected_issue_after_refresh, GitHubQueryMode,
-        GitHubRequest, GitHubTab, GitHubView, PrCommentControl, PrCommentDrafts, PrCommentPhase,
-        PrDetailTab, PrDiffRequest, PrFileAction, PrReadback, PrReplyTarget, PrTimelineKind,
-        PrWorkspaceKey, PrWorkspaceSelections, GitHubStateFilter,
+        github_state_for_tab, issue_filter_matches, issue_start_activation,
+        issue_start_confirmation, issue_start_dialog_result, linked_pr_session,
+        linked_session_fingerprint, linked_session_ids, linked_session_status,
+        linked_sessions_across_projects, list_count_splice, merge_pr_timeline, pr_check_label,
+        pr_diff_result_matches_request, pr_file_action_ix, pr_publish_control,
+        pr_publish_refresh_matches_selection, prepare_selected_diff, selected_file_diff,
+        selected_issue_after_refresh, GitHubQueryMode, GitHubRequest, GitHubStateFilter, GitHubTab,
+        GitHubView, PrCommentControl, PrCommentDrafts, PrCommentPhase, PrDetailTab, PrDiffRequest,
+        PrFileAction, PrReadback, PrReplyTarget, PrTimelineKind, PrWorkspaceKey,
+        PrWorkspaceSelections,
     };
     use crate::state::{AppState, SessionHealth, SessionInfo};
     use gpui::{

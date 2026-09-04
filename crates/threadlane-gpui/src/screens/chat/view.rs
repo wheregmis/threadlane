@@ -4867,7 +4867,9 @@ impl ChatListView {
                 let command_count = commands.len();
                 let has_commands = command_count > 0;
                 slash_completion_active = has_commands;
-                let selected_idx = self.selected_slash_index.min(command_count.saturating_sub(1));
+                let selected_idx = self
+                    .selected_slash_index
+                    .min(command_count.saturating_sub(1));
                 div()
                     .absolute()
                     .bottom_full()
@@ -4933,60 +4935,58 @@ impl ChatListView {
                                         .child("No matching commands"),
                                 )
                             })
-                            .children(commands.into_iter().enumerate().map(
-                                |(idx, command)| {
-                                    let is_active = idx == selected_idx;
-                                    let command_name = command.name.clone();
-                                    div()
-                                        .id(SharedString::from(format!(
-                                            "composer-command-{}",
-                                            command.name
-                                        )))
-                                        .h(px(30.0))
-                                        .flex()
-                                        .items_center()
-                                        .rounded_md()
-                                        .px_2()
-                                        .text_sm()
-                                        .bg(if is_active {
-                                            theme.accent.opacity(0.16)
-                                        } else {
-                                            hsla(0.0, 0.0, 0.0, 0.0)
-                                        })
-                                        .hover(|style| style.bg(theme.list_hover))
-                                        .cursor_pointer()
-                                        .child(
-                                            div()
-                                                .w(px(112.0))
-                                                .flex_none()
-                                                .font_weight(if is_active {
-                                                    FontWeight::BOLD
-                                                } else {
-                                                    FontWeight::SEMIBOLD
-                                                })
-                                                .text_color(if is_active {
-                                                    theme.primary
-                                                } else {
-                                                    theme.foreground
-                                                })
-                                                .child(format!("/{}", command.name)),
-                                        )
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .overflow_hidden()
-                                                .text_color(if is_active {
-                                                    theme.foreground
-                                                } else {
-                                                    theme.muted_foreground
-                                                })
-                                                .child(command.description),
-                                        )
-                                        .on_click(cx.listener(move |this, _event, window, cx| {
-                                            this.complete_slash_command(&command_name, window, cx);
-                                        }))
-                                },
-                            )),
+                            .children(commands.into_iter().enumerate().map(|(idx, command)| {
+                                let is_active = idx == selected_idx;
+                                let command_name = command.name.clone();
+                                div()
+                                    .id(SharedString::from(format!(
+                                        "composer-command-{}",
+                                        command.name
+                                    )))
+                                    .h(px(30.0))
+                                    .flex()
+                                    .items_center()
+                                    .rounded_md()
+                                    .px_2()
+                                    .text_sm()
+                                    .bg(if is_active {
+                                        theme.accent.opacity(0.16)
+                                    } else {
+                                        hsla(0.0, 0.0, 0.0, 0.0)
+                                    })
+                                    .hover(|style| style.bg(theme.list_hover))
+                                    .cursor_pointer()
+                                    .child(
+                                        div()
+                                            .w(px(112.0))
+                                            .flex_none()
+                                            .font_weight(if is_active {
+                                                FontWeight::BOLD
+                                            } else {
+                                                FontWeight::SEMIBOLD
+                                            })
+                                            .text_color(if is_active {
+                                                theme.primary
+                                            } else {
+                                                theme.foreground
+                                            })
+                                            .child(format!("/{}", command.name)),
+                                    )
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .text_color(if is_active {
+                                                theme.foreground
+                                            } else {
+                                                theme.muted_foreground
+                                            })
+                                            .child(command.description),
+                                    )
+                                    .on_click(cx.listener(move |this, _event, window, cx| {
+                                        this.complete_slash_command(&command_name, window, cx);
+                                    }))
+                            })),
                     )
                     .into_any_element()
             }
@@ -5721,15 +5721,15 @@ mod hot_path_tests {
     use super::{
         active_slash_command_query, build_trajectory_rows, build_transcript_rows,
         classify_chat_link, classify_markdown_update, contains_case_insensitive,
-        context_meter_view_model, extend_trajectory_facets, extend_trajectory_previews,
-        extend_trajectory_rows, extend_trajectory_summary, extract_markdown_segments,
-        format_trajectory_raw_json, grouped_tool_activities, is_terminal_runnable_language,
-        markdown_cache_exceeded, next_chat_stream_batch, normalize_terminal_command,
-        reconcile_trajectory_entries, reconcile_trajectory_entries_by_epoch,
-        subagent_popover_counts, summarize_trajectory, ChatLinkTarget, ContextMeterContext,
-        ContextMeterMetrics, MarkdownSegment, MarkdownUpdate, TrajectoryCacheKey, TrajectoryMode,
-        TrajectoryRow, TranscriptRow, editor_target_matches_active_work_dir, INPUT_KEY_CONTEXT, MARKDOWN_CACHE_ENTRY_LIMIT,
-        SLASH_COMMAND_BINDING_CONTEXT, SLASH_COMMAND_KEY_CONTEXT,
+        context_meter_view_model, editor_target_matches_active_work_dir, extend_trajectory_facets,
+        extend_trajectory_previews, extend_trajectory_rows, extend_trajectory_summary,
+        extract_markdown_segments, format_trajectory_raw_json, grouped_tool_activities,
+        is_terminal_runnable_language, markdown_cache_exceeded, next_chat_stream_batch,
+        normalize_terminal_command, reconcile_trajectory_entries,
+        reconcile_trajectory_entries_by_epoch, subagent_popover_counts, summarize_trajectory,
+        ChatLinkTarget, ContextMeterContext, ContextMeterMetrics, MarkdownSegment, MarkdownUpdate,
+        TrajectoryCacheKey, TrajectoryMode, TrajectoryRow, TranscriptRow, INPUT_KEY_CONTEXT,
+        MARKDOWN_CACHE_ENTRY_LIMIT, SLASH_COMMAND_BINDING_CONTEXT, SLASH_COMMAND_KEY_CONTEXT,
     };
 
     #[test]
@@ -5737,8 +5737,14 @@ mod hot_path_tests {
         let worktree = std::path::Path::new("/projects/app/.threadlane/worktrees/session");
         let canonical = std::path::Path::new("/projects/app");
 
-        assert!(editor_target_matches_active_work_dir(worktree, Some(worktree)));
-        assert!(!editor_target_matches_active_work_dir(worktree, Some(canonical)));
+        assert!(editor_target_matches_active_work_dir(
+            worktree,
+            Some(worktree)
+        ));
+        assert!(!editor_target_matches_active_work_dir(
+            worktree,
+            Some(canonical)
+        ));
         assert!(!editor_target_matches_active_work_dir(worktree, None));
     }
     use crate::state::{

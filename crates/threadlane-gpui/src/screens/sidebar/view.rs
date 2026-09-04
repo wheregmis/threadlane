@@ -1045,6 +1045,12 @@ impl SidebarView {
                                         .opacity(0.0)
                                         .group_hover("session-card", |style| style.opacity(1.0))
                                         .tooltip("Archive session")
+                                        // The card selects a session on mouse-down. Keep action buttons from
+                                        // bubbling that event, otherwise archiving first selects the row and
+                                        // queues hydration for the file that is about to be archived.
+                                        .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
+                                            cx.stop_propagation();
+                                        })
                                         .on_click(
                                             move |_event, _window, cx| {
                                                 quick_settle_model.update(cx, |state, cx| {

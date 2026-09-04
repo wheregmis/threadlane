@@ -911,7 +911,10 @@ fn execute_dyn_cli(input: &str, workspace_root: &Path) -> Result<String, String>
         }
         lines.push("".to_string());
         lines.push("Tip: Core tools (read_file, edit_file_hashline, write_file, run_command, subagent) are in active schema.".to_string());
-        return Ok(format!("Exit Status: exit status: 0\n--- STDOUT ---\n{}\n--- STDERR ---", lines.join("\n")));
+        return Ok(format!(
+            "Exit Status: exit status: 0\n--- STDOUT ---\n{}\n--- STDERR ---",
+            lines.join("\n")
+        ));
     }
 
     let mut parts = input.split_whitespace();
@@ -925,7 +928,9 @@ fn execute_dyn_cli(input: &str, workspace_root: &Path) -> Result<String, String>
                 return Ok(format!("Exit Status: exit status: 0\n--- STDOUT ---\nTool Schema for '{tool_name}':\n{formatted}\n--- STDERR ---"));
             }
         }
-        return Err(format!("Unknown tool '{tool_name}'. Run 'dyn' to list tools."));
+        return Err(format!(
+            "Unknown tool '{tool_name}'. Run 'dyn' to list tools."
+        ));
     }
 
     let args_json = if remaining.starts_with('{') {
@@ -937,7 +942,9 @@ fn execute_dyn_cli(input: &str, workspace_root: &Path) -> Result<String, String>
     };
 
     let result = try_execute_tool_in_workspace(tool_name, &args_json, workspace_root)?;
-    Ok(format!("Exit Status: exit status: 0\n--- STDOUT ---\n{result}\n--- STDERR ---"))
+    Ok(format!(
+        "Exit Status: exit status: 0\n--- STDOUT ---\n{result}\n--- STDERR ---"
+    ))
 }
 
 const MAX_TOOL_OUTPUT_CHARS: usize = 3_000;
@@ -2181,13 +2188,16 @@ mod tests {
         // Reading with partial path "src/view.rs"
         let args = json!({ "path": "src/view.rs" }).to_string();
         let result = try_execute_tool_in_workspace("read_file", &args, dir.path()).unwrap();
-        assert!(result.contains("[Notice: Auto-resolved 'src/view.rs' to 'crates/my-crate/src/view.rs']"));
+        assert!(result
+            .contains("[Notice: Auto-resolved 'src/view.rs' to 'crates/my-crate/src/view.rs']"));
         assert!(result.contains("pub fn render()"));
 
         // Reading with bare filename "view.rs"
         let args_bare = json!({ "path": "view.rs" }).to_string();
-        let result_bare = try_execute_tool_in_workspace("read_file", &args_bare, dir.path()).unwrap();
-        assert!(result_bare.contains("[Notice: Auto-resolved 'view.rs' to 'crates/my-crate/src/view.rs']"));
+        let result_bare =
+            try_execute_tool_in_workspace("read_file", &args_bare, dir.path()).unwrap();
+        assert!(result_bare
+            .contains("[Notice: Auto-resolved 'view.rs' to 'crates/my-crate/src/view.rs']"));
         assert!(result_bare.contains("pub fn render()"));
     }
 
@@ -2213,13 +2223,15 @@ mod tests {
         let dir = tempdir().unwrap();
         // 1. "dyn" list
         let args_list = json!({ "command": "dyn" }).to_string();
-        let out_list = try_execute_tool_in_workspace("run_command", &args_list, dir.path()).unwrap();
+        let out_list =
+            try_execute_tool_in_workspace("run_command", &args_list, dir.path()).unwrap();
         assert!(out_list.contains("Threadlane In-Process Tool Runner (dyn)"));
         assert!(out_list.contains("manage_memory"));
 
         // 2. "dyn --help manage_memory"
         let args_help = json!({ "command": "dyn manage_memory --help" }).to_string();
-        let out_help = try_execute_tool_in_workspace("run_command", &args_help, dir.path()).unwrap();
+        let out_help =
+            try_execute_tool_in_workspace("run_command", &args_help, dir.path()).unwrap();
         assert!(out_help.contains("Tool Schema for 'manage_memory'"));
 
         // 3. JSON arguments preserve the tool schema's types and quoting.
@@ -2228,9 +2240,11 @@ mod tests {
         assert!(out_run.contains("No persistent memory found"));
 
         let flags = json!({ "command": "dyn manage_memory --action read" }).to_string();
-        assert!(try_execute_tool_in_workspace("run_command", &flags, dir.path())
-            .unwrap_err()
-            .contains("JSON arguments"));
+        assert!(
+            try_execute_tool_in_workspace("run_command", &flags, dir.path())
+                .unwrap_err()
+                .contains("JSON arguments")
+        );
 
         let escaped_cwd = json!({ "command": "dyn", "cwd": "../outside" }).to_string();
         assert!(try_execute_tool_in_workspace("run_command", &escaped_cwd, dir.path()).is_err());
@@ -2247,10 +2261,16 @@ mod tests {
         // 1. read_file with shorthand path
         let read_args = json!({ "path": "src/view.rs" }).to_string();
         let read_res = try_execute_tool_in_workspace("read_file", &read_args, dir.path()).unwrap();
-        assert!(read_res.contains("[Notice: Auto-resolved 'src/view.rs' to 'crates/my-crate/src/view.rs']"));
+        assert!(read_res
+            .contains("[Notice: Auto-resolved 'src/view.rs' to 'crates/my-crate/src/view.rs']"));
 
         // Extract hash from line 1
-        let hash = read_res.lines().find(|l| l.starts_with("1:")).and_then(|l| l.split(':').nth(1)).and_then(|s| s.split('|').next()).unwrap();
+        let hash = read_res
+            .lines()
+            .find(|l| l.starts_with("1:"))
+            .and_then(|l| l.split(':').nth(1))
+            .and_then(|s| s.split('|').next())
+            .unwrap();
 
         // 2. edit_file_hashline with the same shorthand path
         let edit_args = json!({
@@ -2260,10 +2280,13 @@ mod tests {
                 "action": "replace",
                 "new_content": "hello threadlane"
             }]
-        }).to_string();
+        })
+        .to_string();
 
-        let edit_res = try_execute_tool_in_workspace("edit_file_hashline", &edit_args, dir.path()).unwrap();
-        assert!(edit_res.contains("[Notice: Auto-resolved 'src/view.rs' to 'crates/my-crate/src/view.rs']"));
+        let edit_res =
+            try_execute_tool_in_workspace("edit_file_hashline", &edit_args, dir.path()).unwrap();
+        assert!(edit_res
+            .contains("[Notice: Auto-resolved 'src/view.rs' to 'crates/my-crate/src/view.rs']"));
         assert!(edit_res.contains("Successfully applied 1 hashline edit(s)"));
 
         let updated = fs::read_to_string(&file_path).unwrap();

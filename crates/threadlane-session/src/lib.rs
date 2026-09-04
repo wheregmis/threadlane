@@ -8,12 +8,12 @@ pub mod context;
 pub mod controller;
 pub mod error;
 pub mod extension_broker;
+pub mod orchestrator;
 pub mod permission;
 mod plan;
 pub mod policy;
 pub mod project_registry;
 pub mod prompt_templates;
-pub mod orchestrator;
 pub mod supervisor;
 pub mod system_prompt;
 
