@@ -84,7 +84,7 @@ jobs:
 #      - name: Bundle
 #        run: ./scripts/bundle-gpui-linux.sh
 #
-#      - uses: actions/upload-artifact@v7
+#      - uses: actions/upload-artifact@v7.0.1
 #        with:
 #          name: linux-${{ matrix.arch }}
 #          path: target/release/threadlane-*.tar.gz
@@ -140,7 +140,7 @@ jobs:
           tar -czf target/release/Threadlane.app.tar.gz -C target/release Threadlane.app
           cargo packager signer sign target/release/Threadlane.app.tar.gz
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v7.0.1
         with:
           name: macos-aarch64
           path: |
