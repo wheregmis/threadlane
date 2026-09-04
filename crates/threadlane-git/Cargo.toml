@@ -7,6 +7,7 @@ description = "Project-local Git operations and status parsing for threadlane ag
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+threadlane-auth = { path = "../threadlane-auth" }
 
 [dev-dependencies]
 tempfile = "3.8"

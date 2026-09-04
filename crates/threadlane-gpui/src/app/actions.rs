@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use threadlane_git::GitHubIssueRef;
 use threadlane_session::{ImageAttachment, ReasoningEffort};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -22,6 +23,11 @@ pub enum AppAction {
     BeginNewTask,
     SelectDraftProject(PathBuf),
     SelectWorkMode(crate::state::WorkMode),
+    StartIssueWork {
+        work_dir: PathBuf,
+        issue: GitHubIssueRef,
+        title: String,
+    },
     SendPrompt(String),
     SendPromptWithImages {
         text: String,
@@ -46,6 +52,8 @@ pub enum AppAction {
         config_id: String,
         value: String,
     },
+    OpenGitHub,
+    CloseGitHub,
     OpenSettings,
     CloseSettings,
     SaveOpenAiKey(String),

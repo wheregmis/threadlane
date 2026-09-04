@@ -1,13 +1,16 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use super::context_snapshots::{
+    compacted_context_snapshot_index_for_sources, is_local_path, read_file_request,
+};
 use crate::permission::PermissionTraceEvent;
 use threadlane_runtime::compaction::{
     compact_for_budget, estimate_request_tokens, PreparedCompaction,
@@ -15,12 +18,13 @@ use threadlane_runtime::compaction::{
 pub use threadlane_runtime::harness::Record as HarnessRecord;
 use threadlane_runtime::harness::{
     AbortInitiator, AbortObservation, AbortTarget, AgentHarness, BoundedText, CapabilitySnapshot,
-    CompactionReason, DeferredResolution, Entry as HarnessEntry, ErrorCategory, HarnessEventHub,
-    HookContext, HookKind, HookRegistry, JsonlStore, OperationOutcome, PromptSnapshot,
-    ProviderErrorSummary, ProviderOutcome, ProvisionedEntry, QueueKind, Reducer, RetryPolicy,
-    SessionIdGenerator, SessionStore, Snapshot, SubagentLifecyclePhase, ToolExecutionOutcome,
-    ToolExecutionPhase, ToolReplaySafety as HarnessToolReplaySafety,
-    ToolResult as HarnessToolResult, ToolSpec, TraceString,
+    CompactionReason, ContextSnapshotLoadOutcome, DeferredResolution, Entry as HarnessEntry,
+    ErrorCategory, HarnessEventHub, HookContext, HookKind, HookRegistry, JsonlStore,
+    OperationOutcome, PromptSnapshot, ProviderErrorSummary, ProviderOutcome, ProvisionedEntry,
+    QueueKind, Reducer, RetryPolicy, SessionIdGenerator, SessionStore, Snapshot,
+    SubagentLifecyclePhase, ToolExecutionOutcome, ToolExecutionPhase,
+    ToolReplaySafety as HarnessToolReplaySafety, ToolResult as HarnessToolResult, ToolSpec,
+    TraceString,
 };
 use threadlane_runtime::model_metadata::{context_budget, ContextBudget};
 use threadlane_runtime::{
@@ -34,6 +38,7 @@ use threadlane_runtime::harness::{EventError, HarnessEvent, OperationIntent, Sub
 #[cfg(test)]
 static LAST_PATH_OPERATION_THREAD: std::sync::Mutex<Option<std::thread::ThreadId>> =
     std::sync::Mutex::new(None);
+static NEXT_CONTEXT_SNAPSHOT_LOAD_ID: AtomicU64 = AtomicU64::new(1);
 
 #[cfg(test)]
 fn last_path_operation_thread() -> Option<std::thread::ThreadId> {
@@ -238,6 +243,185 @@ impl CodingSessionHarness {
         Self::with_path(path, |journal| journal.append_message(message).map(|_| ()))
     }
 
+    pub(crate) fn index_read_snapshot(
+        &mut self,
+        run_id: &str,
+        work_dir: &Path,
+        tool_call_id: &str,
+        source_entry_id: &str,
+        output_chars: usize,
+    ) -> Result<Option<String>, String> {
+        self.ensure_fresh()?;
+        let Some((effective_args, result_entry_id)) =
+            self.store.records().iter().find_map(|record| match record {
+                HarnessRecord::ToolStarted {
+                    run_id: record_run_id,
+                    tool_call_id: record_call_id,
+                    tool_name,
+                    effective_args,
+                    result_entry_id,
+                    ..
+                } if record_run_id == run_id
+                    && record_call_id == tool_call_id
+                    && tool_name == "read_file" =>
+                {
+                    Some((effective_args, result_entry_id))
+                }
+                _ => None,
+            })
+        else {
+            return Ok(None);
+        };
+        if result_entry_id != source_entry_id {
+            return Ok(None);
+        }
+        let Some((requested_path, start_line, end_line)) = read_file_request(effective_args) else {
+            return Ok(None);
+        };
+        if !is_local_path(requested_path) {
+            return Ok(None);
+        }
+        let Some(entry) = self
+            .store
+            .entries()
+            .iter()
+            .find(|entry| entry.id == source_entry_id)
+        else {
+            return Ok(None);
+        };
+        let (digest, path) = match &entry.message {
+            AgentMessage::Tool {
+                tool_call_id: entry_call_id,
+                name,
+                content,
+                is_error: false,
+                ..
+            } if entry_call_id == tool_call_id && name == "read_file" => {
+                let Some(digest) = threadlane_tools::read_file_snapshot_digest(content) else {
+                    return Ok(None);
+                };
+                let Some(path) = threadlane_tools::read_file_snapshot_path(content) else {
+                    return Ok(None);
+                };
+                (
+                    TraceString::new(digest.to_owned()).map_err(|error| error.to_string())?,
+                    path,
+                )
+            }
+            _ => return Ok(None),
+        };
+        let canonical_path = threadlane_tools::validate_path_in_workspace(&path, work_dir)?;
+        let canonical_work_dir = work_dir.canonicalize().map_err(|error| error.to_string())?;
+        let relative_path = canonical_path
+            .strip_prefix(&canonical_work_dir)
+            .map_err(|_| {
+                format!(
+                    "read path '{}' is outside workspace",
+                    canonical_path.display()
+                )
+            })?
+            .to_string_lossy()
+            .into_owned();
+        let context_id = format!("ctx-{source_entry_id}");
+        if self.context_snapshots("main").iter().any(|snapshot| {
+            snapshot.context_id == context_id
+                && snapshot.source_run_id == run_id
+                && snapshot.source_tool_call_id == tool_call_id
+                && snapshot.source_entry_id == source_entry_id
+        }) {
+            return Ok(Some(context_id));
+        }
+        let snapshot = threadlane_runtime::harness::ContextSnapshot {
+            context_id: context_id.clone(),
+            source_lane: "main".into(),
+            source_run_id: run_id.into(),
+            source_tool_call_id: tool_call_id.into(),
+            source_entry_id: source_entry_id.into(),
+            path: relative_path,
+            start_line,
+            end_line,
+            file_sha256: digest,
+            output_chars,
+            captured_at: timestamp(),
+        };
+        self.store
+            .append_record_gated(HarnessRecord::ContextSnapshotIndexed {
+                id: format!("context-snapshot-{context_id}"),
+                seq: self.next_seq(),
+                lane: "main".into(),
+                timestamp: timestamp(),
+                run_id: run_id.into(),
+                snapshot,
+            })
+            .map_err(|error| error.to_string())?;
+        self.store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())?;
+        Ok(Some(context_id))
+    }
+
+    pub(crate) fn context_snapshots(
+        &self,
+        lane: &str,
+    ) -> Vec<threadlane_runtime::harness::ContextSnapshot> {
+        Reducer::reduce(self.store.store())
+            .ok()
+            .and_then(|state| state.lane(lane).map(|lane| lane.context_snapshots.clone()))
+            .unwrap_or_default()
+    }
+
+    pub(crate) async fn record_context_snapshot_load_to_path(
+        path: &Path,
+        context_id: &str,
+        source_lane: &str,
+        current_digest: Option<TraceString>,
+        outcome: ContextSnapshotLoadOutcome,
+    ) -> Result<(), String> {
+        let path = path.to_path_buf();
+        let context_id = context_id.to_owned();
+        let source_lane = source_lane.to_owned();
+        tokio::task::spawn_blocking(move || {
+            Self::with_path(&path, |journal| {
+                journal.ensure_fresh()?;
+                let run_id = Reducer::reduce(journal.store.store())
+                    .ok()
+                    .and_then(|state| {
+                        state
+                            .lane("main")
+                            .and_then(|lane| lane.open_operation.clone())
+                    })
+                    .unwrap_or_else(|| "context-load".into());
+                let seq = journal.next_seq();
+                let record_id = format!(
+                    "context-snapshot-load-{}-{}-{}",
+                    std::process::id(),
+                    timestamp(),
+                    NEXT_CONTEXT_SNAPSHOT_LOAD_ID.fetch_add(1, Ordering::Relaxed),
+                );
+                journal
+                    .store
+                    .append_record_gated(HarnessRecord::ContextSnapshotLoaded {
+                        id: record_id,
+                        seq,
+                        lane: "main".into(),
+                        timestamp: timestamp(),
+                        run_id,
+                        context_id,
+                        source_lane,
+                        current_digest,
+                        outcome,
+                    })
+                    .map_err(|error| error.to_string())?;
+                journal
+                    .store
+                    .drive_to_completion()
+                    .map_err(|error| error.to_string())
+            })
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }
+
     pub(crate) fn capture_run_context(
         &mut self,
         run_id: &str,
@@ -422,13 +606,61 @@ impl CodingSessionHarness {
             .unwrap_or(0)
     }
 
+    pub(crate) fn compaction_summary_without_indexed_tool_outputs(
+        &self,
+        summary: &str,
+        compacted_messages: usize,
+        config: &AgentConfig,
+    ) -> Result<String, String> {
+        let omitted_source_entry_ids = self
+            .context_snapshots("main")
+            .into_iter()
+            .map(|snapshot| snapshot.source_entry_id)
+            .collect::<Vec<_>>();
+        if omitted_source_entry_ids.is_empty() {
+            return Ok(summary.to_owned());
+        }
+        let dropped = self
+            .model_context("main")?
+            .entries
+            .into_iter()
+            .filter(|entry| !matches!(entry.message, AgentMessage::System { .. }))
+            .take(compacted_messages)
+            .collect::<Vec<_>>();
+        Ok(
+            threadlane_runtime::compaction::build_checkpoint_omitting_tool_outputs(
+                &dropped,
+                &omitted_source_entry_ids,
+                config,
+            ),
+        )
+    }
+
+    pub(crate) fn context_snapshot_index_for_compaction(
+        &self,
+        compacted_messages: usize,
+    ) -> Result<Vec<Value>, String> {
+        let dropped_source_entry_ids = self
+            .model_context("main")?
+            .entries
+            .into_iter()
+            .filter(|entry| !matches!(entry.message, AgentMessage::System { .. }))
+            .take(compacted_messages)
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>();
+        Ok(compacted_context_snapshot_index_for_sources(
+            &self.context_snapshots("main"),
+            &dropped_source_entry_ids,
+        ))
+    }
+
     pub(crate) fn checkpoint_open_run_compaction(
         &mut self,
         run_id: &str,
         summary: &str,
         reason: CompactionReason,
     ) -> Result<(), String> {
-        self.stage_open_run_compaction(run_id, summary, reason)?;
+        self.stage_open_run_compaction(run_id, summary, &[], reason)?;
         self.store
             .drive_to_completion()
             .map_err(|error| error.to_string())
@@ -438,10 +670,11 @@ impl CodingSessionHarness {
         &mut self,
         run_id: &str,
         summary: &str,
+        context_snapshot_index: &[Value],
         reason: CompactionReason,
     ) -> Result<(), String> {
         self.store
-            .checkpoint_open_run_compaction("main", run_id, summary, reason)
+            .checkpoint_open_run_compaction("main", run_id, summary, context_snapshot_index, reason)
             .map_err(|error| error.to_string())
     }
 
@@ -461,11 +694,32 @@ impl CodingSessionHarness {
                 .iter()
                 .find_map(threadlane_runtime::compaction_summary_text)
                 .ok_or_else(|| "context preparation produced no durable summary".to_string())?;
+            let summary = self.compaction_summary_without_indexed_tool_outputs(
+                summary,
+                prepared.compacted_messages,
+                config,
+            )?;
+            let context_snapshot_index =
+                self.context_snapshot_index_for_compaction(prepared.compacted_messages)?;
+            let mut messages = prepared.messages.clone();
+            let Some(AgentMessage::Custom { payload, .. }) = messages
+                .iter_mut()
+                .find(|message| threadlane_runtime::compaction_summary_text(message).is_some())
+            else {
+                return Err("context preparation produced no durable summary".into());
+            };
+            payload["summary"] = Value::String(summary.clone());
+            payload["context_snapshot_index"] = Value::Array(context_snapshot_index.clone());
             let first_seq = self.next_seq();
             let summary_id = format!("compaction-{parent_run_id}-{first_seq}-summary");
-            self.stage_open_run_compaction(parent_run_id, summary, reason)?;
+            self.stage_open_run_compaction(
+                parent_run_id,
+                &summary,
+                &context_snapshot_index,
+                reason,
+            )?;
 
-            let retained = super::durable::compaction_retained_tail(&prepared.messages);
+            let retained = super::durable::compaction_retained_tail(&messages);
             let mut parent_id = summary_id;
             for (index, message) in retained.into_iter().enumerate() {
                 let id = format!("compaction-{parent_run_id}-{first_seq}-tail-{index}");
@@ -495,7 +749,7 @@ impl CodingSessionHarness {
                 parent_id = id;
             }
 
-            let post_tokens = estimate_request_tokens(&prepared.messages, tool_schema_json, config);
+            let post_tokens = estimate_request_tokens(&messages, tool_schema_json, config);
             let generation = self.compaction_generation().saturating_add(1);
             let record = HarnessRecord::ContextCompacted {
                 id: format!("context-compacted-{parent_run_id}-{generation}"),
@@ -1227,6 +1481,39 @@ impl CodingSessionHarness {
             .validate_accepted_run(&accepted)
             .map_err(|error| error.to_string())?;
         Ok(accepted)
+    }
+
+    pub(crate) fn append_subagent_context(
+        &mut self,
+        lane: &str,
+        run_id: &str,
+        message: String,
+    ) -> Result<(), String> {
+        self.ensure_fresh()?;
+        let prompt_entry_id = format!("entry-{run_id}-user");
+        if !self
+            .store
+            .entries()
+            .iter()
+            .any(|entry| entry.id == prompt_entry_id && entry.lane == lane)
+        {
+            return Err(format!("Missing accepted subagent task for lane {lane}"));
+        }
+        self.store
+            .append_entry_gated(HarnessEntry {
+                id: format!("entry-{run_id}-context-1"),
+                parent_id: Some(prompt_entry_id),
+                lane: lane.into(),
+                seq: harness_next_seq(self.store.store()),
+                timestamp: timestamp(),
+                message: AgentMessage::user(message, Vec::new()),
+                surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
+                terminate: false,
+            })
+            .map_err(|error| error.to_string())?;
+        self.store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())
     }
 
     pub(crate) fn finish_subagent_lane(
@@ -2656,7 +2943,7 @@ impl CodingSessionHarness {
     pub(crate) fn accept_compaction(&mut self, run_id: &str, summary: &str) -> Result<(), String> {
         self.ensure_fresh()?;
         self.store
-            .accept_compaction(run_id, summary)
+            .accept_compaction(run_id, summary, &[])
             .map_err(|error| error.to_string())?;
         self.store
             .drive_to_completion()
@@ -3431,9 +3718,17 @@ mod tests {
             .begin_run("run-compact", AgentMessage::user("old", vec![]))
             .unwrap();
         let repeated = AgentMessage::user("repeat", vec![]);
+        let summary_text = concat!(
+            "before\n",
+            "<!-- threadlane:context-snapshots:index:begin -->\n",
+            "## Available context snapshots\n",
+            "- user-authored marker-looking content\n",
+            "<!-- threadlane:context-snapshots:index:end -->\n",
+            "after",
+        );
         let summary = AgentMessage::Custom {
             custom_type: "compaction_summary".into(),
-            payload: serde_json::json!({ "summary": "summary" }),
+            payload: serde_json::json!({ "summary": summary_text }),
         };
         harness
             .commit_prepared_compaction(
@@ -3456,6 +3751,10 @@ mod tests {
 
         let context = harness.model_context("main").unwrap().messages();
         assert_eq!(context.len(), 3);
+        assert_eq!(
+            threadlane_runtime::compaction_summary_text(&context[0]),
+            Some(summary_text)
+        );
         assert_eq!(context[1], repeated);
         assert_eq!(context[2], repeated);
         let compacted = harness
@@ -3659,6 +3958,24 @@ mod tests {
         let result = AgentToolResult::external("missing", "read_file", "result", false);
 
         let _ = CodingSessionHarness::record_tool_result_to_path(&path, "run", &result).await;
+
+        assert_ne!(last_path_operation_thread().unwrap(), caller);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn context_snapshot_load_path_helper_uses_blocking_worker() {
+        let (_dir, path) = temp_session();
+        let caller = std::thread::current().id();
+
+        CodingSessionHarness::record_context_snapshot_load_to_path(
+            &path,
+            "ctx-1",
+            "main",
+            None,
+            ContextSnapshotLoadOutcome::Missing,
+        )
+        .await
+        .unwrap();
 
         assert_ne!(last_path_operation_thread().unwrap(), caller);
     }
@@ -4389,6 +4706,544 @@ mod tests {
             .entries()
             .iter()
             .any(|entry| entry.message == thinking));
+    }
+
+    #[tokio::test]
+    async fn context_snapshot_capture_indexes_only_successful_local_read_results_once() {
+        let (dir, path) = temp_session();
+        std::fs::write(dir.path().join("README.md"), "snapshot body").unwrap();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        let run_id = harness.unique_run_id("snapshot").unwrap();
+        harness
+            .begin_run(&run_id, AgentMessage::user("inspect", vec![]))
+            .unwrap();
+        harness
+            .append_message(AgentMessage::Assistant {
+                content: None,
+                tool_calls: Some(vec![threadlane_provider::openai::ToolCall {
+                    id: "read-1".into(),
+                    r#type: "function".into(),
+                    function: threadlane_provider::openai::ToolCallFunction {
+                        name: "read_file".into(),
+                        arguments: r#"{\"path\":\"README.md\",\"start_line\":1,\"end_line\":1}"#
+                            .into(),
+                    },
+                    thought_signature: None,
+                }]),
+                stop_reason: None,
+                deferred_handle: None,
+            })
+            .unwrap();
+        harness
+            .append_tool_intent(
+                &run_id,
+                "read-1",
+                "read_file",
+                serde_json::json!({"path": "README.md", "start_line": 1, "end_line": 1}),
+            )
+            .await
+            .unwrap();
+        let read_output = threadlane_tools::try_execute_tool_in_workspace(
+            "read_file",
+            r#"{"path":"README.md","start_line":1,"end_line":1}"#,
+            dir.path(),
+        )
+        .unwrap();
+        let output_chars = read_output.chars().count();
+        let entry_id = harness
+            .append_message(AgentMessage::Tool {
+                tool_call_id: "read-1".into(),
+                name: "read_file".into(),
+                content: read_output.clone(),
+                is_error: false,
+                terminate: false,
+            })
+            .unwrap();
+        std::fs::write(dir.path().join("README.md"), "changed after read").unwrap();
+
+        assert_eq!(
+            harness
+                .index_read_snapshot(&run_id, dir.path(), "read-1", &entry_id, output_chars)
+                .unwrap(),
+            Some("ctx-v2-tool-result-read-1".into())
+        );
+        assert_eq!(harness.context_snapshots("main").len(), 1);
+        assert_eq!(
+            harness.context_snapshots("main")[0].file_sha256.as_str(),
+            threadlane_tools::read_file_snapshot_digest(&read_output).unwrap()
+        );
+        assert!(super::super::context_snapshots::resolve_context_snapshot(
+            &path,
+            dir.path(),
+            "ctx-v2-tool-result-read-1",
+        )
+        .err()
+        .unwrap()
+        .starts_with("Context snapshot stale:"));
+        std::fs::write(dir.path().join("README.md"), "snapshot body").unwrap();
+        assert_eq!(
+            harness
+                .store
+                .entries()
+                .iter()
+                .filter(|entry| matches!(entry.message, AgentMessage::Tool { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            harness
+                .index_read_snapshot(&run_id, dir.path(), "read-1", &entry_id, output_chars)
+                .unwrap(),
+            Some("ctx-v2-tool-result-read-1".into())
+        );
+        let resolved = super::super::context_snapshots::resolve_context_snapshot(
+            &path,
+            dir.path(),
+            "ctx-v2-tool-result-read-1",
+        )
+        .unwrap();
+        assert_eq!(resolved.content, read_output);
+        assert_eq!(resolved.snapshot.source_entry_id, entry_id);
+
+        assert_eq!(
+            harness
+                .index_read_snapshot(&run_id, dir.path(), "missing", &entry_id, 13)
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn context_snapshot_capture_persists_fuzzy_read_actual_path() {
+        let (dir, path) = temp_session();
+        let actual_path = dir.path().join("crates/app/src/view.rs");
+        std::fs::create_dir_all(actual_path.parent().unwrap()).unwrap();
+        std::fs::write(&actual_path, "snapshot body").unwrap();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        let run_id = harness.unique_run_id("snapshot-fuzzy").unwrap();
+        harness
+            .begin_run(&run_id, AgentMessage::user("inspect", vec![]))
+            .unwrap();
+        harness
+            .append_message(AgentMessage::Assistant {
+                content: None,
+                tool_calls: Some(vec![threadlane_provider::openai::ToolCall {
+                    id: "read-fuzzy".into(),
+                    r#type: "function".into(),
+                    function: threadlane_provider::openai::ToolCallFunction {
+                        name: "read_file".into(),
+                        arguments: r#"{\"path\":\"src/view.rs\"}"#.into(),
+                    },
+                    thought_signature: None,
+                }]),
+                stop_reason: None,
+                deferred_handle: None,
+            })
+            .unwrap();
+        harness
+            .append_tool_intent(
+                &run_id,
+                "read-fuzzy",
+                "read_file",
+                serde_json::json!({"path": "src/view.rs"}),
+            )
+            .await
+            .unwrap();
+        let read_output = threadlane_tools::try_execute_tool_in_workspace(
+            "read_file",
+            r#"{"path":"src/view.rs"}"#,
+            dir.path(),
+        )
+        .unwrap();
+        let entry_id = harness
+            .append_message(AgentMessage::Tool {
+                tool_call_id: "read-fuzzy".into(),
+                name: "read_file".into(),
+                content: read_output.clone(),
+                is_error: false,
+                terminate: false,
+            })
+            .unwrap();
+
+        let context_id = harness
+            .index_read_snapshot(
+                &run_id,
+                dir.path(),
+                "read-fuzzy",
+                &entry_id,
+                read_output.chars().count(),
+            )
+            .unwrap()
+            .unwrap();
+        let snapshot = &harness.context_snapshots("main")[0];
+        assert_eq!(snapshot.path, "crates/app/src/view.rs");
+        assert_eq!(
+            super::super::context_snapshots::resolve_context_snapshot(
+                &path,
+                dir.path(),
+                &context_id,
+            )
+            .unwrap()
+            .content,
+            read_output
+        );
+    }
+
+    #[tokio::test]
+    async fn compacted_context_snapshot_stays_durable_and_is_indexed_in_checkpoint() {
+        let (dir, path) = temp_session();
+        std::fs::write(dir.path().join("README.md"), "snapshot body").unwrap();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        let run_id = harness.unique_run_id("snapshot-compact").unwrap();
+        harness
+            .begin_run(&run_id, AgentMessage::user("inspect", vec![]))
+            .unwrap();
+        harness
+            .append_message(AgentMessage::Assistant {
+                content: None,
+                tool_calls: Some(vec![threadlane_provider::openai::ToolCall {
+                    id: "read-1".into(),
+                    r#type: "function".into(),
+                    function: threadlane_provider::openai::ToolCallFunction {
+                        name: "read_file".into(),
+                        arguments: r#"{\"path\":\"README.md\",\"start_line\":1,\"end_line\":1}"#
+                            .into(),
+                    },
+                    thought_signature: None,
+                }]),
+                stop_reason: None,
+                deferred_handle: None,
+            })
+            .unwrap();
+        harness
+            .append_tool_intent(
+                &run_id,
+                "read-1",
+                "read_file",
+                serde_json::json!({"path": "README.md", "start_line": 1, "end_line": 1}),
+            )
+            .await
+            .unwrap();
+        let read_output = threadlane_tools::try_execute_tool_in_workspace(
+            "read_file",
+            r#"{"path":"README.md","start_line":1,"end_line":1}"#,
+            dir.path(),
+        )
+        .unwrap();
+        let output_chars = read_output.chars().count();
+        let source_entry_id = harness
+            .append_message(AgentMessage::Tool {
+                tool_call_id: "read-1".into(),
+                name: "read_file".into(),
+                content: read_output.clone(),
+                is_error: false,
+                terminate: false,
+            })
+            .unwrap();
+        let context_id = harness
+            .index_read_snapshot(
+                &run_id,
+                dir.path(),
+                "read-1",
+                &source_entry_id,
+                output_chars,
+            )
+            .unwrap()
+            .unwrap();
+        harness
+            .store
+            .append_entry_gated(HarnessEntry {
+                id: "later-non-indexed-duplicate-tool-result".into(),
+                parent_id: Some(source_entry_id.clone()),
+                lane: "main".into(),
+                seq: harness.next_seq(),
+                timestamp: timestamp(),
+                message: AgentMessage::Tool {
+                    tool_call_id: "read-1".into(),
+                    name: "read_file".into(),
+                    content: "later non-indexed duplicate tool body".into(),
+                    is_error: false,
+                    terminate: false,
+                },
+                surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
+                terminate: false,
+            })
+            .unwrap();
+        harness.store.drive_to_completion().unwrap();
+        harness
+            .append_message(AgentMessage::user("non-indexed evidence", vec![]))
+            .unwrap();
+        harness
+            .append_message(AgentMessage::user("continue", vec![]))
+            .unwrap();
+        let config = AgentConfig::default();
+        let before = harness.model_context("main").unwrap().messages();
+        let prepared = compact_for_budget(&before, None, 1, &config).unwrap();
+        harness
+            .commit_prepared_compaction(
+                &run_id,
+                "unknown/test-model",
+                None,
+                &config,
+                context_budget("unknown/test-model", &config),
+                CompactionReason::AdaptiveBudget,
+                prepared,
+            )
+            .unwrap();
+
+        let compacted_messages = harness.model_context("main").unwrap().messages();
+        let checkpoint_message = compacted_messages
+            .iter()
+            .find(|message| threadlane_runtime::compaction_summary_text(message).is_some())
+            .unwrap();
+        let checkpoint = threadlane_runtime::compaction_summary_text(checkpoint_message).unwrap();
+        assert!(!checkpoint.contains(&context_id));
+        assert!(!checkpoint.contains("README.md:1-1 sha256="));
+        assert!(!checkpoint.contains("snapshot body"));
+        assert!(checkpoint.contains("later non-indexed duplicate tool body"));
+        let AgentMessage::Custom { payload, .. } = checkpoint_message else {
+            unreachable!();
+        };
+        let index = payload["context_snapshot_index"]
+            .as_array()
+            .expect("structured snapshot index");
+        assert_eq!(index.len(), 1);
+        assert_eq!(index[0]["context_id"], context_id);
+        let provider_checkpoint =
+            threadlane_runtime::convert_to_llm(std::slice::from_ref(checkpoint_message))[0]
+                ["content"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+        assert!(provider_checkpoint.contains(&context_id));
+        assert!(provider_checkpoint.contains("README.md:1-1 sha256="));
+        assert!(!provider_checkpoint.contains("snapshot body"));
+        assert!(provider_checkpoint.contains("non-indexed evidence"));
+        assert!(!compacted_messages
+            .iter()
+            .any(|message| matches!(message, AgentMessage::Tool { content, .. } if content == "snapshot body")));
+        assert!(JsonlStore::open(&path)
+            .unwrap()
+            .entries()
+            .iter()
+            .any(|entry| entry.id == source_entry_id && matches!(&entry.message, AgentMessage::Tool { content, .. } if content == &read_output)));
+        assert_eq!(
+            super::super::context_snapshots::resolve_context_snapshot(
+                &path,
+                dir.path(),
+                &context_id
+            )
+            .unwrap()
+            .content,
+            read_output
+        );
+        let post_tokens = estimate_request_tokens(&compacted_messages, None, &config);
+        assert_eq!(
+            harness
+                .store
+                .records()
+                .iter()
+                .find_map(|record| match record {
+                    HarnessRecord::ContextCompacted { post_tokens, .. } => Some(*post_tokens),
+                    _ => None,
+                }),
+            Some(post_tokens)
+        );
+
+        harness
+            .append_message(AgentMessage::user("continue again", vec![]))
+            .unwrap();
+        let second_config = AgentConfig::builder().max_checkpoint_chars(100_000).build();
+        let before = harness.model_context("main").unwrap().messages();
+        let prepared = compact_for_budget(&before, None, 1, &second_config).unwrap();
+        harness
+            .commit_prepared_compaction(
+                &run_id,
+                "unknown/test-model",
+                None,
+                &second_config,
+                context_budget("unknown/test-model", &second_config),
+                CompactionReason::AdaptiveBudget,
+                prepared,
+            )
+            .unwrap();
+        let checkpoint_message = harness
+            .model_context("main")
+            .unwrap()
+            .messages()
+            .into_iter()
+            .find(|message| threadlane_runtime::compaction_summary_text(message).is_some())
+            .unwrap();
+        let checkpoint = threadlane_runtime::compaction_summary_text(&checkpoint_message).unwrap();
+        assert!(!checkpoint.contains(&context_id), "{checkpoint}");
+        let AgentMessage::Custom { payload, .. } = &checkpoint_message else {
+            unreachable!();
+        };
+        assert_eq!(
+            payload["context_snapshot_index"]
+                .as_array()
+                .expect("structured snapshot index")
+                .len(),
+            1
+        );
+        let provider_checkpoint = threadlane_runtime::convert_to_llm(&[checkpoint_message])[0]
+            ["content"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(provider_checkpoint.matches(&context_id).count(), 1);
+        assert_eq!(
+            provider_checkpoint
+                .matches("## Available context snapshots")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn context_snapshot_capture_skips_failed_virtual_and_unrecorded_reads() {
+        let (dir, path) = temp_session();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        let run_id = harness.unique_run_id("snapshot-skip").unwrap();
+        harness
+            .begin_run(&run_id, AgentMessage::user("inspect", vec![]))
+            .unwrap();
+        harness
+            .append_message(AgentMessage::Assistant {
+                content: None,
+                tool_calls: Some(vec![
+                    threadlane_provider::openai::ToolCall {
+                        id: "failed".into(),
+                        r#type: "function".into(),
+                        function: threadlane_provider::openai::ToolCallFunction {
+                            name: "read_file".into(),
+                            arguments: r#"{\"path\":\"README.md\"}"#.into(),
+                        },
+                        thought_signature: None,
+                    },
+                    threadlane_provider::openai::ToolCall {
+                        id: "virtual".into(),
+                        r#type: "function".into(),
+                        function: threadlane_provider::openai::ToolCallFunction {
+                            name: "read_file".into(),
+                            arguments: r#"{\"path\":\"virtual://README.md\"}"#.into(),
+                        },
+                        thought_signature: None,
+                    },
+                    threadlane_provider::openai::ToolCall {
+                        id: "remote".into(),
+                        r#type: "function".into(),
+                        function: threadlane_provider::openai::ToolCallFunction {
+                            name: "read_file".into(),
+                            arguments: r#"{\"path\":\"https:README.md\"}"#.into(),
+                        },
+                        thought_signature: None,
+                    },
+                    threadlane_provider::openai::ToolCall {
+                        id: "unbound".into(),
+                        r#type: "function".into(),
+                        function: threadlane_provider::openai::ToolCallFunction {
+                            name: "read_file".into(),
+                            arguments: r#"{\"path\":\"README.md\"}"#.into(),
+                        },
+                        thought_signature: None,
+                    },
+                ]),
+                stop_reason: None,
+                deferred_handle: None,
+            })
+            .unwrap();
+        for (call_id, arguments) in [
+            ("failed", serde_json::json!({"path": "README.md"})),
+            (
+                "virtual",
+                serde_json::json!({"path": "virtual://README.md"}),
+            ),
+            ("remote", serde_json::json!({"path": "https:README.md"})),
+            ("unbound", serde_json::json!({"path": "README.md"})),
+        ] {
+            harness
+                .append_tool_intent(&run_id, call_id, "read_file", arguments)
+                .await
+                .unwrap();
+        }
+        let failed_entry = harness
+            .append_message(AgentMessage::Tool {
+                tool_call_id: "failed".into(),
+                name: "read_file".into(),
+                content: "not found".into(),
+                is_error: true,
+                terminate: false,
+            })
+            .unwrap();
+        let virtual_entry = harness
+            .append_message(AgentMessage::Tool {
+                tool_call_id: "virtual".into(),
+                name: "read_file".into(),
+                content: "body".into(),
+                is_error: false,
+                terminate: false,
+            })
+            .unwrap();
+        let remote_entry = harness
+            .append_message(AgentMessage::Tool {
+                tool_call_id: "remote".into(),
+                name: "read_file".into(),
+                content: "body".into(),
+                is_error: false,
+                terminate: false,
+            })
+            .unwrap();
+        let unbound_entry = harness
+            .append_message(AgentMessage::Tool {
+                tool_call_id: "unbound".into(),
+                name: "read_file".into(),
+                content: "body without an execution-bound digest".into(),
+                is_error: false,
+                terminate: false,
+            })
+            .unwrap();
+        let unrecorded_entry = harness
+            .append_message(AgentMessage::Tool {
+                tool_call_id: "unrecorded".into(),
+                name: "read_file".into(),
+                content: "body".into(),
+                is_error: false,
+                terminate: false,
+            })
+            .unwrap();
+
+        assert_eq!(
+            harness
+                .index_read_snapshot(&run_id, dir.path(), "failed", &failed_entry, 9)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            harness
+                .index_read_snapshot(&run_id, dir.path(), "virtual", &virtual_entry, 4)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            harness
+                .index_read_snapshot(&run_id, dir.path(), "remote", &remote_entry, 4)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            harness
+                .index_read_snapshot(&run_id, dir.path(), "unrecorded", &unrecorded_entry, 4)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            harness
+                .index_read_snapshot(&run_id, dir.path(), "unbound", &unbound_entry, 38)
+                .unwrap(),
+            None
+        );
+        assert!(harness.context_snapshots("main").is_empty());
     }
 
     #[test]

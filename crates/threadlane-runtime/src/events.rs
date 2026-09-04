@@ -1,6 +1,4 @@
-use crate::types::{
-    AdvisorNote, AgentMessage, AgentToolResult, ModelRoles, SessionPlan, TokenUsage,
-};
+use crate::types::{AgentMessage, AgentToolResult, SessionPlan, TokenUsage};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -84,12 +82,6 @@ pub enum AgentEvent {
     PlanUpdated {
         plan: SessionPlan,
     },
-    AdvisorNote {
-        note: AdvisorNote,
-    },
-    ModelRolesUpdated {
-        roles: ModelRoles,
-    },
     AgentError {
         error: String,
     },
@@ -101,6 +93,10 @@ pub enum AgentEvent {
         rule_name: String,
         matched_text: String,
         reminder: String,
+    },
+    PrewalkCompleted {
+        model: String,
+        message: String,
     },
 }
 

@@ -97,7 +97,7 @@ pub struct EditorTab {
 
 #[derive(Clone, Debug)]
 enum PendingOpen {
-    File(String),
+    File { project: PathBuf, path: String },
     Diff { path: String, content: String },
 }
 
@@ -154,15 +154,25 @@ impl EditorView {
             return;
         };
         match pending {
-            PendingOpen::File(path) => self.open_file_internal(&path, window, cx),
+            PendingOpen::File { project, path } => {
+                self.open_file_internal(&project, &path, window, cx)
+            }
             PendingOpen::Diff { path, content } => {
                 self.open_diff_internal(&path, &content, window, cx)
             }
         }
     }
 
-    pub fn open_file(&mut self, relative_path: &str, cx: &mut Context<Self>) {
-        self.pending_open = Some(PendingOpen::File(relative_path.to_string()));
+    pub fn open_file(
+        &mut self,
+        project: PathBuf,
+        relative_path: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_open = Some(PendingOpen::File {
+            project,
+            path: relative_path.to_string(),
+        });
         cx.notify();
     }
 
@@ -226,6 +236,7 @@ impl EditorView {
 
     fn open_file_internal(
         &mut self,
+        project_dir: &Path,
         relative_path: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -234,21 +245,14 @@ impl EditorView {
         if let Some(existing_idx) = self
             .tabs
             .iter()
-            .position(|t| t.relative_path == relative_path)
+            .position(|t| t.project_dir == project_dir && t.relative_path == relative_path)
         {
             self.active_tab_index = Some(existing_idx);
             cx.notify();
             return;
         }
 
-        let base_dir = self
-            .model
-            .read(cx)
-            .active_work_dir
-            .clone()
-            .unwrap_or_else(|| PathBuf::from("."));
-
-        let full_path = base_dir.join(relative_path);
+        let full_path = project_dir.join(relative_path);
         let content = match std::fs::read_to_string(&full_path) {
             Ok(c) => c,
             Err(err) => {
@@ -275,13 +279,14 @@ impl EditorView {
         });
 
         let target_path = relative_path.to_string();
+        let target_project = project_dir.to_path_buf();
         let subscription = cx.subscribe(&editor, move |this, editor, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 let current = editor.read(cx).value();
                 if let Some(tab) = this
                     .tabs
                     .iter_mut()
-                    .find(|t| t.relative_path == target_path)
+                    .find(|t| t.project_dir == target_project && t.relative_path == target_path)
                 {
                     let dirty = current.as_str() != tab.saved_content.as_str();
                     if tab.is_dirty != dirty {
@@ -295,7 +300,7 @@ impl EditorView {
         let tab_title = smart_tab_title(relative_path, false);
 
         self.tabs.push(EditorTab {
-            project_dir: base_dir,
+            project_dir: project_dir.to_path_buf(),
             relative_path: relative_path.to_string(),
             file_name: tab_title,
             language: lang,
@@ -359,6 +364,7 @@ impl EditorView {
         if tab.is_dirty && !tab.is_diff {
             let file_name = tab.file_name.clone();
             let target_path = tab.relative_path.clone();
+            let target_project = tab.project_dir.clone();
 
             cx.spawn(async move |this, cx| {
                 let result = rfd::AsyncMessageDialog::new()
@@ -374,7 +380,9 @@ impl EditorView {
                         if let Some(pos) = this
                             .tabs
                             .iter()
-                            .position(|t| t.relative_path == target_path)
+                            .position(|t| {
+                                t.project_dir == target_project && t.relative_path == target_path
+                            })
                         {
                             this.remove_tab_at(pos, cx);
                         }
@@ -408,6 +416,7 @@ impl EditorView {
             cx.notify();
         } else {
             let keep_path = self.tabs[keep_index].relative_path.clone();
+            let keep_project = self.tabs[keep_index].project_dir.clone();
             let description = if dirty_names.len() == 1 {
                 format!(
                     "Do you want to discard unsaved changes to \"{}\"?",
@@ -431,7 +440,9 @@ impl EditorView {
                 if matches!(result, rfd::MessageDialogResult::Yes) {
                     let _ = this.update(cx, |this, cx| {
                         if let Some(pos) =
-                            this.tabs.iter().position(|t| t.relative_path == keep_path)
+                            this.tabs.iter().position(|t| {
+                                t.project_dir == keep_project && t.relative_path == keep_path
+                            })
                         {
                             let kept = this.tabs.remove(pos);
                             this.tabs = vec![kept];

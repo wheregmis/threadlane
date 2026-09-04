@@ -13,6 +13,7 @@ mod plan;
 pub mod policy;
 pub mod project_registry;
 pub mod prompt_templates;
+pub mod orchestrator;
 pub mod supervisor;
 pub mod system_prompt;
 
@@ -52,7 +53,7 @@ pub use commands::{
     CommandAction, SlashCommandInfo,
 };
 pub use config::{CodingAgentConfig, CodingAgentConfigBuilder};
-pub use context::{ProjectContext, ProjectInstruction};
+pub use context::ProjectContext;
 pub use permission::{PermissionDecision, PermissionHandle};
 pub use policy::ToolPolicy;
 pub use project_registry::{

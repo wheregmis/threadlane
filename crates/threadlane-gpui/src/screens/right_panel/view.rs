@@ -6,7 +6,9 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::checkbox::Checkbox;
-use gpui_component::input::{Editor, EditorState, Input, InputEvent, InputState, TabSize};
+use gpui_component::input::{
+    Editor, EditorState, Input, InputEvent, InputState, TabSize, Textarea, TextareaState,
+};
 use gpui_component::list::ListItem;
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::notification::Notification;
@@ -16,31 +18,220 @@ use gpui_component::spinner::Spinner;
 use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::text::{TextView, TextViewState};
 use gpui_component::tree::{Tree, TreeEvent, TreeItem, TreeState};
-use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable, WindowExt};
+use gpui_component::{
+    h_flex, v_flex, ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable, WindowExt,
+};
 use threadlane_git::{GitBranchInfo, GitCommitInfo, GitFile, GitStatus};
 
 use crate::screens::next_event_batch;
 use crate::services::watcher::WorkspaceWatcher;
 use crate::state::AppState;
 
-fn can_publish_branch(status: Option<&GitStatus>) -> bool {
-    status.is_some_and(|status| {
-        !status.has_upstream
-            && !status.detached
-            && status.branch.is_some()
-            && status.remote.is_some()
-    })
+fn can_publish_branch(worktree_available: bool, status: Option<&GitStatus>) -> bool {
+    worktree_available
+        && status.is_some_and(|status| {
+            !status.has_upstream
+                && !status.detached
+                && status.branch.is_some()
+                && status.remote.is_some()
+        })
 }
 
-fn can_create_pull_request(status: Option<&GitStatus>) -> bool {
-    status.is_some_and(|status| {
-        status.pr_ready
-            && !status.detached
-            && status.branch.is_some()
-            && status.remote.is_some()
-            && status.pr_lookup_available
-            && status.pr.is_none()
-    })
+fn nonempty(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty()).then_some(value)
+}
+
+fn can_create_pull_request(worktree_available: bool, status: Option<&GitStatus>) -> bool {
+    worktree_available
+        && status.is_some_and(|status| {
+            status.pr_ready
+                && !status.detached
+                && status.branch.as_deref().and_then(nonempty).is_some()
+                && status.remote.is_some()
+                && status.has_upstream
+                && status.pr_lookup_available
+                && status.pr.is_none()
+        })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DraftPrFields {
+    base: String,
+    title: String,
+    body: String,
+}
+
+impl DraftPrFields {
+    fn validate(&self) -> Result<(), &'static str> {
+        [
+            (&self.base, "Enter the base branch."),
+            (&self.title, "Enter a pull request title."),
+            (&self.body, "Enter a pull request description."),
+        ]
+        .into_iter()
+        .find(|(value, _)| value.trim().is_empty())
+        .map_or(Ok(()), |(_, error)| Err(error))
+    }
+}
+
+fn draft_pr_prefill(status: &GitStatus) -> DraftPrFields {
+    let branch = status
+        .branch
+        .as_deref()
+        .and_then(nonempty)
+        .unwrap_or("main");
+    let base = status
+        .default_branch
+        .as_deref()
+        .and_then(nonempty)
+        .or_else(|| {
+            status
+                .branch_details
+                .iter()
+                .find(|branch| branch.is_default)
+                .and_then(|branch| nonempty(&branch.name))
+        })
+        .unwrap_or("main")
+        .to_string();
+    let commit = status.recent_commits.first();
+    let summary = commit
+        .and_then(|commit| nonempty(&commit.summary))
+        .unwrap_or(branch);
+    let body = commit
+        .and_then(|commit| nonempty(&commit.body))
+        .unwrap_or(summary);
+    DraftPrFields {
+        base,
+        title: summary.into(),
+        body: body.into(),
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DraftPrContextKey {
+    project: PathBuf,
+    branch: String,
+    revision: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DraftPrAttempt {
+    id: u64,
+    key: DraftPrContextKey,
+    fields: DraftPrFields,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum DraftPrPhase {
+    #[default]
+    Idle,
+    Posting(DraftPrAttempt),
+    Unknown(DraftPrAttempt),
+    Checking(DraftPrAttempt),
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct DraftPrAttemptState {
+    next_id: u64,
+    phase: DraftPrPhase,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DraftPrCompletion {
+    Stale,
+    Failure(String),
+    Unknown(String),
+    SuccessExact(String),
+    SuccessWithNewerEdits(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DraftPrRemoteResult {
+    Exists(String),
+    Absent(String),
+    Unknown(String),
+}
+
+impl DraftPrAttemptState {
+    fn begin(
+        &mut self,
+        key: DraftPrContextKey,
+        fields: DraftPrFields,
+    ) -> Result<DraftPrAttempt, &'static str> {
+        fields.validate()?;
+        if !matches!(self.phase, DraftPrPhase::Idle) {
+            return Err("A draft pull request is already being created.");
+        }
+        self.next_id = self.next_id.wrapping_add(1).max(1);
+        let attempt = DraftPrAttempt {
+            id: self.next_id,
+            key,
+            fields,
+        };
+        self.phase = DraftPrPhase::Posting(attempt.clone());
+        Ok(attempt)
+    }
+
+    fn is_busy(&self) -> bool {
+        matches!(
+            self.phase,
+            DraftPrPhase::Posting(_) | DraftPrPhase::Checking(_)
+        )
+    }
+
+    fn is_uncertain(&self) -> bool {
+        matches!(self.phase, DraftPrPhase::Unknown(_))
+    }
+
+    fn begin_check(&mut self) -> Result<DraftPrAttempt, &'static str> {
+        let DraftPrPhase::Unknown(attempt) = &self.phase else {
+            return Err("There is no uncertain draft pull request to check.");
+        };
+        let attempt = attempt.clone();
+        self.phase = DraftPrPhase::Checking(attempt.clone());
+        Ok(attempt)
+    }
+
+    fn complete(
+        &mut self,
+        completed: &DraftPrAttempt,
+        current_key: &DraftPrContextKey,
+        current_fields: &DraftPrFields,
+        result: DraftPrRemoteResult,
+    ) -> DraftPrCompletion {
+        let attempt = match &self.phase {
+            DraftPrPhase::Posting(attempt) | DraftPrPhase::Checking(attempt) => attempt,
+            _ => return DraftPrCompletion::Stale,
+        };
+        if attempt.id != completed.id || &attempt.key != current_key {
+            return DraftPrCompletion::Stale;
+        }
+        let exact = attempt.fields == *current_fields;
+        let attempt = attempt.clone();
+        match result {
+            DraftPrRemoteResult::Absent(error) => {
+                self.phase = DraftPrPhase::Idle;
+                DraftPrCompletion::Failure(error)
+            }
+            DraftPrRemoteResult::Unknown(error) => {
+                self.phase = DraftPrPhase::Unknown(attempt);
+                DraftPrCompletion::Unknown(error)
+            }
+            DraftPrRemoteResult::Exists(url) if exact => {
+                self.phase = DraftPrPhase::Idle;
+                DraftPrCompletion::SuccessExact(url)
+            }
+            DraftPrRemoteResult::Exists(url) => {
+                self.phase = DraftPrPhase::Idle;
+                DraftPrCompletion::SuccessWithNewerEdits(url)
+            }
+        }
+    }
+}
+
+fn message_generated_matches_active_project(origin: &Path, active: Option<&Path>) -> bool {
+    active == Some(origin)
 }
 
 fn normalize_generated_commit_message(raw: &str) -> String {
@@ -173,7 +364,10 @@ enum PanelEvent {
         git_dirty: bool,
         files_dirty: bool,
     },
-    MessageGenerated(Result<String, String>),
+    MessageGenerated {
+        project: PathBuf,
+        result: Result<String, String>,
+    },
     ActionFinished {
         project: PathBuf,
         status: Result<GitStatus, String>,
@@ -191,10 +385,331 @@ enum PanelEvent {
     },
 }
 
+struct DraftPrDialogView {
+    panel: WeakEntity<RightPanelView>,
+    key: DraftPrContextKey,
+    base_input: Entity<InputState>,
+    title_input: Entity<InputState>,
+    body_input: Entity<TextareaState>,
+    attempts: DraftPrAttemptState,
+    error: Option<String>,
+    created: bool,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl DraftPrDialogView {
+    fn new(
+        panel: WeakEntity<RightPanelView>,
+        key: DraftPrContextKey,
+        fields: DraftPrFields,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let base_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Base branch")
+                .default_value(fields.base)
+        });
+        let title_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Pull request title")
+                .default_value(fields.title)
+        });
+        let body_input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .placeholder("Describe the change and how it was verified")
+                .default_value(fields.body)
+                .auto_grow(4, 10)
+                .soft_wrap(true)
+        });
+        let subscriptions = vec![
+            cx.observe(&base_input, |_, _, cx| cx.notify()),
+            cx.observe(&title_input, |_, _, cx| cx.notify()),
+            cx.observe(&body_input, |_, _, cx| cx.notify()),
+        ];
+        Self {
+            panel,
+            key,
+            base_input,
+            title_input,
+            body_input,
+            attempts: DraftPrAttemptState::default(),
+            error: None,
+            created: false,
+            _subscriptions: subscriptions,
+        }
+    }
+
+    fn fields(&self, cx: &App) -> DraftPrFields {
+        DraftPrFields {
+            base: self.base_input.read(cx).value().to_string(),
+            title: self.title_input.read(cx).value().to_string(),
+            body: self.body_input.read(cx).value().to_string(),
+        }
+    }
+
+    fn current_key(&self, creation: bool, cx: &App) -> Option<DraftPrContextKey> {
+        self.panel.upgrade().and_then(|panel| {
+            let panel = panel.read(cx);
+            if creation {
+                panel.draft_pr_creation_key()
+            } else {
+                panel.draft_pr_checkout_key()
+            }
+        })
+    }
+
+    fn start_request(&mut self, check: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.created || self.attempts.is_busy() || (!check && self.attempts.is_uncertain()) {
+            return;
+        }
+        let Some(key) = self.current_key(!check, cx).filter(|key| key == &self.key) else {
+            self.error = Some(
+                "The active checkout or branch changed. Close this dialog and open it again."
+                    .into(),
+            );
+            cx.notify();
+            return;
+        };
+        let fields = self.fields(cx);
+        let attempt = if check {
+            self.attempts.begin_check()
+        } else {
+            self.attempts.begin(key, fields.clone())
+        };
+        let attempt = match attempt {
+            Ok(attempt) => attempt,
+            Err(error) => {
+                self.error = Some(error.into());
+                cx.notify();
+                return;
+            }
+        };
+        self.error = None;
+        let (work_dir, branch) = (attempt.key.project.clone(), attempt.key.branch.clone());
+        let (base, title, body) = (
+            fields.base.trim().to_string(),
+            fields.title.trim().to_string(),
+            fields.body.trim().to_string(),
+        );
+        let task = cx.background_executor().spawn(async move {
+            let inspect = |absent| match threadlane_git::inspect_pr_for_branch(&work_dir, &branch) {
+                Ok(Some(pr)) => DraftPrRemoteResult::Exists(pr.url),
+                Ok(None) => DraftPrRemoteResult::Absent(absent),
+                Err(error) => DraftPrRemoteResult::Unknown(error.to_string()),
+            };
+            if check {
+                return inspect(
+                    "GitHub did not create the draft pull request. You can try again.".into(),
+                );
+            }
+            match threadlane_git::create_draft_pull_request(&work_dir, &base, &title, &body) {
+                Ok(url) => DraftPrRemoteResult::Exists(url),
+                Err(error) => inspect(error.to_string()),
+            }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                let Some(key) = this.current_key(false, cx) else {
+                    return;
+                };
+                let fields = this.fields(cx);
+                let completion = this.attempts.complete(&attempt, &key, &fields, result);
+                this.apply_completion(completion, window, cx);
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn apply_completion(
+        &mut self,
+        completion: DraftPrCompletion,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match completion {
+            DraftPrCompletion::Stale => return,
+            DraftPrCompletion::Failure(error) => {
+                self.error = Some(format!(
+                    "Couldn’t create the draft pull request. {error} Review the fields and try again."
+                ));
+            }
+            DraftPrCompletion::Unknown(error) => {
+                self.error = Some(format!(
+                    "Couldn’t confirm whether GitHub created the draft pull request. {error} Use Check again before trying to create another."
+                ));
+            }
+            DraftPrCompletion::SuccessExact(url) => {
+                self.finish_success(url, true, window, cx);
+            }
+            DraftPrCompletion::SuccessWithNewerEdits(url) => {
+                self.finish_success(url, false, window, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    fn finish_success(
+        &mut self,
+        url: String,
+        exact: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(panel) = self.panel.upgrade() {
+            let message = if url.is_empty() {
+                "Draft pull request created.".into()
+            } else {
+                format!("Draft pull request created: {url}")
+            };
+            panel.update(cx, |panel, cx| {
+                panel.git_feedback = Some(message);
+                panel.refresh_surface(Surface::Review);
+                cx.notify();
+            });
+        }
+        if !url.is_empty() {
+            cx.open_url(&url);
+        }
+        if exact {
+            self.base_input
+                .update(cx, |input, cx| input.set_value("", window, cx));
+            self.title_input
+                .update(cx, |input, cx| input.set_value("", window, cx));
+            self.body_input
+                .update(cx, |input, cx| input.set_value("", window, cx));
+            window.close_dialog(cx);
+        } else {
+            self.created = true;
+            self.error = Some(
+                "The draft pull request was created. Your newer edits remain in this dialog."
+                    .into(),
+            );
+        }
+    }
+}
+
+fn draft_pr_field(label: &'static str, field: impl IntoElement) -> impl IntoElement {
+    v_flex()
+        .gap_1()
+        .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(label))
+        .child(field)
+}
+
+impl Render for DraftPrDialogView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().colors;
+        let fields = self.fields(cx);
+        let busy = self.attempts.is_busy();
+        let uncertain = self.attempts.is_uncertain();
+        let checking = matches!(&self.attempts.phase, DraftPrPhase::Checking(_));
+        let created = self.created;
+        let context_matches = self.current_key(false, cx).as_ref() == Some(&self.key);
+        let creation_available = self.current_key(true, cx).as_ref() == Some(&self.key);
+        let can_submit = creation_available && fields.validate().is_ok() && !busy;
+        let base = if fields.base.trim().is_empty() {
+            "base branch".to_string()
+        } else {
+            fields.base.trim().to_string()
+        };
+
+        v_flex()
+            .gap_3()
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child(format!(
+                        "Creates a DRAFT pull request on GitHub from {} into {base}. No commits are pushed.",
+                        self.key.branch
+                    )),
+            )
+            .child(draft_pr_field(
+                "Base branch",
+                Input::new(&self.base_input).disabled(created),
+            ))
+            .child(draft_pr_field(
+                "Title",
+                Input::new(&self.title_input).disabled(created),
+            ))
+            .child(draft_pr_field(
+                "Description",
+                Textarea::new(&self.body_input).disabled(created),
+            ))
+            .children((!context_matches).then(|| {
+                div()
+                    .text_sm()
+                    .text_color(theme.danger)
+                    .child("The active checkout or branch changed. Close this dialog and open it again.")
+            }))
+            .children(self.error.as_ref().map(|error| {
+                div()
+                    .text_sm()
+                    .text_color(if created {
+                        theme.success
+                    } else {
+                        theme.danger
+                    })
+                    .child(error.clone())
+            }))
+            .children(busy.then(|| {
+                h_flex()
+                    .gap_2()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child(Spinner::new().small())
+                    .child(if checking {
+                        "Checking GitHub…"
+                    } else {
+                        "Creating draft on GitHub…"
+                    })
+            }))
+            .child(
+                h_flex()
+                    .justify_end()
+                    .gap_2()
+                    .pt_2()
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .child(
+                        Button::new("cancel-draft-pr")
+                            .label(if created { "Done" } else { "Cancel" })
+                            .disabled(busy && context_matches)
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .children((!uncertain && !created).then(|| {
+                        Button::new("submit-draft-pr")
+                            .label(if busy { "Creating…" } else { "Create draft" })
+                            .primary()
+                            .disabled(!can_submit)
+                            .tooltip(if context_matches {
+                                "Create a draft pull request on GitHub"
+                            } else {
+                                "The active checkout or branch changed"
+                            })
+                            .on_click(cx.listener(|this, _event, window, cx| {
+                                this.start_request(false, window, cx);
+                            }))
+                    }))
+                    .children((uncertain && !busy).then(|| {
+                        Button::new("check-draft-pr")
+                            .label("Check again")
+                            .outline()
+                            .on_click(cx.listener(|this, _event, window, cx| {
+                                this.start_request(true, window, cx);
+                            }))
+                    })),
+            )
+    }
+}
+
 pub struct RightPanelView {
     model: Entity<AppState>,
     active_surface: Option<Surface>,
     project: Option<PathBuf>,
+    worktree_unavailable: bool,
     tree_state: Entity<TreeState>,
     expanded_paths: HashSet<String>,
     review_tab: ReviewTab,
@@ -206,6 +721,7 @@ pub struct RightPanelView {
     review_files_list_state: ListState,
     selected_files: HashSet<String>,
     git_status: Option<GitStatus>,
+    draft_pr_context_revision: u64,
     review_error: Option<String>,
     commit_message_input: Entity<InputState>,
     generated_commit_message: Option<String>,
@@ -292,6 +808,7 @@ impl RightPanelView {
             model,
             active_surface: None,
             project: None,
+            worktree_unavailable: false,
             tree_state,
             expanded_paths: HashSet::new(),
             review_tab: ReviewTab::Changes,
@@ -304,6 +821,7 @@ impl RightPanelView {
                 .with_uniform_item_height(px(32.0)),
             selected_files: HashSet::new(),
             git_status: None,
+            draft_pr_context_revision: 0,
             review_error: None,
             commit_message_input,
             generated_commit_message: None,
@@ -341,17 +859,34 @@ impl RightPanelView {
     }
 
     fn sync_project(&mut self, cx: &mut Context<Self>) {
-        let project = self.model.read(cx).active_work_dir.clone();
-        if self.project == project {
+        let (project, worktree_unavailable) = {
+            let state = self.model.read(cx);
+            let project = state.active_git_work_dir();
+            let unavailable = state.active_work_dir.is_some()
+                && state.active_session_id.is_some()
+                && project.is_none();
+            (project, unavailable)
+        };
+        if self.project == project && self.worktree_unavailable == worktree_unavailable {
             return;
         }
         self.project = project.clone();
+        self.worktree_unavailable = worktree_unavailable;
+        self.draft_pr_context_revision = self.draft_pr_context_revision.wrapping_add(1);
         self.tree_state
             .update(cx, |state, cx| state.set_items(Vec::new(), cx));
         self.expanded_paths.clear();
         self.review_files.clear();
         self.selected_files.clear();
+        self.git_status = None;
         self.review_error = None;
+        self.git_feedback = None;
+        self.git_message_pending = false;
+        self.generated_commit_message = None;
+        self.should_clear_commit_message = false;
+        self.selected_commit_sha = None;
+        self.selected_commit_files.clear();
+        self.loading_commit_sha = None;
         self.stash_files = None;
         self.loading_stash_index = None;
         self.stash_expanded = false;
@@ -401,6 +936,79 @@ impl RightPanelView {
         self.merge_selected_branch = None;
         self.branch_popover_open = false;
         cx.notify();
+    }
+
+    fn replace_git_status(&mut self, status: Option<GitStatus>) {
+        let previous_branch = self
+            .git_status
+            .as_ref()
+            .and_then(|status| status.branch.as_deref());
+        let next_branch = status.as_ref().and_then(|status| status.branch.as_deref());
+        if previous_branch != next_branch {
+            self.draft_pr_context_revision = self.draft_pr_context_revision.wrapping_add(1);
+        }
+        self.git_status = status;
+    }
+
+    fn draft_pr_checkout_key(&self) -> Option<DraftPrContextKey> {
+        let project = self.project.clone()?;
+        let status = self.git_status.as_ref()?;
+        if self.worktree_unavailable || status.detached {
+            return None;
+        }
+        let branch = status
+            .branch
+            .as_deref()
+            .filter(|branch| !branch.trim().is_empty())?
+            .to_string();
+        Some(DraftPrContextKey {
+            project,
+            branch,
+            revision: self.draft_pr_context_revision,
+        })
+    }
+
+    fn draft_pr_creation_key(&self) -> Option<DraftPrContextKey> {
+        can_create_pull_request(!self.worktree_unavailable, self.git_status.as_ref())
+            .then(|| self.draft_pr_checkout_key())
+            .flatten()
+    }
+
+    fn open_draft_pr_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(key) = self.draft_pr_creation_key() else {
+            let message = "Publish this named branch and refresh pull request status before creating a draft.";
+            self.git_feedback = Some(message.into());
+            window.push_notification(Notification::warning(message), cx);
+            cx.notify();
+            return;
+        };
+        let Some(status) = self.git_status.as_ref() else {
+            return;
+        };
+        let fields = draft_pr_prefill(status);
+        let panel = cx.entity().downgrade();
+        let dialog_state =
+            cx.new(|dialog_cx| DraftPrDialogView::new(panel, key, fields, window, dialog_cx));
+        let content = dialog_state.clone();
+        window.open_dialog(cx, move |dialog, _window, _cx| {
+            let submit_state = content.clone();
+            let cancel_state = content.clone();
+            dialog
+                .title("Create draft pull request")
+                .child(content.clone())
+                .close_button(false)
+                .on_ok(move |_, window, cx| {
+                    submit_state.update(cx, |state, cx| state.start_request(false, window, cx));
+                    false
+                })
+                .on_cancel(move |_, _, cx| {
+                    let state = cancel_state.read(cx);
+                    !state.attempts.is_busy()
+                        || state.current_key(false, cx).as_ref() != Some(&state.key)
+                })
+        });
+        let base_input = dialog_state.read(cx).base_input.clone();
+        base_input.update(cx, |input, cx| input.focus(window, cx));
     }
 
     pub(crate) fn open_files(&mut self, cx: &mut Context<Self>) {
@@ -568,7 +1176,7 @@ impl RightPanelView {
                         cx.notify();
                     });
                 }
-                self.git_status = status;
+                self.replace_git_status(status);
                 let current_set: HashSet<String> = files.iter().map(|f| f.path.clone()).collect();
                 if self.selected_files.is_empty() {
                     self.selected_files = current_set;
@@ -590,7 +1198,12 @@ impl RightPanelView {
                 self.stash_files = None;
                 self.loading_stash_index = None;
             }
-            PanelEvent::MessageGenerated(result) => {
+            PanelEvent::MessageGenerated { project, result }
+                if message_generated_matches_active_project(
+                    &project,
+                    self.model.read(cx).active_git_work_dir().as_deref(),
+                ) =>
+            {
                 self.git_message_pending = false;
                 match result {
                     Ok(message) => {
@@ -621,7 +1234,7 @@ impl RightPanelView {
                             state.git_statuses.insert(project, status.clone());
                             cx.notify();
                         });
-                        self.git_status = Some(status.clone());
+                        self.replace_git_status(Some(status.clone()));
                         self.stash_files = None;
                         self.loading_stash_index = None;
                         self.selected_files = status.files.iter().map(|f| f.path.clone()).collect();
@@ -759,7 +1372,10 @@ impl RightPanelView {
                 }
             }
             .await;
-            let _ = tx.send(PanelEvent::MessageGenerated(result));
+            let _ = tx.send(PanelEvent::MessageGenerated {
+                project: work_dir,
+                result,
+            });
         });
         cx.notify();
     }
@@ -1583,8 +2199,9 @@ impl RightPanelView {
         let status = self.git_status.as_ref();
         let behind = status.map_or(0, |s| s.behind);
         let ahead = status.map_or(0, |s| s.ahead);
-        let can_publish = can_publish_branch(status);
-        let can_create_pr = can_create_pull_request(status);
+        let can_publish = can_publish_branch(self.project.is_some(), status);
+        let can_create_pr =
+            can_create_pull_request(self.project.is_some() && !self.worktree_unavailable, status);
 
         let sync_button = if can_publish {
             Button::new("git-sync-action-btn")
@@ -1637,13 +2254,13 @@ impl RightPanelView {
                 row.child(
                     Button::new("git-create-pull-request")
                         .icon(IconName::Github)
-                        .label("Create Pull Request")
+                        .label("Create draft PR…")
                         .outline()
                         .small()
-                        .tooltip("Create a pull request on GitHub")
+                        .tooltip("Review and create a draft pull request on GitHub")
                         .disabled(self.git_busy)
                         .on_click(cx.listener(|this, _event, window, cx| {
-                            this.run_git_action(GitAction::CreatePullRequest, window, cx);
+                            this.open_draft_pr_dialog(window, cx);
                         })),
                 )
             });
@@ -3919,6 +4536,7 @@ impl RightPanelView {
 
 impl Render for RightPanelView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_project(cx);
         if let Some(message) = self.generated_commit_message.take() {
             self.commit_message_input
                 .update(cx, |input, cx| input.set_value(message, window, cx));
@@ -3928,13 +4546,20 @@ impl Render for RightPanelView {
             self.commit_message_input
                 .update(cx, |input, cx| input.set_value("", window, cx));
         }
-        self.sync_project(cx);
         self.sync_pending_document(window, cx);
         let theme = cx.theme().colors;
-        let body = match self.active_surface {
-            None => self.render_chooser(cx).into_any_element(),
-            Some(Surface::Review) => self.render_review(cx),
-            Some(Surface::Files) => self.render_files(cx),
+        let body = if self.worktree_unavailable {
+            self.render_empty(
+                "Worktree unavailable",
+                "This worktree is not checked out",
+                cx,
+            )
+        } else {
+            match self.active_surface {
+                None => self.render_chooser(cx).into_any_element(),
+                Some(Surface::Review) => self.render_review(cx),
+                Some(Surface::Files) => self.render_files(cx),
+            }
         };
         div()
             .w_full()
@@ -4024,9 +4649,30 @@ fn scan_project_tree(root: &Path, limit: usize) -> Vec<FileNode> {
 
 #[cfg(test)]
 mod tests {
-    use super::{can_create_pull_request, can_publish_branch, scan_project_tree};
+    use super::{
+        can_create_pull_request, can_publish_branch, draft_pr_prefill,
+        message_generated_matches_active_project, scan_project_tree, DraftPrAttemptState,
+        DraftPrCompletion, DraftPrContextKey, DraftPrFields, DraftPrRemoteResult,
+    };
+    use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
     use threadlane_git::GitStatus;
+
+    #[test]
+    fn generated_commit_messages_only_apply_to_the_originating_checkout() {
+        let origin = std::path::Path::new("/projects/app/.threadlane/worktrees/session-a");
+        let other = std::path::Path::new("/projects/app/.threadlane/worktrees/session-b");
+
+        assert!(message_generated_matches_active_project(
+            origin,
+            Some(origin)
+        ));
+        assert!(!message_generated_matches_active_project(
+            origin,
+            Some(other)
+        ));
+        assert!(!message_generated_matches_active_project(origin, None));
+    }
 
     #[test]
     fn only_publishable_branches_without_upstreams_use_the_publish_action() {
@@ -4036,59 +4682,238 @@ mod tests {
             ahead: 731,
             ..GitStatus::default()
         };
-        assert!(can_publish_branch(Some(&unpublished)));
+        assert!(can_publish_branch(true, Some(&unpublished)));
+        assert!(!can_publish_branch(false, Some(&unpublished)));
 
         let published = GitStatus {
             has_upstream: true,
             ..unpublished.clone()
         };
-        assert!(!can_publish_branch(Some(&published)));
+        assert!(!can_publish_branch(true, Some(&published)));
 
         let detached = GitStatus {
             detached: true,
             branch: None,
             ..unpublished
         };
-        assert!(!can_publish_branch(Some(&detached)));
-        assert!(!can_publish_branch(None));
+        assert!(!can_publish_branch(true, Some(&detached)));
+        assert!(!can_publish_branch(true, None));
     }
 
     #[test]
-    fn only_ready_branches_without_a_pull_request_offer_creation() {
+    fn draft_pr_gate_only_allows_ready_published_named_branches() {
         let ready = GitStatus {
             branch: Some("feature/demo".into()),
             remote: Some("git@github.com:threadlane/threadlane.git".into()),
+            has_upstream: true,
             pr_ready: true,
             pr_lookup_available: true,
             ..GitStatus::default()
         };
-        assert!(can_create_pull_request(Some(&ready)));
+        assert!(can_create_pull_request(true, Some(&ready)));
+        assert!(!can_create_pull_request(false, Some(&ready)));
+        let blockers: [fn(&mut GitStatus); 7] = [
+            |status| status.pr_lookup_available = false,
+            |status| status.has_upstream = false,
+            |status| status.remote = None,
+            |status| status.branch = Some(" ".into()),
+            |status| status.pr = Some(Default::default()),
+            |status| status.pr_ready = false,
+            |status| {
+                status.detached = true;
+                status.branch = None;
+            },
+        ];
+        for block in blockers {
+            let mut blocked = ready.clone();
+            block(&mut blocked);
+            assert!(!can_create_pull_request(true, Some(&blocked)));
+        }
+        assert!(!can_create_pull_request(true, None));
+    }
 
-        let unavailable = GitStatus {
-            pr_lookup_available: false,
-            ..ready.clone()
-        };
-        assert!(!can_create_pull_request(Some(&unavailable)));
+    #[test]
+    fn draft_pr_fields_validate_every_value_required_by_the_existing_backend() {
+        assert!(draft_fields("Improve review flow").validate().is_ok());
+        for (base, title, body) in [
+            (" ", "Title", "Body"),
+            ("main", "\n", "Body"),
+            ("main", "Title", ""),
+        ] {
+            assert!(DraftPrFields {
+                base: base.into(),
+                title: title.into(),
+                body: body.into(),
+            }
+            .validate()
+            .is_err());
+        }
+    }
 
-        let with_pr = GitStatus {
-            pr: Some(Default::default()),
-            ..ready.clone()
+    #[test]
+    fn draft_prefill_reuses_default_branch_and_latest_commit_metadata() {
+        let status = GitStatus {
+            branch: Some("feature/draft-pr".into()),
+            default_branch: Some("develop".into()),
+            recent_commits: vec![threadlane_git::GitCommitInfo {
+                summary: "Add draft PR workflow".into(),
+                body: "Keep publishing explicit and recoverable.".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
         };
-        assert!(!can_create_pull_request(Some(&with_pr)));
+        assert_eq!(
+            draft_pr_prefill(&status),
+            DraftPrFields {
+                base: "develop".into(),
+                title: "Add draft PR workflow".into(),
+                body: "Keep publishing explicit and recoverable.".into(),
+            }
+        );
 
-        let not_ready = GitStatus {
-            pr_ready: false,
-            ..ready.clone()
-        };
-        assert!(!can_create_pull_request(Some(&not_ready)));
+        let fallback = draft_pr_prefill(&GitStatus {
+            branch: Some("feature/draft-pr".into()),
+            ..Default::default()
+        });
+        assert_eq!(
+            fallback,
+            DraftPrFields {
+                base: "main".into(),
+                title: "feature/draft-pr".into(),
+                body: "feature/draft-pr".into(),
+            }
+        );
+    }
 
-        let detached = GitStatus {
-            detached: true,
-            branch: None,
-            ..ready
-        };
-        assert!(!can_create_pull_request(Some(&detached)));
-        assert!(!can_create_pull_request(None));
+    fn draft_key(branch: &str, revision: u64) -> DraftPrContextKey {
+        DraftPrContextKey {
+            project: PathBuf::from("/project/.threadlane/worktrees/task"),
+            branch: branch.into(),
+            revision,
+        }
+    }
+
+    fn draft_fields(title: &str) -> DraftPrFields {
+        DraftPrFields {
+            base: "main".into(),
+            title: title.into(),
+            body: "Body".into(),
+        }
+    }
+
+    #[test]
+    fn draft_pr_attempts_are_single_flight_and_snapshot_safe() {
+        let mut state = DraftPrAttemptState::default();
+        let key = draft_key("feature/a", 1);
+        let fields = draft_fields("First");
+        let first = state.begin(key.clone(), fields.clone()).unwrap();
+        assert!(state.begin(key.clone(), fields.clone()).is_err());
+
+        assert_eq!(
+            state.complete(
+                &first,
+                &draft_key("feature/b", 2),
+                &fields,
+                DraftPrRemoteResult::Exists("https://github.com/o/r/pull/1".into()),
+            ),
+            DraftPrCompletion::Stale
+        );
+        assert!(state.is_busy());
+        assert_eq!(
+            state.complete(
+                &first,
+                &key,
+                &fields,
+                DraftPrRemoteResult::Exists("https://github.com/o/r/pull/1".into()),
+            ),
+            DraftPrCompletion::SuccessExact("https://github.com/o/r/pull/1".into())
+        );
+
+        let edited = state.begin(key.clone(), fields.clone()).unwrap();
+        assert_eq!(
+            state.complete(
+                &edited,
+                &key,
+                &draft_fields("Newer edit"),
+                DraftPrRemoteResult::Exists("https://github.com/o/r/pull/2".into()),
+            ),
+            DraftPrCompletion::SuccessWithNewerEdits("https://github.com/o/r/pull/2".into())
+        );
+
+        let failed = state.begin(key.clone(), fields.clone()).unwrap();
+        assert_eq!(
+            state.complete(
+                &failed,
+                &key,
+                &fields,
+                DraftPrRemoteResult::Absent("offline".into()),
+            ),
+            DraftPrCompletion::Failure("offline".into())
+        );
+        assert!(state.begin(key, fields).is_ok());
+    }
+
+    #[test]
+    fn ambiguous_draft_pr_write_requires_explicit_readback_before_another_post() {
+        let mut state = DraftPrAttemptState::default();
+        let key = draft_key("feature/a", 1);
+        let fields = draft_fields("First");
+        let attempt = state.begin(key.clone(), fields.clone()).unwrap();
+
+        assert_eq!(
+            state.complete(
+                &attempt,
+                &key,
+                &fields,
+                DraftPrRemoteResult::Unknown("network result unknown".into()),
+            ),
+            DraftPrCompletion::Unknown("network result unknown".into())
+        );
+        assert!(state.begin(key.clone(), fields.clone()).is_err());
+
+        let check = state.begin_check().unwrap();
+        assert!(state.begin_check().is_err());
+        assert!(matches!(
+            state.complete(
+                &check,
+                &key,
+                &fields,
+                DraftPrRemoteResult::Unknown("still unknown".into()),
+            ),
+            DraftPrCompletion::Unknown(_)
+        ));
+        assert!(state.begin(key.clone(), fields.clone()).is_err());
+        let check = state.begin_check().unwrap();
+        assert_eq!(
+            state.complete(
+                &check,
+                &key,
+                &fields,
+                DraftPrRemoteResult::Absent("not present".into()),
+            ),
+            DraftPrCompletion::Failure("not present".into())
+        );
+        let attempt = state.begin(key.clone(), fields.clone()).unwrap();
+        assert!(matches!(
+            state.complete(
+                &attempt,
+                &key,
+                &fields,
+                DraftPrRemoteResult::Unknown("unknown".into()),
+            ),
+            DraftPrCompletion::Unknown(_)
+        ));
+        let check = state.begin_check().unwrap();
+        assert_eq!(
+            state.complete(
+                &check,
+                &key,
+                &fields,
+                DraftPrRemoteResult::Exists("https://github.com/o/r/pull/3".into()),
+            ),
+            DraftPrCompletion::SuccessExact("https://github.com/o/r/pull/3".into())
+        );
+        assert!(state.begin_check().is_err());
     }
 
     #[test]

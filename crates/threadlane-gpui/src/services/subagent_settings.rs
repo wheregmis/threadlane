@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use threadlane_runtime::ReasoningEffort;
+use threadlane_runtime::{OrchestratorMode, ReasoningEffort};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SubagentSettings {
@@ -8,6 +8,12 @@ pub(crate) struct SubagentSettings {
     pub(crate) model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) reasoning_effort: Option<ReasoningEffort>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) fast_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) fast_reasoning_effort: Option<ReasoningEffort>,
+    #[serde(default)]
+    pub(crate) orchestrator_mode: OrchestratorMode,
 }
 
 fn path(project_root: &Path) -> std::path::PathBuf {
@@ -21,6 +27,12 @@ pub(crate) fn load(project_root: &Path) -> SubagentSettings {
         .filter(|settings: &SubagentSettings| {
             matches!(
                 settings.reasoning_effort,
+                None | Some(ReasoningEffort::Minimal)
+                    | Some(ReasoningEffort::Low)
+                    | Some(ReasoningEffort::Medium)
+                    | Some(ReasoningEffort::High)
+            ) && matches!(
+                settings.fast_reasoning_effort,
                 None | Some(ReasoningEffort::Minimal)
                     | Some(ReasoningEffort::Low)
                     | Some(ReasoningEffort::Medium)
@@ -39,6 +51,15 @@ pub(crate) fn save(project_root: &Path, settings: &SubagentSettings) -> Result<(
             | Some(ReasoningEffort::High)
     ) {
         return Err("Unsupported subagent reasoning effort.".into());
+    }
+    if !matches!(
+        settings.fast_reasoning_effort,
+        None | Some(ReasoningEffort::Minimal)
+            | Some(ReasoningEffort::Low)
+            | Some(ReasoningEffort::Medium)
+            | Some(ReasoningEffort::High)
+    ) {
+        return Err("Unsupported fast model reasoning effort.".into());
     }
     let target = path(project_root);
     let parent = target.parent().ok_or("Invalid subagent settings path.")?;
@@ -60,6 +81,9 @@ mod tests {
         let settings = SubagentSettings {
             model: Some("antigravity/gemini-3.1-pro".into()),
             reasoning_effort: Some(ReasoningEffort::High),
+            fast_model: Some("antigravity/gemini-3-flash".into()),
+            fast_reasoning_effort: Some(ReasoningEffort::Low),
+            orchestrator_mode: OrchestratorMode::Auto,
         };
         save(dir.path(), &settings).unwrap();
         assert_eq!(load(dir.path()), settings);
@@ -75,6 +99,9 @@ mod tests {
         let unsupported = SubagentSettings {
             model: None,
             reasoning_effort: Some(ReasoningEffort::Max),
+            fast_model: None,
+            fast_reasoning_effort: None,
+            orchestrator_mode: OrchestratorMode::default(),
         };
         assert!(save(dir.path(), &unsupported).is_err());
     }

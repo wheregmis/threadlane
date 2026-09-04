@@ -2,6 +2,7 @@ use super::broker::{
     HostCapabilityHandler, ManagedProcessRegistry, MAX_BROKER_CONTINUATION_ROUNDS,
 };
 use super::cancellation::AgentRunTask;
+use super::context_snapshots::{ContextSnapshotToolExecutor, MAX_SUBAGENT_CONTEXT_REFS};
 use super::scheduler::AgentWorkScheduler;
 use super::subagents::{AgentRunner, MAX_SUBAGENT_TASKS};
 use crate::agents::{discover_agents, AgentScope};
@@ -9,7 +10,7 @@ use crate::extension_broker::{
     BrokerError, CapabilityDispatcher, HostBrokerRequest, BROKER_API_VERSION,
 };
 use crate::permission::{PermissionHandle, PermissionManager};
-use crate::plan::{GeneratePlanToolExecutor, SessionPlanStore, UpdatePlanToolExecutor};
+use crate::plan::{SessionPlanStore, UpdatePlanToolExecutor};
 use crate::policy::ToolPolicy;
 use async_trait::async_trait;
 use log::warn;
@@ -18,17 +19,15 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use threadlane_mcp::McpManager;
-use threadlane_protocol::ProviderPort;
 use threadlane_runtime::harness::{HookContext, HookEffect, HookHandler, HookKind};
 use threadlane_runtime::Capability;
-use threadlane_runtime::{
-    AgentConfig, AgentEvent, AgentToolCall, AgentToolDefinition, ToolExecutor, TurnState,
-};
+use threadlane_runtime::{AgentEvent, AgentToolCall, AgentToolDefinition, ToolExecutor};
 use threadlane_skills::{LoadSkillToolExecutor, SkillRegistry};
 use threadlane_wasi::WasiExtensionManager;
 use tokio::sync::broadcast;
 
 const SUBAGENT_TOOL_NAME: &str = "subagent";
+pub(crate) const PREWALK_HANDOFF_TOOL_NAME: &str = "complete_prewalk";
 
 // ── Capability implementations ─────────────────────────────────────────
 // Each wraps a subsystem and implements [`crate::capability_registry::Capability`]
@@ -63,28 +62,71 @@ impl Capability for SubagentCapability {
 pub(crate) struct PlanCapability {
     pub(crate) plan_store: SessionPlanStore,
     pub(crate) event_tx: broadcast::Sender<AgentEvent>,
-    pub(crate) provider_client: Arc<dyn ProviderPort>,
-    pub(crate) turn: Arc<tokio::sync::Mutex<TurnState>>,
-    pub(crate) config: AgentConfig,
+}
+
+pub(crate) struct ContextCapability {
+    pub(crate) session_file: PathBuf,
+    pub(crate) work_dir: PathBuf,
+}
+
+impl Capability for ContextCapability {
+    fn id(&self) -> &str {
+        "context"
+    }
+
+    fn tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
+        vec![Arc::new(ContextSnapshotToolExecutor::new(
+            self.session_file.clone(),
+            self.work_dir.clone(),
+        ))]
+    }
+}
+
+pub(crate) struct PrewalkCapability;
+
+impl Capability for PrewalkCapability {
+    fn id(&self) -> &str {
+        "prewalk"
+    }
+
+    fn tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
+        vec![Arc::new(PrewalkToolExecutor)]
+    }
+}
+
+struct PrewalkToolExecutor;
+
+#[async_trait]
+impl ToolExecutor for PrewalkToolExecutor {
+    fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
+        vec![AgentToolDefinition {
+            name: PREWALK_HANDOFF_TOOL_NAME.into(),
+            description: Some(
+                "Signal that the foundational prewalk change is implemented and verified.".into(),
+            ),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            strict: None,
+        }]
+        .into()
+    }
+
+    async fn execute_tool(&self, name: &str, _args: &str) -> Option<Result<String, String>> {
+        (name == PREWALK_HANDOFF_TOOL_NAME).then(|| Ok("Prewalk handoff requested.".into()))
+    }
 }
 impl Capability for PlanCapability {
     fn id(&self) -> &str {
         "plan"
     }
     fn tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
-        vec![
-            Arc::new(UpdatePlanToolExecutor::new(
-                self.plan_store.clone(),
-                self.event_tx.clone(),
-            )),
-            Arc::new(GeneratePlanToolExecutor::new(
-                self.plan_store.clone(),
-                self.event_tx.clone(),
-                self.provider_client.clone(),
-                self.turn.clone(),
-                self.config.clone(),
-            )),
-        ]
+        vec![Arc::new(UpdatePlanToolExecutor::new(
+            self.plan_store.clone(),
+            self.event_tx.clone(),
+        ))]
     }
 }
 
@@ -184,6 +226,12 @@ fn subagent_tool_definition() -> AgentToolDefinition {
                             "model": {
                                 "type": "string",
                                 "description": "Deprecated compatibility field. Accepted but ignored; project settings select the child model, falling back to the parent session model."
+                            },
+                            "context_refs": {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "maxItems": MAX_SUBAGENT_CONTEXT_REFS,
+                                "description": "Optional ordered context snapshot IDs to pass to this child."
                             }
                         },
                         "required": ["agent", "task"]
@@ -294,6 +342,10 @@ impl SubagentToolExecutor {
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(String::from);
+            let context_refs = match parse_context_refs(val) {
+                Ok(context_refs) => context_refs,
+                Err(error) => return Some(Err(error)),
+            };
 
             tasks.push(AgentRunTask {
                 agent: agent.to_string(),
@@ -301,6 +353,7 @@ impl SubagentToolExecutor {
                 instructions,
                 tools,
                 model,
+                context_refs,
             });
         }
 
@@ -320,6 +373,34 @@ impl SubagentToolExecutor {
             Err(err) => Some(Err(err)),
         }
     }
+}
+
+pub(crate) fn parse_context_refs(value: &Value) -> Result<Vec<String>, String> {
+    let Some(refs) = value.get("context_refs") else {
+        return Ok(Vec::new());
+    };
+    let refs = refs
+        .as_array()
+        .ok_or_else(|| "`context_refs` must be an array".to_string())?;
+    if refs.len() > MAX_SUBAGENT_CONTEXT_REFS {
+        return Err(format!(
+            "`context_refs` accepts at most {MAX_SUBAGENT_CONTEXT_REFS} IDs"
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    refs.iter()
+        .map(|value| {
+            let id = value
+                .as_str()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| "Each context reference requires a non-empty ID".to_string())?;
+            if !seen.insert(id) {
+                return Err(format!("Duplicate context reference: {id}"));
+            }
+            Ok(id.to_string())
+        })
+        .collect()
 }
 
 #[async_trait]

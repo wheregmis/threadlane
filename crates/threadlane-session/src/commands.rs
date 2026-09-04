@@ -13,12 +13,8 @@ pub fn builtin_commands() -> Vec<SlashCommandInfo> {
     [
         ("model", "Switch model, or show the current one"),
         (
-            "plan",
-            "Create or refine an implementation plan using the active model (/plan <objective>)",
-        ),
-        (
-            "roles",
-            "View or configure model roles (task, plan, advisor)",
+            "prewalk",
+            "Explore and land first working edit, then hand off to fast model (/prewalk <objective>)",
         ),
         ("compact", "Compact the conversation context"),
         ("session", "Show session info"),
@@ -67,9 +63,7 @@ pub fn available_slash_commands(project_root: Option<&Path>) -> Vec<SlashCommand
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandAction {
     SwitchModel(String),
-    Advisor(String),
-    Plan(String),
-    Roles(String),
+    Prewalk(String),
     Compact,
     ShowSession,
     SetName(String),
@@ -92,9 +86,7 @@ pub fn parse_slash_command(input: &str) -> Option<CommandAction> {
 
     match cmd {
         "model" => Some(CommandAction::SwitchModel(arg)),
-        "advisor" => Some(CommandAction::Advisor(arg)),
-        "plan" => Some(CommandAction::Plan(arg)),
-        "roles" => Some(CommandAction::Roles(arg)),
+        "prewalk" => Some(CommandAction::Prewalk(arg)),
         "compact" => Some(CommandAction::Compact),
         "session" => Some(CommandAction::ShowSession),
         "name" => Some(CommandAction::SetName(arg)),
@@ -121,30 +113,14 @@ pub async fn execute_slash_command(action: CommandAction, agent: &mut AgentRunti
                     let mut st = agent.turn.lock().await;
                     st.model = new_model.clone();
                 }
-                let mut roles = agent.model_roles().clone();
-                roles.task = Some(new_model.clone());
-                agent.set_model_roles(roles);
                 format!("Switched model to: {}", new_model)
             }
         }
-        CommandAction::Advisor(_) => {
-            "Threadlane relies on the active model's native reasoning (Chain-of-Thought / <think> tokens) for unified turn planning, self-reflection, and execution without secondary reviewer latency.".to_string()
-        }
-        CommandAction::Roles(_) => {
-            let roles = agent.model_roles().clone();
-            let main_model = agent.model();
-            let fallbacks = if roles.fallback_chain.is_empty() {
-                "None".to_string()
-            } else {
-                roles.fallback_chain.join(" -> ")
-            };
-            format!("Model Configuration:\n  Active Model: {main_model}\n  Rate-limit Failover Chain: {fallbacks}")
-        }
-        CommandAction::Plan(objective) => {
+        CommandAction::Prewalk(objective) => {
             if objective.trim().is_empty() {
-                "Usage: /plan <task objective or prompt> to generate a structured implementation plan.".to_string()
+                "Usage: /prewalk <task objective> to explore, land the first edit, and transition to fast model.".to_string()
             } else {
-                format!("Generating implementation plan for: {}", objective.trim())
+                format!("Prewalk initiated for: {}", objective.trim())
             }
         }
         CommandAction::Compact => {

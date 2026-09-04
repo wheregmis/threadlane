@@ -4,7 +4,7 @@
 //! to render chat transcripts, tool activity, and reasoning blocks without
 //! performing domain-level message reductions.
 
-use crate::types::{AdvisorSeverity, AgentMessage};
+use crate::types::AgentMessage;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -12,7 +12,6 @@ pub enum UiMessageRole {
     User,
     Assistant,
     System,
-    Advisor(AdvisorSeverity),
     Error,
 }
 
@@ -84,18 +83,9 @@ pub fn project_chat_messages(agent_messages: &[AgentMessage]) -> Vec<UiChatMessa
         counter += 1;
         match msg {
             AgentMessage::User { content } => {
-                let role = if content.starts_with("[ADVISOR NOTE (Aside)]") {
-                    UiMessageRole::Advisor(AdvisorSeverity::Aside)
-                } else if content.starts_with("[ADVISOR NOTE (Concern)]") {
-                    UiMessageRole::Advisor(AdvisorSeverity::Concern)
-                } else if content.starts_with("[ADVISOR NOTE (CRITICAL BLOCKER)]") {
-                    UiMessageRole::Advisor(AdvisorSeverity::Blocker)
-                } else {
-                    UiMessageRole::User
-                };
                 result.push(UiChatMessage {
                     id: format!("msg_{counter}"),
-                    role,
+                    role: UiMessageRole::User,
                     content: content.clone(),
                     tool_activities: Vec::new(),
                     reasoning_content: None,

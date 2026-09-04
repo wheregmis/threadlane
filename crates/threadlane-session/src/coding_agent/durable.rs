@@ -29,6 +29,29 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+fn should_complete_prewalk(tool_name: &str, is_error: bool) -> bool {
+    !is_error && tool_name == super::capabilities::PREWALK_HANDOFF_TOOL_NAME
+}
+
+#[cfg(test)]
+mod prewalk_tests {
+    use super::should_complete_prewalk;
+
+    #[test]
+    fn only_a_successful_explicit_signal_completes_prewalk() {
+        assert!(!should_complete_prewalk("write_file", false));
+        assert!(!should_complete_prewalk("edit_file_hashline", false));
+        assert!(should_complete_prewalk(
+            super::super::capabilities::PREWALK_HANDOFF_TOOL_NAME,
+            false
+        ));
+        assert!(!should_complete_prewalk(
+            super::super::capabilities::PREWALK_HANDOFF_TOOL_NAME,
+            true
+        ));
+    }
+}
+
 pub(crate) fn durable_prompt_snapshot(content: &str) -> PromptSnapshot {
     let sha256 = threadlane_runtime::harness::TraceString::new(sha256_hex(content.as_bytes()))
         .expect("sha256 digest is bounded");
@@ -125,6 +148,8 @@ impl CodingAgent {
                 Box::pin(async move { harness.lock().await.record_provider_trace(&run_id, event) })
             })));
         let message_harness = trace_harness.clone();
+        let message_run_id = run_id.clone();
+        let message_work_dir = self.work_dir.clone();
         let boundary_harness = trace_harness.clone();
         let boundary_run_id = run_id.clone();
         let boundary_config = self.agent.config().clone();
@@ -141,7 +166,42 @@ impl CodingAgent {
         self.agent
             .set_message_recorder(Some(Arc::new(move |message| {
                 let harness = message_harness.clone();
-                Box::pin(async move { harness.lock().await.append_message(message).map(|_| ()) })
+                let run_id = message_run_id.clone();
+                let work_dir = message_work_dir.clone();
+                Box::pin(async move {
+                    let mut harness = harness.lock().await;
+                    let output_chars = match &message {
+                        AgentMessage::Tool {
+                            content,
+                            name,
+                            is_error: false,
+                            ..
+                        } if name == "read_file" => Some(content.chars().count()),
+                        _ => None,
+                    };
+                    let tool_call_id = match &message {
+                        AgentMessage::Tool {
+                            tool_call_id,
+                            name,
+                            is_error: false,
+                            ..
+                        } if name == "read_file" => Some(tool_call_id.clone()),
+                        _ => None,
+                    };
+                    let entry_id = harness.append_message(message)?;
+                    if let (Some(tool_call_id), Some(output_chars)) = (tool_call_id, output_chars) {
+                        if let Err(error) = harness.index_read_snapshot(
+                            &run_id,
+                            &work_dir,
+                            &tool_call_id,
+                            &entry_id,
+                            output_chars,
+                        ) {
+                            warn!("failed to index read_file context snapshot: {error}");
+                        }
+                    }
+                    Ok(())
+                })
             })));
         let intent_harness = trace_harness.clone();
         let intent_run_id = run_id.clone();
@@ -177,11 +237,52 @@ impl CodingAgent {
         }));
         let completion_harness = trace_harness.clone();
         let completion_run_id = run_id.clone();
+        let prewalk_arc = self.prewalk.clone();
+        let event_tx = self.agent.event_tx.clone();
+        let turn_arc = self.agent.turn.clone();
         self.agent.tool_dispatcher.tool_completion_recorder = Some(Arc::new(move |result| {
             let harness = completion_harness.clone();
             let run_id = completion_run_id.clone();
             let result = result.clone();
-            Box::pin(async move { harness.lock().await.record_tool_result(&run_id, &result) })
+            let prewalk = prewalk_arc.clone();
+            let event_tx = event_tx.clone();
+            let turn_arc = turn_arc.clone();
+            Box::pin(async move {
+                if should_complete_prewalk(&result.name, result.is_error) {
+                    let state = prewalk.lock().unwrap().take();
+                    if let Some(state) = state {
+                        let handoff_ms = state.started_at.elapsed().as_millis();
+                        let target_model = state.target_model;
+                        let target_effort = state.target_reasoning;
+                        let mut turn = turn_arc.lock().await;
+                        turn.model = target_model.clone();
+                        if let Some(effort) = target_effort {
+                            turn.reasoning_effort = effort;
+                        }
+                        if let Some(pos) = turn
+                            .system_prompt
+                            .find(crate::orchestrator::ARCHITECT_PROTOCOL_HEADER)
+                        {
+                            turn.system_prompt.truncate(pos);
+                            turn.system_prompt = turn.system_prompt.trim_end().to_string();
+                        }
+                        drop(turn);
+                        let effort_info = target_effort
+                            .map(|e| format!(" with reasoning effort `{}`", e.label()))
+                            .unwrap_or_default();
+                        let _ = event_tx.send(threadlane_runtime::AgentEvent::PrewalkCompleted {
+                            model: target_model.clone(),
+                            message: format!(
+                                "Prewalk complete: foundational change verified. Switched model to `{target_model}`{effort_info}."
+                            ),
+                        });
+                        log::info!(
+                            "orchestrator handoff_ms={handoff_ms} handoff_model={target_model} success=true"
+                        );
+                    }
+                }
+                harness.lock().await.record_tool_result(&run_id, &result)
+            })
         }));
         let permission_harness = trace_harness;
         self.permission_handle
@@ -237,6 +338,7 @@ impl CodingAgent {
                         instructions: None,
                         tools: None,
                         model: None,
+                        context_refs: Vec::new(),
                     };
                     let parent_leaf =
                         self.prompt_parent_leaf(AgentMessage::user(prompt, Vec::new()), true);
@@ -316,12 +418,7 @@ impl CodingAgent {
                 "run {run_id} is already active; prompt acceptance cannot be repeated"
             ));
         }
-        let model = self
-            .agent
-            .config()
-            .model_roles
-            .resolve_task(&self.agent.model())
-            .to_string();
+        let model = self.agent.model().to_string();
         // The router has no ACP branch and would label an ACP run as an
         // OpenAI one, which makes the trajectory misreport what actually ran.
         let provider = if crate::acp_bridge::is_acp_model(&model) {
@@ -474,12 +571,7 @@ impl CodingAgent {
                 .turn
                 .try_lock()
                 .map_err(|_| "adopted run context is currently locked".to_string())?;
-            let model = self
-                .agent
-                .config()
-                .model_roles
-                .resolve_task(&turn.model)
-                .to_string();
+            let model = turn.model.clone();
             let provider = self
                 .agent
                 .provider_client()
@@ -652,7 +744,8 @@ impl CodingAgent {
             .iter()
             .rev()
             .find_map(threadlane_runtime::compaction_summary_text)
-            .ok_or_else(|| "compaction produced no durable summary".to_string())?;
+            .ok_or_else(|| "compaction produced no durable summary".to_string())?
+            .to_owned();
         let retained_tail = compaction_retained_tail(&compacted);
         let config = self.agent.config().clone();
         let pre_tokens =
@@ -660,8 +753,16 @@ impl CodingAgent {
         let compacted_messages = before
             .len()
             .saturating_sub(compacted.len().saturating_sub(1));
+        let summary = match self.harness.as_ref() {
+            Some(journal) => journal.compaction_summary_without_indexed_tool_outputs(
+                &summary,
+                compacted_messages,
+                &config,
+            )?,
+            None => summary,
+        };
         let persisted = self.persist_harness_compaction(
-            summary,
+            &summary,
             &retained_tail,
             pre_tokens,
             compacted_messages,
@@ -684,16 +785,15 @@ impl CodingAgent {
         let config = self.agent.config().clone();
         let retained_tail_tokens =
             threadlane_runtime::compaction::estimate_request_tokens(retained_tail, None, &config);
-        let model = config
-            .model_roles
-            .resolve_task(&self.agent.model())
-            .to_string();
+        let model = self.agent.model().to_string();
         if let Some(journal) = self.harness.as_mut() {
             journal.ensure_fresh()?;
             let run_id = journal.unique_run_id("foreground-compaction")?;
+            let context_snapshot_index =
+                journal.context_snapshot_index_for_compaction(compacted_messages)?;
             journal
                 .store
-                .accept_compaction(&run_id, summary)
+                .accept_compaction(&run_id, summary, &context_snapshot_index)
                 .map_err(|error| error.to_string())?;
             journal
                 .store

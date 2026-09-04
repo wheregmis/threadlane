@@ -31,6 +31,7 @@ use threadlane_git::GitStatus;
 use crate::app::actions::AppAction;
 use crate::app::controller;
 use crate::screens::chat::ChatListView;
+use crate::screens::github::GitHubView;
 use crate::screens::right_panel::RightPanelView;
 use crate::screens::settings::SettingsView;
 use crate::screens::sidebar::SidebarView;
@@ -43,7 +44,13 @@ use crate::state::{
 };
 use threadlane_updater::UpdateStatus;
 
+fn open_github_from_palette(state: &mut AppState, notify: impl FnOnce()) {
+    controller::dispatch(state, AppAction::OpenGitHub);
+    notify();
+}
+
 pub fn init(cx: &mut App) {
+    crate::screens::github::view::init(cx);
     cx.bind_keys([
         KeyBinding::new("cmd-k", ToggleCommandPalette, None),
         KeyBinding::new("ctrl-k", ToggleCommandPalette, None),
@@ -147,6 +154,7 @@ pub struct WorkspaceView {
     model: Entity<AppState>,
     sidebar: Entity<SidebarView>,
     chat_list: Entity<ChatListView>,
+    github: Entity<GitHubView>,
     settings: Entity<SettingsView>,
     right_panel: Entity<RightPanelView>,
     fallback_terminal: Option<Entity<TerminalView>>,
@@ -255,6 +263,7 @@ impl WorkspaceView {
         let model = cx.new(|_cx| AppState::load());
         let sidebar = cx.new(|cx| SidebarView::new(model.clone(), window, cx));
         let chat_list = cx.new(|cx| ChatListView::new(model.clone(), window, cx));
+        let github = cx.new(|cx| GitHubView::new(model.clone(), window, cx));
         let settings = cx.new(|cx| SettingsView::new(model.clone(), window, cx));
         let right_panel = cx.new(|cx| RightPanelView::new(model.clone(), window, cx));
         let sidebar_resizable_state = cx.new(|_cx| ResizableState::default());
@@ -373,6 +382,7 @@ impl WorkspaceView {
                 model,
                 sidebar,
                 chat_list,
+                github,
                 settings,
                 right_panel,
                 fallback_terminal: None,
@@ -407,6 +417,8 @@ impl WorkspaceView {
                 .detach();
             }
             view.sync_git_status_with_active_project(cx);
+            view.github
+                .update(cx, |github, cx| github.sync_active_project(cx));
         });
 
         let view_handle = view.downgrade();
@@ -441,6 +453,9 @@ impl WorkspaceView {
     }
 
     fn open_git_review(&mut self, cx: &mut Context<Self>) {
+        self.model.update(cx, |state, _cx| {
+            state.workspace_page = WorkspacePage::Chat;
+        });
         self.right_panel_visible = true;
         self.right_panel.update(cx, |panel, cx| {
             panel.open_review(cx);
@@ -450,6 +465,9 @@ impl WorkspaceView {
     }
 
     fn open_git_branches(&mut self, cx: &mut Context<Self>) {
+        self.model.update(cx, |state, _cx| {
+            state.workspace_page = WorkspacePage::Chat;
+        });
         self.right_panel_visible = true;
         self.right_panel.update(cx, |panel, cx| {
             panel.open_branch_popover(cx);
@@ -459,6 +477,9 @@ impl WorkspaceView {
     }
 
     fn open_git_new_branch(&mut self, cx: &mut Context<Self>) {
+        self.model.update(cx, |state, _cx| {
+            state.workspace_page = WorkspacePage::Chat;
+        });
         self.right_panel_visible = true;
         self.right_panel.update(cx, |panel, cx| {
             panel.open_new_branch_dialog(cx);
@@ -468,6 +489,9 @@ impl WorkspaceView {
     }
 
     fn open_git_merge(&mut self, cx: &mut Context<Self>) {
+        self.model.update(cx, |state, _cx| {
+            state.workspace_page = WorkspacePage::Chat;
+        });
         self.right_panel_visible = true;
         self.right_panel.update(cx, |panel, cx| {
             panel.open_merge_dialog(cx);
@@ -620,6 +644,11 @@ impl WorkspaceView {
                 .detach();
             }
             "git" => self.open_git_review(cx),
+            "github" => {
+                model.update(cx, |state, cx| {
+                    open_github_from_palette(state, || cx.notify());
+                });
+            }
             "git_branch" => self.open_git_branches(cx),
             "git_new_branch" => self.open_git_new_branch(cx),
             "git_merge" => self.open_git_merge(cx),
@@ -665,14 +694,14 @@ impl WorkspaceView {
 
     fn sync_git_status_with_active_project(&mut self, cx: &App) {
         self.sync_session_prs(cx);
-        let active_work_dir = self.model.read(cx).active_work_dir.clone();
-        if self.last_git_work_dir == active_work_dir {
+        let active_git_work_dir = self.model.read(cx).active_git_work_dir();
+        if self.last_git_work_dir == active_git_work_dir {
             return;
         }
 
-        self.last_git_work_dir = active_work_dir.clone();
+        self.last_git_work_dir = active_git_work_dir.clone();
 
-        if let Some(work_dir) = active_work_dir {
+        if let Some(work_dir) = active_git_work_dir {
             self.spawn_git_status_refresh(work_dir);
         }
     }
@@ -730,7 +759,7 @@ impl WorkspaceView {
     }
 
     fn refresh_git_status(&mut self, cx: &App) {
-        let Some(work_dir) = self.model.read(cx).active_work_dir.clone() else {
+        let Some(work_dir) = self.model.read(cx).active_git_work_dir() else {
             self.last_git_work_dir = None;
             return;
         };
@@ -769,7 +798,7 @@ impl WorkspaceView {
             }
             GitEvent::Loaded { work_dir, result } => (work_dir, result),
         };
-        let Some(active_work_dir) = self.model.read(cx).active_work_dir.clone() else {
+        let Some(active_work_dir) = self.model.read(cx).active_git_work_dir() else {
             return;
         };
         if !git_result_matches_active(&work_dir, &active_work_dir) {
@@ -929,7 +958,7 @@ impl WorkspaceView {
         let model = self.model.clone();
         let state = model.read(cx);
 
-        let commands: [(&str, &str, &str, IconName, &[&str]); 14] = [
+        let commands: [(&str, &str, &str, IconName, &[&str]); 15] = [
             (
                 "New Task",
                 "Start a fresh session",
@@ -971,6 +1000,13 @@ impl WorkspaceView {
                 "git",
                 IconName::Github,
                 &["git", "diff", "review", "commit", "stage"],
+            ),
+            (
+                "GitHub",
+                "Browse project issues and pull requests",
+                "github",
+                IconName::Github,
+                &["github", "issues", "pull requests", "repository"],
             ),
             (
                 "Git: Switch Branch",
@@ -1172,7 +1208,7 @@ impl WorkspaceView {
         let theme = cx.theme().colors;
 
         let git_status =
-            active_project_git_status(state.active_work_dir.as_deref(), &state.git_statuses);
+            active_project_git_status(state.active_git_work_dir().as_deref(), &state.git_statuses);
 
         let branch = git_status
             .and_then(|s| s.branch.clone())
@@ -1742,33 +1778,40 @@ impl Render for WorkspaceView {
                 upper_content
             };
 
-            if !self.sidebar_collapsed {
-                h_resizable("workspace-sidebar-main-split")
-                    .with_state(&self.sidebar_resizable_state)
-                    .child(
-                        resizable_panel()
-                            .size(px(240.0))
-                            .size_range(px(160.0)..px(500.0))
-                            .child(self.sidebar.clone()),
-                    )
-                    .child(resizable_panel().child(main_content))
-                    .into_any_element()
-            } else {
-                main_content
-            }
+            main_content
         };
 
-        let page_content = match workspace_page {
+        let central_content = match workspace_page {
             WorkspacePage::Chat => chat_page_content.into_any_element(),
+            WorkspacePage::GitHub => self.github.clone().into_any_element(),
             WorkspacePage::Settings => self.settings.clone().into_any_element(),
         };
+        let page_content = if workspace_page != WorkspacePage::Settings && !self.sidebar_collapsed {
+            h_resizable("workspace-sidebar-main-split")
+                .with_state(&self.sidebar_resizable_state)
+                .child(
+                    resizable_panel()
+                        .size(px(240.0))
+                        .size_range(px(160.0)..px(500.0))
+                        .child(self.sidebar.clone()),
+                )
+                .child(resizable_panel().child(central_content))
+                .into_any_element()
+        } else {
+            central_content
+        };
 
-        let view_with_status_bar = div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .child(div().flex_1().min_h_0().child(page_content))
-            .child(self.render_status_bar(cx));
+        let view_with_status_bar = if workspace_page == WorkspacePage::GitHub {
+            page_content
+        } else {
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(div().flex_1().min_h_0().child(page_content))
+                .child(self.render_status_bar(cx))
+                .into_any_element()
+        };
 
         let git_dialog_layer = self
             .right_panel
@@ -1831,7 +1874,7 @@ impl Render for WorkspaceView {
                         cx.notify();
                     }))
             }))
-            .children((workspace_page == WorkspacePage::Chat).then(|| {
+            .children((workspace_page != WorkspacePage::Settings).then(|| {
                 Button::new("sidebar-collapse-toggle")
                     .icon(IconName::PanelLeft)
                     .tooltip(sidebar_tooltip)
@@ -1870,10 +1913,11 @@ impl Render for WorkspaceView {
 mod tests {
     use super::{
         active_project_git_status, git_result_matches_active, next_workspace_event,
-        session_pr_target_is_active, GitEvent, WorkspacePumpEvent,
+        open_github_from_palette, session_pr_target_is_active, GitEvent, WorkspacePumpEvent,
     };
     use crate::services::updater::UpdaterEvent;
-    use crate::state::SessionInfo;
+    use crate::state::{AppState, SessionInfo, WorkspacePage};
+    use std::cell::Cell;
     use std::collections::{HashMap, HashSet};
     use std::path::{Path, PathBuf};
     use threadlane_git::GitStatus;
@@ -1916,6 +1960,19 @@ mod tests {
 
         assert!(session_pr_target_is_active(&targets, &target));
         assert!(!session_pr_target_is_active(&HashSet::new(), &target));
+    }
+
+    #[test]
+    fn github_palette_action_notifies_model_observers() {
+        let notification_count = Cell::new(0);
+        let mut state = AppState::default();
+
+        open_github_from_palette(&mut state, || {
+            notification_count.set(notification_count.get() + 1)
+        });
+
+        assert_eq!(state.workspace_page, WorkspacePage::GitHub);
+        assert_eq!(notification_count.get(), 1);
     }
 
     #[tokio::test]

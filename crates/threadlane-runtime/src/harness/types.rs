@@ -471,6 +471,30 @@ pub struct ContextManifestItem {
     pub label: Option<TraceString>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextSnapshot {
+    pub context_id: String,
+    pub source_lane: String,
+    pub source_run_id: String,
+    pub source_tool_call_id: String,
+    pub source_entry_id: String,
+    pub path: String,
+    pub start_line: Option<usize>,
+    pub end_line: Option<usize>,
+    pub file_sha256: TraceString,
+    pub output_chars: usize,
+    pub captured_at: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextSnapshotLoadOutcome {
+    Loaded,
+    Stale,
+    Missing,
+    Corrupt,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompactionReason {
@@ -526,6 +550,25 @@ pub enum Record {
         #[serde(default, skip_serializing_if = "is_zero")]
         compaction_generation: u64,
         items: Vec<ContextManifestItem>,
+    },
+    ContextSnapshotIndexed {
+        id: String,
+        seq: u64,
+        lane: String,
+        timestamp: u64,
+        run_id: String,
+        snapshot: ContextSnapshot,
+    },
+    ContextSnapshotLoaded {
+        id: String,
+        seq: u64,
+        lane: String,
+        timestamp: u64,
+        run_id: String,
+        context_id: String,
+        source_lane: String,
+        current_digest: Option<TraceString>,
+        outcome: ContextSnapshotLoadOutcome,
     },
     ContextCompacted {
         id: String,
@@ -1163,6 +1206,18 @@ impl Record {
                 }
                 record
             }
+            mut record @ Self::ContextSnapshotIndexed { .. } => {
+                if let Self::ContextSnapshotIndexed { seq: current, .. } = &mut record {
+                    *current = seq;
+                }
+                record
+            }
+            mut record @ Self::ContextSnapshotLoaded { .. } => {
+                if let Self::ContextSnapshotLoaded { seq: current, .. } = &mut record {
+                    *current = seq;
+                }
+                record
+            }
             mut record @ Self::ProviderRequestStarted { .. } => {
                 if let Self::ProviderRequestStarted { seq: current, .. } = &mut record {
                     *current = seq;
@@ -1247,6 +1302,8 @@ impl Record {
             | Self::Usage { id, .. }
             | Self::RunContextCaptured { id, .. }
             | Self::ContextManifestCaptured { id, .. }
+            | Self::ContextSnapshotIndexed { id, .. }
+            | Self::ContextSnapshotLoaded { id, .. }
             | Self::ContextCompacted { id, .. }
             | Self::ProviderRequestStarted { id, .. }
             | Self::ProviderRequestFinished { id, .. }
@@ -1281,6 +1338,8 @@ impl Record {
             | Self::Usage { seq, .. }
             | Self::RunContextCaptured { seq, .. }
             | Self::ContextManifestCaptured { seq, .. }
+            | Self::ContextSnapshotIndexed { seq, .. }
+            | Self::ContextSnapshotLoaded { seq, .. }
             | Self::ContextCompacted { seq, .. }
             | Self::ProviderRequestStarted { seq, .. }
             | Self::ProviderRequestFinished { seq, .. }
@@ -1315,6 +1374,8 @@ impl Record {
             | Self::Usage { lane, .. }
             | Self::RunContextCaptured { lane, .. }
             | Self::ContextManifestCaptured { lane, .. }
+            | Self::ContextSnapshotIndexed { lane, .. }
+            | Self::ContextSnapshotLoaded { lane, .. }
             | Self::ContextCompacted { lane, .. }
             | Self::ProviderRequestStarted { lane, .. }
             | Self::ProviderRequestFinished { lane, .. }
@@ -1345,6 +1406,8 @@ impl Record {
             | Self::WriteApplied { run_id, .. } => Some(run_id),
             Self::RunContextCaptured { run_id, .. }
             | Self::ContextManifestCaptured { run_id, .. }
+            | Self::ContextSnapshotIndexed { run_id, .. }
+            | Self::ContextSnapshotLoaded { run_id, .. }
             | Self::ContextCompacted { run_id, .. }
             | Self::ProviderRequestStarted { run_id, .. }
             | Self::ProviderRequestFinished { run_id, .. }
@@ -1460,6 +1523,8 @@ pub struct LaneState {
     pub abort_requested: bool,
     pub usage: TokenUsage,
     pub tools: Vec<ToolState>,
+    #[serde(default)]
+    pub context_snapshots: Vec<ContextSnapshot>,
     #[serde(default)]
     pub facts: std::collections::BTreeMap<String, String>,
     #[serde(default)]

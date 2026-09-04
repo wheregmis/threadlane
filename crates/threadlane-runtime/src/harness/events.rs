@@ -545,6 +545,8 @@ impl HarnessEvent {
                 Record::LaneMoved { .. } => "LaneMoved",
                 Record::RunContextCaptured { .. } => "RunContextCaptured",
                 Record::ContextManifestCaptured { .. } => "ContextManifestCaptured",
+                Record::ContextSnapshotIndexed { .. } => "ContextSnapshotIndexed",
+                Record::ContextSnapshotLoaded { .. } => "ContextSnapshotLoaded",
                 Record::ProviderRequestStarted { .. } => "ProviderRequestStarted",
                 Record::ProviderRequestFinished { .. } => "ProviderRequestFinished",
                 Record::ProviderResponseAttached { .. } => "ProviderResponseAttached",

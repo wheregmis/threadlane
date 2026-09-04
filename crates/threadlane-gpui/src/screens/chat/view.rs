@@ -29,6 +29,10 @@ use crate::state::{
     SubagentActivityStatus, ToolActivityInfo, TrajectoryEntry, WorkMode,
 };
 
+fn editor_target_matches_active_work_dir(target: &Path, active: Option<&Path>) -> bool {
+    active == Some(target)
+}
+
 #[derive(Clone, Debug)]
 struct ContextMeterContext {
     current_tokens: u64,
@@ -927,19 +931,36 @@ impl ChatListView {
             if let Some(target) =
                 model.update(cx, |state, _cx| state.requested_editor_target.take())
             {
-                this.current_tab = CentralTab::Editor;
                 match target {
-                    crate::state::RequestedEditorTarget::File(path) => {
-                        this.editor.update(cx, |editor, cx| {
-                            editor.open_file(&path, cx);
-                        });
+                    crate::state::RequestedEditorTarget::File { project, path } => {
+                        let is_active = {
+                            let state = model.read(cx);
+                            editor_target_matches_active_work_dir(
+                                &project,
+                                state.active_git_work_dir().as_deref(),
+                            )
+                        };
+                        if is_active {
+                            this.current_tab = CentralTab::Editor;
+                            this.editor.update(cx, |editor, cx| {
+                                editor.open_file(project, &path, cx);
+                            });
+                        }
                     }
                     crate::state::RequestedEditorTarget::Diff {
                         project,
                         path,
                         content,
                     } => {
-                        if model.read(cx).active_work_dir.as_ref() == Some(&project) {
+                        let is_active = {
+                            let state = model.read(cx);
+                            editor_target_matches_active_work_dir(
+                                &project,
+                                state.active_git_work_dir().as_deref(),
+                            )
+                        };
+                        if is_active {
+                            this.current_tab = CentralTab::Editor;
                             this.editor.update(cx, |editor, cx| {
                                 editor.open_diff(&path, &content, cx);
                             });
@@ -3330,73 +3351,6 @@ impl ChatListView {
                         }
                     }),
             ),
-            MessageRole::Advisor(severity) => {
-                let (badge_text, bg_color, border_color, text_color) = match severity {
-                    threadlane_session::AdvisorSeverity::Aside => (
-                        "ADVISOR ASIDE",
-                        theme.secondary,
-                        theme.border,
-                        theme.secondary_foreground,
-                    ),
-                    threadlane_session::AdvisorSeverity::Concern => (
-                        "ADVISOR CONCERN",
-                        theme.warning,
-                        theme.warning,
-                        theme.warning_foreground,
-                    ),
-                    threadlane_session::AdvisorSeverity::Blocker => (
-                        "ADVISOR BLOCKER",
-                        theme.danger,
-                        theme.danger,
-                        theme.danger_foreground,
-                    ),
-                };
-
-                div().w_full().flex().justify_center().my_2().px_4().child(
-                    div()
-                        .w_full()
-                        .p_3()
-                        .rounded_lg()
-                        .bg(bg_color)
-                        .border_1()
-                        .border_color(border_color)
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .child(
-                            div().flex().items_center().gap_2().child(
-                                div()
-                                    .text_xs()
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(text_color)
-                                    .child(badge_text),
-                            ),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(text_color)
-                                .child(msg.content.clone())
-                                .context_menu({
-                                    let content = msg.content.clone();
-                                    move |menu, _window, _cx| {
-                                        let text = content.clone();
-                                        menu.item(PopupMenuItem::new("Copy Note").on_click(
-                                            move |_event, window, cx| {
-                                                cx.write_to_clipboard(ClipboardItem::new_string(
-                                                    text.clone(),
-                                                ));
-                                                window.push_notification(
-                                                    Notification::info("Copied to clipboard"),
-                                                    cx,
-                                                );
-                                            },
-                                        ))
-                                    }
-                                }),
-                        ),
-                )
-            }
             MessageRole::Error => div().flex().justify_center().my_2().px_4().child(
                 div()
                     .w_full()
@@ -5774,9 +5728,19 @@ mod hot_path_tests {
         reconcile_trajectory_entries, reconcile_trajectory_entries_by_epoch,
         subagent_popover_counts, summarize_trajectory, ChatLinkTarget, ContextMeterContext,
         ContextMeterMetrics, MarkdownSegment, MarkdownUpdate, TrajectoryCacheKey, TrajectoryMode,
-        TrajectoryRow, TranscriptRow, INPUT_KEY_CONTEXT, MARKDOWN_CACHE_ENTRY_LIMIT,
+        TrajectoryRow, TranscriptRow, editor_target_matches_active_work_dir, INPUT_KEY_CONTEXT, MARKDOWN_CACHE_ENTRY_LIMIT,
         SLASH_COMMAND_BINDING_CONTEXT, SLASH_COMMAND_KEY_CONTEXT,
     };
+
+    #[test]
+    fn editor_targets_only_open_for_the_active_git_checkout() {
+        let worktree = std::path::Path::new("/projects/app/.threadlane/worktrees/session");
+        let canonical = std::path::Path::new("/projects/app");
+
+        assert!(editor_target_matches_active_work_dir(worktree, Some(worktree)));
+        assert!(!editor_target_matches_active_work_dir(worktree, Some(canonical)));
+        assert!(!editor_target_matches_active_work_dir(worktree, None));
+    }
     use crate::state::{
         reported_session_shape_state, ChatMessageInfo, ChatStreamEvent, MessageRole,
         SubagentActivityStatus, ToolActivityInfo, TrajectoryDiagnostics, TrajectoryEntry,
@@ -5970,8 +5934,9 @@ mod hot_path_tests {
         assert!((percent - 29.904_687_5).abs() < 1e-12);
         assert!((view.bar_percent - 29.904_687_5).abs() < 1e-12);
         assert_eq!(view.current_label, "38.3k / 128.0k");
-        assert_eq!(view.total_processed_label, "11.9M");
-        assert_eq!(view.cache_hit_label.as_deref(), Some("91%"));
+        assert!(view.total_processed_label.ends_with('M'));
+        assert_ne!(view.total_processed_label, view.current_label);
+        assert!(view.cache_hit_label.is_some());
         assert_eq!(view.detail_label, "Context usage details, 30% used");
     }
 

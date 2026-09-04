@@ -37,6 +37,15 @@ pub(crate) fn dispatch(state: &mut AppState, action: AppAction) -> Option<Sessio
         AppAction::BeginNewTask => state.begin_new_task(),
         AppAction::SelectDraftProject(path) => state.select_draft_project(path),
         AppAction::SelectWorkMode(mode) => state.set_work_mode(mode),
+        AppAction::StartIssueWork {
+            work_dir,
+            issue,
+            title,
+        } => {
+            if let Err(error) = state.start_issue_work(work_dir, issue, title) {
+                state.session_status = Some(error);
+            }
+        }
         AppAction::SendPrompt(text) => {
             if let Err(error) = state.send_prompt(text) {
                 state.session_status = Some(error);
@@ -70,6 +79,8 @@ pub(crate) fn dispatch(state: &mut AppState, action: AppAction) -> Option<Sessio
         AppAction::SetAcpConfigOption { config_id, value } => {
             state.set_acp_config_option(config_id, value)
         }
+        AppAction::OpenGitHub => state.open_github(),
+        AppAction::CloseGitHub => state.close_github(),
         AppAction::OpenSettings => state.open_settings(),
         AppAction::CloseSettings => state.close_settings(),
         AppAction::SaveOpenAiKey(key) => {

@@ -4,6 +4,10 @@ use crate::types::AgentMessage;
 
 use serde::{Deserialize, Serialize};
 
+pub const MAX_CONTEXT_SNAPSHOT_INDEX_ENTRIES: usize = 20;
+pub const MAX_CONTEXT_SNAPSHOT_INDEX_CHARS: usize = 4_000;
+const CONTEXT_SNAPSHOT_INDEX_HEADING: &str = "## Available context snapshots";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum CompactionStrategy {
     #[default]
@@ -48,8 +52,8 @@ pub(crate) fn serialized_message(message: &AgentMessage) -> Vec<u8> {
 pub(crate) fn provider_normalized_message(message: &AgentMessage) -> Option<AgentMessage> {
     match message {
         AgentMessage::Custom { .. } => {
-            compaction_summary_text(message).map(|summary| AgentMessage::User {
-                content: format!("<context-checkpoint>\n{summary}\n</context-checkpoint>"),
+            compaction_checkpoint_text(message).map(|checkpoint| AgentMessage::User {
+                content: format!("<context-checkpoint>\n{checkpoint}\n</context-checkpoint>"),
             })
         }
         _ => Some(message.clone()),
@@ -133,6 +137,26 @@ pub fn compact_for_context_budget(
     )
 }
 
+/// Returns true if message history exceeds the speculative compaction threshold (~85% of budget).
+pub fn should_speculatively_compact(
+    messages: &[AgentMessage],
+    tool_schema_json: Option<&str>,
+    budget: &ContextBudget,
+    config: &AgentConfig,
+) -> bool {
+    estimate_request_tokens(messages, tool_schema_json, config)
+        >= budget.speculative_trigger_tokens()
+}
+
+/// Applies local deterministic tool output trimming ("tool shaking") to old turns,
+/// preserving recent turns while reclaiming tokens without calling an LLM summarizer.
+pub fn shake_historical_tool_outputs(
+    messages: &[AgentMessage],
+    preserve_recent_turns: usize,
+) -> Vec<AgentMessage> {
+    prune_historical_tool_outputs(messages, preserve_recent_turns)
+}
+
 pub(crate) fn should_auto_compact(messages: &[AgentMessage], config: &AgentConfig) -> bool {
     estimate_context_tokens(messages, config) > config.auto_compaction_threshold_tokens
 }
@@ -158,6 +182,53 @@ pub fn compaction_summary_text(message: &AgentMessage) -> Option<&str> {
         return None;
     }
     payload.get("summary").and_then(serde_json::Value::as_str)
+}
+
+pub(crate) fn compaction_checkpoint_text(message: &AgentMessage) -> Option<String> {
+    let summary = compaction_summary_text(message)?;
+    let AgentMessage::Custom { payload, .. } = message else {
+        unreachable!();
+    };
+    let Some(entries) = payload
+        .get("context_snapshot_index")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Some(summary.to_owned());
+    };
+    let mut index = CONTEXT_SNAPSHOT_INDEX_HEADING.to_owned();
+    let mut included = 0;
+    for entry in entries.iter().take(MAX_CONTEXT_SNAPSHOT_INDEX_ENTRIES) {
+        let (Some(context_id), Some(path), Some(file_sha256)) = (
+            entry.get("context_id").and_then(serde_json::Value::as_str),
+            entry.get("path").and_then(serde_json::Value::as_str),
+            entry.get("file_sha256").and_then(serde_json::Value::as_str),
+        ) else {
+            continue;
+        };
+        let location = match (
+            entry.get("start_line").and_then(serde_json::Value::as_u64),
+            entry.get("end_line").and_then(serde_json::Value::as_u64),
+        ) {
+            (None, None) => path.to_owned(),
+            (start, end) => format!(
+                "{path}:{}-{}",
+                start.map_or_else(String::new, |line| line.to_string()),
+                end.map_or_else(String::new, |line| line.to_string())
+            ),
+        };
+        let line = format!("- {context_id} {location} sha256={file_sha256}");
+        if index.chars().count() + 1 + line.chars().count() > MAX_CONTEXT_SNAPSHOT_INDEX_CHARS {
+            break;
+        }
+        index.push('\n');
+        index.push_str(&line);
+        included += 1;
+    }
+    Some(if included == 0 {
+        summary.to_owned()
+    } else {
+        format!("{summary}\n\n{index}")
+    })
 }
 
 pub fn compact_messages(
@@ -328,6 +399,7 @@ fn compact_from_index(
             "summary": build_checkpoint(&dropped, config),
             "compacted_messages": dropped.len(),
             "checkpoint_kind": "token_budget",
+            "context_snapshot_index": [],
         }),
     });
     compacted.extend(
@@ -456,11 +528,37 @@ pub fn prepare_token_optimal_context(
 }
 
 fn build_checkpoint(messages: &[AgentMessage], config: &AgentConfig) -> String {
+    build_checkpoint_from_entries(
+        messages.len(),
+        messages.iter().map(|message| (message, false)),
+        config,
+    )
+}
+
+pub fn build_checkpoint_omitting_tool_outputs(
+    entries: &[crate::harness::Entry],
+    omitted_source_entry_ids: &[String],
+    config: &AgentConfig,
+) -> String {
+    build_checkpoint_from_entries(
+        entries.len(),
+        entries
+            .iter()
+            .map(|entry| (&entry.message, omitted_source_entry_ids.contains(&entry.id))),
+        config,
+    )
+}
+
+fn build_checkpoint_from_entries<'a>(
+    message_count: usize,
+    entries: impl DoubleEndedIterator<Item = (&'a AgentMessage, bool)>,
+    config: &AgentConfig,
+) -> String {
     let mut excerpts = Vec::new();
     let mut used_chars = 0;
 
-    for message in messages.iter().rev() {
-        let Some(excerpt) = message_excerpt(message) else {
+    for (message, output_omitted) in entries.rev() {
+        let Some(excerpt) = message_excerpt(message, output_omitted) else {
             continue;
         };
         if used_chars + excerpt.len() > config.max_checkpoint_chars {
@@ -473,12 +571,12 @@ fn build_checkpoint(messages: &[AgentMessage], config: &AgentConfig) -> String {
 
     format!(
         "Context checkpoint from {} earlier messages. Continue the same task using the retained recent messages and these earlier excerpts:\n\n{}",
-        messages.len(),
+        message_count,
         excerpts.join("\n\n")
     )
 }
 
-fn message_excerpt(message: &AgentMessage) -> Option<String> {
+fn message_excerpt(message: &AgentMessage, output_omitted: bool) -> Option<String> {
     match message {
         AgentMessage::User { content } => Some(format!("User: {content}")),
         AgentMessage::UserWithImages { content, images } => Some(format!(
@@ -490,6 +588,11 @@ fn message_excerpt(message: &AgentMessage) -> Option<String> {
             .filter(|content| !content.trim().is_empty())
             .map(|content| format!("Assistant: {content}")),
         AgentMessage::Tool { name, content, .. } => {
+            if output_omitted {
+                return Some(format!(
+                    "Tool {name}: [output stored as an available context snapshot]"
+                ));
+            }
             let truncated_content = if content.len() > 400 {
                 let head: String = content.chars().take(200).collect();
                 let tail_chars: Vec<char> = content.chars().rev().take(150).collect();
@@ -643,6 +746,51 @@ mod tests {
         assert_eq!(
             estimate_request_tokens(&messages, Some(&"t".repeat(400)), &config),
             serialized_message_tokens + 100 + 77
+        );
+    }
+
+    #[test]
+    fn provider_normalization_preserves_summary_and_renders_structured_snapshot_index() {
+        let summary = concat!(
+            "Keep this model-authored text exactly.\n",
+            "<!-- threadlane:context-snapshots:index:begin -->\n",
+            "## Available context snapshots\n",
+            "- user-authored marker-looking content\n",
+            "<!-- threadlane:context-snapshots:index:end -->",
+        );
+        let message = AgentMessage::Custom {
+            custom_type: "compaction_summary".into(),
+            payload: serde_json::json!({
+                "summary": summary,
+                "context_snapshot_index": [{
+                    "context_id": "ctx-1",
+                    "path": "src/lib.rs",
+                    "start_line": 2,
+                    "end_line": 4,
+                    "file_sha256": "abc123",
+                }],
+            }),
+        };
+
+        assert_eq!(compaction_summary_text(&message), Some(summary));
+        assert_eq!(
+            provider_normalized_message(&message),
+            Some(AgentMessage::User {
+                content: format!(
+                    "<context-checkpoint>\n{summary}\n\n## Available context snapshots\n- ctx-1 src/lib.rs:2-4 sha256=abc123\n</context-checkpoint>"
+                ),
+            })
+        );
+
+        let legacy = AgentMessage::Custom {
+            custom_type: "compaction_summary".into(),
+            payload: serde_json::json!({"summary": "legacy summary"}),
+        };
+        assert_eq!(
+            provider_normalized_message(&legacy),
+            Some(AgentMessage::User {
+                content: "<context-checkpoint>\nlegacy summary\n</context-checkpoint>".into(),
+            })
         );
     }
 

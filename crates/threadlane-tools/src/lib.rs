@@ -3,12 +3,35 @@ pub mod search;
 mod virtual_read;
 
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{LazyLock, Mutex, OnceLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+const READ_FILE_SNAPSHOT_PREFIX: &str = "[Threadlane read_file SHA-256: ";
+const READ_FILE_SNAPSHOT_PATH_PREFIX: &str = "[Threadlane read_file path: ";
+
+pub fn read_file_snapshot_digest(output: &str) -> Option<&str> {
+    output.lines().take(2).find_map(|line| {
+        let digest = line
+            .strip_prefix(READ_FILE_SNAPSHOT_PREFIX)?
+            .strip_suffix(']')?;
+        (digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .then_some(digest)
+    })
+}
+
+pub fn read_file_snapshot_path(output: &str) -> Option<String> {
+    output.lines().take(3).find_map(|line| {
+        let path = line
+            .strip_prefix(READ_FILE_SNAPSHOT_PATH_PREFIX)?
+            .strip_suffix(']')?;
+        serde_json::from_str(path).ok()
+    })
+}
 
 fn tool_definitions() -> Vec<Value> {
     vec![
@@ -369,6 +392,122 @@ fn validate_cwd_in_workspace(
     Ok(canonical_target)
 }
 
+static FUZZY_PATH_CACHE: LazyLock<RwLock<HashMap<(PathBuf, String), (PathBuf, String)>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// Searches the workspace for candidate files matching `path_input` as a relative suffix
+/// or filename when an exact path lookup fails.
+pub fn find_fuzzy_workspace_path(
+    path_input: &str,
+    workspace_root: &Path,
+) -> Result<Option<(PathBuf, String)>, String> {
+    let raw = Path::new(path_input);
+    if raw.is_absolute() {
+        return Ok(None);
+    }
+    let canonical_root = canonical_workspace_root(workspace_root)?;
+    let cache_key = (canonical_root.clone(), path_input.to_string());
+    if let Ok(guard) = FUZZY_PATH_CACHE.read() {
+        if let Some((cached_abs, _)) = guard.get(&cache_key) {
+            if let Ok(cached_abs) = cached_abs.canonicalize() {
+                if cached_abs.starts_with(&canonical_root) && cached_abs.is_file() {
+                    let cached_rel = cached_abs
+                        .strip_prefix(&canonical_root)
+                        .expect("checked workspace boundary")
+                        .to_string_lossy()
+                        .to_string();
+                    return Ok(Some((cached_abs, cached_rel)));
+                }
+            }
+        }
+    }
+    let mut candidates = Vec::new();
+
+    fn scan_dir(
+        root: &Path,
+        current: &Path,
+        target_suffix: &Path,
+        target_name: Option<&std::ffi::OsStr>,
+        out: &mut Vec<PathBuf>,
+    ) {
+        if out.len() > 10 {
+            return;
+        }
+        let Ok(entries) = fs::read_dir(current) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            if name == ".git" || name == "target" || name == ".threadlane" || name == "node_modules"
+            {
+                continue;
+            }
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_symlink() {
+                continue;
+            }
+            let Ok(path) = path.canonicalize() else {
+                continue;
+            };
+            if !path.starts_with(root) {
+                continue;
+            }
+            if file_type.is_dir() {
+                scan_dir(root, &path, target_suffix, target_name, out);
+            } else if file_type.is_file() {
+                if path.ends_with(target_suffix)
+                    || (target_suffix.components().count() == 1
+                        && target_name.is_some_and(|n| n == name))
+                {
+                    out.push(path);
+                }
+            }
+        }
+    }
+
+    let target_name = raw.file_name();
+    scan_dir(
+        &canonical_root,
+        &canonical_root,
+        raw,
+        target_name,
+        &mut candidates,
+    );
+
+    if candidates.len() == 1 {
+        let matched = candidates.remove(0);
+        let rel = matched
+            .strip_prefix(&canonical_root)
+            .unwrap_or(&matched)
+            .to_string_lossy()
+            .to_string();
+        if let Ok(mut guard) = FUZZY_PATH_CACHE.write() {
+            guard.insert(cache_key, (matched.clone(), rel.clone()));
+        }
+        Ok(Some((matched, rel)))
+    } else if candidates.len() > 1 {
+        let mut suggestions: Vec<String> = candidates
+            .iter()
+            .map(|c| {
+                c.strip_prefix(&canonical_root)
+                    .unwrap_or(c)
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+        suggestions.sort();
+        Err(format!(
+            "File '{path_input}' not found. Did you mean one of: [{}]?",
+            suggestions.join(", ")
+        ))
+    } else {
+        Ok(None)
+    }
+}
+
 pub fn execute_tool(name: &str, args_json: &str) -> String {
     try_execute_tool(name, args_json).unwrap_or_else(|error| error)
 }
@@ -424,7 +563,29 @@ pub fn try_execute_tool_in_workspace(
                 Some(p) => p,
                 None => return Err("Error: 'path' parameter is required".into()),
             };
-            let validated_path = validate_path_in_workspace(raw_path, workspace_root)?;
+
+            let (validated_path, auto_resolved_notice) =
+                match validate_path_in_workspace(raw_path, workspace_root) {
+                    Ok(p) if p.is_file() => (p, None),
+                    Ok(p) => match find_fuzzy_workspace_path(raw_path, workspace_root)? {
+                        Some((fuzzy_path, rel_name)) => {
+                            let notice = format!(
+                                "[Notice: Auto-resolved '{raw_path}' to '{rel_name}']\n"
+                            );
+                            (fuzzy_path, Some(notice))
+                        }
+                        None => (p, None),
+                    },
+                    Err(e) => match find_fuzzy_workspace_path(raw_path, workspace_root)? {
+                        Some((fuzzy_path, rel_name)) => {
+                            let notice = format!(
+                                "[Notice: Auto-resolved '{raw_path}' to '{rel_name}']\n"
+                            );
+                            (fuzzy_path, Some(notice))
+                        }
+                        None => return Err(e),
+                    },
+                };
 
             let start = args.get("start_line").and_then(|v| v.as_u64()).map(|n| n as usize);
             let end = args.get("end_line").and_then(|v| v.as_u64()).map(|n| n as usize);
@@ -453,14 +614,44 @@ pub fn try_execute_tool_in_workspace(
                     hashline::format_line_hashline(line_no, line)
                 })
                 .collect();
-            Ok(truncate_tool_output(&formatted_lines.join("\n")))
+            let body = formatted_lines.join("\n");
+            let canonical_root = canonical_workspace_root(workspace_root)?;
+            let snapshot_path = validated_path
+                .strip_prefix(&canonical_root)
+                .map_err(|_| {
+                    format!(
+                        "read path '{}' is outside workspace",
+                        validated_path.display()
+                    )
+                })?
+                .to_string_lossy();
+            let snapshot = format!(
+                "{READ_FILE_SNAPSHOT_PREFIX}{:x}]\n{READ_FILE_SNAPSHOT_PATH_PREFIX}{}]\n",
+                Sha256::digest(content.as_bytes()),
+                serde_json::to_string(snapshot_path.as_ref()).map_err(|error| error.to_string())?,
+            );
+            let output = match auto_resolved_notice {
+                Some(notice) => format!("{notice}{snapshot}{body}"),
+                None => format!("{snapshot}{body}"),
+            };
+            Ok(truncate_tool_output(&output))
         }
         "write_file" => {
             let raw_path = args
                 .get("path")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "Error: 'path' parameter is required".to_string())?;
-            let validated_path = validate_path_in_workspace(raw_path, workspace_root)?;
+            let (validated_path, auto_notice) = match validate_path_in_workspace(raw_path, workspace_root) {
+                Ok(p) if p.is_file() => (p, None),
+                Ok(p) => match find_fuzzy_workspace_path(raw_path, workspace_root) {
+                    Ok(Some((resolved, rel))) => (resolved, Some(format!("[Notice: Auto-resolved '{raw_path}' to '{rel}']\n"))),
+                    _ => (p, None),
+                },
+                Err(err) => match find_fuzzy_workspace_path(raw_path, workspace_root) {
+                    Ok(Some((resolved, rel))) => (resolved, Some(format!("[Notice: Auto-resolved '{raw_path}' to '{rel}']\n"))),
+                    _ => return Err(err),
+                },
+            };
 
             let content = args
                 .get("content")
@@ -476,8 +667,9 @@ pub fn try_execute_tool_in_workspace(
             fs::write(&validated_path, content)
                 .map_err(|e| format!("Error writing to file '{raw_path}': {e}"))?;
             let diag = run_post_edit_diagnostics(workspace_root, raw_path);
+            let notice_str = auto_notice.as_deref().unwrap_or("");
             Ok(format!(
-                "Successfully wrote {} bytes to '{raw_path}'{diag}",
+                "{notice_str}Successfully wrote {} bytes to '{raw_path}'{diag}",
                 content.len()
             ))
         }
@@ -486,7 +678,19 @@ pub fn try_execute_tool_in_workspace(
                 .get("path")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "Error: 'path' parameter is required".to_string())?;
-            let validated_path = validate_path_in_workspace(raw_path, workspace_root)?;
+            let (validated_path, auto_notice) = match validate_path_in_workspace(raw_path, workspace_root) {
+                Ok(p) if p.is_file() => (p, None),
+                Ok(p) => match find_fuzzy_workspace_path(raw_path, workspace_root) {
+                    Ok(Some((resolved, rel))) => (resolved, Some(format!("[Notice: Auto-resolved '{raw_path}' to '{rel}']\n"))),
+                    Ok(None) => (p, None),
+                    Err(suggestion_err) => return Err(suggestion_err),
+                },
+                Err(err) => match find_fuzzy_workspace_path(raw_path, workspace_root) {
+                    Ok(Some((resolved, rel))) => (resolved, Some(format!("[Notice: Auto-resolved '{raw_path}' to '{rel}']\n"))),
+                    Ok(None) => return Err(err),
+                    Err(suggestion_err) => return Err(suggestion_err),
+                },
+            };
 
             let edits_value = args
                 .get("edits")
@@ -511,8 +715,9 @@ pub fn try_execute_tool_in_workspace(
             } else {
                 String::new()
             };
+            let notice_str = auto_notice.as_deref().unwrap_or("");
             Ok(format!(
-                "Successfully applied {} hashline edit(s) to '{raw_path}'{diag}{diff_section}{anchors_section}",
+                "{notice_str}Successfully applied {} hashline edit(s) to '{raw_path}'{diag}{diff_section}{anchors_section}",
                 edits.len()
             ))
         }
@@ -526,7 +731,19 @@ pub fn try_execute_tool_in_workspace(
             for file in files {
                 let raw_path = file.get("path").and_then(Value::as_str)
                     .ok_or_else(|| "Error: every file requires 'path'".to_string())?;
-                let path = validate_path_in_workspace(raw_path, workspace_root)?;
+                let path = match validate_path_in_workspace(raw_path, workspace_root) {
+                    Ok(p) if p.is_file() => p,
+                    Ok(p) => match find_fuzzy_workspace_path(raw_path, workspace_root) {
+                        Ok(Some((resolved, _))) => resolved,
+                        Ok(None) => p,
+                        Err(suggestion_err) => return Err(suggestion_err),
+                    },
+                    Err(err) => match find_fuzzy_workspace_path(raw_path, workspace_root) {
+                        Ok(Some((resolved, _))) => resolved,
+                        Ok(None) => return Err(err),
+                        Err(suggestion_err) => return Err(suggestion_err),
+                    },
+                };
                 if !seen.insert(path.clone()) { return Err(format!("Error: duplicate transaction path '{raw_path}'")); }
                 let edits: Vec<hashline::HashlineEdit> = serde_json::from_value(
                     file.get("edits").cloned().ok_or_else(|| format!("Error: '{raw_path}' requires 'edits'"))?
@@ -620,8 +837,14 @@ pub fn try_execute_tool_in_workspace(
                 .get("command")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "Error: 'command' parameter is required".to_string())?;
+
+            let trimmed_cmd = cmd_str.trim();
             let raw_cwd = args.get("cwd").and_then(|v| v.as_str());
             let validated_cwd = validate_cwd_in_workspace(raw_cwd, workspace_root)?;
+            if trimmed_cmd == "dyn" || trimmed_cmd.starts_with("dyn ") {
+                let dyn_args = trimmed_cmd.strip_prefix("dyn").unwrap_or("").trim();
+                return execute_dyn_cli(dyn_args, &validated_cwd);
+            }
 
             let mut cmd = Command::new("sh");
             cmd.arg("-c").arg(cmd_str);
@@ -668,6 +891,53 @@ pub fn try_execute_tool_in_workspace(
         "consolidate_memory" => consolidate_memory_impl(workspace_root, &args),
         unknown => Err(format!("Error: Unknown tool '{unknown}'")),
     }
+}
+
+/// Dispatches an in-process CLI tool invocation via `dyn <tool> [args]`.
+fn execute_dyn_cli(input: &str, workspace_root: &Path) -> Result<String, String> {
+    let input = input.trim();
+    if input.is_empty() || input == "--help" || input == "-h" {
+        let mut lines = vec![
+            "Threadlane In-Process Tool Runner (dyn)".to_string(),
+            "Usage: dyn <tool_name> [json_args] | dyn <tool_name> --help".to_string(),
+            "".to_string(),
+            "Available auxiliary tools:".to_string(),
+        ];
+        for def in tool_definitions() {
+            let name = def.get("name").and_then(Value::as_str).unwrap_or("");
+            let desc = def.get("description").and_then(Value::as_str).unwrap_or("");
+            let first_sentence = desc.split('.').next().unwrap_or(desc).trim();
+            lines.push(format!("  {:<26} {}", name, first_sentence));
+        }
+        lines.push("".to_string());
+        lines.push("Tip: Core tools (read_file, edit_file_hashline, write_file, run_command, subagent) are in active schema.".to_string());
+        return Ok(format!("Exit Status: exit status: 0\n--- STDOUT ---\n{}\n--- STDERR ---", lines.join("\n")));
+    }
+
+    let mut parts = input.split_whitespace();
+    let tool_name = parts.next().unwrap_or("");
+    let remaining = input[tool_name.len()..].trim();
+
+    if remaining == "--help" || remaining == "-h" {
+        for def in tool_definitions() {
+            if def.get("name").and_then(Value::as_str) == Some(tool_name) {
+                let formatted = serde_json::to_string_pretty(&def).unwrap_or_default();
+                return Ok(format!("Exit Status: exit status: 0\n--- STDOUT ---\nTool Schema for '{tool_name}':\n{formatted}\n--- STDERR ---"));
+            }
+        }
+        return Err(format!("Unknown tool '{tool_name}'. Run 'dyn' to list tools."));
+    }
+
+    let args_json = if remaining.starts_with('{') {
+        remaining.to_string()
+    } else if remaining.is_empty() {
+        "{}".to_string()
+    } else {
+        return Err("dyn requires JSON arguments as an object".into());
+    };
+
+    let result = try_execute_tool_in_workspace(tool_name, &args_json, workspace_root)?;
+    Ok(format!("Exit Status: exit status: 0\n--- STDOUT ---\n{result}\n--- STDERR ---"))
 }
 
 const MAX_TOOL_OUTPUT_CHARS: usize = 3_000;
@@ -1177,6 +1447,48 @@ mod tests {
             dir.path(),
         );
         assert!(absolute.is_err(), "got: {absolute:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fuzzy_path_ignores_symlinks_outside_the_workspace() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        fs::write(outside.path().join("secret.rs"), "secret").unwrap();
+        symlink(
+            outside.path().join("secret.rs"),
+            root.path().join("secret.rs"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            find_fuzzy_workspace_path("secret.rs", root.path()).unwrap(),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fuzzy_path_rechecks_cached_symlink_matches() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let linked = root.path().join("secret.rs");
+        fs::write(outside.path().join("secret.rs"), "secret").unwrap();
+        symlink(outside.path().join("secret.rs"), &linked).unwrap();
+        let canonical_root = canonical_workspace_root(root.path()).unwrap();
+        FUZZY_PATH_CACHE.write().unwrap().insert(
+            (canonical_root, "secret.rs".into()),
+            (linked, "secret.rs".into()),
+        );
+
+        assert_eq!(
+            find_fuzzy_workspace_path("secret.rs", root.path()).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -1715,8 +2027,13 @@ mod tests {
         fs::write(dir.path().join("sample.txt"), "contents").unwrap();
 
         let read =
-            try_execute_tool_in_workspace("read_file", r#"{"path":"sample.txt"}"#, dir.path());
-        assert!(read.is_ok(), "{read:?}");
+            try_execute_tool_in_workspace("read_file", r#"{"path":"sample.txt"}"#, dir.path())
+                .unwrap();
+        fs::write(dir.path().join("sample.txt"), "changed after read").unwrap();
+        assert_eq!(
+            read_file_snapshot_digest(&read),
+            Some("d1b2a59fbea7e20077af9f91b27e95e865061b270be03ff539ab3b73587882e8")
+        );
 
         let command =
             try_execute_tool_in_workspace("run_command", r#"{"command":"printf ok"}"#, dir.path());
@@ -1851,5 +2168,105 @@ mod tests {
             execute_tool_in_workspace("run_command", args, dir.path()),
             error
         );
+    }
+
+    #[test]
+    fn test_read_file_auto_resolves_unique_workspace_suffix() {
+        let dir = tempdir().unwrap();
+        let sub = dir.path().join("crates").join("my-crate").join("src");
+        fs::create_dir_all(&sub).unwrap();
+        let file_path = sub.join("view.rs");
+        fs::write(&file_path, "pub fn render() {}\n").unwrap();
+
+        // Reading with partial path "src/view.rs"
+        let args = json!({ "path": "src/view.rs" }).to_string();
+        let result = try_execute_tool_in_workspace("read_file", &args, dir.path()).unwrap();
+        assert!(result.contains("[Notice: Auto-resolved 'src/view.rs' to 'crates/my-crate/src/view.rs']"));
+        assert!(result.contains("pub fn render()"));
+
+        // Reading with bare filename "view.rs"
+        let args_bare = json!({ "path": "view.rs" }).to_string();
+        let result_bare = try_execute_tool_in_workspace("read_file", &args_bare, dir.path()).unwrap();
+        assert!(result_bare.contains("[Notice: Auto-resolved 'view.rs' to 'crates/my-crate/src/view.rs']"));
+        assert!(result_bare.contains("pub fn render()"));
+    }
+
+    #[test]
+    fn test_read_file_errors_with_suggestions_when_path_is_ambiguous() {
+        let dir = tempdir().unwrap();
+        let sub1 = dir.path().join("crate_a").join("src");
+        let sub2 = dir.path().join("crate_b").join("src");
+        fs::create_dir_all(&sub1).unwrap();
+        fs::create_dir_all(&sub2).unwrap();
+        fs::write(sub1.join("lib.rs"), "pub mod a;\n").unwrap();
+        fs::write(sub2.join("lib.rs"), "pub mod b;\n").unwrap();
+
+        let args = json!({ "path": "lib.rs" }).to_string();
+        let err = try_execute_tool_in_workspace("read_file", &args, dir.path()).unwrap_err();
+        assert!(err.contains("File 'lib.rs' not found. Did you mean one of:"));
+        assert!(err.contains("crate_a/src/lib.rs"));
+        assert!(err.contains("crate_b/src/lib.rs"));
+    }
+
+    #[test]
+    fn test_run_command_dyn_cli() {
+        let dir = tempdir().unwrap();
+        // 1. "dyn" list
+        let args_list = json!({ "command": "dyn" }).to_string();
+        let out_list = try_execute_tool_in_workspace("run_command", &args_list, dir.path()).unwrap();
+        assert!(out_list.contains("Threadlane In-Process Tool Runner (dyn)"));
+        assert!(out_list.contains("manage_memory"));
+
+        // 2. "dyn --help manage_memory"
+        let args_help = json!({ "command": "dyn manage_memory --help" }).to_string();
+        let out_help = try_execute_tool_in_workspace("run_command", &args_help, dir.path()).unwrap();
+        assert!(out_help.contains("Tool Schema for 'manage_memory'"));
+
+        // 3. JSON arguments preserve the tool schema's types and quoting.
+        let args_run = json!({ "command": "dyn manage_memory {\"action\":\"read\"}" }).to_string();
+        let out_run = try_execute_tool_in_workspace("run_command", &args_run, dir.path()).unwrap();
+        assert!(out_run.contains("No persistent memory found"));
+
+        let flags = json!({ "command": "dyn manage_memory --action read" }).to_string();
+        assert!(try_execute_tool_in_workspace("run_command", &flags, dir.path())
+            .unwrap_err()
+            .contains("JSON arguments"));
+
+        let escaped_cwd = json!({ "command": "dyn", "cwd": "../outside" }).to_string();
+        assert!(try_execute_tool_in_workspace("run_command", &escaped_cwd, dir.path()).is_err());
+    }
+
+    #[test]
+    fn test_edit_file_hashline_auto_resolves_unique_workspace_suffix() {
+        let dir = tempdir().unwrap();
+        let sub = dir.path().join("crates").join("my-crate").join("src");
+        fs::create_dir_all(&sub).unwrap();
+        let file_path = sub.join("view.rs");
+        fs::write(&file_path, "hello world\n").unwrap();
+
+        // 1. read_file with shorthand path
+        let read_args = json!({ "path": "src/view.rs" }).to_string();
+        let read_res = try_execute_tool_in_workspace("read_file", &read_args, dir.path()).unwrap();
+        assert!(read_res.contains("[Notice: Auto-resolved 'src/view.rs' to 'crates/my-crate/src/view.rs']"));
+
+        // Extract hash from line 1
+        let hash = read_res.lines().find(|l| l.starts_with("1:")).and_then(|l| l.split(':').nth(1)).and_then(|s| s.split('|').next()).unwrap();
+
+        // 2. edit_file_hashline with the same shorthand path
+        let edit_args = json!({
+            "path": "src/view.rs",
+            "edits": [{
+                "start_anchor": format!("1:{hash}"),
+                "action": "replace",
+                "new_content": "hello threadlane"
+            }]
+        }).to_string();
+
+        let edit_res = try_execute_tool_in_workspace("edit_file_hashline", &edit_args, dir.path()).unwrap();
+        assert!(edit_res.contains("[Notice: Auto-resolved 'src/view.rs' to 'crates/my-crate/src/view.rs']"));
+        assert!(edit_res.contains("Successfully applied 1 hashline edit(s)"));
+
+        let updated = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(updated, "hello threadlane\n");
     }
 }

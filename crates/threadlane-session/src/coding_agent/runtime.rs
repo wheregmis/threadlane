@@ -6,8 +6,9 @@ use super::subagents::*;
 
 use super::broker::ManagedProcessRegistry;
 use super::capabilities::{
-    build_broker_dispatcher, render_agent_catalog, restored_tool_policy, McpCapability,
-    PlanCapability, SkillCapability, SubagentCapability, WasiCapability,
+    build_broker_dispatcher, render_agent_catalog, restored_tool_policy, ContextCapability,
+    McpCapability, PlanCapability, PrewalkCapability, SkillCapability, SubagentCapability,
+    WasiCapability,
 };
 use super::harness::{CodingSessionHarness, HarnessWatch, InterruptedSubagentRecoveryState};
 use crate::commands::{execute_slash_command, parse_slash_command, CommandAction};
@@ -48,13 +49,13 @@ pub struct CodingAgent {
     pub(crate) permission_handle: crate::permission::PermissionHandle,
     pub(crate) agent_work: AgentWorkScheduler,
     pub(crate) mcp_manager: Arc<McpManager>,
-    pub(crate) plan_store: SessionPlanStore,
     pub(crate) prompt_templates: Option<Vec<crate::prompt_templates::PromptTemplate>>,
     pub(crate) dispatch_parent_leaf: Arc<std::sync::Mutex<Option<String>>>,
     pub(crate) completed_subagent_lanes: Arc<std::sync::Mutex<Vec<CompletedSubagentLane>>>,
     pub(crate) harness: Option<CodingSessionHarness>,
     pub(crate) harness_journal_error: Option<String>,
     pub(crate) harness_run_id: Arc<std::sync::Mutex<Option<String>>>,
+    pub(crate) prewalk: Arc<std::sync::Mutex<Option<crate::orchestrator::PrewalkState>>>,
     pub(crate) cancellation: CodingAgentCancellation,
     pub(crate) interrupted_subagent_recovery: InterruptedSubagentRecoveryState,
     /// Connection to an external ACP agent, opened on first use.
@@ -551,10 +552,14 @@ impl CodingAgent {
         registry.register(Box::new(PlanCapability {
             plan_store: plan_store.clone(),
             event_tx: agent.event_tx.clone(),
-            provider_client: agent.provider_client_arc(),
-            turn: agent.turn.clone(),
-            config: agent.config().clone(),
         }));
+        if let Some(session_file) = options.session_file.clone() {
+            registry.register(Box::new(ContextCapability {
+                session_file,
+                work_dir: options.work_dir.clone(),
+            }));
+        }
+        registry.register(Box::new(PrewalkCapability));
 
         registry.register(Box::new(WasiCapability {
             extensions: wasi_extensions.clone(),
@@ -626,13 +631,13 @@ impl CodingAgent {
             permission_handle,
             agent_work,
             mcp_manager,
-            plan_store,
             prompt_templates: None,
             dispatch_parent_leaf,
             completed_subagent_lanes,
             harness,
             harness_journal_error,
             harness_run_id,
+            prewalk: Arc::new(std::sync::Mutex::new(None)),
             cancellation,
             interrupted_subagent_recovery,
             acp,
@@ -827,7 +832,8 @@ impl CodingAgent {
         }
         let templates = self.prompt_templates.as_ref().unwrap();
         let expanded_input = crate::prompt_templates::expand_prompt_template(trimmed, templates);
-        let effective_input = expanded_input.trim();
+        let mut effective_input = expanded_input.trim().to_string();
+        let mut architect_directive: Option<String> = None;
 
         if let Some(command_input) = effective_input.strip_prefix('/') {
             let mut parts = command_input.split_whitespace();
@@ -915,6 +921,7 @@ impl CodingAgent {
                     instructions: None,
                     tools: None,
                     model: None,
+                    context_refs: Vec::new(),
                 };
                 let visible_prompt = AgentMessage::user(input, images.clone());
                 let harness_run_id = match self.begin_harness_run(visible_prompt).await {
@@ -1174,7 +1181,7 @@ impl CodingAgent {
                 };
             }
 
-            if let Some(cmd_action) = parse_slash_command(effective_input) {
+            if let Some(cmd_action) = parse_slash_command(&effective_input) {
                 if cmd_action == CommandAction::Quit {
                     return Some(Ok("quitting".to_string()));
                 }
@@ -1200,68 +1207,91 @@ impl CodingAgent {
                             .map(|_| format!("Session name set to: {name}")),
                     );
                 }
-                if let CommandAction::Plan(objective) = &cmd_action {
+                if let CommandAction::Prewalk(objective) = &cmd_action {
                     let task_prompt = objective.trim();
                     if task_prompt.is_empty() {
-                        return Some(Ok("Usage: /plan <task objective> - generate an implementation plan with the Plan model.".into()));
+                        return Some(Ok("Usage: /prewalk <task objective> - explore with frontier model, land first edit, then transition to fast model.".into()));
                     }
-                    let client = self.agent.provider_client_arc();
                     let active_model = self.agent.turn.lock().await.model.clone();
-                    let plan_model = self
+                    let fast_model = self
                         .agent
                         .model_roles()
-                        .resolve_plan(&active_model)
+                        .resolve_fast(&active_model)
                         .to_string();
-                    match crate::plan::generate_plan_with_model(client, &plan_model, task_prompt)
-                        .await
-                    {
-                        Ok(plan) => {
-                            if let Err(error) = self.plan_store.replace(plan.clone()) {
-                                return Some(Err(format!("Failed to save plan: {error}")));
-                            }
-                            let _ = self
-                                .agent
-                                .event_tx
-                                .send(AgentEvent::PlanUpdated { plan: plan.clone() });
-                            let mut msg = format!(
-                                "Generated implementation plan with model `{}`:\n",
-                                plan_model
-                            );
-                            if let Some(exp) = &plan.explanation {
-                                msg.push_str(&format!("\n> {}\n\n", exp));
-                            }
-                            for (i, item) in plan.items.iter().enumerate() {
-                                let status_icon = match item.status {
-                                    threadlane_runtime::PlanItemStatus::Completed => "[x]",
-                                    threadlane_runtime::PlanItemStatus::InProgress => "[>]",
-                                    threadlane_runtime::PlanItemStatus::Pending => "[ ]",
-                                };
-                                msg.push_str(&format!(
-                                    "{}. {} {}\n",
-                                    i + 1,
-                                    status_icon,
-                                    item.step
-                                ));
-                            }
-                            return Some(Ok(msg));
-                        }
-                        Err(error) => return Some(Err(format!("Plan generation failed: {error}"))),
-                    }
-                }
-                if matches!(
-                    cmd_action,
-                    CommandAction::Advisor(_) | CommandAction::Roles(_)
-                ) {
+                    let fast_reasoning = self.agent.config().fast_reasoning_effort;
+                    *self.prewalk.lock().unwrap() = Some(crate::orchestrator::PrewalkState {
+                        target_model: fast_model.clone(),
+                        target_reasoning: fast_reasoning,
+                        started_at: std::time::Instant::now(),
+                    });
+
+                    let _ = self.agent.event_tx.send(AgentEvent::PrewalkCompleted {
+                        model: active_model.clone(),
+                        message: format!("Prewalk started with `{active_model}`. Target fast model: `{fast_model}`."),
+                    });
+
+                    effective_input = task_prompt.to_string();
+                    architect_directive =
+                        Some(crate::orchestrator::build_architect_directive(&fast_model));
+                } else {
                     let output = execute_slash_command(cmd_action, &mut self.agent).await;
-                    let roles = self.agent.model_roles().clone();
-                    let _ = self
-                        .agent
-                        .event_tx
-                        .send(AgentEvent::ModelRolesUpdated { roles });
                     return Some(Ok(output));
                 }
-                let output = execute_slash_command(cmd_action, &mut self.agent).await;
-                return Some(Ok(output));
+            }
+        }
+
+        // --- OMP-style Entrypoint Orchestrator: Intent Classification & Automatic Prewalk ---
+        if architect_directive.is_none() && self.prewalk.lock().unwrap().is_none() {
+            let active_model = self.agent.turn.lock().await.model.clone();
+            let fast_model = self
+                .agent
+                .model_roles()
+                .resolve_fast(&active_model)
+                .to_string();
+            let fast_reasoning = self.agent.config().fast_reasoning_effort;
+            let orchestrator_mode = self.agent.config().orchestrator_mode;
+            let provider_client = Some(self.agent.provider_client_arc());
+
+            let decision = crate::orchestrator::Orchestrator::evaluate(
+                &effective_input,
+                orchestrator_mode,
+                &active_model,
+                &fast_model,
+                fast_reasoning,
+                provider_client,
+            )
+            .await;
+
+            if let crate::orchestrator::OrchestratorDecision::EngagePrewalk {
+                fast_model: target_fast,
+                fast_reasoning: target_effort,
+                architect_system_directive,
+            } = decision
+            {
+                *self.prewalk.lock().unwrap() = Some(crate::orchestrator::PrewalkState {
+                    target_model: target_fast.clone(),
+                    target_reasoning: target_effort,
+                    started_at: std::time::Instant::now(),
+                });
+
+                let _ = self.agent.event_tx.send(AgentEvent::PrewalkCompleted {
+                    model: active_model.clone(),
+                    message: format!(
+                        "Auto-Prewalk engaged: Frontier architect (`{active_model}`) exploring and landing first edit before handoff to `{target_fast}`."
+                    ),
+                });
+
+                architect_directive = Some(architect_system_directive);
+            }
+        }
+
+        if let Some(directive) = architect_directive {
+            let mut turn = self.agent.turn.lock().await;
+            if !turn
+                .system_prompt
+                .contains(crate::orchestrator::ARCHITECT_PROTOCOL_HEADER)
+            {
+                turn.system_prompt.push_str(&directive);
             }
         }
 
@@ -1270,7 +1300,7 @@ impl CodingAgent {
         // here rather than through the provider run below.
         if let Some(agent_id) = crate::acp_bridge::acp_agent_id(&self.agent.model()) {
             let agent_id = agent_id.to_string();
-            return self.run_acp_turn(&agent_id, effective_input, images).await;
+            return self.run_acp_turn(&agent_id, &effective_input, images).await;
         }
 
         let msg = AgentMessage::user(effective_input, images);
@@ -1445,9 +1475,10 @@ mod compaction_sync_tests {
     };
     use threadlane_runtime::{
         harness::{
-            read_transcript_page, CompactionReason, JsonlStore, SessionStore, TranscriptItem,
+            read_transcript_page, CompactionReason, JsonlStore, OperationOutcome, SessionStore,
+            TranscriptItem,
         },
-        AgentConfig, AgentMessage, Record,
+        AgentConfig, AgentMessage, AgentToolResult, Record,
     };
 
     fn summary() -> AgentMessage {
@@ -1498,6 +1529,111 @@ mod compaction_sync_tests {
         });
 
         assert!(!requires_harness_compaction_reset(&durable, &state));
+    }
+
+    #[tokio::test]
+    async fn manual_compaction_preserves_summary_and_structured_snapshot_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(dir.path().join("README.md"), "snapshot body").unwrap();
+        let mut agent = CodingAgent::new(CodingAgentOptions {
+            api_key: "test-key".into(),
+            account_id: None,
+            model: "test-model".into(),
+            work_dir: dir.path().to_path_buf(),
+            session_file: Some(path.clone()),
+            system_prompt: SystemPromptConfig::default(),
+            agent_config: None,
+            coding_config: None,
+        });
+        let harness = agent.harness.as_mut().unwrap();
+        let run_id = harness.unique_run_id("snapshot").unwrap();
+        harness
+            .begin_run(&run_id, AgentMessage::user("inspect", vec![]))
+            .unwrap();
+        harness
+            .append_message(AgentMessage::Assistant {
+                content: None,
+                tool_calls: Some(vec![RuntimeToolCall {
+                    id: "read-1".into(),
+                    r#type: "function".into(),
+                    function: RuntimeToolCallFunction {
+                        name: "read_file".into(),
+                        arguments: r#"{\"path\":\"README.md\",\"start_line\":1,\"end_line\":1}"#
+                            .into(),
+                    },
+                    thought_signature: None,
+                }]),
+                stop_reason: None,
+                deferred_handle: None,
+            })
+            .unwrap();
+        harness
+            .append_tool_intent(
+                &run_id,
+                "read-1",
+                "read_file",
+                serde_json::json!({"path": "README.md", "start_line": 1, "end_line": 1}),
+            )
+            .await
+            .unwrap();
+        let read_output = threadlane_tools::try_execute_tool_in_workspace(
+            "read_file",
+            r#"{"path":"README.md","start_line":1,"end_line":1}"#,
+            dir.path(),
+        )
+        .unwrap();
+        harness
+            .record_tool_result(
+                &run_id,
+                &AgentToolResult::external("read-1", "read_file", &read_output, false),
+            )
+            .unwrap();
+        let source_entry_id = harness.store.entries().last().unwrap().id.clone();
+        let context_id = harness
+            .index_read_snapshot(
+                &run_id,
+                dir.path(),
+                "read-1",
+                &source_entry_id,
+                read_output.chars().count(),
+            )
+            .unwrap()
+            .unwrap();
+        harness
+            .finish_run(&run_id, OperationOutcome::Completed, None)
+            .unwrap();
+
+        let summary = "Keep this user-authored summary exactly.";
+        agent
+            .persist_harness_compaction(summary, &[], 100, 2)
+            .unwrap();
+
+        let store = JsonlStore::open(&path).unwrap();
+        let checkpoint = store
+            .model_context("main")
+            .unwrap()
+            .messages()
+            .into_iter()
+            .find(|message| threadlane_runtime::compaction_summary_text(message).is_some())
+            .unwrap();
+        assert_eq!(
+            threadlane_runtime::compaction_summary_text(&checkpoint),
+            Some(summary)
+        );
+        let AgentMessage::Custom { payload, .. } = checkpoint else {
+            unreachable!();
+        };
+        let index = payload["context_snapshot_index"]
+            .as_array()
+            .expect("structured snapshot index");
+        assert_eq!(index.len(), 1);
+        assert_eq!(index[0]["context_id"], context_id);
+        assert_eq!(index[0]["path"], "README.md");
+        assert_eq!(index[0]["start_line"], 1);
+        assert_eq!(index[0]["end_line"], 1);
+        assert!(index[0]["file_sha256"].is_string());
+        assert!(!payload.to_string().contains("snapshot body"));
     }
 
     #[tokio::test]
