@@ -408,9 +408,16 @@ pub fn find_fuzzy_workspace_path(
     let canonical_root = canonical_workspace_root(workspace_root)?;
     let cache_key = (canonical_root.clone(), path_input.to_string());
     if let Ok(guard) = FUZZY_PATH_CACHE.read() {
-        if let Some((cached_abs, cached_rel)) = guard.get(&cache_key) {
-            if cached_abs.is_file() {
-                return Ok(Some((cached_abs.clone(), cached_rel.clone())));
+        if let Some((cached_abs, _)) = guard.get(&cache_key) {
+            if let Ok(cached_abs) = cached_abs.canonicalize() {
+                if cached_abs.starts_with(&canonical_root) && cached_abs.is_file() {
+                    let cached_rel = cached_abs
+                        .strip_prefix(&canonical_root)
+                        .expect("checked workspace boundary")
+                        .to_string_lossy()
+                        .to_string();
+                    return Ok(Some((cached_abs, cached_rel)));
+                }
             }
         }
     }
@@ -432,12 +439,25 @@ pub fn find_fuzzy_workspace_path(
         for entry in entries.flatten() {
             let path = entry.path();
             let name = entry.file_name();
-            if name == ".git" || name == "target" || name == ".threadlane" || name == "node_modules" {
+            if name == ".git" || name == "target" || name == ".threadlane" || name == "node_modules"
+            {
                 continue;
             }
-            if path.is_dir() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_symlink() {
+                continue;
+            }
+            let Ok(path) = path.canonicalize() else {
+                continue;
+            };
+            if !path.starts_with(root) {
+                continue;
+            }
+            if file_type.is_dir() {
                 scan_dir(root, &path, target_suffix, target_name, out);
-            } else if path.is_file() {
+            } else if file_type.is_file() {
                 if path.ends_with(target_suffix)
                     || (target_suffix.components().count() == 1
                         && target_name.is_some_and(|n| n == name))
@@ -1427,6 +1447,48 @@ mod tests {
             dir.path(),
         );
         assert!(absolute.is_err(), "got: {absolute:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fuzzy_path_ignores_symlinks_outside_the_workspace() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        fs::write(outside.path().join("secret.rs"), "secret").unwrap();
+        symlink(
+            outside.path().join("secret.rs"),
+            root.path().join("secret.rs"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            find_fuzzy_workspace_path("secret.rs", root.path()).unwrap(),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fuzzy_path_rechecks_cached_symlink_matches() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let linked = root.path().join("secret.rs");
+        fs::write(outside.path().join("secret.rs"), "secret").unwrap();
+        symlink(outside.path().join("secret.rs"), &linked).unwrap();
+        let canonical_root = canonical_workspace_root(root.path()).unwrap();
+        FUZZY_PATH_CACHE.write().unwrap().insert(
+            (canonical_root, "secret.rs".into()),
+            (linked, "secret.rs".into()),
+        );
+
+        assert_eq!(
+            find_fuzzy_workspace_path("secret.rs", root.path()).unwrap(),
+            None
+        );
     }
 
     #[test]
