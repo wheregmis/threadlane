@@ -57,13 +57,8 @@ impl Orchestrator {
         // In Auto mode, query the model to determine whether this is an actionable coding task or a query.
         if mode == OrchestratorMode::Auto {
             let is_task = if let Some(client) = provider_client {
-                classify_task_intent_with_model(
-                    client,
-                    fast_model,
-                    fast_reasoning,
-                    task_prompt,
-                )
-                .await
+                classify_task_intent_with_model(client, fast_model, fast_reasoning, task_prompt)
+                    .await
             } else {
                 false
             };
@@ -228,7 +223,9 @@ mod tests {
             events: tokio::sync::mpsc::Sender<RuntimeStreamEvent>,
         ) {
             *self.effort.lock().unwrap() = Some(request.reasoning_effort);
-            let _ = events.send(RuntimeStreamEvent::ContentToken("query".into())).await;
+            let _ = events
+                .send(RuntimeStreamEvent::ContentToken("query".into()))
+                .await;
         }
 
         async fn fetch_deferred(

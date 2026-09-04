@@ -163,12 +163,7 @@ impl EditorView {
         }
     }
 
-    pub fn open_file(
-        &mut self,
-        project: PathBuf,
-        relative_path: &str,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn open_file(&mut self, project: PathBuf, relative_path: &str, cx: &mut Context<Self>) {
         self.pending_open = Some(PendingOpen::File {
             project,
             path: relative_path.to_string(),
@@ -377,13 +372,9 @@ impl EditorView {
                     .await;
                 if matches!(result, rfd::MessageDialogResult::Yes) {
                     let _ = this.update(cx, |this, cx| {
-                        if let Some(pos) = this
-                            .tabs
-                            .iter()
-                            .position(|t| {
-                                t.project_dir == target_project && t.relative_path == target_path
-                            })
-                        {
+                        if let Some(pos) = this.tabs.iter().position(|t| {
+                            t.project_dir == target_project && t.relative_path == target_path
+                        }) {
                             this.remove_tab_at(pos, cx);
                         }
                     });
@@ -439,11 +430,9 @@ impl EditorView {
                     .await;
                 if matches!(result, rfd::MessageDialogResult::Yes) {
                     let _ = this.update(cx, |this, cx| {
-                        if let Some(pos) =
-                            this.tabs.iter().position(|t| {
-                                t.project_dir == keep_project && t.relative_path == keep_path
-                            })
-                        {
+                        if let Some(pos) = this.tabs.iter().position(|t| {
+                            t.project_dir == keep_project && t.relative_path == keep_path
+                        }) {
                             let kept = this.tabs.remove(pos);
                             this.tabs = vec![kept];
                             this.active_tab_index = Some(0);

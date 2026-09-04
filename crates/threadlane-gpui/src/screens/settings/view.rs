@@ -772,19 +772,16 @@ impl SettingsView {
                 .fold(menu, |menu, mode| {
                     let entity = entity.clone();
                     let project = project.clone();
-                    menu.item(
-                        PopupMenuItem::new(mode.label()).on_click(move |_, _, cx| {
-                            let mut settings = crate::services::subagent_settings::load(&project);
-                            settings.orchestrator_mode = mode;
-                            if crate::services::subagent_settings::save(&project, &settings).is_ok()
-                            {
-                                entity.update(cx, |state, cx| {
-                                    state.invalidate_capability_runtimes();
-                                    cx.notify();
-                                });
-                            }
-                        }),
-                    )
+                    menu.item(PopupMenuItem::new(mode.label()).on_click(move |_, _, cx| {
+                        let mut settings = crate::services::subagent_settings::load(&project);
+                        settings.orchestrator_mode = mode;
+                        if crate::services::subagent_settings::save(&project, &settings).is_ok() {
+                            entity.update(cx, |state, cx| {
+                                state.invalidate_capability_runtimes();
+                                cx.notify();
+                            });
+                        }
+                    }))
                 })
             });
         let row = |title: &'static str, description: &'static str, control: AnyElement| {

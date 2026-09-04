@@ -148,6 +148,9 @@ pub enum SubagentProgressUpdate {
         name: String,
         result: AgentToolResult,
     },
+    Usage {
+        usage: TokenUsage,
+    },
     Error {
         error: String,
     },

@@ -318,6 +318,7 @@ pub(crate) fn subagent_ui_event(
             name,
             result,
         },
+        AgentEvent::AgentEnd { usage } => SubagentProgressUpdate::Usage { usage },
         AgentEvent::AgentError { error } => SubagentProgressUpdate::Error { error },
         _ => return None,
     };
@@ -474,11 +475,8 @@ pub(crate) async fn run_subagents_with_context(
                 .acquire_owned()
                 .await
                 .map_err(|_| "Subagent concurrency limiter closed".to_string())?;
-            let context_message = resolve_subagent_context(
-                &task,
-                context.session_file.as_deref(),
-                &context.work_dir,
-            );
+            let context_message =
+                resolve_subagent_context(&task, context.session_file.as_deref(), &context.work_dir);
             let start = match (context_message, context.session_file.as_deref()) {
                 (Err(error), _) => Err(SubagentStartError {
                     identity: None,
@@ -1323,6 +1321,34 @@ mod result_tests {
             update,
             SubagentProgressUpdate::ToolStarted { tool_call_id, .. }
                 if tool_call_id == "subagent-4:1:provider:id:with:colons"
+        ));
+    }
+
+    #[test]
+    fn subagent_ui_event_forwards_final_usage() {
+        let event = subagent_ui_event(
+            AgentEvent::AgentEnd {
+                usage: threadlane_runtime::TokenUsage {
+                    input_tokens: 100,
+                    output_tokens: 25,
+                    total_tokens: 125,
+                    ..Default::default()
+                },
+            },
+            4,
+            1,
+            "journal-run",
+            "child-lane",
+            "subagent-4:1:",
+        )
+        .expect("usage must reach the parent UI");
+
+        assert!(matches!(
+            event,
+            AgentEvent::SubagentUpdate {
+                update: SubagentProgressUpdate::Usage { usage },
+                ..
+            } if usage.input_tokens == 100 && usage.output_tokens == 25
         ));
     }
 
