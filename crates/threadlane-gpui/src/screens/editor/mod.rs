@@ -1,3 +1,3 @@
 mod view;
 
-pub use view::{EditorTab, EditorView, SaveFile};
+pub(crate) use view::{EditorView, SaveFile};

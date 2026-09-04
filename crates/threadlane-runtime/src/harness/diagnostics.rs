@@ -27,17 +27,17 @@ pub struct QueuedWorkDiagnostic {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecoveryPlan {
-    pub session_id: String,
-    pub lane: String,
-    pub source_sequence: u64,
-    pub decision: RecoveryDecision,
-    pub open_operation: Option<String>,
-    pub interrupted_tools: Vec<InterruptedToolDiagnostic>,
-    pub queued_work: Vec<QueuedWorkDiagnostic>,
-    pub open_operation_ids: Vec<String>,
-    pub safe_tools_to_replay: Vec<crate::Record>,
-    pub unreplayable_tools: usize,
-    pub abort_requested_operation_ids: Vec<String>,
+    pub(crate) session_id: String,
+    pub(crate) lane: String,
+    pub(crate) source_sequence: u64,
+    pub(crate) decision: RecoveryDecision,
+    pub(crate) open_operation: Option<String>,
+    pub(crate) interrupted_tools: Vec<InterruptedToolDiagnostic>,
+    pub(crate) queued_work: Vec<QueuedWorkDiagnostic>,
+    pub(crate) open_operation_ids: Vec<String>,
+    pub(crate) safe_tools_to_replay: Vec<crate::Record>,
+    pub(crate) unreplayable_tools: usize,
+    pub(crate) abort_requested_operation_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,7 +58,7 @@ pub struct ModelContextDiagnostic {
     pub seq: u64,
     pub id: String,
     pub lane: String,
-    pub role: String,
+    role: String,
     pub message: crate::types::AgentMessage,
 }
 

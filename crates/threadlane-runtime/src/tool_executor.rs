@@ -13,7 +13,7 @@ use threadlane_tools::{
 pub struct BuiltinToolExecutor;
 
 impl BuiltinToolExecutor {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self
     }
 }
@@ -52,7 +52,7 @@ impl ToolExecutor for BuiltinToolExecutor {
     }
 }
 
-pub fn builtin_tool_executor() -> Arc<dyn ToolExecutor> {
+pub(crate) fn builtin_tool_executor() -> Arc<dyn ToolExecutor> {
     Arc::new(BuiltinToolExecutor::new())
 }
 

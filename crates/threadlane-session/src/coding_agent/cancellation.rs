@@ -169,7 +169,7 @@ impl CodingAgentCancellation {
         }
     }
 
-    pub fn cancel(&self) -> Result<(), String> {
+    pub(crate) fn cancel(&self) -> Result<(), String> {
         let durable_run_id = if let Some(path) = self.harness_session_file.as_deref() {
             let mut journal = CodingSessionHarness::open(path)?;
             journal.request_abort()?

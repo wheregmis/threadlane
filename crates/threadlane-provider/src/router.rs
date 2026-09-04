@@ -23,7 +23,7 @@ pub fn is_opencode_model(model: &str) -> bool {
     model.starts_with(OPENCODE_MODEL_PREFIX)
 }
 
-pub fn is_quota_or_rate_limit(error: &str) -> bool {
+fn is_quota_or_rate_limit(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
     error.contains("429")
         || error.contains("rate limit")
@@ -57,7 +57,7 @@ pub enum PayloadSource {
 }
 
 impl PayloadSource {
-    pub fn lazy<F>(model: impl Into<String>, builder: F) -> Self
+    fn lazy<F>(model: impl Into<String>, builder: F) -> Self
     where
         F: Fn(PayloadFormat) -> BoxFuture<'static, Value> + Send + Sync + 'static,
     {
@@ -235,7 +235,8 @@ impl ProviderClient {
         }
     }
 
-    pub fn with_fallback_account(
+    #[cfg(test)]
+    fn with_fallback_account(
         api_key: impl Into<String>,
         account_id: Option<String>,
         fallback_api_key: impl Into<String>,
@@ -252,7 +253,8 @@ impl ProviderClient {
         }
     }
 
-    pub fn with_fallback_accounts(
+    #[cfg(test)]
+    fn with_fallback_accounts(
         api_key: impl Into<String>,
         account_id: Option<String>,
         fallbacks: Vec<(String, Option<String>)>,
@@ -268,7 +270,8 @@ impl ProviderClient {
         }
     }
 
-    pub fn openai_fallback(&self) -> Option<&OpenAIClient> {
+    #[cfg(test)]
+    fn openai_fallback(&self) -> Option<&OpenAIClient> {
         self.openai_fallbacks.first()
     }
 
@@ -283,7 +286,7 @@ impl ProviderClient {
         }
     }
 
-    pub fn provider_kind(&self, model: &str) -> &'static str {
+    fn provider_kind(&self, model: &str) -> &'static str {
         if is_antigravity_model(model) {
             "antigravity"
         } else if is_opencode_model(model) {
@@ -295,7 +298,7 @@ impl ProviderClient {
         }
     }
 
-    pub async fn stream_chat_completion(
+    async fn stream_chat_completion(
         &self,
         payload_source: impl Into<PayloadSource>,
         prompt_cache_key: Option<String>,
@@ -372,7 +375,8 @@ impl ProviderClient {
     /// Routes a completed provider stream through a sequence of fallbacks before
     /// forwarding events to the caller. Fallback is permitted only if the
     /// preceding provider failed before emitting visible output, preventing duplication.
-    pub async fn stream_with_fallback<P, F, PrimaryFut, FallbackFut>(
+    #[cfg(test)]
+    async fn stream_with_fallback<P, F, PrimaryFut, FallbackFut>(
         &self,
         primary: P,
         fallback: F,
@@ -392,7 +396,7 @@ impl ProviderClient {
         Self::execute_stream_fallback_chain(tasks, event_tx).await;
     }
 
-    pub async fn execute_stream_fallback_chain(
+    async fn execute_stream_fallback_chain(
         tasks: Vec<Box<dyn FnOnce(mpsc::Sender<StreamEvent>) -> BoxFuture<'static, ()> + Send>>,
         event_tx: mpsc::Sender<StreamEvent>,
     ) {
@@ -442,7 +446,7 @@ impl ProviderClient {
         }
     }
 
-    pub async fn fetch_deferred(
+    async fn fetch_deferred(
         &self,
         model: &str,
         handle_id: &str,
@@ -457,7 +461,7 @@ impl ProviderClient {
         provider.fetch_deferred(handle_id).await
     }
 
-    pub async fn cancel_deferred(&self, model: &str, handle_id: &str) -> Result<(), String> {
+    async fn cancel_deferred(&self, model: &str, handle_id: &str) -> Result<(), String> {
         let provider: Arc<dyn crate::traits::ModelProvider> = if is_antigravity_model(model) {
             Arc::new(self.antigravity.clone())
         } else if is_opencode_model(model) {

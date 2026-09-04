@@ -145,7 +145,7 @@ pub(crate) fn load_project_registry_from(global_dir: &Path) -> Vec<ProjectRecord
     normalize_projects(projects)
 }
 
-pub(crate) fn save_project_registry_to(
+fn save_project_registry_to(
     global_dir: &Path,
     projects: &[ProjectRecord],
 ) -> Result<(), String> {

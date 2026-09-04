@@ -256,7 +256,7 @@ impl ReductionContext {
         Ok(ctx)
     }
 
-    pub(crate) fn from_store<S: SessionStore>(store: &S) -> Result<Self, ReduceError> {
+    fn from_store<S: SessionStore>(store: &S) -> Result<Self, ReduceError> {
         Self::build(store.entries(), store.records(), store.facts(), &|lane| {
             store.preferred_leaf(lane)
         })

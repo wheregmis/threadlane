@@ -116,21 +116,6 @@ struct TerminalGroup {
     active_tab: usize,
 }
 
-fn normalize_generated_commit_message(raw: &str) -> String {
-    let line = raw
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty() && !line.starts_with("```"))
-        .unwrap_or_default()
-        .trim_matches('`')
-        .trim();
-    let line = line
-        .strip_prefix("Commit message:")
-        .or_else(|| line.strip_prefix("Commit:"))
-        .unwrap_or(line)
-        .trim();
-    line.chars().take(72).collect()
-}
 
 fn git_result_matches_active(requested: &Path, active: &Path) -> bool {
     requested == active
@@ -175,7 +160,7 @@ pub struct WorkspaceView {
 }
 
 impl WorkspaceView {
-    pub(crate) fn spawn_session_hydration(
+    fn spawn_session_hydration(
         model: Entity<AppState>,
         request: SessionHydrationRequest,
         cx: &mut AsyncApp,
@@ -441,15 +426,6 @@ impl WorkspaceView {
             view._subscriptions.push(shortcut_subscription);
         });
         view
-    }
-
-    fn open_git_files(&mut self, cx: &mut Context<Self>) {
-        self.right_panel_visible = true;
-        self.right_panel.update(cx, |panel, cx| {
-            panel.open_files(cx);
-        });
-        self.refresh_git_status(cx);
-        cx.notify();
     }
 
     fn open_git_review(&mut self, cx: &mut Context<Self>) {

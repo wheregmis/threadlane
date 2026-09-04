@@ -3,9 +3,9 @@ pub mod packages;
 
 pub use broker::*;
 pub use packages::{
-    default_global_threadlane_dir, validate_extension_id, ExtensionManager, ExtensionRecord,
-    ExtensionScope,
+    default_global_threadlane_dir, ExtensionManager, ExtensionRecord, ExtensionScope,
 };
+pub(crate) use packages::validate_extension_id;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -18,9 +18,9 @@ use wasmi::{Caller, Engine, Extern, Func, Linker, Memory, Module, Store};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WasiToolDefinition {
-    pub name: String,
-    pub description: String,
-    pub parameters: Value,
+    name: String,
+    description: String,
+    parameters: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,18 +32,18 @@ pub struct WasiCommandDefinition {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WasiExtensionManifest {
     #[serde(default = "default_api_version")]
-    pub api_version: u32,
+    api_version: u32,
     pub name: String,
-    pub version: String,
-    pub description: String,
+    version: String,
+    description: String,
     #[serde(default)]
-    pub capabilities: Vec<String>,
+    capabilities: Vec<String>,
     #[serde(default)]
-    pub tools: Vec<WasiToolDefinition>,
+    tools: Vec<WasiToolDefinition>,
     #[serde(default)]
     pub commands: Vec<WasiCommandDefinition>,
     #[serde(default)]
-    pub hooks: Vec<String>,
+    hooks: Vec<String>,
 }
 
 fn default_api_version() -> u32 {
@@ -52,21 +52,21 @@ fn default_api_version() -> u32 {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WasiExtensionEvent {
-    pub topic: String,
-    pub payload: Value,
+    topic: String,
+    payload: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WasiExtensionInvocation {
-    pub api_version: u32,
-    pub kind: String,
-    pub name: String,
-    pub arguments: Value,
+    api_version: u32,
+    kind: String,
+    name: String,
+    arguments: Value,
     #[serde(default)]
-    pub state: Value,
+    state: Value,
     /// Events are queued by the host and delivered on this extension's next invocation.
     #[serde(default)]
-    pub events: Vec<WasiExtensionEvent>,
+    events: Vec<WasiExtensionEvent>,
 }
 
 /// Effects retained for API v1 compatibility. Bundled v2 extensions use
@@ -115,8 +115,6 @@ pub struct WasiExtensionInvocationResult {
     pub response: WasiExtensionResponse,
     broker_requests: Vec<BrokerRequest>,
     pub host_broker_requests: Vec<HostBrokerRequest>,
-    /// Events supplied to this concrete WASM invocation.
-    events: Vec<WasiExtensionEvent>,
     invoking_extension: String,
 }
 
@@ -125,9 +123,7 @@ pub struct WasiExtensionCommandResult {
     pub api_version: u32,
     pub message: String,
     pub effects: Vec<WasiLegacyEffect>,
-    pub broker_requests: Vec<BrokerRequest>,
     pub host_broker_requests: Vec<HostBrokerRequest>,
-    pub events: Vec<WasiExtensionEvent>,
 }
 
 #[derive(Default)]
@@ -215,7 +211,7 @@ impl WasiExtension {
         linker
     }
 
-    pub fn load_from_bytes(wasm_bytes: Vec<u8>) -> Result<Self, String> {
+    fn load_from_bytes(wasm_bytes: Vec<u8>) -> Result<Self, String> {
         Self::load_from_bytes_inner(wasm_bytes, false)
     }
 
@@ -275,7 +271,7 @@ impl WasiExtension {
         }
     }
 
-    pub fn load_from_file(path: &Path) -> Result<Self, String> {
+    fn load_from_file(path: &Path) -> Result<Self, String> {
         let bytes =
             fs::read(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
         let mut ext = Self::load_from_bytes(bytes)?;
@@ -333,7 +329,6 @@ impl WasiExtension {
             response,
             broker_requests: std::mem::take(&mut store.data_mut().requests),
             host_broker_requests: Vec::new(),
-            events: invocation.events.clone(),
             invoking_extension: String::new(),
         })
     }
@@ -496,7 +491,8 @@ impl WasiExtensionManager {
             .map_err(|_| "Extension registry lock poisoned".to_string())
     }
 
-    pub fn extension_manifest(&self, name: &str) -> Option<WasiExtensionManifest> {
+    #[cfg(test)]
+    fn extension_manifest(&self, name: &str) -> Option<WasiExtensionManifest> {
         self.extensions
             .read()
             .ok()?
@@ -516,7 +512,8 @@ impl WasiExtensionManager {
         manifests
     }
 
-    pub fn register_extension(&self, extension: WasiExtension) -> Result<(), String> {
+    #[cfg(test)]
+    fn register_extension(&self, extension: WasiExtension) -> Result<(), String> {
         {
             self.extensions
                 .write()
@@ -604,7 +601,8 @@ impl WasiExtensionManager {
         Ok(loaded_count)
     }
 
-    pub fn for_project(project_dir: &Path) -> Self {
+    #[cfg(test)]
+    fn for_project(project_dir: &Path) -> Self {
         Self {
             state_dir: Some(project_dir.join(".threadlane/state/extensions")),
             ..Self::default()
@@ -754,7 +752,7 @@ impl WasiExtensionManager {
     }
 
     /// Removes events queued for one extension, matching the next-invocation delivery path.
-    pub fn drain_events_for(
+    fn drain_events_for(
         &self,
         extension_name: &str,
     ) -> Result<Vec<WasiExtensionEvent>, String> {
@@ -845,19 +843,6 @@ impl WasiExtensionManager {
         persist_json_state(&path, value)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn has_command(&self, name: &str) -> bool {
-        self.extensions.read().is_ok_and(|extensions| {
-            extensions.values().any(|extension| {
-                extension
-                    .manifest
-                    .commands
-                    .iter()
-                    .any(|command| command.name == name)
-            })
-        })
-    }
-
     pub fn execute_tool_with_broker_requests(
         &self,
         name: &str,
@@ -876,8 +861,7 @@ impl WasiExtensionManager {
                 let broker_requests = self.take_broker_requests(&mut result);
                 let host_broker_requests = self.filter_granted_requests(
                     broker_requests
-                        .iter()
-                        .cloned()
+                        .into_iter()
                         .map(|request| HostBrokerRequest {
                             request,
                             invoking_extension: result.invoking_extension.clone(),
@@ -888,9 +872,7 @@ impl WasiExtensionManager {
                     api_version: result.api_version,
                     message: result.response.message.unwrap_or_default(),
                     effects: result.response.effects,
-                    broker_requests,
                     host_broker_requests,
-                    events: result.events,
                 }
             })
         })

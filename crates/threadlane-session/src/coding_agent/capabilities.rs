@@ -525,7 +525,7 @@ pub(crate) async fn dispatch_hook_requests(
     Ok(())
 }
 
-pub(crate) async fn dispatch_hook_requests_isolated(
+async fn dispatch_hook_requests_isolated(
     dispatcher: &Arc<CapabilityDispatcher>,
     extensions: &WasiExtensionManager,
     requests: Vec<HostBrokerRequest>,
@@ -693,7 +693,7 @@ pub(crate) fn create_after_tool_hook_handler(
     })
 }
 
-pub(crate) async fn run_lsp_diagnostics_after_write(
+async fn run_lsp_diagnostics_after_write(
     extensions: &WasiExtensionManager,
     broker_dispatcher: &Arc<CapabilityDispatcher>,
     path: &str,
@@ -735,8 +735,8 @@ pub(crate) async fn run_lsp_diagnostics_after_write(
 }
 
 pub(crate) struct BrokerAwareWasiToolExecutor {
-    pub(crate) extensions: Arc<WasiExtensionManager>,
-    pub(crate) broker_dispatcher: Arc<CapabilityDispatcher>,
+    extensions: Arc<WasiExtensionManager>,
+    broker_dispatcher: Arc<CapabilityDispatcher>,
 }
 
 #[async_trait]

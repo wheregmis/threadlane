@@ -1,6 +1,7 @@
 use super::reducer::{validate_candidate_entry, validate_candidate_record};
 use super::store::SessionStore;
 use super::types::{Entry, Record, ReduceError};
+#[cfg(test)]
 use crate::types::AgentMessage;
 use std::collections::HashSet;
 
@@ -29,21 +30,23 @@ impl MemoryStore {
     fn session_id(&self) -> &str {
         &self.session_id
     }
-    pub fn entries(&self) -> &[Entry] {
+    pub(crate) fn entries(&self) -> &[Entry] {
         &self.entries
     }
-    pub fn records(&self) -> &[Record] {
+    fn records(&self) -> &[Record] {
         &self.records
     }
     pub fn effect_count(&self) -> usize {
         self.effects
     }
 
-    pub fn append_message(&mut self, parent_id: Option<String>, message: AgentMessage) -> String {
+    #[cfg(test)]
+    pub(crate) fn append_message(&mut self, parent_id: Option<String>, message: AgentMessage) -> String {
         self.try_append_message(parent_id, message)
             .expect("valid durable entry")
     }
 
+    #[cfg(test)]
     fn try_append_message(
         &mut self,
         parent_id: Option<String>,
@@ -69,7 +72,7 @@ impl MemoryStore {
         Ok(id)
     }
 
-    pub fn try_append_entry(&mut self, entry: Entry) -> Result<(), ReduceError> {
+    fn try_append_entry(&mut self, entry: Entry) -> Result<(), ReduceError> {
         if entry.id.trim().is_empty() {
             return Err(ReduceError::InvalidRecord("empty entry id".into()));
         }
@@ -102,7 +105,7 @@ impl MemoryStore {
             .expect("valid durable record")
     }
 
-    pub fn try_append_record(&mut self, record: Record) -> Result<(), ReduceError> {
+    fn try_append_record(&mut self, record: Record) -> Result<(), ReduceError> {
         validate_record(
             &record,
             self.records

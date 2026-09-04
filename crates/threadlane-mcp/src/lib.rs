@@ -457,14 +457,14 @@ impl McpManager {
         mcp_tools
     }
 
-    pub fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
+    fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
         self.cached_tool_defs
             .read()
             .map(|defs| defs.clone())
             .unwrap_or_default()
     }
 
-    pub async fn execute_tool(
+    async fn execute_tool(
         &self,
         full_name: &str,
         args: &str,

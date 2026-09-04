@@ -8,7 +8,7 @@ use threadlane_runtime::{
 };
 use tokio::sync::broadcast;
 
-pub(crate) const UPDATE_PLAN_TOOL_NAME: &str = "update_plan";
+const UPDATE_PLAN_TOOL_NAME: &str = "update_plan";
 const MAX_PLAN_ITEMS: usize = 20;
 const MAX_STEP_CHARS: usize = 200;
 const MAX_EXPLANATION_CHARS: usize = 500;
@@ -88,7 +88,7 @@ impl SessionPlanStore {
         self.inner.lock().unwrap().plan.clone()
     }
 
-    pub(crate) fn replace(&self, plan: SessionPlan) -> Result<(), String> {
+    fn replace(&self, plan: SessionPlan) -> Result<(), String> {
         let mut state = self
             .inner
             .lock()

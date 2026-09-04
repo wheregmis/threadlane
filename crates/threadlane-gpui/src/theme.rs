@@ -38,15 +38,6 @@ pub fn init(cx: &mut App) {
     }
 }
 
-pub(crate) fn available_themes(cx: &App) -> Vec<(SharedString, ThemeMode)> {
-    ThemeRegistry::global(cx)
-        .sorted_themes()
-        .into_iter()
-        .filter(|theme| theme.name.starts_with("Threadlane"))
-        .map(|theme| (theme.name.clone(), theme.mode))
-        .collect()
-}
-
 pub(crate) fn active_theme_name(cx: &App) -> SharedString {
     cx.theme().theme_name().clone()
 }

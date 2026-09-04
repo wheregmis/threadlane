@@ -20,7 +20,7 @@ impl EffectAction {
         }
     }
 
-    pub fn id(&self) -> &str {
+    pub(crate) fn id(&self) -> &str {
         match self {
             Self::AppendEntry { entry, .. } => &entry.id,
             Self::AppendRecord { id, .. } => id,
@@ -41,7 +41,7 @@ impl EffectAction {
         }
     }
 
-    pub fn apply<S: SessionStore>(&self, store: &mut S) -> Result<(), ReduceError> {
+    fn apply<S: SessionStore>(&self, store: &mut S) -> Result<(), ReduceError> {
         match self {
             Self::AppendEntry { entry, .. } => store.append_entry(entry.clone()),
             Self::AppendRecord { record, .. } => store.append_record(record.clone()),
@@ -112,7 +112,7 @@ impl Default for GatedEffects {
 }
 
 impl GatedEffects {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -158,7 +158,7 @@ impl GatedEffects {
         self.telemetry.event("effect_committed", &context);
     }
 
-    pub fn park(&mut self, action: EffectAction) -> Result<(), EffectsError> {
+    pub(crate) fn park(&mut self, action: EffectAction) -> Result<(), EffectsError> {
         if let Some(error) = &self.fault {
             return Err(EffectsError::Faulted(error.clone()));
         }
@@ -182,7 +182,7 @@ impl GatedEffects {
         Ok(())
     }
 
-    pub fn peek_action(&self) -> Option<&EffectAction> {
+    pub(crate) fn peek_action(&self) -> Option<&EffectAction> {
         self.pending.front()
     }
 
@@ -246,7 +246,8 @@ impl GatedEffects {
         Ok(action)
     }
 
-    pub fn execute_action<S: SessionStore>(
+    #[cfg(test)]
+    fn execute_action<S: SessionStore>(
         &mut self,
         store: &mut S,
         id: &str,
@@ -263,7 +264,8 @@ impl GatedEffects {
         self.execute_pending(store, Some(lane), id)
     }
 
-    pub fn run_to_completion<S: SessionStore>(
+    #[cfg(test)]
+    pub(crate) fn run_to_completion<S: SessionStore>(
         &mut self,
         store: &mut S,
     ) -> Result<Vec<EffectAction>, EffectsError> {
@@ -276,7 +278,7 @@ impl GatedEffects {
 
     /// Crosses the persistence gate once for the complete pending procedure.
     /// The queue is retained unchanged if the store rejects the durable unit.
-    pub fn run_to_completion_atomically<S: SessionStore>(
+    pub(crate) fn run_to_completion_atomically<S: SessionStore>(
         &mut self,
         store: &mut S,
     ) -> Result<Vec<EffectAction>, EffectsError> {
@@ -354,7 +356,7 @@ impl GatedEffects {
         self.execute_with_events(store, hub, Some(lane), id)
     }
 
-    pub fn run_to_completion_with_events<S: SessionStore>(
+    pub(crate) fn run_to_completion_with_events<S: SessionStore>(
         &mut self,
         store: &mut S,
         hub: &mut HarnessEventHub,

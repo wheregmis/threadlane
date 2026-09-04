@@ -3,6 +3,8 @@ mod app_state;
 pub(crate) use app_state::provider_credentials;
 
 #[cfg(test)]
+pub(crate) use app_state::load_session_messages;
+#[cfg(test)]
 pub(crate) use app_state::reported_session_shape_state;
 #[cfg(test)]
 pub(crate) use app_state::TrajectoryDiagnostics;
@@ -11,8 +13,8 @@ pub(crate) use app_state::{
     runtime_status_text, SessionAttention, SessionHydrationRequest,
 };
 
-pub use app_state::{
-    discover_sessions_in_project, load_session_messages, AppState, AttachedProject,
+pub(crate) use app_state::{
+    discover_sessions_in_project, AppState,
     ChatMessageInfo, ChatStreamEvent, MessageRole, ProjectInfo, RequestedEditorTarget,
     SessionHealth, SessionInfo, SubagentActivityInfo, SubagentActivityStatus, ToolActivityInfo,
     TrajectoryEntry, WorkMode, WorkspacePage,

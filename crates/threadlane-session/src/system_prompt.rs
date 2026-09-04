@@ -6,9 +6,9 @@ use threadlane_runtime::AgentToolDefinition;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SystemPromptConfig {
     /// Replaces threadlane's default identity, tool list, and default guidelines.
-    pub(crate) custom_prompt: Option<String>,
+    custom_prompt: Option<String>,
     /// Text appended after the base prompt and before project resources.
-    pub(crate) append_prompt: Option<String>,
+    append_prompt: Option<String>,
     /// Additional guideline bullets for the default prompt.
     pub(crate) guidelines: Vec<String>,
 }

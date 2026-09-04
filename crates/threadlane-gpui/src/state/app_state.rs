@@ -141,7 +141,7 @@ pub struct TrajectoryDiagnostics {
     pub(crate) output_bytes: Option<u64>,
     pub(crate) files_mutated: Vec<String>,
     pub(crate) commands_executed: Vec<String>,
-    pub(crate) error_summary: Option<String>,
+    error_summary: Option<String>,
     pub(crate) items_count: Option<usize>,
     pub(crate) token_estimate: Option<u32>,
     pub(crate) is_anomaly: bool,
@@ -167,10 +167,10 @@ pub struct TrajectoryEntry {
 pub struct SessionMetricsInfo {
     pub(crate) turns: usize,
     pub(crate) tool_calls: usize,
-    pub(crate) input_tokens: u64,
+    input_tokens: u64,
     pub(crate) output_tokens: u64,
-    pub(crate) cache_read_tokens: u64,
-    pub(crate) cache_write_tokens: u64,
+    cache_read_tokens: u64,
+    cache_write_tokens: u64,
 }
 
 impl SessionMetricsInfo {
@@ -210,7 +210,7 @@ pub(crate) struct ContextWindowInfo {
     pub(crate) context_limit: u64,
     pub(crate) context_limit_is_estimate: bool,
     pub(crate) effective_model: String,
-    pub(crate) compaction_generation: u64,
+    compaction_generation: u64,
     pub(crate) last_compaction_seq: Option<u64>,
     pub(crate) provisional: bool,
     pub(crate) estimating: bool,
@@ -321,13 +321,13 @@ pub(crate) struct SessionHydrationRequest {
 
 /// The complete durable UI projection built from one JSONL store parse.
 pub(crate) struct SessionProjectionResult {
-    pub(crate) plan: SessionPlan,
-    pub(crate) trajectory: Vec<TrajectoryEntry>,
-    pub(crate) subagents: Vec<SubagentActivityInfo>,
-    pub(crate) diagnostics: threadlane_session::harness::SessionDiagnostics,
-    pub(crate) metrics: SessionMetricsInfo,
-    pub(crate) token_usage: TokenUsage,
-    pub(crate) context_window: Option<ContextWindowInfo>,
+    plan: SessionPlan,
+    trajectory: Vec<TrajectoryEntry>,
+    subagents: Vec<SubagentActivityInfo>,
+    diagnostics: threadlane_session::harness::SessionDiagnostics,
+    metrics: SessionMetricsInfo,
+    token_usage: TokenUsage,
+    context_window: Option<ContextWindowInfo>,
 }
 
 pub struct AppState {
@@ -340,7 +340,7 @@ pub struct AppState {
     pub(crate) sidebar_project_filter: Option<PathBuf>,
     pub(crate) search_query: String,
     pub(crate) messages: Arc<Vec<ChatMessageInfo>>,
-    pub(crate) available_models: Vec<crate::model_catalog::ModelOption>,
+    available_models: Vec<crate::model_catalog::ModelOption>,
     pub(crate) active_plan: SessionPlan,
     pub(crate) is_generating: bool,
     composer_text: String,
@@ -368,7 +368,7 @@ pub struct AppState {
     pub(crate) git_prs: HashMap<(PathBuf, String), Option<threadlane_git::GitHubPrInfo>>,
 
     pub(crate) selected_model: String,
-    pub(crate) model_roles: threadlane_session::ModelRoles,
+    model_roles: threadlane_session::ModelRoles,
     pub(crate) reasoning_effort: ReasoningEffort,
     pub(crate) workspace_page: WorkspacePage,
     pub(crate) openai_key: String,
@@ -720,7 +720,8 @@ fn discover_sessions_in_project_cached(
     sessions
 }
 
-pub fn load_session_messages(session_file: &Path) -> Vec<ChatMessageInfo> {
+#[cfg(test)]
+pub(crate) fn load_session_messages(session_file: &Path) -> Vec<ChatMessageInfo> {
     compute_session_messages(session_file).unwrap_or_default()
 }
 
@@ -1319,7 +1320,7 @@ impl AppState {
         &self.available_models
     }
 
-    pub(crate) fn refresh_available_models(&mut self) {
+    fn refresh_available_models(&mut self) {
         self.available_models =
             crate::model_catalog::available_models_for_project(self.active_work_dir.as_deref());
     }
@@ -1333,7 +1334,8 @@ impl AppState {
         Ok(())
     }
 
-    pub(crate) fn current_session_token_usage(&self) -> TokenUsage {
+    #[cfg(test)]
+    fn current_session_token_usage(&self) -> TokenUsage {
         if let Some(key) = self.active_session_projection_key() {
             if let Some(usage) = self.session_token_usage.get(&key) {
                 return usage.clone();
@@ -2202,6 +2204,7 @@ impl AppState {
     }
 
     /// Hydrates trajectory, token usage, and metrics projections from durable harness records.
+    #[cfg(test)]
     fn hydrate_session_projection(
         &mut self,
         session_id: &str,
@@ -3759,7 +3762,7 @@ impl AppState {
     /// Asks the selected external agent what settings it offers.
     ///
     /// A no-op for a provider model, which has no agent to ask.
-    pub(crate) fn request_acp_config_options(&mut self) {
+    fn request_acp_config_options(&mut self) {
         if !threadlane_session::is_acp_model(&self.selected_model) {
             return;
         }

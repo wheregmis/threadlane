@@ -14,7 +14,7 @@ use serde_json::Value;
 pub struct TraceString(String);
 
 impl TraceString {
-    pub const MAX_BYTES: usize = 4096;
+    const MAX_BYTES: usize = 4096;
 
     pub fn new(value: impl Into<String>) -> Result<Self, String> {
         let value = value.into();
@@ -44,7 +44,7 @@ impl<'de> Deserialize<'de> for TraceString {
 pub struct BoundedText(String);
 
 impl BoundedText {
-    pub const MAX_BYTES: usize = 32 * 1024;
+    const MAX_BYTES: usize = 32 * 1024;
 
     pub fn truncated(value: &str) -> Self {
         if value.len() <= Self::MAX_BYTES {
@@ -79,7 +79,7 @@ impl<'de> Deserialize<'de> for BoundedText {
 pub struct BoundedPromptText(String);
 
 impl BoundedPromptText {
-    pub const MAX_BYTES: usize = 256 * 1024;
+    const MAX_BYTES: usize = 256 * 1024;
 
     pub fn new(value: impl Into<String>) -> Result<Self, String> {
         let value = value.into();
@@ -315,7 +315,8 @@ pub struct Entry {
 }
 
 impl Entry {
-    pub fn new(
+    #[cfg(test)]
+    pub(crate) fn new(
         id: impl Into<String>,
         parent_id: Option<String>,
         lane: impl Into<String>,
@@ -363,7 +364,7 @@ impl ProvisionedEntry {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueuedEntry {
-    pub id: String,
+    pub(crate) id: String,
     pub run_id: Option<String>,
     pub queue: QueueKind,
     #[serde(default)]
@@ -431,8 +432,8 @@ pub enum UsageCause {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetryState {
-    pub attempt: u32,
-    pub retry_at: u64,
+    pub(crate) attempt: u32,
+    pub(crate) retry_at: u64,
     pub(crate) reason: String,
 }
 
@@ -459,16 +460,16 @@ pub enum ContextItemStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextManifestItem {
-    pub position: usize,
+    pub(crate) position: usize,
     pub source: ContextItemSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub entry_id: Option<TraceString>,
+    pub(crate) entry_id: Option<TraceString>,
     pub role: TraceString,
     pub token_estimate: u32,
-    pub status: ContextItemStatus,
+    pub(crate) status: ContextItemStatus,
     pub digest_sha256: TraceString,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<TraceString>,
+    pub(crate) label: Option<TraceString>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -504,7 +505,7 @@ pub enum CompactionReason {
 }
 
 impl CompactionReason {
-    pub fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Manual => "manual",
             Self::AdaptiveBudget => "adaptive_budget",
@@ -1389,7 +1390,7 @@ impl Record {
         }
     }
 
-    pub fn run_id(&self) -> Option<&str> {
+    pub(crate) fn run_id(&self) -> Option<&str> {
         match self {
             Self::OperationStarted { id, .. } => Some(id),
             Self::AbortRequested { run_id, .. }
@@ -1425,7 +1426,7 @@ impl Record {
         }
     }
 
-    pub fn turn(&self) -> Option<u32> {
+    pub(crate) fn turn(&self) -> Option<u32> {
         match self {
             Self::StepAttempt { attempt, .. }
             | Self::RetryScheduled { attempt, .. }
@@ -1504,9 +1505,9 @@ pub struct ToolState {
     pub tool_call_id: String,
     pub tool_name: String,
     pub result_entry_id: String,
-    pub replay: ToolReplaySafety,
+    pub(crate) replay: ToolReplaySafety,
     pub completed: bool,
-    pub terminate: bool,
+    pub(crate) terminate: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1517,16 +1518,16 @@ pub struct LaneState {
     pub open_operation: Option<String>,
     pub attempts: u32,
     #[serde(default)]
-    pub retry: Option<RetryState>,
+    pub(crate) retry: Option<RetryState>,
     pub queued: Vec<QueuedEntry>,
-    pub deferred_writes: Vec<ProvisionedEntry>,
+    pub(crate) deferred_writes: Vec<ProvisionedEntry>,
     pub abort_requested: bool,
-    pub usage: TokenUsage,
+    pub(crate) usage: TokenUsage,
     pub tools: Vec<ToolState>,
     #[serde(default)]
     pub context_snapshots: Vec<ContextSnapshot>,
     #[serde(default)]
-    pub facts: std::collections::BTreeMap<String, String>,
+    pub(crate) facts: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub(crate) resume_data: std::collections::BTreeMap<String, String>,
 }

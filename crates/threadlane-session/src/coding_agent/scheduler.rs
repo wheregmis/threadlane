@@ -34,7 +34,7 @@ pub(crate) type SubagentObserverState = Arc<std::sync::Mutex<Option<AgentWorkObs
 #[cfg(test)]
 pub(crate) type SubagentBoundaryObserver = Arc<dyn Fn() + Send + Sync>;
 
-pub(crate) fn enqueue_harness_queue(
+fn enqueue_harness_queue(
     session_file: &Path,
     queue: QueueKind,
     content: String,
@@ -63,9 +63,9 @@ pub(crate) fn consume_harness_follow_ups(session_file: &Path) -> Result<(), Stri
 
 #[derive(Clone, Default)]
 pub(crate) struct AgentWorkScheduler {
-    pub(crate) pending: Arc<std::sync::Mutex<Vec<AgentWork>>>,
+    pending: Arc<std::sync::Mutex<Vec<AgentWork>>>,
     #[cfg(test)]
-    pub(crate) test_observer: SubagentObserverState,
+    test_observer: SubagentObserverState,
 }
 
 impl AgentWorkScheduler {
@@ -75,7 +75,7 @@ impl AgentWorkScheduler {
         }
     }
 
-    pub(crate) fn drain(&self) -> Vec<AgentWork> {
+    fn drain(&self) -> Vec<AgentWork> {
         self.pending
             .lock()
             .map(|mut pending| std::mem::take(&mut *pending))
@@ -174,8 +174,8 @@ impl ToolExecutor for DeterministicSubagentToolExecutor {
 
 #[derive(Clone)]
 pub struct CodingAgentWorkHandle {
-    pub(crate) scheduler: AgentWorkScheduler,
-    pub(crate) session_file: Option<PathBuf>,
+    scheduler: AgentWorkScheduler,
+    session_file: Option<PathBuf>,
 }
 
 impl CodingAgentWorkHandle {
@@ -190,7 +190,7 @@ impl CodingAgentWorkHandle {
         self.queue_follow_up_with_images(content, Vec::new());
     }
 
-    pub(crate) fn queue_follow_up_with_images(
+    fn queue_follow_up_with_images(
         &self,
         content: impl Into<String>,
         images: Vec<ImageAttachment>,

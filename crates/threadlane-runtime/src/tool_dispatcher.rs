@@ -94,7 +94,7 @@ pub struct ToolDispatcher {
     event_tx: broadcast::Sender<AgentEvent>,
 }
 
-pub const CORE_TOOL_NAMES: &[&str] = &[
+const CORE_TOOL_NAMES: &[&str] = &[
     "read_file",
     "edit_file_hashline",
     "edit_files_hashline",
@@ -183,7 +183,7 @@ impl ToolDispatcher {
         Ok(())
     }
 
-    pub fn tool_executor_count(&self) -> usize {
+    pub(crate) fn tool_executor_count(&self) -> usize {
         self.ordered_tool_executors().len()
     }
 

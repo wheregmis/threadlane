@@ -1168,19 +1168,6 @@ impl ChatListView {
         cx.notify();
     }
 
-    pub(crate) fn set_composer_text(
-        &mut self,
-        text: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.current_tab = CentralTab::Chat;
-        self.input_state.update(cx, |input, cx| {
-            input.set_value(text, window, cx);
-        });
-        cx.notify();
-    }
-
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let active_title = {
             let state = self.model.read(cx);
@@ -5916,8 +5903,8 @@ mod hot_path_tests {
 
     #[tokio::test]
     async fn meter_separates_current_context_from_total_processed() {
-        let (path, state) = reported_session_shape_state().await;
-        let projected_context = state.active_context_window().unwrap();
+        let (_path, state) = reported_session_shape_state().await;
+        let _projected_context = state.active_context_window().unwrap();
         let projected_metrics = state.active_session_metrics();
         let view = context_meter_view_model(
             Some(&ContextMeterContext {

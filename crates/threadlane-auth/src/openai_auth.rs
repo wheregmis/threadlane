@@ -72,10 +72,10 @@ fn default_verification_uri() -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceCodeResponse {
-    pub device_auth_id: String,
-    pub user_code: String,
+    device_auth_id: String,
+    user_code: String,
     #[serde(default = "default_verification_uri")]
-    pub verification_uri: String,
+    verification_uri: String,
     #[serde(default)]
     expires_at: Option<String>,
     #[serde(default)]
@@ -84,7 +84,7 @@ pub struct DeviceCodeResponse {
         deserialize_with = "deserialize_string_or_number",
         default = "default_interval"
     )]
-    pub interval: u64,
+    interval: u64,
 }
 
 fn default_interval() -> u64 {
@@ -94,15 +94,15 @@ fn default_interval() -> u64 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OAuthTokens {
     #[serde(default)]
-    pub access_token: String,
+    access_token: String,
     #[serde(default)]
-    pub refresh_token: Option<String>,
+    refresh_token: Option<String>,
     #[serde(default)]
-    pub expires_in: Option<u64>,
+    expires_in: Option<u64>,
     #[serde(default)]
-    pub id_token: Option<String>,
+    id_token: Option<String>,
     #[serde(default)]
-    pub account_id: Option<String>,
+    account_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -117,19 +117,19 @@ pub struct CodexAccount {
     pub label: String,
     pub account_id: Option<String>,
     pub access_token: String,
-    pub refresh_token: Option<String>,
-    pub expires_at: Option<u64>,
+    refresh_token: Option<String>,
+    expires_at: Option<u64>,
     pub source: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct CodexAccountsStore {
-    pub active_account_id: Option<String>,
-    pub accounts: Vec<CodexAccount>,
+    active_account_id: Option<String>,
+    accounts: Vec<CodexAccount>,
 }
 
 impl CodexAccountsStore {
-    pub fn active_account(&self) -> Option<&CodexAccount> {
+    fn active_account(&self) -> Option<&CodexAccount> {
         if let Some(active_id) = &self.active_account_id {
             if let Some(acc) = self.accounts.iter().find(|a| &a.id == active_id) {
                 return Some(acc);
@@ -142,7 +142,7 @@ impl CodexAccountsStore {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredCredentials {
     pub access_token: String,
-    pub refresh_token: Option<String>,
+    refresh_token: Option<String>,
     pub account_id: Option<String>,
     pub source: String,
 }
@@ -188,14 +188,14 @@ fn extract_jwt_claim(jwt: &str, claim_key: &str) -> Option<String> {
     None
 }
 
-pub fn save_credentials_store(store: &CodexAccountsStore) -> Result<(), String> {
+fn save_credentials_store(store: &CodexAccountsStore) -> Result<(), String> {
     let path = get_credentials_path();
     let json = serde_json::to_string_pretty(store)
         .map_err(|_| "Failed to serialize credentials".to_string())?;
     write_secure_text_file(&path, &json)
 }
 
-pub fn add_or_update_account(tokens: &OAuthTokens) -> Result<CodexAccount, String> {
+fn add_or_update_account(tokens: &OAuthTokens) -> Result<CodexAccount, String> {
     let mut store = load_credentials_store();
     let email = tokens
         .id_token
@@ -397,7 +397,7 @@ pub fn load_openai_api_key() -> Option<String> {
     }
 }
 
-pub fn load_credentials_store() -> CodexAccountsStore {
+fn load_credentials_store() -> CodexAccountsStore {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     let threadlane_path = get_credentials_path();
 

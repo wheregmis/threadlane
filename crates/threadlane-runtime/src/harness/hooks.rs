@@ -40,17 +40,17 @@ pub struct HookContext {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HookEffect {
-    pub override_content: Option<String>,
+    pub(crate) override_content: Option<String>,
     /// Appended to an already successful tool result without replacing it.
     pub append_content: Option<String>,
-    pub override_is_error: Option<bool>,
-    pub terminate: Option<bool>,
+    pub(crate) override_is_error: Option<bool>,
+    pub(crate) terminate: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HookRun {
-    pub failures: Vec<HookFailure>,
-    pub effect: HookEffect,
+    pub(crate) failures: Vec<HookFailure>,
+    pub(crate) effect: HookEffect,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,7 +165,7 @@ impl HookRegistry {
 
     /// Registers a handler, replacing an existing handler with the same stable
     /// ID. Use this for built-in session services that are recreated on reload.
-    pub fn replace(
+    pub(crate) fn replace(
         &self,
         kind: HookKind,
         id: impl Into<String>,
@@ -205,7 +205,7 @@ impl HookRegistry {
         }
     }
 
-    pub async fn run_after_tool(&self, context: &HookContext) -> HookRun {
+    pub(crate) async fn run_after_tool(&self, context: &HookContext) -> HookRun {
         self.run_handlers(HookKind::AfterTool, context, false).await
     }
 

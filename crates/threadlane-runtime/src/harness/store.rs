@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 /// type rather than walking the session log or a rendered transcript.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelContextProjection {
-    pub lane: String,
+    lane: String,
     pub leaf_id: Option<String>,
     /// Selected active branch entries, including a compaction checkpoint and
     /// only the tail after that checkpoint.
@@ -22,9 +22,9 @@ pub struct ModelContextProjection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompactionCheckpoint {
     pub entry_id: String,
-    pub seq: u64,
-    pub compacted_messages: Option<usize>,
-    pub source_leaf_id: Option<String>,
+    seq: u64,
+    compacted_messages: Option<usize>,
+    source_leaf_id: Option<String>,
 }
 
 impl ModelContextProjection {
@@ -43,7 +43,7 @@ impl ModelContextProjection {
 /// reconciliation and audits, not for provider payloads.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TranscriptProjection {
-    pub lane: String,
+    lane: String,
     pub entries: Vec<Entry>,
 }
 

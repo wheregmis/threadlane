@@ -17,10 +17,10 @@ use std::collections::{HashMap, HashSet};
 pub struct TrajectoryRef {
     pub seq: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub entry_id: Option<String>,
+    entry_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_id: Option<String>,
-    pub lane: String,
+    run_id: Option<String>,
+    lane: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,39 +34,39 @@ pub enum RequestStatus {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RequestTrajectory {
-    pub request_index: u32,
-    pub prompt_entry_id: String,
-    pub prompt_text: String,
-    pub started_seq: u64,
+    request_index: u32,
+    prompt_entry_id: String,
+    prompt_text: String,
+    started_seq: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub finished_seq: Option<u64>,
+    finished_seq: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<u64>,
-    pub status: RequestStatus,
+    duration_ms: Option<u64>,
+    status: RequestStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub final_assistant_entry_id: Option<String>,
+    final_assistant_entry_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub final_assistant_text: Option<String>,
-    pub turn_count: u32,
-    pub tool_calls_count: u32,
-    pub files_mutated: Vec<String>,
-    pub commands_executed: Vec<String>,
-    pub usage: TokenUsage,
-    pub root_ref: TrajectoryRef,
-    pub item_refs: Vec<TrajectoryRef>,
+    final_assistant_text: Option<String>,
+    turn_count: u32,
+    tool_calls_count: u32,
+    files_mutated: Vec<String>,
+    commands_executed: Vec<String>,
+    usage: TokenUsage,
+    root_ref: TrajectoryRef,
+    item_refs: Vec<TrajectoryRef>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextManifestTrajectory {
-    pub request_id: String,
-    pub attempt: u32,
-    pub seq: u64,
-    pub timestamp: u64,
+    request_id: String,
+    attempt: u32,
+    seq: u64,
+    timestamp: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub total_estimated_tokens: Option<u32>,
-    pub items: Vec<ContextManifestItem>,
+    total_estimated_tokens: Option<u32>,
+    items: Vec<ContextManifestItem>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_ref: Option<TrajectoryRef>,
+    parent_ref: Option<TrajectoryRef>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,27 +102,27 @@ pub struct ContextSnapshotLoadTrajectory {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProviderTrajectory {
-    pub attempt: u32,
-    pub request_id: String,
-    pub provider: String,
-    pub model: String,
-    pub started_seq: u64,
+    attempt: u32,
+    request_id: String,
+    provider: String,
+    model: String,
+    started_seq: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub finished_seq: Option<u64>,
+    finished_seq: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<u64>,
+    duration_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub outcome: Option<ProviderOutcome>,
+    outcome: Option<ProviderOutcome>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<ProviderErrorSummary>,
+    error: Option<ProviderErrorSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub usage: Option<TokenUsage>,
+    usage: Option<TokenUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context_manifest_ref: Option<TrajectoryRef>,
+    context_manifest_ref: Option<TrajectoryRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_entry: Option<TrajectoryRef>,
+    parent_entry: Option<TrajectoryRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub response_entry_id: Option<String>,
+    response_entry_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,77 +136,77 @@ pub enum ToolStatus {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolTrajectory {
-    pub call_id: String,
-    pub tool_name: String,
-    pub effective_args: serde_json::Value,
-    pub status: ToolStatus,
-    pub started_seq: u64,
+    call_id: String,
+    tool_name: String,
+    effective_args: serde_json::Value,
+    status: ToolStatus,
+    started_seq: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub executed_seq: Option<u64>,
+    executed_seq: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub finished_seq: Option<u64>,
+    finished_seq: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<u64>,
+    duration_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exit_code: Option<i32>,
+    exit_code: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_bytes: Option<u64>,
+    output_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_sha256: Option<String>,
+    output_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_summary: Option<String>,
+    output_summary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result_content: Option<String>,
-    pub is_error: bool,
+    result_content: Option<String>,
+    is_error: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_assistant_entry: Option<TrajectoryRef>,
+    parent_assistant_entry: Option<TrajectoryRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result_entry: Option<TrajectoryRef>,
-    pub raw_record_seqs: Vec<u64>,
+    result_entry: Option<TrajectoryRef>,
+    raw_record_seqs: Vec<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PermissionTrajectory {
-    pub request_id: String,
-    pub capability: String,
-    pub scopes: Vec<PermissionTraceScope>,
-    pub requested_seq: u64,
+    request_id: String,
+    capability: String,
+    scopes: Vec<PermissionTraceScope>,
+    requested_seq: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resolved_seq: Option<u64>,
+    resolved_seq: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub decision: Option<PermissionTraceDecision>,
+    decision: Option<PermissionTraceDecision>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<u64>,
-    pub source: PermissionTraceSource,
+    duration_ms: Option<u64>,
+    source: PermissionTraceSource,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubagentTrajectory {
-    pub child_run_id: String,
-    pub agent_id: String,
-    pub subagent_lane: String,
-    pub phase: SubagentLifecyclePhase,
+    child_run_id: String,
+    agent_id: String,
+    subagent_lane: String,
+    phase: SubagentLifecyclePhase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_tool_call_id: Option<String>,
+    parent_tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result_entry_id: Option<String>,
+    result_entry_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    pub seq: u64,
+    error: Option<String>,
+    seq: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GenericDurableTrajectory {
-    pub seq: u64,
-    pub id: String,
-    pub lane: String,
-    pub category: String,
-    pub summary: String,
-    pub detail: String,
+    seq: u64,
+    id: String,
+    lane: String,
+    category: String,
+    summary: String,
+    detail: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_id: Option<String>,
+    run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub turn: Option<u32>,
+    turn: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -219,7 +219,7 @@ pub enum AnomalyKind {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiagnosticAnomaly {
-    pub kind: AnomalyKind,
+    kind: AnomalyKind,
     pub summary: String,
     pub description: String,
     pub related_refs: Vec<TrajectoryRef>,
@@ -240,7 +240,7 @@ pub enum TrajectoryItem {
 }
 
 impl TrajectoryItem {
-    pub fn seq(&self) -> u64 {
+    fn seq(&self) -> u64 {
         match self {
             Self::Request(r) => r.started_seq,
             Self::ContextManifest(c) => c.seq,
@@ -258,10 +258,10 @@ impl TrajectoryItem {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SessionTrajectory {
-    pub requests: Vec<RequestTrajectory>,
-    pub items: Vec<TrajectoryItem>,
+    requests: Vec<RequestTrajectory>,
+    items: Vec<TrajectoryItem>,
     pub anomalies: Vec<DiagnosticAnomaly>,
-    pub total_usage: TokenUsage,
+    total_usage: TokenUsage,
 }
 
 fn extract_mutated_files(tool_name: &str, args: &serde_json::Value) -> Option<String> {

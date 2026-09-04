@@ -46,8 +46,8 @@ fn last_path_operation_thread() -> Option<std::thread::ThreadId> {
 }
 
 pub struct HarnessWatch {
-    pub(crate) hub: HarnessEventHub,
-    pub(crate) subscription: Subscription,
+    hub: HarnessEventHub,
+    subscription: Subscription,
 }
 
 impl HarnessWatch {
@@ -105,7 +105,7 @@ pub(crate) struct SubagentLaneIdentity {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct StartedSubagentLane {
     pub(crate) identity: SubagentLaneIdentity,
-    pub(crate) accepted: AcceptedRun,
+    accepted: AcceptedRun,
 }
 
 #[derive(Debug)]

@@ -17,8 +17,8 @@ pub enum CompactionStrategy {
 
 #[derive(Debug, Clone)]
 pub struct CompactionOptions {
-    pub max_messages: usize,
-    pub preserve_recent: usize,
+    max_messages: usize,
+    preserve_recent: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -120,7 +120,8 @@ pub fn compact_for_budget(
     })
 }
 
-pub fn compact_for_context_budget(
+#[cfg(test)]
+fn compact_for_context_budget(
     messages: &[AgentMessage],
     tool_schema_json: Option<&str>,
     budget: &ContextBudget,

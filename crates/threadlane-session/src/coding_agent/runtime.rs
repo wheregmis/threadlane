@@ -36,19 +36,19 @@ use tokio::sync::broadcast;
 
 pub struct CodingAgent {
     pub(crate) agent: AgentRuntime,
-    pub session_id: String,
-    pub session_file: Option<PathBuf>,
-    pub wasi_extensions: Arc<WasiExtensionManager>,
+    pub(crate) session_id: String,
+    pub(crate) session_file: Option<PathBuf>,
+    pub(crate) wasi_extensions: Arc<WasiExtensionManager>,
     pub(crate) tool_policy: Arc<tokio::sync::Mutex<ToolPolicy>>,
     pub(crate) work_dir: PathBuf,
     pub(crate) agent_config: threadlane_runtime::AgentConfig,
     pub(crate) skills: Arc<SkillRegistry>,
     pub(crate) agent_runner: AgentRunner,
     pub(crate) broker_dispatcher: Arc<CapabilityDispatcher>,
-    pub(crate) managed_processes: ManagedProcessRegistry,
+    managed_processes: ManagedProcessRegistry,
     pub(crate) permission_handle: crate::permission::PermissionHandle,
-    pub(crate) agent_work: AgentWorkScheduler,
-    pub(crate) mcp_manager: Arc<McpManager>,
+    agent_work: AgentWorkScheduler,
+    mcp_manager: Arc<McpManager>,
     pub(crate) prompt_templates: Option<Vec<crate::prompt_templates::PromptTemplate>>,
     pub(crate) dispatch_parent_leaf: Arc<std::sync::Mutex<Option<String>>>,
     pub(crate) completed_subagent_lanes: Arc<std::sync::Mutex<Vec<CompletedSubagentLane>>>,
@@ -56,13 +56,13 @@ pub struct CodingAgent {
     pub(crate) harness_journal_error: Option<String>,
     pub(crate) harness_run_id: Arc<std::sync::Mutex<Option<String>>>,
     pub(crate) prewalk: Arc<std::sync::Mutex<Option<crate::orchestrator::PrewalkState>>>,
-    pub(crate) cancellation: CodingAgentCancellation,
+    cancellation: CodingAgentCancellation,
     pub(crate) interrupted_subagent_recovery: InterruptedSubagentRecoveryState,
     /// Connection to an external ACP agent, opened on first use.
     ///
     /// An ACP agent keeps its own conversation state, so this is held for the
     /// life of the session rather than rebuilt per turn.
-    pub(crate) acp: crate::acp_runtime::AcpEngine,
+    acp: crate::acp_runtime::AcpEngine,
     #[cfg(test)]
     pub(crate) subagent_work_observer: SubagentObserverState,
     #[cfg(test)]
@@ -70,7 +70,7 @@ pub struct CodingAgent {
 }
 
 impl CodingAgent {
-    pub fn permission_handle(&self) -> crate::permission::PermissionHandle {
+    pub(crate) fn permission_handle(&self) -> crate::permission::PermissionHandle {
         self.permission_handle.clone()
     }
 
@@ -88,7 +88,7 @@ impl CodingAgent {
         self.agent.tool_dispatcher.tool_completion_recorder = recorder;
     }
 
-    pub(crate) async fn run_scheduled_agent_work(&mut self) {
+    async fn run_scheduled_agent_work(&mut self) {
         while self
             .agent_work
             .run_executor(&mut self.agent, self.session_file.as_deref())
@@ -109,7 +109,7 @@ impl CodingAgent {
         }
     }
 
-    pub fn work_handle(&self) -> CodingAgentWorkHandle {
+    pub(crate) fn work_handle(&self) -> CodingAgentWorkHandle {
         CodingAgentWorkHandle::new(self.agent_work.clone(), self.session_file.clone())
     }
 
@@ -129,13 +129,13 @@ impl CodingAgent {
             .map_err(|error| error.to_string())
     }
 
-    pub fn harness_error(&self) -> Option<&str> {
+    pub(crate) fn harness_error(&self) -> Option<&str> {
         self.harness_journal_error.as_deref()
     }
 
     /// Returns the fully built system prompt used by this runtime when the
     /// agent state is not currently locked by an active turn.
-    pub fn system_prompt_snapshot(&self) -> Option<String> {
+    pub(crate) fn system_prompt_snapshot(&self) -> Option<String> {
         self.agent
             .turn
             .try_lock()
@@ -150,11 +150,11 @@ impl CodingAgent {
         journal.watch().map(Some)
     }
 
-    pub fn cancellation_handle(&self) -> CodingAgentCancellation {
+    pub(crate) fn cancellation_handle(&self) -> CodingAgentCancellation {
         self.cancellation.clone()
     }
 
-    pub fn has_interrupted_work(&self) -> bool {
+    pub(crate) fn has_interrupted_work(&self) -> bool {
         matches!(
             self.interrupted_subagent_recovery,
             InterruptedSubagentRecoveryState::Pending
@@ -165,11 +165,11 @@ impl CodingAgent {
         self.recover_interrupted_subagent_lanes().await
     }
 
-    pub fn set_model_roles(&mut self, roles: threadlane_runtime::ModelRoles) {
+    pub(crate) fn set_model_roles(&mut self, roles: threadlane_runtime::ModelRoles) {
         self.agent.set_model_roles(roles);
     }
 
-    pub fn set_needle_enabled(&mut self, enabled: bool) {
+    pub(crate) fn set_needle_enabled(&mut self, enabled: bool) {
         self.agent.set_needle_enabled(enabled);
     }
 
@@ -193,7 +193,7 @@ impl CodingAgent {
     ///
     /// Returns an empty list for a non-ACP model rather than an error: asking
     /// what an agent offers is a question the UI may ask about any selection.
-    pub async fn acp_config_options(&mut self) -> Result<Vec<crate::acp::AcpConfigOption>, String> {
+    pub(crate) async fn acp_config_options(&mut self) -> Result<Vec<crate::acp::AcpConfigOption>, String> {
         let model = self.agent.model();
         let Some(agent_id) = crate::acp_bridge::acp_agent_id(&model) else {
             return Ok(Vec::new());
@@ -206,7 +206,7 @@ impl CodingAgent {
     }
 
     /// Applies one of the selected external agent's settings.
-    pub async fn set_acp_config_option(
+    pub(crate) async fn set_acp_config_option(
         &mut self,
         config_id: &str,
         value: &str,
@@ -232,7 +232,7 @@ impl CodingAgent {
         self.acp.model_label(agent_id)
     }
 
-    pub fn model(&self) -> String {
+    pub(crate) fn model(&self) -> String {
         self.agent.model()
     }
 
@@ -246,7 +246,7 @@ impl CodingAgent {
         fetch_available_models(&api_key, account_id.as_deref()).await
     }
 
-    pub async fn reload_extensions(&mut self) -> Result<usize, String> {
+    pub(crate) async fn reload_extensions(&mut self) -> Result<usize, String> {
         let global_threadlane_dir = default_global_threadlane_dir();
         let loaded = self
             .wasi_extensions
@@ -268,7 +268,7 @@ impl CodingAgent {
         self.mcp_manager.discover_and_connect().await;
     }
 
-    pub(crate) async fn set_model(&mut self, model: String) -> Result<(), String> {
+    async fn set_model(&mut self, model: String) -> Result<(), String> {
         let model = model.trim();
         if model.is_empty() {
             return Err("model cannot be empty".into());
@@ -289,7 +289,7 @@ impl CodingAgent {
         Ok(())
     }
 
-    pub(crate) fn set_name(&mut self, name: String) -> Result<(), String> {
+    fn set_name(&mut self, name: String) -> Result<(), String> {
         if let Some(journal) = self.harness.as_mut() {
             journal.refresh().map_err(|error| error.to_string())?;
             journal

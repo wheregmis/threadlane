@@ -40,15 +40,15 @@ pub struct SessionController {
     pub cancellation: CodingAgentCancellation,
     pub work_handle: CodingAgentWorkHandle,
     permission_handle: PermissionHandle,
-    pub prompt_lock: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) prompt_lock: Arc<tokio::sync::Mutex<()>>,
     pub session_file: PathBuf,
-    pub mode: ExecutionMode,
+    mode: ExecutionMode,
     pub selected_model: String,
     pub system_prompt: String,
     pub harness_error: Option<String>,
     is_generating: AtomicBool,
     status: Mutex<SessionStatus>,
-    pub recovery_loaded: AtomicBool,
+    pub(crate) recovery_loaded: AtomicBool,
 }
 
 impl SessionController {
@@ -177,7 +177,7 @@ impl SessionController {
         true
     }
 
-    pub async fn reload_extensions(&self) -> Result<usize, String> {
+    pub(crate) async fn reload_extensions(&self) -> Result<usize, String> {
         let _guard = self.prompt_lock.lock().await;
         let mut agent = self.agent.lock().await;
         agent.reload_extensions().await

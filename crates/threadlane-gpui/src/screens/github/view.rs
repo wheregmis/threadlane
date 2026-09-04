@@ -35,7 +35,7 @@ const GITHUB_PR_TABS_CONTEXT: &str = "GitHubPullRequestTabs";
 const GITHUB_PR_FILE_LIST_CONTEXT: &str = "GitHubPullRequestFiles";
 const PAGE_SIZE: usize = 50;
 
-pub fn init(cx: &mut App) {
+pub(crate) fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("up", SelectPrevious, Some(GITHUB_LIST_CONTEXT)),
         KeyBinding::new("down", SelectNext, Some(GITHUB_LIST_CONTEXT)),
@@ -90,10 +90,10 @@ fn github_state_for_tab(state: GitHubStateFilter, tab: GitHubTab) -> GitHubState
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GitHubRequest {
-    pub(crate) work_dir: PathBuf,
-    pub(crate) tab: GitHubTab,
-    pub(crate) query_revision: u64,
-    pub(crate) item_number: Option<u64>,
+    work_dir: PathBuf,
+    tab: GitHubTab,
+    query_revision: u64,
+    item_number: Option<u64>,
 }
 
 pub(crate) fn github_result_matches_request(
@@ -1051,6 +1051,7 @@ fn same_issue(left: &GitHubIssueRef, right: &GitHubIssueRef) -> bool {
         && left.number == right.number
 }
 
+#[cfg(test)]
 pub(crate) fn linked_session_ids<'a>(
     sessions: &'a [SessionInfo],
     issue: &GitHubIssueRef,
@@ -4221,9 +4222,7 @@ mod tests {
         PrWorkspaceSelections,
     };
     use crate::state::{AppState, SessionHealth, SessionInfo};
-    use gpui::{
-        AppContext as _, Focusable as _, InteractiveElement as _, ParentElement as _, Styled as _,
-    };
+    use gpui::{AppContext as _, Focusable as _};
     use std::path::PathBuf;
     use threadlane_git::{
         GitHubIssueRef, GitHubIssueSummary, GitHubPrFile, GitHubPrInfo, GitHubPullRequestSummary,
