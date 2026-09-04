@@ -81,6 +81,7 @@ pub struct GitHubPrInfo {
     pub head_oid: String,
     pub issue_comments: Vec<PrConversationComment>,
     pub reviews: Vec<PrReview>,
+    #[serde(default)]
     pub commits: Vec<GitHubPrCommit>,
     pub files: Vec<GitHubPrFile>,
 }
@@ -2231,12 +2232,11 @@ pub fn submit_pull_request_review(
         work_dir: work_dir.to_path_buf(),
         message,
     })?;
-    let args = github_pr_review_args(pull_request.number, verdict, body).map_err(|message| {
-        GitError {
+    let args =
+        github_pr_review_args(pull_request.number, verdict, body).map_err(|message| GitError {
             work_dir: work_dir.to_path_buf(),
             message,
-        }
-    })?;
+        })?;
     let comment_payloads = if comments.is_empty() {
         Vec::new()
     } else {
@@ -2245,15 +2245,12 @@ pub fn submit_pull_request_review(
             message,
         })?
     };
-    let review = execute_gh(work_dir, &args)?;
-    if comment_payloads.is_empty() {
-        return Ok(review);
-    }
-    let (repository, _endpoint) =
+    let (repository, _review_endpoint) =
         validated_review_endpoint(pull_request).map_err(|message| GitError {
             work_dir: work_dir.to_path_buf(),
             message,
         })?;
+    let review = execute_gh(work_dir, &args)?;
     let endpoint = format!(
         "repos/{}/{}/pulls/{}/comments",
         repository.owner, repository.repo, pull_request.number
@@ -3104,15 +3101,14 @@ mod tests {
         assert!(!pr.review_comments_complete);
 
         let mut legacy = serde_json::to_value(GitHubPrInfo::default()).unwrap();
-        legacy
-            .as_object_mut()
-            .unwrap()
-            .remove("review_comments_complete");
-        assert!(
-            !serde_json::from_value::<GitHubPrInfo>(legacy)
-                .unwrap()
-                .review_comments_complete
-        );
+        let legacy = legacy.as_object_mut().unwrap();
+        legacy.remove("review_comments_complete");
+        legacy.remove("commits");
+        let deserialized =
+            serde_json::from_value::<GitHubPrInfo>(serde_json::Value::Object(legacy.clone()))
+                .unwrap();
+        assert!(!deserialized.review_comments_complete);
+        assert!(deserialized.commits.is_empty());
     }
 
     #[test]
