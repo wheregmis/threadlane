@@ -59,7 +59,7 @@ Expected: FAIL because `active_git_work_dir` does not exist.
 
 - [ ] **Step 3: Add the minimal resolver**
 
-Implement one lookup on `AppState`: if an active session is present, find it under the active canonical project and return its `runtime_work_dir` only when `worktree_available`; otherwise return `active_work_dir`. Do not change terminal grouping or branch-only sidebar PR lookup.
+Implement one lookup on `AppState`: if an active session is present, find it under the active canonical project and return its `runtime_work_dir` only when `worktree_available`; otherwise return `None`. Return `active_work_dir` only when no session is active. Do not change terminal grouping or branch-only sidebar PR lookup.
 
 - [ ] **Step 4: Use the resolver for interactive review**
 
@@ -140,7 +140,7 @@ gh pr comment 42 --body <body>
 gh pr review 42 --approve|--comment|--request-changes --body <body>
 ```
 
-Assert zero numbers, absolute/traversing review paths, and empty trimmed bodies/titles fail before command execution. `PullRequestReviewVerdict` has exactly `Comment`, `Approve`, and `RequestChanges`. A review without file comments builds the `gh pr review` argv above; a review with file comments builds the exact REST JSON payload for `POST repos/<owner>/<repo>/pulls/<number>/reviews`, including `commit_id`, `event`, `body`, and `{path, body, subject_type: "file"}` comments.
+Assert zero numbers, absolute/traversing review paths, and empty trimmed bodies/titles fail before command execution. `PullRequestReviewVerdict` has exactly `Comment`, `Approve`, and `RequestChanges`. A review always submits its verdict with `gh pr review`; each file-level comment uses `POST repos/<owner>/<repo>/pulls/<number>/comments` with `commit_id`, `path`, `body`, and `subject_type: "file"`.
 
 Add one command-environment test proving a supplied stored token becomes `GH_TOKEN` and is never present in the argument vector.
 
@@ -157,7 +157,7 @@ Expected: FAIL because the typed contracts and helpers do not exist.
 
 - [ ] **Step 4: Implement typed reads with the existing `gh` executor**
 
-Use `gh issue list/view` and `gh pr list/view/diff` in the caller's working directory with `GH_PROMPT_DISABLED=1`. Parse only declared JSON. Add `body`, conversation comments, reviews, files, `head_oid`, and review-comment IDs to `GitHubPrInfo` while preserving all existing fields and callers.
+Use `gh issue list/view` and `gh pr list/view/diff` in the caller's working directory with `GH_PROMPT_DISABLED=1`. Hydrate inline review comments separately with paginated `gh api repos/<owner>/<repo>/pulls/<number>/comments`; map each response `id` to `GitHubPrInfo.review_comments[].remote_id`. Parse only declared JSON. Add `body`, conversation comments, reviews, files, `head_oid`, and review-comment IDs to `GitHubPrInfo` while preserving all existing fields and callers.
 
 Reuse `threadlane-auth` as a workspace path dependency. When Threadlane has a stored non-empty GitHub credential, set it only as `GH_TOKEN` on the spawned `gh` command; otherwise leave the command environment alone so normal `gh` login and environment resolution continue to work. Never put the token in argv or errors.
 
@@ -165,7 +165,7 @@ Do not add caching for list/detail reads in this task; the UI controls refresh f
 
 - [ ] **Step 5: Implement explicit mutation functions**
 
-`create_draft_pull_request` requires an already-published named branch, invalidates its PR cache, and runs `gh pr create --draft` with editable base/title/body; unlike the existing `create_pull_request`, it does not push. Comment/reply/review functions validate input and execute once. Return remote output/URL and never retry a write automatically.
+`create_draft_pull_request` requires an already-published named branch, invalidates its PR cache, and runs `gh pr create --draft` with editable base/title/body; unlike the existing `create_pull_request`, it does not push. Comment/reply/review functions validate input and execute once. Successful writes return stable remote identities; draft PR creation returns its number, URL, head, base, title, and body. Never retry a write automatically.
 
 Review-comment reply derives `owner/repo` and PR number from the validated GitHub PR URL and calls:
 
@@ -237,7 +237,7 @@ Expected: FAIL because the link and strict creation path do not exist.
 
 - [ ] **Step 4: Implement one issue-only creation path**
 
-Generate a unique session ID, derive `issue/<number>-<slug>-<six-id-chars>`, and create `.threadlane/worktrees/<session_id>`. Append exactly these root facts through `CodingSessionHarness`: `is_worktree`, `worktree_path`, `git_branch`, `github_issue`, and `name` (`#<number> <title>`).
+Generate a unique session ID, always derive `issue/<number>-<slug>-<six-id-chars>`, and create `.threadlane/worktrees/<session_id>`. Append exactly these root facts through `CodingSessionHarness`: `is_worktree`, `worktree_path`, `git_branch`, `github_issue`, and `name` (`#<number> <title>`).
 
 If any creation or fact append fails, remove only the newly created worktree and unique stub file, leave selection unchanged, and return the error. Do not refactor ordinary `create_new_session` into an option matrix and do not change its legacy fallback behavior.
 

@@ -1322,6 +1322,8 @@ impl SidebarView {
         let theme = cx.theme().colors;
         let github_selected =
             self.model.read(cx).workspace_page == crate::state::WorkspacePage::GitHub;
+        let settings_selected =
+            self.model.read(cx).workspace_page == crate::state::WorkspacePage::Settings;
 
         div()
             .flex_none()
@@ -1364,6 +1366,7 @@ impl SidebarView {
                             .child("Settings"),
                     )
                     .ghost()
+                    .selected(settings_selected)
                     .w_full()
                     .justify_start()
                     .text_color(theme.muted_foreground)

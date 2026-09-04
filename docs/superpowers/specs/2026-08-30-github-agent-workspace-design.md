@@ -6,7 +6,7 @@ Turn a Git-backed Threadlane project into a clear issue-to-PR workspace where se
 
 ## Product Shape
 
-Add a project-scoped **GitHub** page with two top-level tabs: **Issues** and **Pull requests**. The page uses a native master-detail layout: a virtualized work-item list owns the main area and the existing resizable right panel shows the selected issue or pull request. Opening the linked agent returns to chat while preserving the selected GitHub item.
+Add a project-scoped **GitHub** page with two top-level tabs: **Issues** and **Pull requests**. The GitHub page owns its master-detail layout, including selected-item navigation, drafts, comments, and review state. The existing resizable right panel remains dedicated to local repository review actions. Opening the linked agent returns to chat while preserving the selected GitHub item.
 
 The shell must stay quiet and desktop-native. Reuse Threadlane's current typography, spacing, buttons, tabs, tooltips, empty states, `ListState`, and right-panel behavior. Do not imitate GitHub's web chrome or add a browser-like navigation stack.
 
@@ -24,7 +24,7 @@ Pull-request detail reuses the existing PR summary and local review capabilities
 
 ## Issue-to-Agent Lifecycle
 
-`Start agent task` opens a compact confirmation sheet with the issue, selected model, reasoning effort, and proposed branch. Isolation is mandatory for this action. The branch format is `issue/<number>-<slug>` with collision-safe suffixing through the existing worktree/session path.
+`Start agent task` opens a compact confirmation sheet with the issue, selected model, reasoning effort, and proposed branch. Isolation is mandatory for this action. The branch format is always `issue/<number>-<slug>-<six-id-chars>`.
 
 Confirmation creates an ordinary durable Threadlane session and worktree, not a supervisor task or a new workflow database. The initial prompt includes the canonical issue URL and uses the existing virtual issue read mechanism. Remote issue text is untrusted context, never an instruction source.
 
@@ -83,7 +83,7 @@ Own only project-page selection, filters, fetched page snapshots, local drafts, 
 
 ### Views
 
-The workspace owns page switching and the resizable master-detail shell. A focused GitHub view owns issue/PR list and detail state. The existing right panel remains the single owner of repository review actions; new remote sections extend it rather than duplicating Git controls elsewhere.
+The workspace owns page switching and the resizable sidebar shell. A focused GitHub view owns issue/PR list and detail state. The existing right panel remains the single owner of repository review actions; GitHub preserves its selected item when those actions return the user to Chat.
 
 All repository actions use the selected session's `runtime_work_dir`. The canonical attached-project directory is used only for repository identity and discovery. Stale async responses are discarded when project, item identity, query revision, or selected session changes.
 

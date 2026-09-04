@@ -364,6 +364,7 @@ impl EditorView {
         if tab.is_dirty && !tab.is_diff {
             let file_name = tab.file_name.clone();
             let target_path = tab.relative_path.clone();
+            let target_project = tab.project_dir.clone();
 
             cx.spawn(async move |this, cx| {
                 let result = rfd::AsyncMessageDialog::new()
@@ -379,7 +380,9 @@ impl EditorView {
                         if let Some(pos) = this
                             .tabs
                             .iter()
-                            .position(|t| t.relative_path == target_path)
+                            .position(|t| {
+                                t.project_dir == target_project && t.relative_path == target_path
+                            })
                         {
                             this.remove_tab_at(pos, cx);
                         }
@@ -413,6 +416,7 @@ impl EditorView {
             cx.notify();
         } else {
             let keep_path = self.tabs[keep_index].relative_path.clone();
+            let keep_project = self.tabs[keep_index].project_dir.clone();
             let description = if dirty_names.len() == 1 {
                 format!(
                     "Do you want to discard unsaved changes to \"{}\"?",
@@ -436,7 +440,9 @@ impl EditorView {
                 if matches!(result, rfd::MessageDialogResult::Yes) {
                     let _ = this.update(cx, |this, cx| {
                         if let Some(pos) =
-                            this.tabs.iter().position(|t| t.relative_path == keep_path)
+                            this.tabs.iter().position(|t| {
+                                t.project_dir == keep_project && t.relative_path == keep_path
+                            })
                         {
                             let kept = this.tabs.remove(pos);
                             this.tabs = vec![kept];

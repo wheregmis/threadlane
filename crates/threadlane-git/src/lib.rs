@@ -1678,14 +1678,6 @@ fn review_verdict_flag(verdict: PullRequestReviewVerdict) -> &'static str {
     }
 }
 
-fn review_verdict_event(verdict: PullRequestReviewVerdict) -> &'static str {
-    match verdict {
-        PullRequestReviewVerdict::Comment => "COMMENT",
-        PullRequestReviewVerdict::Approve => "APPROVE",
-        PullRequestReviewVerdict::RequestChanges => "REQUEST_CHANGES",
-    }
-}
-
 fn validate_review_path(path: &str) -> Result<&str, String> {
     let path = path.trim();
     let candidate = Path::new(path);
@@ -1698,30 +1690,22 @@ fn validate_review_path(path: &str) -> Result<&str, String> {
     .ok_or_else(|| format!("review path must be repository-relative: {path}"))
 }
 
-fn review_comment_payload(
+fn review_comment_payloads(
     commit_id: &str,
-    verdict: PullRequestReviewVerdict,
-    body: &str,
     comments: &[PullRequestReviewCommentDraft],
-) -> Result<serde_json::Value, String> {
+) -> Result<Vec<serde_json::Value>, String> {
     let commit_id = validated_text(commit_id, "head commit")?;
-    let body = validated_text(body, "review body")?;
-    let comments = comments
+    comments
         .iter()
         .map(|comment| {
             Ok(serde_json::json!({
+                "commit_id": commit_id,
                 "path": validate_review_path(&comment.path)?,
                 "body": validated_text(&comment.body, "review comment body")?,
                 "subject_type": "file",
             }))
         })
-        .collect::<Result<Vec<_>, String>>()?;
-    Ok(serde_json::json!({
-        "commit_id": commit_id,
-        "event": review_verdict_event(verdict),
-        "body": body,
-        "comments": comments,
-    }))
+        .collect()
 }
 
 fn execute_gh(work_dir: &Path, args: &[String]) -> Result<String, GitError> {
@@ -1741,6 +1725,50 @@ fn execute_gh(work_dir: &Path, args: &[String]) -> Result<String, GitError> {
         &stderr,
         stored_token.as_deref(),
     ))
+}
+
+fn execute_gh_json(
+    work_dir: &Path,
+    args: &[String],
+    payload: &serde_json::Value,
+) -> Result<String, GitError> {
+    let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let (mut command, stored_token) = gh_command_with_captured_token(work_dir, &refs);
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(|error| GitError {
+        work_dir: work_dir.to_path_buf(),
+        message: format!("could not start gh: {error}"),
+    })?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| GitError {
+            work_dir: work_dir.to_path_buf(),
+            message: "could not open gh input".to_owned(),
+        })?
+        .write_all(payload.to_string().as_bytes())
+        .map_err(|error| GitError {
+            work_dir: work_dir.to_path_buf(),
+            message: format!("could not write gh input: {error}"),
+        })?;
+    let output = child.wait_with_output().map_err(|error| GitError {
+        work_dir: work_dir.to_path_buf(),
+        message: format!("could not wait for gh: {error}"),
+    })?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        Err(gh_failure(
+            work_dir,
+            output.status,
+            &stderr,
+            stored_token.as_deref(),
+        ))
+    }
 }
 
 pub fn list_github_issues(
@@ -2203,68 +2231,41 @@ pub fn submit_pull_request_review(
         work_dir: work_dir.to_path_buf(),
         message,
     })?;
-    if comments.is_empty() {
-        let args =
-            github_pr_review_args(pull_request.number, verdict, body).map_err(|message| {
-                GitError {
-                    work_dir: work_dir.to_path_buf(),
-                    message,
-                }
-            })?;
-        return execute_gh(work_dir, &args);
+    let args = github_pr_review_args(pull_request.number, verdict, body).map_err(|message| {
+        GitError {
+            work_dir: work_dir.to_path_buf(),
+            message,
+        }
+    })?;
+    let comment_payloads = if comments.is_empty() {
+        Vec::new()
+    } else {
+        review_comment_payloads(&pull_request.head_oid, comments).map_err(|message| GitError {
+            work_dir: work_dir.to_path_buf(),
+            message,
+        })?
+    };
+    let review = execute_gh(work_dir, &args)?;
+    if comment_payloads.is_empty() {
+        return Ok(review);
     }
-    let (repository, endpoint) =
+    let (repository, _endpoint) =
         validated_review_endpoint(pull_request).map_err(|message| GitError {
             work_dir: work_dir.to_path_buf(),
             message,
         })?;
-    let payload = review_comment_payload(&pull_request.head_oid, verdict, body, comments).map_err(
-        |message| GitError {
-            work_dir: work_dir.to_path_buf(),
-            message,
-        },
-    )?;
-    let api_args = github_api_args(
-        &repository.host,
-        &["--method", "POST", &endpoint, "--input", "-"],
+    let endpoint = format!(
+        "repos/{}/{}/pulls/{}/comments",
+        repository.owner, repository.repo, pull_request.number
     );
-    let api_args = api_args.iter().map(String::as_str).collect::<Vec<_>>();
-    let (mut command, stored_token) = gh_command_with_captured_token(work_dir, &api_args);
-    command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command.spawn().map_err(|error| GitError {
-        work_dir: work_dir.to_path_buf(),
-        message: format!("could not start gh: {error}"),
-    })?;
-    child
-        .stdin
-        .take()
-        .ok_or_else(|| GitError {
-            work_dir: work_dir.to_path_buf(),
-            message: "could not open gh input".to_owned(),
-        })?
-        .write_all(payload.to_string().as_bytes())
-        .map_err(|error| GitError {
-            work_dir: work_dir.to_path_buf(),
-            message: format!("could not write gh input: {error}"),
-        })?;
-    let output = child.wait_with_output().map_err(|error| GitError {
-        work_dir: work_dir.to_path_buf(),
-        message: format!("could not wait for gh: {error}"),
-    })?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        Err(gh_failure(
-            work_dir,
-            output.status,
-            &stderr,
-            stored_token.as_deref(),
-        ))
+    for payload in comment_payloads {
+        let args = github_api_args(
+            &repository.host,
+            &["--method", "POST", &endpoint, "--input", "-"],
+        );
+        execute_gh_json(work_dir, &args, &payload)?;
     }
+    Ok(review)
 }
 
 pub fn pull(work_dir: &Path) -> Result<String, GitError> {
@@ -3196,30 +3197,24 @@ mod tests {
         assert!(create_draft_pr_args("main", "Title", " ").is_err());
         assert!(github_pr_comment_args(0, "Body").is_err());
         assert!(github_pr_review_args(42, PullRequestReviewVerdict::Comment, " ").is_err());
-        assert!(review_comment_payload(
+        assert!(review_comment_payloads(
             "commit",
-            PullRequestReviewVerdict::Approve,
-            "Body",
             &[PullRequestReviewCommentDraft {
                 path: "../outside.rs".into(),
                 body: "Note".into()
             }]
         )
         .is_err());
-        assert!(review_comment_payload(
+        assert!(review_comment_payloads(
             "commit",
-            PullRequestReviewVerdict::Approve,
-            "Body",
             &[PullRequestReviewCommentDraft {
                 path: "/absolute.rs".into(),
                 body: "Note".into()
             }]
         )
         .is_err());
-        assert!(review_comment_payload(
+        assert!(review_comment_payloads(
             "commit",
-            PullRequestReviewVerdict::Approve,
-            "Body",
             &[PullRequestReviewCommentDraft {
                 path: "src/lib.rs".into(),
                 body: " ".into()
@@ -3227,10 +3222,8 @@ mod tests {
         )
         .is_err());
 
-        let payload = review_comment_payload(
+        let payloads = review_comment_payloads(
             "abc123",
-            PullRequestReviewVerdict::Approve,
-            "Ship it",
             &[PullRequestReviewCommentDraft {
                 path: "src/lib.rs".into(),
                 body: "Minor note".into(),
@@ -3238,13 +3231,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            payload,
-            serde_json::json!({
+            payloads,
+            vec![serde_json::json!({
                 "commit_id": "abc123",
-                "event": "APPROVE",
-                "body": "Ship it",
-                "comments": [{ "path": "src/lib.rs", "body": "Minor note", "subject_type": "file" }]
-            })
+                "path": "src/lib.rs",
+                "body": "Minor note",
+                "subject_type": "file"
+            })]
         );
     }
 

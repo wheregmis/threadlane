@@ -453,6 +453,9 @@ impl WorkspaceView {
     }
 
     fn open_git_review(&mut self, cx: &mut Context<Self>) {
+        self.model.update(cx, |state, _cx| {
+            state.workspace_page = WorkspacePage::Chat;
+        });
         self.right_panel_visible = true;
         self.right_panel.update(cx, |panel, cx| {
             panel.open_review(cx);
@@ -462,6 +465,9 @@ impl WorkspaceView {
     }
 
     fn open_git_branches(&mut self, cx: &mut Context<Self>) {
+        self.model.update(cx, |state, _cx| {
+            state.workspace_page = WorkspacePage::Chat;
+        });
         self.right_panel_visible = true;
         self.right_panel.update(cx, |panel, cx| {
             panel.open_branch_popover(cx);
@@ -471,6 +477,9 @@ impl WorkspaceView {
     }
 
     fn open_git_new_branch(&mut self, cx: &mut Context<Self>) {
+        self.model.update(cx, |state, _cx| {
+            state.workspace_page = WorkspacePage::Chat;
+        });
         self.right_panel_visible = true;
         self.right_panel.update(cx, |panel, cx| {
             panel.open_new_branch_dialog(cx);
@@ -480,6 +489,9 @@ impl WorkspaceView {
     }
 
     fn open_git_merge(&mut self, cx: &mut Context<Self>) {
+        self.model.update(cx, |state, _cx| {
+            state.workspace_page = WorkspacePage::Chat;
+        });
         self.right_panel_visible = true;
         self.right_panel.update(cx, |panel, cx| {
             panel.open_merge_dialog(cx);
