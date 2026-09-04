@@ -22,6 +22,29 @@ use tracing::{debug, warn};
 use futures::FutureExt;
 
 /// Callback invoked after a tool intent is recorded and before execution.
+fn dyn_tool_call(run_command_arguments: &str) -> Option<(String, String)> {
+    let arguments: Value = serde_json::from_str(run_command_arguments).ok()?;
+    let command = arguments.get("command")?.as_str()?.trim();
+    let input = command.strip_prefix("dyn ")?.trim();
+    let mut parts = input.split_whitespace();
+    let tool_name = parts.next()?;
+    let remaining = input[tool_name.len()..].trim();
+    if tool_name.starts_with('-') || remaining == "--help" || remaining == "-h" {
+        return None;
+    }
+    let tool_arguments = if remaining.is_empty() {
+        "{}".to_owned()
+    } else if remaining.starts_with('{')
+        && serde_json::from_str::<Value>(remaining)
+            .ok()
+            .is_some_and(|value| value.is_object())
+    {
+        remaining.to_owned()
+    } else {
+        return None;
+    };
+    Some((tool_name.to_owned(), tool_arguments))
+}
 pub type ToolIntentRecorder = crate::provider::ToolIntentRecorder;
 /// Callback invoked after tool execution completes.
 pub type ToolCompletionRecorder = crate::provider::ToolCompletionRecorder;
@@ -355,6 +378,34 @@ impl ToolDispatcher {
     }
 
     async fn run_tool_with_hooks(tc: ToolCall, context: ToolRunContext) -> AgentToolResult {
+        if tc.function.name == "run_command" {
+            if let Some((tool_name, tool_arguments)) = dyn_tool_call(&tc.function.arguments) {
+                let nested = ToolCall {
+                    id: format!("{}:dyn", tc.id),
+                    r#type: "function".into(),
+                    function: threadlane_protocol::RuntimeToolCallFunction {
+                        name: tool_name,
+                        arguments: tool_arguments,
+                    },
+                    thought_signature: None,
+                };
+                let nested_result = Box::pin(Self::run_tool_with_hooks(nested, context)).await;
+                return AgentToolResult {
+                    tool_call_id: tc.id,
+                    name: tc.function.name,
+                    content: if nested_result.is_error {
+                        nested_result.content
+                    } else {
+                        format!(
+                            "Exit Status: exit status: 0\n--- STDOUT ---\n{}\n--- STDERR ---",
+                            nested_result.content
+                        )
+                    },
+                    is_error: nested_result.is_error,
+                    terminate: nested_result.terminate,
+                };
+            }
+        }
         match Self::prepare_tool_call(tc, context).await {
             Ok(call) => Self::execute_prepared_tool(call).await,
             Err(result) => result,

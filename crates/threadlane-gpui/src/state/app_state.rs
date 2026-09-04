@@ -506,24 +506,26 @@ fn effective_session_work_dir(
     id: &str,
     facts: &std::collections::BTreeMap<String, String>,
 ) -> PathBuf {
-    if facts
+    if !facts
         .get("is_worktree")
         .is_some_and(|value| value == "true")
     {
-        facts
-            .get("worktree_path")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                let inferred = canonical_work_dir.join(".threadlane/worktrees").join(id);
-                if inferred.exists() {
-                    inferred
-                } else {
-                    canonical_work_dir.to_path_buf()
-                }
-            })
-    } else {
-        canonical_work_dir.to_path_buf()
+        return canonical_work_dir.to_path_buf();
     }
+
+    let inferred = canonical_work_dir.join(".threadlane/worktrees").join(id);
+    let candidate = facts
+        .get("worktree_path")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| inferred.clone());
+    let valid_worktree = std::fs::canonicalize(&candidate).ok().filter(|candidate| {
+        std::fs::canonicalize(&inferred).is_ok_and(|inferred| *candidate == inferred)
+            && candidate.starts_with(canonical_work_dir)
+    });
+
+    // Preserve the expected worktree path when validation fails so callers mark
+    // the session unavailable instead of falling back to the attached project.
+    valid_worktree.unwrap_or(inferred)
 }
 
 fn resolve_session_transcript_file(
@@ -1911,7 +1913,11 @@ impl AppState {
                     .get(&(session.work_dir.clone(), branch.clone()))
             })
             .and_then(Option::as_ref)
-            .or_else(|| is_active.then(|| git_status.and_then(|status| status.pr.as_ref())).flatten());
+            .or_else(|| {
+                is_active
+                    .then(|| git_status.and_then(|status| status.pr.as_ref()))
+                    .flatten()
+            });
         let linked_pr_is_active = linked_pr.is_some_and(|pr| {
             !pr.state.eq_ignore_ascii_case("merged")
                 && !pr.state.eq_ignore_ascii_case("closed")
@@ -4888,7 +4894,10 @@ mod tests {
         let sessions = discover_sessions_in_project(project_dir.path());
         let session = &sessions[0];
         assert_eq!(session.work_dir, project_dir.path().canonicalize().unwrap());
-        assert_eq!(session.runtime_work_dir, runtime_work_dir);
+        assert_eq!(
+            session.runtime_work_dir,
+            session.work_dir.join(".threadlane/worktrees/session")
+        );
         assert!(session.is_worktree);
         assert!(!session.worktree_available);
 

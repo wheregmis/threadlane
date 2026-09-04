@@ -150,7 +150,7 @@ pub(crate) fn build_system_prompt(options: SystemPromptBuildOptions<'_>) -> Stri
         }
         if available_tool_names.contains("run_command") {
             add_tool_guideline(
-                "Auxiliary capabilities can be inspected or executed in-process via `run_command` using `dyn <tool_name> [args]` or `dyn --help` without tool schema overhead.",
+                "Auxiliary capabilities can be inspected or executed in-process via `run_command` using `dyn <tool_name> [json_args]` or `dyn --help` without tool schema overhead.",
             );
         }
         if available_tool_names.contains("subagent") {
