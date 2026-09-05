@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use gpui::{AssetSource, Result, SharedString};
-use gpui_component_assets::Assets as ComponentAssets;
+use gpui_kit_assets::Assets as ComponentAssets;
 
 pub struct Assets;
 

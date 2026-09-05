@@ -27,6 +27,24 @@ opt-level = 2
 [profile.dev.package.threadlane-gpui]
 opt-level = 2
 
+[profile.dev.package.gpui-pre]
+opt-level = 3
+
+[profile.dev.package.gpui-pre-platform]
+opt-level = 3
+
+[profile.dev.package.gpui-pre-macros]
+opt-level = 3
+
+[profile.dev.package.gpui-component]
+opt-level = 3
+
+[profile.dev.package.gpui-kit]
+opt-level = 3
+
+[profile.dev.package.gpui-kit-assets]
+opt-level = 3
+
 [profile.release]
 opt-level = 3
 debug = false

@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/longbridge/gpui-component/main/.theme-schema.json",
+  "$schema": "https://raw.githubusercontent.com/longbridge/gpui-kit/main/.theme-schema.json",
   "name": "Threadlane",
   "author": "Threadlane Team",
   "themes": [

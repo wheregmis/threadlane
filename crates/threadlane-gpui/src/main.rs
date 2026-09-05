@@ -73,7 +73,9 @@ fn main() {
         return;
     }
     let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        tracing_subscriber::EnvFilter::new("info,gpui_component::text::format::markdown=error")
+        tracing_subscriber::EnvFilter::new(
+            "info,gpui_component::text::format::markdown=error,gpui_base::text::format::markdown=error",
+        )
     });
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_target(true)
