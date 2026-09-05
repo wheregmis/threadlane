@@ -495,7 +495,7 @@ impl CodingAgent {
                 #[cfg(test)]
                 let observer = observer
                     .and_then(|observer| observer.lock().ok().and_then(|value| value.clone()));
-                let (output, thinking, lanes) = run_subagents_with_context(
+                let (output, thinking, _) = run_subagents_with_context(
                     tasks,
                     parallel,
                     tool_call_id,
@@ -510,17 +510,19 @@ impl CodingAgent {
                         parent_event_tx: event_tx,
                         parent_leaf_id,
                         session_file,
+                        completed_lanes,
                         #[cfg(test)]
                         scheduler_observer: observer,
                         #[cfg(test)]
                         child_work_observer: None,
                         #[cfg(test)]
                         child_tool_observer: None,
+                        #[cfg(test)]
+                        child_run_override: None,
                         semaphore,
                     },
                 )
                 .await?;
-                accept_completed_subagent_lanes(&completed_lanes, lanes)?;
                 Ok(serde_json::json!({
                     "message": output,
                     "output": output,

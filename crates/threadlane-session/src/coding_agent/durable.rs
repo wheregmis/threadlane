@@ -1293,12 +1293,15 @@ impl CodingAgent {
                     parent_event_tx: self.agent.event_tx.clone(),
                     parent_leaf_id: lane.source_leaf_id.clone(),
                     session_file: self.session_file.clone(),
+                    completed_lanes: self.completed_subagent_lanes.clone(),
                     #[cfg(test)]
                     scheduler_observer,
                     #[cfg(test)]
                     child_work_observer: None,
                     #[cfg(test)]
                     child_tool_observer: None,
+                    #[cfg(test)]
+                    child_run_override: None,
                     semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
                 },
                 NEXT_SUBAGENT_UI_RUN_ID.fetch_add(1, Ordering::Relaxed),

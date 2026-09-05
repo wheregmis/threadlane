@@ -130,14 +130,24 @@ pub(crate) struct SubagentRunContext {
     pub(crate) parent_event_tx: broadcast::Sender<AgentEvent>,
     pub(crate) parent_leaf_id: Option<String>,
     pub(crate) session_file: Option<PathBuf>,
+    pub(crate) completed_lanes: Arc<std::sync::Mutex<Vec<CompletedSubagentLane>>>,
     #[cfg(test)]
     pub(crate) scheduler_observer: Option<AgentWorkObserver>,
     #[cfg(test)]
     pub(crate) child_work_observer: Option<SubagentBoundaryObserver>,
     #[cfg(test)]
     pub(crate) child_tool_observer: Option<Arc<AtomicBool>>,
+    #[cfg(test)]
+    pub(crate) child_run_override: Option<(Duration, SubagentRunOverride)>,
     pub(crate) semaphore: Arc<tokio::sync::Semaphore>,
 }
+
+#[cfg(test)]
+pub(crate) type SubagentRunOverride = Arc<
+    dyn Fn(String) -> Pin<Box<dyn Future<Output = Result<SubagentResult, String>> + Send>>
+        + Send
+        + Sync,
+>;
 
 #[derive(Clone, Debug)]
 pub struct SubagentResult {
@@ -395,6 +405,7 @@ pub(crate) async fn run_subagents_with_context(
         }
 
         let context = context.clone();
+        let completed_lanes = context.completed_lanes.clone();
         let event_tx = context.parent_event_tx.clone();
         let lane_task = task.task.clone();
         let lane_agent = task.agent.clone();
@@ -475,6 +486,10 @@ pub(crate) async fn run_subagents_with_context(
                 }
             };
             let resolved_model = context.child_model.clone();
+            let has_lane = match &start {
+                Ok(_) => true,
+                Err(error) => error.identity.is_some(),
+            };
             let result = match start {
                 Ok((identity, accepted)) => {
                     let _ = event_tx.send(AgentEvent::SubagentStarted {
@@ -490,8 +505,14 @@ pub(crate) async fn run_subagents_with_context(
                     if let Some(observer) = context.child_work_observer.as_ref() {
                         observer();
                     }
-                    timeout(
-                        SUBAGENT_TIMEOUT,
+                    let child_timeout = SUBAGENT_TIMEOUT;
+                    #[cfg(test)]
+                    let child_timeout = context
+                        .child_run_override
+                        .as_ref()
+                        .map_or(child_timeout, |(duration, _)| *duration);
+                    let result = timeout(
+                        child_timeout,
                         run_subagent_task(
                             config,
                             task.task,
@@ -504,8 +525,8 @@ pub(crate) async fn run_subagents_with_context(
                         ),
                     )
                     .await
-                    .map_err(|_| "Subagent timed out".to_string())
-                    .map(|result| (result, identity))?
+                    .unwrap_or_else(|_| Err("Subagent timed out".to_string()));
+                    (result, identity)
                 }
                 Err(SubagentStartError { identity, error }) => (
                     Err(error),
@@ -556,6 +577,11 @@ pub(crate) async fn run_subagents_with_context(
                     .and_then(|result| result.error.clone())
                     .or_else(|| result.as_ref().err().cloned()),
             };
+            // Completion belongs to the child lifecycle, not batch success.
+            // A sibling failure must not strand this lane or discard its work.
+            if has_lane {
+                accept_completed_subagent_lanes(&completed_lanes, vec![lane.clone()])?;
+            }
             Ok((result, lane))
         }
     };
@@ -634,6 +660,10 @@ pub(crate) async fn run_subagent_task(
     accepted: Option<AcceptedRun>,
     resume_messages: Vec<AgentMessage>,
 ) -> Result<SubagentResult, String> {
+    #[cfg(test)]
+    if let Some((_, run)) = &context.child_run_override {
+        return run(task).await;
+    }
     let policy = configure_subagent_tools(&mut config);
     let model = context.child_model.clone();
     let lane_name = identity.lane_name.clone();
@@ -1005,9 +1035,11 @@ mod result_tests {
             parent_event_tx,
             parent_leaf_id: None,
             session_file: Some(session_file),
+            completed_lanes: Arc::default(),
             scheduler_observer: Some(Arc::new(std::sync::Mutex::new(Vec::new()))),
             child_work_observer: observer,
             child_tool_observer: None,
+            child_run_override: None,
             semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
         }
     }
@@ -1190,6 +1222,118 @@ mod result_tests {
             thinking: Vec::new(),
             error: None,
             messages: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_batches_finalize_every_started_lane_and_keep_successes() {
+        use crate::coding_agent::{CodingAgent, CodingAgentOptions};
+        use crate::system_prompt::SystemPromptConfig;
+        use threadlane_runtime::harness::{OperationOutcome, Record, Reducer};
+
+        for parallel in [false, true] {
+            for all_failed in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("session.jsonl");
+                let mut agent = CodingAgent::new(CodingAgentOptions {
+                    api_key: "test-key".into(),
+                    account_id: None,
+                    model: "test-model".into(),
+                    work_dir: dir.path().into(),
+                    session_file: Some(path.clone()),
+                    system_prompt: SystemPromptConfig::default(),
+                    agent_config: None,
+                    coding_config: None,
+                });
+                agent
+                    .begin_harness_run(AgentMessage::user("parent task", vec![]))
+                    .await
+                    .unwrap();
+                let mut context = test_context(dir.path().into(), path.clone(), None);
+                context.semaphore = Arc::new(tokio::sync::Semaphore::new(2));
+                context.completed_lanes = agent.completed_subagent_lanes.clone();
+                context.child_run_override = Some((
+                    Duration::from_millis(10),
+                    Arc::new(|task| {
+                        Box::pin(async move {
+                            if task == "timeout task" {
+                                return std::future::pending().await;
+                            }
+                            if task == "failed task" {
+                                return Err("child failed".into());
+                            }
+                            let mut result = success("successful sibling report");
+                            result.messages.push(AgentMessage::Assistant {
+                                content: Some(result.output.clone()),
+                                tool_calls: None,
+                                stop_reason: Some("end_turn".into()),
+                                deferred_handle: None,
+                            });
+                            Ok(result)
+                        })
+                    }),
+                ));
+                let mut events = context.parent_event_tx.subscribe();
+                let result = run_subagents_with_context(
+                    vec![
+                        task("timeout"),
+                        task(if all_failed { "failed" } else { "worker" }),
+                    ],
+                    parallel,
+                    None,
+                    context,
+                )
+                .await;
+                if all_failed {
+                    let error = result.unwrap_err();
+                    assert!(error.contains("child failed"));
+                    assert!(error.contains("Subagent timed out"));
+                } else {
+                    let (output, _, _) = result.unwrap();
+                    assert!(output.contains("successful sibling report"));
+                    assert!(output.contains("Subagent timed out"));
+                }
+                let mut finished = 0;
+                while let Ok(event) = events.try_recv() {
+                    if matches!(event, AgentEvent::SubagentFinished { .. }) {
+                        finished += 1;
+                    }
+                }
+                assert_eq!(finished, 2);
+                assert_eq!(agent.completed_subagent_lanes.lock().unwrap().len(), 2);
+                agent.commit_completed_subagent_lanes().unwrap();
+                drop(agent);
+                let store = JsonlStore::open(&path).unwrap();
+                let state = Reducer::reduce(&store).unwrap();
+                let children: Vec<_> = state
+                    .lanes
+                    .iter()
+                    .filter(|lane| lane.name != "main")
+                    .collect();
+                assert_eq!(children.len(), 2);
+                assert!(children.iter().all(|lane| lane.open_operation.is_none()));
+                let outcomes: Vec<_> = store
+                    .records()
+                    .iter()
+                    .filter_map(|record| match record {
+                        Record::OperationFinished { lane, outcome, .. } if lane != "main" => {
+                            Some(outcome)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(outcomes.len(), 2);
+                assert_eq!(
+                    outcomes
+                        .iter()
+                        .filter(|outcome| matches!(outcome, OperationOutcome::Completed))
+                        .count(),
+                    usize::from(!all_failed)
+                );
+                assert!(store.entries().iter().any(|entry| matches!(&entry.message,
+                    AgentMessage::Assistant { content: Some(content), .. } if content == "successful sibling report"
+                )) == !all_failed);
+            }
         }
     }
 
