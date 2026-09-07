@@ -166,6 +166,7 @@ pub(crate) fn execute_prompt(
         if !acp_options.is_empty() {
             let _ = task_stream_tx.send(ChatStreamEvent::AcpConfigOptions {
                 session_id: task_session_id.clone(),
+                source: Arc::downgrade(&task_runtime),
                 options: acp_options,
                 error: None,
             });
@@ -239,12 +240,14 @@ where
         return Err("Stop the current turn before changing the agent's settings".into());
     }
     executor()?.spawn(async move {
+        let source = Arc::downgrade(&runtime);
         let (options, error) = match operation(runtime).await {
             Ok(options) => (options, None),
             Err(error) => (Vec::new(), Some(error)),
         };
         let _ = stream_tx.send(ChatStreamEvent::AcpConfigOptions {
             session_id,
+            source,
             options,
             error,
         });

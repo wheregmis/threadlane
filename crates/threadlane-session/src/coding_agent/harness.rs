@@ -1780,28 +1780,34 @@ impl CodingSessionHarness {
         queue: QueueKind,
         entry_id: &str,
     ) -> Result<Option<AgentMessage>, String> {
+        let Some(message) = self.unbound_queue_message(queue, entry_id)? else {
+            return Ok(None);
+        };
+        self.store
+            .consume_unbound(entry_id)
+            .map_err(|error| error.to_string())?;
+        self.store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())?;
+        Ok(Some(message))
+    }
+
+    pub(crate) fn unbound_queue_message(
+        &mut self,
+        queue: QueueKind,
+        entry_id: &str,
+    ) -> Result<Option<AgentMessage>, String> {
         self.ensure_fresh()?;
         let state = Reducer::reduce(self.store.store())
             .map_err(|error| format!("reduce failed: {error:?}"))?;
         let lane = state
             .lane(&self.main_lane_name)
             .ok_or_else(|| format!("unknown lane: {}", self.main_lane_name))?;
-        let Some(queued) = lane
+        Ok(lane
             .queued
             .iter()
             .find(|q| q.run_id.is_none() && q.queue == queue && q.target.id == entry_id)
-            .cloned()
-        else {
-            return Ok(None);
-        };
-        let message = queued.target.message.clone();
-        self.store
-            .consume_unbound(&queued.target.id)
-            .map_err(|error| error.to_string())?;
-        self.store
-            .drive_to_completion()
-            .map_err(|error| error.to_string())?;
-        Ok(Some(message))
+            .map(|queued| queued.target.message.clone()))
     }
 
     pub(crate) fn cancel_queued_unbound(&mut self, entry_id: &str) -> Result<(), String> {

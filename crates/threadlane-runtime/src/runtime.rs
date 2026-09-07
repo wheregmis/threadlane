@@ -633,6 +633,21 @@ impl AgentRuntime {
         }
     }
 
+    /// Execute a queued input whose durable intent the caller has already consumed.
+    /// Reuse message persistence without creating another queue entry for replay.
+    pub async fn run_consumed_queue_message(&mut self, queue: QueueKind, message: AgentMessage) {
+        match queue {
+            QueueKind::Steer => {
+                self.steering_queue.push(message);
+                self.run_steer().await;
+            }
+            QueueKind::FollowUp | QueueKind::NextRun => {
+                self.follow_up_queue.push(message);
+                self.run_follow_up().await;
+            }
+        }
+    }
+
     pub async fn fetch_deferred(
         &self,
         model: &str,

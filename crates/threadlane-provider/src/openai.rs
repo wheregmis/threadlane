@@ -642,6 +642,7 @@ pub async fn fetch_available_models(api_key: &str, account_id: Option<&str>) -> 
 pub struct OpenAIClient {
     api_key: String,
     account_id: Option<String>,
+    codex_account_id: Option<String>,
     client: reqwest::Client,
     codex_ws: Arc<Mutex<CodexWsState>>,
 }
@@ -658,9 +659,13 @@ enum WsResult {
 
 impl OpenAIClient {
     pub(crate) fn new(api_key: String, account_id: Option<String>) -> Self {
+        let codex_account_id = (account_id.is_some() || api_key.starts_with("ey"))
+            .then(|| threadlane_auth::openai_auth::codex_account_id_for_token(&api_key))
+            .flatten();
         Self {
             api_key,
             account_id,
+            codex_account_id,
             client: http_client().clone(),
             codex_ws: Arc::new(Mutex::new(CodexWsState::new())),
         }
@@ -668,6 +673,13 @@ impl OpenAIClient {
 
     pub(crate) fn is_codex(&self) -> bool {
         self.account_id.is_some() || self.api_key.starts_with("ey")
+    }
+
+    async fn access_token(&self) -> Result<String, String> {
+        match self.codex_account_id.as_deref() {
+            Some(id) => threadlane_auth::openai_auth::get_valid_codex_account_token(id).await,
+            None => Ok(self.api_key.clone()),
+        }
     }
 
     pub(crate) async fn generate_title(&self, model: &str, prompt: &str) -> Result<String, String> {
@@ -685,7 +697,10 @@ impl OpenAIClient {
             .client
             .post(url)
             .timeout(TITLE_REQUEST_TIMEOUT)
-            .header(AUTHORIZATION, format!("Bearer {}", self.api_key))
+            .header(
+                AUTHORIZATION,
+                format!("Bearer {}", self.access_token().await?),
+            )
             .header(CONTENT_TYPE, "application/json");
         if let Some(account_id) = &self.account_id {
             request = request.header("chatgpt-account-id", account_id);
@@ -780,8 +795,9 @@ impl OpenAIClient {
             .into_client_request()
             .map_err(|error| error.to_string())?;
         let headers = request.headers_mut();
-        let authorization = HeaderValue::from_str(&format!("Bearer {}", self.api_key))
-            .map_err(|error| error.to_string())?;
+        let authorization =
+            HeaderValue::from_str(&format!("Bearer {}", self.access_token().await?))
+                .map_err(|error| error.to_string())?;
         headers.insert("authorization", authorization);
         if let Some(account_id) = &self.account_id {
             headers.insert(
@@ -1052,10 +1068,17 @@ impl OpenAIClient {
         is_codex: bool,
         event_tx: &mpsc::Sender<StreamEvent>,
     ) {
+        let access_token = match self.access_token().await {
+            Ok(token) => token,
+            Err(error) => {
+                let _ = event_tx.send(StreamEvent::Error(error)).await;
+                return;
+            }
+        };
         let mut request = self
             .client
             .post(url)
-            .header(AUTHORIZATION, format!("Bearer {}", self.api_key))
+            .header(AUTHORIZATION, format!("Bearer {access_token}"))
             .header(CONTENT_TYPE, "application/json");
         if let Some(account_id) = &self.account_id {
             request = request.header("chatgpt-account-id", account_id);
@@ -1198,7 +1221,10 @@ impl crate::traits::ModelProvider for OpenAIClient {
             .client
             .get(format!("{base}/{handle_id}"))
             .timeout(Duration::from_secs(30))
-            .header(AUTHORIZATION, format!("Bearer {}", self.api_key))
+            .header(
+                AUTHORIZATION,
+                format!("Bearer {}", self.access_token().await?),
+            )
             .header(CONTENT_TYPE, "application/json")
             .send()
             .await
@@ -1250,7 +1276,10 @@ impl crate::traits::ModelProvider for OpenAIClient {
             .client
             .post(format!("{base}/{handle_id}/cancel"))
             .timeout(Duration::from_secs(30))
-            .header(AUTHORIZATION, format!("Bearer {}", self.api_key))
+            .header(
+                AUTHORIZATION,
+                format!("Bearer {}", self.access_token().await?),
+            )
             .header(CONTENT_TYPE, "application/json")
             .send()
             .await

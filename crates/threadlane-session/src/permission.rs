@@ -319,9 +319,10 @@ impl PermissionHandle {
     /// dispatcher, such as an external ACP agent's `session/request_permission`.
     ///
     /// Unlike the capability requests above this grants nothing on its own and
-    /// persists nothing: it renders a prompt, waits for the answer, and returns
+    /// persists no grants: it renders a prompt, waits for the answer, and returns
     /// it. Without a UI attached there is no informed consent to give, so the
     /// answer is [`PermissionDecision::Deny`] rather than a silent allow.
+    /// Cancellation returns `None` and records a cancelled permission decision.
     pub(crate) async fn request_external(
         &self,
         event_tx: &tokio::sync::broadcast::Sender<AgentEvent>,
@@ -329,9 +330,14 @@ impl PermissionHandle {
         title: String,
         detail: String,
         allow_always: bool,
-    ) -> PermissionDecision {
+        cancelled: impl Future<Output = ()>,
+    ) -> Option<PermissionDecision> {
         let id = self.generate_request_id();
         let interactive = self.is_interactive();
+        let recorder = match self.inner.trace_recorder.lock() {
+            Ok(recorder) => recorder.clone(),
+            Err(_) => return Some(PermissionDecision::Deny),
+        };
         let mut scopes = vec![PermissionScope::Once];
         if allow_always {
             scopes.push(PermissionScope::Always);
@@ -356,69 +362,73 @@ impl PermissionHandle {
                 threadlane_runtime::harness::PermissionTraceSource::UnattendedDefault
             },
         };
-        if self.record_trace(requested).await.is_err() {
-            return PermissionDecision::Deny;
+        if let Some(recorder) = &recorder {
+            if recorder(requested).await.is_err() {
+                return Some(PermissionDecision::Deny);
+            }
         }
-        if !interactive {
-            let _ = self
-                .record_trace(PermissionTraceEvent::Resolved {
-                    request_id: id,
-                    decision: threadlane_runtime::harness::PermissionTraceDecision::Denied,
-                    scope: None,
-                    source: threadlane_runtime::harness::PermissionTraceSource::UnattendedDefault,
-                    remembered: false,
-                })
-                .await;
-            return PermissionDecision::Deny;
-        }
-        let (tx, rx) = oneshot::channel();
-        if let Ok(mut pending) = self.inner.pending.lock() {
-            pending.insert(id.clone(), tx);
-        } else {
-            return PermissionDecision::Deny;
-        }
-        let request = PermissionRequest {
-            id: id.clone(),
-            capability: capability.to_string(),
-            title,
-            detail,
-            scopes,
+        let decision = tokio::select! {
+            biased;
+            _ = cancelled => None,
+            decision = async {
+                if !interactive {
+                    return PermissionDecision::Deny;
+                }
+                let (tx, rx) = oneshot::channel();
+                if let Ok(mut pending) = self.inner.pending.lock() {
+                    pending.insert(id.clone(), tx);
+                } else {
+                    return PermissionDecision::Deny;
+                }
+                let guard = PendingRequestGuard {
+                    handle: self.clone(),
+                    request_id: id.clone(),
+                };
+                let request = PermissionRequest {
+                    id: id.clone(),
+                    capability: capability.to_string(),
+                    title,
+                    detail,
+                    scopes,
+                };
+                if event_tx.send(AgentEvent::PermissionRequested { request }).is_err() {
+                    return PermissionDecision::Deny;
+                }
+                let decision = rx.await.unwrap_or(PermissionDecision::Deny);
+                drop(guard);
+                decision
+            } => Some(decision),
         };
-        if event_tx
-            .send(AgentEvent::PermissionRequested { request })
-            .is_err()
-        {
-            self.remove_pending(&id);
-            return PermissionDecision::Deny;
-        }
-        let guard = PendingRequestGuard {
-            handle: self.clone(),
-            request_id: id.clone(),
-        };
-        let decision = rx.await.unwrap_or(PermissionDecision::Deny);
-        drop(guard);
-        let _ = self
-            .record_trace(PermissionTraceEvent::Resolved {
+        if let Some(recorder) = recorder {
+            let _ = recorder(PermissionTraceEvent::Resolved {
                 request_id: id,
                 decision: match decision {
-                    PermissionDecision::Deny => {
+                    None => threadlane_runtime::harness::PermissionTraceDecision::Cancelled,
+                    Some(PermissionDecision::Deny) => {
                         threadlane_runtime::harness::PermissionTraceDecision::Denied
                     }
                     _ => threadlane_runtime::harness::PermissionTraceDecision::Allowed,
                 },
                 scope: match decision {
-                    PermissionDecision::AllowAlways => {
+                    Some(PermissionDecision::AllowAlways) => {
                         Some(threadlane_runtime::harness::PermissionTraceScope::Project)
                     }
-                    PermissionDecision::AllowOnce => {
+                    Some(PermissionDecision::AllowOnce) => {
                         Some(threadlane_runtime::harness::PermissionTraceScope::Once)
                     }
-                    PermissionDecision::Deny => None,
+                    _ => None,
                 },
-                source: threadlane_runtime::harness::PermissionTraceSource::User,
+                source: if decision.is_none() {
+                    threadlane_runtime::harness::PermissionTraceSource::System
+                } else if interactive {
+                    threadlane_runtime::harness::PermissionTraceSource::User
+                } else {
+                    threadlane_runtime::harness::PermissionTraceSource::UnattendedDefault
+                },
                 remembered: false,
             })
             .await;
+        }
         decision
     }
 

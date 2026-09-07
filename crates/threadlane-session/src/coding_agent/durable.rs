@@ -408,6 +408,14 @@ impl CodingAgent {
         &mut self,
         prompt: AgentMessage,
     ) -> Result<Option<threadlane_runtime::harness::AcceptedRun>, String> {
+        self.begin_harness_run_with_queue(prompt, None).await
+    }
+
+    pub(crate) async fn begin_harness_run_with_queue(
+        &mut self,
+        prompt: AgentMessage,
+        queued: Option<(threadlane_runtime::harness::QueueKind, &str)>,
+    ) -> Result<Option<threadlane_runtime::harness::AcceptedRun>, String> {
         if let Some(run_id) = self
             .harness_run_id
             .lock()
@@ -484,6 +492,11 @@ impl CodingAgent {
         };
         let run_id = journal.unique_run_id("foreground")?;
         let accepted = journal.begin_run(&run_id, prompt)?;
+        // Accept the prompt durably before removing its queue intent, without
+        // an async cancellation point between these writes.
+        if let Some((queue, entry_id)) = queued {
+            journal.consume_unbound_queue_entry(queue, entry_id)?;
+        }
         journal.capture_run_context(
             &run_id,
             "main",

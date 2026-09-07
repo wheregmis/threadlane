@@ -135,7 +135,12 @@ fn session_pr_target_is_active(
     targets.contains(target)
 }
 
+fn session_pr_refresh_delay(succeeded: bool) -> std::time::Duration {
+    std::time::Duration::from_secs(if succeeded { 31 } else { 5 * 60 })
+}
+
 pub struct WorkspaceView {
+    focus_handle: FocusHandle,
     model: Entity<AppState>,
     sidebar: Entity<SidebarView>,
     chat_list: Entity<ChatListView>,
@@ -270,6 +275,8 @@ impl WorkspaceView {
 
         let model_clone = model.clone();
         let view = cx.new(|cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window, cx);
             let sub = cx.observe(&model_clone, move |this: &mut Self, model, cx| {
                 this.sync_git_status_with_active_project(cx);
                 if let Some(cmd) =
@@ -364,6 +371,7 @@ impl WorkspaceView {
             });
 
             Self {
+                focus_handle,
                 model,
                 sidebar,
                 chat_list,
@@ -429,8 +437,9 @@ impl WorkspaceView {
     }
 
     fn open_git_review(&mut self, cx: &mut Context<Self>) {
-        self.model.update(cx, |state, _cx| {
+        self.model.update(cx, |state, cx| {
             state.workspace_page = WorkspacePage::Chat;
+            cx.notify();
         });
         self.right_panel_visible = true;
         self.right_panel.update(cx, |panel, cx| {
@@ -441,8 +450,9 @@ impl WorkspaceView {
     }
 
     fn open_git_branches(&mut self, cx: &mut Context<Self>) {
-        self.model.update(cx, |state, _cx| {
+        self.model.update(cx, |state, cx| {
             state.workspace_page = WorkspacePage::Chat;
+            cx.notify();
         });
         self.right_panel_visible = true;
         self.right_panel.update(cx, |panel, cx| {
@@ -453,8 +463,9 @@ impl WorkspaceView {
     }
 
     fn open_git_new_branch(&mut self, cx: &mut Context<Self>) {
-        self.model.update(cx, |state, _cx| {
+        self.model.update(cx, |state, cx| {
             state.workspace_page = WorkspacePage::Chat;
+            cx.notify();
         });
         self.right_panel_visible = true;
         self.right_panel.update(cx, |panel, cx| {
@@ -465,8 +476,9 @@ impl WorkspaceView {
     }
 
     fn open_git_merge(&mut self, cx: &mut Context<Self>) {
-        self.model.update(cx, |state, _cx| {
+        self.model.update(cx, |state, cx| {
             state.workspace_page = WorkspacePage::Chat;
+            cx.notify();
         });
         self.right_panel_visible = true;
         self.right_panel.update(cx, |panel, cx| {
@@ -507,8 +519,14 @@ impl WorkspaceView {
         group
     }
 
-    fn add_terminal_tab(&mut self, project: PathBuf, cx: &mut Context<Self>) {
+    fn add_terminal_tab(
+        &mut self,
+        project: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let terminal = cx.new(|cx| TerminalView::new(project.clone(), cx));
+        terminal.read(cx).focus_handle(cx).focus(window, cx);
         let group = self
             .terminal_groups
             .entry(project)
@@ -531,9 +549,18 @@ impl WorkspaceView {
             .clone()
     }
 
-    fn select_terminal_tab(&mut self, project: &PathBuf, tab: usize, cx: &mut Context<Self>) {
+    fn select_terminal_tab(
+        &mut self,
+        project: &PathBuf,
+        tab: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(group) = self.terminal_groups.get_mut(project) {
             group.active_tab = tab.min(group.tabs.len().saturating_sub(1));
+            if let Some(terminal) = group.tabs.get(group.active_tab) {
+                terminal.read(cx).focus_handle(cx).focus(window, cx);
+            }
             cx.notify();
         }
     }
@@ -602,9 +629,7 @@ impl WorkspaceView {
         let model = self.model.clone();
         match action_key {
             "new" => {
-                model.update(cx, |state, _cx| {
-                    controller::dispatch(state, AppAction::BeginNewTask);
-                });
+                self.begin_new_task_action(&BeginNewTask, window, cx);
             }
             "attach" => {
                 cx.spawn(async move |_this, cx| {
@@ -641,12 +666,10 @@ impl WorkspaceView {
                 });
             }
             "settings" => {
-                model.update(cx, |state, _cx| {
-                    controller::dispatch(state, AppAction::OpenSettings);
-                });
+                self.open_settings_action(&OpenSettings, window, cx);
             }
             "sidebar" => {
-                self.sidebar_collapsed = !self.sidebar_collapsed;
+                self.toggle_sidebar_action(&ToggleSidebar, window, cx);
             }
             "panel" => {
                 self.right_panel_visible = !self.right_panel_visible;
@@ -720,11 +743,13 @@ impl WorkspaceView {
         });
     }
 
-    fn schedule_session_pr_refresh(target: (PathBuf, String), cx: &mut Context<Self>) {
+    fn schedule_session_pr_refresh(
+        target: (PathBuf, String),
+        delay: std::time::Duration,
+        cx: &mut Context<Self>,
+    ) {
         cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_secs(31))
-                .await;
+            cx.background_executor().timer(delay).await;
             let _ = this.update(cx, |this, _cx| {
                 if session_pr_target_is_active(&this.last_git_pr_targets, &target) {
                     this.spawn_session_pr_refresh(target.0, target.1);
@@ -763,13 +788,14 @@ impl WorkspaceView {
                 result,
             } => {
                 let target = (work_dir.clone(), branch.clone());
+                let refresh_delay = session_pr_refresh_delay(result.is_ok());
                 if let Ok(pr) = result {
                     self.model.update(cx, |state, cx| {
                         state.git_prs.insert((work_dir, branch), pr);
                         cx.notify();
                     });
                 }
-                Self::schedule_session_pr_refresh(target, cx);
+                Self::schedule_session_pr_refresh(target, refresh_delay, cx);
                 return;
             }
             GitEvent::Loaded { work_dir, result } => (work_dir, result),
@@ -1160,7 +1186,7 @@ impl WorkspaceView {
                                         {
                                             let work_dir = work_dir.clone();
                                             let session_id = session_id.clone();
-                                            this.model.update(cx, |state, _cx| {
+                                            this.model.update(cx, |state, cx| {
                                                 controller::dispatch(
                                                     state,
                                                     AppAction::SelectSession {
@@ -1168,6 +1194,7 @@ impl WorkspaceView {
                                                         session_id,
                                                     },
                                                 );
+                                                cx.notify();
                                             });
                                         }
                                     }
@@ -1369,6 +1396,9 @@ impl WorkspaceView {
             chat.header_left_padding = inset;
             cx.notify();
         });
+        self.github.update(cx, |github, cx| {
+            github.set_window_controls_inset(self.sidebar_collapsed.then_some(inset), cx);
+        });
         cx.notify();
     }
 
@@ -1406,11 +1436,15 @@ impl WorkspaceView {
     fn begin_new_task_action(
         &mut self,
         _: &BeginNewTask,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.model.update(cx, |state, _cx| {
+        self.model.update(cx, |state, cx| {
             controller::dispatch(state, AppAction::BeginNewTask);
+            cx.notify();
+        });
+        self.chat_list.update(cx, |chat, cx| {
+            chat.focus_composer(window, cx);
         });
         cx.notify();
     }
@@ -1421,8 +1455,9 @@ impl WorkspaceView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.model.update(cx, |state, _cx| {
+        self.model.update(cx, |state, cx| {
             controller::dispatch(state, AppAction::OpenSettings);
+            cx.notify();
         });
         cx.notify();
     }
@@ -1551,10 +1586,10 @@ impl Render for WorkspaceView {
                                 .ghost()
                                 .selected(is_selected)
                                 .xsmall()
-                                .on_click(move |_event, _window, cx| {
+                                .on_click(move |_event, window, cx| {
                                     if let Some(project) = &select_project {
                                         select_view.update(cx, |this, cx| {
-                                            this.select_terminal_tab(project, tab, cx)
+                                            this.select_terminal_tab(project, tab, window, cx)
                                         });
                                     }
                                 })
@@ -1600,10 +1635,10 @@ impl Render for WorkspaceView {
                                     let n_proj = new_tab_project.clone();
                                     let n_view = new_view.clone();
                                     menu.item(PopupMenuItem::new("New Terminal Tab").on_click(
-                                        move |_event, _window, cx| {
+                                        move |_event, window, cx| {
                                             if let Some(project) = &n_proj {
                                                 n_view.update(cx, |this, cx| {
-                                                    this.add_terminal_tab(project.clone(), cx);
+                                                    this.add_terminal_tab(project.clone(), window, cx);
                                                 });
                                             }
                                         },
@@ -1672,9 +1707,9 @@ impl Render for WorkspaceView {
                             .tooltip("New terminal tab")
                             .ghost()
                             .xsmall()
-                            .on_click(move |_event, _window, cx| {
+                            .on_click(move |_event, window, cx| {
                                 new_view.update(cx, |this, cx| {
-                                    this.add_terminal_tab(project.clone(), cx)
+                                    this.add_terminal_tab(project.clone(), window, cx)
                                 });
                             })
                     }))
@@ -1798,6 +1833,7 @@ impl Render for WorkspaceView {
             .flex()
             .w_full()
             .h_full()
+            .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::toggle_command_palette))
             .on_action(cx.listener(Self::toggle_sidebar_action))
             .on_action(cx.listener(Self::toggle_right_panel_action))
@@ -1859,18 +1895,8 @@ impl Render for WorkspaceView {
                     .absolute()
                     .top(px(9.0))
                     .left(px(76.0))
-                    .on_click(cx.listener(|this, _event, _window, cx| {
-                        this.sidebar_collapsed = !this.sidebar_collapsed;
-                        let inset = if this.sidebar_collapsed {
-                            px(110.0)
-                        } else {
-                            px(14.0)
-                        };
-                        this.chat_list.update(cx, |chat, cx| {
-                            chat.header_left_padding = inset;
-                            cx.notify();
-                        });
-                        cx.notify();
+                    .on_click(cx.listener(|this, _event, window, cx| {
+                        this.toggle_sidebar_action(&ToggleSidebar, window, cx);
                     }))
             }))
             .children(
@@ -1889,7 +1915,8 @@ impl Render for WorkspaceView {
 mod tests {
     use super::{
         active_project_git_status, git_result_matches_active, next_workspace_event,
-        open_github_from_palette, session_pr_target_is_active, GitEvent, WorkspacePumpEvent,
+        open_github_from_palette, session_pr_refresh_delay, session_pr_target_is_active, GitEvent,
+        WorkspacePumpEvent,
     };
     use crate::services::updater::UpdaterEvent;
     use crate::state::{AppState, SessionInfo, WorkspacePage};
@@ -1936,6 +1963,8 @@ mod tests {
 
         assert!(session_pr_target_is_active(&targets, &target));
         assert!(!session_pr_target_is_active(&HashSet::new(), &target));
+        assert_eq!(session_pr_refresh_delay(true).as_secs(), 31);
+        assert_eq!(session_pr_refresh_delay(false).as_secs(), 300);
     }
 
     #[test]

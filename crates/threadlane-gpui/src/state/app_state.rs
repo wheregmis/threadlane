@@ -277,6 +277,7 @@ pub enum ChatStreamEvent {
     /// arrive once it has connected.
     AcpConfigOptions {
         session_id: String,
+        source: std::sync::Weak<SessionRuntime>,
         options: Vec<AcpConfigOption>,
         error: Option<String>,
     },
@@ -360,7 +361,7 @@ pub struct AppState {
     ///
     /// Keyed by session rather than by model id because two sessions on the
     /// same configured agent can hold different settings.
-    acp_config_options: HashMap<String, Vec<AcpConfigOption>>,
+    acp_config_options: HashMap<SessionProjectionKey, Vec<AcpConfigOption>>,
     stashed_prompts: HashMap<String, String>,
     pub(crate) pending_permissions: HashMap<String, threadlane_session::PermissionRequest>,
     pub(crate) pending_hydrations: Vec<SessionHydrationRequest>,
@@ -1429,26 +1430,45 @@ impl AppState {
         if !self.available_models.iter().any(|m| m.id == model) {
             return;
         }
-        self.selected_model = model.clone();
-        if let (Some(work_dir), Some(session_id)) = (
-            self.active_work_dir.as_ref(),
-            self.active_session_id.as_ref(),
-        ) {
-            let session_file = self.session_file(work_dir, session_id);
-            if self
-                .session_runtimes
-                .get(&session_file)
-                .is_some_and(|runtime| !runtime.is_generating())
-            {
-                self.session_runtimes.remove(&session_file);
+        if let Some((runtime, _)) = self.active_session_runtime() {
+            if runtime.model() == model && self.selected_model == model {
+                return;
             }
+            if runtime.is_generating() {
+                self.session_status = Some("Stop the current turn before changing models".into());
+                return;
+            }
+            let result = if let Some(error) = runtime.harness_error() {
+                Err(error.to_string())
+            } else if let Ok(mut agent) = runtime.agent.try_lock() {
+                // Reuse the canonical model fact used by /model. Rebuilding
+                // afterwards also refreshes the selected provider's credentials.
+                agent.set_fact("model", &model)
+            } else {
+                Err("Agent settings are still loading. Try changing models again shortly.".into())
+            };
+            if let Err(error) = result {
+                self.session_status = Some(format!("Could not switch models: {error}"));
+                return;
+            }
+            self.session_runtimes.remove(&runtime.session_file);
+        } else if self.selected_model == model {
+            return;
         }
+        self.selected_model = model.clone();
         self.auth_status_msg = Some(format!("Model switched to {model}"));
-        // The runtime above was dropped, taking the old agent connection with
-        // it, so anything cached about the previous agent is now stale.
-        if let Some(session_id) = self.active_session_id.clone() {
-            self.acp_config_options.remove(&session_id);
+        if self.session_status.as_deref().is_some_and(|status| {
+            status == "Stop the current turn before changing models"
+                || status.starts_with("Could not switch models:")
+        }) {
+            self.session_status = None;
         }
+        if let Some(key) = self.active_session_projection_key() {
+            self.acp_config_options.remove(&key);
+        }
+        // Install the rebuilt runtime before a pending hydration can restore
+        // its older selection. The next prompt and picker share this runtime.
+        self.active_session_runtime();
         self.request_acp_config_options();
     }
 
@@ -1860,7 +1880,7 @@ impl AppState {
         self.pending_permissions.remove(session_id);
         self.deferred_stream_events.remove(session_id);
         self.pending_composer_messages.remove(session_id);
-        self.acp_config_options.remove(session_id);
+        self.acp_config_options.remove(&Self::projection_key(session_id, &session_file));
         if let Some(project) = self
             .projects
             .iter_mut()
@@ -3815,24 +3835,13 @@ impl AppState {
 
     /// Settings the active session's external agent exposes.
     pub(crate) fn active_acp_config_options(&self) -> &[AcpConfigOption] {
-        self.active_session_id
-            .as_deref()
-            .and_then(|session_id| self.acp_config_options.get(session_id))
+        if !threadlane_session::is_acp_model(&self.selected_model) {
+            return &[];
+        }
+        self.active_session_projection_key()
+            .and_then(|key| self.acp_config_options.get(&key))
             .map(Vec::as_slice)
             .unwrap_or_default()
-    }
-
-    /// Short name of the model the active session's agent is running.
-    ///
-    /// The control-sized form ("Opus", "Sonnet") for a button, as distinct
-    /// from [`Self::active_acp_model_label`], which is the fuller phrase the
-    /// status bar has room for.
-    pub(crate) fn active_acp_model_name(&self) -> Option<String> {
-        threadlane_session::config_option_for(
-            self.active_acp_config_options(),
-            threadlane_session::ACP_CONFIG_CATEGORY_MODEL,
-        )
-        .and_then(AcpConfigOption::current_label)
     }
 
     /// Model the active session's external agent reports it is running.
@@ -4109,22 +4118,34 @@ impl AppState {
                 }
                 ChatStreamEvent::AcpConfigOptions {
                     session_id,
+                    source,
                     options,
                     error,
                 } => {
-                    if let Some(error) = error {
-                        self.session_status = Some(error);
-                        changed = true;
+                    let Some(runtime) = source.upgrade() else {
+                        continue;
+                    };
+                    if !self.session_runtimes.get(&runtime.session_file).is_some_and(|current| {
+                        Arc::ptr_eq(current, &runtime)
+                    }) {
+                        continue;
                     }
-                    if options.is_empty() {
-                        if self.acp_config_options.remove(&session_id).is_some()
-                            && self.active_session_id.as_deref() == Some(&session_id)
-                        {
+                    let is_active = self.active_session_matches(&session_id, &runtime.session_file);
+                    if let Some(error) = error {
+                        if is_active {
+                            self.session_status = Some(error);
                             changed = true;
                         }
-                    } else if self.acp_config_options.get(&session_id) != Some(&options) {
-                        self.acp_config_options.insert(session_id.clone(), options);
-                        if self.active_session_id.as_deref() == Some(&session_id) {
+                        continue;
+                    }
+                    let key = Self::projection_key(&session_id, &runtime.session_file);
+                    if options.is_empty() {
+                        if self.acp_config_options.remove(&key).is_some() && is_active {
+                            changed = true;
+                        }
+                    } else if self.acp_config_options.get(&key) != Some(&options) {
+                        self.acp_config_options.insert(key, options);
+                        if is_active {
                             changed = true;
                         }
                     }
@@ -4232,9 +4253,7 @@ impl AppState {
             .active_work_dir
             .as_ref()
             .ok_or_else(|| "No active project".to_string())?;
-        let session_file = work_dir
-            .join(".threadlane/sessions")
-            .join(format!("{session_id}.jsonl"));
+        let session_file = self.session_file(work_dir, &session_id);
         let runtime = self
             .session_runtimes
             .get(&session_file)
@@ -4392,9 +4411,7 @@ impl AppState {
         ) else {
             return Ok(());
         };
-        let session_file = work_dir
-            .join(".threadlane/sessions")
-            .join(format!("{session_id}.jsonl"));
+        let session_file = self.session_file(work_dir, session_id);
         let Some(runtime) = self.session_runtimes.get(&session_file).cloned() else {
             return Ok(());
         };
@@ -4587,6 +4604,187 @@ mod tests {
         std::iter::from_fn(|| receiver.try_recv().ok())
             .take(limit)
             .collect()
+    }
+
+    #[derive(Default)]
+    struct ModelSelectionProvider(Mutex<Vec<String>>);
+
+    #[async_trait::async_trait]
+    impl threadlane_protocol::ProviderPort for ModelSelectionProvider {
+        async fn stream_request(
+            &self,
+            request: threadlane_protocol::RuntimeRequest,
+            events: tokio::sync::mpsc::Sender<threadlane_protocol::RuntimeStreamEvent>,
+        ) {
+            self.0.lock().unwrap().push(request.model);
+            events
+                .send(threadlane_protocol::RuntimeStreamEvent::ContentToken("done".into()))
+                .await
+                .unwrap();
+            events
+                .send(threadlane_protocol::RuntimeStreamEvent::Finished {
+                    tool_calls: vec![],
+                    usage: Default::default(),
+                })
+                .await
+                .unwrap();
+        }
+
+        async fn fetch_deferred(
+            &self,
+            _model: &str,
+            _handle_id: &str,
+        ) -> Result<threadlane_protocol::DeferredResponse, String> {
+            Ok(threadlane_protocol::DeferredResponse::Pending)
+        }
+
+        async fn cancel_deferred(&self, _model: &str, _handle_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn provider_kind(&self, _model: &str) -> &'static str {
+            "test"
+        }
+    }
+
+    #[tokio::test]
+    async fn model_picker_persists_before_rebuild_and_next_provider_request() {
+        let selected = "opencode-go/minimax-m2.7";
+        for has_runtime in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let session_file = temp.path().join("session.jsonl");
+            let options = || threadlane_session::CodingAgentOptions {
+                api_key: "test-key".into(),
+                account_id: None,
+                model: "gpt-4o".into(),
+                work_dir: temp.path().into(),
+                session_file: Some(session_file.clone()),
+                system_prompt: Default::default(),
+                agent_config: None,
+                coding_config: None,
+            };
+            let mut original = threadlane_session::CodingAgent::new(options());
+            original.set_fact("model", "gpt-4o").unwrap();
+            drop(original);
+            let mut state = AppState::load_from_registry(Vec::new());
+            activate_test_session(&mut state, "session", &session_file);
+            // Before hydration the picker can still show another session's
+            // selection. Clicking it must update this session's stored model.
+            state.selected_model = if has_runtime { "gpt-4o" } else { selected }.into();
+            state.available_models = vec![crate::model_catalog::ModelOption {
+                id: selected.into(),
+                label: "MiniMax M2.7".into(),
+                provider: crate::model_catalog::ModelProvider::OpenCode,
+            }];
+            if has_runtime {
+                state.active_session_runtime().unwrap();
+            }
+
+            state.set_selected_model(selected.into());
+
+            assert_eq!(state.selected_model, selected);
+            assert_eq!(state.session_runtimes[&session_file].model(), selected);
+            assert_eq!(
+                JsonlStore::open_read_only(&session_file).unwrap().facts()["model"],
+                selected
+            );
+            drop(state);
+
+            // Reload with the old default, as startup does, then drive the real
+            // CodingAgent/harness path with only the network transport replaced.
+            let provider = Arc::new(ModelSelectionProvider::default());
+            let mut restored = threadlane_session::test_support::coding_agent_with_provider(
+                options(),
+                provider.clone(),
+            );
+            let result = restored.handle_input_with_images("continue", vec![]).await;
+            assert!(result.is_none(), "generation failed: {result:?}");
+            assert_eq!(*provider.0.lock().unwrap(), [selected]);
+            let store = JsonlStore::open_read_only(&session_file).unwrap();
+            assert!(store.records().iter().any(|record| matches!(
+                record,
+                Record::ProviderRequestStarted { model, .. } if model.as_str() == selected
+            )));
+        }
+    }
+
+    #[test]
+    fn model_picker_preserves_current_selection_while_runtime_is_busy() {
+        let temp = tempfile::tempdir().unwrap();
+        let session_file = temp.path().join("session.jsonl");
+        let mut state = AppState::load_from_registry(Vec::new());
+        activate_test_session(&mut state, "session", &session_file);
+        state.selected_model = "gpt-4o".into();
+        state.available_models = vec![crate::model_catalog::ModelOption {
+            id: "opencode-go/minimax-m2.7".into(),
+            label: "MiniMax M2.7".into(),
+            provider: crate::model_catalog::ModelProvider::OpenCode,
+        }];
+        let (runtime, _) = state.active_session_runtime().unwrap();
+        runtime.agent.try_lock().unwrap().set_fact("model", "gpt-4o").unwrap();
+        runtime.begin_generation().unwrap();
+
+        state.set_selected_model("opencode-go/minimax-m2.7".into());
+
+        assert_eq!(state.selected_model, "gpt-4o");
+        assert_eq!(state.session_status.as_deref(), Some("Stop the current turn before changing models"));
+        runtime.finish_generation(None);
+        let _settings = runtime.agent.try_lock().unwrap();
+        state.set_selected_model("opencode-go/minimax-m2.7".into());
+        assert_eq!(state.selected_model, "gpt-4o");
+        assert!(state.session_status.as_deref().unwrap().contains("settings are still loading"));
+        assert!(Arc::ptr_eq(&state.session_runtimes[&session_file], &runtime));
+        assert_eq!(JsonlStore::open_read_only(&session_file).unwrap().facts()["model"], "gpt-4o");
+        drop(_settings);
+        state.set_selected_model("opencode-go/minimax-m2.7".into());
+        assert_eq!(state.selected_model, "opencode-go/minimax-m2.7");
+        assert!(state.session_status.is_none());
+    }
+
+    #[test]
+    fn model_picker_ignores_acp_replies_from_replaced_or_inactive_runtimes() {
+        let temp = tempfile::tempdir().unwrap();
+        let file_a = temp.path().join("a/session.jsonl");
+        let file_b = temp.path().join("b/session.jsonl");
+        let mut state = AppState::load_from_registry(Vec::new());
+        activate_test_session(&mut state, "session", &file_a);
+        state.selected_model = "acp/test".into();
+        let (old, _) = state.active_session_runtime().unwrap();
+        state.session_runtimes.remove(&file_a);
+        let (current, _) = state.active_session_runtime().unwrap();
+        let reply = |runtime: &Arc<SessionRuntime>, label: &str, error: Option<&str>| {
+            ChatStreamEvent::AcpConfigOptions {
+                session_id: "session".into(),
+                source: Arc::downgrade(runtime),
+                options: vec![serde_json::from_value(serde_json::json!({
+                    "id": "model", "name": "Model", "category": "model",
+                    "currentValue": "model", "options": [{ "value": "model", "name": label }]
+                })).unwrap()],
+                error: error.map(str::to_string),
+            }
+        };
+        state.session_status = Some("Existing status".into());
+
+        assert!(!state.drain_chat_stream(vec![reply(&old, "Stale model", Some("Stale error"))]));
+        assert!(state.active_acp_config_options().is_empty());
+        assert_eq!(state.session_status.as_deref(), Some("Existing status"));
+        assert!(state.drain_chat_stream(vec![reply(&current, "Current model", None)]));
+        assert_eq!(state.active_acp_model_label().as_deref(), Some("Current model"));
+        assert!(state.drain_chat_stream(vec![reply(&current, "Wrong model", Some("Try again"))]));
+        assert_eq!(state.active_acp_model_label().as_deref(), Some("Current model"));
+
+        // Equal session ids in different projects still have distinct settings
+        // and an inactive session's error cannot replace the active status.
+        activate_test_session(&mut state, "session", &file_b);
+        let (other, _) = state.active_session_runtime().unwrap();
+        state.session_status = Some("Other session status".into());
+        assert!(!state.drain_chat_stream(vec![reply(&current, "Wrong model", Some("Inactive error"))]));
+        assert_eq!(state.session_status.as_deref(), Some("Other session status"));
+        assert!(state.active_acp_config_options().is_empty());
+        assert!(state.drain_chat_stream(vec![reply(&other, "Other model", None)]));
+        assert_eq!(state.active_acp_model_label().as_deref(), Some("Other model"));
+        state.selected_model = "gpt-4o".into();
+        assert!(state.active_acp_model_label().is_none());
     }
 
     fn permission_request(id: &str) -> threadlane_session::PermissionRequest {
@@ -4828,6 +5026,38 @@ mod tests {
             SessionAttention::NeedsYou
         );
         assert_eq!(state.deferred_stream_events[&session.id].len(), 2);
+    }
+
+    #[test]
+    fn worktree_queue_and_stop_use_the_existing_session_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().canonicalize().unwrap();
+        let worktree = project.join("worktree");
+        let session_file = worktree.join(".threadlane/sessions/worktree-session.jsonl");
+        let mut session = test_session("worktree-session", &session_file);
+        session.work_dir = project.clone();
+        session.is_worktree = true;
+        let mut state = AppState::load_from_registry(Vec::new());
+        state.projects.push(ProjectInfo {
+            name: "project".into(),
+            work_dir: project.clone(),
+            sessions: vec![session.clone()],
+            is_expanded: true,
+        });
+        state.active_work_dir = Some(project);
+        state.active_session_id = Some(session.id);
+        let runtime = state.ensure_session_runtime(worktree, session_file);
+        runtime.begin_generation().unwrap();
+        state.is_generating = true;
+        state.stage_busy_message("Follow up in this worktree".into(), Vec::new()).unwrap();
+
+        let (pending_runtime, _, text, _) = state.pending_runtime_message().unwrap();
+        assert!(Arc::ptr_eq(&runtime, &pending_runtime));
+        assert_eq!(text, "Follow up in this worktree");
+        state.cancel_generation().unwrap();
+        assert!(!state.is_generating);
+        assert!(!runtime.is_generating());
+        assert_eq!(state.session_status.as_deref(), Some("Generation cancelled"));
     }
 
     #[test]

@@ -4,6 +4,7 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
@@ -940,6 +941,21 @@ fn pr_check_label(checks: &[PrCheckStatus]) -> String {
     }
 }
 
+fn pr_check_status_label(check: &PrCheckStatus) -> String {
+    let status = check
+        .conclusion
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(&check.status)
+        .replace('_', " ")
+        .to_ascii_lowercase();
+    let mut chars = status.trim().chars();
+    match chars.next() {
+        Some(first) => format!("{}{}", first.to_ascii_uppercase(), chars.as_str()),
+        None => "Unknown".into(),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PrFileAction {
     Previous,
@@ -959,80 +975,18 @@ fn pr_file_action_ix(current: Option<usize>, len: usize, action: PrFileAction) -
     })
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum GitHubQueryMode {
-    Local,
-    Advanced,
-}
-
-pub(crate) fn github_query_mode(query: &str) -> GitHubQueryMode {
-    const QUALIFIERS: &[&str] = &[
-        "archived",
-        "assignee",
-        "author",
-        "base",
-        "closed",
-        "comments",
-        "created",
-        "draft",
-        "head",
-        "interactions",
-        "involves",
-        "is",
-        "label",
-        "linked",
-        "mentions",
-        "milestone",
-        "no",
-        "org",
-        "project",
-        "reactions",
-        "repo",
-        "review",
-        "review-requested",
-        "reviewed-by",
-        "sort",
-        "state",
-        "status",
-        "team-review-requested",
-        "type",
-        "updated",
-        "user",
-    ];
-
-    if query.split_whitespace().any(|token| {
-        let token = token.trim_start_matches('-');
-        let Some((key, value)) = token.split_once(':') else {
-            return false;
-        };
-        !value.is_empty()
-            && QUALIFIERS
-                .iter()
-                .any(|qualifier| key.eq_ignore_ascii_case(qualifier))
-    }) {
-        GitHubQueryMode::Advanced
-    } else {
-        GitHubQueryMode::Local
-    }
-}
-
 fn github_server_query(query: &str) -> Option<&str> {
-    (github_query_mode(query) == GitHubQueryMode::Advanced).then_some(query)
+    let query = query.trim();
+    (!query.is_empty()).then_some(query)
 }
 
-pub(crate) fn issue_filter_matches(issue: &GitHubIssueSummary, query: &str) -> bool {
-    let query = query.trim().to_lowercase();
-    query.is_empty()
-        || issue.title.to_lowercase().contains(&query)
-        || issue.issue.number.to_string().contains(&query)
-        || issue
-            .labels
-            .iter()
-            .any(|label| label.name.to_lowercase().contains(&query))
-        || issue
-            .assignees
-            .iter()
-            .any(|assignee| assignee.to_lowercase().contains(&query))
+fn github_empty_message(tab: GitHubTab, state: GitHubStateFilter, query: &str) -> String {
+    let items = tab.label().to_lowercase();
+    if github_server_query(query).is_some() {
+        format!("No matching {items}. Try another search or state filter.")
+    } else {
+        format!("No {} {items}.", state.value())
+    }
 }
 
 pub(crate) fn selected_issue_after_refresh(
@@ -1230,19 +1184,14 @@ fn selected_number_after_refresh<T>(
         .or_else(|| rows.first().map(number))
 }
 
-fn pr_filter_matches(pr: &GitHubPullRequestSummary, query: &str) -> bool {
-    let query = query.trim().to_lowercase();
-    query.is_empty()
-        || pr.title.to_lowercase().contains(&query)
-        || pr.number.to_string().contains(&query)
-        || pr.author.to_lowercase().contains(&query)
-        || pr.head_ref.to_lowercase().contains(&query)
-        || pr.base_ref.to_lowercase().contains(&query)
-}
-
 fn github_error_message(error: &str) -> String {
     let normalized = error.to_lowercase();
-    if normalized.contains("auth") || normalized.contains("login") {
+    if normalized.contains("rate limit")
+        || normalized.contains("rate_limit")
+        || normalized.contains("http 429")
+    {
+        "GitHub’s API limit has been reached. Wait before retrying.".into()
+    } else if normalized.contains("auth") || normalized.contains("login") {
         "GitHub authentication is required. Sign in with gh and refresh.".into()
     } else if normalized.contains("remote") || normalized.contains("repository") {
         "This project does not have an accessible GitHub remote.".into()
@@ -1252,7 +1201,7 @@ fn github_error_message(error: &str) -> String {
     {
         "GitHub is offline. Check your connection and refresh.".into()
     } else {
-        format!("Couldn’t load GitHub: {error}")
+        "GitHub couldn’t load this view. Retry, or copy details to inspect the error.".into()
     }
 }
 
@@ -1501,6 +1450,7 @@ fn open_issue_start_dialog(
 
 pub struct GitHubView {
     model: Entity<AppState>,
+    window_controls_inset: Option<Pixels>,
     project_work_dir: Option<PathBuf>,
     repository: Option<GitHubRepository>,
     tab: GitHubTab,
@@ -1559,7 +1509,8 @@ impl GitHubView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let query_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search issues…"));
+        let query_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search this repository…"));
         let detail_body = cx.new(|cx| TextViewState::markdown("", cx));
         let pr_diff_body = cx.new(|cx| TextViewState::markdown("", cx));
         let pr_comment_input = cx.new(|cx| {
@@ -1633,6 +1584,7 @@ impl GitHubView {
 
         Self {
             model,
+            window_controls_inset: None,
             project_work_dir: None,
             repository: None,
             tab: GitHubTab::Issues,
@@ -1743,6 +1695,11 @@ impl GitHubView {
 
     fn schedule_query(&mut self, _query: String, cx: &mut Context<Self>) {
         self.debounce_task.take();
+        self.issue_limit = PAGE_SIZE;
+        self.pr_limit = PAGE_SIZE;
+        self.active_list_request = None;
+        self.list_loading = self.project_work_dir.is_some();
+        self.list_error = None;
         let revision = self.query_revision;
         self.debounce_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
@@ -1754,6 +1711,7 @@ impl GitHubView {
                 }
             });
         }));
+        cx.notify();
     }
 
     fn query(&self, cx: &App) -> String {
@@ -1859,15 +1817,7 @@ impl GitHubView {
                             owner: row.issue.owner.clone(),
                             repo: row.issue.repo.clone(),
                         });
-                        let query = this.query(cx);
-                        let query_mode = github_query_mode(&query);
-                        this.issues = rows
-                            .into_iter()
-                            .filter(|row| {
-                                query_mode == GitHubQueryMode::Advanced
-                                    || issue_filter_matches(row, &query)
-                            })
-                            .collect();
+                        this.issues = rows;
                         this.selected_issue =
                             selected_issue_after_refresh(this.selected_issue, &this.issues);
                         let new_count = this.issues.len() + usize::from(this.issue_has_more);
@@ -1884,15 +1834,7 @@ impl GitHubView {
                         let old_count = this.pull_requests.len() + usize::from(this.pr_has_more);
                         this.pr_has_more = rows.len() == limit;
                         this.repository = rows.first().map(|row| row.repository.clone());
-                        let query = this.query(cx);
-                        let query_mode = github_query_mode(&query);
-                        this.pull_requests = rows
-                            .into_iter()
-                            .filter(|row| {
-                                query_mode == GitHubQueryMode::Advanced
-                                    || pr_filter_matches(row, &query)
-                            })
-                            .collect();
+                        this.pull_requests = rows;
                         this.selected_pr = selected_number_after_refresh(
                             this.selected_pr,
                             &this.pull_requests,
@@ -1909,7 +1851,7 @@ impl GitHubView {
                     }
                     GitHubListResult::Issues(Err(error))
                     | GitHubListResult::PullRequests(Err(error)) => {
-                        this.list_error = Some(github_error_message(&error));
+                        this.list_error = Some(error);
                     }
                 }
                 cx.notify();
@@ -2011,7 +1953,7 @@ impl GitHubView {
                     }
                     GitHubDetailResult::Issue(Err(error))
                     | GitHubDetailResult::PullRequest(Err(error)) => {
-                        this.detail_error = Some(github_error_message(&error));
+                        this.detail_error = Some(error);
                     }
                 }
                 cx.notify();
@@ -2504,6 +2446,11 @@ impl GitHubView {
     }
 
     fn select_ix(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if self.selected_ix() == Some(ix)
+            && (self.detail_loading || self.selected_detail_is_loaded())
+        {
+            return;
+        }
         match self.tab {
             GitHubTab::Issues => {
                 let Some(row) = self.issues.get(ix) else {
@@ -2550,7 +2497,23 @@ impl GitHubView {
         self.move_selection(1, cx);
     }
 
-    fn open_selected(&mut self, _: &OpenSelected, _window: &mut Window, cx: &mut Context<Self>) {
+    fn selected_detail_is_loaded(&self) -> bool {
+        self.detail_error.is_none() && match self.tab {
+            GitHubTab::Issues => self.issue_detail.as_ref().is_some_and(|detail| {
+                self.selected_issue == Some(detail.summary.issue.number)
+            }),
+            GitHubTab::PullRequests => self.pr_detail.as_ref().is_some_and(|detail| {
+                self.selected_pr == Some(detail.number)
+            }),
+        }
+    }
+
+    fn open_selected(&mut self, _: &OpenSelected, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tab == GitHubTab::PullRequests && self.selected_detail_is_loaded() {
+            self.pr_tabs_focus.focus(window, cx);
+            cx.notify();
+            return;
+        }
         if let Some(ix) = self.selected_ix() {
             self.select_ix(ix, cx);
         }
@@ -2585,6 +2548,11 @@ impl GitHubView {
             .collect()
     }
 
+    pub(crate) fn set_window_controls_inset(&mut self, inset: Option<Pixels>, cx: &mut Context<Self>) {
+        self.window_controls_inset = inset;
+        cx.notify();
+    }
+
     fn render_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().colors;
         let close_model = self.model.clone();
@@ -2607,6 +2575,7 @@ impl GitHubView {
             .border_color(theme.border)
             .bg(theme.title_bar)
             .px_4()
+            .when_some(self.window_controls_inset, |this, inset| this.pl(inset))
             .py_2()
             .flex()
             .items_center()
@@ -2707,6 +2676,7 @@ impl GitHubView {
             }))
             .child(
                 div()
+                    .debug_selector(|| "github-search-field".into())
                     .min_w_0()
                     .flex_1()
                     .child(Input::new(&self.query_input).small()),
@@ -2724,14 +2694,6 @@ impl GitHubView {
                     } else {
                         "Refreshing…"
                     })
-            }))
-            .children(self.list_error.as_ref().map(|error| {
-                div()
-                    .max_w_64()
-                    .text_xs()
-                    .text_color(theme.danger)
-                    .truncate()
-                    .child(error.clone())
             }))
             .into_any_element()
     }
@@ -2960,14 +2922,10 @@ impl GitHubView {
         };
         if row_count == 0 && !has_more && !self.list_loading {
             if let Some(error) = self.list_error.clone() {
-                return self.render_empty(&error, cx);
+                return self.render_error("list", &error, cx);
             }
             return self.render_empty(
-                &format!(
-                    "No {} {}.",
-                    self.state_filter.value(),
-                    self.tab.label().to_lowercase()
-                ),
+                &github_empty_message(self.tab, self.state_filter, &self.query(cx)),
                 cx,
             );
         }
@@ -2976,7 +2934,8 @@ impl GitHubView {
             GitHubTab::PullRequests => self.pr_list_state.clone(),
         };
         let tab = self.tab;
-        div()
+        let content = div()
+            .debug_selector(|| "github-result-list".into())
             .relative()
             .size_full()
             .min_h_0()
@@ -3007,6 +2966,68 @@ impl GitHubView {
                     .absolute()
                     .inset_0()
                     .child(Scrollbar::vertical(&list_state)),
+            )
+            .into_any_element();
+        if let Some(error) = &self.list_error {
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(self.render_error("list", error, cx))
+                .child(div().flex_1().min_h_0().child(content))
+                .into_any_element()
+        } else {
+            content
+        }
+    }
+
+    fn render_error(&self, id: &'static str, error: &str, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().colors;
+        let details = error.to_owned();
+        div()
+            .debug_selector(move || format!("github-{id}-error"))
+            .w_full()
+            .flex_none()
+            .p_3()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .text_sm()
+            .child(
+                div()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.danger)
+                    .child("GitHub request failed"),
+            )
+            .child(
+                div()
+                    .text_color(theme.foreground)
+                    .child(github_error_message(error)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Button::new(format!("github-{id}-error-retry"))
+                            .debug_selector(move || format!("github-{id}-error-retry"))
+                            .label("Retry")
+                            .small()
+                            .disabled(self.list_loading)
+                            .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
+                    )
+                    .child(
+                        Button::new(format!("github-{id}-error-copy"))
+                            .debug_selector(move || format!("github-{id}-error-copy"))
+                            .label("Copy details")
+                            .tooltip("Copy the complete GitHub error")
+                            .ghost()
+                            .small()
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(details.clone()));
+                            }),
+                    ),
             )
             .into_any_element()
     }
@@ -3528,6 +3549,65 @@ impl GitHubView {
                         )
                     }),
             )
+            .children(detail.checks.iter().map(|check| {
+                div()
+                    .debug_selector({
+                        let name = check.name.clone();
+                        move || format!("github-pr-check-{name}")
+                    })
+                    .mt_2()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .text_sm()
+                    .child(div().min_w_0().flex_1().child(check.name.clone()))
+                    .child(
+                        div()
+                            .flex_none()
+                            .debug_selector({
+                                let name = check.name.clone();
+                                move || format!("github-pr-check-status-{name}")
+                            })
+                            .text_color(theme.muted_foreground)
+                            .child(pr_check_status_label(check)),
+                    )
+                    .child(
+                        div().w_20().flex_none().children(
+                            check
+                                .details_url
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|url| {
+                                    url.starts_with("https://") || url.starts_with("http://")
+                                })
+                                .map(|url| {
+                                    gpui_kit::base::Link::new(SharedString::from(format!(
+                                        "github-pr-check-log-{}-{}-{url}",
+                                        detail.number, check.name
+                                    )))
+                                    .href(url.to_owned())
+                                    .open_with(|url, _, _, cx| cx.open_url(url))
+                                    .accessibility_label(format!("View logs for {}", check.name))
+                                    .flex_none()
+                                    .text_color(theme.link)
+                                    .underline()
+                                    .cursor_pointer()
+                                    .border_1()
+                                    .border_color(cx.theme().transparent)
+                                    .rounded(cx.theme().radius)
+                                    .px_1()
+                                    .py_1()
+                                    .hover(|style| style.bg(theme.list_hover))
+                                    .focus_visible(|style| style.border_color(theme.primary))
+                                    .debug_selector({
+                                        let name = check.name.clone();
+                                        move || format!("github-pr-check-log-{name}")
+                                    })
+                                    .child("View logs")
+                                }),
+                        ),
+                    )
+            }))
             .child(
                 div()
                     .mt_5()
@@ -3892,7 +3972,7 @@ impl GitHubView {
             return self.render_empty("Select an item to see details.", cx);
         }
         if let Some(error) = &self.detail_error {
-            return self.render_empty(error, cx);
+            return self.render_error("detail", error, cx);
         }
         if self.tab == GitHubTab::PullRequests {
             return self.render_pr_detail(window, cx);
@@ -4208,18 +4288,17 @@ impl Render for GitHubView {
 #[cfg(test)]
 mod tests {
     use super::{
-        detail_result_matches_list, draft_reply_prompt, github_link_fingerprint_rows,
-        github_query_mode, github_result_matches_request, github_server_query,
-        github_state_for_tab, issue_filter_matches, issue_start_activation,
-        issue_start_confirmation, issue_start_dialog_result, linked_pr_session,
-        linked_session_fingerprint, linked_session_ids, linked_session_status,
-        linked_sessions_across_projects, list_count_splice, merge_pr_timeline, pr_check_label,
-        pr_diff_result_matches_request, pr_file_action_ix, pr_publish_control,
-        pr_publish_refresh_matches_selection, prepare_selected_diff, selected_file_diff,
-        selected_issue_after_refresh, GitHubQueryMode, GitHubRequest, GitHubStateFilter, GitHubTab,
-        GitHubView, PrCommentControl, PrCommentDrafts, PrCommentPhase, PrDetailTab, PrDiffRequest,
-        PrFileAction, PrReadback, PrReplyTarget, PrTimelineKind, PrWorkspaceKey,
-        PrWorkspaceSelections,
+        detail_result_matches_list, draft_reply_prompt, github_empty_message,
+        github_link_fingerprint_rows, github_result_matches_request, github_server_query,
+        github_state_for_tab, issue_start_activation, issue_start_confirmation,
+        issue_start_dialog_result, linked_pr_session, linked_session_fingerprint,
+        linked_session_ids, linked_session_status, linked_sessions_across_projects,
+        list_count_splice, merge_pr_timeline, pr_check_label, pr_diff_result_matches_request,
+        pr_file_action_ix, pr_publish_control, pr_publish_refresh_matches_selection,
+        prepare_selected_diff, selected_file_diff, selected_issue_after_refresh, GitHubRequest,
+        GitHubStateFilter, GitHubTab, GitHubView, PrCommentControl, PrCommentDrafts,
+        PrCommentPhase, PrDetailTab, PrDiffRequest, PrFileAction, PrReadback, PrReplyTarget,
+        PrTimelineKind, PrWorkspaceKey, PrWorkspaceSelections,
     };
     use crate::state::{AppState, SessionHealth, SessionInfo};
     use gpui::{AppContext as _, Focusable as _};
@@ -4304,6 +4383,85 @@ mod tests {
     #[test]
     fn github_pr_merged_filter_uses_merged_state() {
         assert_eq!(GitHubStateFilter::Merged.value(), "merged");
+    }
+
+    #[gpui::test]
+    fn github_errors_preserve_search_space_cached_results_and_raw_details(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::*;
+
+        struct Harness(Entity<GitHubView>);
+        impl Render for Harness {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0.update(cx, |view, cx| {
+                    div()
+                        .w(px(520.0))
+                        .h(px(500.0))
+                        .flex()
+                        .flex_col()
+                        .child(view.render_filters(cx))
+                        .child(div().flex_1().min_h_0().child(view.render_list(window, cx)))
+                })
+            }
+        }
+
+        let raw = format!(
+            "GraphQL: API rate limit exceeded for user ID 123456.\n{}",
+            "diagnostic detail\n".repeat(100)
+        );
+        assert_eq!(
+            super::github_error_message(&raw),
+            "GitHub’s API limit has been reached. Wait before retrying."
+        );
+        assert!(super::github_error_message("HTTP 429 from GitHub").contains("API limit"));
+        assert!(super::github_error_message(&"unknown provider body ".repeat(100)).len() < 120);
+        cx.update(gpui_component::init);
+        let (harness, cx) = cx.add_window_view(|window, cx| {
+            Harness(cx.new(|cx| {
+                let model = cx.new(|_| AppState::default());
+                let mut view = GitHubView::new(model, window, cx);
+                configure_pr_workspace(&mut view, cx);
+                view
+            }))
+        });
+        let view = harness.read_with(cx, |harness, _| harness.0.clone());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let search_width = cx.debug_bounds("github-search-field").unwrap().size.width;
+        assert!(search_width > px(100.0));
+
+        view.update(cx, |view, cx| {
+            view.list_error = Some(raw.clone());
+            cx.notify();
+        });
+        harness.update(cx, |_, cx| cx.notify());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(
+            cx.debug_bounds("github-search-field").unwrap().size.width,
+            search_width
+        );
+        let error = cx.debug_bounds("github-list-error").unwrap();
+        let results = cx.debug_bounds("github-result-list").unwrap();
+        assert!(error.bottom() <= results.top());
+        assert!(error.size.height < px(200.0));
+        assert!(cx.debug_bounds("github-list-error-retry").is_some());
+        let copy = cx.debug_bounds("github-list-error-copy").unwrap();
+        cx.simulate_click(copy.center(), Modifiers::default());
+        cx.update(|_, cx| assert_eq!(cx.read_from_clipboard().unwrap().text(), Some(raw.clone())));
+
+        view.update(cx, |view, cx| {
+            view.pull_requests.clear();
+            view.pr_list_state.reset(0);
+            cx.notify();
+        });
+        harness.update(cx, |_, cx| cx.notify());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("github-list-error-copy").is_some());
+        assert!(cx.debug_bounds("github-result-list").is_none());
+        assert_eq!(
+            cx.debug_bounds("github-search-field").unwrap().size.width,
+            search_width
+        );
     }
 
     #[test]
@@ -5138,28 +5296,59 @@ mod tests {
     }
 
     #[test]
-    fn github_query_mode_keeps_plain_text_local_and_sends_qualifiers_remote() {
-        for query in ["linked task", "42", "desktop maintainer"] {
-            assert_eq!(github_query_mode(query), GitHubQueryMode::Local);
-        }
-        for query in ["label:desktop", "is:open linked", "-author:octocat"] {
-            assert_eq!(github_query_mode(query), GitHubQueryMode::Advanced);
+    fn github_search_sends_plain_text_and_qualifiers_to_the_repository() {
+        for query in [
+            "linked task",
+            "42",
+            "label:desktop",
+            "is:open linked",
+            "-author:octocat",
+        ] {
             assert_eq!(github_server_query(query), Some(query));
         }
-        for query in ["https://github.com", "note:", ":value", "unknown:value"] {
-            assert_eq!(github_query_mode(query), GitHubQueryMode::Local);
+        assert_eq!(github_server_query("  linked task  "), Some("linked task"));
+        for query in ["", "  ", "\n"] {
             assert_eq!(github_server_query(query), None);
         }
+        assert_eq!(
+            github_empty_message(GitHubTab::Issues, GitHubStateFilter::Open, ""),
+            "No open issues."
+        );
+        assert_eq!(
+            github_empty_message(
+                GitHubTab::PullRequests,
+                GitHubStateFilter::Merged,
+                "older fix"
+            ),
+            "No matching pull requests. Try another search or state filter."
+        );
     }
 
-    #[test]
-    fn issue_filter_matches_title_number_label_and_assignee() {
-        let issue = issue(42);
-
-        for query in ["linked task", "42", "desktop", "maintainer"] {
-            assert!(issue_filter_matches(&issue, query), "query: {query}");
-        }
-        assert!(!issue_filter_matches(&issue, "unrelated"));
+    #[gpui::test]
+    fn github_search_invalidates_old_results_before_debounce(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let model = cx.new(|_| AppState::default());
+            GitHubView::new(model, window, cx)
+        });
+        view.update(cx, |view, cx| {
+            configure_pr_workspace(view, cx);
+            view.issue_limit = 100;
+            view.pr_limit = 150;
+            view.active_list_request = Some(GitHubRequest {
+                work_dir: view.project_work_dir.clone().unwrap(),
+                tab: GitHubTab::PullRequests,
+                query_revision: view.query_revision,
+                item_number: None,
+            });
+            view.query_revision += 1;
+            view.schedule_query("older fix".into(), cx);
+            assert!(view.active_list_request.is_none());
+            assert!(view.list_loading);
+            assert_eq!(view.issue_limit, super::PAGE_SIZE);
+            assert_eq!(view.pr_limit, super::PAGE_SIZE);
+            view.debounce_task.take();
+        });
     }
 
     #[test]
@@ -5496,6 +5685,91 @@ mod tests {
         );
     }
 
+    #[gpui::test]
+    fn github_pr_checks_expose_results_and_keyboard_accessible_logs(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            super::init(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let model = cx.new(|_| AppState::default());
+            GitHubView::new(model, window, cx)
+        });
+        view.update(cx, |view, cx| {
+            configure_pr_workspace(view, cx);
+            let detail = view.pr_detail.as_mut().unwrap();
+            detail.checks = vec![
+                PrCheckStatus {
+                    name: "Build".into(),
+                    status: "COMPLETED".into(),
+                    conclusion: Some("TIMED_OUT".into()),
+                    details_url: Some("https://github.com/threadlane/app/actions/runs/123".into()),
+                },
+                PrCheckStatus {
+                    name: "Lint".into(),
+                    status: "IN_PROGRESS".into(),
+                    conclusion: Some("".into()),
+                    details_url: None,
+                },
+                PrCheckStatus {
+                    name: "Untrusted".into(),
+                    status: "COMPLETED".into(),
+                    conclusion: Some("SUCCESS".into()),
+                    details_url: Some("file:///private/tmp/check.log".into()),
+                },
+            ];
+            detail.total_checks = 3;
+            detail.failing_checks = 1;
+            detail.pending_checks = 1;
+            detail.passing_checks = 1;
+            assert_eq!(super::pr_check_status_label(&detail.checks[0]), "Timed out");
+            assert_eq!(
+                super::pr_check_status_label(&detail.checks[1]),
+                "In progress"
+            );
+            assert_eq!(
+                super::pr_check_status_label(&PrCheckStatus::default()),
+                "Unknown"
+            );
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("github-pr-check-Lint").is_some());
+        assert!(cx.debug_bounds("github-pr-check-log-Lint").is_none());
+        assert!(cx.debug_bounds("github-pr-check-log-Untrusted").is_none());
+        assert_eq!(
+            cx.debug_bounds("github-pr-check-status-Build")
+                .unwrap()
+                .right(),
+            cx.debug_bounds("github-pr-check-status-Lint")
+                .unwrap()
+                .right()
+        );
+        let log = cx.debug_bounds("github-pr-check-log-Build").unwrap();
+        cx.simulate_click(log.center(), gpui::Modifiers::default());
+        assert_eq!(
+            cx.opened_url().as_deref(),
+            Some("https://github.com/threadlane/app/actions/runs/123")
+        );
+
+        cx.update(|window, cx| {
+            assert!(window.focused(cx).is_some());
+            cx.open_url("https://example.invalid/keyboard-test-marker");
+            window.draw(cx).clear(cx);
+        });
+        let keystroke = gpui::Keystroke::parse("enter").unwrap();
+        cx.simulate_event(gpui::KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        cx.simulate_event(gpui::KeyUpEvent { keystroke });
+        assert_eq!(
+            cx.opened_url().as_deref(),
+            Some("https://github.com/threadlane/app/actions/runs/123")
+        );
+    }
+
     #[test]
     fn github_pr_tab_arrows_and_file_actions_keep_bounded_selection() {
         assert_eq!(PrDetailTab::Summary.adjacent(1), PrDetailTab::Timeline);
@@ -5527,10 +5801,17 @@ mod tests {
         cx.update(|window, cx| window.draw(cx).clear(cx));
 
         let tabs_focus = view.read_with(cx, |view, _| view.pr_tabs_focus.clone());
+        let list_focus = view.read_with(cx, |view, _| view.list_focus.clone());
         cx.update(|window, cx| {
-            window.focus(&tabs_focus, cx);
+            window.focus(&list_focus, cx);
             window.draw(cx).clear(cx);
         });
+        cx.simulate_keystrokes("up enter");
+        cx.update(|window, cx| {
+            assert!(tabs_focus.is_focused(window));
+            window.draw(cx).clear(cx);
+        });
+        assert!(view.read_with(cx, |view, _| view.active_detail_request.is_none()));
         cx.simulate_keystrokes("right");
         assert_eq!(
             view.read_with(cx, |view, _| view.current_pr_tab()),
@@ -5553,6 +5834,14 @@ mod tests {
             view.read_with(cx, |view, _| view.current_pr_file().map(str::to_owned)),
             Some("src/view.rs".into())
         );
+        view.update(cx, |view, cx| {
+            view.detail_loading = true;
+            view.select_ix(0, cx);
+            assert!(view.active_detail_request.is_none(), "An in-flight detail must not be restarted");
+            view.detail_loading = false;
+            view.detail_error = Some("Check your connection".into());
+            assert!(!view.selected_detail_is_loaded(), "A failed detail remains retryable");
+        });
     }
 
     #[gpui::test]

@@ -17,7 +17,6 @@ use crate::extension_broker::CapabilityDispatcher;
 use crate::plan::SessionPlanStore;
 use crate::policy::ToolPolicy;
 use crate::system_prompt::{build_system_prompt, SystemPromptBuildOptions};
-use log::warn;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -25,7 +24,7 @@ use threadlane_mcp::McpManager;
 use threadlane_protocol::ProviderPort;
 use threadlane_provider::openai::fetch_available_models;
 use threadlane_provider::router::ProviderClient;
-use threadlane_runtime::harness::{OperationOutcome, QueueKind, Reducer, SessionStore, Snapshot};
+use threadlane_runtime::harness::{OperationOutcome, Reducer, SessionStore, Snapshot};
 use threadlane_runtime::{
     AgentEvent, AgentMessage, AgentRuntime, ImageAttachment, ReasoningEffort, TokenUsage,
 };
@@ -95,21 +94,12 @@ impl CodingAgent {
             .await
         {
             self.sync_harness_and_dispatch_assistant_hooks().await;
-            if let Some(path) = self.session_file.as_deref() {
-                if let Err(error) = consume_harness_follow_ups(path) {
-                    warn!("Failed to consume queued follow-up: {error}");
-                }
-                if let Err(error) = consume_harness_queue(path, QueueKind::Steer) {
-                    warn!("Failed to consume queued steer: {error}");
-                }
-                if let Err(error) = consume_harness_queue(path, QueueKind::NextRun) {
-                    warn!("Failed to consume queued next-run input: {error}");
-                }
-            }
         }
     }
 
     pub(crate) fn work_handle(&self) -> CodingAgentWorkHandle {
+        self.agent_work
+            .set_acp_model(crate::acp_bridge::is_acp_model(&self.agent.model()));
         CodingAgentWorkHandle::new(self.agent_work.clone(), self.session_file.clone())
     }
 
@@ -286,6 +276,8 @@ impl CodingAgent {
             self.sync_turn_from_model_context().await?;
         }
         self.agent.turn.lock().await.model = model.to_string();
+        self.agent_work
+            .set_acp_model(crate::acp_bridge::is_acp_model(model));
         Ok(())
     }
 
@@ -661,9 +653,41 @@ impl CodingAgent {
         agent_id: &str,
         input: &str,
         images: Vec<ImageAttachment>,
+        queued: Option<(threadlane_runtime::harness::QueueKind, &str)>,
     ) -> Option<Result<String, String>> {
+        // A retry can arrive while the external agent is still answering Stop.
+        // Retain that input as existing queue intent before waiting, then open
+        // the new operation only after all old permission responses are sent.
+        let staged_entry = if queued.is_none() && self.acp.has_pending_turn(agent_id) {
+            if let Some(journal) = self.harness.as_mut() {
+                let queue = threadlane_runtime::harness::QueueKind::NextRun;
+                let entry_id = match journal.enqueue_unbound_with_images(
+                    queue.clone(),
+                    input.to_string(),
+                    images.clone(),
+                ) {
+                    Ok(entry_id) => entry_id,
+                    Err(error) => return Some(Err(format!("Harness Error: {error}"))),
+                };
+                self.agent_work.schedule(AgentWork::DurableQueueWake {
+                    queue,
+                    entry_id: entry_id.clone(),
+                });
+                Some(entry_id)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let queued = queued.or_else(|| {
+            staged_entry
+                .as_deref()
+                .map(|entry_id| (threadlane_runtime::harness::QueueKind::NextRun, entry_id))
+        });
+        self.acp.finish_pending_turn(agent_id).await;
         let msg = AgentMessage::user(input, images.clone());
-        let harness_run_id = match self.begin_harness_run(msg).await {
+        let harness_run_id = match self.begin_harness_run_with_queue(msg, queued).await {
             Ok(run_id) => run_id,
             Err(error) => {
                 let message = format!("Harness Error: {error}");
@@ -701,46 +725,49 @@ impl CodingAgent {
             }
         };
 
-        if let (Some(run_id), Some(journal)) = (run_id, self.harness.as_mut()) {
-            let tool_calls = (!outcome.tools.is_empty()).then(|| {
-                outcome
-                    .tools
-                    .iter()
-                    .map(|tool| threadlane_provider::openai::ToolCall {
-                        id: tool.tool_call_id.clone(),
-                        r#type: "function".into(),
-                        function: threadlane_provider::openai::ToolCallFunction {
-                            name: tool.name.clone(),
-                            arguments: tool.arguments.clone(),
-                        },
-                        thought_signature: None,
-                    })
-                    .collect()
-            });
-            let recorded = journal.append_message_to_lane(
-                "main",
-                run_id,
-                AgentMessage::Assistant {
-                    content: Some(outcome.reply),
-                    tool_calls,
-                    stop_reason: None,
-                    deferred_handle: None,
-                },
-            );
-            if let Err(error) = recorded {
+        if let Some(plan) = outcome.plan {
+            let saved = serde_json::to_string(&plan)
+                .map_err(|error| error.to_string())
+                .and_then(|plan| self.set_fact("session_plan", &plan));
+            if let Err(error) = saved {
                 let _ = self
-                    .finish_harness_run(Some(run_id), OperationOutcome::Failed, Some(error.clone()))
+                    .finish_harness_run(run_id, OperationOutcome::Failed, Some(error.clone()))
                     .await;
                 return Some(Err(format!("Harness Error: {error}")));
             }
+        }
 
+        if let (Some(run_id), Some(journal)) = (run_id, self.harness.as_mut()) {
             // ACP tools execute inside the external agent, but their ordered
-            // lifecycle still belongs in the canonical trajectory.
+            // preambles and results must precede the final reply after reload.
+            let has_tools = !outcome.tools.is_empty();
             for tool in outcome.tools {
                 let arguments = serde_json::from_str(&tool.arguments)
                     .unwrap_or_else(|_| serde_json::Value::String(tool.arguments.clone()));
                 let recorded = journal
-                    .tool_started_on_lane("main", run_id, &tool.tool_call_id, &tool.name, arguments)
+                    .append_message(AgentMessage::Assistant {
+                        content: (!tool.preamble.is_empty()).then_some(tool.preamble),
+                        tool_calls: Some(vec![threadlane_provider::openai::ToolCall {
+                            id: tool.tool_call_id.clone(),
+                            r#type: "function".into(),
+                            function: threadlane_provider::openai::ToolCallFunction {
+                                name: tool.name.clone(),
+                                arguments: tool.arguments.clone(),
+                            },
+                            thought_signature: None,
+                        }]),
+                        stop_reason: None,
+                        deferred_handle: None,
+                    })
+                    .and_then(|_| {
+                        journal.tool_started_on_lane(
+                            "main",
+                            run_id,
+                            &tool.tool_call_id,
+                            &tool.name,
+                            arguments,
+                        )
+                    })
                     .and_then(|_| {
                         let mut result = tool.result.unwrap_or_else(|| {
                             threadlane_runtime::types::AgentToolResult::external(
@@ -756,6 +783,25 @@ impl CodingAgent {
                         result.name = tool.name;
                         journal.finish_tool_result(run_id, &result)
                     });
+                if let Err(error) = recorded {
+                    let _ = self
+                        .finish_harness_run(
+                            Some(run_id),
+                            OperationOutcome::Failed,
+                            Some(error.clone()),
+                        )
+                        .await;
+                    return Some(Err(format!("Harness Error: {error}")));
+                }
+            }
+
+            if !outcome.reply.is_empty() || !has_tools {
+                let recorded = journal.append_message(AgentMessage::Assistant {
+                    content: Some(outcome.reply),
+                    tool_calls: None,
+                    stop_reason: None,
+                    deferred_handle: None,
+                });
                 if let Err(error) = recorded {
                     let _ = self
                         .finish_harness_run(
@@ -790,6 +836,47 @@ impl CodingAgent {
         None
     }
 
+    async fn run_queued_acp_work(&mut self, agent_id: &str) -> Option<Result<String, String>> {
+        while let Some(work) = self.agent_work.next() {
+            let result = match &work {
+                AgentWork::DurableQueueWake { queue, entry_id } => {
+                    let message = match self.harness.as_mut() {
+                        Some(journal) => journal.unbound_queue_message(queue.clone(), entry_id),
+                        None => Err("session persistence is unavailable".into()),
+                    };
+                    let message = match message {
+                        Ok(Some(message)) => message,
+                        Ok(None) => {
+                            self.agent_work.finish_next();
+                            continue;
+                        }
+                        Err(error) => return Some(Err(format!("Harness Error: {error}"))),
+                    };
+                    let (content, images) = match message {
+                        AgentMessage::User { content } => (content, Vec::new()),
+                        AgentMessage::UserWithImages { content, images } => (content, images),
+                        _ => return Some(Err("Queued ACP input must be a user message".into())),
+                    };
+                    self.run_acp_turn(agent_id, &content, images, Some((queue.clone(), entry_id)))
+                        .await
+                }
+                AgentWork::QueueMessage { content, images }
+                | AgentWork::SteerMessage { content, images } => {
+                    // Legacy pending steer inputs are retained as later prompts.
+                    self.run_acp_turn(agent_id, content, images.clone(), None)
+                        .await
+                }
+            };
+            if result.is_some() {
+                // The durable wake stays until its accepted input is observed
+                // as consumed on retry. All later queued inputs remain pending.
+                return result;
+            }
+            self.agent_work.finish_next();
+        }
+        None
+    }
+
     pub async fn handle_input_with_images(
         &mut self,
         input: &str,
@@ -811,12 +898,17 @@ impl CodingAgent {
             .lock()
             .ok()
             .is_some_and(|run_id| run_id.is_some());
-        if !adopted_harness_run {
+        if !adopted_harness_run || crate::acp_bridge::is_acp_model(&self.agent.model()) {
             if let Some(journal) = self.harness.as_mut() {
                 match journal.recover_abort() {
                     Ok(_) => {}
                     Err(error) => return Some(Err(format!("Harness Error: {error}"))),
                 }
+            }
+            // ACP never adopts an already accepted native runtime run. A
+            // dropped turn can leave this handle behind after Stop.
+            if let Ok(mut run_id) = self.harness_run_id.lock() {
+                *run_id = None;
             }
         }
         *self.dispatch_parent_leaf.lock().unwrap() = None;
@@ -1302,7 +1394,14 @@ impl CodingAgent {
         // here rather than through the provider run below.
         if let Some(agent_id) = crate::acp_bridge::acp_agent_id(&self.agent.model()) {
             let agent_id = agent_id.to_string();
-            return self.run_acp_turn(&agent_id, &effective_input, images).await;
+            let result = self
+                .run_acp_turn(&agent_id, &effective_input, images, None)
+                .await;
+            return if result.is_some() {
+                result
+            } else {
+                self.run_queued_acp_work(&agent_id).await
+            };
         }
 
         let msg = AgentMessage::user(effective_input, images);
@@ -1701,6 +1800,115 @@ mod compaction_sync_tests {
         attempts: AtomicUsize,
         max_request_estimate: AtomicUsize,
         previous_serialized_request: Mutex<Option<String>>,
+    }
+
+    #[derive(Default)]
+    struct FollowUpProvider {
+        work: Mutex<Option<super::CodingAgentWorkHandle>>,
+        prompts: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl ProviderPort for FollowUpProvider {
+        async fn stream_request(
+            &self,
+            request: RuntimeRequest,
+            events: tokio::sync::mpsc::Sender<RuntimeStreamEvent>,
+        ) {
+            let messages: Vec<AgentMessage> = serde_json::from_value(request.messages).unwrap();
+            let prompt = messages
+                .iter()
+                .rev()
+                .find_map(|message| match message {
+                    AgentMessage::User { content } => Some(content.clone()),
+                    _ => None,
+                })
+                .unwrap();
+            self.prompts.lock().unwrap().push(prompt.clone());
+            {
+                let work = self.work.lock().unwrap();
+                let work = work.as_ref().unwrap();
+                match prompt.as_str() {
+                    "initial" => work
+                        .try_queue_follow_up_with_images("first follow-up", vec![])
+                        .unwrap(),
+                    "first follow-up" => work.queue_steer_with_images("new steer", vec![]).unwrap(),
+                    _ => {}
+                }
+            }
+            events
+                .send(RuntimeStreamEvent::ContentToken("done".into()))
+                .await
+                .unwrap();
+            events
+                .send(RuntimeStreamEvent::Finished {
+                    tool_calls: vec![],
+                    usage: RuntimeUsage::default(),
+                })
+                .await
+                .unwrap();
+        }
+
+        async fn fetch_deferred(
+            &self,
+            _model: &str,
+            _handle_id: &str,
+        ) -> Result<DeferredResponse, String> {
+            Ok(DeferredResponse::Pending)
+        }
+
+        async fn cancel_deferred(&self, _model: &str, _handle_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn provider_kind(&self, _model: &str) -> &'static str {
+            "test"
+        }
+    }
+
+    #[tokio::test]
+    async fn steer_queued_during_follow_up_reaches_provider_and_survives_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let provider = Arc::new(FollowUpProvider::default());
+        let mut agent = CodingAgent::new_with_provider(
+            CodingAgentOptions {
+                api_key: "test-key".into(),
+                account_id: None,
+                model: "test-model".into(),
+                work_dir: dir.path().to_path_buf(),
+                session_file: Some(path.clone()),
+                system_prompt: SystemPromptConfig::default(),
+                agent_config: None,
+                coding_config: None,
+            },
+            provider.clone(),
+        );
+        *provider.work.lock().unwrap() = Some(agent.work_handle());
+
+        let result = agent.handle_input_with_images("initial", vec![]).await;
+        assert!(result.is_none(), "foreground run failed: {result:?}");
+        let expected = ["initial", "first follow-up", "new steer"];
+        assert_eq!(*provider.prompts.lock().unwrap(), expected);
+
+        drop(agent);
+        let store = JsonlStore::open(&path).unwrap();
+        let context = store.model_context("main").unwrap();
+        let prompts: Vec<_> = context
+            .messages()
+            .into_iter()
+            .filter_map(|message| match message {
+                AgentMessage::User { content } => Some(content),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(prompts, expected);
+        assert!(threadlane_runtime::harness::Reducer::reduce(&store)
+            .unwrap()
+            .lane("main")
+            .unwrap()
+            .queued
+            .is_empty());
     }
 
     impl LongToolLoopProvider {

@@ -7,6 +7,15 @@ pub enum ModelProvider {
 }
 
 impl ModelProvider {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::OpenAi => "OpenAI",
+            Self::Antigravity => "Antigravity",
+            Self::OpenCode => "OpenCode",
+            Self::Acp => "External agents",
+        }
+    }
+
     pub(crate) const fn icon_path(self) -> &'static str {
         match self {
             Self::OpenAi => "icons/providers/openai.svg",
@@ -146,6 +155,15 @@ pub(crate) fn label_for(model_id: &str) -> Option<String> {
     option_for(model_id).map(|model| model.label)
 }
 
+pub(crate) fn selection_label(model_id: &str, available: &[ModelOption]) -> String {
+    available
+        .iter()
+        .find(|model| model.id == model_id)
+        .map(|model| model.label.clone())
+        .or_else(|| label_for(model_id))
+        .unwrap_or_else(|| model_id.to_string())
+}
+
 pub fn available_option(model_id: &str) -> Option<ModelOption> {
     available_option_for_project(model_id, None)
 }
@@ -203,6 +221,18 @@ mod tests {
     #[test]
     fn no_credentials_produce_no_provider_models() {
         assert!(models_for_credentials(false, false, false).is_empty());
+    }
+
+    #[test]
+    fn selection_labels_preserve_configured_agents_and_unavailable_models() {
+        let models = vec![ModelOption {
+            id: "acp/claude".into(),
+            label: "Claude Code".into(),
+            provider: ModelProvider::Acp,
+        }];
+        assert_eq!(selection_label("acp/claude", &models), "Claude Code");
+        assert_eq!(selection_label("gpt-5.5", &models), "GPT-5.5");
+        assert_eq!(selection_label("acp/removed-agent", &models), "acp/removed-agent");
     }
 
     #[test]

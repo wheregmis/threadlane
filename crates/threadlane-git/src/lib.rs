@@ -3121,6 +3121,12 @@ mod tests {
         assert!(!plain_issue_args
             .iter()
             .any(|argument| argument == "--search"));
+        for args in [
+            github_issue_list_args("open", Some("older task"), 50).unwrap(),
+            github_pr_list_args("open", Some("older task"), 100).unwrap(),
+        ] {
+            assert!(args.windows(2).any(|pair| pair == ["--search", "older task"]));
+        }
         assert_eq!(
             github_issue_list_args("closed", Some("bug label:desktop"), 100).unwrap(),
             vec![

@@ -424,7 +424,6 @@ impl SidebarView {
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let model = self.model.clone();
         let theme = cx.theme().colors;
 
         div()
@@ -441,11 +440,11 @@ impl SidebarView {
                     .label("New Task")
                     .ghost()
                     .w_full()
-                    .on_click(move |_event, _window, cx| {
-                        model.update(cx, |state, cx| {
-                            controller::dispatch(state, AppAction::BeginNewTask);
-                            cx.notify();
-                        });
+                    .on_click(move |_event, window, cx| {
+                        window.dispatch_action(
+                            Box::new(crate::screens::workspace::BeginNewTask),
+                            cx,
+                        );
                     }),
             )
             .child(
@@ -714,6 +713,9 @@ impl SidebarView {
         let work_dir = session.work_dir.clone();
         let session_id = session.id.clone();
         let model = self.model.clone();
+        let title_work_dir = session.work_dir.clone();
+        let title_session_id = session.id.clone();
+        let title_model = self.model.clone();
         let context_work_dir = session.work_dir.clone();
         let context_session_id = session.id.clone();
         let context_model = self.model.clone();
@@ -990,18 +992,50 @@ impl SidebarView {
                             .justify_between()
                             .gap_2()
                             .child(
-                                div()
+                                Button::new(SharedString::from(format!(
+                                    "session-title-{}",
+                                    session.id
+                                )))
+                                    .debug_selector({
+                                        let id = session.id.clone();
+                                        move || format!("session-title-{id}")
+                                    })
+                                    .accessibility_label(session_title.clone())
+                                    .ghost()
+                                    .xsmall()
+                                    .compact()
                                     .flex_1()
                                     .min_w_0()
-                                    .text_sm()
-                                    .font_weight(if is_active {
-                                        FontWeight::SEMIBOLD
-                                    } else {
-                                        FontWeight::MEDIUM
+                                    .px_0()
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation();
                                     })
-                                    .text_color(title_color)
-                                    .truncate()
-                                    .child(session_title),
+                                    .on_click(move |_, _, cx| {
+                                        title_model.update(cx, |state, cx| {
+                                            controller::dispatch(
+                                                state,
+                                                AppAction::SelectSession {
+                                                    work_dir: title_work_dir.clone(),
+                                                    session_id: title_session_id.clone(),
+                                                },
+                                            );
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .min_w_0()
+                                            .text_sm()
+                                            .font_weight(if is_active {
+                                                FontWeight::SEMIBOLD
+                                            } else {
+                                                FontWeight::MEDIUM
+                                            })
+                                            .text_color(title_color)
+                                            .truncate()
+                                            .child(session_title),
+                                    ),
                             )
                             .child(
                                 div()
@@ -1042,8 +1076,9 @@ impl SidebarView {
                                         .absolute()
                                         .right(px(0.0))
                                         .top(px(0.0))
-                                        .opacity(0.0)
-                                        .group_hover("session-card", |style| style.opacity(1.0))
+                                            .opacity(0.0)
+                                            .group_hover("session-card", |style| style.opacity(1.0))
+                                            .focus_visible(|style| style.opacity(1.0))
                                         .tooltip("Archive session")
                                         // The card selects a session on mouse-down. Keep action buttons from
                                         // bubbling that event, otherwise archiving first selects the row and
@@ -1337,6 +1372,8 @@ impl SidebarView {
             .py_2()
             .child(
                 Button::new("sidebar-github")
+                    .debug_selector(|| "sidebar-github".into())
+                    .accessibility_label("GitHub")
                     .child(
                         div()
                             .w_full()
@@ -1361,6 +1398,8 @@ impl SidebarView {
             )
             .child(
                 Button::new("sidebar-settings")
+                    .debug_selector(|| "sidebar-settings".into())
+                    .accessibility_label("Settings")
                     .child(
                         div()
                             .w_full()
@@ -1458,7 +1497,6 @@ impl SidebarView {
 
     fn render_history(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().colors;
-        let model = self.model.clone();
         let state = self.model.read(cx);
         let query = state.search_query.trim().to_lowercase();
         let now = now_unix_secs();
@@ -1509,11 +1547,11 @@ impl SidebarView {
                         .label("New Task")
                         .ghost()
                         .small()
-                        .on_click(move |_event, _window, cx| {
-                            model.update(cx, |state, cx| {
-                                controller::dispatch(state, AppAction::BeginNewTask);
-                                cx.notify();
-                            });
+                        .on_click(move |_event, window, cx| {
+                            window.dispatch_action(
+                                Box::new(crate::screens::workspace::BeginNewTask),
+                                cx,
+                            );
                         })
                 }))
                 .into_any_element();
@@ -1567,6 +1605,106 @@ mod tests {
             github_issue: None,
             is_worktree: false,
             worktree_available: true,
+        }
+    }
+
+    #[gpui::test]
+    fn sidebar_task_title_and_navigation_support_keyboard_activation(cx: &mut gpui::TestAppContext) {
+        use crate::state::{AppState, WorkspacePage};
+        use gpui::*;
+        use std::{cell::Cell, rc::Rc};
+
+        struct Harness {
+            sidebar: Entity<super::SidebarView>,
+            session: SessionInfo,
+        }
+
+        impl Render for Harness {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.sidebar.update(cx, |sidebar, cx| {
+                    div()
+                        .tab_group()
+                        .w(px(320.0))
+                        .child(sidebar.render_session_card(
+                            &self.session,
+                            SessionAttention::Idle,
+                            false,
+                            cx,
+                        ))
+                        .child(sidebar.render_footer(cx))
+                        .into_any_element()
+                })
+            }
+        }
+
+        cx.update(gpui_component::init);
+        let temporary = tempfile::tempdir().unwrap();
+        let mut task = session("keyboard-task");
+        // A missing project cannot be persisted to the user's project registry.
+        task.work_dir = temporary.path().join("missing-project");
+        let (harness, cx) = cx.add_window_view(|window, cx| Harness {
+            sidebar: cx.new(|cx| {
+                let model = cx.new(|_| {
+                    let mut state = AppState::default();
+                    state.active_work_dir = None;
+                    state.active_session_id = None;
+                    state.pending_hydrations.clear();
+                    state
+                });
+                super::SidebarView::new(model, window, cx)
+            }),
+            session: task.clone(),
+        });
+        let model = harness.read_with(cx, |harness, cx| harness.sidebar.read(cx).model.clone());
+        let changes = Rc::new(Cell::new(0));
+        let _subscription = cx.update(|_, cx| {
+            let changes = changes.clone();
+            cx.observe(&model, move |_, _| changes.set(changes.get() + 1))
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let title = cx.debug_bounds("session-title-keyboard-task").unwrap();
+        cx.simulate_click(title.center(), Modifiers::default());
+        assert_eq!(changes.get(), 1, "title click must select only once");
+        model.read_with(cx, |state, _| {
+            assert_eq!(state.active_session_id.as_deref(), Some("keyboard-task"));
+            assert_eq!(state.pending_hydrations.len(), 1);
+        });
+
+        model.update(cx, |state, _| state.active_session_id = None);
+        cx.update(|window, cx| {
+            window.blur(cx);
+            window.focus_next(cx);
+            window.draw(cx).clear(cx);
+        });
+        for key in ["enter", "space"] {
+            let previous_changes = changes.get();
+            let keystroke = Keystroke::parse(key).unwrap();
+            cx.simulate_event(KeyDownEvent {
+                keystroke: keystroke.clone(),
+                is_held: false,
+                prefer_character_input: false,
+            });
+            cx.simulate_event(KeyUpEvent { keystroke });
+            assert_eq!(changes.get(), previous_changes + 1);
+            model.read_with(cx, |state, _| {
+                assert_eq!(state.active_session_id.as_deref(), Some("keyboard-task"));
+            });
+        }
+
+        cx.update(|window, cx| window.focus_next(cx)); // Archive remains separate.
+        for page in [WorkspacePage::GitHub, WorkspacePage::Settings] {
+            cx.update(|window, cx| {
+                window.focus_next(cx);
+                window.draw(cx).clear(cx);
+            });
+            let keystroke = Keystroke::parse("enter").unwrap();
+            cx.simulate_event(KeyDownEvent {
+                keystroke: keystroke.clone(),
+                is_held: false,
+                prefer_character_input: false,
+            });
+            cx.simulate_event(KeyUpEvent { keystroke });
+            model.read_with(cx, |state, _| assert_eq!(state.workspace_page, page));
         }
     }
 

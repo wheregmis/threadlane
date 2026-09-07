@@ -33,6 +33,115 @@ fn editor_target_matches_active_work_dir(target: &Path, active: Option<&Path>) -
     active == Some(target)
 }
 
+fn chat_error_summary(error: &str) -> (String, bool) {
+    let expired = ["token_expired", "token has expired", "sign-in expired"]
+        .iter()
+        .any(|marker| contains_case_insensitive(error, marker));
+    if expired {
+        return (
+            "Your provider sign-in has expired. Sign in again in Settings → Providers, then resend your message.".into(),
+            true,
+        );
+    }
+    let rejected = ["invalid_api_key", "http 401", "401 unauthorized"]
+        .iter()
+        .any(|marker| contains_case_insensitive(error, marker));
+    if rejected {
+        return (
+            "The provider rejected your credentials. Check your sign-in or API key in Settings → Providers, then resend your message.".into(),
+            true,
+        );
+    }
+    let first_line = error.lines().find(|line| !line.trim().is_empty()).unwrap_or("");
+    let mut chars = first_line.trim().chars();
+    let mut summary: String = chars.by_ref().take(240).collect();
+    if chars.next().is_some() {
+        summary.push('…');
+    }
+    if summary.is_empty() {
+        summary = "The turn stopped without an error description.".into();
+    }
+    (summary, false)
+}
+
+fn visible_session_status<'a>(
+    status: Option<&'a str>,
+    last_message: Option<&ChatMessageInfo>,
+) -> Option<&'a str> {
+    status.filter(|status| {
+        !status.trim().is_empty()
+            && !matches!(*status, "Working…" | "Reconciling session…")
+            && !last_message.is_some_and(|message| {
+                message.role == MessageRole::Error && message.content == *status
+            })
+    })
+}
+
+fn render_chat_error(
+    id: &str,
+    error: &str,
+    model: &Entity<AppState>,
+    cx: &App,
+) -> Div {
+    let theme = cx.theme().colors;
+    let (summary, needs_provider_settings) = chat_error_summary(error);
+    let details = error.to_owned();
+    div().w_full().my_2().px_4().child(
+        div()
+            .w_full()
+            .p_3()
+            .rounded(cx.theme().radius)
+            .bg(theme.danger.opacity(0.08))
+            .border_1()
+            .border_color(theme.danger.opacity(0.4))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.danger)
+                    .child("Turn stopped"),
+            )
+            .child(
+                div()
+                    .mt_1()
+                    .text_sm()
+                    .text_color(theme.foreground)
+                    .child(summary),
+            )
+            .child(
+                div()
+                    .mt_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .children(needs_provider_settings.then(|| {
+                        let model = model.clone();
+                        Button::new(SharedString::from(format!("chat-error-settings-{id}")))
+                            .label("Settings…")
+                            .small()
+                            .debug_selector(|| "chat-error-settings".into())
+                            .on_click(move |_, _, cx| {
+                                model.update(cx, |state, cx| {
+                                    controller::dispatch(state, AppAction::OpenSettings);
+                                    cx.notify();
+                                });
+                            })
+                    }))
+                    .child(
+                        Button::new(SharedString::from(format!("chat-error-copy-{id}")))
+                            .label("Copy details")
+                            .ghost()
+                            .small()
+                            .debug_selector(|| "chat-error-copy".into())
+                            .on_click(move |_, window, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(details.clone()));
+                                window.push_notification(Notification::info("Copied error details"), cx);
+                            }),
+                    ),
+            ),
+    )
+}
+
 #[derive(Clone, Debug)]
 struct ContextMeterContext {
     current_tokens: u64,
@@ -836,6 +945,12 @@ pub fn init(cx: &mut App) {
     ]);
 }
 
+#[derive(Default)]
+struct ComposerDraft {
+    text: SharedString,
+    images: Vec<ImageAttachment>,
+}
+
 pub struct ChatListView {
     model: Entity<AppState>,
     pub(crate) input_state: Entity<TextareaState>,
@@ -849,6 +964,8 @@ pub struct ChatListView {
     markdown_states: HashMap<(SharedString, String), MarkdownRenderState>,
     markdown_cache_namespace: SharedString,
     pasted_images: Vec<ImageAttachment>,
+    composer_key: (Option<PathBuf>, Option<String>),
+    composer_drafts: HashMap<(Option<PathBuf>, Option<String>), ComposerDraft>,
     last_session_key: Option<(std::path::PathBuf, String)>,
     initial_scroll_frames: u8,
     current_tab: CentralTab,
@@ -927,7 +1044,8 @@ impl ChatListView {
 
         let editor = cx.new(|cx| EditorView::new(model.clone(), window, cx));
 
-        let sub1 = cx.observe(&model, |this, model, cx| {
+        let sub1 = cx.observe_in(&model, window, |this, model, window, cx| {
+            this.sync_composer_draft(window, cx);
             if let Some(target) =
                 model.update(cx, |state, _cx| state.requested_editor_target.take())
             {
@@ -1017,6 +1135,15 @@ impl ChatListView {
                         if !text.trim().is_empty()
                             || (!is_generating && !this.pasted_images.is_empty())
                         {
+                            if is_generating && *secondary
+                                && threadlane_session::is_acp_model(&model_clone.read(cx).selected_model)
+                            {
+                                model_clone.update(cx, |state, cx| {
+                                    state.session_status = Some("This agent does not support live steering. Use Queue to send your message after this turn.".into());
+                                    cx.notify();
+                                });
+                                return;
+                            }
                             let images = std::mem::take(&mut this.pasted_images);
                             let is_steer = *secondary;
                             model_clone.update(cx, |state, cx| {
@@ -1075,6 +1202,10 @@ impl ChatListView {
             cx.notify();
         });
 
+        let composer_key = {
+            let state = model.read(cx);
+            (state.active_work_dir.clone(), state.active_session_id.clone())
+        };
         Self {
             model,
             input_state,
@@ -1088,6 +1219,8 @@ impl ChatListView {
             markdown_states: HashMap::new(),
             markdown_cache_namespace: SharedString::from(""),
             pasted_images: Vec::new(),
+            composer_key,
+            composer_drafts: HashMap::new(),
             last_session_key: None,
             initial_scroll_frames: 0,
             current_tab: CentralTab::Chat,
@@ -1111,6 +1244,31 @@ impl ChatListView {
             selected_subagent_run_id: None,
             _subscriptions: vec![sub1, sub2, sub3, sub_editor],
         }
+    }
+
+    fn sync_composer_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let key = {
+            let state = self.model.read(cx);
+            (state.active_work_dir.clone(), state.active_session_id.clone())
+        };
+        if key == self.composer_key {
+            return;
+        }
+
+        // An explicit stash is separate from the unsent text and attachments in each task.
+        let draft = ComposerDraft {
+            text: self.input_state.read(cx).value(),
+            images: std::mem::take(&mut self.pasted_images),
+        };
+        let previous = std::mem::replace(&mut self.composer_key, key);
+        if !draft.text.is_empty() || !draft.images.is_empty() {
+            self.composer_drafts.insert(previous, draft);
+        }
+        let draft = self.composer_drafts.remove(&self.composer_key).unwrap_or_default();
+        self.pasted_images = draft.images;
+        self.input_state.update(cx, |input, cx| {
+            input.set_value(draft.text, window, cx);
+        });
     }
 
     fn paste_composer_clipboard(
@@ -3338,51 +3496,7 @@ impl ChatListView {
                         }
                     }),
             ),
-            MessageRole::Error => div().flex().justify_center().my_2().px_4().child(
-                div()
-                    .w_full()
-                    .p_3()
-                    .rounded_lg()
-                    .bg(theme.danger)
-                    .border_1()
-                    .border_color(theme.danger)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(theme.danger_foreground)
-                                    .child("ERROR"),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(theme.danger_foreground)
-                                    .child(msg.content.clone())
-                                    .context_menu({
-                                        let content = msg.content.clone();
-                                        move |menu, _window, _cx| {
-                                            let text = content.clone();
-                                            menu.item(PopupMenuItem::new("Copy Message").on_click(
-                                                move |_event, window, cx| {
-                                                    cx.write_to_clipboard(
-                                                        ClipboardItem::new_string(text.clone()),
-                                                    );
-                                                    window.push_notification(
-                                                        Notification::info("Copied to clipboard"),
-                                                        cx,
-                                                    );
-                                                },
-                                            ))
-                                        }
-                                    }),
-                            ),
-                    ),
-            ),
+            MessageRole::Error => render_chat_error(&msg.id, &msg.content, &self.model, cx),
         }
         .into_any_element()
     }
@@ -4079,8 +4193,10 @@ impl ChatListView {
             };
             let entity = cx.entity();
             rows.push(
-                div()
-                    .id(SharedString::from(format!("subagent-popup-row-{index}")))
+                Button::new(SharedString::from(format!("subagent-popup-row-{index}")))
+                    .accessibility_label(format!("{} · {status}", item.agent))
+                    .ghost()
+                    .h_auto()
                     .w_full()
                     .px_3()
                     .py_2()
@@ -4090,6 +4206,7 @@ impl ChatListView {
                     .hover(|row| row.bg(theme.muted))
                     .flex()
                     .items_start()
+                    .text_left()
                     .gap_2()
                     .on_click(move |_event, _window, cx| {
                         entity.update(cx, |this, cx| {
@@ -4158,7 +4275,7 @@ impl ChatListView {
         let count_label = if active_count > 0 {
             format!("{active_count} active")
         } else {
-            format!("{} completed", subagents.len())
+            format!("{} total", subagents.len())
         };
         div()
             .w(px(520.0))
@@ -4331,7 +4448,8 @@ impl ChatListView {
                 state.is_generating,
                 state.active_pending_composer_message().map(str::to_owned),
                 state.active_session_id.clone(),
-                state.session_status.clone(),
+                visible_session_status(state.session_status.as_deref(), state.messages.last())
+                    .map(str::to_owned),
             )
         };
         let (metrics, context_window) = {
@@ -4350,6 +4468,12 @@ impl ChatListView {
             (state.active_session_metrics(), context_window)
         };
         let subagent_count = self.model.read(cx).active_subagents().len();
+        let supports_live_steering = !threadlane_session::is_acp_model(&selected_model);
+        let steer_tooltip = if supports_live_steering {
+            "Steer current turn immediately (Cmd+Enter)"
+        } else {
+            "This agent does not support live steering. Use Queue for the next turn."
+        };
         let has_composer_text = !self.input_state.read(cx).value().trim().is_empty();
         let has_prompt =
             !self.input_state.read(cx).value().trim().is_empty() || !self.pasted_images.is_empty();
@@ -4370,7 +4494,7 @@ impl ChatListView {
         // model. Naming it here rather than only in the settings menu is what
         // makes choosing a model visibly take effect, since this is the control
         // a user reads to answer "which model am I on".
-        let model_label = match self.model.read(cx).active_acp_model_name() {
+        let model_label = match self.model.read(cx).active_acp_model_label() {
             Some(agent_model) => format!("{model_label} · {agent_model}"),
             None => model_label,
         };
@@ -4618,6 +4742,7 @@ impl ChatListView {
             .ghost()
             .xsmall()
             .dropdown_menu(move |menu, _window, _cx| {
+                let menu = menu.check_side(gpui_component::Side::Right);
                 let local_model = work_mode_model.clone();
                 let wt_model = work_mode_model.clone();
                 menu.item(PopupMenuItem::label("Work in"))
@@ -4713,7 +4838,8 @@ impl ChatListView {
                         .icon(IconName::ArrowRight)
                         .xsmall()
                         .primary()
-                        .tooltip("Steer the current response")
+                        .disabled(!supports_live_steering)
+                        .tooltip(steer_tooltip)
                         .on_click(move |_event, _window, cx| {
                             steer_model.update(cx, |state, cx| {
                                 controller::dispatch(state, AppAction::SteerPendingMessage);
@@ -4755,23 +4881,42 @@ impl ChatListView {
         } else {
             model_picker
         };
+        let selected_model_for_picker = selected_model.clone();
         let model_picker = model_picker.dropdown_menu(move |menu, _window, _cx| {
-            let menu = model_options.iter().cloned().fold(menu, |menu, option| {
-                let model = model_for_picker.clone();
-                menu.item(
-                    PopupMenuItem::new(option.label)
-                        .icon(Icon::default().path(option.provider.icon_path()))
-                        .on_click(move |_event, _window, cx| {
-                            model.update(cx, |state, cx| {
-                                controller::dispatch(
-                                    state,
-                                    AppAction::SelectModel(option.id.to_string()),
-                                );
-                                cx.notify();
-                            });
-                        }),
-                )
-            });
+            let menu = menu.check_side(gpui_component::Side::Right);
+            let mut previous_provider = None;
+            let menu = model_options.iter().cloned().fold(
+                menu.scrollable(true),
+                |menu, option| {
+                    let menu = if previous_provider == Some(option.provider) {
+                        menu
+                    } else {
+                        previous_provider = Some(option.provider);
+                        menu.item(PopupMenuItem::label(option.provider.label()))
+                    };
+                    let model = model_for_picker.clone();
+                    let is_current = option.id == selected_model_for_picker;
+                    let label = if is_current {
+                        format!("{} · Current", option.label)
+                    } else {
+                        option.label
+                    };
+                    menu.item(
+                        PopupMenuItem::new(label)
+                            .icon(Icon::default().path(option.provider.icon_path()))
+                            .checked(is_current)
+                            .on_click(move |_event, _window, cx| {
+                                model.update(cx, |state, cx| {
+                                    controller::dispatch(
+                                        state,
+                                        AppAction::SelectModel(option.id.to_string()),
+                                    );
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                },
+            );
             let Some(acp_model) = acp_model_option.as_ref() else {
                 return menu;
             };
@@ -4784,9 +4929,15 @@ impl ChatListView {
                 let model = acp_model_menu_model.clone();
                 let config_id = config_id.clone();
                 let value = choice.value.clone();
+                let is_current = current == Some(choice.value.as_str());
+                let label = if is_current {
+                    format!("{} · Current", choice.name)
+                } else {
+                    choice.name.clone()
+                };
                 menu.item(
-                    PopupMenuItem::new(choice.name.clone())
-                        .checked(current == Some(choice.value.as_str()))
+                    PopupMenuItem::new(label)
+                        .checked(is_current)
                         .on_click(move |_event, _window, cx| {
                             model.update(cx, |state, cx| {
                                 controller::dispatch(
@@ -4811,6 +4962,7 @@ impl ChatListView {
             .dropdown_caret(true)
             .ghost()
             .dropdown_menu(move |menu, _window, _cx| {
+                let menu = menu.check_side(gpui_component::Side::Right);
                 [
                     ReasoningEffort::Off,
                     ReasoningEffort::Minimal,
@@ -5278,14 +5430,16 @@ impl ChatListView {
             .pb_2()
             .bg(theme.background)
             .children(provider_setup_banner)
-            .children(session_status.filter(|status| {
-                !status.trim().is_empty()
-                    && status != "Working…"
-                    && status != "Reconciling session…"
-            }).map(|status| {
+            .children(session_status.map(|status| {
+                let (summary, needs_provider_settings) = chat_error_summary(&status);
                 let is_error = status.starts_with("Could not")
                     || status.starts_with("Failed")
-                    || status.starts_with("Error");
+                    || status.starts_with("Error")
+                    || needs_provider_settings;
+                if is_error {
+                    return render_chat_error("session-status", &status, &self.model, cx)
+                        .into_any_element();
+                }
                 div()
                     .w_full()
                     .max_w(px(1000.0))
@@ -5295,31 +5449,16 @@ impl ChatListView {
                     .py_2()
                     .rounded_lg()
                     .border_1()
-                    .border_color(if is_error {
-                        theme.danger.opacity(0.4)
-                    } else {
-                        theme.border
-                    })
-                    .bg(if is_error {
-                        theme.danger.opacity(0.08)
-                    } else {
-                        theme.title_bar
-                    })
+                    .border_color(theme.border)
+                    .bg(theme.title_bar)
                     .flex()
                     .items_center()
                     .gap_2()
                     .text_sm()
-                    .text_color(if is_error {
-                        theme.danger
-                    } else {
-                        theme.muted_foreground
-                    })
-                    .child(if is_error {
-                        IconName::CircleX
-                    } else {
-                        IconName::Asterisk
-                    })
-                    .child(div().min_w_0().child(status))
+                    .text_color(theme.muted_foreground)
+                    .child(IconName::Asterisk)
+                    .child(div().min_w_0().child(summary))
+                    .into_any_element()
             }))
             .children(pending_preview)
             .child(composer_context_bar)
@@ -5400,8 +5539,8 @@ impl ChatListView {
                                             .label("Steer")
                                             .small()
                                             .primary()
-                                            .disabled(!has_composer_text)
-                                            .tooltip("Steer current turn immediately (Cmd+Enter)")
+                                            .disabled(!has_composer_text || !supports_live_steering)
+                                            .tooltip(steer_tooltip)
                                             .on_click(cx.listener(move |this, _event, window, cx| {
                                                 let text = steer_prompt_input.read(cx).value().to_string();
                                                 if !text.trim().is_empty() {
@@ -5705,6 +5844,115 @@ impl Render for ChatListView {
 
 #[cfg(test)]
 mod hot_path_tests {
+    #[gpui::test]
+    fn unsupported_acp_steer_keeps_the_composer_text_and_images(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+
+        cx.update(gpui_component::init);
+        let model = cx.new(|_| {
+            let mut state = crate::state::AppState::default();
+            state.selected_model = "acp/test".into();
+            state.is_generating = true;
+            state
+        });
+        let retained_model = model.clone();
+        let (chat, cx) = cx.add_window_view(move |window, cx| {
+            super::ChatListView::new(model, window, cx)
+        });
+        chat.update_in(cx, |chat, window, cx| {
+            chat.pasted_images.push(super::ImageAttachment {
+                display_name: "draft.png".into(),
+                data_url: "data:image/png;base64,test".into(),
+            });
+            chat.input_state.update(cx, |input, cx| {
+                input.set_value("Keep this draft", window, cx);
+                cx.emit(super::InputEvent::PressEnter { secondary: true, shift: false });
+            });
+        });
+        cx.run_until_parked();
+        chat.update(cx, |chat, cx| {
+            assert_eq!(chat.input_state.read(cx).value().as_ref(), "Keep this draft");
+            assert_eq!(chat.pasted_images.len(), 1);
+        });
+        retained_model.read_with(cx, |state, _| {
+            assert!(state.session_status.as_deref().unwrap().contains("Use Queue"));
+            assert!(state.active_pending_composer_message().is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn unsent_composer_drafts_and_images_follow_their_task(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+
+        cx.update(gpui_component::init);
+        let model = cx.new(|_| {
+            let mut state = crate::state::AppState::default();
+            state.active_work_dir = Some("/projects/one".into());
+            state.active_session_id = Some("first".into());
+            state
+        });
+        let retained_model = model.clone();
+        let (chat, cx) = cx.add_window_view(move |window, cx| {
+            super::ChatListView::new(model, window, cx)
+        });
+        chat.update_in(cx, |chat, window, cx| {
+            chat.input_state.update(cx, |input, cx| {
+                input.set_value("First task draft", window, cx);
+            });
+            chat.pasted_images.push(super::ImageAttachment {
+                display_name: "first.png".into(),
+                data_url: "data:image/png;base64,test".into(),
+            });
+        });
+        retained_model.update(cx, |state, cx| {
+            state.active_session_id = Some("second".into());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        chat.update_in(cx, |chat, window, cx| {
+            assert!(chat.input_state.read(cx).value().is_empty());
+            assert!(chat.pasted_images.is_empty());
+            chat.input_state.update(cx, |input, cx| {
+                input.set_value("Second task draft", window, cx);
+            });
+        });
+        retained_model.update(cx, |state, cx| {
+            state.active_session_id = Some("first".into());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        chat.update(cx, |chat, cx| {
+            assert_eq!(chat.input_state.read(cx).value().as_ref(), "First task draft");
+            assert_eq!(chat.pasted_images[0].display_name, "first.png");
+        });
+        retained_model.update(cx, |state, cx| {
+            state.active_session_id = None;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        chat.update_in(cx, |chat, window, cx| {
+            assert!(chat.input_state.read(cx).value().is_empty());
+            assert!(chat.pasted_images.is_empty());
+            chat.input_state.update(cx, |input, cx| {
+                input.set_value("New task draft", window, cx);
+            });
+        });
+        retained_model.update(cx, |state, cx| {
+            state.active_work_dir = Some("/projects/two".into());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        chat.update(cx, |chat, cx| assert!(chat.input_state.read(cx).value().is_empty()));
+        retained_model.update(cx, |state, cx| {
+            state.active_work_dir = Some("/projects/one".into());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        chat.update(cx, |chat, cx| {
+            assert_eq!(chat.input_state.read(cx).value().as_ref(), "New task draft");
+        });
+    }
+
     use super::{
         active_slash_command_query, build_trajectory_rows, build_transcript_rows,
         classify_chat_link, classify_markdown_update, contains_case_insensitive,
@@ -5718,6 +5966,72 @@ mod hot_path_tests {
         TrajectoryCacheKey, TrajectoryMode, TrajectoryRow, TranscriptRow, INPUT_KEY_CONTEXT,
         MARKDOWN_CACHE_ENTRY_LIMIT, SLASH_COMMAND_BINDING_CONTEXT, SLASH_COMMAND_KEY_CONTEXT,
     };
+
+    #[gpui::test]
+    fn chat_errors_are_bounded_deduplicated_and_keep_recovery_details(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+
+        struct ErrorHarness {
+            model: gpui::Entity<crate::state::AppState>,
+            error: String,
+        }
+
+        impl gpui::Render for ErrorHarness {
+            fn render(
+                &mut self,
+                _: &mut gpui::Window,
+                cx: &mut gpui::Context<Self>,
+            ) -> impl gpui::IntoElement {
+                super::render_chat_error("test", &self.error, &self.model, cx)
+            }
+        }
+
+        let error = format!(
+            "Provider HTTP 401: {{\"error\":{{\"code\":\"token_expired\",\"detail\":\"{}\"}}}}",
+            "diagnostic ".repeat(1_000)
+        );
+        let (summary, needs_settings) = super::chat_error_summary(&error);
+        assert!(needs_settings);
+        assert!(summary.contains("Sign in again"));
+        assert!(!summary.contains("token_expired"));
+        assert!(summary.chars().count() < 240);
+        assert_eq!(super::chat_error_summary(&"界".repeat(500)).0.chars().count(), 241);
+        assert_eq!(super::chat_error_summary("\nNetwork failed\nraw detail").0, "Network failed");
+
+        let mut message = crate::state::ChatMessageInfo {
+            id: "error".into(),
+            role: crate::state::MessageRole::Error,
+            content: error.clone(),
+            tool_activities: Vec::new(),
+            streaming: false,
+            reasoning_content: None,
+            reasoning_expanded: false,
+        };
+        assert!(super::visible_session_status(Some(&error), Some(&message)).is_none());
+        assert_eq!(super::visible_session_status(Some("Message queued…"), Some(&message)), Some("Message queued…"));
+        message.role = crate::state::MessageRole::Assistant;
+        assert_eq!(super::visible_session_status(Some(&error), Some(&message)), Some(error.as_str()));
+
+        cx.update(gpui_component::init);
+        let model = cx.new(|_| crate::state::AppState::default());
+        let expected_error = error.clone();
+        let retained_model = model.clone();
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let view = cx.new(|_| ErrorHarness { model, error });
+            gpui_component::Root::new(view, window, cx)
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let copy = cx.debug_bounds("chat-error-copy").unwrap();
+        cx.simulate_click(copy.center(), gpui::Modifiers::default());
+        assert_eq!(cx.read_from_clipboard().and_then(|item| item.text()), Some(expected_error));
+
+        let settings = cx.debug_bounds("chat-error-settings").unwrap();
+        cx.simulate_click(settings.center(), gpui::Modifiers::default());
+        assert_eq!(
+            retained_model.read_with(cx, |model, _| model.workspace_page),
+            crate::state::WorkspacePage::Settings
+        );
+    }
 
     #[test]
     fn editor_targets_only_open_for_the_active_git_checkout() {

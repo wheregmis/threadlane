@@ -488,13 +488,15 @@ fn configure_project_stub(work_dir: &Path, mode: &str) {
 
 #[tokio::test]
 async fn an_acp_turn_is_journaled_so_the_transcript_survives_a_reload() {
-    use threadlane_session::harness::{read_transcript_page, TranscriptItem};
-    use threadlane_session::{AgentMessage, CodingAgent, CodingAgentOptions};
+    use threadlane_session::harness::{
+        read_transcript_page, JsonlStore, SessionStore, TranscriptItem,
+    };
+    use threadlane_session::{AgentMessage, CodingAgent, CodingAgentOptions, PlanItemStatus};
 
     let temp = tempfile::tempdir().unwrap();
     let work = work_dir(&temp);
     std::fs::create_dir_all(&work).unwrap();
-    configure_project_stub(&work, "stream");
+    configure_project_stub(&work, "stream_after_tool");
 
     let session_file = work.join(".threadlane/sessions/session_test.jsonl");
     std::fs::create_dir_all(session_file.parent().unwrap()).unwrap();
@@ -511,8 +513,24 @@ async fn an_acp_turn_is_journaled_so_the_transcript_survives_a_reload() {
         coding_config: None,
     });
 
+    let mut events = agent.subscribe();
     let result = agent.handle_input_with_images("hi", Vec::new()).await;
     assert!(result.is_none(), "the turn should succeed, got {result:?}");
+    let streamed_plan = collect(&mut events)
+        .into_iter()
+        .filter_map(|event| match event {
+            AgentEvent::PlanUpdated { plan } => Some(plan),
+            _ => None,
+        })
+        .last()
+        .expect("the agent's final plan must reach the UI");
+    assert_eq!(streamed_plan.items[0].status, PlanItemStatus::Completed);
+    drop(agent);
+    assert_eq!(
+        JsonlStore::open_read_only(&session_file).unwrap().plan(),
+        streamed_plan,
+        "completion hydration must preserve the last streamed plan"
+    );
 
     // Reading the journal back is what the UI does when a session is reopened,
     // so this is the check that a named session is not an empty one.
@@ -543,6 +561,353 @@ async fn an_acp_turn_is_journaled_so_the_transcript_survives_a_reload() {
         unreachable!()
     };
     assert_eq!(content.as_deref(), Some("hello world"));
+
+    let tool_index = messages
+        .iter()
+        .position(|message| matches!(message, AgentMessage::Tool { tool_call_id, .. } if tool_call_id == "call_1"))
+        .expect("the tool output must be journaled");
+    assert!(matches!(
+        &messages[tool_index - 1],
+        AgentMessage::Assistant { content: Some(content), tool_calls: Some(calls), .. }
+            if content == "hello world" && calls[0].id == "call_1"
+    ));
+    assert!(matches!(
+        &messages[tool_index + 1],
+        AgentMessage::Assistant { content: Some(content), tool_calls: None, .. }
+            if content == "The file is ready."
+    ));
+}
+
+#[tokio::test]
+async fn queued_acp_prompts_reuse_the_conversation_and_survive_reload() {
+    use threadlane_session::harness::{JsonlStore, Reducer};
+
+    let temp = tempfile::tempdir().unwrap();
+    let work = work_dir(&temp);
+    configure_project_stub(&work, "queued");
+    let controller = queued_controller(&work);
+    let mut events = controller.agent.lock().await.subscribe();
+    let running = controller.clone();
+    let turn = tokio::spawn(async move {
+        running
+            .agent
+            .lock()
+            .await
+            .handle_input_with_images("wait for permission", Vec::new())
+            .await
+    });
+    let request = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let AgentEvent::PermissionRequested { request } = events.recv().await.unwrap() {
+                break request;
+            }
+        }
+    })
+    .await
+    .expect("the initial ACP turn should wait for permission");
+    controller
+        .work_handle
+        .try_queue_follow_up_with_images("queued follow-up", Vec::new())
+        .unwrap();
+    let steer = controller
+        .work_handle
+        .queue_steer_with_images("unsupported steer", Vec::new())
+        .unwrap_err();
+    assert!(steer.contains("use Queue"));
+    assert!(controller.resolve_permission(&request.id, PermissionDecision::AllowOnce));
+    assert!(tokio::time::timeout(Duration::from_secs(10), turn)
+        .await
+        .unwrap()
+        .unwrap()
+        .is_none());
+
+    let session_file = controller.session_file.clone();
+    drop(controller);
+    assert_eq!(
+        queued_transcript(&session_file),
+        [
+            "wait for permission",
+            "session:1 prompt:1 input:wait for permission",
+            "queued follow-up",
+            "session:1 prompt:2 input:queued follow-up",
+        ]
+    );
+    let store = JsonlStore::open_read_only(&session_file).unwrap();
+    assert!(Reducer::reduce(&store).unwrap().lanes[0].queued.is_empty());
+}
+
+#[tokio::test]
+async fn stopping_acp_cancels_pending_and_late_permissions_before_resuming() {
+    assert_acp_permission_cancellation(false).await;
+}
+
+#[tokio::test]
+async fn stopping_again_while_acp_cancels_retains_the_new_prompt() {
+    assert_acp_permission_cancellation(true).await;
+}
+
+async fn assert_acp_permission_cancellation(stop_again: bool) {
+    use threadlane_session::harness::{JsonlStore, PermissionTraceDecision, Record, Reducer};
+
+    let temp = tempfile::tempdir().unwrap();
+    let work = work_dir(&temp);
+    configure_project_stub(&work, "queued");
+    let release = temp.path().join("release-cancel");
+    if stop_again {
+        let config_path = work.join(".threadlane/acp.json");
+        let mut config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+        config["agents"][0]["env"]["THREADLANE_STUB_CANCEL_RELEASE"] = serde_json::json!(release);
+        std::fs::write(config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    }
+    let controller = queued_controller(&work);
+    let mut events = controller.agent.lock().await.subscribe();
+    let running = controller.clone();
+    let turn = tokio::spawn(async move {
+        running
+            .agent
+            .lock()
+            .await
+            .handle_input_with_images("wait for cancelled permission", Vec::new())
+            .await
+    });
+    controller
+        .cancellation
+        .track_active_run(turn.abort_handle())
+        .unwrap();
+    let request = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let AgentEvent::PermissionRequested { request } = events.recv().await.unwrap() {
+                break request;
+            }
+        }
+    })
+    .await
+    .expect("the ACP turn must display its permission request");
+    controller
+        .work_handle
+        .try_queue_follow_up_with_images("retained follow-up", Vec::new())
+        .unwrap();
+    controller.cancel().unwrap();
+    assert!(turn.await.unwrap_err().is_cancelled());
+
+    let input = if stop_again {
+        let running = controller.clone();
+        let retry = tokio::spawn(async move {
+            running
+                .agent
+                .lock()
+                .await
+                .handle_input_with_images("resume", Vec::new())
+                .await
+        });
+        controller
+            .cancellation
+            .track_active_run(retry.abort_handle())
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let store = JsonlStore::open_read_only(&controller.session_file).unwrap();
+                if Reducer::reduce(&store).unwrap().lanes[0].queued.iter().any(|queued|
+                    matches!(&queued.target.message, threadlane_session::AgentMessage::User { content } if content == "resume")
+                ) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("a prompt submitted during cancellation must first become durable");
+        controller.cancel().unwrap();
+        assert!(retry.await.unwrap_err().is_cancelled());
+        std::fs::write(release, "continue").unwrap();
+        "resume again"
+    } else {
+        "resume"
+    };
+    let result = tokio::time::timeout(Duration::from_secs(10), async {
+        controller
+            .agent
+            .lock()
+            .await
+            .handle_input_with_images(input, Vec::new())
+            .await
+    })
+    .await
+    .expect("Stop must answer both permission requests so the same conversation can resume");
+    assert!(result.is_none(), "resume failed: {result:?}");
+    assert!(!controller.resolve_permission(&request.id, PermissionDecision::AllowOnce));
+    assert!(collect(&mut events)
+        .iter()
+        .all(|event| !matches!(event, AgentEvent::PermissionRequested { .. })));
+
+    let session_file = controller.session_file.clone();
+    drop(controller);
+    let proof = " cancel:true pending:cancelled late:cancelled";
+    let mut expected = vec![
+        "wait for cancelled permission".to_string(),
+        "Run aborted before completion.".to_string(),
+        input.to_string(),
+        format!("session:1 prompt:2 input:{input}{proof}"),
+        "retained follow-up".to_string(),
+        format!("session:1 prompt:3 input:retained follow-up{proof}"),
+    ];
+    if stop_again {
+        expected.extend([
+            "resume".to_string(),
+            format!("session:1 prompt:4 input:resume{proof}"),
+        ]);
+    }
+    assert_eq!(queued_transcript(&session_file), expected);
+    let store = JsonlStore::open_read_only(&session_file).unwrap();
+    let first_run = store
+        .records()
+        .iter()
+        .find_map(|record| match record {
+            Record::OperationStarted { id, .. } => Some(id),
+            _ => None,
+        })
+        .unwrap();
+    let resolved = store
+        .records()
+        .iter()
+        .filter_map(|record| match record {
+            Record::PermissionResolved {
+                run_id, decision, ..
+            } => Some((run_id.as_ref(), decision)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(resolved.len(), 2);
+    assert!(resolved
+        .iter()
+        .all(|(run_id, decision)| *run_id == Some(first_run)
+            && **decision == PermissionTraceDecision::Cancelled));
+    assert!(Reducer::reduce(&store).unwrap().lanes[0].queued.is_empty());
+}
+
+#[tokio::test]
+async fn stopping_acp_preserves_queued_input_for_the_next_turn() {
+    assert_stopping_acp_preserves_queued_input(false).await;
+}
+
+#[tokio::test]
+async fn stopping_acp_preserves_queued_input_across_restart() {
+    assert_stopping_acp_preserves_queued_input(true).await;
+}
+
+async fn assert_stopping_acp_preserves_queued_input(reopen: bool) {
+    use threadlane_session::harness::{JsonlStore, QueueKind, Reducer};
+
+    let temp = tempfile::tempdir().unwrap();
+    let work = work_dir(&temp);
+    configure_project_stub(&work, "queued");
+    let mut controller = queued_controller(&work);
+    let mut events = controller.agent.lock().await.subscribe();
+    let running = controller.clone();
+    let turn = tokio::spawn(async move {
+        running
+            .agent
+            .lock()
+            .await
+            .handle_input_with_images("wait for stop", Vec::new())
+            .await
+    });
+    controller
+        .cancellation
+        .track_active_run(turn.abort_handle())
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if matches!(events.recv().await.unwrap(), AgentEvent::MessageUpdate { text_delta: Some(text), .. } if text == "working") {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    controller
+        .work_handle
+        .try_queue_follow_up_with_images("retained follow-up", Vec::new())
+        .unwrap();
+    controller.cancel().unwrap();
+    assert!(turn.await.unwrap_err().is_cancelled());
+
+    // Read the canonical file independently while keeping the same ACP engine
+    // alive, as the desktop does after Stop.
+    let store = JsonlStore::open_read_only(&controller.session_file).unwrap();
+    let queued = Reducer::reduce(&store).unwrap().lanes[0].queued.clone();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].queue, QueueKind::NextRun);
+    if reopen {
+        drop(controller);
+        controller = queued_controller(&work);
+    }
+    let result = tokio::time::timeout(Duration::from_secs(10), async {
+        controller
+            .agent
+            .lock()
+            .await
+            .handle_input_with_images("resume", Vec::new())
+            .await
+    })
+    .await
+    .expect("the same ACP engine must accept another turn after Stop");
+    assert!(result.is_none(), "resume failed: {result:?}");
+    let session_file = controller.session_file.clone();
+    drop(controller);
+    let resumed_prompt = if reopen { 1 } else { 2 };
+    assert_eq!(
+        queued_transcript(&session_file),
+        vec![
+            "wait for stop".to_string(),
+            "Run aborted before completion.".to_string(),
+            "resume".to_string(),
+            format!("session:1 prompt:{resumed_prompt} input:resume"),
+            "retained follow-up".to_string(),
+            format!(
+                "session:1 prompt:{} input:retained follow-up",
+                resumed_prompt + 1
+            ),
+        ]
+    );
+    let store = JsonlStore::open_read_only(&session_file).unwrap();
+    assert!(Reducer::reduce(&store).unwrap().lanes[0].queued.is_empty());
+}
+
+fn queued_controller(work: &Path) -> std::sync::Arc<threadlane_session::SessionController> {
+    use threadlane_session::{CodingAgentOptions, ExecutionMode, SessionController};
+    let session_file = work.join(".threadlane/sessions/session_queue.jsonl");
+    std::fs::create_dir_all(session_file.parent().unwrap()).unwrap();
+    SessionController::new(
+        CodingAgentOptions {
+            api_key: String::new(),
+            account_id: None,
+            model: "acp/stub".into(),
+            work_dir: work.to_path_buf(),
+            session_file: Some(session_file),
+            system_prompt: Default::default(),
+            agent_config: None,
+            coding_config: None,
+        },
+        ExecutionMode::Interactive,
+    )
+}
+
+fn queued_transcript(path: &Path) -> Vec<String> {
+    use threadlane_session::harness::{read_transcript_page, TranscriptItem};
+    use threadlane_session::AgentMessage;
+    read_transcript_page(path, None, 100)
+        .unwrap()
+        .items
+        .into_iter()
+        .filter_map(|item| match item {
+            TranscriptItem::Message(AgentMessage::User { content })
+            | TranscriptItem::Message(AgentMessage::Assistant {
+                content: Some(content),
+                ..
+            }) => Some(content),
+            _ => None,
+        })
+        .collect()
 }
 
 #[tokio::test]

@@ -201,8 +201,9 @@ impl SettingsView {
             move |_this, input, event: &InputEvent, _window, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
                     let key = input.read(cx).value().to_string();
-                    openai_model.update(cx, |state, _cx| {
+                    openai_model.update(cx, |state, cx| {
                         controller::dispatch(state, AppAction::SaveOpenAiKey(key));
+                        cx.notify();
                     });
                 }
             },
@@ -214,8 +215,9 @@ impl SettingsView {
             move |_this, input, event: &InputEvent, _window, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
                     let key = input.read(cx).value().to_string();
-                    opencode_model.update(cx, |state, _cx| {
+                    opencode_model.update(cx, |state, cx| {
                         controller::dispatch(state, AppAction::SaveOpenCodeKey(key));
+                        cx.notify();
                     });
                 }
             },
@@ -539,8 +541,9 @@ impl SettingsView {
                         .justify_start()
                         .text_color(theme.muted_foreground)
                         .on_click(move |_event, _window, cx| {
-                            model.update(cx, |state, _cx| {
+                            model.update(cx, |state, cx| {
                                 controller::dispatch(state, AppAction::CloseSettings);
+                                cx.notify();
                             });
                         }),
                 ),
@@ -554,51 +557,66 @@ impl SettingsView {
             return Self::empty_state("Attach a project to configure subagents.", theme);
         };
         let preferences = crate::services::subagent_settings::load(&project);
+        let available = crate::model_catalog::available_models_for_project(Some(&project));
         let selected_model = preferences.model.clone();
         let selected_reasoning = preferences.reasoning_effort;
         let model_label = selected_model
             .as_deref()
-            .and_then(crate::model_catalog::label_for)
+            .map(|id| crate::model_catalog::selection_label(id, &available))
             .unwrap_or_else(|| "Same as parent".into());
         let reasoning_label = selected_reasoning
             .map(|effort| effort.label())
             .unwrap_or("Same as parent");
-        let available = crate::model_catalog::available_models_for_project(Some(&project));
         let available_for_subagent = available.clone();
-        let available_for_fast = available;
+        let available_for_fast = available.clone();
         let model_entity = self.model.clone();
         let project_for_models = project.clone();
         let model_picker = Button::new("subagent-model-picker")
             .label(model_label)
             .dropdown_caret(true)
             .dropdown_menu(move |menu, _, _| {
+                let menu = menu.check_side(gpui_component::Side::Right);
                 let model_entity_for_parent = model_entity.clone();
                 let project_for_parent = project_for_models.clone();
+                let parent_label = if selected_model.is_none() {
+                    "Same as parent · Current"
+                } else {
+                    "Same as parent"
+                };
                 available_for_subagent.iter().cloned().fold(
-                    menu.item(
-                        PopupMenuItem::new("Same as parent").on_click(move |_, _, cx| {
-                            let mut settings =
-                                crate::services::subagent_settings::load(&project_for_parent);
-                            settings.model = None;
-                            if crate::services::subagent_settings::save(
-                                &project_for_parent,
-                                &settings,
-                            )
-                            .is_ok()
-                            {
-                                model_entity_for_parent.update(cx, |state, cx| {
-                                    state.invalidate_capability_runtimes();
-                                    cx.notify();
-                                });
-                            }
-                        }),
+                    menu.scrollable(true).item(
+                        PopupMenuItem::new(parent_label)
+                            .checked(selected_model.is_none())
+                            .on_click(move |_, _, cx| {
+                                let mut settings =
+                                    crate::services::subagent_settings::load(&project_for_parent);
+                                settings.model = None;
+                                if crate::services::subagent_settings::save(
+                                    &project_for_parent,
+                                    &settings,
+                                )
+                                .is_ok()
+                                {
+                                    model_entity_for_parent.update(cx, |state, cx| {
+                                        state.invalidate_capability_runtimes();
+                                        cx.notify();
+                                    });
+                                }
+                            }),
                     ),
                     |menu, option| {
                         let model_entity = model_entity.clone();
                         let project = project_for_models.clone();
+                        let is_current = selected_model.as_deref() == Some(option.id.as_str());
+                        let label = if is_current {
+                            format!("{} · Current", option.label)
+                        } else {
+                            option.label
+                        };
                         menu.item(
-                            PopupMenuItem::new(option.label)
+                            PopupMenuItem::new(label)
                                 .icon(Icon::default().path(option.provider.icon_path()))
+                                .checked(is_current)
                                 .on_click(move |_, _, cx| {
                                     let mut settings =
                                         crate::services::subagent_settings::load(&project);
@@ -641,6 +659,7 @@ impl SettingsView {
                                 .map(|value| value.label())
                                 .unwrap_or("Same as parent"),
                         )
+                        .checked(selected_reasoning == effort)
                         .on_click(move |_, _, cx| {
                             let mut settings = crate::services::subagent_settings::load(&project);
                             settings.reasoning_effort = effort;
@@ -658,7 +677,7 @@ impl SettingsView {
         let selected_fast_model = preferences.fast_model.clone();
         let fast_model_label = selected_fast_model
             .as_deref()
-            .and_then(crate::model_catalog::label_for)
+            .map(|id| crate::model_catalog::selection_label(id, &available))
             .unwrap_or_else(|| "Same as parent".into());
         let fast_model_entity = self.model.clone();
         let project_for_fast = project.clone();
@@ -666,33 +685,48 @@ impl SettingsView {
             .label(fast_model_label)
             .dropdown_caret(true)
             .dropdown_menu(move |menu, _, _| {
+                let menu = menu.check_side(gpui_component::Side::Right);
                 let model_entity_for_parent = fast_model_entity.clone();
                 let project_for_parent = project_for_fast.clone();
+                let parent_label = if selected_fast_model.is_none() {
+                    "Same as parent · Current"
+                } else {
+                    "Same as parent"
+                };
                 available_for_fast.iter().cloned().fold(
-                    menu.item(
-                        PopupMenuItem::new("Same as parent").on_click(move |_, _, cx| {
-                            let mut settings =
-                                crate::services::subagent_settings::load(&project_for_parent);
-                            settings.fast_model = None;
-                            if crate::services::subagent_settings::save(
-                                &project_for_parent,
-                                &settings,
-                            )
-                            .is_ok()
-                            {
-                                model_entity_for_parent.update(cx, |state, cx| {
-                                    state.invalidate_capability_runtimes();
-                                    cx.notify();
-                                });
-                            }
-                        }),
+                    menu.scrollable(true).item(
+                        PopupMenuItem::new(parent_label)
+                            .checked(selected_fast_model.is_none())
+                            .on_click(move |_, _, cx| {
+                                let mut settings =
+                                    crate::services::subagent_settings::load(&project_for_parent);
+                                settings.fast_model = None;
+                                if crate::services::subagent_settings::save(
+                                    &project_for_parent,
+                                    &settings,
+                                )
+                                .is_ok()
+                                {
+                                    model_entity_for_parent.update(cx, |state, cx| {
+                                        state.invalidate_capability_runtimes();
+                                        cx.notify();
+                                    });
+                                }
+                            }),
                     ),
                     |menu, option| {
                         let model_entity = fast_model_entity.clone();
                         let project = project_for_fast.clone();
+                        let is_current = selected_fast_model.as_deref() == Some(option.id.as_str());
+                        let label = if is_current {
+                            format!("{} · Current", option.label)
+                        } else {
+                            option.label
+                        };
                         menu.item(
-                            PopupMenuItem::new(option.label)
+                            PopupMenuItem::new(label)
                                 .icon(Icon::default().path(option.provider.icon_path()))
+                                .checked(is_current)
                                 .on_click(move |_, _, cx| {
                                     let mut settings =
                                         crate::services::subagent_settings::load(&project);
@@ -739,6 +773,7 @@ impl SettingsView {
                                 .map(|value| value.label())
                                 .unwrap_or("Same as parent"),
                         )
+                        .checked(selected_fast_reasoning == effort)
                         .on_click(move |_, _, cx| {
                             let mut settings = crate::services::subagent_settings::load(&project);
                             settings.fast_reasoning_effort = effort;
@@ -2166,8 +2201,9 @@ impl SettingsView {
                     .child(Button::new(button_id).label("Save").primary().on_click(
                         move |_event, _window, cx| {
                             let value = input.read(cx).value().to_string();
-                            model.update(cx, |state, _cx| {
+                            model.update(cx, |state, cx| {
                                 controller::dispatch(state, action(value));
+                                cx.notify();
                             });
                         },
                     )),

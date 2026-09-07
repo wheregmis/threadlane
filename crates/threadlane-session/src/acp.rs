@@ -399,15 +399,36 @@ impl AcpConfigOption {
             .or_else(|| self.current_value().map(str::to_string))
     }
 
-    /// The most specific description of the current selection.
+    /// The most specific label of the current selection.
     ///
-    /// Prefers the leading segment of the agent's description, because that is
-    /// where it names what is concretely running ("Opus 4.8 with 1M context ·
-    /// Best for everyday…") — a model's option *name* is often generic
-    /// ("Default (recommended)") and answers the wrong question. Only useful
-    /// where there is room for a phrase; a mode's description is a whole
-    /// sentence, so a button should use [`Self::current_label`] instead.
+    /// Model choices keep an explicit name ("GPT-6-Astra"); generic names such
+    /// as "Default (recommended)" use the leading description segment, where
+    /// agents such as Claude Code identify the concrete model. Other settings
+    /// prefer their description; buttons for those settings should use
+    /// [`Self::current_label`] instead.
     pub fn current_detail_label(&self) -> Option<String> {
+        if self.is_category(ACP_CONFIG_CATEGORY_MODEL) {
+            let label = self.current_label()?;
+            let name = label
+                .split('(')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase();
+            // ponytail: recognize advertised placeholder names; extend this
+            // list if another agent uses a different generic model label.
+            if !matches!(
+                name.as_str(),
+                "" | "default"
+                    | "default model"
+                    | "recommended"
+                    | "recommended model"
+                    | "auto"
+                    | "automatic"
+            ) {
+                return Some(label);
+            }
+        }
         self.current_description()
             .and_then(|description| description.split(" · ").next())
             .map(str::trim)
@@ -1775,6 +1796,58 @@ impl AcpManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_labels_keep_explicit_names_and_resolve_generic_names_from_descriptions() {
+        for (category, name, description, expected) in [
+            (
+                "model",
+                "GPT-6-Astra",
+                Some("Our most capable model for complex, demanding work."),
+                "GPT-6-Astra",
+            ),
+            (
+                "model",
+                "Default (recommended)",
+                Some("Opus 4.8 with 1M context · Best for everyday work"),
+                "Opus 4.8 with 1M context",
+            ),
+            (
+                "model",
+                "Recommended",
+                Some("Claude Sonnet 4.6"),
+                "Claude Sonnet 4.6",
+            ),
+            ("model", "Default", None, "Default"),
+            (
+                "model",
+                "GPT-6-Astra (recommended)",
+                Some("Most capable"),
+                "GPT-6-Astra (recommended)",
+            ),
+            (
+                "mode",
+                "Default",
+                Some("Standard behavior, prompts for dangerous operations"),
+                "Standard behavior, prompts for dangerous operations",
+            ),
+        ] {
+            let mut option: AcpConfigOption = serde_json::from_value(json!({
+                "id": "agent-defined-id",
+                "name": "Setting",
+                "category": category,
+                "currentValue": "configured-value",
+                "options": [{"value": "configured-value", "name": name, "description": description}],
+            })).unwrap();
+            assert_eq!(option.current_detail_label().as_deref(), Some(expected));
+            assert_eq!(option.current_label().as_deref(), Some(name));
+            option.options.clear();
+            assert_eq!(
+                option.current_detail_label().as_deref(),
+                Some("configured-value")
+            );
+        }
+    }
 
     #[test]
     fn agent_config_round_trips_through_settings_file() {
