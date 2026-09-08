@@ -1585,14 +1585,15 @@ impl CodingSessionHarness {
                 }
             }
             if any_provisioned {
-                let _ = self.refresh();
+                self.refresh().map_err(|error| error.to_string())?;
             }
+            // Best-effort abort request; reconcile errors are observed below
+            // but must not skip the terminal lifecycle record.
             let _ = self.store.request_abort(run_id);
             let _ = self.store.drive_to_completion();
             let _ = self.refresh();
             if self.store.reconcile_abort_run(run_id).is_ok() {
                 let _ = self.store.drive_to_completion();
-                return Ok(());
             }
         }
 
@@ -1990,6 +1991,19 @@ impl CodingSessionHarness {
         self.ensure_fresh()?;
         let state = Reducer::reduce(&self.store).map_err(|error| error.to_string())?;
         let attempt = state.lane("main").map(|lane| lane.attempts);
+        let finished_ids: std::collections::HashSet<&str> = self
+            .store
+            .records()
+            .iter()
+            .filter_map(|candidate| match candidate {
+                HarnessRecord::ProviderRequestFinished {
+                    run_id: finished_run_id,
+                    request_id: Some(finished_request_id),
+                    ..
+                } if finished_run_id == run_id => Some(finished_request_id.as_str()),
+                _ => None,
+            })
+            .collect();
         let unfinished_requests = self
             .store
             .records()
@@ -2001,16 +2015,7 @@ impl CodingSessionHarness {
                     request_id: Some(request_id),
                     ..
                 } if provider_run_id == run_id
-                    && !self.store.records().iter().any(|candidate| {
-                        matches!(
-                            candidate,
-                            HarnessRecord::ProviderRequestFinished {
-                                run_id: finished_run_id,
-                                request_id: Some(finished_request_id),
-                                ..
-                            } if finished_run_id == run_id && finished_request_id == request_id
-                        )
-                    }) =>
+                    && !finished_ids.contains(request_id.as_str()) =>
                 {
                     Some((*attempt, request_id.clone()))
                 }
@@ -2096,7 +2101,7 @@ impl CodingSessionHarness {
             .store
             .entries()
             .iter()
-            .filter(|entry| entry.seq > start_seq)
+            .filter(|entry| entry.seq > start_seq && entry.lane == "main")
             .find_map(|entry| {
                 matches!(&entry.message, AgentMessage::Assistant { .. }).then_some(entry.id.clone())
             })
@@ -2117,7 +2122,9 @@ impl CodingSessionHarness {
                 })
         });
         let had_result_entry = result_entry_id.is_some();
-        let entry_id = result_entry_id.unwrap_or_else(|| format!("abort-entry-{run_id}"));
+        let seq_hint = self.next_seq();
+        let entry_id =
+            result_entry_id.unwrap_or_else(|| format!("abort-entry-{run_id}-{seq_hint}"));
         let has_abort_entry = self.store.entries().iter().any(|entry| {
             entry.id == entry_id
                 && matches!(
@@ -2129,10 +2136,11 @@ impl CodingSessionHarness {
                 )
         });
         if !had_result_entry && !has_abort_entry {
+            let attempt_seq = self.next_seq();
             self.store
                 .append_record_gated(HarnessRecord::StepAttempt {
-                    id: format!("abort-attempt-{run_id}"),
-                    seq: self.next_seq(),
+                    id: format!("abort-attempt-{run_id}-{attempt_seq}"),
+                    seq: attempt_seq,
                     lane: "main".into(),
                     timestamp: timestamp(),
                     run_id: run_id.clone(),
@@ -2180,8 +2188,12 @@ impl CodingSessionHarness {
 
     /// Append a user/assistant/tool message as a harness entry on the main
     /// lane.
+    ///
+    /// Consecutive identical messages are legitimate (e.g. two `"hello"`
+    /// user turns), so no last-entry content dedup is applied. Idempotency
+    /// for tool results is handled by deterministic entry ids below.
     pub(crate) fn append_message(&mut self, message: AgentMessage) -> Result<String, String> {
-        self.append_message_inner(message, true, false)
+        self.append_message_inner(message, false, false)
     }
 
     /// Append a message discovered while reconciling the provider transcript.
@@ -2209,20 +2221,16 @@ impl CodingSessionHarness {
     fn append_message_inner(
         &mut self,
         message: AgentMessage,
-        deduplicate_last_entry: bool,
+        _deduplicate_last_entry: bool,
         context_restoration: bool,
     ) -> Result<String, String> {
         self.ensure_fresh()?;
-        if deduplicate_last_entry {
-            if let Some(entry) = self.store.entries().last() {
-                if entry.message == message {
-                    return Ok(entry.id.clone());
-                }
-            }
-        }
-        let parent_id = Reducer::reduce(&self.store)
-            .ok()
-            .and_then(|state| state.lane("main").and_then(|lane| lane.leaf_id.clone()))
+        // Single reduce + one id set replaces the previous double-reduce
+        // and nested `entries.iter().any` scans.
+        let reduced = Reducer::reduce(&self.store).ok();
+        let main_lane = reduced.as_ref().and_then(|state| state.lane("main"));
+        let parent_id = main_lane
+            .and_then(|lane| lane.leaf_id.clone())
             .or_else(|| {
                 self.store
                     .entries()
@@ -2231,6 +2239,12 @@ impl CodingSessionHarness {
                     .find(|entry| entry.lane == "main")
                     .map(|entry| entry.id.clone())
             });
+        let entry_ids: std::collections::HashSet<&str> = self
+            .store
+            .entries()
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect();
         let seq = self.next_seq();
         let terminate = matches!(
             &message,
@@ -2240,13 +2254,8 @@ impl CodingSessionHarness {
             }
         );
         let id = match &message {
-            AgentMessage::Assistant { .. } => Reducer::reduce(&self.store)
-                .ok()
-                .and_then(|state| {
-                    state
-                        .lane("main")
-                        .and_then(|lane| lane.open_operation.clone())
-                })
+            AgentMessage::Assistant { .. } => main_lane
+                .and_then(|lane| lane.open_operation.clone())
                 .and_then(|run_id| {
                     self.store
                         .records()
@@ -2258,11 +2267,7 @@ impl CodingSessionHarness {
                                 result_entry_id,
                                 ..
                             } if record_run_id == &run_id
-                                && !self
-                                    .store
-                                    .entries()
-                                    .iter()
-                                    .any(|entry| entry.id == result_entry_id.as_str()) =>
+                                && !entry_ids.contains(result_entry_id.as_str()) =>
                             {
                                 Some(result_entry_id.clone())
                             }
@@ -2276,11 +2281,12 @@ impl CodingSessionHarness {
         // Tool completions are recorded both by the execution lifecycle and
         // by the model-visible transcript.  They may be separated by other
         // journal records, so checking only the last entry is insufficient.
-        if self
-            .store
-            .entries()
-            .iter()
-            .any(|entry| entry.id == id && entry.message == message)
+        if entry_ids.contains(id.as_str())
+            && self
+                .store
+                .entries()
+                .iter()
+                .any(|entry| entry.id == id && entry.message == message)
         {
             return Ok(id);
         }
@@ -3069,16 +3075,19 @@ impl CodingSessionHarness {
             else {
                 continue;
             };
-            let already_completed =
-                records.iter().any(|record| {
-                    matches!(
-                        record,
-                        HarnessRecord::ToolFinished {
-                            tool_call_id: finished_call,
-                            ..
-                        } if finished_call == tool_call_id
-                    )
-                }) || entries.iter().any(|entry| entry.id.contains(tool_call_id));
+            let already_completed = records.iter().any(|record| {
+                matches!(
+                    record,
+                    HarnessRecord::ToolFinished {
+                        run_id: finished_run,
+                        tool_call_id: finished_call,
+                        result_entry_id: finished_result,
+                        ..
+                    } if finished_run == run_id
+                        && finished_call == tool_call_id
+                        && finished_result == result_entry_id
+                )
+            }) || entries.iter().any(|entry| entry.id == *result_entry_id);
             if already_completed {
                 continue;
             }

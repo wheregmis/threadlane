@@ -264,7 +264,7 @@ impl ChatListView {
         let trajectory_list_state = ListState::new(0, ListAlignment::Top, px(400.0));
         let input_state = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .placeholder("Do anything...")
+                .placeholder("Ask a question, describe a task, or type / for commands...")
                 .auto_grow(2, 8)
                 .submit_on_enter(true)
                 .soft_wrap(true)
@@ -3767,14 +3767,21 @@ impl ChatListView {
                 div()
                     .flex()
                     .items_center()
-                    .gap_1()
-                    .px_2()
+                    .gap_1p5()
+                    .px_2p5()
                     .py_1()
-                    .rounded_md()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(theme.border)
                     .bg(theme.secondary)
                     .text_xs()
-                    .child("▣")
-                    .child(name)
+                    .text_color(theme.foreground)
+                    .child(
+                        Icon::new(IconName::File)
+                            .xsmall()
+                            .text_color(theme.primary),
+                    )
+                    .child(div().max_w(px(160.0)).truncate().child(name))
                     .child(
                         Button::new(("remove-pasted-image", index))
                             .icon(IconName::Close)
@@ -3911,7 +3918,7 @@ impl ChatListView {
             .icon(IconName::Folder)
             .label(selected_project_name)
             .dropdown_caret(true)
-            .ghost()
+            .outline()
             .xsmall()
             .dropdown_menu(move |menu, _window, _cx| {
                 let mut menu = menu;
@@ -3973,7 +3980,7 @@ impl ChatListView {
             })
             .label(work_mode_label)
             .dropdown_caret(true)
-            .ghost()
+            .outline()
             .xsmall()
             .dropdown_menu(move |menu, _window, _cx| {
                 let menu = menu.check_side(gpui_component::Side::Right);
@@ -4017,10 +4024,10 @@ impl ChatListView {
             .w_full()
             .max_w(px(1000.0))
             .mx_auto()
-            .mb_1p5()
+            .mb_2()
             .flex()
             .items_center()
-            .gap_1p5()
+            .gap_2()
             .child(project_chip)
             .child(work_mode_chip);
 
@@ -4261,8 +4268,10 @@ impl ChatListView {
                             .flex()
                             .items_center()
                             .justify_between()
-                            .h(px(26.0))
+                            .h(px(28.0))
                             .px_2()
+                            .border_b_1()
+                            .border_color(theme.border.opacity(0.4))
                             .text_xs()
                             .text_color(theme.muted_foreground)
                             .child(
@@ -4289,6 +4298,7 @@ impl ChatListView {
                         div()
                             .id("slash-command-list")
                             .relative()
+                            .mt_1()
                             .track_scroll(&self.slash_scroll_handle)
                             .overflow_y_scroll()
                             .vertical_scrollbar(&self.slash_scroll_handle)
@@ -4699,7 +4709,7 @@ impl ChatListView {
                     .max_w(px(1000.0))
                     .mx_auto()
                     .relative()
-                    .min_h(px(132.0))
+                    .min_h(px(136.0))
                     .flex()
                     .flex_col()
                     .justify_between()
@@ -4708,6 +4718,8 @@ impl ChatListView {
                     .border_1()
                     .border_color(theme.border)
                     .bg(theme.title_bar)
+                    .shadow_md()
+                    .hover(|style| style.border_color(theme.border.opacity(0.85)))
                     .on_action(cx.listener(Self::paste_composer_clipboard))
                     .when(slash_completion_active, |composer| {
                         composer
@@ -4724,9 +4736,15 @@ impl ChatListView {
                     )
                     .child(command_menu)
                     .child(
-                        Textarea::new(&self.input_state)
-                            .appearance(false)
-                            .bordered(false),
+                        div()
+                            .w_full()
+                            .flex_1()
+                            .min_h(px(48.0))
+                            .child(
+                                Textarea::new(&self.input_state)
+                                    .appearance(false)
+                                    .bordered(false),
+                            ),
                     )
                     .child(
                         div()
@@ -4808,8 +4826,8 @@ impl ChatListView {
                             } else {
                                 vec![
                                     Button::new("send-btn")
-                                        .w(px(40.0))
-                                        .h(px(40.0))
+                                        .w(px(34.0))
+                                        .h(px(34.0))
                                         .icon(IconName::ArrowUp)
                                         .tooltip(if needs_provider {
                                             "Connect a model provider in Settings before sending"
@@ -4818,8 +4836,8 @@ impl ChatListView {
                                         } else {
                                             "Type a message to send"
                                         })
-                                        .primary()
-                                        .disabled(!has_prompt || needs_provider)
+                                        .when(has_prompt && !needs_provider, |b| b.primary())
+                                        .when(!has_prompt || needs_provider, |b| b.ghost().disabled(true))
                                         .on_click(cx.listener(move |this, _event, window, cx| {
                                             let text = send_input.read(cx).value().to_string();
                                             if !text.trim().is_empty() || !this.pasted_images.is_empty() {

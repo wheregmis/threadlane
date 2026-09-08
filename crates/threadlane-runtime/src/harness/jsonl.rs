@@ -31,6 +31,14 @@ unsafe extern "C" {
     fn flock(fd: i32, operation: i32) -> i32;
 }
 
+/// Process-wide serialiser for all session-file appends (single lines and
+/// atomic batches) so concurrent `append_entry` / `append_atomic_batch`
+/// traffic to the same path cannot interleave.
+fn session_append_lock() -> &'static Mutex<()> {
+    static APPEND_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    APPEND_LOCK.get_or_init(|| Mutex::new(()))
+}
+
 #[derive(Debug)]
 struct WriterClaim {
     file: Option<fs::File>,
@@ -991,11 +999,11 @@ impl Record {
             | Self::ContextSnapshotIndexed { .. }
             | Self::ContextSnapshotLoaded { .. }
             | Self::ContextCompacted { .. }
+            | Self::ProviderResponseAttached { .. } => SyncPolicy::Data,
             | Self::RunContextCaptured { .. }
             | Self::ProviderRequestStarted { .. }
             | Self::ProviderRequestFinished { .. }
-            | Self::ProviderResponseAttached { .. }
-            | Self::StreamCheckpoint { .. } => SyncPolicy::Data,
+            | Self::StreamCheckpoint { .. } => SyncPolicy::All,
             Self::OperationStarted { .. }
             | Self::AbortRequested { .. }
             | Self::OperationFinished { .. }
@@ -1027,10 +1035,9 @@ fn append_session_json_line_with_policy<T: serde::Serialize>(
     value: &T,
     sync_policy: SyncPolicy,
 ) -> io::Result<()> {
-    // Process-wide append lock; the session writer lease handles cross-process writers.
-    static APPEND_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    let _guard = APPEND_LOCK
-        .get_or_init(|| Mutex::new(()))
+    // Process-wide append lock shared with atomic batches; the session
+    // writer lease handles cross-process writers.
+    let _guard = session_append_lock()
         .lock()
         .map_err(|error| io::Error::other(error.to_string()))?;
     let mut file = fs::OpenOptions::new()
@@ -1054,19 +1061,32 @@ fn prepare_append_boundary(file: &mut fs::File) -> io::Result<()> {
     if len == 0 {
         return Ok(());
     }
-    file.seek(SeekFrom::Start(0))?;
-    let mut data = Vec::with_capacity(len as usize);
-    file.read_to_end(&mut data)?;
-    if data.last() == Some(&b'\n') {
+    // Hot-path fix: only inspect the tail instead of reading the whole file.
+    const TAIL_PROBE: u64 = 64 * 1024;
+    let probe_len = len.min(TAIL_PROBE);
+    file.seek(SeekFrom::End(-(probe_len as i64)))?;
+    let mut tail_buf = vec![0u8; probe_len as usize];
+    file.read_exact(&mut tail_buf)?;
+    if tail_buf.last() == Some(&b'\n') {
         return Ok(());
     }
-    let tail = data.rsplit(|byte| *byte == b'\n').next().unwrap_or(&data);
-    let payload = atomic_frame_payload(tail).unwrap_or(tail);
-    if serde_json::from_slice::<serde_json::Value>(payload).is_err()
-        && is_atomic_frame_fragment(tail)
-    {
+    let tail_line = tail_buf
+        .rsplit(|byte| *byte == b'\n')
+        .next()
+        .unwrap_or(&tail_buf);
+    // If the probe window truncated a long line (no newline in window but
+    // file is larger), still quarantine: a missing trailing newline means
+    // the previous write did not finish cleanly.
+    let truncated = !tail_buf.contains(&b'\n') && len > probe_len;
+    let payload = atomic_frame_payload(tail_line).unwrap_or(tail_line);
+    if truncated || serde_json::from_slice::<serde_json::Value>(payload).is_err() {
+        // Quarantine any torn tail (atomic fragment or torn single-line
+        // JSON) so the next strict read can skip it instead of bricking
+        // the whole session.
+        file.seek(SeekFrom::End(0))?;
         file.write_all(TORN_EOF_SENTINEL.as_bytes())?;
     }
+    file.seek(SeekFrom::End(0))?;
     file.write_all(b"\n")
 }
 
@@ -1090,9 +1110,7 @@ fn append_json_line<T: serde::Serialize>(
 fn append_atomic_batch_line(path: &Path, value: &AtomicBatchLine) -> Result<(), ReduceError> {
     let encoded =
         serde_json::to_vec(value).map_err(|error| ReduceError::Storage(error.to_string()))?;
-    static APPEND_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    let _guard = APPEND_LOCK
-        .get_or_init(|| Mutex::new(()))
+    let _guard = session_append_lock()
         .lock()
         .map_err(|error| ReduceError::Storage(error.to_string()))?;
     let mut file = fs::OpenOptions::new()
@@ -1288,10 +1306,19 @@ fn is_atomic_frame_fragment(bytes: &[u8]) -> bool {
 }
 
 fn is_recoverable_atomic_fragment(bytes: &[u8], is_physical_eof: bool) -> bool {
-    (is_physical_eof && is_atomic_frame_fragment(bytes))
-        || bytes
-            .strip_suffix(TORN_EOF_SENTINEL.as_bytes())
-            .is_some_and(is_atomic_frame_fragment)
+    if is_physical_eof && is_atomic_frame_fragment(bytes) {
+        return true;
+    }
+    let Some(stripped) = bytes.strip_suffix(TORN_EOF_SENTINEL.as_bytes()) else {
+        return false;
+    };
+    if is_atomic_frame_fragment(stripped) {
+        return true;
+    }
+    // Torn single-line JSON quarantined by `prepare_append_boundary`:
+    // skip it if the quarantined payload is not valid JSON.
+    let payload = atomic_frame_payload(stripped).unwrap_or(stripped);
+    serde_json::from_slice::<serde_json::Value>(payload).is_err()
 }
 
 fn read_strict<T: DeserializeOwned>(path: &Path) -> io::Result<Vec<T>> {
@@ -1684,6 +1711,9 @@ mod tests {
 
     #[test]
     fn observational_records_use_data_sync_but_intents_use_full_sync() {
+        // NOTE: crash-critical provider/stream records (request boundaries,
+        // run context, checkpoints) use full sync so a crash cannot leave a
+        // torn tail that bricks the session; pure observations stay on Data.
         let checkpoint = Record::StreamCheckpoint {
             id: "checkpoint".into(),
             seq: 1,
@@ -1722,7 +1752,7 @@ mod tests {
             replay: crate::harness::ToolReplaySafety::Safe,
         };
 
-        assert_eq!(checkpoint.sync_policy(), SyncPolicy::Data);
+        assert_eq!(checkpoint.sync_policy(), SyncPolicy::All);
         assert_eq!(operation.sync_policy(), SyncPolicy::All);
         assert_eq!(tool.sync_policy(), SyncPolicy::All);
     }
@@ -1824,8 +1854,15 @@ mod tests {
 
     #[test]
     fn strict_open_rejects_completed_arbitrary_torn_eof_suffix() {
-        let line = format!("junk{TORN_EOF_SENTINEL}");
-        assert_completed_malformed_line_is_rejected("torn-suffix.jsonl", line.as_bytes());
+        // Quarantined torn single-line tails (invalid JSON + sentinel) are
+        // now recovered by skipping the torn line instead of bricking the
+        // session.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("torn-suffix.jsonl");
+        let line = format!("junk{TORN_EOF_SENTINEL}\n");
+        std::fs::write(&path, line.as_bytes()).unwrap();
+        let store = JsonlStore::open(&path).unwrap();
+        assert!(store.entries().is_empty() && store.records().is_empty());
     }
 
     #[test]
@@ -1862,11 +1899,13 @@ mod tests {
 
     #[test]
     fn transcript_page_rejects_completed_arbitrary_torn_eof_suffix() {
-        let line = format!("junk{TORN_EOF_SENTINEL}");
-        assert_completed_malformed_transcript_line_is_rejected(
-            "transcript-torn-suffix.jsonl",
-            line.as_bytes(),
-        );
+        // Quarantined torn tails are skipped, yielding an empty page.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript-torn-suffix.jsonl");
+        let line = format!("junk{TORN_EOF_SENTINEL}\n");
+        std::fs::write(&path, line.as_bytes()).unwrap();
+        let page = read_transcript_page(&path, None, 1).unwrap();
+        assert!(page.messages().is_empty());
     }
 
     #[test]

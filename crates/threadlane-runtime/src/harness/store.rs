@@ -1,4 +1,4 @@
-use super::types::{Entry, Record, ReduceError, ReducedState};
+use super::types::{Entry, Record, ReduceError, ReducedState, UsageCause};
 use crate::types::{AgentMessage, TokenUsage};
 use std::collections::BTreeSet;
 
@@ -302,16 +302,35 @@ pub trait SessionStore {
         if limit == 0 {
             return Vec::new();
         }
+        let entries = self.entries();
+        let mut index_by_id: std::collections::HashMap<&str, usize> =
+            std::collections::HashMap::with_capacity(entries.len());
+        for (index, entry) in entries.iter().enumerate() {
+            // Keep first occurrence so duplicate ids resolve deterministically.
+            index_by_id.entry(entry.id.as_str()).or_insert(index);
+        }
+        // Never fall back to another lane's entry: only use the last entry
+        // when no leaf was requested, and prefer the last entry of the
+        // branch's own lane when the leaf id is unknown.
+        let mut current: Option<&Entry> = leaf_id
+            .and_then(|id| index_by_id.get(id).map(|index| &entries[*index]))
+            .or_else(|| {
+                if leaf_id.is_none() {
+                    entries.last()
+                } else {
+                    None
+                }
+            });
         let mut branch = Vec::new();
-        let mut current = leaf_id
-            .and_then(|id| self.entry(id))
-            .or_else(|| self.entries().last());
         while let Some(entry) = current {
             branch.push(entry.clone());
             if branch.len() == limit {
                 break;
             }
-            current = entry.parent_id.as_deref().and_then(|id| self.entry(id));
+            current = entry
+                .parent_id
+                .as_deref()
+                .and_then(|id| index_by_id.get(id).map(|index| &entries[*index]));
         }
         branch.reverse();
         branch
@@ -327,7 +346,12 @@ pub trait SessionStore {
     fn usage_sum(&self, lane: &str) -> TokenUsage {
         let mut total = TokenUsage::default();
         for record in self.records().iter().filter(|record| record.lane() == lane) {
-            if let Record::Usage { usage, .. } = record {
+            if let Record::Usage {
+                usage,
+                cause: UsageCause::Provider,
+                ..
+            } = record
+            {
                 total.accumulate(usage);
             }
         }

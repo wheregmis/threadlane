@@ -381,10 +381,12 @@ impl ReductionContext {
         let id = entry.id.clone();
         let seq = entry.seq;
         let lane_name = entry.lane.clone();
-        self.lane_entries
-            .entry(lane_name)
-            .or_default()
-            .push((seq, id));
+        let ordered = self.lane_entries.entry(lane_name).or_default();
+        // Keep per-lane entries sorted by seq so `partition_point`-based
+        // scans (e.g. pending-deferred) stay correct for out-of-order
+        // incremental appends, matching the sorted `build()` state.
+        let pos = ordered.partition_point(|(existing_seq, _)| *existing_seq <= seq);
+        ordered.insert(pos, (seq, id));
     }
 
     /// Mirrors the store updating its preferred main leaf (e.g. after a
@@ -1004,9 +1006,11 @@ impl ReductionContext {
                         removed_incomplete
                     });
                     self.edit_aux(&lane_name, |aux| {
-                        *aux.incomplete_tools_by_run
+                        aux.incomplete_tools_by_run
                             .entry(run_id.to_owned())
-                            .or_default() -= removed_incomplete;
+                            .and_modify(|count| {
+                                *count = count.saturating_sub(removed_incomplete);
+                            });
                         aux.tool_by_call = rebuilt.0;
                         aux.tool_by_ordinal = rebuilt.1;
                     });
@@ -1048,7 +1052,7 @@ impl ReductionContext {
                 terminate,
                 ..
             } => {
-                let updated = self.edit_lane(&lane_name, |lane| {
+                let transitioned = self.edit_lane(&lane_name, |lane| {
                     lane.tools
                         .iter()
                         .rposition(|tool| {
@@ -1057,15 +1061,20 @@ impl ReductionContext {
                                 && tool.result_entry_id == *result_entry_id
                         })
                         .map(|index| {
-                            lane.tools[index].completed = true;
+                            let was_completed =
+                                std::mem::replace(&mut lane.tools[index].completed, true);
                             lane.tools[index].terminate = *terminate;
+                            !was_completed
                         })
+                        .unwrap_or(false)
                 });
-                if updated.is_some() {
+                if transitioned {
                     self.edit_aux(&lane_name, |aux| {
-                        *aux.incomplete_tools_by_run
+                        aux.incomplete_tools_by_run
                             .entry(run_id.to_owned())
-                            .or_default() -= 1;
+                            .and_modify(|count| {
+                                *count = count.saturating_sub(1);
+                            });
                     });
                 }
             }
