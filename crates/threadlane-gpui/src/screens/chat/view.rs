@@ -305,7 +305,7 @@ fn context_meter_view_model(
     }
 }
 use threadlane_session::commands::{available_slash_commands, SlashCommandInfo};
-use threadlane_session::{ImageAttachment, PlanItemStatus, ReasoningEffort, SessionPlan};
+use threadlane_session::{ImageAttachment, PlanItemStatus, SessionPlan};
 
 actions!(
     threadlane_composer,
@@ -4955,6 +4955,10 @@ impl ChatListView {
         });
 
         let effort_model = self.model.clone();
+        let effort_options = crate::model_catalog::efforts_for_model(
+            &selected_model,
+            project_root.as_deref(),
+        );
         let effort_picker = Button::new("composer-reasoning-effort-picker")
             .icon(Icon::default().path("icons/effort.svg"))
             .label(reasoning_effort.label())
@@ -4963,15 +4967,8 @@ impl ChatListView {
             .ghost()
             .dropdown_menu(move |menu, _window, _cx| {
                 let menu = menu.check_side(gpui_component::Side::Right);
-                [
-                    ReasoningEffort::Off,
-                    ReasoningEffort::Minimal,
-                    ReasoningEffort::Low,
-                    ReasoningEffort::Medium,
-                    ReasoningEffort::High,
-                    ReasoningEffort::XHigh,
-                    ReasoningEffort::Max,
-                ]
+                effort_options
+                .clone()
                 .into_iter()
                 .fold(menu, |menu, effort| {
                     let model = effort_model.clone();

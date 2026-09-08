@@ -3946,6 +3946,7 @@ impl GitHubView {
                             .child(
                                 div()
                                     .id("github-pr-detail-tabs-focus")
+                                    .role(Role::TabList)
                                     .border_1()
                                     .border_color(theme.background)
                                     .focus(|style| style.border_color(theme.primary))

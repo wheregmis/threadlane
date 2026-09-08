@@ -82,6 +82,7 @@ A normal `cargo run` may be unsuitable for testing installation: update installa
 - Prefer root-cause fixes over state-specific offsets or visual patches.
 - Avoid holding locks across expensive work, UI callbacks, or async boundaries.
 - Preserve user work and persisted session data. Never casually delete `.threadlane` state or session files.
+- Accessibility: any element combining `.id(...)` with `track_focus(...)` must also set `.role(...)`, otherwise GPUI logs `focused element has no accessibility node` and screen readers announce the whole window.
 
 ## Session and Context-Menu Behavior
 
@@ -103,6 +104,7 @@ A normal `cargo run` may be unsuitable for testing installation: update installa
 ## Model Provider Routing
 
 - Provider selection is encoded in the persisted model ID. Models prefixed with `antigravity/` or `opencode-go/` route through `threadlane-provider::router::ProviderClient`; unprefixed models retain the OpenAI path. Preserve the prefix across model switching, sessions, subagents, and payload construction.
+- Models and reasoning efforts are data-driven, not code-driven. New models ship via `resources/models.json`, `THREADLANE_MODELS_JSON`, `~/.threadlane/models.json`, or `<project>/.threadlane/models.json` (merged by `threadlane-runtime::model_registry`); OpenCode Zen models are additionally discovered live from `GET /models` and merged into the picker with a background refresh at startup and after the key is saved. New efforts via `ReasoningEffort::Other` plus per-model `supported_efforts`. Do not add a new const list or enum variant for a model/effort — add registry data and, for Antigravity runtime mapping, `ANTIGRAVITY_RUNTIME_MODEL_MAP_JSON`.
 - Persist each session's selected model in `SessionTree` metadata. Restore it before constructing the agent runtime and synchronize the model picker from that restored value; legacy metadata without a model continues to use the caller-provided default.
 - A restored session has two synchronized representations: the persisted `SessionTree` active branch and `AgentState.messages`, which supplies provider context. Every constructor or session-switch path must load the active branch into `AgentState.messages` after the current system prompt; populating only the chat UI makes old messages visible without sending them to the model and also breaks subsequent prefix-based persistence. Independently, GPUI must hydrate its visible transcript from the canonical session JSONL on startup and every session selection; do not render a runtime/provider-context snapshot as chat history, because it can omit persisted reasoning, responses, or tool activity.
 - Keep the central agent loop provider-neutral. Provider clients must translate requests and stream results into the shared `StreamEvent`, `ToolCall`, and `ProviderUsage` contract so tool execution, hooks, compaction, persistence, and chat rendering are not duplicated.

@@ -8,6 +8,7 @@ pub mod harness;
 pub mod local_tool_router;
 pub(crate) mod loop_engine;
 pub mod model_metadata;
+pub mod model_registry;
 pub mod provider;
 pub mod rules;
 pub mod tool_dispatcher;

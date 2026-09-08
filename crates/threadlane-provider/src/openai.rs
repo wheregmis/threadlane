@@ -576,6 +576,41 @@ impl ResponseAccumulator {
     }
 }
 
+/// Exclusion-based filter so new chat models appear without a code change.
+/// `OPENAI_MODELS_ALLOW_EXTRA` (comma-separated substrings) can re-include a
+/// family excluded below without editing this function.
+pub(crate) fn is_chat_capable_model(id: &str) -> bool {
+    let id_lower = id.to_ascii_lowercase();
+    const EXCLUDED_PREFIXES: &[&str] = &[
+        "text-embedding-",
+        "tts-",
+        "whisper-",
+        "dall-e",
+        "omni-moderation-",
+        "computer-use-",
+    ];
+    const EXCLUDED_CONTAINS: &[&str] = &[
+        "embedding",
+        "moderation",
+        "transcribe",
+        "realtime",
+        "audio-",
+        "image-",
+    ];
+    if EXCLUDED_PREFIXES.iter().any(|prefix| id_lower.starts_with(prefix))
+        || EXCLUDED_CONTAINS.iter().any(|part| id_lower.contains(part))
+    {
+        let extra = std::env::var("OPENAI_MODELS_ALLOW_EXTRA").unwrap_or_default();
+        for token in extra.split(',').map(str::trim).filter(|token| !token.is_empty()) {
+            if id_lower.contains(&token.to_ascii_lowercase()) {
+                return true;
+            }
+        }
+        return false;
+    }
+    true
+}
+
 pub async fn fetch_available_models(api_key: &str, account_id: Option<&str>) -> Vec<String> {
     let cache_key = model_cache_key(api_key, account_id);
     let now = Instant::now();
@@ -600,12 +635,7 @@ pub async fn fetch_available_models(api_key: &str, account_id: Option<&str>) -> 
                     let mut models: Vec<_> = data
                         .iter()
                         .filter_map(|item| item.get("id").and_then(Value::as_str))
-                        .filter(|id| {
-                            id.starts_with("gpt-")
-                                || id.starts_with("o1")
-                                || id.starts_with("o3")
-                                || id.contains("codex")
-                        })
+                        .filter(|id| is_chat_capable_model(id))
                         .map(str::to_string)
                         .collect();
                     if !models.is_empty() {
@@ -1655,5 +1685,16 @@ mod tests {
         }));
         assert_eq!(code, "model_not_found");
         assert_eq!(message, "missing");
+    }
+
+    #[test]
+    fn chat_model_filter_accepts_new_models_without_code_changes() {
+        use super::is_chat_capable_model;
+        assert!(is_chat_capable_model("gpt-5.6-luna"));
+        assert!(is_chat_capable_model("gpt-99-new"));
+        assert!(is_chat_capable_model("o4-mini"));
+        assert!(!is_chat_capable_model("text-embedding-3-small"));
+        assert!(!is_chat_capable_model("tts-1"));
+        assert!(!is_chat_capable_model("whisper-1"));
     }
 }

@@ -412,6 +412,17 @@ impl WorkspaceView {
             view.sync_git_status_with_active_project(cx);
             view.github
                 .update(cx, |github, cx| github.sync_active_project(cx));
+            // Pull the live Zen model list in the background so new
+            // `opencode-go/*` models appear in the picker without a restart.
+            let discovery_model = view.model.clone();
+            cx.spawn(async move |_view, cx| {
+                crate::model_catalog::refresh_discovered_models_and_update(
+                    discovery_model,
+                    cx,
+                )
+                .await;
+            })
+            .detach();
         });
 
         let view_handle = view.downgrade();

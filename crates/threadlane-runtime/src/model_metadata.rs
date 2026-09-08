@@ -3,6 +3,9 @@ use crate::AgentConfig;
 pub const UNKNOWN_MODEL_CONTEXT_LIMIT: usize = 128_000;
 
 pub fn model_context_limit(model: &str) -> Option<usize> {
+    if let Some(limit) = crate::model_registry::context_window_for(model, None) {
+        return Some(limit);
+    }
     let unadorned = model
         .strip_prefix("antigravity/")
         .or_else(|| model.strip_prefix("opencode-go/"))

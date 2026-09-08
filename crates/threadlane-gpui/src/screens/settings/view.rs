@@ -219,6 +219,16 @@ impl SettingsView {
                         controller::dispatch(state, AppAction::SaveOpenCodeKey(key));
                         cx.notify();
                     });
+                    // The key just changed, so re-pull the live Zen model list.
+                    let discovery_model = opencode_model.clone();
+                    cx.spawn(async move |_this, cx| {
+                        crate::model_catalog::refresh_discovered_models_and_update(
+                            discovery_model,
+                            cx,
+                        )
+                        .await;
+                    })
+                    .detach();
                 }
             },
         );
@@ -571,6 +581,7 @@ impl SettingsView {
         let available_for_fast = available.clone();
         let model_entity = self.model.clone();
         let project_for_models = project.clone();
+        let reasoning_for_model = selected_model.clone().unwrap_or_default();
         let model_picker = Button::new("subagent-model-picker")
             .label(model_label)
             .dropdown_caret(true)
@@ -636,19 +647,23 @@ impl SettingsView {
             });
         let reasoning_entity = self.model.clone();
         let project_for_reasoning = project.clone();
+        let reasoning_for_model_cloned = reasoning_for_model.clone();
         let reasoning_picker = Button::new("subagent-reasoning-picker")
             .label(reasoning_label)
             .dropdown_caret(true)
             .dropdown_menu(move |menu, _, _| {
                 let entity = reasoning_entity.clone();
                 let project = project_for_reasoning.clone();
-                [
-                    None,
-                    Some(threadlane_runtime::ReasoningEffort::Minimal),
-                    Some(threadlane_runtime::ReasoningEffort::Low),
-                    Some(threadlane_runtime::ReasoningEffort::Medium),
-                    Some(threadlane_runtime::ReasoningEffort::High),
-                ]
+                let mut options: Vec<Option<threadlane_runtime::ReasoningEffort>> = vec![None];
+                options.extend(
+                    crate::model_catalog::efforts_for_model(
+                        &reasoning_for_model_cloned,
+                        Some(&project),
+                    )
+                    .into_iter()
+                    .map(Some),
+                );
+                options
                 .into_iter()
                 .fold(menu, |menu, effort| {
                     let entity = entity.clone();
@@ -750,19 +765,20 @@ impl SettingsView {
             .unwrap_or("Same as parent");
         let fast_reasoning_entity = self.model.clone();
         let project_for_fast_reasoning = project.clone();
+        let fast_for_model = preferences.fast_model.clone().unwrap_or_default();
         let fast_reasoning_picker = Button::new("fast-reasoning-picker")
             .label(fast_reasoning_label)
             .dropdown_caret(true)
             .dropdown_menu(move |menu, _, _| {
                 let entity = fast_reasoning_entity.clone();
                 let project = project_for_fast_reasoning.clone();
-                [
-                    None,
-                    Some(threadlane_runtime::ReasoningEffort::Minimal),
-                    Some(threadlane_runtime::ReasoningEffort::Low),
-                    Some(threadlane_runtime::ReasoningEffort::Medium),
-                    Some(threadlane_runtime::ReasoningEffort::High),
-                ]
+                let mut options: Vec<Option<threadlane_runtime::ReasoningEffort>> = vec![None];
+                options.extend(
+                    crate::model_catalog::efforts_for_model(&fast_for_model, Some(&project))
+                        .into_iter()
+                        .map(Some),
+                );
+                options
                 .into_iter()
                 .fold(menu, |menu, effort| {
                     let entity = entity.clone();

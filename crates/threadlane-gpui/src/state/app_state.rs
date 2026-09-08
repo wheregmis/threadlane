@@ -1321,7 +1321,7 @@ impl AppState {
         &self.available_models
     }
 
-    fn refresh_available_models(&mut self) {
+    pub(crate) fn refresh_available_models(&mut self) {
         self.available_models =
             crate::model_catalog::available_models_for_project(self.active_work_dir.as_deref());
     }

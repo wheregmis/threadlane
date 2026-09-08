@@ -87,8 +87,168 @@ pub(crate) fn available_models_for_project(
         threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some(),
         threadlane_auth::opencode_auth::load_opencode_api_key().is_some(),
     );
+    merge_registry_models(&mut models, project_root);
+    merge_discovered_opencode_models(&mut models);
     append_acp_models(&mut models, project_root);
     models
+}
+
+/// Live-discovered Zen models, refreshed in the background by
+/// [`refresh_discovered_models`]. Lets new `opencode-go/*` models appear in
+/// the picker without a code change or a `models.json` entry.
+static DISCOVERED_OPENCODE: std::sync::OnceLock<std::sync::Mutex<(std::time::Instant, Vec<ModelOption>)>> =
+    std::sync::OnceLock::new();
+
+fn pretty_bare_label(bare_id: &str) -> String {
+    let mut label = String::new();
+    for part in bare_id.split(['-', '_', '/']) {
+        if part.is_empty() {
+            continue;
+        }
+        if !label.is_empty() {
+            label.push(' ');
+        }
+        let mut chars = part.chars();
+        if let Some(first) = chars.next() {
+            label.extend(first.to_uppercase());
+            label.push_str(&chars.as_str().to_ascii_lowercase());
+        }
+    }
+    if label.is_empty() {
+        bare_id.to_string()
+    } else {
+        label
+    }
+}
+
+/// Fetches the live Zen model list and caches it for the picker. Skips the
+/// network when there is no OpenCode key or the cache is still fresh.
+pub async fn refresh_discovered_models() {
+    if threadlane_auth::opencode_auth::load_opencode_api_key().is_none() {
+        return;
+    }
+    let fresh = DISCOVERED_OPENCODE
+        .get()
+        .and_then(|cache| cache.lock().ok())
+        .is_some_and(|guard| guard.0.elapsed() < std::time::Duration::from_secs(5 * 60));
+    if fresh {
+        return;
+    }
+    let mut discovered: Vec<ModelOption> =
+        threadlane_provider::opencode::fetch_available_models()
+            .await
+            .into_iter()
+            .map(|bare_id| ModelOption {
+                id: format!("opencode-go/{bare_id}"),
+                label: pretty_bare_label(&bare_id),
+                provider: ModelProvider::OpenCode,
+            })
+            .collect();
+    discovered.sort_by(|a, b| a.id.cmp(&b.id));
+    if let Some(cache) = DISCOVERED_OPENCODE.get_or_init(|| {
+        std::sync::Mutex::new((std::time::Instant::now(), Vec::new()))
+    })
+    .lock()
+    .ok()
+    {
+        let mut guard = cache;
+        guard.0 = std::time::Instant::now();
+        guard.1 = discovered;
+    }
+}
+
+/// Refreshes the live Zen list, then rebuilds the picker's model list.
+/// Call from a background task at startup and after the OpenCode key changes.
+pub async fn refresh_discovered_models_and_update(
+    model: gpui::Entity<crate::state::AppState>,
+    cx: &mut gpui::AsyncApp,
+) {
+    refresh_discovered_models().await;
+    let _ = cx.update(|cx| {
+        model.update(cx, |state, cx| {
+            state.refresh_available_models();
+            cx.notify();
+        })
+    });
+}
+
+fn merge_discovered_opencode_models(models: &mut Vec<ModelOption>) {
+    if !credentials_allow(ModelProvider::OpenCode) {
+        return;
+    }
+    let discovered = DISCOVERED_OPENCODE
+        .get()
+        .and_then(|cache| cache.lock().ok())
+        .map(|guard| guard.1.clone())
+        .unwrap_or_default();
+    for option in discovered {
+        if !models.iter().any(|model| model.id == option.id) {
+            models.push(option);
+        }
+    }
+}
+
+fn provider_for_id(id: &str, declared: Option<&str>) -> ModelProvider {
+    match declared.unwrap_or_default().to_ascii_lowercase().as_str() {
+        "openai" => ModelProvider::OpenAi,
+        "antigravity" => ModelProvider::Antigravity,
+        "opencode" | "opencode-go" => ModelProvider::OpenCode,
+        "acp" => ModelProvider::Acp,
+        _ if id.starts_with("antigravity/") => ModelProvider::Antigravity,
+        _ if id.starts_with("opencode-go/") => ModelProvider::OpenCode,
+        _ if id.starts_with("acp/") => ModelProvider::Acp,
+        _ => ModelProvider::OpenAi,
+    }
+}
+
+fn credentials_allow(provider: ModelProvider) -> bool {
+    match provider {
+        ModelProvider::OpenAi => has_openai_credentials(),
+        ModelProvider::Antigravity => {
+            threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some()
+        }
+        ModelProvider::OpenCode => {
+            threadlane_auth::opencode_auth::load_opencode_api_key().is_some()
+        }
+        ModelProvider::Acp => true,
+    }
+}
+
+/// Merges `models.json` registry entries (bundled, env, global, project) over
+/// the compiled seeds so new models appear without a code change.
+fn merge_registry_models(models: &mut Vec<ModelOption>, project_root: Option<&std::path::Path>) {
+    for info in threadlane_runtime::model_registry::registry_for_project(project_root) {
+        if let Some(existing) = models.iter_mut().find(|model| model.id == info.id) {
+            if !info.label.trim().is_empty() {
+                existing.label = info.label.clone();
+            }
+            continue;
+        }
+        // Skip ACP entries here; live agent configs own that section.
+        if info.id.starts_with("acp/") {
+            continue;
+        }
+        let provider = provider_for_id(&info.id, info.provider.as_deref());
+        if provider != ModelProvider::Acp && !credentials_allow(provider) {
+            continue;
+        }
+        models.push(ModelOption {
+            id: info.id.clone(),
+            label: if info.label.trim().is_empty() {
+                info.id.clone()
+            } else {
+                info.label.clone()
+            },
+            provider,
+        });
+    }
+}
+
+pub(crate) fn efforts_for_model(
+    model_id: &str,
+    project_root: Option<&std::path::Path>,
+) -> Vec<threadlane_runtime::ReasoningEffort> {
+    threadlane_runtime::model_registry::supported_efforts_for(model_id, project_root)
 }
 
 fn models_for_credentials(
@@ -272,6 +432,38 @@ mod tests {
         assert_eq!(format_tokens(850), "850");
         assert_eq!(format_tokens(24_500), "24.5k");
         assert_eq!(format_tokens(1_000_000), "1.0M");
+    }
+
+    #[test]
+    fn discovered_opencode_models_merge_without_duplicates() {
+        assert_eq!(pretty_bare_label("deepseek-v4-flash"), "Deepseek V4 Flash");
+        assert_eq!(pretty_bare_label("hy3"), "Hy3");
+        let mut models = provider_models(OPENCODE_MODELS, ModelProvider::OpenCode);
+        let before = models.len();
+        // Seed entries already present must not be duplicated by discovery.
+        if let Some(cache) = DISCOVERED_OPENCODE
+            .get_or_init(|| std::sync::Mutex::new((std::time::Instant::now(), Vec::new())))
+            .lock()
+            .ok()
+        {
+            let mut guard = cache;
+            guard.0 = std::time::Instant::now();
+            guard.1 = vec![
+                ModelOption {
+                    id: "opencode-go/minimax-m2.7".into(),
+                    label: "Minimax M2.7".into(),
+                    provider: ModelProvider::OpenCode,
+                },
+                ModelOption {
+                    id: "opencode-go/kimi-k2.6".into(),
+                    label: "Kimi K2.6".into(),
+                    provider: ModelProvider::OpenCode,
+                },
+            ];
+        }
+        merge_discovered_opencode_models(&mut models);
+        assert_eq!(models.len(), before + 1);
+        assert!(models.iter().any(|model| model.id == "opencode-go/kimi-k2.6"));
     }
 
     #[test]

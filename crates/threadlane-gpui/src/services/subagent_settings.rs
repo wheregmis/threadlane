@@ -24,41 +24,18 @@ pub(crate) fn load(project_root: &Path) -> SubagentSettings {
     std::fs::read(path(project_root))
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .filter(|settings: &SubagentSettings| {
-            matches!(
-                settings.reasoning_effort,
-                None | Some(ReasoningEffort::Minimal)
-                    | Some(ReasoningEffort::Low)
-                    | Some(ReasoningEffort::Medium)
-                    | Some(ReasoningEffort::High)
-            ) && matches!(
-                settings.fast_reasoning_effort,
-                None | Some(ReasoningEffort::Minimal)
-                    | Some(ReasoningEffort::Low)
-                    | Some(ReasoningEffort::Medium)
-                    | Some(ReasoningEffort::High)
-            )
-        })
         .unwrap_or_default()
 }
 
 pub(crate) fn save(project_root: &Path, settings: &SubagentSettings) -> Result<(), String> {
-    if !matches!(
-        settings.reasoning_effort,
-        None | Some(ReasoningEffort::Minimal)
-            | Some(ReasoningEffort::Low)
-            | Some(ReasoningEffort::Medium)
-            | Some(ReasoningEffort::High)
-    ) {
+    if settings.reasoning_effort.is_some_and(|effort| {
+        ReasoningEffort::from_label(effort.label()).is_none()
+    }) {
         return Err("Unsupported subagent reasoning effort.".into());
     }
-    if !matches!(
-        settings.fast_reasoning_effort,
-        None | Some(ReasoningEffort::Minimal)
-            | Some(ReasoningEffort::Low)
-            | Some(ReasoningEffort::Medium)
-            | Some(ReasoningEffort::High)
-    ) {
+    if settings.fast_reasoning_effort.is_some_and(|effort| {
+        ReasoningEffort::from_label(effort.label()).is_none()
+    }) {
         return Err("Unsupported fast model reasoning effort.".into());
     }
     let target = path(project_root);
@@ -90,19 +67,26 @@ mod tests {
     }
 
     #[test]
-    fn malformed_and_unsupported_settings_fall_back_safely() {
+    fn malformed_settings_fall_back_and_all_efforts_persist() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join(".threadlane")).unwrap();
         std::fs::write(path(dir.path()), b"not-json").unwrap();
         assert_eq!(load(dir.path()), SubagentSettings::default());
 
-        let unsupported = SubagentSettings {
-            model: None,
-            reasoning_effort: Some(ReasoningEffort::Max),
-            fast_model: None,
-            fast_reasoning_effort: None,
-            orchestrator_mode: OrchestratorMode::default(),
-        };
-        assert!(save(dir.path(), &unsupported).is_err());
+        for effort in [
+            ReasoningEffort::Max,
+            ReasoningEffort::XHigh,
+            ReasoningEffort::from_label("ultra").unwrap(),
+        ] {
+            let settings = SubagentSettings {
+                model: None,
+                reasoning_effort: Some(effort),
+                fast_model: None,
+                fast_reasoning_effort: None,
+                orchestrator_mode: OrchestratorMode::default(),
+            };
+            save(dir.path(), &settings).unwrap();
+            assert_eq!(load(dir.path()), settings);
+        }
     }
 }
