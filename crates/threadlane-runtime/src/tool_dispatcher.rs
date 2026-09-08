@@ -101,6 +101,16 @@ const CORE_TOOL_NAMES: &[&str] = &[
     "write_file",
     "run_command",
     "subagent",
+    // Embedded browser panel (threadlane-session/src/browser.rs). The tools
+    // report a helpful error when no panel is attached, so they are safe to
+    // advertise unconditionally.
+    "browser_navigate",
+    "browser_back",
+    "browser_reload",
+    "browser_current_url",
+    "browser_snapshot",
+    "browser_act",
+    "browser_evaluate_script",
 ];
 
 impl ToolDispatcher {

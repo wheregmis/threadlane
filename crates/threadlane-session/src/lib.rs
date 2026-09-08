@@ -40,7 +40,7 @@ pub use acp::{
 };
 pub use acp_bridge::{acp_agent_id, acp_model_id, is_acp_model};
 pub use acp_runtime::AcpEngine;
-pub use browser::{BrowserBridge, BrowserCommand, BrowserRequest};
+pub use browser::{ActTarget, BrowserBridge, BrowserCommand, BrowserRequest};
 pub use commands::{available_slash_commands, SlashCommandInfo};
 pub use config::CodingAgentConfig;
 pub use permission::{PermissionDecision, PermissionHandle};

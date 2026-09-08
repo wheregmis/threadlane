@@ -21,6 +21,9 @@ pub const BROWSER_NAVIGATE_TOOL: &str = "browser_navigate";
 pub const BROWSER_BACK_TOOL: &str = "browser_back";
 pub const BROWSER_RELOAD_TOOL: &str = "browser_reload";
 pub const BROWSER_CURRENT_URL_TOOL: &str = "browser_current_url";
+pub const BROWSER_SNAPSHOT_TOOL: &str = "browser_snapshot";
+pub const BROWSER_ACT_TOOL: &str = "browser_act";
+pub const BROWSER_EVALUATE_TOOL: &str = "browser_evaluate_script";
 
 const BROWSER_ROUND_TRIP_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -33,6 +36,22 @@ pub enum BrowserCommand {
     Back,
     Reload,
     CurrentUrl,
+    Snapshot,
+    Act {
+        action: String,
+        target: ActTarget,
+        text: Option<String>,
+        key: Option<String>,
+    },
+    Evaluate { script: String },
+}
+
+/// Addressable element for [`BrowserCommand::Act`]: a `browser_snapshot` ref
+/// or a CSS selector. Exactly one must be set.
+#[derive(Debug)]
+pub enum ActTarget {
+    Ref(u32),
+    Selector(String),
 }
 
 /// A command plus its reply channel, sent from a tool worker to the UI pump.
@@ -155,6 +174,63 @@ fn browser_tool_definitions() -> Arc<[AgentToolDefinition]> {
                 "additionalProperties": false
             }),
         ),
+        AgentToolDefinition::new(
+            BROWSER_SNAPSHOT_TOOL,
+            "Read the embedded browser panel as a compact interactive-element tree: links, buttons, inputs and headings with numeric refs, names and coordinates. Call this after navigating before acting. Refs expire on re-render; take a fresh snapshot when an act reports a stale ref.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        ),
+        AgentToolDefinition::new(
+            BROWSER_ACT_TOOL,
+            "Click, type into, or otherwise operate an element in the embedded browser panel, addressed by a browser_snapshot ref or a CSS selector (exactly one).",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["click", "focus", "type", "press", "select"],
+                        "description": "click: activate. focus: focus. type: replace editable content (requires text). press: keydown/keypress/keyup on the element (requires key, e.g. Enter, Escape, Tab, ArrowDown). select: pick a <select> option by visible text or value (requires text)."
+                    },
+                    "ref": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Element ref from the latest browser_snapshot."
+                    },
+                    "selector": {
+                        "type": "string",
+                        "description": "CSS selector fallback when no ref is handy."
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Text for type/select actions."
+                    },
+                    "key": {
+                        "type": "string",
+                        "description": "Key name for the press action."
+                    }
+                },
+                "required": ["action"],
+                "additionalProperties": false
+            }),
+        ),
+        AgentToolDefinition::new(
+            BROWSER_EVALUATE_TOOL,
+            "Escape hatch: evaluate a synchronous JavaScript expression in the embedded browser panel and get its JSON-serialized result (capped). Prefer browser_snapshot/browser_act; use this for reading page state those cannot express.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "script": {
+                        "type": "string",
+                        "description": "Synchronous JavaScript expression to evaluate."
+                    }
+                },
+                "required": ["script"],
+                "additionalProperties": false
+            }),
+        ),
     ]
     .into()
 }
@@ -185,10 +261,85 @@ impl ToolExecutor for BrowserToolExecutor {
             BROWSER_BACK_TOOL => BrowserCommand::Back,
             BROWSER_RELOAD_TOOL => BrowserCommand::Reload,
             BROWSER_CURRENT_URL_TOOL => BrowserCommand::CurrentUrl,
+            BROWSER_SNAPSHOT_TOOL => BrowserCommand::Snapshot,
+            BROWSER_ACT_TOOL => match parse_act_command(args) {
+                Ok(command) => command,
+                Err(error) => return Some(Err(error)),
+            },
+            BROWSER_EVALUATE_TOOL => {
+                let parsed: serde_json::Value = serde_json::from_str(args).ok()?;
+                match parsed.get("script").and_then(|value| value.as_str()) {
+                    Some(script) if !script.trim().is_empty() => BrowserCommand::Evaluate {
+                        script: script.to_string(),
+                    },
+                    _ => {
+                        return Some(Err(
+                            "`browser_evaluate_script` requires a non-empty `script`.".into(),
+                        ))
+                    }
+                }
+            }
             _ => return None,
         };
         Some(self.bridge.round_trip(command).await)
     }
+}
+
+/// Validate `browser_act` arguments into a panel command.
+fn parse_act_command(args: &str) -> Result<BrowserCommand, String> {
+    let parsed: serde_json::Value = serde_json::from_str(args)
+        .map_err(|error| format!("Invalid {BROWSER_ACT_TOOL} arguments: {error}"))?;
+    let action = parsed
+        .get("action")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    if !matches!(action, "click" | "focus" | "type" | "press" | "select") {
+        return Err(
+            "`browser_act` action must be one of click, focus, type, press, select.".into(),
+        );
+    }
+    let reference = parsed.get("ref").and_then(|value| value.as_u64());
+    let selector = parsed
+        .get("selector")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let target = match (reference, selector) {
+        (Some(number), None) => ActTarget::Ref(number.min(u32::MAX as u64) as u32),
+        (None, Some(selector)) => ActTarget::Selector(selector.to_string()),
+        (Some(_), Some(_)) => {
+            return Err(
+                "`browser_act` takes exactly one of ref or selector, not both.".into(),
+            );
+        }
+        (None, None) => {
+            return Err(
+                "`browser_act` needs a ref from browser_snapshot or a CSS selector.".into(),
+            );
+        }
+    };
+    let text = parsed
+        .get("text")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let key = parsed
+        .get("key")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if matches!(action, "type" | "select") && text.is_none() {
+        return Err(format!("`browser_act` {action} requires `text`."));
+    }
+    if action == "press" && key.is_none() {
+        return Err("`browser_act` press requires `key` (e.g. Enter).".into());
+    }
+    Ok(BrowserCommand::Act {
+        action: action.to_string(),
+        target,
+        text,
+        key,
+    })
 }
 
 #[cfg(test)]
@@ -248,8 +399,7 @@ mod tests {
     }
 
     #[test]
-    fn definitions_cover_all_four_tools() {
-        let definitions = browser_tool_definitions();
+    fn definitions_cover_all_tools() {        let definitions = browser_tool_definitions();
         let names: Vec<_> = definitions
             .iter()
             .map(|def| def.name.as_str())
@@ -260,8 +410,74 @@ mod tests {
                 BROWSER_NAVIGATE_TOOL,
                 BROWSER_BACK_TOOL,
                 BROWSER_RELOAD_TOOL,
-                BROWSER_CURRENT_URL_TOOL
+                BROWSER_CURRENT_URL_TOOL,
+                BROWSER_SNAPSHOT_TOOL,
+                BROWSER_ACT_TOOL,
+                BROWSER_EVALUATE_TOOL,
             ]
         );
+    }
+
+    #[test]
+    fn act_validation_rejects_bad_targets() {
+        assert!(parse_act_command(r#"{"action":"click"}"#).is_err());
+        assert!(parse_act_command(r#"{"action":"click","ref":1,"selector":"a"}"#).is_err());
+        assert!(parse_act_command(r#"{"action":"dance","ref":1}"#).is_err());
+        assert!(parse_act_command(r#"{"action":"type","ref":1}"#).is_err());
+        assert!(parse_act_command(r#"{"action":"press","ref":1}"#).is_err());
+    }
+
+    #[test]
+    fn act_validation_accepts_ref_and_selector() {
+        let command = parse_act_command(r#"{"action":"type","ref":3,"text":"hi"}"#).unwrap();
+        assert!(matches!(
+            command,
+            BrowserCommand::Act { target: ActTarget::Ref(3), .. }
+        ));
+        let command =
+            parse_act_command(r#"{"action":"press","selector":"input","key":"Enter"}"#).unwrap();
+        assert!(matches!(
+            command,
+            BrowserCommand::Act { target: ActTarget::Selector(_), .. }
+        ));
+    }
+
+    #[test]
+    fn browser_tools_survive_core_schema_filter() {
+        // Regression: core_tool_schema_mode strips every non-core schema from
+        // the provider payload. The browser tools must stay model-visible.
+        let dir = tempfile::tempdir().unwrap();
+        let session_file = dir.path().join("session.jsonl");
+        let agent = crate::coding_agent::CodingAgent::new(crate::coding_agent::CodingAgentOptions {
+            api_key: "test-key".into(),
+            account_id: None,
+            model: "gpt-4o".into(),
+            work_dir: dir.path().to_path_buf(),
+            session_file: Some(session_file),
+            system_prompt: Default::default(),
+            agent_config: None,
+            coding_config: None,
+            browser: BrowserBridge::unavailable(),
+        });
+        let names: Vec<String> = agent
+            .agent
+            .configured_tool_definitions()
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect();
+        for tool in [
+            BROWSER_NAVIGATE_TOOL,
+            BROWSER_BACK_TOOL,
+            BROWSER_RELOAD_TOOL,
+            BROWSER_CURRENT_URL_TOOL,
+            BROWSER_SNAPSHOT_TOOL,
+            BROWSER_ACT_TOOL,
+            BROWSER_EVALUATE_TOOL,
+        ] {
+            assert!(
+                names.iter().any(|name| name == tool),
+                "model-visible schemas must include {tool}"
+            );
+        }
     }
 }

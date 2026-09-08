@@ -170,8 +170,12 @@ pub(crate) fn build_system_prompt(options: SystemPromptBuildOptions<'_>) -> Stri
                 "When invoking `subagent`, specify clear custom `instructions` and the minimum required `tools` for each subagent.",
             );
         }
-        if available_tool_names.contains("update_plan") {
+        if available_tool_names.contains("browser_navigate") {
             add_tool_guideline(
+                "To drive the embedded browser panel: open pages with `browser_navigate`, read the page with `browser_snapshot`, then operate elements with `browser_act` using snapshot refs. Refs expire on re-render, so take a fresh snapshot when an act reports a stale ref. Prefer snapshot/act over `browser_evaluate_script`. The panel is visible to the user, so narrate what you open.",
+            );
+        }
+        if available_tool_names.contains("update_plan") {            add_tool_guideline(
                 "For multi-step work, maintain a concise plan with `update_plan`; keep at most one item in progress and skip plans for simple requests.",
             );
             add_tool_guideline(
@@ -327,6 +331,28 @@ mod tests {
         assert!(!build(&[]).contains("AGENTS"));
         assert!(build(&[tool("read_file", "read")]).contains("SKILLS"));
         assert!(build(&[tool("subagent", "delegate")]).contains("AGENTS"));
+    }
+
+    #[test]
+    fn browser_guideline_tracks_browser_tools() {
+        let config = SystemPromptConfig::default();
+        let context = ProjectContext::default();
+        let build = |tools: &[AgentToolDefinition]| {
+            build_system_prompt(SystemPromptBuildOptions {
+                config: &config,
+                work_dir: Path::new("/workspace"),
+                tools,
+                project_context: &context,
+                skill_catalog: None,
+                agent_catalog: None,
+                loaded_extension_count: 0,
+            })
+        };
+
+        assert!(!build(&[]).contains("browser_snapshot"));
+        let with_browser = build(&[tool("browser_navigate", "navigate")]);
+        assert!(with_browser.contains("browser_snapshot"));
+        assert!(with_browser.contains("browser_act"));
     }
 
     #[test]

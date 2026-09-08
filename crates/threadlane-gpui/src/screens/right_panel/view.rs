@@ -122,14 +122,26 @@ impl RightPanelView {
         // Agent browser commands arrive from tokio tool workers, which cannot
         // touch entities directly. The first panel to construct claims the
         // shared receiver and pumps commands into the live browser view.
+        // Script evaluations park here on a oneshot without blocking the UI;
+        // the session side bounds every round-trip with its own timeout.
         if let Some(mut browser_rx) = model.read(cx).browser_bridge.take_receiver() {
             cx.spawn(async move |this, cx| {
                 while let Some(request) = browser_rx.recv().await {
-                    let reply = this
-                        .update(cx, |this, cx| this.apply_browser_command(request.command, cx))
+                    let step = this
+                        .update(cx, |this, cx| {
+                            start_browser_request(this, request.command, cx)
+                        })
                         .unwrap_or_else(|_| {
-                            Err("The browser panel is no longer available.".to_string())
+                            BrowserReply::Ready(Err(
+                                "The browser panel is no longer available.".to_string(),
+                            ))
                         });
+                    let reply = match step {
+                        BrowserReply::Ready(reply) => reply,
+                        BrowserReply::PendingEval(rx) => rx.await.map_err(|_| {
+                            "The browser dropped the evaluation.".to_string()
+                        }).map(|payload| finalize_browser_eval(&payload)),
+                    };
                     let _ = request.reply.send(reply);
                 }
             })
@@ -908,6 +920,19 @@ impl RightPanelView {
         browser.update(cx, |browser, cx| browser.set_visible(visible, cx));
     }
 
+    /// Start a script evaluation against the live view, returning the
+    /// pending result channel. The caller awaits it off the UI thread.
+    fn start_browser_eval(
+        &mut self,
+        script: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<tokio::sync::oneshot::Receiver<String>, String> {
+        let Some(browser) = self.browser.clone() else {
+            return Err("The browser panel is not ready.".to_string());
+        };
+        browser.update(cx, |browser, cx| browser.evaluate_script(script, cx))
+    }
+
     /// Apply one agent browser command on the UI thread. Called from the
     /// bridge pump, never from a tool worker directly.
     fn apply_browser_command(
@@ -960,6 +985,9 @@ impl RightPanelView {
                         url
                     })
                 }
+                // Script-backed commands route through start_browser_eval;
+                // reaching here is a pump bug, not a page problem.
+                _ => Err("Internal browser routing error.".to_string()),
             }
         }
     }
@@ -4090,6 +4118,72 @@ impl Render for RightPanelView {
             .child(self.render_header(cx))
             .child(body)
     }
+}
+
+/// One bridge-pump step: either a finished reply or a pending script
+/// evaluation whose channel the pump awaits without blocking the UI.
+enum BrowserReply {
+    Ready(Result<String, String>),
+    PendingEval(tokio::sync::oneshot::Receiver<String>),
+}
+
+/// Cap for evaluated script results. Snapshot JSON keeps url/title/count up
+/// front so a cut tail still orients the model.
+const MAX_BROWSER_EVAL_CHARS: usize = 8_000;
+
+fn start_browser_request(
+    panel: &mut RightPanelView,
+    command: threadlane_session::BrowserCommand,
+    cx: &mut Context<RightPanelView>,
+) -> BrowserReply {
+    use threadlane_session::BrowserCommand;
+    let script = match &command {
+        BrowserCommand::Snapshot => Some(super::browser::snapshot_js()),
+        BrowserCommand::Act {
+            action,
+            target,
+            text,
+            key,
+        } => {
+            let target_json = match target {
+                threadlane_session::ActTarget::Ref(number) => {
+                    serde_json::json!({"ref": number, "selector": serde_json::Value::Null})
+                }
+                threadlane_session::ActTarget::Selector(selector) => {
+                    serde_json::json!({"ref": serde_json::Value::Null, "selector": selector})
+                }
+            }
+            .to_string();
+            let text_json = serde_json::to_string(text).unwrap_or_else(|_| "null".into());
+            let key_json = serde_json::to_string(key).unwrap_or_else(|_| "null".into());
+            Some(super::browser::act_script(
+                action,
+                &target_json,
+                &text_json,
+                &key_json,
+            ))
+        }
+        BrowserCommand::Evaluate { script } => {
+            Some(super::browser::evaluate_script_wrap(script))
+        }
+        _ => None,
+    };
+    match script {
+        Some(script) => match panel.start_browser_eval(&script, cx) {
+            Ok(rx) => BrowserReply::PendingEval(rx),
+            Err(error) => BrowserReply::Ready(Err(error)),
+        },
+        None => BrowserReply::Ready(panel.apply_browser_command(command, cx)),
+    }
+}
+
+fn finalize_browser_eval(payload: &str) -> String {
+    let inner = super::browser::unwrap_callback_payload(payload);
+    if inner.chars().count() <= MAX_BROWSER_EVAL_CHARS {
+        return inner;
+    }
+    let head: String = inner.chars().take(MAX_BROWSER_EVAL_CHARS).collect();
+    format!("{head}\n[... browser result truncated to {MAX_BROWSER_EVAL_CHARS} characters ...]")
 }
 
 fn convert_node_to_tree_item(node: FileNode, expanded_paths: &HashSet<String>) -> TreeItem {

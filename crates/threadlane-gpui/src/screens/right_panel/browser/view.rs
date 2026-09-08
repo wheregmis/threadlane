@@ -87,6 +87,30 @@ impl BrowserView {
             .filter(|url| !url.is_empty())
     }
 
+    /// Evaluate a synchronous script, resolving with wry's JSON-serialized
+    /// result. The callback fires on the main thread; the caller awaits the
+    /// receiver on a foreground task (never blocking the UI).
+    pub(crate) fn evaluate_script(
+        &self,
+        script: &str,
+        cx: &App,
+    ) -> Result<tokio::sync::oneshot::Receiver<String>, String> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let tx = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
+        self.webview
+            .read(cx)
+            .raw()
+            .evaluate_script_with_callback(script, move |result| {
+                if let Ok(mut slot) = tx.lock() {
+                    if let Some(tx) = slot.take() {
+                        let _ = tx.send(result);
+                    }
+                }
+            })
+            .map_err(|error| format!("Script evaluation failed to start: {error}"))?;
+        Ok(rx)
+    }
+
     pub(crate) fn go_back(&mut self, cx: &mut Context<Self>) {
         self.webview.update(cx, |view, _| {
             let _ = view.back();

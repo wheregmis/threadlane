@@ -82,7 +82,8 @@ pub struct AgentConfig {
     max_tool_output_bytes: Option<usize>,
 
     /// When enabled, restricts the model-visible JSON tool schema to the essential core tools
-    /// (read_file, edit_file_hashline, edit_files_hashline, write_file, run_command, subagent).
+    /// (read_file, edit_file_hashline, edit_files_hashline, write_file, run_command, subagent,
+    /// plus the browser_* panel tools).
     /// Auxiliary tools remain executable directly or via the in-process `dyn` CLI.
     #[serde(default = "default_core_tool_schema_mode")]
     pub(crate) core_tool_schema_mode: bool,

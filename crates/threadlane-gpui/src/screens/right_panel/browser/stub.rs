@@ -19,6 +19,14 @@ impl BrowserView {
         None
     }
 
+    pub(crate) fn evaluate_script(
+        &self,
+        _script: &str,
+        _cx: &App,
+    ) -> Result<tokio::sync::oneshot::Receiver<String>, String> {
+        Err("The embedded browser is available on macOS only.".to_string())
+    }
+
     pub fn set_visible(&mut self, _visible: bool, _cx: &mut Context<Self>) {}
 }
 
