@@ -294,6 +294,19 @@
         }
     }
 
+    fn question_request(id: &str) -> threadlane_session::QuestionRequest {
+        threadlane_session::QuestionRequest {
+            id: id.into(),
+            questions: vec![threadlane_session::QuestionItem {
+                id: "q1".into(),
+                header: "Scope".into(),
+                question: "Which scope should be used?".into(),
+                options: vec!["small".into(), "full".into()],
+                allow_custom: true,
+            }],
+        }
+    }
+
     fn test_session(id: &str, session_file: &Path) -> SessionInfo {
         let work_dir = session_file
             .parent()
@@ -371,6 +384,39 @@
         assert_eq!(deferred.len(), 2);
         assert!(matches!(deferred[0], ChatStreamEvent::Agent { .. }));
         assert!(matches!(deferred[1], ChatStreamEvent::Finished { .. }));
+    }
+
+    #[test]
+    fn active_question_is_noticed_and_released_without_a_runtime() {
+        let mut state = AppState::load_from_registry(Vec::new());
+        let session = test_session("active", Path::new("/project/active.jsonl"));
+        state.active_session_id = Some(session.id.clone());
+        state.active_work_dir = Some(Path::new("/project").to_path_buf());
+        let request = question_request("question-1");
+
+        let changed = state.drain_chat_stream(vec![ChatStreamEvent::Agent {
+            session_id: session.id.clone(),
+            event: AgentEvent::QuestionRequested {
+                request: request.clone(),
+            },
+        }]);
+
+        assert!(changed);
+        assert_eq!(state.pending_questions.get(&session.id), Some(&request));
+        assert!(state.messages.iter().any(|message| {
+            message.role == MessageRole::System
+                && message.content.contains("Which scope should be used?")
+        }));
+        // No runtime is attached in the test, so nothing resolves the request;
+        // in production `resolve_active_question` releases it immediately, and
+        // the Finished arm always drops the pending entry.
+        assert!(!state.resolve_active_question(&request.id));
+        let changed = state.drain_chat_stream(vec![ChatStreamEvent::Finished {
+            session_id: session.id.clone(),
+            session_file: session.session_file.clone(),
+        }]);
+        assert!(changed);
+        assert!(!state.pending_questions.contains_key(&session.id));
     }
 
     #[test]
@@ -3327,4 +3373,111 @@
             .any(|t| t.run_id.as_deref() == Some("run-branch-b")));
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn live_tool_entry(correlation: &str, summary: &str) -> TrajectoryEntry {
+        TrajectoryEntry {
+            seq: None,
+            run_id: None,
+            turn: None,
+            request: None,
+            category: "Tool".into(),
+            summary: summary.into(),
+            detail: String::new(),
+            lane: None,
+            correlation_id: Some(correlation.into()),
+            diagnostics: TrajectoryDiagnostics::default(),
+        }
+    }
+
+    fn file_tool_entry(seq: u64, correlation: &str, summary: &str) -> TrajectoryEntry {
+        TrajectoryEntry {
+            seq: Some(seq),
+            run_id: None,
+            turn: None,
+            request: None,
+            category: "Tool".into(),
+            summary: summary.into(),
+            detail: String::new(),
+            lane: None,
+            correlation_id: Some(correlation.into()),
+            diagnostics: TrajectoryDiagnostics::default(),
+        }
+    }
+
+    #[test]
+    fn hydration_merge_keeps_live_tools_missing_from_snapshot() {
+        let fresh = vec![file_tool_entry(1, "call-1", "read_file finished")];
+        let live = vec![
+            live_tool_entry("call-1", "read_file finished"),
+            live_tool_entry("call-2", "run_command running"),
+        ];
+        let merged = merge_live_trajectory(fresh, &live);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(
+            merged
+                .iter()
+                .filter(|entry| entry.correlation_id.as_deref() == Some("call-1"))
+                .count(),
+            1,
+            "snapshot-covered tools must not duplicate"
+        );
+        assert!(
+            merged
+                .iter()
+                .any(|entry| entry.correlation_id.as_deref() == Some("call-2")),
+            "post-snapshot live tools must survive hydration"
+        );
+    }
+
+    #[test]
+    fn hydration_merge_dedups_uncorrelated_live_entries() {
+        let uncorrelated = |summary: &str| TrajectoryEntry {
+            seq: None,
+            run_id: None,
+            turn: None,
+            request: None,
+            category: "Subagent".into(),
+            summary: summary.into(),
+            detail: String::new(),
+            lane: None,
+            correlation_id: None,
+            diagnostics: TrajectoryDiagnostics::default(),
+        };
+        let mut covered = uncorrelated("Subagent 0 started");
+        covered.seq = Some(7);
+        let live = vec![
+            uncorrelated("Subagent 0 started"),
+            uncorrelated("Subagent 1 started"),
+        ];
+        let merged = merge_live_trajectory(vec![covered], &live);
+        assert_eq!(merged.len(), 2);
+        assert!(
+            merged.iter().any(|entry| entry.summary == "Subagent 1 started"),
+            "post-snapshot live entries must survive hydration"
+        );
+    }
+
+    #[test]
+    fn hydration_merge_subagents_by_identity() {
+        let activity = |batch: u64, task: usize| SubagentActivityInfo {
+            batch_run_id: batch,
+            task_index: task,
+            journal_run_id: None,
+            lane: None,
+            agent: "worker".into(),
+            task: "do things".into(),
+            model: None,
+            status: SubagentActivityStatus::Running,
+            messages: Vec::new(),
+            error: None,
+        };
+        let merged = merge_live_subagents(vec![activity(1, 0)], &[activity(1, 0), activity(1, 1)]);
+        assert_eq!(merged.len(), 2);
+        assert!(
+            merged
+                .iter()
+                .any(|entry| entry.batch_run_id == 1 && entry.task_index == 1),
+            "live subagents missing from the snapshot must survive hydration"
+        );
     }

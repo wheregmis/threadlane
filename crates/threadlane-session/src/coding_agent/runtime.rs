@@ -8,8 +8,8 @@ use super::broker::ManagedProcessRegistry;
 use super::capabilities::{
     build_broker_dispatcher, render_agent_catalog, restored_tool_policy, BrowserCapability,
     ContextCapability,
-    McpCapability, PlanCapability, PrewalkCapability, SkillCapability, SubagentCapability,
-    WasiCapability,
+    McpCapability, PlanCapability, PrewalkCapability, QuestionCapability, SkillCapability,
+    SubagentCapability, WasiCapability,
 };
 use super::harness::{CodingSessionHarness, HarnessWatch, InterruptedSubagentRecoveryState};
 use crate::commands::{execute_slash_command, parse_slash_command, CommandAction};
@@ -17,6 +17,7 @@ use crate::context::ProjectContext;
 use crate::extension_broker::CapabilityDispatcher;
 use crate::plan::SessionPlanStore;
 use crate::policy::ToolPolicy;
+use crate::question::QuestionManager;
 use crate::system_prompt::{build_system_prompt, SystemPromptBuildOptions};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -47,6 +48,7 @@ pub struct CodingAgent {
     pub(crate) broker_dispatcher: Arc<CapabilityDispatcher>,
     managed_processes: ManagedProcessRegistry,
     pub(crate) permission_handle: crate::permission::PermissionHandle,
+    pub(crate) question_handle: crate::question::QuestionHandle,
     agent_work: AgentWorkScheduler,
     mcp_manager: Arc<McpManager>,
     pub(crate) prompt_templates: Option<Vec<crate::prompt_templates::PromptTemplate>>,
@@ -72,6 +74,10 @@ pub struct CodingAgent {
 impl CodingAgent {
     pub(crate) fn permission_handle(&self) -> crate::permission::PermissionHandle {
         self.permission_handle.clone()
+    }
+
+    pub(crate) fn question_handle(&self) -> crate::question::QuestionHandle {
+        self.question_handle.clone()
     }
 
     pub(crate) fn set_tool_intent_recorder(
@@ -548,6 +554,12 @@ impl CodingAgent {
             plan_store: plan_store.clone(),
             event_tx: agent.event_tx.clone(),
         }));
+        let question_manager = QuestionManager::new();
+        let question_handle = question_manager.handle();
+        registry.register(Box::new(QuestionCapability {
+            handle: question_handle.clone(),
+            event_tx: agent.event_tx.clone(),
+        }));
         if let Some(session_file) = options.session_file.clone() {
             registry.register(Box::new(ContextCapability {
                 session_file,
@@ -627,6 +639,7 @@ impl CodingAgent {
             broker_dispatcher,
             managed_processes,
             permission_handle,
+            question_handle,
             agent_work,
             mcp_manager,
             prompt_templates: None,

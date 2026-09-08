@@ -50,6 +50,7 @@ pub struct AppState {
     acp_config_options: HashMap<SessionProjectionKey, Vec<AcpConfigOption>>,
     stashed_prompts: HashMap<String, String>,
     pub(crate) pending_permissions: HashMap<String, threadlane_session::PermissionRequest>,
+    pub(crate) pending_questions: HashMap<String, threadlane_session::QuestionRequest>,
     pub(crate) pending_hydrations: Vec<SessionHydrationRequest>,
     pub(crate) git_statuses: HashMap<PathBuf, threadlane_git::GitStatus>,
     pub(crate) git_prs: HashMap<(PathBuf, String), Option<threadlane_git::GitHubPrInfo>>,
@@ -274,6 +275,7 @@ impl AppState {
             deferred_stream_events: HashMap::new(),
             browser_bridge: threadlane_session::BrowserBridge::channel(),
             pending_permissions: HashMap::new(),
+            pending_questions: HashMap::new(),
             pending_hydrations: Vec::new(),
             git_statuses: HashMap::new(),
             git_prs: HashMap::new(),
@@ -691,7 +693,13 @@ impl AppState {
         self.refresh_available_models();
         self.messages = Arc::new(Vec::new());
         self.active_plan = SessionPlan::default();
-        self.is_generating = false;
+        // Switching to a session that is still generating must keep the
+        // generating state: hydration preserves in-flight streaming rows only
+        // while it is set, and the composer stays gated on it.
+        self.is_generating = self
+            .session_runtimes
+            .get(&session_file)
+            .is_some_and(|runtime| runtime.is_generating());
         self.session_status = Some("Loading session…".into());
         let request = SessionHydrationRequest {
             session_id,
@@ -810,6 +818,29 @@ impl AppState {
         resolved
     }
 
+    /// Releases a pending `ask_question` request without an answer.
+    ///
+    /// There is no answer UI yet, so the request is dismissed immediately and
+    /// surfaced as a visible transcript notice instead of blocking the turn.
+    pub(crate) fn resolve_active_question(&mut self, request_id: &str) -> bool {
+        let Some(session_id) = self.active_session_id.clone() else {
+            return false;
+        };
+        let Some(work_dir) = self.active_work_dir.clone() else {
+            return false;
+        };
+        let session_file = self.session_file(&work_dir, &session_id);
+        let answer = threadlane_session::QuestionAnswer::dismissed(request_id);
+        let resolved = self
+            .session_runtimes
+            .get(&session_file)
+            .is_some_and(|runtime| runtime.resolve_question(request_id, answer));
+        if resolved {
+            self.pending_questions.remove(&session_id);
+        }
+        resolved
+    }
+
     fn session_file(&self, work_dir: &Path, session_id: &str) -> PathBuf {
         self.projects
             .iter()
@@ -866,6 +897,7 @@ impl AppState {
         let session_file = self.session_file(work_dir, session_id);
         self.session_runtimes.remove(&session_file);
         self.pending_permissions.remove(session_id);
+        self.pending_questions.remove(session_id);
         self.deferred_stream_events.remove(session_id);
         self.pending_composer_messages.remove(session_id);
         self.acp_config_options.remove(&Self::projection_key(session_id, &session_file));
@@ -2257,7 +2289,61 @@ impl AppState {
             self.messages = Arc::new(messages);
         }
     }
+}
 
+/// Merge live-recorded trajectory entries over a fresh file projection.
+/// Live entries carry `seq: None`; file entries carry durable sequence
+/// numbers. Tool entries deduplicate on `correlation_id` (the tool call id
+/// both sides record); other live entries deduplicate on category+summary.
+/// Surviving live entries ran after the snapshot, so they append at the end.
+pub(crate) fn merge_live_trajectory(
+    fresh: Vec<TrajectoryEntry>,
+    live: &[TrajectoryEntry],
+) -> Vec<TrajectoryEntry> {    let fresh_correlations: HashSet<String> = fresh
+        .iter()
+        .filter_map(|entry| entry.correlation_id.clone())
+        .collect();
+    let fresh_summaries: HashSet<(String, String)> = fresh
+        .iter()
+        .map(|entry| (entry.category.clone(), entry.summary.clone()))
+        .collect();
+    let mut merged = fresh;
+    for entry in live {
+        if entry.seq.is_some() {
+            continue;
+        }
+        let covered = match entry.correlation_id.as_deref() {
+            Some(correlation) => fresh_correlations.contains(correlation),
+            None => fresh_summaries
+                .contains(&(entry.category.clone(), entry.summary.clone())),
+        };
+        if !covered {
+            merged.push(entry.clone());
+        }
+    }
+    merged
+}
+
+/// Merge live subagent activity over a fresh file projection, keyed by
+/// (batch run id, task index) — the same identity `record_subagent_activity`
+/// deduplicates on.
+pub(crate) fn merge_live_subagents(
+    fresh: Vec<SubagentActivityInfo>,
+    live: &[SubagentActivityInfo],
+) -> Vec<SubagentActivityInfo> {
+    let mut merged = fresh;
+    for activity in live {
+        let covered = merged.iter().any(|entry| {
+            entry.batch_run_id == activity.batch_run_id && entry.task_index == activity.task_index
+        });
+        if !covered {
+            merged.push(activity.clone());
+        }
+    }
+    merged
+}
+
+impl AppState {
     pub(crate) fn apply_session_hydration(
         &mut self,
         session_id: &str,
@@ -2269,11 +2355,29 @@ impl AppState {
         }
         let key = Self::projection_key(session_id, session_file);
         self.active_plan = result.plan;
-        self.trajectory_by_session
-            .insert(key.clone(), result.trajectory);
+        // Hydration snapshots lag live execution: the file is parsed in the
+        // background while tool/subagent events keep arriving, and deferred
+        // replay on session switch already consumed its queue into these maps.
+        // While the runtime is still generating, a wholesale replace would
+        // drop that live activity, so merge it back over the fresh snapshot.
+        let generating = self
+            .session_runtimes
+            .get(session_file)
+            .is_some_and(|runtime| runtime.is_generating());
+        if generating {
+            let live_trajectory = self.trajectory_by_session.remove(&key).unwrap_or_default();
+            self.trajectory_by_session
+                .insert(key.clone(), merge_live_trajectory(result.trajectory, &live_trajectory));
+            let live_subagents = self.subagents_by_session.remove(&key).unwrap_or_default();
+            self.subagents_by_session
+                .insert(key.clone(), merge_live_subagents(result.subagents, &live_subagents));
+        } else {
+            self.trajectory_by_session
+                .insert(key.clone(), result.trajectory);
+            self.subagents_by_session
+                .insert(key.clone(), result.subagents);
+        }
         self.trajectory_epoch = self.trajectory_epoch.wrapping_add(1);
-        self.subagents_by_session
-            .insert(key.clone(), result.subagents);
         self.trajectory_revision = self.trajectory_revision.wrapping_add(1);
         self.diagnostics_by_session
             .insert(key.clone(), result.diagnostics);
@@ -3027,6 +3131,36 @@ impl AppState {
                             changed = true;
                             self.pending_permissions.insert(session_id.clone(), request);
                         }
+                        ChatAgentUpdate::QuestionRequested(request) => {
+                            changed = true;
+                            let summary = request
+                                .questions
+                                .iter()
+                                .map(|item| {
+                                    let options = if item.options.is_empty() {
+                                        String::new()
+                                    } else {
+                                        format!(" [{}]", item.options.join(" / "))
+                                    };
+                                    format!("• {}: {}{}", item.header, item.question, options)
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            self.messages_mut().push(ChatMessageInfo {
+                                id: format!("question-notice-{}", request.id),
+                                role: MessageRole::System,
+                                content: format!(
+                                    "The model asked a question, but question answering is not implemented in the UI yet, so it was dismissed. Reply in chat to answer it.\n{summary}"
+                                ),
+                                tool_activities: Vec::new(),
+                                streaming: false,
+                                reasoning_content: None,
+                                reasoning_expanded: false,
+                            });
+                            self.pending_questions
+                                .insert(session_id.clone(), request.clone());
+                            self.resolve_active_question(&request.id);
+                        }
                         ChatAgentUpdate::Error(error) => {
                             changed = true;
                             self.messages_mut().push(ChatMessageInfo {
@@ -3049,6 +3183,7 @@ impl AppState {
                     session_file,
                 } => {
                     self.pending_permissions.remove(&session_id);
+                    self.pending_questions.remove(&session_id);
                     if self.active_session_id.as_deref() != Some(&session_id) {
                         changed = true;
                         self.deferred_stream_events

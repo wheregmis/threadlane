@@ -15,6 +15,7 @@ mod plan;
 pub mod policy;
 pub mod project_registry;
 pub mod prompt_templates;
+pub mod question;
 pub mod supervisor;
 pub mod system_prompt;
 
@@ -44,6 +45,7 @@ pub use browser::{ActTarget, BrowserBridge, BrowserCommand, BrowserRequest};
 pub use commands::{available_slash_commands, SlashCommandInfo};
 pub use config::CodingAgentConfig;
 pub use permission::{PermissionDecision, PermissionHandle};
+pub use question::QuestionHandle;
 pub use policy::ToolPolicy;
 pub use project_registry::{
     load_project_registry, register_project, save_project_registry, select_project, ProjectRecord,

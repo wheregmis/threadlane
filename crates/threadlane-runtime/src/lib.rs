@@ -34,8 +34,8 @@ pub use config::{AgentConfig, AgentConfigBuilder};
 pub use engine::get_runtime;
 pub use error::AgentError;
 pub use events::{
-    AgentEvent, HarnessMetrics, PermissionRequest, PermissionScope, SubagentProgressUpdate,
-    SubagentRecoveryStatus,
+    AgentEvent, HarnessMetrics, PermissionRequest, PermissionScope, QuestionAnswer, QuestionItem,
+    QuestionItemAnswer, QuestionRequest, SubagentProgressUpdate, SubagentRecoveryStatus,
 };
 pub use harness::{
     has_open_subagent_lanes, interrupted_subagent_lanes, AcceptedRun, DurableEvent, DurablePayload,
