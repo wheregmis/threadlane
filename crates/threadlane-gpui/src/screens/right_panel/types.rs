@@ -103,13 +103,22 @@ pub enum ReviewTab {
 pub enum Surface {
     Review,
     Files,
+    Browser,
 }
 
 impl Surface {
+    pub(crate) fn all() -> Vec<Self> {
+        let mut surfaces = vec![Self::Review, Self::Files];
+        #[cfg(target_os = "macos")]
+        surfaces.push(Self::Browser);
+        surfaces
+    }
+
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Review => "Review",
             Self::Files => "Files",
+            Self::Browser => "Browser",
         }
     }
 
@@ -117,6 +126,7 @@ impl Surface {
         match self {
             Self::Review => IconName::File,
             Self::Files => IconName::Folder,
+            Self::Browser => IconName::Globe,
         }
     }
 }

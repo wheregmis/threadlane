@@ -2,6 +2,7 @@ pub mod acp;
 pub mod acp_bridge;
 pub mod acp_runtime;
 pub mod agents;
+pub mod browser;
 pub mod commands;
 pub mod config;
 pub mod context;
@@ -39,6 +40,7 @@ pub use acp::{
 };
 pub use acp_bridge::{acp_agent_id, acp_model_id, is_acp_model};
 pub use acp_runtime::AcpEngine;
+pub use browser::{BrowserBridge, BrowserCommand, BrowserRequest};
 pub use commands::{available_slash_commands, SlashCommandInfo};
 pub use config::CodingAgentConfig;
 pub use permission::{PermissionDecision, PermissionHandle};

@@ -27,6 +27,7 @@ use crate::screens::next_event_batch;
 use crate::services::watcher::WorkspaceWatcher;
 use crate::state::AppState;
 
+use super::browser::BrowserView;
 use super::draft_pr::{
     draft_pr_prefill, DraftPrContextKey, DraftPrDialogView,
 };
@@ -80,6 +81,7 @@ pub struct RightPanelView {
     saved_content: String,
     is_dirty: bool,
     pending_document: Option<(String, String)>,
+    browser: Option<Entity<BrowserView>>,
     event_tx: tokio::sync::mpsc::UnboundedSender<PanelEvent>,
     _watcher: Option<WorkspaceWatcher>,
     _subscriptions: Vec<Subscription>,
@@ -117,6 +119,23 @@ impl RightPanelView {
         })
         .detach();
 
+        // Agent browser commands arrive from tokio tool workers, which cannot
+        // touch entities directly. The first panel to construct claims the
+        // shared receiver and pumps commands into the live browser view.
+        if let Some(mut browser_rx) = model.read(cx).browser_bridge.take_receiver() {
+            cx.spawn(async move |this, cx| {
+                while let Some(request) = browser_rx.recv().await {
+                    let reply = this
+                        .update(cx, |this, cx| this.apply_browser_command(request.command, cx))
+                        .unwrap_or_else(|_| {
+                            Err("The browser panel is no longer available.".to_string())
+                        });
+                    let _ = request.reply.send(reply);
+                }
+            })
+            .detach();
+        }
+
         let observe_model = cx.observe(&model, |this, _model, cx| {
             this.sync_project(cx);
             cx.notify();
@@ -133,6 +152,10 @@ impl RightPanelView {
                     }
                 },
             );
+        // Eager so agent browser commands always have a live view to act on,
+        // even before the user opens the tab. Hidden until selected.
+        let browser = cx.new(|cx| BrowserView::new(window, cx));
+        browser.update(cx, |browser, cx| browser.set_visible(false, cx));
 
         let mut panel = Self {
             model,
@@ -180,6 +203,7 @@ impl RightPanelView {
             saved_content: String::new(),
             is_dirty: false,
             pending_document: None,
+            browser: Some(browser),
             event_tx,
             _watcher: None,
             _subscriptions: vec![observe_model, tree_subscription],
@@ -349,6 +373,7 @@ impl RightPanelView {
         }
         self.active_surface = Some(surface);
         self.refresh_surface(surface);
+        self.sync_browser_visibility(cx);
         cx.notify();
     }
 
@@ -385,6 +410,9 @@ impl RightPanelView {
                     files,
                     error,
                 });
+            }
+            Surface::Browser => {
+                // The live webview needs no background refresh.
             }
         });
     }
@@ -863,6 +891,89 @@ impl RightPanelView {
         cx.notify();
     }
 
+    fn ensure_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<BrowserView> {
+        if let Some(browser) = &self.browser {
+            return browser.clone();
+        }
+        let browser = cx.new(|cx| BrowserView::new(window, cx));
+        self.browser = Some(browser.clone());
+        browser
+    }
+
+    fn sync_browser_visibility(&mut self, cx: &mut Context<Self>) {
+        let Some(browser) = self.browser.clone() else {
+            return;
+        };
+        let visible = self.active_surface == Some(Surface::Browser);
+        browser.update(cx, |browser, cx| browser.set_visible(visible, cx));
+    }
+
+    /// Apply one agent browser command on the UI thread. Called from the
+    /// bridge pump, never from a tool worker directly.
+    fn apply_browser_command(
+        &mut self,
+        command: threadlane_session::BrowserCommand,
+        cx: &mut Context<Self>,
+    ) -> Result<String, String> {
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (command, cx);
+            return Err("The embedded browser is available on macOS only.".to_string());
+        }
+        #[cfg(target_os = "macos")]
+        {
+            use super::browser::{AddressTarget, resolve_address, search_url};
+            use threadlane_session::BrowserCommand;
+            let Some(browser) = self.browser.clone() else {
+                return Err("The browser panel is not ready.".to_string());
+            };
+            match command {
+                BrowserCommand::Navigate { url } => {
+                    let final_url = match resolve_address(&url) {
+                        None => {
+                            return Err(
+                                "`browser_navigate` requires a non-empty `url`.".to_string()
+                            );
+                        }
+                        Some(AddressTarget::Url(url)) => url,
+                        Some(AddressTarget::Search(query)) => search_url(&query),
+                    };
+                    browser.update(cx, |browser, cx| browser.load_url(&final_url, cx));
+                    // Keep the agent's browsing visible to the user.
+                    self.open_surface(Surface::Browser, cx);
+                    Ok(format!("Opened {final_url} in the browser panel."))
+                }
+                BrowserCommand::Back => {
+                    browser.update(cx, |browser, cx| browser.go_back(cx));
+                    self.open_surface(Surface::Browser, cx);
+                    Ok("Went back in the browser panel.".to_string())
+                }
+                BrowserCommand::Reload => {
+                    browser.update(cx, |browser, cx| browser.reload(cx));
+                    Ok("Reloaded the browser panel.".to_string())
+                }
+                BrowserCommand::CurrentUrl => {
+                    let url = browser.read(cx).current_url(cx).unwrap_or_default();
+                    Ok(if url.is_empty() {
+                        "The browser panel has no page open yet.".to_string()
+                    } else {
+                        url
+                    })
+                }
+            }
+        }
+    }
+
+    fn render_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let browser = self.ensure_browser(window, cx);
+        browser.update(cx, |browser, cx| browser.set_visible(true, cx));
+        div()
+            .flex_1()
+            .min_h_0()
+            .child(browser)
+            .into_any_element()
+    }
+
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
         let active = self.active_surface;
@@ -878,7 +989,7 @@ impl RightPanelView {
                     .flex()
                     .items_center()
                     .gap_1()
-                    .children([Surface::Review, Surface::Files].map(|surface| {
+                    .children(Surface::all().into_iter().map(|surface| {
                         Button::new(SharedString::from(format!(
                             "right-panel-tab-{}",
                             surface.label().to_lowercase()
@@ -938,7 +1049,7 @@ impl RightPanelView {
                             .child("Choose what to show in the right panel"),
                     )
                     .child(div().mt_4().w_full().flex().gap_2().children(
-                        [Surface::Review, Surface::Files].map(|surface| {
+                        Surface::all().into_iter().map(|surface| {
                             Button::new(SharedString::from(format!(
                                 "right-panel-card-{}",
                                 surface.label().to_lowercase()
@@ -3966,6 +4077,7 @@ impl Render for RightPanelView {
                 None => self.render_chooser(cx).into_any_element(),
                 Some(Surface::Review) => self.render_review(cx),
                 Some(Surface::Files) => self.render_files(cx),
+                Some(Surface::Browser) => self.render_browser(window, cx),
             }
         };
         div()

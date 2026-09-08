@@ -1,3 +1,4 @@
+mod browser;
 mod draft_pr;
 #[cfg(test)]
 mod tests;

@@ -158,6 +158,7 @@
                 system_prompt: Default::default(),
                 agent_config: None,
                 coding_config: None,
+                browser: threadlane_session::BrowserBridge::unavailable(),
             };
             let mut original = threadlane_session::CodingAgent::new(options());
             original.set_fact("model", "gpt-4o").unwrap();
@@ -1143,6 +1144,7 @@
                 system_prompt: SystemPromptConfig::default(),
                 agent_config: Some(AgentConfig::default()),
                 coding_config: None,
+                browser: threadlane_session::BrowserBridge::unavailable(),
             },
             provider.clone(),
         );

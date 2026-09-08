@@ -72,8 +72,12 @@ pub struct AppState {
     session_refresh_tx: Sender<PathBuf>,
     pub(crate) session_refresh_rx:
         Option<tokio::sync::mpsc::UnboundedReceiver<(PathBuf, Vec<SessionInfo>)>>,
-    pub(crate) session_runtimes: HashMap<PathBuf, Arc<SessionRuntime>>,
+    pub(crate)     session_runtimes: HashMap<PathBuf, Arc<SessionRuntime>>,
     deferred_stream_events: HashMap<String, Vec<ChatStreamEvent>>,
+    /// Bridge to the embedded browser panel. The channel is created with the
+    /// app; the first constructed right panel claims the receiver and pumps
+    /// agent browser commands into the live view.
+    pub(crate) browser_bridge: threadlane_session::BrowserBridge,
 }
 
 impl Default for AppState {
@@ -268,6 +272,7 @@ impl AppState {
             session_refresh_rx: Some(session_refresh_rx),
             session_runtimes,
             deferred_stream_events: HashMap::new(),
+            browser_bridge: threadlane_session::BrowserBridge::channel(),
             pending_permissions: HashMap::new(),
             pending_hydrations: Vec::new(),
             git_statuses: HashMap::new(),
@@ -286,6 +291,7 @@ impl AppState {
                         work_dir,
                         state.selected_model.clone(),
                         state.model_roles.clone(),
+                        state.browser_bridge.clone(),
                     )
                 }),
             });
@@ -695,6 +701,7 @@ impl AppState {
                 runtime_work_dir,
                 self.selected_model.clone(),
                 self.model_roles.clone(),
+                self.browser_bridge.clone(),
             )),
         };
         self.drain_chat_stream(Vec::new());
@@ -773,6 +780,7 @@ impl AppState {
                 session_file.clone(),
                 self.selected_model.clone(),
                 self.model_roles.clone(),
+                self.browser_bridge.clone(),
             ),
             ExecutionMode::Interactive,
         );

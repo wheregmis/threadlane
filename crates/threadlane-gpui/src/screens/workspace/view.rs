@@ -174,11 +174,11 @@ impl WorkspaceView {
             let runtime_task = request
                 .runtime_options
                 .clone()
-                .map(|(work_dir, model, roles)| {
+                .map(|(work_dir, model, roles, browser)| {
                     let session_file = request.session_file.clone();
                     cx.background_executor().spawn(async move {
                         SessionRuntime::new(
-                            coding_agent_options(work_dir, session_file, model, roles),
+                            coding_agent_options(work_dir, session_file, model, roles, browser),
                             ExecutionMode::Interactive,
                         )
                     })

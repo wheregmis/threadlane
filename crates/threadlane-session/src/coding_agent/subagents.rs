@@ -13,6 +13,8 @@ use super::scheduler::{
     AgentWork, AgentWorkObserver, DeterministicSubagentToolExecutor, SubagentBoundaryObserver,
 };
 use crate::agents::{discover_agents, AgentDefinition, AgentScope};
+#[cfg(test)]
+use crate::browser::BrowserBridge;
 use crate::policy::ToolPolicy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1244,6 +1246,7 @@ mod result_tests {
                     system_prompt: SystemPromptConfig::default(),
                     agent_config: None,
                     coding_config: None,
+                    browser: BrowserBridge::unavailable(),
                 });
                 agent
                     .begin_harness_run(AgentMessage::user("parent task", vec![]))

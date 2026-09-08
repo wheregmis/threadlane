@@ -1,3 +1,4 @@
+use crate::browser::BrowserBridge;
 use crate::system_prompt::SystemPromptConfig;
 use serde::Serialize;
 use std::path::PathBuf;
@@ -16,6 +17,9 @@ pub struct CodingAgentOptions {
     pub agent_config: Option<threadlane_runtime::AgentConfig>,
     /// Coding-agent-specific configuration (subagents, WASI, etc.).
     pub coding_config: Option<crate::config::CodingAgentConfig>,
+    /// Handle to the embedded browser panel. Unavailable in headless/test
+    /// contexts; the browser tools then report a helpful error.
+    pub browser: BrowserBridge,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -3,6 +3,8 @@
 // exercised only in tests; dead-code warnings are intentionally suppressed.
 #![allow(dead_code)]
 use crate::coding_agent::harness::CodingSessionHarness;
+#[cfg(test)]
+use crate::browser::BrowserBridge;
 use crate::coding_agent::{CodingAgentOptions, SubagentCancellationGuard};
 use crate::controller::{ExecutionMode, SessionController};
 use crate::project_registry::{
@@ -1526,6 +1528,7 @@ mod tests {
             system_prompt: Default::default(),
             agent_config: None,
             coding_config: None,
+            browser: BrowserBridge::unavailable(),
         });
 
         let results = agent
@@ -1571,6 +1574,7 @@ mod tests {
                     system_prompt: Default::default(),
                     agent_config: None,
                     coding_config: None,
+                    browser: BrowserBridge::unavailable(),
                 },
             )
             .unwrap();
@@ -1790,6 +1794,7 @@ mod tests {
                     system_prompt: Default::default(),
                     agent_config: None,
                     coding_config: None,
+                    browser: BrowserBridge::unavailable(),
                 },
             )
             .unwrap();

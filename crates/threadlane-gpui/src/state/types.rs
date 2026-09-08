@@ -313,7 +313,12 @@ pub(crate) struct SessionHydrationRequest {
     pub(crate) session_file: PathBuf,
     pub(crate) reload_messages: bool,
     /// The first tuple item is the effective worktree directory for agent execution.
-    pub(crate) runtime_options: Option<(PathBuf, String, threadlane_session::ModelRoles)>,
+    pub(crate) runtime_options: Option<(
+        PathBuf,
+        String,
+        threadlane_session::ModelRoles,
+        threadlane_session::BrowserBridge,
+    )>,
 }
 
 /// The complete durable UI projection built from one JSONL store parse.

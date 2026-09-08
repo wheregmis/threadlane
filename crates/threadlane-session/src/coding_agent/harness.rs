@@ -2605,40 +2605,84 @@ impl CodingSessionHarness {
             return Ok(());
         }
         let result_entry_id = format!("subagent-result-{run_id}-{tool_call_id}");
-        let assistant_entry_id = match self
+        // Prefer the assistant entry that actually declares this call: the
+        // reducer validates `(call_id, name)` at `calls[tool_index]`, so both
+        // the entry and the index must come from the declaration. Counting
+        // prior `ToolStarted` records is only correct within a single batch;
+        // across turns it points past the end of a one-call declaration and
+        // faults with "tool intent does not match assistant declaration".
+        let declaring = self
             .store
             .entries()
             .iter()
             .rev()
             .find(|entry| {
-                entry.lane == lane && matches!(entry.message, AgentMessage::Assistant { .. })
+                entry.lane == lane
+                    && matches!(
+                        &entry.message,
+                        AgentMessage::Assistant { tool_calls: Some(calls), .. }
+                        if calls.iter().any(|call| call.id == tool_call_id)
+                    )
             })
-            .map(|entry| entry.id.clone())
-        {
+            .map(|entry| entry.id.clone());
+        let assistant_entry_id = match declaring {
             Some(id) => id,
-            None => {
-                let assistant_msg = AgentMessage::Assistant {
-                    content: None,
-                    tool_calls: None,
-                    stop_reason: None,
-                    deferred_handle: None,
-                };
-                self.append_message_to_lane(lane, run_id, assistant_msg)?
-            }
+            None => match self
+                .store
+                .entries()
+                .iter()
+                .rev()
+                .find(|entry| {
+                    entry.lane == lane && matches!(entry.message, AgentMessage::Assistant { .. })
+                })
+                .map(|entry| entry.id.clone())
+            {
+                Some(id) => id,
+                None => {
+                    let assistant_msg = AgentMessage::Assistant {
+                        content: None,
+                        tool_calls: None,
+                        stop_reason: None,
+                        deferred_handle: None,
+                    };
+                    self.append_message_to_lane(lane, run_id, assistant_msg)?
+                }
+            },
         };
-        let tool_index = self
-            .store
-            .records()
-            .iter()
-            .filter(|record| match record {
-                HarnessRecord::ToolStarted {
-                    run_id: r_id,
-                    lane: r_lane,
+        let tool_index = match self.store.entries().iter().find(|entry| {
+            entry.id == assistant_entry_id
+                && matches!(
+                    &entry.message,
+                    AgentMessage::Assistant { tool_calls: Some(calls), .. }
+                    if calls.iter().any(|call| call.id == tool_call_id)
+                )
+        }) {
+            Some(entry) => match &entry.message {
+                AgentMessage::Assistant {
+                    tool_calls: Some(calls),
                     ..
-                } => r_id == run_id && r_lane == lane,
-                _ => false,
-            })
-            .count();
+                } => calls
+                    .iter()
+                    .position(|call| call.id == tool_call_id)
+                    .unwrap_or(0),
+                _ => 0,
+            },
+            // No declaring entry (synthesized empty assistant): keep the
+            // count-based ordinal so sequential undeclared tools stay unique.
+            None => self
+                .store
+                .records()
+                .iter()
+                .filter(|record| match record {
+                    HarnessRecord::ToolStarted {
+                        run_id: r_id,
+                        lane: r_lane,
+                        ..
+                    } => r_id == run_id && r_lane == lane,
+                    _ => false,
+                })
+                .count(),
+        };
         let record = HarnessRecord::ToolStarted {
             id: format!("tool-started-{run_id}-{tool_call_id}"),
             seq: harness_next_seq(self.store.store()),
@@ -5535,5 +5579,45 @@ mod tests {
         } else {
             panic!("expected ProviderResponseAttached");
         }
+    }
+
+    #[test]
+    fn sequential_single_call_turns_start_tools_on_lane() {
+        // Regression for session_1788900913874865000: the second ACP tool
+        // faulted the gate with "tool intent does not match assistant
+        // declaration" because the lane path derived the tool index from the
+        // count of prior ToolStarted records instead of the declaring entry.
+        let (_dir, path) = temp_session();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        harness
+            .begin_run("run-1", AgentMessage::user("prompt", vec![]))
+            .unwrap();
+        for call_id in ["call-a", "call-b"] {
+            // ACP flow: one assistant entry declaring exactly one call.
+            harness
+                .append_message(AgentMessage::Assistant {
+                    content: None,
+                    tool_calls: Some(vec![threadlane_provider::openai::ToolCall {
+                        id: call_id.into(),
+                        r#type: "function".into(),
+                        function: threadlane_provider::openai::ToolCallFunction {
+                            name: "read".into(),
+                            arguments: "{}".into(),
+                        },
+                        thought_signature: None,
+                    }]),
+                    stop_reason: None,
+                    deferred_handle: None,
+                })
+                .unwrap();
+            harness
+                .tool_started_on_lane("main", "run-1", call_id, "read", serde_json::json!({}))
+                .unwrap();
+        }
+        let state = Reducer::reduce(&harness.store).unwrap();
+        let tools = &state.lane("main").unwrap().tools;
+        assert_eq!(tools.len(), 2);
+        assert_ne!(tools[0].assistant_entry_id, tools[1].assistant_entry_id);
+        assert_eq!((tools[0].tool_index, tools[1].tool_index), (0, 0));
     }
 }

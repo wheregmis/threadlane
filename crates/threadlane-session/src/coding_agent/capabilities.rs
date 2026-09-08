@@ -6,6 +6,7 @@ use super::context_snapshots::{ContextSnapshotToolExecutor, MAX_SUBAGENT_CONTEXT
 use super::scheduler::AgentWorkScheduler;
 use super::subagents::{AgentRunner, MAX_SUBAGENT_TASKS};
 use crate::agents::{discover_agents, AgentScope};
+use crate::browser::{BrowserBridge, BrowserToolExecutor};
 use crate::extension_broker::{
     BrokerError, CapabilityDispatcher, HostBrokerRequest, BROKER_API_VERSION,
 };
@@ -170,13 +171,24 @@ impl Capability for WasiCapability {
 
 pub(crate) struct McpCapability {
     pub(crate) mcp_manager: Arc<McpManager>,
-}
-impl Capability for McpCapability {
+}impl Capability for McpCapability {
     fn id(&self) -> &str {
         "mcp"
     }
     fn tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
         vec![self.mcp_manager.clone()]
+    }
+}
+
+pub(crate) struct BrowserCapability {
+    pub(crate) bridge: BrowserBridge,
+}
+impl Capability for BrowserCapability {
+    fn id(&self) -> &str {
+        "browser"
+    }
+    fn tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
+        vec![Arc::new(BrowserToolExecutor::new(self.bridge.clone()))]
     }
 }
 

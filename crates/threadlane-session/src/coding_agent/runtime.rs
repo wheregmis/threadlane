@@ -6,7 +6,8 @@ use super::subagents::*;
 
 use super::broker::ManagedProcessRegistry;
 use super::capabilities::{
-    build_broker_dispatcher, render_agent_catalog, restored_tool_policy, ContextCapability,
+    build_broker_dispatcher, render_agent_catalog, restored_tool_policy, BrowserCapability,
+    ContextCapability,
     McpCapability, PlanCapability, PrewalkCapability, SkillCapability, SubagentCapability,
     WasiCapability,
 };
@@ -562,6 +563,9 @@ impl CodingAgent {
         }));
         registry.register(Box::new(McpCapability {
             mcp_manager: mcp_manager.clone(),
+        }));
+        registry.register(Box::new(BrowserCapability {
+            bridge: options.browser.clone(),
         }));
         let (_wired, errors) = registry.wire_all(&mut agent.tool_dispatcher, &agent.hook_registry);
         for error in &errors {
@@ -1561,6 +1565,7 @@ mod compaction_sync_tests {
         CodingAgentOptions, CompletedSubagentLane, SubagentLaneStatus,
         MAX_PERSISTED_SYSTEM_PROMPT_BYTES,
     };
+    use crate::browser::BrowserBridge;
     use crate::system_prompt::SystemPromptConfig;
     use async_trait::async_trait;
     use std::{
@@ -1646,6 +1651,7 @@ mod compaction_sync_tests {
             system_prompt: SystemPromptConfig::default(),
             agent_config: None,
             coding_config: None,
+            browser: BrowserBridge::unavailable(),
         });
         let harness = agent.harness.as_mut().unwrap();
         let run_id = harness.unique_run_id("snapshot").unwrap();
@@ -1750,6 +1756,7 @@ mod compaction_sync_tests {
             system_prompt: SystemPromptConfig::default(),
             agent_config: None,
             coding_config: None,
+            browser: BrowserBridge::unavailable(),
         });
         agent
             .begin_harness_run(AgentMessage::user("prompt", vec![]))
@@ -1881,6 +1888,7 @@ mod compaction_sync_tests {
                 system_prompt: SystemPromptConfig::default(),
                 agent_config: None,
                 coding_config: None,
+            browser: BrowserBridge::unavailable(),
             },
             provider.clone(),
         );
@@ -2043,6 +2051,7 @@ mod compaction_sync_tests {
                 system_prompt: SystemPromptConfig::default(),
                 agent_config: Some(AgentConfig::default()),
                 coding_config: None,
+            browser: BrowserBridge::unavailable(),
             },
             provider.clone(),
         );
