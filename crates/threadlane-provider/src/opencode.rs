@@ -63,32 +63,19 @@ impl OpenCodeGoClient {
     }
 }
 
-/// Lists bare Zen model ids from the OpenAI-compatible `/models` endpoint.
-///
-/// Results are cached per API key for [`MODELS_CACHE_TTL`]; failures fall back
-/// to [`FALLBACK_MODELS`] so the picker keeps working offline.
-pub async fn fetch_available_models() -> Vec<String> {
-    let api_key = threadlane_auth::load_opencode_api_key().unwrap_or_default();
-    let cache_key = models_cache_key(&api_key);
-    let now = Instant::now();
-    if let Some(models) = MODELS_CACHE
-        .get_or_init(|| StdMutex::new(HashMap::new()))
-        .lock()
-        .ok()
-        .and_then(|cache| {
-            cache
-                .get(&cache_key)
-                .map(|entry| (entry.stored_at, entry.models.clone()))
-        })
-        .filter(|(stored_at, _)| now.duration_since(*stored_at) <= MODELS_CACHE_TTL)
-        .map(|(_, models)| models)
-    {
-        return models;
-    }
+static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+fn http_client() -> &'static reqwest::Client {
+    HTTP_CLIENT.get_or_init(reqwest::Client::new)
+}
+
+async fn fetch_available_models_network(api_key: String, cache_key: u64, now: Instant) -> Vec<String> {
     let base_url = OpenCodeGoClient::get_base_url();
     let url = format!("{}/models", base_url.trim_end_matches('/'));
-    let client = reqwest::Client::new();
-    let mut request = client.get(&url).header(USER_AGENT, "threadlane/1.0");
+    let mut request = http_client()
+        .get(&url)
+        .header(USER_AGENT, "threadlane/1.0")
+        .timeout(std::time::Duration::from_secs(10));
     if !api_key.trim().is_empty() {
         request = request.header(AUTHORIZATION, format!("Bearer {api_key}"));
     }
@@ -124,6 +111,40 @@ pub async fn fetch_available_models() -> Vec<String> {
         }
     }
     FALLBACK_MODELS.iter().map(|model| model.to_string()).collect()
+}
+
+/// Lists bare Zen model ids from the OpenAI-compatible `/models` endpoint.
+///
+/// Results are cached per API key for [`MODELS_CACHE_TTL`]; failures fall back
+/// to [`FALLBACK_MODELS`] so the picker keeps working offline.
+pub async fn fetch_available_models() -> Vec<String> {
+    let api_key = threadlane_auth::load_opencode_api_key().unwrap_or_default();
+    let cache_key = models_cache_key(&api_key);
+    let now = Instant::now();
+    if let Some(models) = MODELS_CACHE
+        .get_or_init(|| StdMutex::new(HashMap::new()))
+        .lock()
+        .ok()
+        .and_then(|cache| {
+            cache
+                .get(&cache_key)
+                .map(|entry| (entry.stored_at, entry.models.clone()))
+        })
+        .filter(|(stored_at, _)| now.duration_since(*stored_at) <= MODELS_CACHE_TTL)
+        .map(|(_, models)| models)
+    {
+        return models;
+    }
+    if tokio::runtime::Handle::try_current().is_ok() {
+        fetch_available_models_network(api_key, cache_key, now).await
+    } else {
+        let handle = threadlane_runtime::get_runtime()
+            .spawn(fetch_available_models_network(api_key, cache_key, now));
+        match handle.await {
+            Ok(models) => models,
+            Err(_) => FALLBACK_MODELS.iter().map(|model| model.to_string()).collect(),
+        }
+    }
 }
 
 #[async_trait]

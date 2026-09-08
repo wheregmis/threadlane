@@ -5210,9 +5210,15 @@ mod tests {
         let cached_sessions = discover_sessions_in_project_cached(&project, &mut cache);
 
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].session_file, worktree_session_file);
+        assert_eq!(
+            sessions[0].session_file,
+            worktree_session_file.canonicalize().unwrap()
+        );
         assert_eq!(sessions[0].work_dir, project.canonicalize().unwrap());
-        assert_eq!(sessions[0].runtime_work_dir, worktree);
+        assert_eq!(
+            sessions[0].runtime_work_dir,
+            worktree.canonicalize().unwrap()
+        );
         assert_eq!(sessions[0].github_issue, Some(issue.clone()));
         assert_eq!(cached_sessions[0].github_issue, Some(issue));
         let messages = compute_session_messages(&sessions[0].session_file).unwrap();

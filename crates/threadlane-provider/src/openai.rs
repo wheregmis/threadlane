@@ -611,20 +611,31 @@ pub(crate) fn is_chat_capable_model(id: &str) -> bool {
     true
 }
 
-pub async fn fetch_available_models(api_key: &str, account_id: Option<&str>) -> Vec<String> {
-    let cache_key = model_cache_key(api_key, account_id);
-    let now = Instant::now();
+fn fallback_models() -> Vec<String> {
+    vec![
+        "gpt-5.6-luna".to_string(),
+        "gpt-5.4".to_string(),
+        "gpt-5.4-mini".to_string(),
+        "gpt-5.5".to_string(),
+        "gpt-5.6-sol".to_string(),
+        "gpt-5.6-terra".to_string(),
+        "gpt-5.3-codex-spark".to_string(),
+        "gpt-4o".to_string(),
+        "gpt-4o-mini".to_string(),
+    ]
+}
+
+async fn fetch_available_models_network(
+    api_key: &str,
+    account_id: Option<&str>,
+    cache_key: u64,
+    now: Instant,
+) -> Vec<String> {
     let cache = MODEL_CACHE.get_or_init(|| StdMutex::new(HashMap::new()));
-    if let Some(models) = cache.lock().ok().and_then(|cache| {
-        cache
-            .get(&cache_key)
-            .and_then(|entry| fresh_models(entry, now))
-    }) {
-        return models.iter().cloned().collect();
-    }
     let mut req = http_client()
         .get("https://api.openai.com/v1/models")
-        .header(AUTHORIZATION, format!("Bearer {api_key}"));
+        .header(AUTHORIZATION, format!("Bearer {api_key}"))
+        .timeout(Duration::from_secs(10));
     if let Some(account_id) = account_id {
         req = req.header("chatgpt-account-id", account_id);
     }
@@ -655,17 +666,33 @@ pub async fn fetch_available_models(api_key: &str, account_id: Option<&str>) -> 
             }
         }
     }
-    vec![
-        "gpt-5.6-luna".to_string(),
-        "gpt-5.4".to_string(),
-        "gpt-5.4-mini".to_string(),
-        "gpt-5.5".to_string(),
-        "gpt-5.6-sol".to_string(),
-        "gpt-5.6-terra".to_string(),
-        "gpt-5.3-codex-spark".to_string(),
-        "gpt-4o".to_string(),
-        "gpt-4o-mini".to_string(),
-    ]
+    fallback_models()
+}
+
+pub async fn fetch_available_models(api_key: &str, account_id: Option<&str>) -> Vec<String> {
+    let cache_key = model_cache_key(api_key, account_id);
+    let now = Instant::now();
+    let cache = MODEL_CACHE.get_or_init(|| StdMutex::new(HashMap::new()));
+    if let Some(models) = cache.lock().ok().and_then(|cache| {
+        cache
+            .get(&cache_key)
+            .and_then(|entry| fresh_models(entry, now))
+    }) {
+        return models.iter().cloned().collect();
+    }
+    if tokio::runtime::Handle::try_current().is_ok() {
+        fetch_available_models_network(api_key, account_id, cache_key, now).await
+    } else {
+        let api_key = api_key.to_string();
+        let account_id = account_id.map(str::to_string);
+        let handle = threadlane_runtime::get_runtime().spawn(async move {
+            fetch_available_models_network(&api_key, account_id.as_deref(), cache_key, now).await
+        });
+        match handle.await {
+            Ok(models) => models,
+            Err(_) => fallback_models(),
+        }
+    }
 }
 
 #[derive(Clone)]
