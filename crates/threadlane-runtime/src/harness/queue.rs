@@ -5,7 +5,7 @@
 
 use crate::types::AgentMessage;
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{BinaryHeap, VecDeque};
 
 use super::QueueKind;
 
@@ -16,16 +16,28 @@ pub enum SteerPriority {
     High = 2,
 }
 
+/// Upper bound per queue so an in-memory staging buffer cannot grow without
+/// limit. Durable scheduling state lives in `QueueEnqueued` harness records;
+/// this buffer is presentation/staging only and never the source of truth.
+pub const MAX_QUEUE_DEPTH: usize = 256;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SteerItem {
     message: AgentMessage,
     priority: SteerPriority,
     timestamp_ms: u128,
+    /// Monotonic tiebreaker: FIFO among equal `(priority, timestamp_ms)` and
+    /// keeps `Ord` consistent with `Eq`.
+    #[serde(default)]
+    seq: u64,
 }
 
 impl PartialEq for SteerItem {
     fn eq(&self, other: &Self) -> bool {
-        self.priority == other.priority && self.timestamp_ms == other.timestamp_ms
+        self.priority == other.priority
+            && self.timestamp_ms == other.timestamp_ms
+            && self.seq == other.seq
+            && self.message == other.message
     }
 }
 
@@ -39,27 +51,49 @@ impl PartialOrd for SteerItem {
 
 impl Ord for SteerItem {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        match self.priority.cmp(&other.priority).reverse() {
-            std::cmp::Ordering::Equal => self.timestamp_ms.cmp(&other.timestamp_ms),
+        // BinaryHeap is a max-heap: the "greatest" item pops first, so
+        // higher priority must compare greater, with earlier timestamps
+        // (and lower seq) winning ties.
+        match self.priority.cmp(&other.priority) {
+            std::cmp::Ordering::Equal => match other.timestamp_ms.cmp(&self.timestamp_ms) {
+                std::cmp::Ordering::Equal => other.seq.cmp(&self.seq),
+                ord => ord,
+            },
             ord => ord,
         }
     }
 }
 
-/// A per-lane in-memory message queue supporting steering and follow-ups.
+/// Per-lane in-memory staging queue for steering and follow-ups.
+///
+/// This buffer is not durable: scheduled work that must survive restarts
+/// belongs in `QueueEnqueued` harness records. Every sub-queue can be
+/// drained (`pop_steer` / `pop_follow_up` / `pop_next_run` / `pop`), so a
+/// filled steer lane no longer leaks behind a test-only drain.
 #[derive(Debug, Clone, Default)]
 pub struct LaneQueue {
-    steer: Vec<SteerItem>,
+    steer: BinaryHeap<SteerItem>,
     follow_up: VecDeque<AgentMessage>,
     next_run: VecDeque<AgentMessage>,
+    next_seq: u64,
 }
 
 impl LaneQueue {
     pub fn enqueue(&mut self, kind: QueueKind, message: AgentMessage) {
         match kind {
             QueueKind::Steer => self.enqueue_steer_with_priority(message, SteerPriority::Normal),
-            QueueKind::FollowUp => self.follow_up.push_back(message),
-            QueueKind::NextRun => self.next_run.push_back(message),
+            QueueKind::FollowUp => {
+                if self.follow_up.len() >= MAX_QUEUE_DEPTH {
+                    self.follow_up.pop_front();
+                }
+                self.follow_up.push_back(message);
+            }
+            QueueKind::NextRun => {
+                if self.next_run.len() >= MAX_QUEUE_DEPTH {
+                    self.next_run.pop_front();
+                }
+                self.next_run.push_back(message);
+            }
         }
     }
 
@@ -68,29 +102,63 @@ impl LaneQueue {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.saturating_add(1);
         self.steer.push(SteerItem {
             message,
             priority,
             timestamp_ms,
+            seq,
         });
-        self.steer.sort();
+        // Bound the heap by evicting the lowest-priority oldest item, which
+        // is the most expensive to locate; overflow is unexpected (durable
+        // records are the real queue), so keep this path simple.
+        if self.steer.len() > MAX_QUEUE_DEPTH {
+            let mut items = std::mem::take(&mut self.steer).into_vec();
+            if let Some(victim) = items
+                .iter()
+                .enumerate()
+                .min_by(|(_, a), (_, b)| {
+                    a.priority
+                        .cmp(&b.priority)
+                        .then_with(|| a.timestamp_ms.cmp(&b.timestamp_ms))
+                        .then_with(|| a.seq.cmp(&b.seq))
+                })
+                .map(|(index, _)| index)
+            {
+                items.swap_remove(victim);
+            }
+            self.steer = items.into_iter().collect();
+        }
     }
 
-    #[cfg(test)]
-    fn pop_steer(&mut self) -> Option<AgentMessage> {
-        if self.steer.is_empty() {
-            None
-        } else {
-            Some(self.steer.remove(0).message)
-        }
+    pub fn pop_steer(&mut self) -> Option<AgentMessage> {
+        self.steer.pop().map(|item| item.message)
     }
 
     pub fn pop_follow_up(&mut self) -> Option<AgentMessage> {
         self.follow_up.pop_front()
     }
 
+    pub fn pop_next_run(&mut self) -> Option<AgentMessage> {
+        self.next_run.pop_front()
+    }
+
+    /// Drain the next item for one queue kind.
+    pub fn pop(&mut self, kind: QueueKind) -> Option<AgentMessage> {
+        match kind {
+            QueueKind::Steer => self.pop_steer(),
+            QueueKind::FollowUp => self.pop_follow_up(),
+            QueueKind::NextRun => self.pop_next_run(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.steer.len() + self.follow_up.len() + self.next_run.len()
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.steer.is_empty() && self.follow_up.is_empty() && self.next_run.is_empty()
+        self.len() == 0
     }
 }
 

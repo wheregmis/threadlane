@@ -240,8 +240,8 @@ pub struct GitFile {
     pub(crate) status: String,
     pub(crate) index_status: char,
     pub(crate) worktree_status: char,
-    pub(crate) staged: bool,
-    pub(crate) unstaged: bool,
+    pub staged: bool,
+    pub unstaged: bool,
     pub additions: u32,
     pub deletions: u32,
 }

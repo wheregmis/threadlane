@@ -10,6 +10,7 @@ use std::fs;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::SystemTime;
 
 #[cfg(test)]
 thread_local! {
@@ -56,9 +57,32 @@ impl Drop for WriterClaim {
     }
 }
 
+/// Registry key for the writer lease. The session file itself usually does
+/// not exist yet on first open, so canonicalizing the file path directly
+/// fails and different spellings (`a.jsonl` vs `./a.jsonl`, symlinked
+/// parents) would split into independent gates and lock files. Canonicalize
+/// the parent directory (which must exist for the file to be openable) and
+/// join the file name instead.
+pub(crate) fn canonical_writer_key(path: &Path) -> PathBuf {
+    if let (Some(parent), Some(name)) = (
+        path.parent().filter(|p| !p.as_os_str().is_empty()),
+        path.file_name(),
+    ) {
+        if let Ok(canonical_parent) = parent.canonicalize() {
+            return canonical_parent.join(name);
+        }
+    }
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    std::env::current_dir()
+        .map(|cwd| cwd.join(path))
+        .unwrap_or_else(|_| path.to_path_buf())
+}
+
 fn writer_claim(path: &Path) -> io::Result<Arc<WriterClaim>> {
     static CLAIMS: OnceLock<Mutex<HashMap<PathBuf, Weak<WriterClaim>>>> = OnceLock::new();
-    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let canonical = canonical_writer_key(path);
     let lock_path = canonical.with_extension("harness.lock");
     let claims = CLAIMS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut claims = claims
@@ -436,6 +460,8 @@ pub struct JsonlStore {
     preferred_leaf: Option<String>,
     session_file_len: u64,
     harness_file_len: u64,
+    session_mtime: Option<SystemTime>,
+    harness_mtime: Option<SystemTime>,
     /// Highest sequence across entries and records, maintained incrementally
     /// so sequence allocation does not rescan the whole file.
     max_seq: u64,
@@ -475,8 +501,9 @@ impl JsonlStore {
             .lock()
             .map_err(|_| io::Error::other("writer claim poisoned"))?;
         let (session_id, preferred_leaf, entries, records) = Self::load_parts(&path)?;
-        let session_file_len = file_len(&path)?;
-        let harness_file_len = file_len(&path.with_extension("harness.jsonl"))?;
+        let (session_file_len, session_mtime) = file_fingerprint(&path)?;
+        let (harness_file_len, harness_mtime) =
+            file_fingerprint(&path.with_extension("harness.jsonl"))?;
         // Mirrors SessionStore::facts over the freshly parsed record stream.
         let mut fact_seed = std::collections::BTreeMap::new();
         for record in &records {
@@ -516,6 +543,8 @@ impl JsonlStore {
             preferred_leaf,
             session_file_len,
             harness_file_len,
+            session_mtime,
+            harness_mtime,
             max_seq,
             entry_ids,
             record_ids,
@@ -584,14 +613,24 @@ impl JsonlStore {
     }
 
     fn refresh_file_lengths(&mut self) -> io::Result<()> {
-        self.session_file_len = file_len(&self.path)?;
-        self.harness_file_len = file_len(&self.path.with_extension("harness.jsonl"))?;
+        let (session_len, session_mtime) = file_fingerprint(&self.path)?;
+        let (harness_len, harness_mtime) =
+            file_fingerprint(&self.path.with_extension("harness.jsonl"))?;
+        self.session_file_len = session_len;
+        self.session_mtime = session_mtime;
+        self.harness_file_len = harness_len;
+        self.harness_mtime = harness_mtime;
         Ok(())
     }
 
     fn is_fresh(&self) -> io::Result<bool> {
-        Ok(self.session_file_len == file_len(&self.path)?
-            && self.harness_file_len == file_len(&self.path.with_extension("harness.jsonl"))?)
+        let (session_len, session_mtime) = file_fingerprint(&self.path)?;
+        let (harness_len, harness_mtime) =
+            file_fingerprint(&self.path.with_extension("harness.jsonl"))?;
+        Ok(self.session_file_len == session_len
+            && self.session_mtime == session_mtime
+            && self.harness_file_len == harness_len
+            && self.harness_mtime == harness_mtime)
     }
 
     fn load_parts(path: &Path) -> io::Result<(String, Option<String>, Vec<Entry>, Vec<Record>)> {
@@ -774,8 +813,8 @@ impl SessionStore for JsonlStore {
         entry.seq = self.next_seq();
         self.reduction.entry_guard(&entry)?;
         append_json_line(&self.path, &entry, SyncPolicy::All)?;
-        self.session_file_len =
-            file_len(&self.path).map_err(|error| ReduceError::Storage(error.to_string()))?;
+        (self.session_file_len, self.session_mtime) = file_fingerprint(&self.path)
+            .map_err(|error| ReduceError::Storage(error.to_string()))?;
         if entry.lane == "main" {
             let leaf = entry.id.clone();
             self.preferred_leaf = Some(leaf.clone());
@@ -819,8 +858,8 @@ impl SessionStore for JsonlStore {
         record = record.with_seq(self.next_seq());
         self.reduction.record_guard(&record)?;
         append_json_line(&self.path, &record, record.sync_policy())?;
-        self.session_file_len =
-            file_len(&self.path).map_err(|error| ReduceError::Storage(error.to_string()))?;
+        (self.session_file_len, self.session_mtime) = file_fingerprint(&self.path)
+            .map_err(|error| ReduceError::Storage(error.to_string()))?;
         self.reduction.commit_record(&record);
         self.max_seq = record.seq();
         self.record_ids.insert(record.id().to_owned());
@@ -1090,10 +1129,12 @@ fn prepare_append_boundary(file: &mut fs::File) -> io::Result<()> {
     file.write_all(b"\n")
 }
 
-fn file_len(path: &Path) -> io::Result<u64> {
+/// Length plus mtime so a same-length truncate-and-rewrite is still detected
+/// as stale. Missing files fingerprint as zero length with no mtime.
+fn file_fingerprint(path: &Path) -> io::Result<(u64, Option<SystemTime>)> {
     match fs::metadata(path) {
-        Ok(metadata) => Ok(metadata.len()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0),
+        Ok(metadata) => Ok((metadata.len(), metadata.modified().ok())),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok((0, None)),
         Err(error) => Err(error),
     }
 }

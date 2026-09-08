@@ -314,24 +314,47 @@ pub fn project_trajectory<S: SessionStore>(store: &S) -> SessionTrajectory {
     let mut requests: Vec<RequestTrajectory> = Vec::new();
     let mut current_request: Option<RequestTrajectory> = None;
     let mut request_index = 0u32;
+    // Per-request dedup sets for mutated files/commands (O(1) instead of a
+    // linear `contains` scan per tool). Reset whenever a new request opens.
+    let mut seen_files: HashSet<String> = HashSet::new();
+    let mut seen_commands: HashSet<String> = HashSet::new();
 
-    // Collect all chronological journal events (entries & records sorted by seq)
+    // Merge the two seq-ordered streams in linear time instead of
+    // concatenating and re-sorting (O(n log n)). All stores keep entries and
+    // records in seq order (JsonlStore assigns at append and sorts records on
+    // load; SqliteStore loads ORDER BY seq), with entries winning ties to
+    // match the previous stable sort.
     #[derive(Clone)]
     enum JournalItem<'a> {
         Entry(&'a Entry),
         Record(&'a Record),
     }
-    let mut journal: Vec<JournalItem> = Vec::new();
-    for entry in store.entries() {
-        journal.push(JournalItem::Entry(entry));
+    #[cfg(debug_assertions)]
+    {
+        debug_assert!(store.entries().windows(2).all(|w| w[0].seq <= w[1].seq));
+        debug_assert!(store.records().windows(2).all(|w| {
+            w[0].seq() <= w[1].seq()
+        }));
     }
-    for record in store.records() {
-        journal.push(JournalItem::Record(record));
+    let mut journal: Vec<JournalItem> = Vec::with_capacity(store.entries().len() + store.records().len());
+    {
+        let mut entries = store.entries().iter().peekable();
+        let mut records = store.records().iter().peekable();
+        loop {
+            let take_entry = match (entries.peek(), records.peek()) {
+                (Some(e), Some(r)) => e.seq <= r.seq(),
+                (Some(_), None) => true,
+                (None, _) => false,
+            };
+            if take_entry {
+                journal.push(JournalItem::Entry(entries.next().expect("peeked entry")));
+            } else if records.peek().is_some() {
+                journal.push(JournalItem::Record(records.next().expect("peeked record")));
+            } else {
+                break;
+            }
+        }
     }
-    journal.sort_by_key(|item| match item {
-        JournalItem::Entry(e) => e.seq,
-        JournalItem::Record(r) => r.seq(),
-    });
 
     for item in journal {
         match item {
@@ -344,6 +367,8 @@ pub fn project_trajectory<S: SessionStore>(store: &S) -> SessionTrajectory {
                             req.status = RequestStatus::Completed;
                             requests.push(req);
                         }
+                        seen_files.clear();
+                        seen_commands.clear();
                         request_index += 1;
                         let root_ref = TrajectoryRef {
                             seq: entry.seq,
@@ -671,12 +696,12 @@ pub fn project_trajectory<S: SessionStore>(store: &S) -> SessionTrajectory {
                             req.tool_calls_count += 1;
                             if let Some(mutated) = extract_mutated_files(tool_name, effective_args)
                             {
-                                if !req.files_mutated.contains(&mutated) {
+                                if seen_files.insert(mutated.clone()) {
                                     req.files_mutated.push(mutated);
                                 }
                             }
                             if let Some(cmd) = extract_command(tool_name, effective_args) {
-                                if !req.commands_executed.contains(&cmd) {
+                                if seen_commands.insert(cmd.clone()) {
                                     req.commands_executed.push(cmd);
                                 }
                             }

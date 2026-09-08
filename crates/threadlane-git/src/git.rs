@@ -978,6 +978,16 @@ pub fn unstage_file(work_dir: &Path, path: &str) -> Result<(), GitError> {
     Ok(())
 }
 
+pub fn stage_all(work_dir: &Path) -> Result<(), GitError> {
+    command(work_dir, &["add", "-A"])?;
+    Ok(())
+}
+
+pub fn unstage_all(work_dir: &Path) -> Result<(), GitError> {
+    command(work_dir, &["restore", "--staged", "."])?;
+    Ok(())
+}
+
 pub(crate) fn validate_diff_path(work_dir: &Path, path: &str) -> Result<(), GitError> {
     let invalid = || GitError::new(
         work_dir,

@@ -753,6 +753,8 @@ impl RightPanelView {
             GitAction::Push => "Pushing…".to_string(),
             GitAction::Pull => "Pulling from origin…".to_string(),
             GitAction::Fetch => "Fetching origin…".to_string(),
+            GitAction::StageAll => "Staging all changes…".to_string(),
+            GitAction::UnstageAll => "Unstaging all changes…".to_string(),
             GitAction::CreatePullRequest => "Creating pull request…".to_string(),
             GitAction::Checkout(b) => format!("Switching to {b}…"),
             GitAction::CheckoutStash(b) => format!("Stashing changes & switching to {b}…"),
@@ -799,6 +801,12 @@ impl RightPanelView {
                     }
                     GitAction::Fetch => {
                         threadlane_git::fetch(&work_dir).map_err(|e| e.to_string())?;
+                    }
+                    GitAction::StageAll => {
+                        threadlane_git::stage_all(&work_dir).map_err(|e| e.to_string())?;
+                    }
+                    GitAction::UnstageAll => {
+                        threadlane_git::unstage_all(&work_dir).map_err(|e| e.to_string())?;
                     }
                     GitAction::CreatePullRequest => {
                         action_message = Some(
@@ -1214,10 +1222,10 @@ impl RightPanelView {
             .as_ref()
             .map(|root| root.join(&path).display().to_string());
         let status = file.status_char().to_string();
-        let status_color = match file.status_char() {
-            'A' | '?' => theme.success,
-            'D' => theme.danger,
-            _ => theme.warning,
+        let (status_bg, status_color) = match file.status_char() {
+            'A' | '?' => (theme.success.opacity(0.15), theme.success),
+            'D' => (theme.danger.opacity(0.15), theme.danger),
+            _ => (theme.warning.opacity(0.15), theme.warning),
         };
         let context_path = path.clone();
         div()
@@ -1285,8 +1293,11 @@ impl RightPanelView {
                     })
                     .child(
                         div()
-                            .size(px(16.0))
+                            .size(px(18.0))
                             .rounded_sm()
+                            .border_1()
+                            .border_color(status_color.opacity(0.35))
+                            .bg(status_bg)
                             .flex()
                             .items_center()
                             .justify_center()
@@ -1870,6 +1881,10 @@ impl RightPanelView {
                 })
         });
 
+        let staged_count = self.review_files.iter().filter(|f| f.staged).count();
+        let unstaged_count = self.review_files.iter().filter(|f| f.unstaged).count();
+        let has_staged = staged_count > 0;
+
         let selection_bar = (total_files > 0).then(|| {
             div()
                 .flex()
@@ -1892,10 +1907,10 @@ impl RightPanelView {
                                 .on_click(cx.listener(move |this, checked, _window, cx| {
                                     if *checked {
                                         this.selected_files = this
-                                            .review_files
-                                            .iter()
-                                            .map(|f| f.path.clone())
-                                            .collect();
+                                             .review_files
+                                             .iter()
+                                             .map(|f| f.path.clone())
+                                             .collect();
                                     } else {
                                         this.selected_files.clear();
                                     }
@@ -1930,7 +1945,31 @@ impl RightPanelView {
                                 .child(format!("−{selected_deletions}"))
                                 .with_variant(TagVariant::Danger)
                                 .small(),
-                        ),
+                        )
+                        .child(
+                            Button::new("git-stage-all-btn")
+                                .label("Stage All")
+                                .ghost()
+                                .xsmall()
+                                .disabled(self.git_busy || unstaged_count == 0)
+                                .tooltip("Stage all changes (git add -A)")
+                                .on_click(cx.listener(|this, _event, window, cx| {
+                                    this.run_git_action(GitAction::StageAll, window, cx);
+                                })),
+                        )
+                        .when(has_staged, |row| {
+                            row.child(
+                                Button::new("git-unstage-all-btn")
+                                    .label("Unstage All")
+                                    .ghost()
+                                    .xsmall()
+                                    .disabled(self.git_busy)
+                                    .tooltip("Unstage all changes (git restore --staged .)")
+                                    .on_click(cx.listener(|this, _event, window, cx| {
+                                        this.run_git_action(GitAction::UnstageAll, window, cx);
+                                    })),
+                            )
+                        }),
                 )
         });
 
@@ -1988,12 +2027,19 @@ impl RightPanelView {
             "Commit & push".to_string()
         };
 
+        let commit_val = self.commit_message_input.read(cx).value();
+        let first_line = commit_val.lines().next().unwrap_or("");
+        let subject_len = first_line.chars().count();
+        let counter_color = if subject_len > 72 {
+            theme.danger
+        } else if subject_len > 50 {
+            theme.warning
+        } else {
+            theme.muted_foreground
+        };
+
         let commit_footer = div()
             .flex_none()
-            .border_t_1()
-            .border_color(theme.border)
-            .bg(theme.title_bar)
-            .p_3()
             .flex()
             .flex_col()
             .gap_2()
@@ -2004,10 +2050,29 @@ impl RightPanelView {
                     .justify_between()
                     .child(
                         div()
-                            .text_xs()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.muted_foreground)
-                            .child("COMMIT"),
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.muted_foreground)
+                                    .child("COMMIT"),
+                            )
+                            .when(subject_len > 0, |header| {
+                                header.child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(counter_color)
+                                        .child(if subject_len > 72 {
+                                            format!("{subject_len}/72 (too long)")
+                                        } else {
+                                            format!("{subject_len}/50")
+                                        }),
+                                )
+                            }),
                     )
                     .child(
                         Button::new("git-generate-message")
@@ -2354,6 +2419,7 @@ impl RightPanelView {
         let history_active = self.review_tab == ReviewTab::History;
         let total_changes = self.review_files.len();
 
+        let staged_in_tab = self.review_files.iter().filter(|f| f.staged).count();
         let review_sub_tabs = div()
             .flex()
             .items_center()
@@ -2398,22 +2464,41 @@ impl RightPanelView {
                     )
                     .children((total_changes > 0).then(|| {
                         div()
-                            .px_1p5()
-                            .py_0p5()
-                            .rounded_full()
-                            .bg(if changes_active {
-                                theme.muted
-                            } else {
-                                theme.muted.opacity(0.5)
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .px_1p5()
+                                    .py_0p5()
+                                    .rounded_full()
+                                    .bg(if changes_active {
+                                        theme.muted
+                                    } else {
+                                        theme.muted.opacity(0.5)
+                                    })
+                                    .text_xs()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(if changes_active {
+                                        theme.foreground
+                                    } else {
+                                        theme.muted_foreground
+                                    })
+                                    .child(format!("{total_changes}")),
+                            )
+                            .when(staged_in_tab > 0, |badge| {
+                                badge.child(
+                                    div()
+                                        .px_1p5()
+                                        .py_0p5()
+                                        .rounded_full()
+                                        .bg(theme.success.opacity(0.15))
+                                        .text_xs()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(theme.success)
+                                        .child(format!("{staged_in_tab} staged")),
+                                )
                             })
-                            .text_xs()
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(if changes_active {
-                                theme.foreground
-                            } else {
-                                theme.muted_foreground
-                            })
-                            .child(format!("{total_changes}"))
                     })),
             )
             .child(

@@ -80,17 +80,24 @@ impl SessionIdGenerator {
                 }
             })
             .collect::<String>();
-        let kind = kind
+        let mut kind = kind
             .trim()
             .replace(|character: char| !character.is_ascii_alphanumeric(), "-");
+        if kind.is_empty() {
+            kind.push_str("id");
+        }
         let base = format!("{session}-{kind}");
+        // One hash build so probing is O(1) per candidate instead of O(n).
+        let used: std::collections::HashSet<&str> =
+            used_ids.iter().map(String::as_str).collect();
         let mut counter = 1u64;
         loop {
             let candidate = format!("{base}-{counter}");
-            if !used_ids.iter().any(|used| used == &candidate) {
+            if !used.contains(candidate.as_str()) {
                 return candidate;
             }
             counter = counter.saturating_add(1);
+            debug_assert!(counter > 1, "runaway id probe");
         }
     }
 }

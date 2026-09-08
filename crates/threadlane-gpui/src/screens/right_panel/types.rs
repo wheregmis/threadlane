@@ -128,6 +128,8 @@ pub enum GitAction {
     Push,
     Pull,
     Fetch,
+    StageAll,
+    UnstageAll,
     #[allow(dead_code)]
     CreatePullRequest,
     Checkout(String),

@@ -8,9 +8,9 @@ use base64::Engine as _;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants, Toggle, ToggleVariants};
-use gpui_component::collapsible::Collapsible;
 use gpui_component::hover_card::HoverCard;
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_component::spinner::Spinner;
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_component::notification::Notification;
 use gpui_component::popover::Popover;
@@ -238,6 +238,8 @@ pub struct ChatListView {
     context_meter_open: bool,
     subagents_popover_open: bool,
     selected_subagent_run_id: Option<String>,
+    copied_code_block: Option<(String, std::time::Instant)>,
+    expanded_tool_aggregates: HashSet<String>,
     _subscriptions: Vec<Subscription>,
 }
 async fn next_chat_stream_batch(
@@ -476,6 +478,8 @@ impl ChatListView {
             context_meter_open: false,
             subagents_popover_open: false,
             selected_subagent_run_id: None,
+            copied_code_block: None,
+            expanded_tool_aggregates: HashSet::new(),
             _subscriptions: vec![sub1, sub2, sub3, sub_editor],
         }
     }
@@ -2394,23 +2398,37 @@ impl ChatListView {
                                 })
                             }))
                             .when(!streaming, |actions| {
+                                let block_key = format!("copy-code-{msg_id}-{block_index}");
+                                let is_copied = self.copied_code_block.as_ref().is_some_and(|(id, time)| {
+                                    id == &block_key && time.elapsed() < std::time::Duration::from_secs(2)
+                                });
+                                let copy_code_key = block_key.clone();
                                 actions.child(
-                                    Button::new(SharedString::from(format!(
-                                        "copy-code-{msg_id}-{block_index}"
-                                    )))
-                                    .icon(IconName::Copy)
-                                    .xsmall()
-                                    .ghost()
-                                    .tooltip("Copy code to clipboard")
-                                    .on_click(move |_event, window, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            copy_code.clone(),
-                                        ));
-                                        window.push_notification(
-                                            Notification::info("Code copied to clipboard"),
-                                            cx,
-                                        );
-                                    }),
+                                    Button::new(SharedString::from(block_key))
+                                        .icon(if is_copied {
+                                            IconName::Check
+                                        } else {
+                                            IconName::Copy
+                                        })
+                                        .xsmall()
+                                        .ghost()
+                                        .tooltip(if is_copied {
+                                            "Copied!"
+                                        } else {
+                                            "Copy code to clipboard"
+                                        })
+                                        .when(is_copied, |btn| btn.text_color(theme.success))
+                                        .on_click(cx.listener(move |this, _event, window, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                copy_code.clone(),
+                                            ));
+                                            this.copied_code_block = Some((copy_code_key.clone(), std::time::Instant::now()));
+                                            window.push_notification(
+                                                Notification::info("Code copied to clipboard"),
+                                                cx,
+                                            );
+                                            cx.notify();
+                                        })),
                                 )
                             }),
                     ),
@@ -2447,44 +2465,54 @@ impl ChatListView {
         let model = self.model.clone();
         let msg_id = msg.id.clone();
 
-        let icon_element = div()
-            .text_xs()
-            .text_color(if is_streaming {
-                theme.primary
+        let approx_tokens = (reasoning.len() + 3) / 4;
+        let token_badge = Tag::new()
+            .child(if is_streaming {
+                "thinking…".to_string()
             } else {
-                theme.muted_foreground
+                format!("~{approx_tokens} tokens")
             })
-            .child("✦")
-            .into_any_element();
+            .small()
+            .with_variant(TagVariant::Secondary);
 
         let header = div()
             .id(SharedString::from(format!("reasoning-toggle-{}", msg.id)))
-            .h(px(28.0))
-            .px_1()
-            .rounded_md()
+            .h(px(32.0))
+            .px_2()
+            .rounded_lg()
             .flex()
             .items_center()
-            .gap_2()
+            .justify_between()
             .cursor_pointer()
-            .hover(|s| s.bg(theme.muted))
+            .hover(|s| s.bg(theme.muted.opacity(0.5)))
             .child(
                 div()
-                    .w(px(18.0))
-                    .flex_none()
-                    .text_center()
-                    .child(icon_element),
-            )
-            .child(
-                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
                     .min_w_0()
-                    .flex_1()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child(if is_streaming {
-                        "Thinking…"
-                    } else {
-                        "Thought process"
-                    }),
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(if is_streaming {
+                                theme.primary
+                            } else {
+                                theme.muted_foreground
+                            })
+                            .child("✦"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.muted_foreground)
+                            .child(if is_streaming {
+                                "Thinking…"
+                            } else {
+                                "Thought process"
+                            }),
+                    )
+                    .child(token_badge),
             )
             .child(
                 Icon::new(if is_expanded {
@@ -2504,14 +2532,14 @@ impl ChatListView {
 
         let detail = is_expanded.then(|| {
             let container = div()
-                .ml(px(26.0))
-                .mt_1()
-                .p_2()
-                .max_h(px(300.0))
+                .mx_2()
+                .mb_2()
+                .p_2p5()
+                .max_h(px(340.0))
                 .rounded_md()
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.title_bar)
+                .border_t_1()
+                .border_color(theme.border.opacity(0.4))
+                .bg(theme.secondary.opacity(0.3))
                 .text_xs()
                 .text_color(theme.muted_foreground)
                 .overflow_y_scrollbar();
@@ -2527,10 +2555,170 @@ impl ChatListView {
         });
 
         Some(
-            Collapsible::new()
-                .open(is_expanded)
+            div()
+                .w_full()
+                .min_w_0()
+                .rounded_lg()
+                .border_1()
+                .border_color(theme.border.opacity(0.6))
+                .bg(theme.title_bar)
                 .child(header)
-                .when_some(detail, |c, content| c.content(content))
+                .children(detail)
+                .into_any_element(),
+        )
+    }
+
+    fn render_tool_activities_block(
+        &mut self,
+        msg_id: &str,
+        tools: &[ToolActivityInfo],
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if tools.is_empty() {
+            return None;
+        }
+        if tools.len() == 1 {
+            return Some(self.render_tool_activity(&tools[0], cx).into_any_element());
+        }
+
+        let mut reads = 0;
+        let mut edits = 0;
+        let mut runs = 0;
+        let mut others = 0;
+        let mut has_error = false;
+        let mut has_running = false;
+        for t in tools {
+            if t.category == "Error" {
+                has_error = true;
+            } else if t.category == "Working" || t.category == "Thinking" {
+                has_running = true;
+            }
+            match t.title.as_str() {
+                "read_file" | "view_file" | "grep_search" | "find_by_name" | "list_dir" => reads += 1,
+                "write_to_file" | "replace_file_content" | "apply_diff" | "edit_file" => edits += 1,
+                "run_command" | "execute" => runs += 1,
+                _ => others += 1,
+            }
+        }
+
+        let mut parts = Vec::new();
+        if reads > 0 {
+            parts.push(format!("inspected {reads} file{}", if reads == 1 { "" } else { "s" }));
+        }
+        if edits > 0 {
+            parts.push(format!("edited {edits} file{}", if edits == 1 { "" } else { "s" }));
+        }
+        if runs > 0 {
+            parts.push(format!("ran {runs} command{}", if runs == 1 { "" } else { "s" }));
+        }
+        if others > 0 {
+            parts.push(format!("{others} other tool{}", if others == 1 { "" } else { "s" }));
+        }
+        let summary = if parts.is_empty() {
+            format!("Ran {} tools", tools.len())
+        } else {
+            let mut s = parts.join(", ");
+            if let Some(c) = s.get_mut(0..1) {
+                c.make_ascii_uppercase();
+            }
+            s
+        };
+
+        let group_key = format!("tool-group-{msg_id}");
+        let is_expanded = if has_running {
+            !self.expanded_tool_aggregates.contains(&format!("collapsed-{group_key}"))
+        } else {
+            self.expanded_tool_aggregates.contains(&format!("expanded-{group_key}"))
+        };
+
+        let theme = cx.theme().colors;
+        let status_icon = if has_running {
+            Spinner::new().xsmall().color(theme.primary).into_any_element()
+        } else if has_error {
+            Icon::new(IconName::CircleX).xsmall().text_color(theme.danger).into_any_element()
+        } else {
+            Icon::new(IconName::CircleCheck).xsmall().text_color(theme.success).into_any_element()
+        };
+
+        let toggle_key = group_key.clone();
+        let toggle_has_running = has_running;
+        let header = div()
+            .id(SharedString::from(format!("tool-toggle-{msg_id}")))
+            .h(px(28.0))
+            .px_2()
+            .rounded_md()
+            .bg(theme.muted.opacity(0.25))
+            .hover(|s| s.bg(theme.muted.opacity(0.5)))
+            .flex()
+            .items_center()
+            .justify_between()
+            .cursor_pointer()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .min_w_0()
+                    .child(status_icon)
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.muted_foreground)
+                            .truncate()
+                            .child(summary),
+                    )
+                    .child(
+                        Tag::new()
+                            .child(format!("{} tools", tools.len()))
+                            .small()
+                            .with_variant(TagVariant::Secondary),
+                    ),
+            )
+            .child(
+                Icon::new(if is_expanded {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                })
+                .xsmall()
+                .text_color(theme.muted_foreground),
+            )
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                if toggle_has_running {
+                    let key = format!("collapsed-{toggle_key}");
+                    if !this.expanded_tool_aggregates.remove(&key) {
+                        this.expanded_tool_aggregates.insert(key);
+                    }
+                } else {
+                    let key = format!("expanded-{toggle_key}");
+                    if !this.expanded_tool_aggregates.remove(&key) {
+                        this.expanded_tool_aggregates.insert(key);
+                    }
+                }
+                cx.notify();
+            }));
+
+        let tool_rows = tools.iter().map(|t| self.render_tool_activity(t, cx)).collect::<Vec<_>>();
+        let detail_rows = is_expanded.then(|| {
+            div()
+                .flex()
+                .flex_col()
+                .pl_2()
+                .mt_1()
+                .border_l_2()
+                .border_color(theme.border.opacity(0.4))
+                .children(tool_rows)
+        });
+
+        Some(
+            div()
+                .w_full()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(header)
+                .children(detail_rows)
                 .into_any_element(),
         )
     }
@@ -2606,12 +2794,13 @@ impl ChatListView {
             }
             MessageRole::Assistant => {
                 let reasoning_element = self.render_reasoning_block(msg, cx);
-                let tool_elements: Vec<_> = msg
+                let filtered_tools: Vec<ToolActivityInfo> = msg
                     .tool_activities
                     .iter()
                     .filter(|tool| tool.title != "update_plan")
-                    .map(|tool| self.render_tool_activity(tool, cx))
+                    .cloned()
                     .collect();
+                let tools_element = self.render_tool_activities_block(&msg.id, &filtered_tools, cx);
 
                 div()
                     .w_full()
@@ -2681,7 +2870,7 @@ impl ChatListView {
                             } else {
                                 None
                             })
-                            .children(tool_elements)
+                            .children(tools_element)
                             .context_menu({
                                 let content = msg.content.clone();
                                 move |menu, _window, _cx| {

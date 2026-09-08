@@ -437,9 +437,21 @@ impl SidebarView {
             .child(
                 Button::new("new-task-btn")
                     .icon(IconName::Plus)
-                    .label("New Task")
-                    .ghost()
+                    .label("New Session")
+                    .outline()
+                    .small()
                     .w_full()
+                    .justify_between()
+                    .child(
+                        div()
+                            .px_1p5()
+                            .py(px(0.5))
+                            .rounded_sm()
+                            .bg(theme.muted)
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("⌘N"),
+                    )
                     .on_click(move |_event, window, cx| {
                         window.dispatch_action(
                             Box::new(crate::screens::workspace::BeginNewTask),
@@ -630,12 +642,18 @@ impl SidebarView {
                     .flex()
                     .flex_none()
                     .items_center()
-                    .gap(px(3.0))
-                    .px_1()
+                    .gap(px(3.5))
+                    .px_1p5()
+                    .py(px(0.5))
                     .rounded_full()
-                    .bg(theme.warning.opacity(0.12))
+                    .bg(theme.warning.opacity(0.15))
                     .text_color(theme.warning)
-                    .child(Icon::new(IconName::Info).xsmall())
+                    .child(
+                        div()
+                            .size(px(6.0))
+                            .rounded_full()
+                            .bg(theme.warning),
+                    )
                     .child(
                         div()
                             .text_xs()
@@ -650,10 +668,11 @@ impl SidebarView {
                     .flex()
                     .flex_none()
                     .items_center()
-                    .gap(px(4.0))
-                    .px_1()
+                    .gap(px(3.5))
+                    .px_1p5()
+                    .py(px(0.5))
                     .rounded_full()
-                    .bg(theme.primary.opacity(0.08))
+                    .bg(theme.primary.opacity(0.12))
                     .text_color(theme.primary)
                     .child(Spinner::new().xsmall().color(theme.primary))
                     .child(
@@ -670,12 +689,18 @@ impl SidebarView {
                     .flex()
                     .flex_none()
                     .items_center()
-                    .gap(px(3.0))
-                    .px_1()
+                    .gap(px(3.5))
+                    .px_1p5()
+                    .py(px(0.5))
                     .rounded_full()
                     .bg(theme.success.opacity(0.12))
                     .text_color(theme.success)
-                    .child(Icon::new(IconName::CircleCheck).xsmall())
+                    .child(
+                        div()
+                            .size(px(6.0))
+                            .rounded_full()
+                            .bg(theme.success),
+                    )
                     .child(
                         div()
                             .text_xs()
@@ -895,12 +920,13 @@ impl SidebarView {
         }
 
         if session.is_worktree {
+            let branch_display = session.git_branch.as_deref().unwrap_or("worktree");
             let (background, foreground, tooltip) = if session.worktree_available {
                 (
                     theme.secondary,
                     theme.muted_foreground,
                     format!(
-                        "Local worktree\nChecked out at {}",
+                        "Local worktree on branch '{branch_display}'\nChecked out at {}",
                         session.runtime_work_dir.display()
                     ),
                 )
@@ -909,7 +935,7 @@ impl SidebarView {
                     theme.warning.opacity(0.12),
                     theme.warning,
                     format!(
-                        "Worktree unavailable\nNot checked out locally\nRecorded path: {}\nSession history remains available",
+                        "Worktree unavailable\nBranch: '{branch_display}'\nNot checked out locally\nRecorded path: {}\nSession history remains available",
                         session.runtime_work_dir.display()
                     ),
                 )
@@ -920,6 +946,7 @@ impl SidebarView {
                     session.id
                 )))
                 .icon(Icon::default().path("icons/git/branch.svg"))
+                .label(branch_display.to_string())
                 .tooltip(tooltip)
                 .ghost()
                 .xsmall()
