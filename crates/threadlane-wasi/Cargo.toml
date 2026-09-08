@@ -9,9 +9,7 @@ threadlane-runtime = { version = "0.1.0", path = "../threadlane-runtime" }
 wasmi = "1.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-md5 = "0.8"
 async-trait = "0.1"
-directories = "6.0"
 
 [dev-dependencies]
 tempfile = "3.10"
