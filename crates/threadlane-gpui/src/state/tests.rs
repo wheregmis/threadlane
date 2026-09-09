@@ -939,7 +939,13 @@
                 work_dir.clone(),
                 issue_ref(77),
                 "Prompt failure".into(),
-                |_, _| Err("prompt acceptance failed".into()),
+                |_, prompt| {
+                    assert!(prompt.contains("push the issue branch to origin"));
+                    assert!(prompt.contains("create a draft pull request"));
+                    assert!(prompt.contains("automatically without asking for confirmation"));
+                    assert!(!prompt.contains("Do not push or publish anything"));
+                    Err("prompt acceptance failed".into())
+                },
             )
             .unwrap_err();
 
