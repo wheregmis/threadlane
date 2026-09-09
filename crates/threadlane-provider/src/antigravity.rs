@@ -399,7 +399,15 @@ impl AntigravityClient {
                 "Antigravity API error ({status}, runtime model {runtime_model}): {}",
                 safe_error_text(&text)
             );
-            if !matches!(status.as_u16(), 403 | 404 | 429 | 500 | 502 | 503 | 504) {
+            // 4xx errors (e.g. 429 RESOURCE_EXHAUSTED / quota, 401 Unauthorized, 403
+            // Forbidden, 404 model not found) from the production endpoint are
+            // authoritative account responses and must not be masked by falling back
+            // to internal daily sandbox endpoints (which may not host the same model
+            // and would surface a misleading 404).
+            if status.is_client_error() {
+                break;
+            }
+            if !matches!(status.as_u16(), 500 | 502 | 503 | 504) {
                 break;
             }
         }
@@ -569,6 +577,36 @@ fn antigravity_headers(token: &str) -> reqwest::header::HeaderMap {
     headers
 }
 
+fn runtime_model_override(model: &str, effort: &str) -> Option<String> {
+    let raw = std::env::var("ANTIGRAVITY_RUNTIME_MODEL_MAP_JSON").ok()?;
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let value: Value = serde_json::from_str(raw).ok()?;
+    // Supports {"public-model": {"effort": "runtime", "*": "fallback"}}
+    // and flat {"public-model:effort": "runtime", "public-model": "runtime"}.
+    if let Some(flat) = value
+        .get(format!("{model}:{effort}"))
+        .and_then(Value::as_str)
+    {
+        return Some(flat.to_string());
+    }
+    if let Some(entry) = value.get(model) {
+        if let Some(runtime) = entry.as_str() {
+            return Some(runtime.to_string());
+        }
+        if let Some(mapped) = entry
+            .get(effort)
+            .or_else(|| entry.get("*"))
+            .and_then(Value::as_str)
+        {
+            return Some(mapped.to_string());
+        }
+    }
+    None
+}
+
 fn resolve_runtime_model(model_id: &str, effort: &str) -> String {
     if let Ok(model) = std::env::var("ANTIGRAVITY_RUNTIME_MODEL") {
         if !model.trim().is_empty() {
@@ -576,6 +614,9 @@ fn resolve_runtime_model(model_id: &str, effort: &str) -> String {
         }
     }
     let model = model_id.strip_prefix("antigravity/").unwrap_or(model_id);
+    if let Some(mapped) = runtime_model_override(model, effort) {
+        return mapped;
+    }
     match model {
         "gemini-3.7-flash" => match effort {
             "medium" => "gemini-3.7-flash-medium",
@@ -1354,6 +1395,21 @@ mod tests {
             resolve_runtime_model("claude-opus-4-6", "high"),
             "claude-opus-4-6-thinking"
         );
+    }
+
+    #[test]
+    fn runtime_model_map_env_overrides_without_code_changes() {
+        std::env::set_var(
+            "ANTIGRAVITY_RUNTIME_MODEL_MAP_JSON",
+            r#"{"new-model": {"ultra": "new-model-ultra", "*": "new-model-default"}}"#,
+        );
+        assert_eq!(runtime_model_override("new-model", "ultra"), Some("new-model-ultra".into()));
+        assert_eq!(runtime_model_override("new-model", "low"), Some("new-model-default".into()));
+        assert_eq!(
+            resolve_runtime_model("antigravity/new-model", "ultra"),
+            "new-model-ultra"
+        );
+        std::env::remove_var("ANTIGRAVITY_RUNTIME_MODEL_MAP_JSON");
     }
 
     #[test]

@@ -1,3 +1,5 @@
+#![recursion_limit = "8192"]
+
 pub mod adapters;
 pub mod app;
 pub mod assets;

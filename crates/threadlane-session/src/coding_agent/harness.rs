@@ -1577,6 +1577,7 @@ impl CodingSessionHarness {
                                         .unwrap_or_else(|| "Tool execution cancelled.".into()),
                                     is_error: true,
                                     terminate: false,
+                                    images: Vec::new(),
                                 },
                             )?;
                             any_provisioned = true;
@@ -1585,14 +1586,15 @@ impl CodingSessionHarness {
                 }
             }
             if any_provisioned {
-                let _ = self.refresh();
+                self.refresh().map_err(|error| error.to_string())?;
             }
+            // Best-effort abort request; reconcile errors are observed below
+            // but must not skip the terminal lifecycle record.
             let _ = self.store.request_abort(run_id);
             let _ = self.store.drive_to_completion();
             let _ = self.refresh();
             if self.store.reconcile_abort_run(run_id).is_ok() {
                 let _ = self.store.drive_to_completion();
-                return Ok(());
             }
         }
 
@@ -1990,6 +1992,19 @@ impl CodingSessionHarness {
         self.ensure_fresh()?;
         let state = Reducer::reduce(&self.store).map_err(|error| error.to_string())?;
         let attempt = state.lane("main").map(|lane| lane.attempts);
+        let finished_ids: std::collections::HashSet<&str> = self
+            .store
+            .records()
+            .iter()
+            .filter_map(|candidate| match candidate {
+                HarnessRecord::ProviderRequestFinished {
+                    run_id: finished_run_id,
+                    request_id: Some(finished_request_id),
+                    ..
+                } if finished_run_id == run_id => Some(finished_request_id.as_str()),
+                _ => None,
+            })
+            .collect();
         let unfinished_requests = self
             .store
             .records()
@@ -2001,16 +2016,7 @@ impl CodingSessionHarness {
                     request_id: Some(request_id),
                     ..
                 } if provider_run_id == run_id
-                    && !self.store.records().iter().any(|candidate| {
-                        matches!(
-                            candidate,
-                            HarnessRecord::ProviderRequestFinished {
-                                run_id: finished_run_id,
-                                request_id: Some(finished_request_id),
-                                ..
-                            } if finished_run_id == run_id && finished_request_id == request_id
-                        )
-                    }) =>
+                    && !finished_ids.contains(request_id.as_str()) =>
                 {
                     Some((*attempt, request_id.clone()))
                 }
@@ -2096,7 +2102,7 @@ impl CodingSessionHarness {
             .store
             .entries()
             .iter()
-            .filter(|entry| entry.seq > start_seq)
+            .filter(|entry| entry.seq > start_seq && entry.lane == "main")
             .find_map(|entry| {
                 matches!(&entry.message, AgentMessage::Assistant { .. }).then_some(entry.id.clone())
             })
@@ -2117,7 +2123,9 @@ impl CodingSessionHarness {
                 })
         });
         let had_result_entry = result_entry_id.is_some();
-        let entry_id = result_entry_id.unwrap_or_else(|| format!("abort-entry-{run_id}"));
+        let seq_hint = self.next_seq();
+        let entry_id =
+            result_entry_id.unwrap_or_else(|| format!("abort-entry-{run_id}-{seq_hint}"));
         let has_abort_entry = self.store.entries().iter().any(|entry| {
             entry.id == entry_id
                 && matches!(
@@ -2129,10 +2137,11 @@ impl CodingSessionHarness {
                 )
         });
         if !had_result_entry && !has_abort_entry {
+            let attempt_seq = self.next_seq();
             self.store
                 .append_record_gated(HarnessRecord::StepAttempt {
-                    id: format!("abort-attempt-{run_id}"),
-                    seq: self.next_seq(),
+                    id: format!("abort-attempt-{run_id}-{attempt_seq}"),
+                    seq: attempt_seq,
                     lane: "main".into(),
                     timestamp: timestamp(),
                     run_id: run_id.clone(),
@@ -2180,8 +2189,12 @@ impl CodingSessionHarness {
 
     /// Append a user/assistant/tool message as a harness entry on the main
     /// lane.
+    ///
+    /// Consecutive identical messages are legitimate (e.g. two `"hello"`
+    /// user turns), so no last-entry content dedup is applied. Idempotency
+    /// for tool results is handled by deterministic entry ids below.
     pub(crate) fn append_message(&mut self, message: AgentMessage) -> Result<String, String> {
-        self.append_message_inner(message, true, false)
+        self.append_message_inner(message, false, false)
     }
 
     /// Append a message discovered while reconciling the provider transcript.
@@ -2209,20 +2222,16 @@ impl CodingSessionHarness {
     fn append_message_inner(
         &mut self,
         message: AgentMessage,
-        deduplicate_last_entry: bool,
+        _deduplicate_last_entry: bool,
         context_restoration: bool,
     ) -> Result<String, String> {
         self.ensure_fresh()?;
-        if deduplicate_last_entry {
-            if let Some(entry) = self.store.entries().last() {
-                if entry.message == message {
-                    return Ok(entry.id.clone());
-                }
-            }
-        }
-        let parent_id = Reducer::reduce(&self.store)
-            .ok()
-            .and_then(|state| state.lane("main").and_then(|lane| lane.leaf_id.clone()))
+        // Single reduce + one id set replaces the previous double-reduce
+        // and nested `entries.iter().any` scans.
+        let reduced = Reducer::reduce(&self.store).ok();
+        let main_lane = reduced.as_ref().and_then(|state| state.lane("main"));
+        let parent_id = main_lane
+            .and_then(|lane| lane.leaf_id.clone())
             .or_else(|| {
                 self.store
                     .entries()
@@ -2231,6 +2240,12 @@ impl CodingSessionHarness {
                     .find(|entry| entry.lane == "main")
                     .map(|entry| entry.id.clone())
             });
+        let entry_ids: std::collections::HashSet<&str> = self
+            .store
+            .entries()
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect();
         let seq = self.next_seq();
         let terminate = matches!(
             &message,
@@ -2240,13 +2255,8 @@ impl CodingSessionHarness {
             }
         );
         let id = match &message {
-            AgentMessage::Assistant { .. } => Reducer::reduce(&self.store)
-                .ok()
-                .and_then(|state| {
-                    state
-                        .lane("main")
-                        .and_then(|lane| lane.open_operation.clone())
-                })
+            AgentMessage::Assistant { .. } => main_lane
+                .and_then(|lane| lane.open_operation.clone())
                 .and_then(|run_id| {
                     self.store
                         .records()
@@ -2258,11 +2268,7 @@ impl CodingSessionHarness {
                                 result_entry_id,
                                 ..
                             } if record_run_id == &run_id
-                                && !self
-                                    .store
-                                    .entries()
-                                    .iter()
-                                    .any(|entry| entry.id == result_entry_id.as_str()) =>
+                                && !entry_ids.contains(result_entry_id.as_str()) =>
                             {
                                 Some(result_entry_id.clone())
                             }
@@ -2276,11 +2282,12 @@ impl CodingSessionHarness {
         // Tool completions are recorded both by the execution lifecycle and
         // by the model-visible transcript.  They may be separated by other
         // journal records, so checking only the last entry is insufficient.
-        if self
-            .store
-            .entries()
-            .iter()
-            .any(|entry| entry.id == id && entry.message == message)
+        if entry_ids.contains(id.as_str())
+            && self
+                .store
+                .entries()
+                .iter()
+                .any(|entry| entry.id == id && entry.message == message)
         {
             return Ok(id);
         }
@@ -2599,40 +2606,84 @@ impl CodingSessionHarness {
             return Ok(());
         }
         let result_entry_id = format!("subagent-result-{run_id}-{tool_call_id}");
-        let assistant_entry_id = match self
+        // Prefer the assistant entry that actually declares this call: the
+        // reducer validates `(call_id, name)` at `calls[tool_index]`, so both
+        // the entry and the index must come from the declaration. Counting
+        // prior `ToolStarted` records is only correct within a single batch;
+        // across turns it points past the end of a one-call declaration and
+        // faults with "tool intent does not match assistant declaration".
+        let declaring = self
             .store
             .entries()
             .iter()
             .rev()
             .find(|entry| {
-                entry.lane == lane && matches!(entry.message, AgentMessage::Assistant { .. })
+                entry.lane == lane
+                    && matches!(
+                        &entry.message,
+                        AgentMessage::Assistant { tool_calls: Some(calls), .. }
+                        if calls.iter().any(|call| call.id == tool_call_id)
+                    )
             })
-            .map(|entry| entry.id.clone())
-        {
+            .map(|entry| entry.id.clone());
+        let assistant_entry_id = match declaring {
             Some(id) => id,
-            None => {
-                let assistant_msg = AgentMessage::Assistant {
-                    content: None,
-                    tool_calls: None,
-                    stop_reason: None,
-                    deferred_handle: None,
-                };
-                self.append_message_to_lane(lane, run_id, assistant_msg)?
-            }
+            None => match self
+                .store
+                .entries()
+                .iter()
+                .rev()
+                .find(|entry| {
+                    entry.lane == lane && matches!(entry.message, AgentMessage::Assistant { .. })
+                })
+                .map(|entry| entry.id.clone())
+            {
+                Some(id) => id,
+                None => {
+                    let assistant_msg = AgentMessage::Assistant {
+                        content: None,
+                        tool_calls: None,
+                        stop_reason: None,
+                        deferred_handle: None,
+                    };
+                    self.append_message_to_lane(lane, run_id, assistant_msg)?
+                }
+            },
         };
-        let tool_index = self
-            .store
-            .records()
-            .iter()
-            .filter(|record| match record {
-                HarnessRecord::ToolStarted {
-                    run_id: r_id,
-                    lane: r_lane,
+        let tool_index = match self.store.entries().iter().find(|entry| {
+            entry.id == assistant_entry_id
+                && matches!(
+                    &entry.message,
+                    AgentMessage::Assistant { tool_calls: Some(calls), .. }
+                    if calls.iter().any(|call| call.id == tool_call_id)
+                )
+        }) {
+            Some(entry) => match &entry.message {
+                AgentMessage::Assistant {
+                    tool_calls: Some(calls),
                     ..
-                } => r_id == run_id && r_lane == lane,
-                _ => false,
-            })
-            .count();
+                } => calls
+                    .iter()
+                    .position(|call| call.id == tool_call_id)
+                    .unwrap_or(0),
+                _ => 0,
+            },
+            // No declaring entry (synthesized empty assistant): keep the
+            // count-based ordinal so sequential undeclared tools stay unique.
+            None => self
+                .store
+                .records()
+                .iter()
+                .filter(|record| match record {
+                    HarnessRecord::ToolStarted {
+                        run_id: r_id,
+                        lane: r_lane,
+                        ..
+                    } => r_id == run_id && r_lane == lane,
+                    _ => false,
+                })
+                .count(),
+        };
         let record = HarnessRecord::ToolStarted {
             id: format!("tool-started-{run_id}-{tool_call_id}"),
             seq: harness_next_seq(self.store.store()),
@@ -2670,6 +2721,7 @@ impl CodingSessionHarness {
             content,
             is_error,
             terminate,
+            images,
         } = message
         else {
             return Ok(());
@@ -2684,6 +2736,7 @@ impl CodingSessionHarness {
                     content: content.clone(),
                     is_error: *is_error,
                     terminate: *terminate,
+                    images: images.clone(),
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -2708,12 +2761,14 @@ impl CodingSessionHarness {
                     content: result.content.clone(),
                     is_error: result.is_error,
                     terminate: result.terminates(),
+                    images: result.images.clone(),
                 },
             )
             .map_err(|error| error.to_string())?;
         self.store
             .drive_to_completion()
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        Ok(())
     }
 
     /// Finish a replayed tool result.
@@ -2732,6 +2787,7 @@ impl CodingSessionHarness {
                     content: result.content.clone(),
                     is_error: result.is_error,
                     terminate: result.terminates(),
+                    images: result.images.clone(),
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -2858,6 +2914,7 @@ impl CodingSessionHarness {
                         content: persisted_result.0,
                         is_error: persisted_result.1,
                         terminate,
+                        images: Vec::new(),
                     },
                 )
                 .map_err(|error| error.to_string())?;
@@ -3035,6 +3092,7 @@ impl CodingSessionHarness {
                     content: result.content.clone(),
                     is_error: result.is_error,
                     terminate: result.terminates(),
+                    images: result.images.clone(),
                 },
                 surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
                 terminate: result.terminates(),
@@ -3069,16 +3127,19 @@ impl CodingSessionHarness {
             else {
                 continue;
             };
-            let already_completed =
-                records.iter().any(|record| {
-                    matches!(
-                        record,
-                        HarnessRecord::ToolFinished {
-                            tool_call_id: finished_call,
-                            ..
-                        } if finished_call == tool_call_id
-                    )
-                }) || entries.iter().any(|entry| entry.id.contains(tool_call_id));
+            let already_completed = records.iter().any(|record| {
+                matches!(
+                    record,
+                    HarnessRecord::ToolFinished {
+                        run_id: finished_run,
+                        tool_call_id: finished_call,
+                        result_entry_id: finished_result,
+                        ..
+                    } if finished_run == run_id
+                        && finished_call == tool_call_id
+                        && finished_result == result_entry_id
+                )
+            }) || entries.iter().any(|entry| entry.id == *result_entry_id);
             if already_completed {
                 continue;
             }
@@ -3333,6 +3394,7 @@ impl CodingSessionHarness {
                 content: result.content.clone(),
                 is_error: result.is_error,
                 terminate: result.terminates(),
+                images: result.images.clone(),
             };
             let entry_id = self.append_message_to_lane(lane, run_id, msg)?;
             let _ = self.finish_tool_result(run_id, result);
@@ -4384,6 +4446,7 @@ mod tests {
                         content: "contents".into(),
                         is_error: false,
                         terminate: false,
+                        images: Vec::new(),
                     },
                 ],
             )
@@ -4688,9 +4751,10 @@ mod tests {
             tool_call_id: "call-1".into(),
             name: "read_file".into(),
             content: "contents".into(),
-            is_error: false,
-            terminate: false,
-        };
+                is_error: false,
+                terminate: false,
+                images: Vec::new(),
+            };
         harness.sync_messages(&[result.clone()]).unwrap();
 
         let state = Reducer::reduce(&harness.store).unwrap();
@@ -4826,6 +4890,7 @@ mod tests {
                 content: read_output.clone(),
                 is_error: false,
                 terminate: false,
+                images: Vec::new(),
             })
             .unwrap();
         std::fs::write(dir.path().join("README.md"), "changed after read").unwrap();
@@ -4931,6 +4996,7 @@ mod tests {
                 content: read_output.clone(),
                 is_error: false,
                 terminate: false,
+                images: Vec::new(),
             })
             .unwrap();
 
@@ -5007,6 +5073,7 @@ mod tests {
                 content: read_output.clone(),
                 is_error: false,
                 terminate: false,
+                images: Vec::new(),
             })
             .unwrap();
         let context_id = harness
@@ -5033,6 +5100,7 @@ mod tests {
                     content: "later non-indexed duplicate tool body".into(),
                     is_error: false,
                     terminate: false,
+                    images: Vec::new(),
                 },
                 surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
                 terminate: false,
@@ -5243,6 +5311,7 @@ mod tests {
                 content: "not found".into(),
                 is_error: true,
                 terminate: false,
+                images: Vec::new(),
             })
             .unwrap();
         let virtual_entry = harness
@@ -5252,6 +5321,7 @@ mod tests {
                 content: "body".into(),
                 is_error: false,
                 terminate: false,
+                images: Vec::new(),
             })
             .unwrap();
         let remote_entry = harness
@@ -5261,6 +5331,7 @@ mod tests {
                 content: "body".into(),
                 is_error: false,
                 terminate: false,
+                images: Vec::new(),
             })
             .unwrap();
         let unbound_entry = harness
@@ -5270,6 +5341,7 @@ mod tests {
                 content: "body without an execution-bound digest".into(),
                 is_error: false,
                 terminate: false,
+                images: Vec::new(),
             })
             .unwrap();
         let unrecorded_entry = harness
@@ -5279,6 +5351,7 @@ mod tests {
                 content: "body".into(),
                 is_error: false,
                 terminate: false,
+                images: Vec::new(),
             })
             .unwrap();
 
@@ -5356,16 +5429,18 @@ mod tests {
             tool_call_id: "call-1".into(),
             name: "read_file".into(),
             content: "first".into(),
-            is_error: false,
-            terminate: false,
-        };
+                is_error: false,
+                terminate: false,
+                images: Vec::new(),
+            };
         let second_tool = AgentMessage::Tool {
             tool_call_id: "call-2".into(),
             name: "grep".into(),
             content: "second".into(),
-            is_error: false,
-            terminate: false,
-        };
+                is_error: false,
+                terminate: false,
+                images: Vec::new(),
+            };
         let final_assistant = AgentMessage::Assistant {
             content: Some("done".into()),
             tool_calls: None,
@@ -5526,5 +5601,45 @@ mod tests {
         } else {
             panic!("expected ProviderResponseAttached");
         }
+    }
+
+    #[test]
+    fn sequential_single_call_turns_start_tools_on_lane() {
+        // Regression for session_1788900913874865000: the second ACP tool
+        // faulted the gate with "tool intent does not match assistant
+        // declaration" because the lane path derived the tool index from the
+        // count of prior ToolStarted records instead of the declaring entry.
+        let (_dir, path) = temp_session();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        harness
+            .begin_run("run-1", AgentMessage::user("prompt", vec![]))
+            .unwrap();
+        for call_id in ["call-a", "call-b"] {
+            // ACP flow: one assistant entry declaring exactly one call.
+            harness
+                .append_message(AgentMessage::Assistant {
+                    content: None,
+                    tool_calls: Some(vec![threadlane_provider::openai::ToolCall {
+                        id: call_id.into(),
+                        r#type: "function".into(),
+                        function: threadlane_provider::openai::ToolCallFunction {
+                            name: "read".into(),
+                            arguments: "{}".into(),
+                        },
+                        thought_signature: None,
+                    }]),
+                    stop_reason: None,
+                    deferred_handle: None,
+                })
+                .unwrap();
+            harness
+                .tool_started_on_lane("main", "run-1", call_id, "read", serde_json::json!({}))
+                .unwrap();
+        }
+        let state = Reducer::reduce(&harness.store).unwrap();
+        let tools = &state.lane("main").unwrap().tools;
+        assert_eq!(tools.len(), 2);
+        assert_ne!(tools[0].assistant_entry_id, tools[1].assistant_entry_id);
+        assert_eq!((tools[0].tool_index, tools[1].tool_index), (0, 0));
     }
 }

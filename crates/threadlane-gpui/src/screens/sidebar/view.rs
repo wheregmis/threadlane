@@ -437,9 +437,21 @@ impl SidebarView {
             .child(
                 Button::new("new-task-btn")
                     .icon(IconName::Plus)
-                    .label("New Task")
-                    .ghost()
+                    .label("New Session")
+                    .outline()
+                    .small()
                     .w_full()
+                    .justify_between()
+                    .child(
+                        div()
+                            .px_1p5()
+                            .py(px(0.5))
+                            .rounded_sm()
+                            .bg(theme.muted)
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("⌘N"),
+                    )
                     .on_click(move |_event, window, cx| {
                         window.dispatch_action(
                             Box::new(crate::screens::workspace::BeginNewTask),
@@ -503,6 +515,7 @@ impl SidebarView {
                     Button::new("sidebar-project-filter")
                         .icon(IconName::Folder)
                         .label(selected_label)
+                        .tooltip("Filter sessions by project")
                         .dropdown_caret(true)
                         .selected(true)
                         .w_full()
@@ -630,12 +643,18 @@ impl SidebarView {
                     .flex()
                     .flex_none()
                     .items_center()
-                    .gap(px(3.0))
-                    .px_1()
+                    .gap(px(3.5))
+                    .px_1p5()
+                    .py(px(0.5))
                     .rounded_full()
-                    .bg(theme.warning.opacity(0.12))
+                    .bg(theme.warning.opacity(0.15))
                     .text_color(theme.warning)
-                    .child(Icon::new(IconName::Info).xsmall())
+                    .child(
+                        div()
+                            .size(px(6.0))
+                            .rounded_full()
+                            .bg(theme.warning),
+                    )
                     .child(
                         div()
                             .text_xs()
@@ -650,10 +669,11 @@ impl SidebarView {
                     .flex()
                     .flex_none()
                     .items_center()
-                    .gap(px(4.0))
-                    .px_1()
+                    .gap(px(3.5))
+                    .px_1p5()
+                    .py(px(0.5))
                     .rounded_full()
-                    .bg(theme.primary.opacity(0.08))
+                    .bg(theme.primary.opacity(0.12))
                     .text_color(theme.primary)
                     .child(Spinner::new().xsmall().color(theme.primary))
                     .child(
@@ -670,12 +690,18 @@ impl SidebarView {
                     .flex()
                     .flex_none()
                     .items_center()
-                    .gap(px(3.0))
-                    .px_1()
+                    .gap(px(3.5))
+                    .px_1p5()
+                    .py(px(0.5))
                     .rounded_full()
                     .bg(theme.success.opacity(0.12))
                     .text_color(theme.success)
-                    .child(Icon::new(IconName::CircleCheck).xsmall())
+                    .child(
+                        div()
+                            .size(px(6.0))
+                            .rounded_full()
+                            .bg(theme.success),
+                    )
                     .child(
                         div()
                             .text_xs()
@@ -784,7 +810,7 @@ impl SidebarView {
                         .gap(px(2.0))
                         .px_1()
                         .py(px(0.5))
-                        .rounded(px(3.0))
+                        .rounded_sm()
                         .bg(theme.danger.opacity(0.12))
                         .text_color(theme.danger)
                         .child(IconName::Close)
@@ -799,7 +825,7 @@ impl SidebarView {
                         .gap(px(2.0))
                         .px_1()
                         .py(px(0.5))
-                        .rounded(px(3.0))
+                        .rounded_sm()
                         .bg(theme.warning.opacity(0.12))
                         .text_color(theme.warning)
                         .child(IconName::Asterisk)
@@ -814,7 +840,7 @@ impl SidebarView {
                         .gap(px(2.0))
                         .px_1()
                         .py(px(0.5))
-                        .rounded(px(3.0))
+                        .rounded_sm()
                         .bg(theme.success.opacity(0.12))
                         .text_color(theme.success)
                         .child(IconName::CircleCheck)
@@ -832,7 +858,7 @@ impl SidebarView {
                     .gap(px(2.0))
                     .px_1()
                     .py(px(0.5))
-                    .rounded(px(3.0))
+                    .rounded_sm()
                     .bg(theme.secondary)
                     .text_color(theme.muted_foreground)
                     .child(
@@ -895,12 +921,13 @@ impl SidebarView {
         }
 
         if session.is_worktree {
+            let branch_display = session.git_branch.as_deref().unwrap_or("worktree");
             let (background, foreground, tooltip) = if session.worktree_available {
                 (
                     theme.secondary,
                     theme.muted_foreground,
                     format!(
-                        "Local worktree\nChecked out at {}",
+                        "Local worktree on branch '{branch_display}'\nChecked out at {}",
                         session.runtime_work_dir.display()
                     ),
                 )
@@ -909,7 +936,7 @@ impl SidebarView {
                     theme.warning.opacity(0.12),
                     theme.warning,
                     format!(
-                        "Worktree unavailable\nNot checked out locally\nRecorded path: {}\nSession history remains available",
+                        "Worktree unavailable\nBranch: '{branch_display}'\nNot checked out locally\nRecorded path: {}\nSession history remains available",
                         session.runtime_work_dir.display()
                     ),
                 )
@@ -920,6 +947,7 @@ impl SidebarView {
                     session.id
                 )))
                 .icon(Icon::default().path("icons/git/branch.svg"))
+                .label(branch_display.to_string())
                 .tooltip(tooltip)
                 .ghost()
                 .xsmall()
@@ -1358,11 +1386,8 @@ impl SidebarView {
     }
 
     fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let github_model = self.model.clone();
         let settings_model = self.model.clone();
         let theme = cx.theme().colors;
-        let github_selected =
-            self.model.read(cx).workspace_page == crate::state::WorkspacePage::GitHub;
         let settings_selected =
             self.model.read(cx).workspace_page == crate::state::WorkspacePage::Settings;
 
@@ -1370,32 +1395,6 @@ impl SidebarView {
             .flex_none()
             .px_3()
             .py_2()
-            .child(
-                Button::new("sidebar-github")
-                    .debug_selector(|| "sidebar-github".into())
-                    .accessibility_label("GitHub")
-                    .child(
-                        div()
-                            .w_full()
-                            .flex()
-                            .items_center()
-                            .justify_start()
-                            .gap_2()
-                            .child(IconName::Github)
-                            .child("GitHub"),
-                    )
-                    .ghost()
-                    .selected(github_selected)
-                    .w_full()
-                    .justify_start()
-                    .text_color(theme.muted_foreground)
-                    .on_click(move |_event, _window, cx| {
-                        github_model.update(cx, |state, cx| {
-                            controller::dispatch(state, AppAction::OpenGitHub);
-                            cx.notify();
-                        });
-                    }),
-            )
             .child(
                 Button::new("sidebar-settings")
                     .debug_selector(|| "sidebar-settings".into())
@@ -1692,7 +1691,7 @@ mod tests {
         }
 
         cx.update(|window, cx| window.focus_next(cx)); // Archive remains separate.
-        for page in [WorkspacePage::GitHub, WorkspacePage::Settings] {
+        for page in [WorkspacePage::Settings] {
             cx.update(|window, cx| {
                 window.focus_next(cx);
                 window.draw(cx).clear(cx);

@@ -1,4 +1,5 @@
 pub mod chat;
+pub mod computer_mirror;
 pub mod editor;
 pub mod github;
 pub mod right_panel;

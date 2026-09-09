@@ -77,6 +77,12 @@ fn tool_activity_summary(name: &str, arguments: &str) -> String {
 /// Projects a sequence of [`AgentMessage`]s into canonical [`UiChatMessage`]s.
 pub fn project_chat_messages(agent_messages: &[AgentMessage]) -> Vec<UiChatMessage> {
     let mut result = Vec::new();
+    // Index of the latest activity per tool call id, replacing the previous
+    // O(activities) reverse scan per tool result (worst-case O(n^2) on
+    // tool-heavy transcripts). Overwriting on insert preserves the old
+    // "latest match wins" semantics of the reverse search.
+    let mut activity_index: std::collections::HashMap<&str, (usize, usize)> =
+        std::collections::HashMap::new();
     let mut counter = 0usize;
 
     for msg in agent_messages {
@@ -133,9 +139,9 @@ pub fn project_chat_messages(agent_messages: &[AgentMessage]) -> Vec<UiChatMessa
                     .last()
                     .filter(|message| {
                         message.role == UiMessageRole::Assistant
-                            && message.content.is_empty()
-                            && message.tool_activities.is_empty()
-                            && message.reasoning_content.is_some()
+                        && message.content.is_empty()
+                        && message.tool_activities.is_empty()
+                        && message.reasoning_content.is_some()
                     })
                     .and_then(|message| message.reasoning_content.clone());
                 if reasoning_content.is_some() {
@@ -148,6 +154,15 @@ pub fn project_chat_messages(agent_messages: &[AgentMessage]) -> Vec<UiChatMessa
                     tool_activities,
                     reasoning_content,
                 });
+                // Index after the pop/push above: recording earlier would
+                // capture a pre-pop position when a reasoning-only message
+                // is merged into this one.
+                if let Some(calls) = tool_calls {
+                    let msg_idx = result.len() - 1;
+                    for (act_idx, call) in calls.iter().enumerate() {
+                        activity_index.insert(call.id.as_str(), (msg_idx, act_idx));
+                    }
+                }
             }
             AgentMessage::Tool {
                 tool_call_id,
@@ -157,15 +172,18 @@ pub fn project_chat_messages(agent_messages: &[AgentMessage]) -> Vec<UiChatMessa
                 ..
             } => {
                 let category = if *is_error { "Error" } else { "Result" };
-                if let Some(activity) = result
-                    .iter_mut()
-                    .rev()
-                    .flat_map(|message| message.tool_activities.iter_mut().rev())
-                    .find(|activity| activity.id == *tool_call_id)
+                if let Some((msg_idx, act_idx)) =
+                    activity_index.get(tool_call_id.as_str()).copied()
                 {
-                    activity.category = category.into();
-                    activity.detail = content.clone();
-                    continue;
+                    if let Some(activity) = result
+                        .get_mut(msg_idx)
+                        .and_then(|message| message.tool_activities.get_mut(act_idx))
+                        .filter(|activity| activity.id == *tool_call_id)
+                    {
+                        activity.category = category.into();
+                        activity.detail = content.clone();
+                        continue;
+                    }
                 }
                 let tool_info = UiToolActivity {
                     id: tool_call_id.clone(),
@@ -174,12 +192,19 @@ pub fn project_chat_messages(agent_messages: &[AgentMessage]) -> Vec<UiChatMessa
                     title: name.clone(),
                     detail: content.clone(),
                 };
-                if let Some(last) = result.last_mut() {
-                    if last.role == UiMessageRole::Assistant {
-                        last.tool_activities.push(tool_info);
-                        continue;
-                    }
+                if result
+                    .last()
+                    .is_some_and(|last| last.role == UiMessageRole::Assistant)
+                {
+                    let msg_idx = result.len() - 1;
+                    let last = result.last_mut().expect("checked above");
+                    let act_idx = last.tool_activities.len();
+                    activity_index.insert(tool_call_id.as_str(), (msg_idx, act_idx));
+                    last.tool_activities.push(tool_info);
+                    continue;
                 }
+                let msg_idx = result.len();
+                activity_index.insert(tool_call_id.as_str(), (msg_idx, 0));
                 result.push(UiChatMessage {
                     id: format!("msg_{counter}"),
                     role: UiMessageRole::Assistant,
@@ -189,9 +214,8 @@ pub fn project_chat_messages(agent_messages: &[AgentMessage]) -> Vec<UiChatMessa
                 });
             }
             AgentMessage::System { content } => {
-                let role = if content.to_lowercase().contains("error")
-                    || content.to_lowercase().contains("failed")
-                {
+                let lowered = content.to_lowercase();
+                let role = if lowered.contains("error") || lowered.contains("failed") {
                     UiMessageRole::Error
                 } else {
                     UiMessageRole::System

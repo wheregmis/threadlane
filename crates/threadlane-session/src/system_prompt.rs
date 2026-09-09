@@ -170,8 +170,17 @@ pub(crate) fn build_system_prompt(options: SystemPromptBuildOptions<'_>) -> Stri
                 "When invoking `subagent`, specify clear custom `instructions` and the minimum required `tools` for each subagent.",
             );
         }
-        if available_tool_names.contains("update_plan") {
+        if available_tool_names.contains("browser_navigate") {
             add_tool_guideline(
+                "To drive the embedded browser panel: open pages with `browser_navigate`, read the page with `browser_snapshot`, then operate elements with `browser_act` using snapshot refs. Refs expire on re-render, so take a fresh snapshot when an act reports a stale ref. Prefer snapshot/act over `browser_evaluate_script`. The panel is visible to the user, so narrate what you open.",
+            );
+        }
+        if available_tool_names.contains("computer_windows") {
+            add_tool_guideline(
+                "To operate the computer outside the embedded browser: list targets with `computer_windows`, capture context with `computer_screenshot` (you receive the image — read positions off it), then act with `computer_act`. Prefer these native tools over shell workarounds (`open`, `osascript`, pasted JS): they keep coordinates, approvals, and verification in one loop. Pass target with a window id to act in the background: coordinates become window-relative and your cursor and focus stay untouched. Omit target only for foreground control with display coordinates. A window-targeted screenshot shows just that window — prefer it over full-display shots before acting, and re-screenshot after any act that changes the UI to verify the effect before continuing. A stale window id or snapshot ref means re-list, never guessing. Chromium/Electron apps may ignore background clicks; say so and ask the user rather than hammering. For anything inside a web page, prefer the embedded browser tools (DOM refs beat pixels). The first screenshot/input asks the user for approval and they can allow always for the project; denied actions must not be retried verbatim. Threadlane's own windows are hidden from you; never try to drive them.",
+            );
+        }
+        if available_tool_names.contains("update_plan") {            add_tool_guideline(
                 "For multi-step work, maintain a concise plan with `update_plan`; keep at most one item in progress and skip plans for simple requests.",
             );
             add_tool_guideline(
@@ -327,6 +336,52 @@ mod tests {
         assert!(!build(&[]).contains("AGENTS"));
         assert!(build(&[tool("read_file", "read")]).contains("SKILLS"));
         assert!(build(&[tool("subagent", "delegate")]).contains("AGENTS"));
+    }
+
+    #[test]
+    fn browser_guideline_tracks_browser_tools() {
+        let config = SystemPromptConfig::default();
+        let context = ProjectContext::default();
+        let build = |tools: &[AgentToolDefinition]| {
+            build_system_prompt(SystemPromptBuildOptions {
+                config: &config,
+                work_dir: Path::new("/workspace"),
+                tools,
+                project_context: &context,
+                skill_catalog: None,
+                agent_catalog: None,
+                loaded_extension_count: 0,
+            })
+        };
+
+        assert!(!build(&[]).contains("browser_snapshot"));
+        let with_browser = build(&[tool("browser_navigate", "navigate")]);
+        assert!(with_browser.contains("browser_snapshot"));
+        assert!(with_browser.contains("browser_act"));
+    }
+
+    #[test]
+    fn computer_guideline_tracks_computer_tools() {
+        let config = SystemPromptConfig::default();
+        let context = ProjectContext::default();
+        let build = |tools: &[AgentToolDefinition]| {
+            build_system_prompt(SystemPromptBuildOptions {
+                config: &config,
+                work_dir: Path::new("/workspace"),
+                tools,
+                project_context: &context,
+                skill_catalog: None,
+                agent_catalog: None,
+                loaded_extension_count: 0,
+            })
+        };
+
+        assert!(!build(&[]).contains("computer_act"));
+        let with_computer = build(&[tool("computer_windows", "windows")]);
+        assert!(with_computer.contains("computer_act"));
+        assert!(with_computer.contains("computer_screenshot"));
+        assert!(with_computer.contains("re-screenshot after any act"));
+        assert!(with_computer.contains("embedded browser tools"));
     }
 
     #[test]

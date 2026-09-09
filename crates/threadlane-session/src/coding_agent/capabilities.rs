@@ -6,11 +6,13 @@ use super::context_snapshots::{ContextSnapshotToolExecutor, MAX_SUBAGENT_CONTEXT
 use super::scheduler::AgentWorkScheduler;
 use super::subagents::{AgentRunner, MAX_SUBAGENT_TASKS};
 use crate::agents::{discover_agents, AgentScope};
+use crate::browser::{BrowserBridge, BrowserToolExecutor};
 use crate::extension_broker::{
     BrokerError, CapabilityDispatcher, HostBrokerRequest, BROKER_API_VERSION,
 };
 use crate::permission::{PermissionHandle, PermissionManager};
 use crate::plan::{SessionPlanStore, UpdatePlanToolExecutor};
+use crate::question::{AskQuestionToolExecutor, QuestionHandle};
 use crate::policy::ToolPolicy;
 use async_trait::async_trait;
 use log::warn;
@@ -130,6 +132,23 @@ impl Capability for PlanCapability {
     }
 }
 
+pub(crate) struct QuestionCapability {
+    pub(crate) handle: QuestionHandle,
+    pub(crate) event_tx: broadcast::Sender<AgentEvent>,
+}
+
+impl Capability for QuestionCapability {
+    fn id(&self) -> &str {
+        "question"
+    }
+    fn tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
+        vec![Arc::new(AskQuestionToolExecutor::new(
+            self.handle.clone(),
+            self.event_tx.clone(),
+        ))]
+    }
+}
+
 pub(crate) struct WasiCapability {
     pub(crate) extensions: Arc<WasiExtensionManager>,
     pub(crate) broker_dispatcher: Arc<CapabilityDispatcher>,
@@ -170,13 +189,24 @@ impl Capability for WasiCapability {
 
 pub(crate) struct McpCapability {
     pub(crate) mcp_manager: Arc<McpManager>,
-}
-impl Capability for McpCapability {
+}impl Capability for McpCapability {
     fn id(&self) -> &str {
         "mcp"
     }
     fn tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
         vec![self.mcp_manager.clone()]
+    }
+}
+
+pub(crate) struct BrowserCapability {
+    pub(crate) bridge: BrowserBridge,
+}
+impl Capability for BrowserCapability {
+    fn id(&self) -> &str {
+        "browser"
+    }
+    fn tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
+        vec![Arc::new(BrowserToolExecutor::new(self.bridge.clone()))]
     }
 }
 
@@ -475,6 +505,7 @@ pub(crate) fn build_broker_dispatcher(
     Arc<CapabilityDispatcher>,
     ManagedProcessRegistry,
     PermissionHandle,
+    Arc<PermissionManager>,
 ) {
     let allowed_hosts: Arc<HashSet<String>> = Arc::new(
         std::env::var("THREADLANE_NETWORK_ALLOW_HOSTS")
@@ -510,7 +541,12 @@ pub(crate) fn build_broker_dispatcher(
             }),
         );
     }
-    (Arc::new(dispatcher), managed_processes, permission_handle)
+    (
+        Arc::new(dispatcher),
+        managed_processes,
+        permission_handle,
+        permissions,
+    )
 }
 
 pub(crate) async fn dispatch_hook_requests(

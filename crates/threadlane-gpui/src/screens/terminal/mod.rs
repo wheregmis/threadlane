@@ -1000,6 +1000,7 @@ impl Render for TerminalView {
                             self.scrollback_offset
                         ))
                         .icon(IconName::ChevronDown)
+                        .tooltip("Jump to live output")
                         .xsmall()
                         .on_click(move |_event, _window, cx| {
                             scroll_to_bottom_handle.update(cx, |t, cx| t.scroll_to_bottom(cx));
@@ -1011,12 +1012,18 @@ impl Render for TerminalView {
         };
 
         div()
+            .id("pty-terminal-root")
             .size_full()
             .min_h_0()
             .flex()
             .flex_col()
             .bg(theme.background)
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .focus(|style| style.border_color(theme.primary))
             .track_focus(&self.focus_handle)
+            .role(Role::Terminal)
             .on_key_down(cx.listener(Self::key_down))
             .child(
                 div()

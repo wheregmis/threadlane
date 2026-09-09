@@ -7,7 +7,7 @@ use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::{
-    Editor, EditorState, Input, InputEvent, InputState, TabSize, Textarea, TextareaState,
+    Editor, EditorState, Input, InputEvent, InputState, TabSize,
 };
 use gpui_component::list::ListItem;
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
@@ -19,7 +19,7 @@ use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::text::{TextView, TextViewState};
 use gpui_component::tree::{Tree, TreeEvent, TreeItem, TreeState};
 use gpui_component::{
-    h_flex, v_flex, ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable, WindowExt,
+    ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable, WindowExt,
 };
 use threadlane_git::{GitBranchInfo, GitCommitInfo, GitFile, GitStatus};
 
@@ -27,684 +27,14 @@ use crate::screens::next_event_batch;
 use crate::services::watcher::WorkspaceWatcher;
 use crate::state::AppState;
 
-fn can_publish_branch(worktree_available: bool, status: Option<&GitStatus>) -> bool {
-    worktree_available
-        && status.is_some_and(|status| {
-            !status.has_upstream
-                && !status.detached
-                && status.branch.is_some()
-                && status.remote.is_some()
-        })
-}
-
-fn nonempty(value: &str) -> Option<&str> {
-    let value = value.trim();
-    (!value.is_empty()).then_some(value)
-}
-
-fn can_create_pull_request(worktree_available: bool, status: Option<&GitStatus>) -> bool {
-    worktree_available
-        && status.is_some_and(|status| {
-            status.pr_ready
-                && !status.detached
-                && status.branch.as_deref().and_then(nonempty).is_some()
-                && status.remote.is_some()
-                && status.has_upstream
-                && status.pr_lookup_available
-                && status.pr.is_none()
-        })
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct DraftPrFields {
-    base: String,
-    title: String,
-    body: String,
-}
-
-impl DraftPrFields {
-    fn validate(&self) -> Result<(), &'static str> {
-        [
-            (&self.base, "Enter the base branch."),
-            (&self.title, "Enter a pull request title."),
-            (&self.body, "Enter a pull request description."),
-        ]
-        .into_iter()
-        .find(|(value, _)| value.trim().is_empty())
-        .map_or(Ok(()), |(_, error)| Err(error))
-    }
-}
-
-fn draft_pr_prefill(status: &GitStatus) -> DraftPrFields {
-    let branch = status
-        .branch
-        .as_deref()
-        .and_then(nonempty)
-        .unwrap_or("main");
-    let base = status
-        .default_branch
-        .as_deref()
-        .and_then(nonempty)
-        .or_else(|| {
-            status
-                .branch_details
-                .iter()
-                .find(|branch| branch.is_default)
-                .and_then(|branch| nonempty(&branch.name))
-        })
-        .unwrap_or("main")
-        .to_string();
-    let commit = status.recent_commits.first();
-    let summary = commit
-        .and_then(|commit| nonempty(&commit.summary))
-        .unwrap_or(branch);
-    let body = commit
-        .and_then(|commit| nonempty(&commit.body))
-        .unwrap_or(summary);
-    DraftPrFields {
-        base,
-        title: summary.into(),
-        body: body.into(),
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct DraftPrContextKey {
-    project: PathBuf,
-    branch: String,
-    revision: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct DraftPrAttempt {
-    id: u64,
-    key: DraftPrContextKey,
-    fields: DraftPrFields,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-enum DraftPrPhase {
-    #[default]
-    Idle,
-    Posting(DraftPrAttempt),
-    Unknown(DraftPrAttempt),
-    Checking(DraftPrAttempt),
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct DraftPrAttemptState {
-    next_id: u64,
-    phase: DraftPrPhase,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum DraftPrCompletion {
-    Stale,
-    Failure(String),
-    Unknown(String),
-    SuccessExact(String),
-    SuccessWithNewerEdits(String),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum DraftPrRemoteResult {
-    Exists(String),
-    Absent(String),
-    Unknown(String),
-}
-
-impl DraftPrAttemptState {
-    fn begin(
-        &mut self,
-        key: DraftPrContextKey,
-        fields: DraftPrFields,
-    ) -> Result<DraftPrAttempt, &'static str> {
-        fields.validate()?;
-        if !matches!(self.phase, DraftPrPhase::Idle) {
-            return Err("A draft pull request is already being created.");
-        }
-        self.next_id = self.next_id.wrapping_add(1).max(1);
-        let attempt = DraftPrAttempt {
-            id: self.next_id,
-            key,
-            fields,
-        };
-        self.phase = DraftPrPhase::Posting(attempt.clone());
-        Ok(attempt)
-    }
-
-    fn is_busy(&self) -> bool {
-        matches!(
-            self.phase,
-            DraftPrPhase::Posting(_) | DraftPrPhase::Checking(_)
-        )
-    }
-
-    fn is_uncertain(&self) -> bool {
-        matches!(self.phase, DraftPrPhase::Unknown(_))
-    }
-
-    fn begin_check(&mut self) -> Result<DraftPrAttempt, &'static str> {
-        let DraftPrPhase::Unknown(attempt) = &self.phase else {
-            return Err("There is no uncertain draft pull request to check.");
-        };
-        let attempt = attempt.clone();
-        self.phase = DraftPrPhase::Checking(attempt.clone());
-        Ok(attempt)
-    }
-
-    fn complete(
-        &mut self,
-        completed: &DraftPrAttempt,
-        current_key: &DraftPrContextKey,
-        current_fields: &DraftPrFields,
-        result: DraftPrRemoteResult,
-    ) -> DraftPrCompletion {
-        let attempt = match &self.phase {
-            DraftPrPhase::Posting(attempt) | DraftPrPhase::Checking(attempt) => attempt,
-            _ => return DraftPrCompletion::Stale,
-        };
-        if attempt.id != completed.id || &attempt.key != current_key {
-            return DraftPrCompletion::Stale;
-        }
-        let exact = attempt.fields == *current_fields;
-        let attempt = attempt.clone();
-        match result {
-            DraftPrRemoteResult::Absent(error) => {
-                self.phase = DraftPrPhase::Idle;
-                DraftPrCompletion::Failure(error)
-            }
-            DraftPrRemoteResult::Unknown(error) => {
-                self.phase = DraftPrPhase::Unknown(attempt);
-                DraftPrCompletion::Unknown(error)
-            }
-            DraftPrRemoteResult::Exists(url) if exact => {
-                self.phase = DraftPrPhase::Idle;
-                DraftPrCompletion::SuccessExact(url)
-            }
-            DraftPrRemoteResult::Exists(url) => {
-                self.phase = DraftPrPhase::Idle;
-                DraftPrCompletion::SuccessWithNewerEdits(url)
-            }
-        }
-    }
-}
-
-fn message_generated_matches_active_project(origin: &Path, active: Option<&Path>) -> bool {
-    active == Some(origin)
-}
-
-fn normalize_generated_commit_message(raw: &str) -> String {
-    let trimmed = raw.trim();
-    let unquoted = trimmed
-        .strip_prefix('"')
-        .and_then(|s| s.strip_suffix('"'))
-        .unwrap_or(trimmed)
-        .trim();
-    let without_fences = if unquoted.starts_with("```") {
-        unquoted
-            .lines()
-            .filter(|line| !line.trim().starts_with("```"))
-            .collect::<Vec<_>>()
-            .join("\n")
-            .trim()
-            .to_string()
-    } else {
-        unquoted.to_string()
-    };
-    without_fences
-}
-
-fn detect_language(path_str: &str) -> &'static str {
-    let path = Path::new(path_str);
-    match path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|s| s.to_lowercase())
-        .as_deref()
-    {
-        Some("rs") => "rust",
-        Some("py") => "python",
-        Some("js" | "mjs" | "cjs") => "javascript",
-        Some("ts" | "mts" | "cts" | "jsx" | "tsx") => "typescript",
-        Some("json") => "json",
-        Some("toml") => "toml",
-        Some("yaml" | "yml") => "yaml",
-        Some("html" | "htm") => "html",
-        Some("css") => "css",
-        Some("md" | "markdown") => "markdown",
-        Some("sh" | "bash" | "zsh") => "bash",
-        Some("go") => "go",
-        Some("c" | "h") => "c",
-        Some("cpp" | "hpp" | "cc" | "cxx" | "hh") => "cpp",
-        Some("diff" | "patch") => "diff",
-        Some("zig") => "zig",
-        _ => match path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(|s| s.to_lowercase())
-            .as_deref()
-        {
-            Some("dockerfile") => "bash",
-            Some("cargo.lock") => "toml",
-            _ => "text",
-        },
-    }
-}
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
-pub enum ReviewTab {
-    #[default]
-    Changes,
-    History,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum Surface {
-    Review,
-    Files,
-}
-
-impl Surface {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Review => "Review",
-            Self::Files => "Files",
-        }
-    }
-
-    fn icon(self) -> IconName {
-        match self {
-            Self::Review => IconName::File,
-            Self::Files => IconName::Folder,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum GitAction {
-    Commit,
-    CommitAndPush,
-    Push,
-    Pull,
-    Fetch,
-    #[allow(dead_code)]
-    CreatePullRequest,
-    Checkout(String),
-    CheckoutStash(String),
-    CheckoutCarry(String),
-    CreateBranch(String),
-    Merge(String),
-    PopStash(Option<usize>),
-    DropStash(Option<usize>),
-    DiscardFile(String),
-    IgnoreFile(String),
-    IgnoreExtension(String),
-}
-
-#[derive(Clone, Debug)]
-struct FileNode {
-    relative_path: String,
-    name: String,
-    is_dir: bool,
-    children: Vec<FileNode>,
-}
-
-enum PanelEvent {
-    FilesLoaded {
-        project: PathBuf,
-        nodes: Vec<FileNode>,
-    },
-    ReviewLoaded {
-        project: PathBuf,
-        status: Option<GitStatus>,
-        files: Vec<GitFile>,
-        error: Option<String>,
-    },
-    WorkspaceChanged {
-        project: PathBuf,
-        git_dirty: bool,
-        files_dirty: bool,
-    },
-    MessageGenerated {
-        project: PathBuf,
-        result: Result<String, String>,
-    },
-    ActionFinished {
-        project: PathBuf,
-        status: Result<GitStatus, String>,
-        action_error: Option<String>,
-        action_message: Option<String>,
-    },
-    CommitFilesLoaded {
-        sha: String,
-        files: Vec<GitFile>,
-    },
-    StashFilesLoaded {
-        project: PathBuf,
-        index: usize,
-        files: Vec<GitFile>,
-    },
-}
-
-struct DraftPrDialogView {
-    panel: WeakEntity<RightPanelView>,
-    key: DraftPrContextKey,
-    base_input: Entity<InputState>,
-    title_input: Entity<InputState>,
-    body_input: Entity<TextareaState>,
-    attempts: DraftPrAttemptState,
-    error: Option<String>,
-    created: bool,
-    _subscriptions: Vec<Subscription>,
-}
-
-impl DraftPrDialogView {
-    fn new(
-        panel: WeakEntity<RightPanelView>,
-        key: DraftPrContextKey,
-        fields: DraftPrFields,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let base_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Base branch")
-                .default_value(fields.base)
-        });
-        let title_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Pull request title")
-                .default_value(fields.title)
-        });
-        let body_input = cx.new(|cx| {
-            TextareaState::new(window, cx)
-                .placeholder("Describe the change and how it was verified")
-                .default_value(fields.body)
-                .auto_grow(4, 10)
-                .soft_wrap(true)
-        });
-        let subscriptions = vec![
-            cx.observe(&base_input, |_, _, cx| cx.notify()),
-            cx.observe(&title_input, |_, _, cx| cx.notify()),
-            cx.observe(&body_input, |_, _, cx| cx.notify()),
-        ];
-        Self {
-            panel,
-            key,
-            base_input,
-            title_input,
-            body_input,
-            attempts: DraftPrAttemptState::default(),
-            error: None,
-            created: false,
-            _subscriptions: subscriptions,
-        }
-    }
-
-    fn fields(&self, cx: &App) -> DraftPrFields {
-        DraftPrFields {
-            base: self.base_input.read(cx).value().to_string(),
-            title: self.title_input.read(cx).value().to_string(),
-            body: self.body_input.read(cx).value().to_string(),
-        }
-    }
-
-    fn current_key(&self, creation: bool, cx: &App) -> Option<DraftPrContextKey> {
-        self.panel.upgrade().and_then(|panel| {
-            let panel = panel.read(cx);
-            if creation {
-                panel.draft_pr_creation_key()
-            } else {
-                panel.draft_pr_checkout_key()
-            }
-        })
-    }
-
-    fn start_request(&mut self, check: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.created || self.attempts.is_busy() || (!check && self.attempts.is_uncertain()) {
-            return;
-        }
-        let Some(key) = self.current_key(!check, cx).filter(|key| key == &self.key) else {
-            self.error = Some(
-                "The active checkout or branch changed. Close this dialog and open it again."
-                    .into(),
-            );
-            cx.notify();
-            return;
-        };
-        let fields = self.fields(cx);
-        let attempt = if check {
-            self.attempts.begin_check()
-        } else {
-            self.attempts.begin(key, fields.clone())
-        };
-        let attempt = match attempt {
-            Ok(attempt) => attempt,
-            Err(error) => {
-                self.error = Some(error.into());
-                cx.notify();
-                return;
-            }
-        };
-        self.error = None;
-        let (work_dir, branch) = (attempt.key.project.clone(), attempt.key.branch.clone());
-        let (base, title, body) = (
-            fields.base.trim().to_string(),
-            fields.title.trim().to_string(),
-            fields.body.trim().to_string(),
-        );
-        let task = cx.background_executor().spawn(async move {
-            let inspect = |absent| match threadlane_git::inspect_pr_for_branch(&work_dir, &branch) {
-                Ok(Some(pr)) => DraftPrRemoteResult::Exists(pr.url),
-                Ok(None) => DraftPrRemoteResult::Absent(absent),
-                Err(error) => DraftPrRemoteResult::Unknown(error.to_string()),
-            };
-            if check {
-                return inspect(
-                    "GitHub did not create the draft pull request. You can try again.".into(),
-                );
-            }
-            match threadlane_git::create_draft_pull_request(&work_dir, &base, &title, &body) {
-                Ok(url) => DraftPrRemoteResult::Exists(url),
-                Err(error) => inspect(error.to_string()),
-            }
-        });
-        cx.spawn_in(window, async move |this, cx| {
-            let result = task.await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                let Some(key) = this.current_key(false, cx) else {
-                    return;
-                };
-                let fields = this.fields(cx);
-                let completion = this.attempts.complete(&attempt, &key, &fields, result);
-                this.apply_completion(completion, window, cx);
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    fn apply_completion(
-        &mut self,
-        completion: DraftPrCompletion,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match completion {
-            DraftPrCompletion::Stale => return,
-            DraftPrCompletion::Failure(error) => {
-                self.error = Some(format!(
-                    "Couldn’t create the draft pull request. {error} Review the fields and try again."
-                ));
-            }
-            DraftPrCompletion::Unknown(error) => {
-                self.error = Some(format!(
-                    "Couldn’t confirm whether GitHub created the draft pull request. {error} Use Check again before trying to create another."
-                ));
-            }
-            DraftPrCompletion::SuccessExact(url) => {
-                self.finish_success(url, true, window, cx);
-            }
-            DraftPrCompletion::SuccessWithNewerEdits(url) => {
-                self.finish_success(url, false, window, cx);
-            }
-        }
-        cx.notify();
-    }
-
-    fn finish_success(
-        &mut self,
-        url: String,
-        exact: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(panel) = self.panel.upgrade() {
-            let message = if url.is_empty() {
-                "Draft pull request created.".into()
-            } else {
-                format!("Draft pull request created: {url}")
-            };
-            panel.update(cx, |panel, cx| {
-                panel.git_feedback = Some(message);
-                panel.refresh_surface(Surface::Review);
-                cx.notify();
-            });
-        }
-        if !url.is_empty() {
-            cx.open_url(&url);
-        }
-        if exact {
-            self.base_input
-                .update(cx, |input, cx| input.set_value("", window, cx));
-            self.title_input
-                .update(cx, |input, cx| input.set_value("", window, cx));
-            self.body_input
-                .update(cx, |input, cx| input.set_value("", window, cx));
-            window.close_dialog(cx);
-        } else {
-            self.created = true;
-            self.error = Some(
-                "The draft pull request was created. Your newer edits remain in this dialog."
-                    .into(),
-            );
-        }
-    }
-}
-
-fn draft_pr_field(label: &'static str, field: impl IntoElement) -> impl IntoElement {
-    v_flex()
-        .gap_1()
-        .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(label))
-        .child(field)
-}
-
-impl Render for DraftPrDialogView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme().colors;
-        let fields = self.fields(cx);
-        let busy = self.attempts.is_busy();
-        let uncertain = self.attempts.is_uncertain();
-        let checking = matches!(&self.attempts.phase, DraftPrPhase::Checking(_));
-        let created = self.created;
-        let context_matches = self.current_key(false, cx).as_ref() == Some(&self.key);
-        let creation_available = self.current_key(true, cx).as_ref() == Some(&self.key);
-        let can_submit = creation_available && fields.validate().is_ok() && !busy;
-        let base = if fields.base.trim().is_empty() {
-            "base branch".to_string()
-        } else {
-            fields.base.trim().to_string()
-        };
-
-        v_flex()
-            .gap_3()
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child(format!(
-                        "Creates a DRAFT pull request on GitHub from {} into {base}. No commits are pushed.",
-                        self.key.branch
-                    )),
-            )
-            .child(draft_pr_field(
-                "Base branch",
-                Input::new(&self.base_input).disabled(created),
-            ))
-            .child(draft_pr_field(
-                "Title",
-                Input::new(&self.title_input).disabled(created),
-            ))
-            .child(draft_pr_field(
-                "Description",
-                Textarea::new(&self.body_input).disabled(created),
-            ))
-            .children((!context_matches).then(|| {
-                div()
-                    .text_sm()
-                    .text_color(theme.danger)
-                    .child("The active checkout or branch changed. Close this dialog and open it again.")
-            }))
-            .children(self.error.as_ref().map(|error| {
-                div()
-                    .text_sm()
-                    .text_color(if created {
-                        theme.success
-                    } else {
-                        theme.danger
-                    })
-                    .child(error.clone())
-            }))
-            .children(busy.then(|| {
-                h_flex()
-                    .gap_2()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child(Spinner::new().small())
-                    .child(if checking {
-                        "Checking GitHub…"
-                    } else {
-                        "Creating draft on GitHub…"
-                    })
-            }))
-            .child(
-                h_flex()
-                    .justify_end()
-                    .gap_2()
-                    .pt_2()
-                    .border_t_1()
-                    .border_color(theme.border)
-                    .child(
-                        Button::new("cancel-draft-pr")
-                            .label(if created { "Done" } else { "Cancel" })
-                            .disabled(busy && context_matches)
-                            .on_click(|_, window, cx| window.close_dialog(cx)),
-                    )
-                    .children((!uncertain && !created).then(|| {
-                        Button::new("submit-draft-pr")
-                            .label(if busy { "Creating…" } else { "Create draft" })
-                            .primary()
-                            .disabled(!can_submit)
-                            .tooltip(if context_matches {
-                                "Create a draft pull request on GitHub"
-                            } else {
-                                "The active checkout or branch changed"
-                            })
-                            .on_click(cx.listener(|this, _event, window, cx| {
-                                this.start_request(false, window, cx);
-                            }))
-                    }))
-                    .children((uncertain && !busy).then(|| {
-                        Button::new("check-draft-pr")
-                            .label("Check again")
-                            .outline()
-                            .on_click(cx.listener(|this, _event, window, cx| {
-                                this.start_request(true, window, cx);
-                            }))
-                    })),
-            )
-    }
-}
+use super::browser::BrowserView;
+use super::draft_pr::{
+    draft_pr_prefill, DraftPrContextKey, DraftPrDialogView,
+};
+pub(crate) use super::types::{
+    can_create_pull_request, can_publish_branch, detect_language, message_generated_matches_active_project,
+    normalize_generated_commit_message, FileNode, GitAction, PanelEvent, ReviewTab, Surface,
+};
 
 pub struct RightPanelView {
     model: Entity<AppState>,
@@ -729,7 +59,7 @@ pub struct RightPanelView {
     should_clear_commit_message: bool,
     git_busy: bool,
     git_message_pending: bool,
-    git_feedback: Option<String>,
+    pub(crate) git_feedback: Option<String>,
     branch_popover_open: bool,
     branch_filter_input: Entity<InputState>,
     new_branch_dialog_open: bool,
@@ -751,6 +81,7 @@ pub struct RightPanelView {
     saved_content: String,
     is_dirty: bool,
     pending_document: Option<(String, String)>,
+    browser: Option<Entity<BrowserView>>,
     event_tx: tokio::sync::mpsc::UnboundedSender<PanelEvent>,
     _watcher: Option<WorkspaceWatcher>,
     _subscriptions: Vec<Subscription>,
@@ -788,6 +119,102 @@ impl RightPanelView {
         })
         .detach();
 
+        // Agent browser commands arrive from tokio tool workers, which cannot
+        // touch entities directly. The first panel to construct claims the
+        // shared receiver and pumps commands into the live browser view.
+        // Script evaluations park here on a oneshot without blocking the UI;
+        // the session side bounds every round-trip with its own timeout.
+        if let Some(mut browser_rx) = model.read(cx).browser_bridge.take_receiver() {
+            cx.spawn(async move |this, cx| {
+                while let Some(request) = browser_rx.recv().await {
+                    let step = this
+                        .update(cx, |this, cx| {
+                            start_browser_request(this, request.command, cx)
+                        })
+                        .unwrap_or_else(|_| {
+                            BrowserReply::Ready(Err(
+                                "The browser panel is no longer available.".to_string(),
+                            ))
+                        });
+                    let reply = match step {
+                        BrowserReply::Ready(reply) => reply,
+                        BrowserReply::PendingEval(rx) => rx.await.map_err(|_| {
+                            "The browser dropped the evaluation.".to_string()
+                        }).map(|payload| finalize_browser_eval(&payload)),
+                        BrowserReply::PendingSnapshot(rx) => match rx.await {
+                            Ok(Ok((bytes, width, height))) => {
+                                let (path, data_url) = this
+                                    .update(cx, |this, _cx| {
+                                        this.save_browser_screenshot(&bytes)
+                                    })
+                                    .unwrap_or_else(|_| (None, base64_data_url(&bytes)));
+                                let payload = serde_json::json!({
+                                    "width": width,
+                                    "height": height,
+                                    "data_url": data_url,
+                                    "path": path,
+                                })
+                                .to_string();
+                                Ok(payload)
+                            }
+                            Ok(Err(err)) => Err(err),
+                            Err(_) => Err("The browser dropped the snapshot.".to_string()),
+                        },
+                        BrowserReply::PendingWait {
+                            selector,
+                            text,
+                            deadline,
+                        } => {
+                            let mut outcome = Err("Timed out waiting for condition in browser.".to_string());
+                            while std::time::Instant::now() < deadline {
+                                let check_script = super::browser::wait_check_js(
+                                    selector.as_deref(),
+                                    text.as_deref(),
+                                );
+                                let eval_rx = this.update(cx, |this, cx| {
+                                    this.start_browser_eval(&check_script, cx)
+                                });
+                                match eval_rx {
+                                    Ok(Ok(rx)) => {
+                                        if let Ok(raw) = rx.await {
+                                            let payload = super::browser::unwrap_callback_payload(&raw);
+                                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
+                                                if v.get("ok").and_then(|b| b.as_bool()) == Some(true) {
+                                                    let sel_found = v.get("selectorFound").and_then(|b| b.as_bool());
+                                                    let txt_found = v.get("textFound").and_then(|b| b.as_bool());
+                                                    let ready = v.get("readyState").and_then(|s| s.as_str()) == Some("complete");
+
+                                                    let sel_ok = selector.is_none() || sel_found == Some(true);
+                                                    let txt_ok = text.is_none() || txt_found == Some(true);
+                                                    let ready_ok = (selector.is_some() || text.is_some()) || ready;
+
+                                                    if sel_ok && txt_ok && ready_ok {
+                                                        outcome = Ok("Condition satisfied in browser.".to_string());
+                                                        break;
+                                                    }
+                                                } else if let Some(err) = v.get("error").and_then(|s| s.as_str()) {
+                                                    outcome = Err(err.to_string());
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        outcome = Err("Browser panel closed during wait.".to_string());
+                                        break;
+                                    }
+                                }
+                                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                            }
+                            outcome
+                        }
+                    };
+                    let _ = request.reply.send(reply);
+                }
+            })
+            .detach();
+        }
+
         let observe_model = cx.observe(&model, |this, _model, cx| {
             this.sync_project(cx);
             cx.notify();
@@ -804,6 +231,10 @@ impl RightPanelView {
                     }
                 },
             );
+        // Eager so agent browser commands always have a live view to act on,
+        // even before the user opens the tab. Hidden until selected.
+        let browser = cx.new(|cx| BrowserView::new(window, cx));
+        browser.update(cx, |browser, cx| browser.set_visible(false, cx));
 
         let mut panel = Self {
             model,
@@ -851,6 +282,7 @@ impl RightPanelView {
             saved_content: String::new(),
             is_dirty: false,
             pending_document: None,
+            browser: Some(browser),
             event_tx,
             _watcher: None,
             _subscriptions: vec![observe_model, tree_subscription],
@@ -951,7 +383,7 @@ impl RightPanelView {
         self.git_status = status;
     }
 
-    fn draft_pr_checkout_key(&self) -> Option<DraftPrContextKey> {
+    pub(crate) fn draft_pr_checkout_key(&self) -> Option<DraftPrContextKey> {
         let project = self.project.clone()?;
         let status = self.git_status.as_ref()?;
         if self.worktree_unavailable || status.detached {
@@ -969,7 +401,7 @@ impl RightPanelView {
         })
     }
 
-    fn draft_pr_creation_key(&self) -> Option<DraftPrContextKey> {
+    pub(crate) fn draft_pr_creation_key(&self) -> Option<DraftPrContextKey> {
         can_create_pull_request(!self.worktree_unavailable, self.git_status.as_ref())
             .then(|| self.draft_pr_checkout_key())
             .flatten()
@@ -1020,6 +452,7 @@ impl RightPanelView {
         }
         self.active_surface = Some(surface);
         self.refresh_surface(surface);
+        self.sync_browser_visibility(cx);
         cx.notify();
     }
 
@@ -1029,7 +462,7 @@ impl RightPanelView {
         }
     }
 
-    fn refresh_surface(&self, surface: Surface) {
+    pub(crate) fn refresh_surface(&self, surface: Surface) {
         let Some(project) = self.project.clone() else {
             return;
         };
@@ -1056,6 +489,9 @@ impl RightPanelView {
                     files,
                     error,
                 });
+            }
+            Surface::Browser => {
+                // The live webview needs no background refresh.
             }
         });
     }
@@ -1424,6 +860,8 @@ impl RightPanelView {
             GitAction::Push => "Pushing…".to_string(),
             GitAction::Pull => "Pulling from origin…".to_string(),
             GitAction::Fetch => "Fetching origin…".to_string(),
+            GitAction::StageAll => "Staging all changes…".to_string(),
+            GitAction::UnstageAll => "Unstaging all changes…".to_string(),
             GitAction::CreatePullRequest => "Creating pull request…".to_string(),
             GitAction::Checkout(b) => format!("Switching to {b}…"),
             GitAction::CheckoutStash(b) => format!("Stashing changes & switching to {b}…"),
@@ -1470,6 +908,12 @@ impl RightPanelView {
                     }
                     GitAction::Fetch => {
                         threadlane_git::fetch(&work_dir).map_err(|e| e.to_string())?;
+                    }
+                    GitAction::StageAll => {
+                        threadlane_git::stage_all(&work_dir).map_err(|e| e.to_string())?;
+                    }
+                    GitAction::UnstageAll => {
+                        threadlane_git::unstage_all(&work_dir).map_err(|e| e.to_string())?;
                     }
                     GitAction::CreatePullRequest => {
                         action_message = Some(
@@ -1526,6 +970,124 @@ impl RightPanelView {
         cx.notify();
     }
 
+    fn ensure_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<BrowserView> {
+        if let Some(browser) = &self.browser {
+            return browser.clone();
+        }
+        let browser = cx.new(|cx| BrowserView::new(window, cx));
+        self.browser = Some(browser.clone());
+        browser
+    }
+
+    fn sync_browser_visibility(&mut self, cx: &mut Context<Self>) {
+        let Some(browser) = self.browser.clone() else {
+            return;
+        };
+        let visible = self.active_surface == Some(Surface::Browser);
+        browser.update(cx, |browser, cx| browser.set_visible(visible, cx));
+    }
+
+    /// Start a script evaluation against the live view, returning the
+    /// pending result channel. The caller awaits it off the UI thread.
+    fn start_browser_eval(
+        &mut self,
+        script: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<tokio::sync::oneshot::Receiver<String>, String> {
+        let Some(browser) = self.browser.clone() else {
+            return Err("The browser panel is not ready.".to_string());
+        };
+        browser.update(cx, |browser, cx| browser.evaluate_script(script, cx))
+    }
+
+    fn save_browser_screenshot(&self, bytes: &[u8]) -> (Option<String>, String) {
+        let data_url = base64_data_url(bytes);
+        let Some(project) = &self.project else {
+            return (None, data_url);
+        };
+        let dir = project.join(".threadlane").join("previews");
+        if std::fs::create_dir_all(&dir).is_err() {
+            return (None, data_url);
+        }
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let path = dir.join(format!("browser-{stamp}.jpg"));
+        let _ = std::fs::write(&path, bytes);
+        let _ = std::fs::write(dir.join("latest-browser.jpg"), bytes);
+        (Some(path.display().to_string()), data_url)
+    }
+
+    /// Apply one agent browser command on the UI thread. Called from the
+    /// bridge pump, never from a tool worker directly.
+    fn apply_browser_command(
+        &mut self,
+        command: threadlane_session::BrowserCommand,
+        cx: &mut Context<Self>,
+    ) -> Result<String, String> {
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (command, cx);
+            return Err("The embedded browser is available on macOS only.".to_string());
+        }
+        #[cfg(target_os = "macos")]
+        {
+            use super::browser::{AddressTarget, resolve_address, search_url};
+            use threadlane_session::BrowserCommand;
+            let Some(browser) = self.browser.clone() else {
+                return Err("The browser panel is not ready.".to_string());
+            };
+            match command {
+                BrowserCommand::Navigate { url } => {
+                    let final_url = match resolve_address(&url) {
+                        None => {
+                            return Err(
+                                "`browser_navigate` requires a non-empty `url`.".to_string()
+                            );
+                        }
+                        Some(AddressTarget::Url(url)) => url,
+                        Some(AddressTarget::Search(query)) => search_url(&query),
+                    };
+                    browser.update(cx, |browser, cx| browser.load_url(&final_url, cx));
+                    // Keep the agent's browsing visible to the user.
+                    self.open_surface(Surface::Browser, cx);
+                    Ok(format!("Opened {final_url} in the browser panel."))
+                }
+                BrowserCommand::Back => {
+                    browser.update(cx, |browser, cx| browser.go_back(cx));
+                    self.open_surface(Surface::Browser, cx);
+                    Ok("Went back in the browser panel.".to_string())
+                }
+                BrowserCommand::Reload => {
+                    browser.update(cx, |browser, cx| browser.reload(cx));
+                    Ok("Reloaded the browser panel.".to_string())
+                }
+                BrowserCommand::CurrentUrl => {
+                    let url = browser.read(cx).current_url(cx).unwrap_or_default();
+                    Ok(if url.is_empty() {
+                        "The browser panel has no page open yet.".to_string()
+                    } else {
+                        url
+                    })
+                }
+                // Script-backed commands route through start_browser_eval;
+                // reaching here is a pump bug, not a page problem.
+                _ => Err("Internal browser routing error.".to_string()),
+            }
+        }
+    }
+
+    fn render_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let browser = self.ensure_browser(window, cx);
+        browser.update(cx, |browser, cx| browser.set_visible(true, cx));
+        div()
+            .flex_1()
+            .min_h_0()
+            .child(browser)
+            .into_any_element()
+    }
+
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
         let active = self.active_surface;
@@ -1541,7 +1103,7 @@ impl RightPanelView {
                     .flex()
                     .items_center()
                     .gap_1()
-                    .children([Surface::Review, Surface::Files].map(|surface| {
+                    .children(Surface::all().into_iter().map(|surface| {
                         Button::new(SharedString::from(format!(
                             "right-panel-tab-{}",
                             surface.label().to_lowercase()
@@ -1601,7 +1163,7 @@ impl RightPanelView {
                             .child("Choose what to show in the right panel"),
                     )
                     .child(div().mt_4().w_full().flex().gap_2().children(
-                        [Surface::Review, Surface::Files].map(|surface| {
+                        Surface::all().into_iter().map(|surface| {
                             Button::new(SharedString::from(format!(
                                 "right-panel-card-{}",
                                 surface.label().to_lowercase()
@@ -1885,10 +1447,10 @@ impl RightPanelView {
             .as_ref()
             .map(|root| root.join(&path).display().to_string());
         let status = file.status_char().to_string();
-        let status_color = match file.status_char() {
-            'A' | '?' => theme.success,
-            'D' => theme.danger,
-            _ => theme.warning,
+        let (status_bg, status_color) = match file.status_char() {
+            'A' | '?' => (theme.success.opacity(0.15), theme.success),
+            'D' => (theme.danger.opacity(0.15), theme.danger),
+            _ => (theme.warning.opacity(0.15), theme.warning),
         };
         let context_path = path.clone();
         div()
@@ -1900,7 +1462,17 @@ impl RightPanelView {
             .flex()
             .items_center()
             .gap_2()
-            .hover(|row| row.bg(theme.muted))
+            .bg(if is_selected {
+                theme.accent.opacity(0.12)
+            } else {
+                hsla(0.0, 0.0, 0.0, 0.0)
+            })
+            .hover(|row| row.bg(if is_selected {
+                theme.accent.opacity(0.16)
+            } else {
+                theme.muted
+            }))
+            .focus(|row| row.border_color(theme.primary))
             .child(
                 Checkbox::new(SharedString::from(format!("chk-{path}")))
                     .checked(is_selected)
@@ -1956,8 +1528,11 @@ impl RightPanelView {
                     })
                     .child(
                         div()
-                            .size(px(16.0))
+                            .size(px(18.0))
                             .rounded_sm()
+                            .border_1()
+                            .border_color(status_color.opacity(0.35))
+                            .bg(status_bg)
                             .flex()
                             .items_center()
                             .justify_center()
@@ -2541,6 +2116,10 @@ impl RightPanelView {
                 })
         });
 
+        let staged_count = self.review_files.iter().filter(|f| f.staged).count();
+        let unstaged_count = self.review_files.iter().filter(|f| f.unstaged).count();
+        let has_staged = staged_count > 0;
+
         let selection_bar = (total_files > 0).then(|| {
             div()
                 .flex()
@@ -2563,10 +2142,10 @@ impl RightPanelView {
                                 .on_click(cx.listener(move |this, checked, _window, cx| {
                                     if *checked {
                                         this.selected_files = this
-                                            .review_files
-                                            .iter()
-                                            .map(|f| f.path.clone())
-                                            .collect();
+                                             .review_files
+                                             .iter()
+                                             .map(|f| f.path.clone())
+                                             .collect();
                                     } else {
                                         this.selected_files.clear();
                                     }
@@ -2601,7 +2180,31 @@ impl RightPanelView {
                                 .child(format!("−{selected_deletions}"))
                                 .with_variant(TagVariant::Danger)
                                 .small(),
-                        ),
+                        )
+                        .child(
+                            Button::new("git-stage-all-btn")
+                                .label("Stage All")
+                                .ghost()
+                                .xsmall()
+                                .disabled(self.git_busy || unstaged_count == 0)
+                                .tooltip("Stage all changes (git add -A)")
+                                .on_click(cx.listener(|this, _event, window, cx| {
+                                    this.run_git_action(GitAction::StageAll, window, cx);
+                                })),
+                        )
+                        .when(has_staged, |row| {
+                            row.child(
+                                Button::new("git-unstage-all-btn")
+                                    .label("Unstage All")
+                                    .ghost()
+                                    .xsmall()
+                                    .disabled(self.git_busy)
+                                    .tooltip("Unstage all changes (git restore --staged .)")
+                                    .on_click(cx.listener(|this, _event, window, cx| {
+                                        this.run_git_action(GitAction::UnstageAll, window, cx);
+                                    })),
+                            )
+                        }),
                 )
         });
 
@@ -2659,12 +2262,19 @@ impl RightPanelView {
             "Commit & push".to_string()
         };
 
+        let commit_val = self.commit_message_input.read(cx).value();
+        let first_line = commit_val.lines().next().unwrap_or("");
+        let subject_len = first_line.chars().count();
+        let counter_color = if subject_len > 72 {
+            theme.danger
+        } else if subject_len > 50 {
+            theme.warning
+        } else {
+            theme.muted_foreground
+        };
+
         let commit_footer = div()
             .flex_none()
-            .border_t_1()
-            .border_color(theme.border)
-            .bg(theme.title_bar)
-            .p_3()
             .flex()
             .flex_col()
             .gap_2()
@@ -2675,10 +2285,29 @@ impl RightPanelView {
                     .justify_between()
                     .child(
                         div()
-                            .text_xs()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.muted_foreground)
-                            .child("COMMIT"),
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.muted_foreground)
+                                    .child("COMMIT"),
+                            )
+                            .when(subject_len > 0, |header| {
+                                header.child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(counter_color)
+                                        .child(if subject_len > 72 {
+                                            format!("{subject_len}/72 (too long)")
+                                        } else {
+                                            format!("{subject_len}/50")
+                                        }),
+                                )
+                            }),
                     )
                     .child(
                         Button::new("git-generate-message")
@@ -3025,6 +2654,7 @@ impl RightPanelView {
         let history_active = self.review_tab == ReviewTab::History;
         let total_changes = self.review_files.len();
 
+        let staged_in_tab = self.review_files.iter().filter(|f| f.staged).count();
         let review_sub_tabs = div()
             .flex()
             .items_center()
@@ -3069,22 +2699,41 @@ impl RightPanelView {
                     )
                     .children((total_changes > 0).then(|| {
                         div()
-                            .px_1p5()
-                            .py_0p5()
-                            .rounded_full()
-                            .bg(if changes_active {
-                                theme.muted
-                            } else {
-                                theme.muted.opacity(0.5)
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .px_1p5()
+                                    .py_0p5()
+                                    .rounded_full()
+                                    .bg(if changes_active {
+                                        theme.muted
+                                    } else {
+                                        theme.muted.opacity(0.5)
+                                    })
+                                    .text_xs()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(if changes_active {
+                                        theme.foreground
+                                    } else {
+                                        theme.muted_foreground
+                                    })
+                                    .child(format!("{total_changes}")),
+                            )
+                            .when(staged_in_tab > 0, |badge| {
+                                badge.child(
+                                    div()
+                                        .px_1p5()
+                                        .py_0p5()
+                                        .rounded_full()
+                                        .bg(theme.success.opacity(0.15))
+                                        .text_xs()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(theme.success)
+                                        .child(format!("{staged_in_tab} staged")),
+                                )
                             })
-                            .text_xs()
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(if changes_active {
-                                theme.foreground
-                            } else {
-                                theme.muted_foreground
-                            })
-                            .child(format!("{total_changes}"))
                     })),
             )
             .child(
@@ -4552,6 +4201,7 @@ impl Render for RightPanelView {
                 None => self.render_chooser(cx).into_any_element(),
                 Some(Surface::Review) => self.render_review(cx),
                 Some(Surface::Files) => self.render_files(cx),
+                Some(Surface::Browser) => self.render_browser(window, cx),
             }
         };
         div()
@@ -4564,6 +4214,157 @@ impl Render for RightPanelView {
             .child(self.render_header(cx))
             .child(body)
     }
+}
+
+/// One bridge-pump step: either a finished reply or a pending script
+/// evaluation/snapshot/wait whose channel the pump awaits without blocking the UI.
+enum BrowserReply {
+    Ready(Result<String, String>),
+    PendingEval(tokio::sync::oneshot::Receiver<String>),
+    PendingSnapshot(tokio::sync::oneshot::Receiver<Result<(Vec<u8>, u32, u32), String>>),
+    PendingWait {
+        selector: Option<String>,
+        text: Option<String>,
+        deadline: std::time::Instant,
+    },
+}
+
+/// Cap for evaluated script results. Snapshot JSON keeps url/title/count up
+/// front so a cut tail still orients the model.
+const MAX_BROWSER_EVAL_CHARS: usize = 8_000;
+
+fn start_browser_request(
+    panel: &mut RightPanelView,
+    command: threadlane_session::BrowserCommand,
+    cx: &mut Context<RightPanelView>,
+) -> BrowserReply {
+    use threadlane_session::BrowserCommand;
+    match command {
+        BrowserCommand::Screenshot => {
+            #[cfg(target_os = "macos")]
+            {
+                panel.open_surface(Surface::Browser, cx);
+                let Some(browser) = panel.browser.clone() else {
+                    return BrowserReply::Ready(Err("The browser panel is not ready.".to_string()));
+                };
+                match browser.update(cx, |browser, cx| browser.take_snapshot(cx)) {
+                    Ok(rx) => BrowserReply::PendingSnapshot(rx),
+                    Err(err) => BrowserReply::Ready(Err(err)),
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                BrowserReply::Ready(Err("The embedded browser is available on macOS only.".to_string()))
+            }
+        }
+        BrowserCommand::Wait {
+            selector,
+            text,
+            timeout_ms,
+        } => {
+            panel.open_surface(Surface::Browser, cx);
+            let deadline = std::time::Instant::now()
+                + std::time::Duration::from_millis(timeout_ms.max(100));
+            BrowserReply::PendingWait {
+                selector,
+                text,
+                deadline,
+            }
+        }
+        BrowserCommand::ConsoleLogs { clear, level } => {
+            let script = super::browser::drain_console_logs_js(clear, &level);
+            match panel.start_browser_eval(&script, cx) {
+                Ok(rx) => BrowserReply::PendingEval(rx),
+                Err(error) => BrowserReply::Ready(Err(error)),
+            }
+        }
+        _ => {
+            let script = match &command {
+                BrowserCommand::Snapshot => Some(super::browser::snapshot_js()),
+                BrowserCommand::Act {
+                    action,
+                    target,
+                    text,
+                    key,
+                } => {
+                    let target_json = match target {
+                        threadlane_session::ActTarget::Ref(number) => {
+                            serde_json::json!({"ref": number, "selector": serde_json::Value::Null})
+                        }
+                        threadlane_session::ActTarget::Selector(selector) => {
+                            serde_json::json!({"ref": serde_json::Value::Null, "selector": selector})
+                        }
+                    }
+                    .to_string();
+                    let text_json = serde_json::to_string(text).unwrap_or_else(|_| "null".into());
+                    let key_json = serde_json::to_string(key).unwrap_or_else(|_| "null".into());
+                    Some(super::browser::act_script(
+                        action,
+                        &target_json,
+                        &text_json,
+                        &key_json,
+                    ))
+                }
+                BrowserCommand::Evaluate { script } => {
+                    Some(super::browser::evaluate_script_wrap(script))
+                }
+                _ => None,
+            };
+            match script {
+                Some(script) => match panel.start_browser_eval(&script, cx) {
+                    Ok(rx) => BrowserReply::PendingEval(rx),
+                    Err(error) => BrowserReply::Ready(Err(error)),
+                },
+                None => BrowserReply::Ready(panel.apply_browser_command(command, cx)),
+            }
+        }
+    }
+}
+
+fn finalize_browser_eval(payload: &str) -> String {
+    let inner = super::browser::unwrap_callback_payload(payload);
+    // Format console logs if this payload is from drain_console_logs_js
+    if inner.contains("\"logs\":[") && inner.contains("\"count\":") {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&inner) {
+            if let Some(logs) = v.get("logs").and_then(|a| a.as_array()) {
+                if logs.is_empty() {
+                    return "No console errors or warnings recorded on the current page.".to_string();
+                }
+                let mut out = format!("Recorded console messages ({}):\n", logs.len());
+                for log in logs {
+                    let level = log
+                        .get("level")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("log")
+                        .to_uppercase();
+                    let msg = log.get("message").and_then(|s| s.as_str()).unwrap_or("");
+                    let line_info = match (
+                        log.get("source").and_then(|s| s.as_str()),
+                        log.get("line").and_then(|l| l.as_i64()),
+                    ) {
+                        (Some(src), Some(l)) => format!(" ({src}:{l})"),
+                        (Some(src), None) => format!(" ({src})"),
+                        _ => String::new(),
+                    };
+                    out.push_str(&format!("- [{level}]{line_info} {msg}\n"));
+                }
+                return out.trim_end().to_string();
+            }
+        }
+    }
+    if inner.chars().count() <= MAX_BROWSER_EVAL_CHARS {
+        return inner;
+    }
+    let head: String = inner.chars().take(MAX_BROWSER_EVAL_CHARS).collect();
+    format!("{head}\n[... browser result truncated to {MAX_BROWSER_EVAL_CHARS} characters ...]")
+}
+
+fn base64_data_url(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    format!(
+        "data:image/jpeg;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    )
 }
 
 fn convert_node_to_tree_item(node: FileNode, expanded_paths: &HashSet<String>) -> TreeItem {
@@ -4582,7 +4383,7 @@ fn convert_node_to_tree_item(node: FileNode, expanded_paths: &HashSet<String>) -
     }
 }
 
-fn scan_project_tree(root: &Path, limit: usize) -> Vec<FileNode> {
+pub(crate) fn scan_project_tree(root: &Path, limit: usize) -> Vec<FileNode> {
     fn visit(
         root: &Path,
         relative: &Path,
@@ -4638,308 +4439,4 @@ fn scan_project_tree(root: &Path, limit: usize) -> Vec<FileNode> {
 
     let mut count = 0;
     visit(root, Path::new(""), 0, limit, &mut count)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        can_create_pull_request, can_publish_branch, draft_pr_prefill,
-        message_generated_matches_active_project, scan_project_tree, DraftPrAttemptState,
-        DraftPrCompletion, DraftPrContextKey, DraftPrFields, DraftPrRemoteResult,
-    };
-    use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
-    use threadlane_git::GitStatus;
-
-    #[test]
-    fn generated_commit_messages_only_apply_to_the_originating_checkout() {
-        let origin = std::path::Path::new("/projects/app/.threadlane/worktrees/session-a");
-        let other = std::path::Path::new("/projects/app/.threadlane/worktrees/session-b");
-
-        assert!(message_generated_matches_active_project(
-            origin,
-            Some(origin)
-        ));
-        assert!(!message_generated_matches_active_project(
-            origin,
-            Some(other)
-        ));
-        assert!(!message_generated_matches_active_project(origin, None));
-    }
-
-    #[test]
-    fn only_publishable_branches_without_upstreams_use_the_publish_action() {
-        let unpublished = GitStatus {
-            branch: Some("feature/demo".into()),
-            remote: Some("git@github.com:threadlane/threadlane.git".into()),
-            ahead: 731,
-            ..GitStatus::default()
-        };
-        assert!(can_publish_branch(true, Some(&unpublished)));
-        assert!(!can_publish_branch(false, Some(&unpublished)));
-
-        let published = GitStatus {
-            has_upstream: true,
-            ..unpublished.clone()
-        };
-        assert!(!can_publish_branch(true, Some(&published)));
-
-        let detached = GitStatus {
-            detached: true,
-            branch: None,
-            ..unpublished
-        };
-        assert!(!can_publish_branch(true, Some(&detached)));
-        assert!(!can_publish_branch(true, None));
-    }
-
-    #[test]
-    fn draft_pr_gate_only_allows_ready_published_named_branches() {
-        let ready = GitStatus {
-            branch: Some("feature/demo".into()),
-            remote: Some("git@github.com:threadlane/threadlane.git".into()),
-            has_upstream: true,
-            pr_ready: true,
-            pr_lookup_available: true,
-            ..GitStatus::default()
-        };
-        assert!(can_create_pull_request(true, Some(&ready)));
-        assert!(!can_create_pull_request(false, Some(&ready)));
-        let blockers: [fn(&mut GitStatus); 7] = [
-            |status| status.pr_lookup_available = false,
-            |status| status.has_upstream = false,
-            |status| status.remote = None,
-            |status| status.branch = Some(" ".into()),
-            |status| status.pr = Some(Default::default()),
-            |status| status.pr_ready = false,
-            |status| {
-                status.detached = true;
-                status.branch = None;
-            },
-        ];
-        for block in blockers {
-            let mut blocked = ready.clone();
-            block(&mut blocked);
-            assert!(!can_create_pull_request(true, Some(&blocked)));
-        }
-        assert!(!can_create_pull_request(true, None));
-    }
-
-    #[test]
-    fn draft_pr_fields_validate_every_value_required_by_the_existing_backend() {
-        assert!(draft_fields("Improve review flow").validate().is_ok());
-        for (base, title, body) in [
-            (" ", "Title", "Body"),
-            ("main", "\n", "Body"),
-            ("main", "Title", ""),
-        ] {
-            assert!(DraftPrFields {
-                base: base.into(),
-                title: title.into(),
-                body: body.into(),
-            }
-            .validate()
-            .is_err());
-        }
-    }
-
-    #[test]
-    fn draft_prefill_reuses_default_branch_and_latest_commit_metadata() {
-        let status = GitStatus {
-            branch: Some("feature/draft-pr".into()),
-            default_branch: Some("develop".into()),
-            recent_commits: vec![threadlane_git::GitCommitInfo {
-                summary: "Add draft PR workflow".into(),
-                body: "Keep publishing explicit and recoverable.".into(),
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        assert_eq!(
-            draft_pr_prefill(&status),
-            DraftPrFields {
-                base: "develop".into(),
-                title: "Add draft PR workflow".into(),
-                body: "Keep publishing explicit and recoverable.".into(),
-            }
-        );
-
-        let fallback = draft_pr_prefill(&GitStatus {
-            branch: Some("feature/draft-pr".into()),
-            ..Default::default()
-        });
-        assert_eq!(
-            fallback,
-            DraftPrFields {
-                base: "main".into(),
-                title: "feature/draft-pr".into(),
-                body: "feature/draft-pr".into(),
-            }
-        );
-    }
-
-    fn draft_key(branch: &str, revision: u64) -> DraftPrContextKey {
-        DraftPrContextKey {
-            project: PathBuf::from("/project/.threadlane/worktrees/task"),
-            branch: branch.into(),
-            revision,
-        }
-    }
-
-    fn draft_fields(title: &str) -> DraftPrFields {
-        DraftPrFields {
-            base: "main".into(),
-            title: title.into(),
-            body: "Body".into(),
-        }
-    }
-
-    #[test]
-    fn draft_pr_attempts_are_single_flight_and_snapshot_safe() {
-        let mut state = DraftPrAttemptState::default();
-        let key = draft_key("feature/a", 1);
-        let fields = draft_fields("First");
-        let first = state.begin(key.clone(), fields.clone()).unwrap();
-        assert!(state.begin(key.clone(), fields.clone()).is_err());
-
-        assert_eq!(
-            state.complete(
-                &first,
-                &draft_key("feature/b", 2),
-                &fields,
-                DraftPrRemoteResult::Exists("https://github.com/o/r/pull/1".into()),
-            ),
-            DraftPrCompletion::Stale
-        );
-        assert!(state.is_busy());
-        assert_eq!(
-            state.complete(
-                &first,
-                &key,
-                &fields,
-                DraftPrRemoteResult::Exists("https://github.com/o/r/pull/1".into()),
-            ),
-            DraftPrCompletion::SuccessExact("https://github.com/o/r/pull/1".into())
-        );
-
-        let edited = state.begin(key.clone(), fields.clone()).unwrap();
-        assert_eq!(
-            state.complete(
-                &edited,
-                &key,
-                &draft_fields("Newer edit"),
-                DraftPrRemoteResult::Exists("https://github.com/o/r/pull/2".into()),
-            ),
-            DraftPrCompletion::SuccessWithNewerEdits("https://github.com/o/r/pull/2".into())
-        );
-
-        let failed = state.begin(key.clone(), fields.clone()).unwrap();
-        assert_eq!(
-            state.complete(
-                &failed,
-                &key,
-                &fields,
-                DraftPrRemoteResult::Absent("offline".into()),
-            ),
-            DraftPrCompletion::Failure("offline".into())
-        );
-        assert!(state.begin(key, fields).is_ok());
-    }
-
-    #[test]
-    fn ambiguous_draft_pr_write_requires_explicit_readback_before_another_post() {
-        let mut state = DraftPrAttemptState::default();
-        let key = draft_key("feature/a", 1);
-        let fields = draft_fields("First");
-        let attempt = state.begin(key.clone(), fields.clone()).unwrap();
-
-        assert_eq!(
-            state.complete(
-                &attempt,
-                &key,
-                &fields,
-                DraftPrRemoteResult::Unknown("network result unknown".into()),
-            ),
-            DraftPrCompletion::Unknown("network result unknown".into())
-        );
-        assert!(state.begin(key.clone(), fields.clone()).is_err());
-
-        let check = state.begin_check().unwrap();
-        assert!(state.begin_check().is_err());
-        assert!(matches!(
-            state.complete(
-                &check,
-                &key,
-                &fields,
-                DraftPrRemoteResult::Unknown("still unknown".into()),
-            ),
-            DraftPrCompletion::Unknown(_)
-        ));
-        assert!(state.begin(key.clone(), fields.clone()).is_err());
-        let check = state.begin_check().unwrap();
-        assert_eq!(
-            state.complete(
-                &check,
-                &key,
-                &fields,
-                DraftPrRemoteResult::Absent("not present".into()),
-            ),
-            DraftPrCompletion::Failure("not present".into())
-        );
-        let attempt = state.begin(key.clone(), fields.clone()).unwrap();
-        assert!(matches!(
-            state.complete(
-                &attempt,
-                &key,
-                &fields,
-                DraftPrRemoteResult::Unknown("unknown".into()),
-            ),
-            DraftPrCompletion::Unknown(_)
-        ));
-        let check = state.begin_check().unwrap();
-        assert_eq!(
-            state.complete(
-                &check,
-                &key,
-                &fields,
-                DraftPrRemoteResult::Exists("https://github.com/o/r/pull/3".into()),
-            ),
-            DraftPrCompletion::SuccessExact("https://github.com/o/r/pull/3".into())
-        );
-        assert!(state.begin_check().is_err());
-    }
-
-    #[test]
-    fn project_scan_is_bounded_and_skips_generated_roots() {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("threadlane-panel-{nonce}"));
-        std::fs::create_dir_all(root.join("src/nested")).unwrap();
-        std::fs::create_dir_all(root.join("target/debug")).unwrap();
-        std::fs::create_dir_all(root.join(".threadlane/sessions")).unwrap();
-        std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
-        std::fs::write(root.join("src/nested/lib.rs"), "pub fn value() {}\n").unwrap();
-        std::fs::write(root.join("target/debug/generated"), "ignored").unwrap();
-
-        let items = scan_project_tree(&root, 10);
-        assert_eq!(
-            items
-                .iter()
-                .map(|entry| entry.relative_path.as_str())
-                .collect::<Vec<_>>(),
-            vec!["src"]
-        );
-        assert!(items[0]
-            .children
-            .iter()
-            .any(|item| item.relative_path == "src/main.rs"));
-        assert!(items[0]
-            .children
-            .iter()
-            .any(|item| item.relative_path == "src/nested"));
-
-        std::fs::remove_dir_all(root).unwrap();
-    }
 }

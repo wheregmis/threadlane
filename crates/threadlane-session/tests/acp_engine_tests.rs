@@ -491,7 +491,7 @@ async fn an_acp_turn_is_journaled_so_the_transcript_survives_a_reload() {
     use threadlane_session::harness::{
         read_transcript_page, JsonlStore, SessionStore, TranscriptItem,
     };
-    use threadlane_session::{AgentMessage, CodingAgent, CodingAgentOptions, PlanItemStatus};
+    use threadlane_session::{AgentMessage, BrowserBridge, CodingAgent, CodingAgentOptions, PlanItemStatus};
 
     let temp = tempfile::tempdir().unwrap();
     let work = work_dir(&temp);
@@ -511,6 +511,7 @@ async fn an_acp_turn_is_journaled_so_the_transcript_survives_a_reload() {
         system_prompt: Default::default(),
         agent_config: None,
         coding_config: None,
+        browser: BrowserBridge::unavailable(),
     });
 
     let mut events = agent.subscribe();
@@ -874,7 +875,7 @@ async fn assert_stopping_acp_preserves_queued_input(reopen: bool) {
 }
 
 fn queued_controller(work: &Path) -> std::sync::Arc<threadlane_session::SessionController> {
-    use threadlane_session::{CodingAgentOptions, ExecutionMode, SessionController};
+    use threadlane_session::{BrowserBridge, CodingAgentOptions, ExecutionMode, SessionController};
     let session_file = work.join(".threadlane/sessions/session_queue.jsonl");
     std::fs::create_dir_all(session_file.parent().unwrap()).unwrap();
     SessionController::new(

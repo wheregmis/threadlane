@@ -571,6 +571,14 @@ fn acp_effort_value(effort: ReasoningEffort) -> Option<&'static str> {
         ReasoningEffort::High => Some("high"),
         ReasoningEffort::XHigh => Some("xhigh"),
         ReasoningEffort::Max => Some("max"),
+        ReasoningEffort::Other(value) => {
+            let normalized = value.trim().to_ascii_lowercase();
+            if normalized.is_empty() || normalized == "off" || normalized == "none" {
+                Some("low")
+            } else {
+                Some(value)
+            }
+        }
     }
 }
 

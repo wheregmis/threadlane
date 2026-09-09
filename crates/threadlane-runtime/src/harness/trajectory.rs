@@ -215,6 +215,12 @@ pub enum AnomalyKind {
     ProviderRetryLoop,
     OrphanedToolStart,
     ContextOverflowRisk,
+    /// Consecutive failures of one tool with the same output hash (mirrors
+    /// the runtime loop guard's error-loop tripwire).
+    ErrorLoop,
+    /// Consecutive A→B→A… tool cycles with stable outputs (mirrors the
+    /// runtime ping-pong tripwire).
+    PingPongCycle,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -314,24 +320,47 @@ pub fn project_trajectory<S: SessionStore>(store: &S) -> SessionTrajectory {
     let mut requests: Vec<RequestTrajectory> = Vec::new();
     let mut current_request: Option<RequestTrajectory> = None;
     let mut request_index = 0u32;
+    // Per-request dedup sets for mutated files/commands (O(1) instead of a
+    // linear `contains` scan per tool). Reset whenever a new request opens.
+    let mut seen_files: HashSet<String> = HashSet::new();
+    let mut seen_commands: HashSet<String> = HashSet::new();
 
-    // Collect all chronological journal events (entries & records sorted by seq)
+    // Merge the two seq-ordered streams in linear time instead of
+    // concatenating and re-sorting (O(n log n)). All stores keep entries and
+    // records in seq order (JsonlStore assigns at append and sorts records on
+    // load; SqliteStore loads ORDER BY seq), with entries winning ties to
+    // match the previous stable sort.
     #[derive(Clone)]
     enum JournalItem<'a> {
         Entry(&'a Entry),
         Record(&'a Record),
     }
-    let mut journal: Vec<JournalItem> = Vec::new();
-    for entry in store.entries() {
-        journal.push(JournalItem::Entry(entry));
+    #[cfg(debug_assertions)]
+    {
+        debug_assert!(store.entries().windows(2).all(|w| w[0].seq <= w[1].seq));
+        debug_assert!(store.records().windows(2).all(|w| {
+            w[0].seq() <= w[1].seq()
+        }));
     }
-    for record in store.records() {
-        journal.push(JournalItem::Record(record));
+    let mut journal: Vec<JournalItem> = Vec::with_capacity(store.entries().len() + store.records().len());
+    {
+        let mut entries = store.entries().iter().peekable();
+        let mut records = store.records().iter().peekable();
+        loop {
+            let take_entry = match (entries.peek(), records.peek()) {
+                (Some(e), Some(r)) => e.seq <= r.seq(),
+                (Some(_), None) => true,
+                (None, _) => false,
+            };
+            if take_entry {
+                journal.push(JournalItem::Entry(entries.next().expect("peeked entry")));
+            } else if records.peek().is_some() {
+                journal.push(JournalItem::Record(records.next().expect("peeked record")));
+            } else {
+                break;
+            }
+        }
     }
-    journal.sort_by_key(|item| match item {
-        JournalItem::Entry(e) => e.seq,
-        JournalItem::Record(r) => r.seq(),
-    });
 
     for item in journal {
         match item {
@@ -344,6 +373,8 @@ pub fn project_trajectory<S: SessionStore>(store: &S) -> SessionTrajectory {
                             req.status = RequestStatus::Completed;
                             requests.push(req);
                         }
+                        seen_files.clear();
+                        seen_commands.clear();
                         request_index += 1;
                         let root_ref = TrajectoryRef {
                             seq: entry.seq,
@@ -671,12 +702,12 @@ pub fn project_trajectory<S: SessionStore>(store: &S) -> SessionTrajectory {
                             req.tool_calls_count += 1;
                             if let Some(mutated) = extract_mutated_files(tool_name, effective_args)
                             {
-                                if !req.files_mutated.contains(&mutated) {
+                                if seen_files.insert(mutated.clone()) {
                                     req.files_mutated.push(mutated);
                                 }
                             }
                             if let Some(cmd) = extract_command(tool_name, effective_args) {
-                                if !req.commands_executed.contains(&cmd) {
+                                if seen_commands.insert(cmd.clone()) {
                                     req.commands_executed.push(cmd);
                                 }
                             }
@@ -881,6 +912,12 @@ pub fn project_trajectory<S: SessionStore>(store: &S) -> SessionTrajectory {
     // ── Diagnostic Anomaly Detection Pass ──────────────────────────────────
     let mut anomalies = Vec::new();
 
+    /// Minimum consecutive same-error runs for an ErrorLoop anomaly (mirrors
+    /// the runtime loop guard default).
+    const ERROR_LOOP_MIN_RUN: usize = 3;
+    /// Minimum consecutive cycle rounds for a PingPongCycle anomaly.
+    const PING_PONG_MIN_ROUNDS: usize = 3;
+
     // 1. Detect repeated tool calls with identical arguments (potential execution loop)
     let mut seen_calls: HashMap<(String, String), Vec<TrajectoryRef>> = HashMap::new();
     for item in &items {
@@ -924,6 +961,205 @@ pub fn project_trajectory<S: SessionStore>(store: &S) -> SessionTrajectory {
         }
     }
 
+    // 3. Detect consecutive same-error runs (mirrors the runtime error-loop
+    // tripwire): one tool failing repeatedly with the same output hash.
+    // Arguments may vary; the error signature must match consecutively.
+    {
+        fn error_signature(tool: &ToolTrajectory) -> Option<String> {
+            (tool.status == ToolStatus::Failed).then(|| {
+                format!(
+                    "{}|{}",
+                    tool.tool_name,
+                    tool.output_sha256.as_deref().unwrap_or("")
+                )
+            })
+        }
+        let mut run: Vec<&ToolTrajectory> = Vec::new();
+        let mut runs: Vec<Vec<&ToolTrajectory>> = Vec::new();
+        for item in &items {
+            let TrajectoryItem::Tool(tool) = item else {
+                continue;
+            };
+            let matches_run = match (run.last(), error_signature(tool)) {
+                (Some(first), Some(sig)) => error_signature(first) == Some(sig),
+                _ => false,
+            };
+            if matches_run {
+                run.push(tool);
+            } else {
+                if run.len() >= ERROR_LOOP_MIN_RUN {
+                    runs.push(std::mem::take(&mut run));
+                } else {
+                    run.clear();
+                }
+                if error_signature(tool).is_some() {
+                    run.push(tool);
+                }
+            }
+        }
+        if run.len() >= ERROR_LOOP_MIN_RUN {
+            runs.push(run);
+        }
+        for run in runs {
+            let first = run[0];
+            anomalies.push(DiagnosticAnomaly {
+                kind: AnomalyKind::ErrorLoop,
+                summary: format!(
+                    "Error loop: '{}' failed {} times in a row with the same error",
+                    first.tool_name,
+                    run.len()
+                ),
+                description: format!(
+                    "Tool '{}' failed {} consecutive times with identical output. Retrying verbatim will not help.",
+                    first.tool_name,
+                    run.len()
+                ),
+                related_refs: run
+                    .iter()
+                    .map(|tool| TrajectoryRef {
+                        seq: tool.started_seq,
+                        entry_id: None,
+                        run_id: None,
+                        lane: "main".into(),
+                    })
+                    .collect(),
+            });
+        }
+    }
+
+    // 4. Detect ping-pong cycles (mirrors the runtime tripwire): alternating
+    // A→B→A… tool sequences with stable per-position outputs.
+    {
+        let tools: Vec<&ToolTrajectory> = items
+            .iter()
+            .filter_map(|item| match item {
+                TrajectoryItem::Tool(tool) => Some(tool),
+                _ => None,
+            })
+            .collect();
+        // Tool identity for cycle purposes: name + args + output hash.
+        let key = |tool: &ToolTrajectory| {
+            format!(
+                "{}|{}|{}",
+                tool.tool_name,
+                tool.effective_args,
+                tool.output_sha256.as_deref().unwrap_or("")
+            )
+        };
+        for period in [2usize, 3] {
+            let mut start = 0;
+            while start + period * PING_PONG_MIN_ROUNDS <= tools.len() {
+                let block: Vec<String> =
+                    tools[start..start + period].iter().map(|t| key(t)).collect();
+                let mut rounds = 1;
+                while start + (rounds + 1) * period <= tools.len()
+                    && tools[start + rounds * period..start + (rounds + 1) * period]
+                        .iter()
+                        .map(|t| key(t))
+                        .collect::<Vec<_>>()
+                        == block
+                {
+                    rounds += 1;
+                }
+                if rounds >= PING_PONG_MIN_ROUNDS {
+                    let names: Vec<String> = tools[start..start + period]
+                        .iter()
+                        .map(|tool| tool.tool_name.clone())
+                        .collect();
+                    anomalies.push(DiagnosticAnomaly {
+                        kind: AnomalyKind::PingPongCycle,
+                        summary: format!(
+                            "Ping-pong loop: {} cycled {rounds} times",
+                            names.join(" → ")
+                        ),
+                        description: format!(
+                            "Tools {} repeated {rounds} consecutive rounds with identical outputs. The loop is not converging.",
+                            names.join(", ")
+                        ),
+                        related_refs: tools[start..start + rounds * period]
+                            .iter()
+                            .map(|tool| TrajectoryRef {
+                                seq: tool.started_seq,
+                                entry_id: None,
+                                run_id: None,
+                                lane: "main".into(),
+                            })
+                            .collect(),
+                    });
+                    start += rounds * period;
+                } else {
+                    start += 1;
+                }
+            }
+        }
+    }
+
+    // 5. Detect provider retry loops: consecutive provider attempts that all
+    // errored. Same provider+model+error code required consecutively.
+    {
+        let mut run: Vec<(&ProviderTrajectory, String)> = Vec::new();
+        let mut runs: Vec<Vec<(&ProviderTrajectory, String)>> = Vec::new();
+        for item in &items {
+            let TrajectoryItem::Provider(provider) = item else {
+                continue;
+            };
+            let signature = provider.error.as_ref().map(|error| {
+                format!(
+                    "{}|{}|{}",
+                    provider.provider,
+                    provider.model,
+                    error.code.as_ref().map(|code| code.as_str()).unwrap_or_default()
+                )
+            });
+            let matches_run = match (run.last(), &signature) {
+                (Some((_, previous)), Some(current)) => previous == current,
+                _ => false,
+            };
+            if matches_run {
+                run.push((provider, signature.unwrap_or_default()));
+            } else {
+                if run.len() >= ERROR_LOOP_MIN_RUN {
+                    runs.push(std::mem::take(&mut run));
+                } else {
+                    run.clear();
+                }
+                if let Some(current) = signature {
+                    run.push((provider, current));
+                }
+            }
+        }
+        if run.len() >= ERROR_LOOP_MIN_RUN {
+            runs.push(run);
+        }
+        for run in runs {
+            let first = run[0].0;
+            anomalies.push(DiagnosticAnomaly {
+                kind: AnomalyKind::ProviderRetryLoop,
+                summary: format!(
+                    "Provider retry loop: {} failed {} times in a row",
+                    first.model,
+                    run.len()
+                ),
+                description: format!(
+                    "Provider {} ({}) errored {} consecutive times ({}).",
+                    first.provider,
+                    first.model,
+                    run.len(),
+                    run[0].1
+                ),
+                related_refs: run
+                    .iter()
+                    .map(|(provider, _)| TrajectoryRef {
+                        seq: provider.started_seq,
+                        entry_id: None,
+                        run_id: None,
+                        lane: "main".into(),
+                    })
+                    .collect(),
+            });
+        }
+    }
+
     SessionTrajectory {
         requests,
         items,
@@ -937,7 +1173,7 @@ mod tests {
     use super::*;
     use crate::harness::{
         ContextItemSource, ContextItemStatus, ContextManifestItem, JsonlStore, Record,
-        ToolReplaySafety, TraceString,
+        ToolExecutionOutcome, ToolExecutionPhase, ToolReplaySafety, TraceString,
     };
 
     #[test]
@@ -1328,6 +1564,7 @@ mod tests {
                         content: "private snapshot body".into(),
                         is_error: false,
                         terminate: false,
+                        images: Vec::new(),
                     },
                     false,
                 ))
@@ -1523,5 +1760,269 @@ mod tests {
             .filter(|a| a.kind == AnomalyKind::OrphanedToolStart)
             .count();
         assert_eq!(orphaned_count, 4);
+    }
+
+    fn append_finished_tool(
+        store: &mut JsonlStore,
+        index: usize,
+        name: &str,
+        args: serde_json::Value,
+        failed: bool,
+        output_hash: &str,
+    ) {
+        use crate::harness::{ToolExecutionOutcome, ToolExecutionPhase};
+        let call_id = format!("call-{index}");
+        store
+            .append_entry(Entry::new(
+                format!("ast-{index}"),
+                None,
+                "main",
+                store.next_sequence(),
+                60,
+                AgentMessage::Assistant {
+                    content: None,
+                    tool_calls: Some(vec![threadlane_protocol::RuntimeToolCall {
+                        id: call_id.clone(),
+                        r#type: "function".into(),
+                        function: threadlane_protocol::RuntimeToolCallFunction {
+                            name: name.into(),
+                            arguments: args.to_string(),
+                        },
+                        thought_signature: None,
+                    }]),
+                    stop_reason: None,
+                    deferred_handle: None,
+                },
+                false,
+            ))
+            .unwrap();
+        store
+            .append_record(Record::ToolStarted {
+                id: format!("tool-start-{index}"),
+                seq: store.next_sequence(),
+                lane: "main".into(),
+                timestamp: 100 * index as u64,
+                run_id: "run-1".into(),
+                assistant_entry_id: format!("ast-{index}"),
+                tool_index: 0,
+                tool_call_id: call_id.clone(),
+                tool_name: name.into(),
+                effective_args: args,
+                result_entry_id: format!("res-{index}"),
+                replay: ToolReplaySafety::Never,
+            })
+            .unwrap();
+        store
+            .append_record(Record::ToolExecutionObserved {
+                id: format!("tool-exec-{index}"),
+                seq: store.next_sequence(),
+                lane: "main".into(),
+                timestamp: 100 * index as u64 + 1,
+                run_id: "run-1".into(),
+                attempt: Some(1),
+                tool_call_id: TraceString::new(call_id).unwrap(),
+                tool_name: TraceString::new(name).unwrap(),
+                executor_kind: TraceString::new("builtin").unwrap(),
+                phase: ToolExecutionPhase::Finished,
+                started_at_ms: Some(100),
+                duration_ms: Some(10),
+                outcome: Some(if failed {
+                    ToolExecutionOutcome::Failed
+                } else {
+                    ToolExecutionOutcome::Succeeded
+                }),
+                exit_code: Some(if failed { 1 } else { 0 }),
+                cancelled: false,
+                is_error: Some(failed),
+                terminate: Some(false),
+                output_sha256: Some(TraceString::new(output_hash).unwrap()),
+                output_bytes: Some(64),
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn error_loop_anomaly_needs_consecutive_same_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut store = JsonlStore::open(&path).unwrap();
+        store
+            .append_record(Record::OperationStarted {
+                id: "run-1".into(),
+                seq: store.next_sequence(),
+                lane: "main".into(),
+                timestamp: 50,
+                source_leaf_id: None,
+                intent: crate::harness::OperationIntent::Run,
+            })
+            .unwrap();
+        // Two failures, a success, then three identical failures: only the
+        // trailing run trips.
+        for (index, (args, failed, hash)) in [
+            (serde_json::json!({"path": "a"}), true, "h1"),
+            (serde_json::json!({"path": "b"}), true, "h1"),
+            (serde_json::json!({"path": "c"}), false, "h1"),
+            (serde_json::json!({"path": "d"}), true, "h9"),
+            (serde_json::json!({"path": "e"}), true, "h9"),
+            (serde_json::json!({"path": "f"}), true, "h9"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            append_finished_tool(&mut store, index + 1, "read_file", args, failed, hash);
+        }
+        let traj = project_trajectory(&store);
+        let loops: Vec<_> = traj
+            .anomalies
+            .iter()
+            .filter(|a| a.kind == AnomalyKind::ErrorLoop)
+            .collect();
+        assert_eq!(loops.len(), 1);
+        assert_eq!(loops[0].related_refs.len(), 3);
+        assert!(loops[0].summary.contains("3 times"));
+    }
+
+    #[test]
+    fn ping_pong_anomaly_needs_stable_cycles() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut store = JsonlStore::open(&path).unwrap();
+        store
+            .append_record(Record::OperationStarted {
+                id: "run-1".into(),
+                seq: store.next_sequence(),
+                lane: "main".into(),
+                timestamp: 50,
+                source_leaf_id: None,
+                intent: crate::harness::OperationIntent::Run,
+            })
+            .unwrap();
+        // read/list alternating with stable outputs: 3 rounds trip.
+        for round in 0..3 {
+            append_finished_tool(
+                &mut store,
+                round * 2 + 1,
+                "read_file",
+                serde_json::json!({}),
+                false,
+                "ha",
+            );
+            append_finished_tool(
+                &mut store,
+                round * 2 + 2,
+                "list_dir",
+                serde_json::json!({}),
+                false,
+                "hb",
+            );
+        }
+        let traj = project_trajectory(&store);
+        let cycles: Vec<_> = traj
+            .anomalies
+            .iter()
+            .filter(|a| a.kind == AnomalyKind::PingPongCycle)
+            .collect();
+        assert_eq!(cycles.len(), 1);
+        assert_eq!(cycles[0].related_refs.len(), 6);
+
+        // Evolving outputs never trip.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut store = JsonlStore::open(&path).unwrap();
+        store
+            .append_record(Record::OperationStarted {
+                id: "run-1".into(),
+                seq: store.next_sequence(),
+                lane: "main".into(),
+                timestamp: 50,
+                source_leaf_id: None,
+                intent: crate::harness::OperationIntent::Run,
+            })
+            .unwrap();
+        for round in 0..4 {
+            append_finished_tool(
+                &mut store,
+                round * 2 + 1,
+                "read_file",
+                serde_json::json!({}),
+                false,
+                &format!("ha{round}"),
+            );
+            append_finished_tool(
+                &mut store,
+                round * 2 + 2,
+                "list_dir",
+                serde_json::json!({}),
+                false,
+                &format!("hb{round}"),
+            );
+        }
+        let traj = project_trajectory(&store);
+        assert!(traj
+            .anomalies
+            .iter()
+            .all(|a| a.kind != AnomalyKind::PingPongCycle));
+    }
+
+    #[test]
+    fn provider_retry_loop_needs_consecutive_same_errors() {
+        use crate::harness::{ErrorCategory, ProviderErrorSummary, ProviderOutcome};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut store = JsonlStore::open(&path).unwrap();
+        // Attempts 1-2 fail with 429 (a run of 2: silent), attempt 3
+        // succeeds (breaks the run), attempts 4-6 fail with 429 (trips).
+        for attempt in 1..=6u32 {
+            let (outcome, error) = if attempt == 3 {
+                (ProviderOutcome::Completed, None)
+            } else {
+                (
+                    ProviderOutcome::Failed,
+                    Some(ProviderErrorSummary {
+                        category: ErrorCategory::RateLimit,
+                        code: TraceString::new("429").ok(),
+                        retryable: true,
+                    }),
+                )
+            };
+            let request_id = format!("req-{attempt}");
+            store
+                .append_record(Record::ProviderRequestStarted {
+                    id: format!("provider-start-{attempt}"),
+                    seq: store.next_sequence(),
+                    lane: "main".into(),
+                    timestamp: 10 * attempt as u64,
+                    run_id: "run-1".into(),
+                    attempt,
+                    provider: TraceString::new("test").unwrap(),
+                    model: TraceString::new("model").unwrap(),
+                    request_id: Some(TraceString::new(request_id.clone()).unwrap()),
+                })
+                .unwrap();
+            store
+                .append_record(Record::ProviderRequestFinished {
+                    id: format!("provider-finish-{attempt}"),
+                    seq: store.next_sequence(),
+                    lane: "main".into(),
+                    timestamp: 10 * attempt as u64 + 1,
+                    run_id: "run-1".into(),
+                    attempt,
+                    request_id: Some(TraceString::new(request_id).unwrap()),
+                    outcome,
+                    error,
+                    duration_ms: Some(5),
+                    usage: None,
+                })
+                .unwrap();
+        }
+        let traj = project_trajectory(&store);
+        let loops: Vec<_> = traj
+            .anomalies
+            .iter()
+            .filter(|a| a.kind == AnomalyKind::ProviderRetryLoop)
+            .collect();
+        assert_eq!(loops.len(), 1);
+        assert_eq!(loops[0].related_refs.len(), 3);
+        assert!(loops[0].summary.contains("3 times"));
     }
 }

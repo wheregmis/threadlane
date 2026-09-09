@@ -6,16 +6,19 @@ use super::subagents::*;
 
 use super::broker::ManagedProcessRegistry;
 use super::capabilities::{
-    build_broker_dispatcher, render_agent_catalog, restored_tool_policy, ContextCapability,
-    McpCapability, PlanCapability, PrewalkCapability, SkillCapability, SubagentCapability,
-    WasiCapability,
+    build_broker_dispatcher, render_agent_catalog, restored_tool_policy, BrowserCapability,
+    ContextCapability,
+    McpCapability, PlanCapability, PrewalkCapability, QuestionCapability, SkillCapability,
+    SubagentCapability, WasiCapability,
 };
+use crate::computer::ComputerCapability;
 use super::harness::{CodingSessionHarness, HarnessWatch, InterruptedSubagentRecoveryState};
 use crate::commands::{execute_slash_command, parse_slash_command, CommandAction};
 use crate::context::ProjectContext;
 use crate::extension_broker::CapabilityDispatcher;
 use crate::plan::SessionPlanStore;
 use crate::policy::ToolPolicy;
+use crate::question::QuestionManager;
 use crate::system_prompt::{build_system_prompt, SystemPromptBuildOptions};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -46,6 +49,7 @@ pub struct CodingAgent {
     pub(crate) broker_dispatcher: Arc<CapabilityDispatcher>,
     managed_processes: ManagedProcessRegistry,
     pub(crate) permission_handle: crate::permission::PermissionHandle,
+    pub(crate) question_handle: crate::question::QuestionHandle,
     agent_work: AgentWorkScheduler,
     mcp_manager: Arc<McpManager>,
     pub(crate) prompt_templates: Option<Vec<crate::prompt_templates::PromptTemplate>>,
@@ -71,6 +75,10 @@ pub struct CodingAgent {
 impl CodingAgent {
     pub(crate) fn permission_handle(&self) -> crate::permission::PermissionHandle {
         self.permission_handle.clone()
+    }
+
+    pub(crate) fn question_handle(&self) -> crate::question::QuestionHandle {
+        self.question_handle.clone()
     }
 
     pub(crate) fn set_tool_intent_recorder(
@@ -522,7 +530,8 @@ impl CodingAgent {
                 }))
             })
         });
-        let (broker_dispatcher, managed_processes, permission_handle) = build_broker_dispatcher(
+        let (broker_dispatcher, managed_processes, permission_handle, permissions) =
+            build_broker_dispatcher(
             tool_policy.clone(),
             wasi_extensions.clone(),
             true,
@@ -547,6 +556,12 @@ impl CodingAgent {
             plan_store: plan_store.clone(),
             event_tx: agent.event_tx.clone(),
         }));
+        let question_manager = QuestionManager::new();
+        let question_handle = question_manager.handle();
+        registry.register(Box::new(QuestionCapability {
+            handle: question_handle.clone(),
+            event_tx: agent.event_tx.clone(),
+        }));
         if let Some(session_file) = options.session_file.clone() {
             registry.register(Box::new(ContextCapability {
                 session_file,
@@ -562,6 +577,12 @@ impl CodingAgent {
         }));
         registry.register(Box::new(McpCapability {
             mcp_manager: mcp_manager.clone(),
+        }));
+        registry.register(Box::new(BrowserCapability {
+            bridge: options.browser.clone(),
+        }));
+        registry.register(Box::new(ComputerCapability {
+            permissions: Some(permissions.clone()),
         }));
         let (_wired, errors) = registry.wire_all(&mut agent.tool_dispatcher, &agent.hook_registry);
         for error in &errors {
@@ -623,6 +644,7 @@ impl CodingAgent {
             broker_dispatcher,
             managed_processes,
             permission_handle,
+            question_handle,
             agent_work,
             mcp_manager,
             prompt_templates: None,
@@ -1561,6 +1583,7 @@ mod compaction_sync_tests {
         CodingAgentOptions, CompletedSubagentLane, SubagentLaneStatus,
         MAX_PERSISTED_SYSTEM_PROMPT_BYTES,
     };
+    use crate::browser::BrowserBridge;
     use crate::system_prompt::SystemPromptConfig;
     use async_trait::async_trait;
     use std::{
@@ -1646,6 +1669,7 @@ mod compaction_sync_tests {
             system_prompt: SystemPromptConfig::default(),
             agent_config: None,
             coding_config: None,
+            browser: BrowserBridge::unavailable(),
         });
         let harness = agent.harness.as_mut().unwrap();
         let run_id = harness.unique_run_id("snapshot").unwrap();
@@ -1750,6 +1774,7 @@ mod compaction_sync_tests {
             system_prompt: SystemPromptConfig::default(),
             agent_config: None,
             coding_config: None,
+            browser: BrowserBridge::unavailable(),
         });
         agent
             .begin_harness_run(AgentMessage::user("prompt", vec![]))
@@ -1881,6 +1906,7 @@ mod compaction_sync_tests {
                 system_prompt: SystemPromptConfig::default(),
                 agent_config: None,
                 coding_config: None,
+            browser: BrowserBridge::unavailable(),
             },
             provider.clone(),
         );
@@ -2041,8 +2067,16 @@ mod compaction_sync_tests {
                 work_dir: dir.path().to_path_buf(),
                 session_file: Some(path.clone()),
                 system_prompt: SystemPromptConfig::default(),
-                agent_config: Some(AgentConfig::default()),
+                // This synthetic provider repeats one identical call 101
+                // times to stress compaction; the loop guard would rightly
+                // trip it in production, so it stays off here.
+                agent_config: Some(
+                    threadlane_runtime::AgentConfig::builder()
+                        .loop_guard_enabled(false)
+                        .build(),
+                ),
                 coding_config: None,
+            browser: BrowserBridge::unavailable(),
             },
             provider.clone(),
         );

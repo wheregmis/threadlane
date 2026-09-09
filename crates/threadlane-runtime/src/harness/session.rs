@@ -409,18 +409,41 @@ impl<S: SessionStore> SessionAgent<S> {
         let mut unreplayable_tools = 0;
 
         for tool in &lane_state.tools {
-            if !tool.completed {
-                if let Some(record) = self.harness.store().records().iter().find(|r| {
-                    if let super::Record::ToolStarted { tool_call_id, .. } = r {
-                        tool_call_id == &tool.tool_call_id
-                    } else {
-                        false
-                    }
-                }) {
-                    safe_tools_to_replay.push(record.clone());
+            if tool.completed {
+                continue;
+            }
+            // Only tools from the open operation on this lane with an
+            // explicit Safe replay marker are replayable. Matching on
+            // tool_call_id alone would replay `Never` tools or tools from
+            // other runs/lanes sharing the same call id.
+            let open_matches = lane_state
+                .open_operation
+                .as_deref()
+                .is_some_and(|open| open == tool.run_id.as_str());
+            if !open_matches || tool.replay != super::ToolReplaySafety::Safe {
+                unreplayable_tools += 1;
+                continue;
+            }
+            if let Some(record) = self.harness.store().records().iter().find(|r| {
+                if let super::Record::ToolStarted {
+                    lane: record_lane,
+                    run_id: record_run_id,
+                    tool_call_id: record_call_id,
+                    replay: record_replay,
+                    ..
+                } = r
+                {
+                    record_lane == lane.name()
+                        && record_run_id == &tool.run_id
+                        && record_call_id == &tool.tool_call_id
+                        && *record_replay == super::ToolReplaySafety::Safe
                 } else {
-                    unreplayable_tools += 1;
+                    false
                 }
+            }) {
+                safe_tools_to_replay.push(record.clone());
+            } else {
+                unreplayable_tools += 1;
             }
         }
 
@@ -456,13 +479,25 @@ impl<S: SessionStore> SessionAgent<S> {
         } else {
             super::RecoveryDecision::None
         };
+        let interrupted_tools = lane_state
+            .tools
+            .iter()
+            .filter(|tool| !tool.completed)
+            .map(|tool| super::InterruptedToolDiagnostic {
+                run_id: tool.run_id.clone(),
+                call_id: tool.tool_call_id.clone(),
+                name: tool.tool_name.clone(),
+                result_entry_id: tool.result_entry_id.clone(),
+                replay: tool.replay.clone(),
+            })
+            .collect::<Vec<_>>();
         Ok(super::RecoveryPlan {
             session_id: self.harness.store().session_id().to_string(),
             lane: lane.name().to_string(),
             source_sequence,
             decision,
             open_operation: lane_state.open_operation.clone(),
-            interrupted_tools: Vec::new(),
+            interrupted_tools,
             queued_work: lane_state
                 .queued
                 .iter()
@@ -492,7 +527,7 @@ impl<S: SessionStore> SessionAgent<S> {
         let mut recovered_open_operations = 0;
         for op_id in &plan.open_operation_ids {
             if plan.abort_requested_operation_ids.contains(op_id) {
-                let _ = self.harness.reconcile_abort_run(op_id);
+                self.harness.reconcile_abort_run(op_id)?;
             }
             recovered_open_operations += 1;
         }

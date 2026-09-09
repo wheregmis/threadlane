@@ -1076,6 +1076,7 @@ mod tests {
                 content: "contents".into(),
                 is_error: false,
                 terminate: false,
+                images: Vec::new(),
             },
             AgentMessage::UserWithImages {
                 content: "inspect".into(),

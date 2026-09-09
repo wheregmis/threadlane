@@ -6,8 +6,10 @@ pub mod error;
 pub mod events;
 pub mod harness;
 pub mod local_tool_router;
+pub(crate) mod loop_detector;
 pub(crate) mod loop_engine;
 pub mod model_metadata;
+pub mod model_registry;
 pub mod provider;
 pub mod rules;
 pub mod tool_dispatcher;
@@ -33,8 +35,8 @@ pub use config::{AgentConfig, AgentConfigBuilder};
 pub use engine::get_runtime;
 pub use error::AgentError;
 pub use events::{
-    AgentEvent, HarnessMetrics, PermissionRequest, PermissionScope, SubagentProgressUpdate,
-    SubagentRecoveryStatus,
+    AgentEvent, HarnessMetrics, PermissionRequest, PermissionScope, QuestionAnswer, QuestionItem,
+    QuestionItemAnswer, QuestionRequest, SubagentProgressUpdate, SubagentRecoveryStatus,
 };
 pub use harness::{
     has_open_subagent_lanes, interrupted_subagent_lanes, AcceptedRun, DurableEvent, DurablePayload,

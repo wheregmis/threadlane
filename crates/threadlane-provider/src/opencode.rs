@@ -6,9 +6,41 @@ use futures_util::StreamExt;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::{Mutex as StdMutex, OnceLock};
+use std::time::Instant;
 use tokio::sync::mpsc;
 
 const DEFAULT_OPENCODE_BASE_URL: &str = "https://opencode.ai/zen/go/v1";
+const MODELS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// Bare model ids shipped as an offline fallback. Live discovery via
+/// [`fetch_available_models`] replaces this list whenever it succeeds, so new
+/// Zen models appear without a code change.
+const FALLBACK_MODELS: &[&str] = &[
+    "mimo-v2.5-pro",
+    "mimo-v2.5",
+    "qwen3.8-max",
+    "minimax-m3",
+    "minimax-m2.7",
+    "deepseek-v4-pro",
+    "deepseek-v4-flash",
+    "hy3",
+];
+
+struct ModelsCacheEntry {
+    stored_at: Instant,
+    models: Vec<String>,
+}
+
+static MODELS_CACHE: OnceLock<StdMutex<HashMap<u64, ModelsCacheEntry>>> = OnceLock::new();
+
+fn models_cache_key(api_key: &str) -> u64 {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    api_key.hash(&mut hasher);
+    OpenCodeGoClient::get_base_url().hash(&mut hasher);
+    hasher.finish()
+}
 
 fn strip_opencode_prefix(model: &str) -> &str {
     model.strip_prefix("opencode-go/").unwrap_or(model)
@@ -28,6 +60,90 @@ impl OpenCodeGoClient {
 
     fn get_base_url() -> String {
         std::env::var("OPENCODE_BASE_URL").unwrap_or_else(|_| DEFAULT_OPENCODE_BASE_URL.to_string())
+    }
+}
+
+static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+fn http_client() -> &'static reqwest::Client {
+    HTTP_CLIENT.get_or_init(reqwest::Client::new)
+}
+
+async fn fetch_available_models_network(api_key: String, cache_key: u64, now: Instant) -> Vec<String> {
+    let base_url = OpenCodeGoClient::get_base_url();
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let mut request = http_client()
+        .get(&url)
+        .header(USER_AGENT, "threadlane/1.0")
+        .timeout(std::time::Duration::from_secs(10));
+    if !api_key.trim().is_empty() {
+        request = request.header(AUTHORIZATION, format!("Bearer {api_key}"));
+    }
+    if let Ok(response) = request.send().await {
+        if response.status().is_success() {
+            if let Ok(value) = response.json::<Value>().await {
+                if let Some(data) = value.get("data").and_then(Value::as_array) {
+                    let mut models: Vec<String> = data
+                        .iter()
+                        .filter_map(|item| item.get("id").and_then(Value::as_str))
+                        .filter(|id| !id.trim().is_empty())
+                        .map(str::to_string)
+                        .collect();
+                    if !models.is_empty() {
+                        models.sort();
+                        models.dedup();
+                        if let Ok(mut cache) = MODELS_CACHE
+                            .get_or_init(|| StdMutex::new(HashMap::new()))
+                            .lock()
+                        {
+                            cache.insert(
+                                cache_key,
+                                ModelsCacheEntry {
+                                    stored_at: now,
+                                    models: models.clone(),
+                                },
+                            );
+                        }
+                        return models;
+                    }
+                }
+            }
+        }
+    }
+    FALLBACK_MODELS.iter().map(|model| model.to_string()).collect()
+}
+
+/// Lists bare Zen model ids from the OpenAI-compatible `/models` endpoint.
+///
+/// Results are cached per API key for [`MODELS_CACHE_TTL`]; failures fall back
+/// to [`FALLBACK_MODELS`] so the picker keeps working offline.
+pub async fn fetch_available_models() -> Vec<String> {
+    let api_key = threadlane_auth::load_opencode_api_key().unwrap_or_default();
+    let cache_key = models_cache_key(&api_key);
+    let now = Instant::now();
+    if let Some(models) = MODELS_CACHE
+        .get_or_init(|| StdMutex::new(HashMap::new()))
+        .lock()
+        .ok()
+        .and_then(|cache| {
+            cache
+                .get(&cache_key)
+                .map(|entry| (entry.stored_at, entry.models.clone()))
+        })
+        .filter(|(stored_at, _)| now.duration_since(*stored_at) <= MODELS_CACHE_TTL)
+        .map(|(_, models)| models)
+    {
+        return models;
+    }
+    if tokio::runtime::Handle::try_current().is_ok() {
+        fetch_available_models_network(api_key, cache_key, now).await
+    } else {
+        let handle = threadlane_runtime::get_runtime()
+            .spawn(fetch_available_models_network(api_key, cache_key, now));
+        match handle.await {
+            Ok(models) => models,
+            Err(_) => FALLBACK_MODELS.iter().map(|model| model.to_string()).collect(),
+        }
     }
 }
 
@@ -314,5 +430,13 @@ mod tests {
         assert!(client.supports_model("opencode-go/kimi-k2.6"));
         assert!(!client.supports_model("gpt-4o"));
         assert!(!client.supports_model("antigravity/gemini-3.6-flash"));
+    }
+
+    #[test]
+    fn fallback_models_cover_all_seeds() {
+        for model in FALLBACK_MODELS {
+            assert!(!model.trim().is_empty());
+        }
+        assert!(FALLBACK_MODELS.contains(&"minimax-m2.7"));
     }
 }

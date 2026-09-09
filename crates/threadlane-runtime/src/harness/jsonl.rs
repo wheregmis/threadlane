@@ -10,6 +10,7 @@ use std::fs;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::SystemTime;
 
 #[cfg(test)]
 thread_local! {
@@ -31,6 +32,14 @@ unsafe extern "C" {
     fn flock(fd: i32, operation: i32) -> i32;
 }
 
+/// Process-wide serialiser for all session-file appends (single lines and
+/// atomic batches) so concurrent `append_entry` / `append_atomic_batch`
+/// traffic to the same path cannot interleave.
+fn session_append_lock() -> &'static Mutex<()> {
+    static APPEND_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    APPEND_LOCK.get_or_init(|| Mutex::new(()))
+}
+
 #[derive(Debug)]
 struct WriterClaim {
     file: Option<fs::File>,
@@ -48,9 +57,32 @@ impl Drop for WriterClaim {
     }
 }
 
+/// Registry key for the writer lease. The session file itself usually does
+/// not exist yet on first open, so canonicalizing the file path directly
+/// fails and different spellings (`a.jsonl` vs `./a.jsonl`, symlinked
+/// parents) would split into independent gates and lock files. Canonicalize
+/// the parent directory (which must exist for the file to be openable) and
+/// join the file name instead.
+pub(crate) fn canonical_writer_key(path: &Path) -> PathBuf {
+    if let (Some(parent), Some(name)) = (
+        path.parent().filter(|p| !p.as_os_str().is_empty()),
+        path.file_name(),
+    ) {
+        if let Ok(canonical_parent) = parent.canonicalize() {
+            return canonical_parent.join(name);
+        }
+    }
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    std::env::current_dir()
+        .map(|cwd| cwd.join(path))
+        .unwrap_or_else(|_| path.to_path_buf())
+}
+
 fn writer_claim(path: &Path) -> io::Result<Arc<WriterClaim>> {
     static CLAIMS: OnceLock<Mutex<HashMap<PathBuf, Weak<WriterClaim>>>> = OnceLock::new();
-    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let canonical = canonical_writer_key(path);
     let lock_path = canonical.with_extension("harness.lock");
     let claims = CLAIMS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut claims = claims
@@ -428,6 +460,8 @@ pub struct JsonlStore {
     preferred_leaf: Option<String>,
     session_file_len: u64,
     harness_file_len: u64,
+    session_mtime: Option<SystemTime>,
+    harness_mtime: Option<SystemTime>,
     /// Highest sequence across entries and records, maintained incrementally
     /// so sequence allocation does not rescan the whole file.
     max_seq: u64,
@@ -467,8 +501,9 @@ impl JsonlStore {
             .lock()
             .map_err(|_| io::Error::other("writer claim poisoned"))?;
         let (session_id, preferred_leaf, entries, records) = Self::load_parts(&path)?;
-        let session_file_len = file_len(&path)?;
-        let harness_file_len = file_len(&path.with_extension("harness.jsonl"))?;
+        let (session_file_len, session_mtime) = file_fingerprint(&path)?;
+        let (harness_file_len, harness_mtime) =
+            file_fingerprint(&path.with_extension("harness.jsonl"))?;
         // Mirrors SessionStore::facts over the freshly parsed record stream.
         let mut fact_seed = std::collections::BTreeMap::new();
         for record in &records {
@@ -508,6 +543,8 @@ impl JsonlStore {
             preferred_leaf,
             session_file_len,
             harness_file_len,
+            session_mtime,
+            harness_mtime,
             max_seq,
             entry_ids,
             record_ids,
@@ -576,14 +613,24 @@ impl JsonlStore {
     }
 
     fn refresh_file_lengths(&mut self) -> io::Result<()> {
-        self.session_file_len = file_len(&self.path)?;
-        self.harness_file_len = file_len(&self.path.with_extension("harness.jsonl"))?;
+        let (session_len, session_mtime) = file_fingerprint(&self.path)?;
+        let (harness_len, harness_mtime) =
+            file_fingerprint(&self.path.with_extension("harness.jsonl"))?;
+        self.session_file_len = session_len;
+        self.session_mtime = session_mtime;
+        self.harness_file_len = harness_len;
+        self.harness_mtime = harness_mtime;
         Ok(())
     }
 
     fn is_fresh(&self) -> io::Result<bool> {
-        Ok(self.session_file_len == file_len(&self.path)?
-            && self.harness_file_len == file_len(&self.path.with_extension("harness.jsonl"))?)
+        let (session_len, session_mtime) = file_fingerprint(&self.path)?;
+        let (harness_len, harness_mtime) =
+            file_fingerprint(&self.path.with_extension("harness.jsonl"))?;
+        Ok(self.session_file_len == session_len
+            && self.session_mtime == session_mtime
+            && self.harness_file_len == harness_len
+            && self.harness_mtime == harness_mtime)
     }
 
     fn load_parts(path: &Path) -> io::Result<(String, Option<String>, Vec<Entry>, Vec<Record>)> {
@@ -766,8 +813,8 @@ impl SessionStore for JsonlStore {
         entry.seq = self.next_seq();
         self.reduction.entry_guard(&entry)?;
         append_json_line(&self.path, &entry, SyncPolicy::All)?;
-        self.session_file_len =
-            file_len(&self.path).map_err(|error| ReduceError::Storage(error.to_string()))?;
+        (self.session_file_len, self.session_mtime) = file_fingerprint(&self.path)
+            .map_err(|error| ReduceError::Storage(error.to_string()))?;
         if entry.lane == "main" {
             let leaf = entry.id.clone();
             self.preferred_leaf = Some(leaf.clone());
@@ -811,8 +858,8 @@ impl SessionStore for JsonlStore {
         record = record.with_seq(self.next_seq());
         self.reduction.record_guard(&record)?;
         append_json_line(&self.path, &record, record.sync_policy())?;
-        self.session_file_len =
-            file_len(&self.path).map_err(|error| ReduceError::Storage(error.to_string()))?;
+        (self.session_file_len, self.session_mtime) = file_fingerprint(&self.path)
+            .map_err(|error| ReduceError::Storage(error.to_string()))?;
         self.reduction.commit_record(&record);
         self.max_seq = record.seq();
         self.record_ids.insert(record.id().to_owned());
@@ -991,11 +1038,11 @@ impl Record {
             | Self::ContextSnapshotIndexed { .. }
             | Self::ContextSnapshotLoaded { .. }
             | Self::ContextCompacted { .. }
+            | Self::ProviderResponseAttached { .. } => SyncPolicy::Data,
             | Self::RunContextCaptured { .. }
             | Self::ProviderRequestStarted { .. }
             | Self::ProviderRequestFinished { .. }
-            | Self::ProviderResponseAttached { .. }
-            | Self::StreamCheckpoint { .. } => SyncPolicy::Data,
+            | Self::StreamCheckpoint { .. } => SyncPolicy::All,
             Self::OperationStarted { .. }
             | Self::AbortRequested { .. }
             | Self::OperationFinished { .. }
@@ -1027,10 +1074,9 @@ fn append_session_json_line_with_policy<T: serde::Serialize>(
     value: &T,
     sync_policy: SyncPolicy,
 ) -> io::Result<()> {
-    // Process-wide append lock; the session writer lease handles cross-process writers.
-    static APPEND_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    let _guard = APPEND_LOCK
-        .get_or_init(|| Mutex::new(()))
+    // Process-wide append lock shared with atomic batches; the session
+    // writer lease handles cross-process writers.
+    let _guard = session_append_lock()
         .lock()
         .map_err(|error| io::Error::other(error.to_string()))?;
     let mut file = fs::OpenOptions::new()
@@ -1054,26 +1100,41 @@ fn prepare_append_boundary(file: &mut fs::File) -> io::Result<()> {
     if len == 0 {
         return Ok(());
     }
-    file.seek(SeekFrom::Start(0))?;
-    let mut data = Vec::with_capacity(len as usize);
-    file.read_to_end(&mut data)?;
-    if data.last() == Some(&b'\n') {
+    // Hot-path fix: only inspect the tail instead of reading the whole file.
+    const TAIL_PROBE: u64 = 64 * 1024;
+    let probe_len = len.min(TAIL_PROBE);
+    file.seek(SeekFrom::End(-(probe_len as i64)))?;
+    let mut tail_buf = vec![0u8; probe_len as usize];
+    file.read_exact(&mut tail_buf)?;
+    if tail_buf.last() == Some(&b'\n') {
         return Ok(());
     }
-    let tail = data.rsplit(|byte| *byte == b'\n').next().unwrap_or(&data);
-    let payload = atomic_frame_payload(tail).unwrap_or(tail);
-    if serde_json::from_slice::<serde_json::Value>(payload).is_err()
-        && is_atomic_frame_fragment(tail)
-    {
+    let tail_line = tail_buf
+        .rsplit(|byte| *byte == b'\n')
+        .next()
+        .unwrap_or(&tail_buf);
+    // If the probe window truncated a long line (no newline in window but
+    // file is larger), still quarantine: a missing trailing newline means
+    // the previous write did not finish cleanly.
+    let truncated = !tail_buf.contains(&b'\n') && len > probe_len;
+    let payload = atomic_frame_payload(tail_line).unwrap_or(tail_line);
+    if truncated || serde_json::from_slice::<serde_json::Value>(payload).is_err() {
+        // Quarantine any torn tail (atomic fragment or torn single-line
+        // JSON) so the next strict read can skip it instead of bricking
+        // the whole session.
+        file.seek(SeekFrom::End(0))?;
         file.write_all(TORN_EOF_SENTINEL.as_bytes())?;
     }
+    file.seek(SeekFrom::End(0))?;
     file.write_all(b"\n")
 }
 
-fn file_len(path: &Path) -> io::Result<u64> {
+/// Length plus mtime so a same-length truncate-and-rewrite is still detected
+/// as stale. Missing files fingerprint as zero length with no mtime.
+fn file_fingerprint(path: &Path) -> io::Result<(u64, Option<SystemTime>)> {
     match fs::metadata(path) {
-        Ok(metadata) => Ok(metadata.len()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0),
+        Ok(metadata) => Ok((metadata.len(), metadata.modified().ok())),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok((0, None)),
         Err(error) => Err(error),
     }
 }
@@ -1090,9 +1151,7 @@ fn append_json_line<T: serde::Serialize>(
 fn append_atomic_batch_line(path: &Path, value: &AtomicBatchLine) -> Result<(), ReduceError> {
     let encoded =
         serde_json::to_vec(value).map_err(|error| ReduceError::Storage(error.to_string()))?;
-    static APPEND_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    let _guard = APPEND_LOCK
-        .get_or_init(|| Mutex::new(()))
+    let _guard = session_append_lock()
         .lock()
         .map_err(|error| ReduceError::Storage(error.to_string()))?;
     let mut file = fs::OpenOptions::new()
@@ -1288,10 +1347,19 @@ fn is_atomic_frame_fragment(bytes: &[u8]) -> bool {
 }
 
 fn is_recoverable_atomic_fragment(bytes: &[u8], is_physical_eof: bool) -> bool {
-    (is_physical_eof && is_atomic_frame_fragment(bytes))
-        || bytes
-            .strip_suffix(TORN_EOF_SENTINEL.as_bytes())
-            .is_some_and(is_atomic_frame_fragment)
+    if is_physical_eof && is_atomic_frame_fragment(bytes) {
+        return true;
+    }
+    let Some(stripped) = bytes.strip_suffix(TORN_EOF_SENTINEL.as_bytes()) else {
+        return false;
+    };
+    if is_atomic_frame_fragment(stripped) {
+        return true;
+    }
+    // Torn single-line JSON quarantined by `prepare_append_boundary`:
+    // skip it if the quarantined payload is not valid JSON.
+    let payload = atomic_frame_payload(stripped).unwrap_or(stripped);
+    serde_json::from_slice::<serde_json::Value>(payload).is_err()
 }
 
 fn read_strict<T: DeserializeOwned>(path: &Path) -> io::Result<Vec<T>> {
@@ -1408,6 +1476,7 @@ mod tests {
                     content: "contents".into(),
                     is_error: false,
                     terminate: false,
+                    images: Vec::new(),
                 },
                 false,
             ))
@@ -1479,6 +1548,7 @@ mod tests {
                     content: "contents".into(),
                     is_error: false,
                     terminate: false,
+                    images: Vec::new(),
                 },
                 false,
             ))
@@ -1684,6 +1754,9 @@ mod tests {
 
     #[test]
     fn observational_records_use_data_sync_but_intents_use_full_sync() {
+        // NOTE: crash-critical provider/stream records (request boundaries,
+        // run context, checkpoints) use full sync so a crash cannot leave a
+        // torn tail that bricks the session; pure observations stay on Data.
         let checkpoint = Record::StreamCheckpoint {
             id: "checkpoint".into(),
             seq: 1,
@@ -1722,7 +1795,7 @@ mod tests {
             replay: crate::harness::ToolReplaySafety::Safe,
         };
 
-        assert_eq!(checkpoint.sync_policy(), SyncPolicy::Data);
+        assert_eq!(checkpoint.sync_policy(), SyncPolicy::All);
         assert_eq!(operation.sync_policy(), SyncPolicy::All);
         assert_eq!(tool.sync_policy(), SyncPolicy::All);
     }
@@ -1824,8 +1897,15 @@ mod tests {
 
     #[test]
     fn strict_open_rejects_completed_arbitrary_torn_eof_suffix() {
-        let line = format!("junk{TORN_EOF_SENTINEL}");
-        assert_completed_malformed_line_is_rejected("torn-suffix.jsonl", line.as_bytes());
+        // Quarantined torn single-line tails (invalid JSON + sentinel) are
+        // now recovered by skipping the torn line instead of bricking the
+        // session.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("torn-suffix.jsonl");
+        let line = format!("junk{TORN_EOF_SENTINEL}\n");
+        std::fs::write(&path, line.as_bytes()).unwrap();
+        let store = JsonlStore::open(&path).unwrap();
+        assert!(store.entries().is_empty() && store.records().is_empty());
     }
 
     #[test]
@@ -1862,11 +1942,13 @@ mod tests {
 
     #[test]
     fn transcript_page_rejects_completed_arbitrary_torn_eof_suffix() {
-        let line = format!("junk{TORN_EOF_SENTINEL}");
-        assert_completed_malformed_transcript_line_is_rejected(
-            "transcript-torn-suffix.jsonl",
-            line.as_bytes(),
-        );
+        // Quarantined torn tails are skipped, yielding an empty page.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript-torn-suffix.jsonl");
+        let line = format!("junk{TORN_EOF_SENTINEL}\n");
+        std::fs::write(&path, line.as_bytes()).unwrap();
+        let page = read_transcript_page(&path, None, 1).unwrap();
+        assert!(page.messages().is_empty());
     }
 
     #[test]
@@ -1954,6 +2036,7 @@ mod tests {
                     content: "ok".into(),
                     is_error: false,
                     terminate: false,
+                    images: Vec::new(),
                 },
                 false,
             ))

@@ -245,6 +245,7 @@ pub fn interrupted_subagent_lanes(
                             ),
                             is_error: true,
                             terminate: false,
+                            images: Vec::new(),
                         },
                     ));
                 }
@@ -763,23 +764,35 @@ impl HarnessEventHub {
         store: &S,
         lane: Option<&str>,
     ) -> Result<Subscription, ReduceError> {
-        // Keep the cursor paired with the snapshot. Commits cannot publish
-        // between these two observations, so polling starts without a gap.
-        let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        // Capture the cursor before the expensive snapshot build and hold no
+        // lock across it: cloning every entry/record plus a full reduce while
+        // holding the hub lock blocked streaming publishers for O(n). Events
+        // committed during the build are re-delivered by poll (at-least-once)
+        // rather than skipped, so no published event is ever lost.
+        let (next_id, streaming) = {
+            let state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+            (
+                state.next_id,
+                state
+                    .streaming
+                    .clone()
+                    .filter(|stream| lane.is_none_or(|lane| stream.lane == lane)),
+            )
+        };
         let mut snapshot = Snapshot::from_store(store)?;
-        snapshot.streaming = state
-            .streaming
-            .clone()
-            .filter(|stream| lane.is_none_or(|lane| stream.lane == lane));
+        snapshot.streaming = streaming;
 
         // Hydrate operation_intents from existing store records so a fresh
         // hub after restart can correlate a later OperationFinished with its
         // original OperationStarted intent.
-        hydrate_intents_from_store(&mut state.operation_intents, store);
+        {
+            let mut state = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+            hydrate_intents_from_store(&mut state.operation_intents, store);
+        }
 
         Ok(Subscription {
             snapshot,
-            next_id: state.next_id,
+            next_id,
             lane: lane.map(str::to_owned),
         })
     }

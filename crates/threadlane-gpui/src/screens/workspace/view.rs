@@ -49,6 +49,19 @@ fn open_github_from_palette(state: &mut AppState, notify: impl FnOnce()) {
     notify();
 }
 
+fn update_notice_key(status: &UpdateStatus) -> String {
+    match status {
+        UpdateStatus::Idle => "idle".to_string(),
+        UpdateStatus::Checking => "checking".to_string(),
+        UpdateStatus::Available(info) => format!("available:{}", info.version),
+        UpdateStatus::UpToDate => "up-to-date".to_string(),
+        UpdateStatus::Downloading { version, .. } => format!("downloading:{version}"),
+        UpdateStatus::ReadyToInstall { info, .. } => format!("ready:{}", info.version),
+        UpdateStatus::Installing => "installing".to_string(),
+        UpdateStatus::Error(error) => format!("error:{error}"),
+    }
+}
+
 pub fn init(cx: &mut App) {
     crate::screens::github::view::init(cx);
     cx.bind_keys([
@@ -116,7 +129,6 @@ struct TerminalGroup {
     active_tab: usize,
 }
 
-
 fn git_result_matches_active(requested: &Path, active: &Path) -> bool {
     requested == active
 }
@@ -171,18 +183,19 @@ impl WorkspaceView {
         cx: &mut AsyncApp,
     ) {
         cx.spawn(async move |cx| {
-            let runtime_task = request
-                .runtime_options
-                .clone()
-                .map(|(work_dir, model, roles)| {
-                    let session_file = request.session_file.clone();
-                    cx.background_executor().spawn(async move {
-                        SessionRuntime::new(
-                            coding_agent_options(work_dir, session_file, model, roles),
-                            ExecutionMode::Interactive,
-                        )
-                    })
-                });
+            let runtime_task =
+                request
+                    .runtime_options
+                    .clone()
+                    .map(|(work_dir, model, roles, browser)| {
+                        let session_file = request.session_file.clone();
+                        cx.background_executor().spawn(async move {
+                            SessionRuntime::new(
+                                coding_agent_options(work_dir, session_file, model, roles, browser),
+                                ExecutionMode::Interactive,
+                            )
+                        })
+                    });
             if request.reload_messages {
                 let history_file = request.session_file.clone();
                 let history = cx
@@ -353,8 +366,12 @@ impl WorkspaceView {
                         }
                         for UpdaterEvent::Status(status) in updater_events {
                             this.model.update(cx, |state, cx| {
+                                let new_key = update_notice_key(&status);
+                                let old_key = update_notice_key(&state.update_status);
                                 state.update_status = status;
-                                state.update_notice_dismissed = false;
+                                if new_key != old_key {
+                                    state.update_notice_dismissed = false;
+                                }
                                 cx.notify();
                             });
                         }
@@ -412,6 +429,14 @@ impl WorkspaceView {
             view.sync_git_status_with_active_project(cx);
             view.github
                 .update(cx, |github, cx| github.sync_active_project(cx));
+            // Pull the live Zen model list in the background so new
+            // `opencode-go/*` models appear in the picker without a restart.
+            let discovery_model = view.model.clone();
+            cx.spawn(async move |_view, cx| {
+                crate::model_catalog::refresh_discovered_models_and_update(discovery_model, cx)
+                    .await;
+            })
+            .detach();
         });
 
         let view_handle = view.downgrade();
@@ -519,12 +544,7 @@ impl WorkspaceView {
         group
     }
 
-    fn add_terminal_tab(
-        &mut self,
-        project: PathBuf,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn add_terminal_tab(&mut self, project: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let terminal = cx.new(|cx| TerminalView::new(project.clone(), cx));
         terminal.read(cx).focus_handle(cx).focus(window, cx);
         let group = self
@@ -822,8 +842,7 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    fn render_update_notice(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let status = {
+    fn render_update_notice(&self, cx: &mut Context<Self>) -> Option<AnyElement> {        let status = {
             let state = self.model.read(cx);
             if state.update_notice_dismissed {
                 return None;
@@ -906,7 +925,7 @@ impl WorkspaceView {
                 .right(px(16.0))
                 .bottom(px(16.0))
                 .w(px(420.0))
-                .rounded_xl()
+                .rounded_lg()
                 .border_1()
                 .border_color(theme.border)
                 .bg(theme.title_bar)
@@ -1151,7 +1170,7 @@ impl WorkspaceView {
                 div()
                     .id("command-palette-modal")
                     .w(px(560.0))
-                    .rounded_xl()
+                    .rounded_lg()
                     .border_1()
                     .border_color(theme.border)
                     .bg(theme.title_bar)
@@ -1638,7 +1657,11 @@ impl Render for WorkspaceView {
                                         move |_event, window, cx| {
                                             if let Some(project) = &n_proj {
                                                 n_view.update(cx, |this, cx| {
-                                                    this.add_terminal_tab(project.clone(), window, cx);
+                                                    this.add_terminal_tab(
+                                                        project.clone(),
+                                                        window,
+                                                        cx,
+                                                    );
                                                 });
                                             }
                                         },
@@ -1706,7 +1729,7 @@ impl Render for WorkspaceView {
                             .icon(IconName::Plus)
                             .tooltip("New terminal tab")
                             .ghost()
-                            .xsmall()
+                            .small()
                             .on_click(move |_event, window, cx| {
                                 new_view.update(cx, |this, cx| {
                                     this.add_terminal_tab(project.clone(), window, cx)
@@ -1718,7 +1741,7 @@ impl Render for WorkspaceView {
                             .icon(IconName::Undo2)
                             .tooltip("Clear terminal")
                             .ghost()
-                            .xsmall()
+                            .small()
                             .on_click(move |_event, _window, cx| {
                                 active_terminal_clear.update(cx, |t, cx| t.clear(cx));
                             }),
@@ -1728,7 +1751,7 @@ impl Render for WorkspaceView {
                             .icon(IconName::Redo)
                             .tooltip("Restart shell")
                             .ghost()
-                            .xsmall()
+                            .small()
                             .on_click(move |_event, _window, cx| {
                                 active_terminal_restart.update(cx, |t, cx| t.restart(cx));
                             }),
@@ -1738,7 +1761,7 @@ impl Render for WorkspaceView {
                             .icon(IconName::Close)
                             .tooltip("Hide terminal (Cmd+J)")
                             .ghost()
-                            .xsmall()
+                            .small()
                             .on_click(move |_event, _window, cx| {
                                 close_panel_view.update(cx, |this, cx| {
                                     this.bottom_panel_visible = false;
@@ -1829,11 +1852,13 @@ impl Render for WorkspaceView {
             .update(cx, |panel, cx| panel.render_git_dialog_layer(cx));
 
         div()
+            .id("workspace-root")
             .relative()
             .flex()
             .w_full()
             .h_full()
             .track_focus(&self.focus_handle)
+            .role(Role::Application)
             .on_action(cx.listener(Self::toggle_command_palette))
             .on_action(cx.listener(Self::toggle_sidebar_action))
             .on_action(cx.listener(Self::toggle_right_panel_action))

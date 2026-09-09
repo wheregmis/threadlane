@@ -13,6 +13,8 @@ use super::scheduler::{
     AgentWork, AgentWorkObserver, DeterministicSubagentToolExecutor, SubagentBoundaryObserver,
 };
 use crate::agents::{discover_agents, AgentDefinition, AgentScope};
+#[cfg(test)]
+use crate::browser::BrowserBridge;
 use crate::policy::ToolPolicy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -721,7 +723,7 @@ You are an isolated subagent working in {}. Complete only the assigned task and 
 
     let policy = Arc::new(tokio::sync::Mutex::new(policy));
     let agent_work = AgentWorkScheduler::default();
-    let (broker_dispatcher, _, _) = build_broker_dispatcher(
+    let (broker_dispatcher, _, _, _) = build_broker_dispatcher(
         policy.clone(),
         context.extensions.clone(),
         false,
@@ -1006,6 +1008,7 @@ mod result_tests {
                     .unwrap(),
                     is_error: false,
                     terminate: false,
+                    images: Vec::new(),
                 })
                 .unwrap();
             context_ids.push(
@@ -1244,6 +1247,7 @@ mod result_tests {
                     system_prompt: SystemPromptConfig::default(),
                     agent_config: None,
                     coding_config: None,
+                    browser: BrowserBridge::unavailable(),
                 });
                 agent
                     .begin_harness_run(AgentMessage::user("parent task", vec![]))
@@ -1376,7 +1380,7 @@ mod result_tests {
         );
         let policy = Arc::new(tokio::sync::Mutex::new(policy));
         let extensions = Arc::new(WasiExtensionManager::new());
-        let (broker, _, _) = build_broker_dispatcher(
+        let (broker, _, _, _) = build_broker_dispatcher(
             policy.clone(),
             extensions.clone(),
             false,
@@ -1448,6 +1452,7 @@ mod result_tests {
             content: "large child tool output".repeat(1000),
             is_error: false,
             terminate: false,
+            images: Vec::new(),
         }];
         result.messages = history.clone();
         let mut completed = lane("scout", SubagentLaneStatus::Completed);

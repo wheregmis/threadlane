@@ -76,7 +76,10 @@ impl From<ReduceError> for EffectsError {
 /// Parking is inert; only execute methods cross into the store.
 pub struct GatedEffects {
     pending: VecDeque<EffectAction>,
-    committed_sequences: Vec<u64>,
+    /// High-water mark of committed sequence numbers. Only the maximum is
+    /// ever read (via `pending_sequences`), so retaining the full history
+    /// would leak memory over long sessions.
+    max_committed_seq: u64,
     closed: bool,
     fault: Option<ReduceError>,
     executor: Option<EffectExecutor>,
@@ -90,7 +93,7 @@ impl std::fmt::Debug for GatedEffects {
         formatter
             .debug_struct("GatedEffects")
             .field("pending", &self.pending)
-            .field("committed_sequences", &self.committed_sequences)
+            .field("max_committed_seq", &self.max_committed_seq)
             .field("closed", &self.closed)
             .field("fault", &self.fault)
             .field("production", &self.executor.is_some())
@@ -102,7 +105,7 @@ impl Default for GatedEffects {
     fn default() -> Self {
         Self {
             pending: VecDeque::new(),
-            committed_sequences: Vec::new(),
+            max_committed_seq: 0,
             closed: false,
             fault: None,
             executor: None,
@@ -172,7 +175,7 @@ impl GatedEffects {
                 self.fault = Some(error.clone());
                 return Err(EffectsError::Faulted(error));
             }
-            self.committed_sequences.push(seq);
+            self.max_committed_seq = self.max_committed_seq.max(seq);
             // The executor has committed the action before observers are told.
             // Keep telemetry aligned with the durable boundary.
             self.notify_committed(&committed_action);
@@ -199,7 +202,48 @@ impl GatedEffects {
         self.pending
             .iter()
             .map(EffectAction::seq)
-            .chain(self.committed_sequences.iter().copied())
+            .chain((self.max_committed_seq > 0).then_some(self.max_committed_seq))
+    }
+
+    /// Records parked but not yet committed. Idempotency checks in procedures
+    /// must consult both the store and this iterator, otherwise two parked
+    /// procedures compute the same attempt/id and the second fails at commit
+    /// with `DuplicateId` after reporting `Ok`.
+    pub(crate) fn pending_records(&self) -> impl Iterator<Item = &Record> + '_ {
+        self.pending.iter().filter_map(|action| match action {
+            EffectAction::AppendRecord { record, .. } => Some(record),
+            EffectAction::AppendEntry { .. } => None,
+        })
+    }
+
+    pub(crate) fn has_pending_record_with_id(&self, id: &str) -> bool {
+        self.pending_records().any(|record| record.id() == id)
+    }
+
+    /// Attempt numbers claimed by parked `StepAttempt` / `Usage` /
+    /// `RetryConsumed` records for one run.
+    pub(crate) fn pending_attempts_for_run<'a>(
+        &'a self,
+        run_id: &'a str,
+    ) -> impl Iterator<Item = u32> + 'a {
+        self.pending_records().filter_map(move |record| match record {
+            Record::StepAttempt {
+                run_id: record_run_id,
+                attempt,
+                ..
+            }
+            | Record::RetryConsumed {
+                run_id: record_run_id,
+                attempt,
+                ..
+            } if record_run_id == run_id => Some(*attempt),
+            Record::Usage {
+                run_id: Some(record_run_id),
+                attempt: Some(attempt),
+                ..
+            } if record_run_id == run_id => Some(*attempt),
+            _ => None,
+        })
     }
 
     pub fn is_closed(&self) -> bool {
@@ -298,7 +342,7 @@ impl GatedEffects {
         }
         self.pending.clear();
         for action in &actions {
-            self.committed_sequences.push(action.seq());
+            self.max_committed_seq = self.max_committed_seq.max(action.seq());
             self.notify_committed(action);
         }
         Ok(actions)

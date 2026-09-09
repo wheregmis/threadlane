@@ -116,8 +116,7 @@ impl AgentToolDefinition {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReasoningEffort {
     Off,
     Minimal,
@@ -127,10 +126,38 @@ pub enum ReasoningEffort {
     High,
     XHigh,
     Max,
+    /// Provider/model-defined effort level loaded at runtime (e.g. from
+    /// `models.json` or an ACP `thought_level` option). Stored as a leaked
+    /// lowercase API value so the enum stays `Copy` and wire-compatible.
+    Other(&'static str),
 }
 
 impl ReasoningEffort {
-    pub(crate) fn as_api_str(self) -> Option<&'static str> {
+    /// All built-in levels in picker order. Custom levels from the model
+    /// registry are appended by callers.
+    pub fn known_levels() -> [Self; 7] {
+        [
+            Self::Off,
+            Self::Minimal,
+            Self::Low,
+            Self::Medium,
+            Self::High,
+            Self::XHigh,
+            Self::Max,
+        ]
+    }
+
+    pub fn is_custom(self) -> bool {
+        matches!(self, Self::Other(_))
+    }
+
+    /// Builds a custom level from a runtime string. Empty strings return
+    /// `None`; known names resolve to their built-in variant.
+    pub fn custom(value: &str) -> Option<Self> {
+        Self::from_label(value)
+    }
+
+    pub fn as_api_str(self) -> Option<&'static str> {
         match self {
             Self::Off => None,
             Self::Minimal => Some("minimal"),
@@ -139,6 +166,14 @@ impl ReasoningEffort {
             Self::High => Some("high"),
             Self::XHigh => Some("xhigh"),
             Self::Max => Some("max"),
+            Self::Other(value) => {
+                let normalized = value.trim().to_ascii_lowercase();
+                if normalized.is_empty() || normalized == "off" || normalized == "none" {
+                    None
+                } else {
+                    Some(value)
+                }
+            }
         }
     }
 
@@ -151,12 +186,14 @@ impl ReasoningEffort {
             Self::High => "High",
             Self::XHigh => "XHigh",
             Self::Max => "Max",
+            Self::Other(value) => value,
         }
     }
 
     pub fn from_label(label: &str) -> Option<Self> {
         let label = label.strip_prefix("Thinking: ").unwrap_or(label).trim();
         match label.to_ascii_lowercase().as_str() {
+            "" => None,
             "off" | "none" => Some(Self::Off),
             "minimal" => Some(Self::Minimal),
             "low" => Some(Self::Low),
@@ -164,8 +201,34 @@ impl ReasoningEffort {
             "high" => Some(Self::High),
             "xhigh" => Some(Self::XHigh),
             "max" => Some(Self::Max),
-            _ => None,
+            _ => {
+                let normalized = label.to_ascii_lowercase();
+                let leaked: &'static str = Box::leak(normalized.into_boxed_str());
+                Some(Self::Other(leaked))
+            }
         }
+    }
+}
+
+impl serde::Serialize for ReasoningEffort {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Off => serializer.serialize_str("off"),
+            Self::Minimal => serializer.serialize_str("minimal"),
+            Self::Low => serializer.serialize_str("low"),
+            Self::Medium => serializer.serialize_str("medium"),
+            Self::High => serializer.serialize_str("high"),
+            Self::XHigh => serializer.serialize_str("xhigh"),
+            Self::Max => serializer.serialize_str("max"),
+            Self::Other(value) => serializer.serialize_str(value),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ReasoningEffort {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        Self::from_label(&value).ok_or_else(|| serde::de::Error::custom("empty reasoning effort"))
     }
 }
 
@@ -236,6 +299,11 @@ pub enum AgentMessage {
         is_error: bool,
         #[serde(default)]
         terminate: bool,
+        /// Model-visible images attached by the tool (e.g. screenshots).
+        /// Empty for text-only results; serialized inline so durable reload
+        /// reproduces the exact provider-visible context.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<ImageAttachment>,
     },
     Custom {
         custom_type: String,
@@ -328,6 +396,27 @@ pub struct AgentToolResult {
     pub content: String,
     pub is_error: bool,
     pub(crate) terminate: bool,
+    /// Model-visible images attached by the tool. Serialized inline so the
+    /// durable transcript reproduces the exact provider-visible context.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageAttachment>,
+}
+
+/// Rich tool output: text plus optional model-visible images. Executors keep
+/// returning plain strings; only image-producing tools build this directly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolOutput {
+    pub content: String,
+    pub images: Vec<ImageAttachment>,
+}
+
+impl From<String> for ToolOutput {
+    fn from(content: String) -> Self {
+        Self {
+            content,
+            images: Vec::new(),
+        }
+    }
 }
 
 impl AgentToolResult {
@@ -352,6 +441,7 @@ impl AgentToolResult {
             content: content.into(),
             is_error,
             terminate: false,
+            images: Vec::new(),
         }
     }
 }

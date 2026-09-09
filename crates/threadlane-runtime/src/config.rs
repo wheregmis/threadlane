@@ -36,6 +36,22 @@ pub struct AgentConfig {
     pub(crate) context_maximum_retained_tail_tokens: usize,
     pub(crate) context_retained_tail_percent: usize,
 
+    // ── Loop Guard ──────────────────────────────────────────────────────
+    /// Master switch for the turn-level loop circuit breaker. When enabled,
+    /// consecutive identical calls, ping-pong cycles, and same-error runs
+    /// trip with a terminal message instead of burning to the context limit.
+    #[serde(default = "default_loop_guard_enabled")]
+    pub(crate) loop_guard_enabled: bool,
+    /// Consecutive identical (tool+args+output) calls that trip the breaker.
+    #[serde(default = "default_loop_identical_limit")]
+    pub(crate) loop_identical_limit: usize,
+    /// Repeated A→B→A… rounds (period 2-3) that trip the breaker.
+    #[serde(default = "default_loop_pingpong_rounds")]
+    pub(crate) loop_pingpong_rounds: usize,
+    /// Consecutive same-error failures that trip the breaker.
+    #[serde(default = "default_loop_error_limit")]
+    pub(crate) loop_error_limit: usize,
+
     // ── Stream Rules ────────────────────────────────────────────────────
     /// Maximum bytes of accumulated streaming text to retain for regex
     /// matching. Text beyond this window is discarded.
@@ -82,7 +98,8 @@ pub struct AgentConfig {
     max_tool_output_bytes: Option<usize>,
 
     /// When enabled, restricts the model-visible JSON tool schema to the essential core tools
-    /// (read_file, edit_file_hashline, edit_files_hashline, write_file, run_command, subagent).
+    /// (read_file, edit_file_hashline, edit_files_hashline, write_file, run_command, subagent,
+    /// plus the browser_* panel and computer_* native tools).
     /// Auxiliary tools remain executable directly or via the in-process `dyn` CLI.
     #[serde(default = "default_core_tool_schema_mode")]
     pub(crate) core_tool_schema_mode: bool,
@@ -94,6 +111,22 @@ pub struct AgentConfig {
 
 fn default_core_tool_schema_mode() -> bool {
     true
+}
+
+fn default_loop_guard_enabled() -> bool {
+    true
+}
+
+fn default_loop_identical_limit() -> usize {
+    5
+}
+
+fn default_loop_pingpong_rounds() -> usize {
+    3
+}
+
+fn default_loop_error_limit() -> usize {
+    3
 }
 
 impl Default for AgentConfig {
@@ -119,6 +152,10 @@ impl Default for AgentConfig {
             orchestrator_mode: OrchestratorMode::default(),
             needle_enabled: false,
             core_tool_schema_mode: true,
+            loop_guard_enabled: true,
+            loop_identical_limit: 5,
+            loop_pingpong_rounds: 3,
+            loop_error_limit: 3,
             tool_execution_timeout: None,
             max_tool_output_bytes: None,
             event_channel_capacity: 500,
@@ -244,6 +281,26 @@ impl AgentConfigBuilder {
 
     pub fn core_tool_schema_mode(mut self, value: bool) -> Self {
         self.config.core_tool_schema_mode = value;
+        self
+    }
+
+    pub fn loop_guard_enabled(mut self, value: bool) -> Self {
+        self.config.loop_guard_enabled = value;
+        self
+    }
+
+    pub fn loop_identical_limit(mut self, value: usize) -> Self {
+        self.config.loop_identical_limit = value;
+        self
+    }
+
+    pub fn loop_pingpong_rounds(mut self, value: usize) -> Self {
+        self.config.loop_pingpong_rounds = value;
+        self
+    }
+
+    pub fn loop_error_limit(mut self, value: usize) -> Self {
+        self.config.loop_error_limit = value;
         self
     }
 
