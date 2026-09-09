@@ -109,7 +109,7 @@ fn computer_tool_definitions() -> Arc<[AgentToolDefinition]> {
                     "text": { "type": "string", "description": "Text for the type action." },
                     "key": {
                         "type": "string",
-                        "description": "Key for press: Enter, Escape, Tab, Space, Backspace, Delete, Up, Down, Left, Right."
+                        "description": "Key for press: a named key (Enter, Escape, Tab, Space, Backspace, Delete, Up, Down, Left, Right) or a single character for combos (cmd+L, ctrl+C)."
                     },
                     "modifiers": {
                         "type": "array",
@@ -146,7 +146,9 @@ pub(crate) fn parse_act_target(args: &str) -> Result<Option<i64>, String> {
         .map_err(|error| format!("Invalid {COMPUTER_ACT_TOOL} arguments: {error}"))?;
     match parsed.get("target") {
         None => Ok(None),
-        Some(value) => value.as_i64().filter(|id| *id >= 0).map(Some).ok_or_else(|| {
+        // Window id 0 is kCGNullWindowID and never names a window; a zero
+        // target is always a caller defaulting the field, not a real target.
+        Some(value) => value.as_i64().filter(|id| *id > 0).map(Some).ok_or_else(|| {
             "`computer_act` target must be a window id from computer_windows.".to_string()
         }),
     }
@@ -352,9 +354,12 @@ pub(crate) fn parse_computer_act(args: &str) -> Result<ComputerAct, String> {
                 .map(str::trim)
                 .filter(|key| !key.is_empty())
                 .ok_or_else(|| "`computer_act` press requires `key`.".to_string())?;
-            if !VALID_KEYS.contains(&key) {
+            // Named keys (Enter, Escape, …) or one character for combos
+            // (cmd+L, ctrl+C): single characters ride the unicode path.
+            let is_character = key.chars().count() == 1;
+            if !is_character && !VALID_KEYS.contains(&key) {
                 return Err(format!(
-                    "`computer_act` press key must be one of {}.",
+                    "`computer_act` press key must be a single character or one of {}.",
                     VALID_KEYS.join(", ")
                 ));
             }
@@ -534,25 +539,72 @@ mod mac {
     }
 
     /// Composite every on-screen window except ours into a bounded JPEG.
-    /// Returns (jpeg bytes, width, height). Unlike `screencapture` this never
-    /// includes Threadlane's own windows, so a mirror popup cannot recurse.
-    /// Fails closed (Err) when the composite is blank, e.g. without Screen
-    /// Recording permission — the caller falls back to `screencapture`.
+    /// Returns (jpeg bytes, served width, served height, source points
+    /// width). Unlike `screencapture` this never includes Threadlane's own
+    /// windows, so a mirror popup cannot recurse. Fails closed (Err) when
+    /// the composite is blank, e.g. without Screen Recording permission —
+    /// the caller falls back to `screencapture`.
     pub(super) fn capture_composited_jpeg(
         max_width: u32,
         quality: u8,
-    ) -> Result<(Vec<u8>, u32, u32), String> {
-        capture_composited_ids(&capture_window_ids(), max_width, quality)
+    ) -> Result<(Vec<u8>, u32, u32, f64), String> {
+        use core_graphics::display::CGDisplay;
+        let source_points = CGDisplay::main().bounds().size.width;
+        let (bytes, width, height) =
+            capture_composited_ids(&capture_window_ids(), max_width, quality)?;
+        Ok((bytes, width, height, source_points))
     }
 
-    /// Composite one window by id — the target-only capture the model should
-    /// use instead of guessing coordinates off a full display.
+    /// Composite one window by id, cropped to the window rect: the model sees
+    /// just that window and coordinates are window-local. Returns (jpeg
+    /// bytes, served width, served height, source points width).
     pub(super) fn capture_composited_window(
         window_id: i32,
         max_width: u32,
         quality: u8,
-    ) -> Result<(Vec<u8>, u32, u32), String> {
-        capture_composited_ids(&[window_id], max_width, quality)
+    ) -> Result<(Vec<u8>, u32, u32, f64), String> {
+        use core_graphics::display::CGDisplay;
+
+        let bounds = window_infos()
+            .ok()
+            .and_then(|infos| {
+                infos.into_iter().find_map(|window| {
+                    (window.id == window_id && window.onscreen).then_some(window.bounds)
+                })
+            })
+            .ok_or_else(|| {
+                format!("Window {window_id} is gone; re-list with computer_windows and pick a live id.")
+            })?;
+        let display_points = CGDisplay::main().bounds().size.width;
+        if display_points <= 0.0 {
+            return Err("Could not read display bounds.".to_string());
+        }
+        // Near-native composite (2x points, bounded) so the crop stays sharp,
+        // then downscale the crop for context.
+        let cap = ((display_points * 2.0).round() as u32).max(1);
+        let (bytes, served_w, _) = capture_composited_ids(&[window_id], cap, 100)?;
+        let pixel_scale = f64::from(served_w) / display_points;
+        let image = image::load_from_memory(&bytes)
+            .map_err(|error| format!("Could not decode composite: {error}"))?
+            .to_rgb8();
+        let (img_w, img_h) = (image.width(), image.height());
+        let left = ((bounds.0 * pixel_scale).round() as u32).min(img_w.saturating_sub(1));
+        let top = ((bounds.1 * pixel_scale).round() as u32).min(img_h.saturating_sub(1));
+        let width = ((bounds.2 * pixel_scale).round() as u32)
+            .min(img_w.saturating_sub(left))
+            .max(1);
+        let height = ((bounds.3 * pixel_scale).round() as u32)
+            .min(img_h.saturating_sub(top))
+            .max(1);
+        let cropped = image::imageops::crop_imm(&image, left, top, width, height).to_image();
+        let (bytes, width, height) = crate::computer_stream::encode_bounded_jpeg(
+            cropped.as_raw(),
+            width,
+            height,
+            max_width,
+            quality,
+        )?;
+        Ok((bytes, width, height, bounds.2))
     }
 
     fn capture_composited_ids(
@@ -609,20 +661,35 @@ mod mac {
         crate::computer_stream::encode_bounded_jpeg(&rgb, width, height, max_width, quality)
     }
 
+    /// Display points per served image pixel: window bounds and input
+    /// events live in points while screenshots are downscaled pixels.
+    /// Kept for callers that only know the served width; prefer passing the
+    /// exact source width through capture results instead.
+    pub(super) fn display_scale_for(served_width: u32) -> f64 {
+        use core_graphics::display::CGDisplay;
+        if served_width == 0 {
+            return 1.0;
+        }
+        let points = CGDisplay::main().bounds().size.width;
+        if points <= 0.0 {
+            return 1.0;
+        }
+        points / f64::from(served_width)
+    }
+
     /// Read one window dictionary by comparing key names. Comparing
     /// content (not pointers) keeps this independent of CF key-callback
     /// details; the kCGWindow* names are stable API.
-    struct WindowInfo {
-        id: i32,
-        owner: String,
-        title: String,
-        pid: i32,
-        layer: i32,
-        alpha: f64,
-        bounds: (f64, f64, f64, f64),
-        onscreen: bool,
+    pub(super) struct WindowInfo {
+        pub(super) id: i32,
+        pub(super) owner: String,
+        pub(super) title: String,
+        pub(super) pid: i32,
+        pub(super) layer: i32,
+        pub(super) alpha: f64,
+        pub(super) bounds: (f64, f64, f64, f64),
+        pub(super) onscreen: bool,
     }
-
     fn cf_string(ptr: *const std::ffi::c_void) -> String {
             unsafe { CFString::wrap_under_get_rule(ptr as CFStringRef) }.to_string()
         }
@@ -705,7 +772,7 @@ mod mac {
             }
         }
 
-        fn window_infos() -> Result<Vec<WindowInfo>, String> {
+        pub(super) fn window_infos() -> Result<Vec<WindowInfo>, String> {
             use core_foundation::base::{CFIndex, TCFType};
             use core_foundation::dictionary::CFDictionary;
             use core_graphics::window::{
@@ -737,7 +804,8 @@ mod mac {
 }
 
 #[cfg(target_os = "macos")]
-fn list_windows() -> Result<String, String> {    mac::list_windows()
+fn list_windows() -> Result<String, String> {
+    mac::list_windows()
 }
 
 #[cfg(target_os = "macos")]
@@ -773,6 +841,9 @@ impl ComputerToolExecutor {
             .map(|duration| duration.as_millis())
             .unwrap_or(0);
         let path = dir.join(format!("computer-{stamp}.jpg"));
+        // The live mirror is global (one popup, many project sessions) while
+        // history stays per-project.
+        let mirror_dir = global_previews_dir().unwrap_or_else(|| dir.clone());
         // Live stream first: a fresh frame for this exact target is instant
         // and already excludes our own windows. Otherwise fall back to
         // one-shot capture (which also warms the stream for next time).
@@ -780,22 +851,33 @@ impl ComputerToolExecutor {
             Some(id) => crate::computer_stream::StreamTarget::Window(id as u32),
             None => crate::computer_stream::StreamTarget::Display,
         };
-        crate::computer_stream::ensure_stream(target, Some(dir.join("latest-frame.jpg")));
+        crate::computer_stream::ensure_stream(
+            target,
+            Some(mirror_dir.join("latest-frame.jpg")),
+        );
         if let Some(frame) = crate::computer_stream::fresh_frame(target) {
             std::fs::write(&path, &frame.jpeg)
                 .map_err(|error| format!("Could not save screenshot: {error}"))?;
-            write_mirror_sidecar(&dir, Some(&path), &format!("Screenshot {} (live)", target.label()));
+            write_mirror_sidecar(
+                &mirror_dir,
+                Some(&path),
+                &format!("Screenshot {} (live)", target.label()),
+            );
             return Ok(attach_jpeg(
                 &path,
                 &frame.jpeg,
                 &format!("{}x{}", frame.width, frame.height),
+                Some(target),
+                frame.src_points_width / f64::from(frame.width.max(1)),
             ));
         }
         // One-shot capture, target-aware: a window id composites just that
         // window so the model sees what it drives instead of a full display
         // with Threadlane mixed in. Falls back to `screencapture` (which owns
         // the TCC prompt) when the composite is unavailable or blank.
-        let (bytes, dims) = match match window_id {
+        // Each arm yields (bytes, dims text, source points width) so clicks
+        // convert image pixels back to display points exactly.
+        let (bytes, dims, src_points_width) = match match window_id {
             Some(id) => mac::capture_composited_window(
                 id as i32,
                 SCREENSHOT_WIDTH,
@@ -803,10 +885,14 @@ impl ComputerToolExecutor {
             ),
             None => mac::capture_composited_jpeg(SCREENSHOT_WIDTH, SCREENSHOT_JPEG_QUALITY),
         } {
-            Ok((bytes, width, height)) => {
+            Ok((bytes, width, height, src_points_width)) => {
                 std::fs::write(&path, &bytes)
                     .map_err(|error| format!("Could not save screenshot: {error}"))?;
-                (bytes, format!("{width}x{height}"))
+                (
+                    bytes,
+                    format!("{width}x{height}"),
+                    src_points_width,
+                )
             }
             Err(_) => {
                 let bytes = tokio::task::spawn_blocking({
@@ -816,16 +902,71 @@ impl ComputerToolExecutor {
                 .await
                 .map_err(|error| format!("Screenshot task failed: {error}"))??;
                 let dims = jpeg_dimensions(&path).unwrap_or_else(|| "unknown size".to_string());
-                (bytes, dims)
+                let served_width = dims
+                    .split('x')
+                    .next()
+                    .and_then(|width| width.parse::<u32>().ok())
+                    .unwrap_or(SCREENSHOT_WIDTH);
+                // screencapture covers the display: fall back to display scale
+                // (source points = served pixels × scale).
+                let src_points_width =
+                    served_width as f64 * mac::display_scale_for(served_width);
+                (bytes, dims, src_points_width)
             }
         };
-        write_mirror_sidecar(&dir, Some(&path), &format!("Screenshot {}", target.label()));
-        Ok(attach_jpeg(&path, &bytes, &dims))
+        write_mirror_sidecar(
+            &mirror_dir,
+            Some(&path),
+            &format!("Screenshot {}", target.label()),
+        );
+        let served_width = dims
+            .split('x')
+            .next()
+            .and_then(|width| width.parse::<u32>().ok())
+            .unwrap_or(SCREENSHOT_WIDTH);
+        Ok(attach_jpeg(
+            &path,
+            &bytes,
+            &dims,
+            Some(target),
+            src_points_width / f64::from(served_width.max(1)),
+        ))
     }
 
     async fn act(&self, args: &str, work_dir: Option<&Path>) -> Result<String, String> {
         let intent = parse_computer_act(args)?;
-        let targeted = resolve_target(intent, parse_act_target(args)?)?;
+        let raw_target = parse_act_target(args)?;
+        // Convert image-pixel coordinates to display points using the scale
+        // recorded when this target was last screenshotted. Without a scale
+        // reference the model is acting blind: proceed unscaled but say so.
+        let scale_target = match raw_target {
+            Some(id) => Some(crate::computer_stream::StreamTarget::Window(id as u32)),
+            None => Some(crate::computer_stream::StreamTarget::Display),
+        };
+        let scale = scale_target
+            .and_then(crate::computer_stream::served_scale)
+            .unwrap_or(1.0);
+        let scale_note = if scale_target.is_some_and(|target| {
+            crate::computer_stream::served_scale(target).is_none()
+        }) {
+            " (no scale reference on file — screenshot the target first for precise clicks)"
+        } else {
+            ""
+        };
+        let mut intent = intent;
+        match &mut intent {
+            ComputerAct::Click { x, y, .. }
+            | ComputerAct::DoubleClick { x, y, .. }
+            | ComputerAct::Move { x, y } => {
+                *x *= scale;
+                *y *= scale;
+            }
+            // Scroll deltas are wheel units, not screen positions.
+            ComputerAct::Scroll { .. }
+            | ComputerAct::Type { .. }
+            | ComputerAct::Press { .. } => {}
+        }
+        let targeted = resolve_target(intent, raw_target)?;
         let mut title = targeted.intent.approval_title();
         if let Some(app) = &targeted.app {
             title = format!("{title} in {app}");
@@ -845,26 +986,52 @@ impl ComputerToolExecutor {
                 .await
                 .map_err(|error| format!("Input task failed: {error}"))?;
         if let Ok(outcome) = &outcome {
-            let dir = mac::previews_dir(work_dir);
-            write_mirror_sidecar(&dir, None, &format!("{title} — {outcome}"));
+            let dir = global_previews_dir()
+                .unwrap_or_else(|| mac::previews_dir(work_dir));
+            write_mirror_sidecar(&dir, None, &format!("{title} — {outcome}{scale_note}"));
         }
         outcome
+        .map(|outcome| format!("{outcome}{scale_note}"))
     }
 }
 
 /// Build the screenshot tool output: text metadata plus the JPEG for the
-/// model, unless it exceeds the model byte cap (metadata only then).
-fn attach_jpeg(path: &Path, bytes: &[u8], dims: &str) -> ToolOutput {
+/// model, unless it exceeds the model byte cap (metadata only then) or is
+/// pixel-identical to what the model last received for the target (a
+/// one-line unchanged note, no re-attached image).
+fn attach_jpeg(
+    path: &Path,
+    bytes: &[u8],
+    dims: &str,
+    target: Option<crate::computer_stream::StreamTarget>,
+    points_per_pixel: f64,
+) -> ToolOutput {
     let content = format!(
-        "Screenshot saved to {} ({} pixels, {} bytes).",
+        "Screenshot saved to {} ({} pixels, {} bytes). Display points = image pixels × {:.3}.",
         path.display(),
         dims,
-        bytes.len()
+        bytes.len(),
+        points_per_pixel
     );
     if bytes.len() > MAX_IMAGE_BYTES {
         return ToolOutput {
             content: format!(
                 "{content} Image exceeded the {MAX_IMAGE_BYTES}-byte model limit, so only metadata is attached."
+            ),
+            images: Vec::new(),
+        };
+    }
+    if let Some(since_ms) = target.and_then(|target| {
+        crate::computer_stream::frame_unchanged_since_with_scale(
+            target,
+            bytes,
+            Some(points_per_pixel),
+        )
+    }) {
+        return ToolOutput {
+            content: format!(
+                "{content} Unchanged since {} — same pixels as the screenshot you already have, so no new image is attached.",
+                crate::computer_stream::ago_ms(since_ms)
             ),
             images: Vec::new(),
         };
@@ -893,7 +1060,7 @@ pub(crate) fn capture_composited_for_target(
     target: crate::computer_stream::StreamTarget,
     max_width: u32,
     quality: u8,
-) -> Result<(Vec<u8>, u32, u32), String> {
+) -> Result<(Vec<u8>, u32, u32, f64), String> {
     match target {
         crate::computer_stream::StreamTarget::Window(id) => {
             mac::capture_composited_window(id as i32, max_width, quality)
@@ -913,6 +1080,19 @@ pub(crate) fn write_mirror_sidecar_action(dir: &Path, action: &str) {
     .ok()
     .and_then(|value| value.get("path").and_then(|value| value.as_str()).map(PathBuf::from));
     write_mirror_sidecar(dir, path.as_deref(), action);
+}
+
+/// Global live-mirror dir (`~/.threadlane/previews/`): the popup is global
+/// while sessions live in per-project worktrees, so `latest.json` and
+/// `latest-frame.jpg` live here. Timestamped history files stay per-project.
+#[cfg(target_os = "macos")]
+pub fn global_previews_dir() -> Option<PathBuf> {
+    threadlane_wasi::packages::default_global_threadlane_dir().map(|dir| dir.join("previews"))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn global_previews_dir() -> Option<PathBuf> {
+    None
 }
 
 /// Mirror-popup state for the GPUI frontend: the latest preview path (if any),
@@ -1151,6 +1331,30 @@ fn perform_act(intent: &ComputerAct, pid: Option<i32>) -> Result<String, String>
             ))
         }
         ComputerAct::Press { key, modifiers } => {
+            let event_flags = flags(modifiers);
+            // Single characters (cmd+L, ctrl+C) ride the unicode path with
+            // modifier flags; named keys use hardware keycodes.
+            if key.chars().count() == 1 {
+                let down = CGEvent::new_keyboard_event(source.clone(), 0, true)
+                    .map_err(|_| "Could not create keyboard event.".to_string())?;
+                down.set_flags(event_flags);
+                down.set_string(key);
+                post(&down);
+                let up = CGEvent::new_keyboard_event(source, 0, false)
+                    .map_err(|_| "Could not create keyboard event.".to_string())?;
+                up.set_flags(event_flags);
+                post(&up);
+                return Ok(format!(
+                    "Pressed {}{}.{}",
+                    if modifiers.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{}+", modifiers.join("+"))
+                    },
+                    key,
+                    background_note.unwrap_or("")
+                ));
+            }
             let keycode = match key.as_str() {
                 "Enter" => KeyCode::RETURN,
                 "Escape" => KeyCode::ESCAPE,
@@ -1236,6 +1440,29 @@ mod tests {
     }
 
     #[test]
+    fn press_accepts_single_character_combos() {
+        let act =
+            parse_computer_act(r#"{"action":"press","key":"L","modifiers":["cmd"]}"#).unwrap();
+        assert!(matches!(
+            act,
+            ComputerAct::Press { ref key, .. } if key == "L"
+        ));
+        assert_eq!(act.approval_title(), "Press cmd+L");
+        assert!(parse_computer_act(r#"{"action":"press","key":"F13"}"#).is_err());
+        assert!(parse_computer_act(r#"{"action":"press","key":"ab"}"#).is_err());
+    }
+
+    #[test]
+    fn act_target_rejects_null_window() {
+        assert_eq!(
+            parse_act_target(r#"{"action":"click","x":1,"y":2,"target":16958}"#).unwrap(),
+            Some(16958)
+        );
+        // 0 is kCGNullWindowID: never a real target, always a caller default.
+        assert!(parse_act_target(r#"{"action":"click","x":1,"y":2,"target":0}"#).is_err());
+    }
+
+    #[test]
     fn act_target_parsing() {
         assert_eq!(parse_act_target(r#"{"action":"click","x":1,"y":2}"#).unwrap(), None);
         assert_eq!(
@@ -1300,6 +1527,30 @@ mod tests {
         let sample = "/tmp/shot.jpg\n  pixelWidth: 1560\n  pixelHeight: 960\n";
         assert_eq!(parse_sips_dimensions(sample).as_deref(), Some("1560x960"));
         assert_eq!(parse_sips_dimensions("garbage"), None);
+    }
+
+    #[test]
+    fn mirror_sidecar_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("computer-1.jpg");
+        std::fs::write(&path, b"fake-jpeg").unwrap();
+        write_mirror_sidecar(dir.path(), Some(&path), "Screenshot live");
+        let sidecar: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(dir.path().join("latest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(sidecar["action"], "Screenshot live");
+        assert!(sidecar["path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("computer-1.jpg")));
+        assert!(sidecar["ts_ms"].as_u64().is_some());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn global_previews_dir_is_shared_location() {
+        let dir = global_previews_dir().expect("home dir present");
+        assert!(dir.ends_with("previews"));
     }
 
     #[cfg(target_os = "macos")]
@@ -1429,6 +1680,30 @@ mod tests {
             targeted.intent,
             ComputerAct::Click { x, y, .. } if x == 10.0 + origin_x && y == 20.0 + origin_y
         ));
+
+        // Window captures are cropped to the window, not the display canvas.
+        let infos = super::mac::window_infos().unwrap_or_default();
+        let big = infos
+            .into_iter()
+            .find(|window| window.bounds.2 > 400.0 && window.bounds.3 > 300.0)
+            .expect("a sizable window");
+        let (bytes, width, height, src_points) = super::mac::capture_composited_window(
+            big.id,
+            super::SCREENSHOT_WIDTH,
+            super::SCREENSHOT_JPEG_QUALITY,
+        )
+        .expect("window crop captures");
+        assert!(!bytes.is_empty());
+        let aspect = f64::from(width) / f64::from(height.max(1));
+        let expected = big.bounds.2 / big.bounds.3.max(1.0);
+        assert!(
+            (aspect - expected).abs() < 0.05,
+            "crop aspect {aspect} should match window {expected}"
+        );
+        assert!(
+            (src_points - big.bounds.2).abs() < 1.0,
+            "source width should be window points"
+        );
     }
 
     #[tokio::test]

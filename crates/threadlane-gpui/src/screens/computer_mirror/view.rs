@@ -23,7 +23,10 @@ pub struct MirrorView {
     previews_dir: PathBuf,
     image: Option<Arc<Image>>,
     image_path: Option<PathBuf>,
+    loaded_path: Option<PathBuf>,
+    loaded_mtime_ms: u64,
     action: String,
+    error: Option<String>,
     last_ts: u64,
 }
 
@@ -66,45 +69,74 @@ impl MirrorView {
             previews_dir,
             image: None,
             image_path: None,
+            loaded_path: None,
+            loaded_mtime_ms: 0,
             action: "Waiting for computer activity…".into(),
+            error: None,
             last_ts: 0,
         }
     }
 
-    /// Re-read the sidecar; true when the view changed.
+    /// Re-read the sidecar; true when the view changed. Never fails silently:
+    /// a missing sidecar falls back to the newest capture on disk, and an
+    /// unreadable image surfaces as an error line instead of a blank window.
     fn poll(&mut self) -> bool {
-        let sidecar = self.previews_dir.join("latest.json");
-        let bytes = match std::fs::read(&sidecar) {
-            Ok(bytes) => bytes,
-            Err(_) => return false,
-        };
-        let value: serde_json::Value = match serde_json::from_slice(&bytes) {
-            Ok(value) => value,
-            Err(_) => return false,
-        };
-        let ts = value.get("ts_ms").and_then(|value| value.as_u64()).unwrap_or(0);
-        if ts <= self.last_ts {
-            return false;
-        }
-        self.last_ts = ts;
         let mut changed = false;
-        if let Some(action) = value.get("action").and_then(|value| value.as_str()) {
-            if self.action != action {
-                self.action = action.to_string();
-                changed = true;
+        if let Ok(bytes) = std::fs::read(self.previews_dir.join("latest.json")) {
+            if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                let ts = value.get("ts_ms").and_then(|value| value.as_u64()).unwrap_or(0);
+                if ts > self.last_ts {
+                    self.last_ts = ts;
+                    if let Some(action) = value.get("action").and_then(|value| value.as_str()) {
+                        if self.action != action {
+                            self.action = action.to_string();
+                            changed = true;
+                        }
+                    }
+                    let path = value
+                        .get("path")
+                        .and_then(|value| value.as_str())
+                        .map(PathBuf::from);
+                    if path != self.image_path {
+                        self.image_path = path;
+                        changed = true;
+                    }
+                }
             }
         }
-        let path = value
-            .get("path")
-            .and_then(|value| value.as_str())
-            .map(PathBuf::from);
-        if path != self.image_path {
-            self.image_path = path.clone();
-            self.image = path
+        let mut candidate = self.image_path.clone();
+        if candidate.as_ref().is_none_or(|path| !path.is_file()) {
+            let scanned = newest_capture(&self.previews_dir);
+            if scanned != self.image_path {
+                self.image_path = scanned.clone();
+                changed = true;
+            }
+            candidate = scanned;
+        }
+        let mtime = candidate
+            .as_ref()
+            .and_then(|path| file_mtime_ms(path))
+            .unwrap_or(0);
+        if candidate != self.loaded_path || mtime > self.loaded_mtime_ms {
+            self.loaded_path = candidate.clone();
+            self.loaded_mtime_ms = mtime;
+            match candidate
                 .as_ref()
                 .and_then(|path| std::fs::read(path).ok())
                 .filter(|bytes| !bytes.is_empty())
-                .map(|bytes| Arc::new(Image::from_bytes(ImageFormat::Jpeg, bytes)));
+            {
+                Some(bytes) => {
+                    self.image = Some(Arc::new(Image::from_bytes(ImageFormat::Jpeg, bytes)));
+                    self.error = None;
+                }
+                None => {
+                    self.image = None;
+                    self.error = Some(match candidate.as_ref() {
+                        Some(path) => format!("Cannot read {}", path.display()),
+                        None => format!("No captures in {}", self.previews_dir.display()),
+                    });
+                }
+            }
             changed = true;
         }
         changed
@@ -113,6 +145,55 @@ impl MirrorView {
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.model.update(cx, |state, _| state.mirror_open = false);
         window.remove_window();
+    }
+}
+
+/// Newest `computer-*.jpg` / `latest-frame.jpg` in a previews dir, if any.
+fn newest_capture(dir: &std::path::Path) -> Option<PathBuf> {
+    std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.extension().and_then(|ext| ext.to_str()) == Some("jpg")
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("computer-") || name == "latest-frame.jpg")
+        })
+        .max_by_key(|path| file_mtime_ms(path).unwrap_or(0))}
+
+fn file_mtime_ms(path: &std::path::Path) -> Option<u64> {
+    std::fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_millis() as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn newest_capture_picks_latest_jpg() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("computer-1.jpg");
+        let new = dir.path().join("latest-frame.jpg");
+        std::fs::write(&old, b"old").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        std::fs::write(&new, b"new").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), b"nope").unwrap();
+        assert_eq!(newest_capture(dir.path()), Some(new));
+        assert!(file_mtime_ms(&old).is_some());
+    }
+
+    #[test]
+    fn newest_capture_empty_without_images() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("latest.json"), b"{}").unwrap();
+        assert_eq!(newest_capture(dir.path()), None);
     }
 }
 
@@ -170,13 +251,23 @@ impl Render for MirrorView {
                             })),
                     ),
             )
-            .child(match self.image.clone() {
-                Some(image) => div()
+            .child(match (self.image.clone(), self.error.clone()) {
+                (Some(image), _) => div()
                     .flex_1()
                     .min_h_0()
                     .child(img(image).size_full().object_fit(ObjectFit::Contain))
                     .into_any_element(),
-                None => div()
+                (None, Some(error)) => div()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .p_4()
+                    .text_xs()
+                    .text_color(theme.danger)
+                    .child(error)
+                    .into_any_element(),
+                (None, None) => div()
                     .flex_1()
                     .flex()
                     .items_center()

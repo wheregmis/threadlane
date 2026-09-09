@@ -92,10 +92,14 @@ fn open_computer_mirror(model: &Entity<AppState>, cx: &mut AsyncApp) {
         if state.mirror_open {
             return None;
         }
-        state
-            .active_work_dir
-            .clone()
-            .map(|work_dir| work_dir.join(".threadlane").join("previews"))
+        // The live mirror is global (one popup, many project sessions); the
+        // session tools write latest.json/latest-frame.jpg here.
+        threadlane_session::computer::global_previews_dir().or_else(|| {
+            state
+                .active_work_dir
+                .clone()
+                .map(|work_dir| work_dir.join(".threadlane").join("previews"))
+        })
     });
     let Some(previews_dir) = previews_dir else {
         return;

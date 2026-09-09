@@ -30,7 +30,7 @@ const STREAM_IDLE_MS: u128 = 120_000;
 
 /// What the poller is pointed at. Screenshots reuse frames only when the
 /// target matches; otherwise they fall back to one-shot capture.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum StreamTarget {
     Window(u32),
     Display,
@@ -51,6 +51,9 @@ pub(super) struct StreamFrame {
     pub jpeg: Vec<u8>,
     pub width: u32,
     pub height: u32,
+    /// Source width in display points: display points = image pixels ×
+    /// src_points_width / width.
+    pub src_points_width: f64,
     pub target: StreamTarget,
     pub ts_ms: u128,
 }
@@ -71,6 +74,82 @@ fn poller() -> &'static Mutex<Option<PollerState>> {
 fn latest() -> &'static Mutex<Option<StreamFrame>> {
     static LATEST: OnceLock<Mutex<Option<StreamFrame>>> = OnceLock::new();
     LATEST.get_or_init(|| Mutex::new(None))
+}
+
+/// Last image served to the model per target, for unchanged-frame dedup.
+fn last_served() -> &'static Mutex<std::collections::HashMap<StreamTarget, ServedFrame>> {
+    static SERVED: OnceLock<Mutex<std::collections::HashMap<StreamTarget, ServedFrame>>> =
+        OnceLock::new();
+    SERVED.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+#[derive(Clone, Copy)]
+struct ServedFrame {
+    hash: u64,
+    ts_ms: u128,
+    /// Display points per image pixel at serve time. Coordinates the model
+    /// reads off the image divide by nothing here — instead `act` divides by
+    /// this scale — because window bounds and input events live in points
+    /// while screenshots are downscaled pixels.
+    points_per_pixel: f64,
+}
+
+fn hash_bytes(bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// True when these bytes match what the model last received for `target`,
+/// returning when that was. Records the new hash otherwise. Identical
+/// consecutive screenshots (static pages, spinners settled) then ride as a
+/// one-line note instead of another ~300KB image.
+/// Like [`frame_unchanged_since_with_scale`], recording the point/pixel scale of a
+/// changed frame for later coordinate conversion in `act`.
+pub(super) fn frame_unchanged_since_with_scale(
+    target: StreamTarget,
+    bytes: &[u8],
+    points_per_pixel: Option<f64>,
+) -> Option<u128> {
+    let hash = hash_bytes(bytes);
+    let mut guard = last_served().lock().ok()?;
+    if let Some(served) = guard.get(&target) {
+        if served.hash == hash {
+            return Some(served.ts_ms);
+        }
+    }
+    let carried_scale = guard.get(&target).map(|served| served.points_per_pixel);
+    guard.insert(
+        target,
+        ServedFrame {
+            hash,
+            ts_ms: now_ms(),
+            points_per_pixel: points_per_pixel
+                .or(carried_scale)
+                .unwrap_or(1.0),
+        },
+    );
+    None
+}
+
+/// Display-points-per-image-pixel last recorded for `target`, if any
+/// screenshot was served for it.
+pub(super) fn served_scale(target: StreamTarget) -> Option<f64> {
+    last_served()
+        .lock()
+        .ok()?
+        .get(&target)
+        .map(|served| served.points_per_pixel)
+}
+
+pub(super) fn ago_ms(ts_ms: u128) -> String {
+    let secs = now_ms().saturating_sub(ts_ms) / 1_000;
+    if secs < 60 {
+        format!("{secs}s ago")
+    } else {
+        format!("{}m ago", secs / 60)
+    }
 }
 
 fn now_ms() -> u128 {
@@ -147,11 +226,12 @@ fn spawn_poller() {
                 SCREENSHOT_WIDTH,
                 SCREENSHOT_JPEG_QUALITY,
             ) {
-                Ok((jpeg, width, height)) => {
+                Ok((jpeg, width, height, src_points_width)) => {
                     let frame = StreamFrame {
                         jpeg: jpeg.clone(),
                         width,
                         height,
+                        src_points_width,
                         target: current.target,
                         ts_ms: now_ms(),
                     };
@@ -236,5 +316,22 @@ mod tests {
             super::StreamTarget::Display.label(),
             "the main display"
         );
+    }
+
+    #[test]
+    fn unchanged_frames_dedup_per_target_with_scale() {
+        use super::{ago_ms, frame_unchanged_since_with_scale, served_scale, StreamTarget};
+        let target = StreamTarget::Window(424242);
+        let other = StreamTarget::Display;
+        assert!(frame_unchanged_since_with_scale(target, b"frame-a", Some(0.5)).is_none());
+        // Same bytes: unchanged, scale preserved from the first serve.
+        assert!(frame_unchanged_since_with_scale(target, b"frame-a", Some(0.9)).is_some());
+        assert_eq!(served_scale(target), Some(0.5));
+        // Different bytes: served fresh with the new scale.
+        assert!(frame_unchanged_since_with_scale(target, b"frame-b", Some(0.9)).is_none());
+        assert_eq!(served_scale(target), Some(0.9));
+        // Other targets are independent.
+        assert!(served_scale(other).is_none());
+        assert!(!ago_ms(0).is_empty());
     }
 }
