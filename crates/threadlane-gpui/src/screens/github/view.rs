@@ -1748,9 +1748,10 @@ impl GitHubView {
             .justify_center()
             .child(
                 Button::new("github-load-more")
-                    .label("Load more")
+                    .label(if self.list_loading { "Loading…" } else { "Load more" })
                     .ghost()
                     .small()
+                    .disabled(self.list_loading)
                     .on_click(cx.listener(|this, _, _, cx| this.load_more(cx))),
             )
             .into_any_element()

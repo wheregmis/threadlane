@@ -1000,6 +1000,7 @@ impl Render for TerminalView {
                             self.scrollback_offset
                         ))
                         .icon(IconName::ChevronDown)
+                        .tooltip("Jump to live output")
                         .xsmall()
                         .on_click(move |_event, _window, cx| {
                             scroll_to_bottom_handle.update(cx, |t, cx| t.scroll_to_bottom(cx));

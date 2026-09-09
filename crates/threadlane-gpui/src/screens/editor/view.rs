@@ -677,6 +677,7 @@ impl EditorView {
                                     .ghost()
                                     .xsmall()
                                     .icon(IconName::Close)
+                                    .tooltip("Close tab")
                                     .on_click(move |_event, _window, cx| {
                                         close_view.update(cx, |this, cx| this.close_tab(idx, cx));
                                     }),

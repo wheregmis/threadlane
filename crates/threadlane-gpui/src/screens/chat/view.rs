@@ -187,6 +187,7 @@ fn render_chat_error(
                         Button::new(SharedString::from(format!("chat-error-settings-{id}")))
                             .label("Settings…")
                             .small()
+                            .tooltip("Open provider settings")
                             .debug_selector(|| "chat-error-settings".into())
                             .on_click(move |_, _, cx| {
                                 model.update(cx, |state, cx| {
@@ -200,6 +201,7 @@ fn render_chat_error(
                             .label("Copy details")
                             .ghost()
                             .small()
+                            .tooltip("Copy full error to clipboard")
                             .debug_selector(|| "chat-error-copy".into())
                             .on_click(move |_, window, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(details.clone()));
@@ -4644,10 +4646,15 @@ impl ChatListView {
         });
 
         let model_picker = Button::new("composer-model-picker")
-            .label(model_label)
+            .label(model_label.clone())
             .dropdown_caret(true)
             .ghost()
-            .disabled(!has_models);
+            .disabled(!has_models)
+            .tooltip(if has_models {
+                format!("Model: {model_label}")
+            } else {
+                "No models available — connect a provider in Settings".to_string()
+            });
 
         let model_picker = if let Some(option) = selected_option.as_ref() {
             model_picker.icon(Icon::default().path(option.provider.icon_path()))

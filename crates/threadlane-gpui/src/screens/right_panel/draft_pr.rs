@@ -476,6 +476,7 @@ impl Render for DraftPrDialogView {
                     .child(
                         Button::new("cancel-draft-pr")
                             .label(if created { "Done" } else { "Cancel" })
+                            .tooltip("Close dialog")
                             .disabled(busy && context_matches)
                             .on_click(|_, window, cx| window.close_dialog(cx)),
                     )
