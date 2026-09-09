@@ -4744,7 +4744,7 @@ impl ChatListView {
             let menu = menu.check_side(gpui_component::Side::Right);
             let mut previous_provider = None;
             let menu = model_options.iter().cloned().fold(
-                menu.scrollable(true),
+                menu.max_h(px(320.0)).scrollable(true),
                 |menu, option| {
                     let menu = if previous_provider == Some(option.provider) {
                         menu
