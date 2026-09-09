@@ -29,7 +29,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 rfd = "0.17.2"
 robius-open = { git = "https://github.com/project-robius/robius.git" }
-dirs = "6.0"
+dirs = "7.0"
 anyhow = "1.0"
 base64 = "0.22"
 tracing = "0.1"
