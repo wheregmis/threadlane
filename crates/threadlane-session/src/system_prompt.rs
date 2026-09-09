@@ -177,7 +177,7 @@ pub(crate) fn build_system_prompt(options: SystemPromptBuildOptions<'_>) -> Stri
         }
         if available_tool_names.contains("computer_windows") {
             add_tool_guideline(
-                "To operate the computer outside the embedded browser: list targets with `computer_windows`, capture context with `computer_screenshot` (you receive the image — read positions off it), then act with `computer_act` using display-pixel coordinates. The first screenshot/input asks the user for approval and they can allow always for the project; denied actions must not be retried verbatim. Threadlane's own windows are hidden from you; never try to drive them.",
+                "To operate the computer outside the embedded browser: list targets with `computer_windows`, capture context with `computer_screenshot` (you receive the image — read positions off it), then act with `computer_act`. Pass target with a window id to act in the background: coordinates become window-relative and your cursor and focus stay untouched. Omit target only for foreground control with display coordinates. A window-targeted screenshot shows just that window — prefer it over full-display shots before acting. Chromium/Electron apps may ignore background clicks; say so and ask the user rather than hammering. The first screenshot/input asks the user for approval and they can allow always for the project; denied actions must not be retried verbatim. Threadlane's own windows are hidden from you; never try to drive them.",
             );
         }
         if available_tool_names.contains("update_plan") {            add_tool_guideline(

@@ -115,6 +115,10 @@ fn computer_tool_definitions() -> Arc<[AgentToolDefinition]> {
                         "type": "array",
                         "items": { "type": "string", "enum": ["shift", "ctrl", "alt", "cmd"] },
                         "description": "Optional modifiers held for click/press."
+                    },
+                    "target": {
+                        "type": "integer",
+                        "description": "Optional window id from computer_windows. Coordinates become window-relative and input goes straight to that app without moving your cursor or stealing focus. Omit for foreground control with display coordinates."
                     }
                 },
                 "required": ["action"],
@@ -123,6 +127,82 @@ fn computer_tool_definitions() -> Arc<[AgentToolDefinition]> {
         ),
     ]
     .into()
+}
+
+/// Validated `computer_act` target: a window id whose coordinates are
+/// window-relative and whose input is background-delivered.
+/// Resolved delivery: screen-space intent plus where to post it.
+#[derive(Debug, PartialEq)]
+pub(crate) struct TargetedAct {
+    pub intent: ComputerAct,
+    /// Target process id for background delivery; None posts to the HID
+    /// stream (foreground: moves the cursor, steals focus).
+    pub pid: Option<i32>,
+    pub app: Option<String>,
+}
+
+pub(crate) fn parse_act_target(args: &str) -> Result<Option<i64>, String> {
+    let parsed: serde_json::Value = serde_json::from_str(args)
+        .map_err(|error| format!("Invalid {COMPUTER_ACT_TOOL} arguments: {error}"))?;
+    match parsed.get("target") {
+        None => Ok(None),
+        Some(value) => value.as_i64().filter(|id| *id >= 0).map(Some).ok_or_else(|| {
+            "`computer_act` target must be a window id from computer_windows.".to_string()
+        }),
+    }
+}
+
+/// Resolve a parsed intent against an optional target window: window-relative
+/// coordinates shift to screen space and delivery becomes background
+/// (`post_to_pid`, cursor untouched). Untargeted intents keep display
+/// coordinates and HID delivery.
+#[cfg(target_os = "macos")]
+fn resolve_target(intent: ComputerAct, target: Option<i64>) -> Result<TargetedAct, String> {
+    let Some(id) = target else {
+        return Ok(TargetedAct {
+            intent,
+            pid: None,
+            app: None,
+        });
+    };
+    let (pid, owner, (origin_x, origin_y)) =
+        mac::find_window(id as i32).ok_or_else(|| {
+            format!("Window {id} is gone; re-list with computer_windows and pick a live id.")
+        })?;
+    let shift = |x: f64, y: f64| (x + origin_x, y + origin_y);
+    let intent = match intent {
+        ComputerAct::Click { x, y, modifiers } => {
+            let (x, y) = shift(x, y);
+            ComputerAct::Click { x, y, modifiers }
+        }
+        ComputerAct::DoubleClick { x, y, modifiers } => {
+            let (x, y) = shift(x, y);
+            ComputerAct::DoubleClick { x, y, modifiers }
+        }
+        ComputerAct::Move { x, y } => {
+            let (x, y) = shift(x, y);
+            ComputerAct::Move { x, y }
+        }
+        // Scroll deltas, text, and keys are coordinate-free.
+        intent => intent,
+    };
+    Ok(TargetedAct {
+        intent,
+        pid: Some(pid),
+        app: Some(owner),
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn resolve_target(intent: ComputerAct, target: Option<i64>) -> Result<TargetedAct, String> {
+    if target.is_some() {
+        return Err(COMPUTER_UNAVAILABLE.to_string());
+    }
+    Ok(TargetedAct {
+        intent,
+        pid: None,
+        app: None,
+    })
 }
 
 /// Validated `computer_act` intent. Pure and cross-platform for testability;
@@ -437,6 +517,22 @@ mod mac {
             .collect()
     }
 
+    /// Resolve a target window id to (pid, owner, bounds origin) for
+    /// background delivery. Our own windows stay unaddressable even if a
+    /// stale id names one.
+    pub(super) fn find_window(id: i32) -> Option<(i32, String, (f64, f64))> {
+        let own_pid = std::process::id() as i32;
+        window_infos().ok()?.into_iter().find_map(|window| {
+            (window.id == id && window.onscreen && window.pid != own_pid).then(|| {
+                (
+                    window.pid,
+                    window.owner.clone(),
+                    (window.bounds.0, window.bounds.1),
+                )
+            })
+        })
+    }
+
     /// Composite every on-screen window except ours into a bounded JPEG.
     /// Returns (jpeg bytes, width, height). Unlike `screencapture` this never
     /// includes Threadlane's own windows, so a mirror popup cannot recurse.
@@ -729,12 +825,17 @@ impl ComputerToolExecutor {
 
     async fn act(&self, args: &str, work_dir: Option<&Path>) -> Result<String, String> {
         let intent = parse_computer_act(args)?;
-        let title = intent.approval_title();
+        let targeted = resolve_target(intent, parse_act_target(args)?)?;
+        let mut title = targeted.intent.approval_title();
+        if let Some(app) = &targeted.app {
+            title = format!("{title} in {app}");
+        }
         self.approve(title.clone(), format!("{title} on this Mac. Deny if the target looks wrong."))
             .await?;
-        let outcome = tokio::task::spawn_blocking(move || perform_act(&intent))
-            .await
-            .map_err(|error| format!("Input task failed: {error}"))?;
+        let outcome =
+            tokio::task::spawn_blocking(move || perform_act(&targeted.intent, targeted.pid))
+                .await
+                .map_err(|error| format!("Input task failed: {error}"))?;
         if let Ok(outcome) = &outcome {
             let dir = mac::previews_dir(work_dir);
             write_mirror_sidecar(&dir, None, &format!("{title} — {outcome}"));
@@ -918,7 +1019,7 @@ fn parse_sips_dimensions(text: &str) -> Option<String> {
 }
 
 #[cfg(target_os = "macos")]
-fn perform_act(intent: &ComputerAct) -> Result<String, String> {
+fn perform_act(intent: &ComputerAct, pid: Option<i32>) -> Result<String, String> {
     use core_graphics::event::{
         CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, KeyCode,
         ScrollEventUnit,
@@ -928,7 +1029,16 @@ fn perform_act(intent: &ComputerAct) -> Result<String, String> {
 
     let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
         .map_err(|_| "Could not create an input event source (grant Accessibility access in System Settings → Privacy & Security).".to_string())?;
-    let post = |event: &CGEvent| event.post(CGEventTapLocation::HID);
+    // Background delivery posts straight to the target process: the cursor
+    // never moves and focus never changes. Untargeted acts use the HID
+    // stream (foreground behavior).
+    let post = |event: &CGEvent| match pid {
+        Some(pid) => event.post_to_pid(pid),
+        None => event.post(CGEventTapLocation::HID),
+    };
+    // Fire-and-forget delivery cannot confirm Chromium/Electron targets, which
+    // drop per-PID clicks at the renderer boundary; say so in the result.
+    let background_note = pid.is_some().then_some(" (background — cursor untouched; Chromium/Electron targets may ignore it)");
     let point = |x: f64, y: f64| CGPoint::new(x, y);
     let flags = |modifiers: &[String]| {
         let mut flags = CGEventFlags::empty();
@@ -953,8 +1063,10 @@ fn perform_act(intent: &ComputerAct) -> Result<String, String> {
             )
             .map_err(|_| "Could not create mouse event.".to_string())?;
             post(&event);
-            Ok(format!("Moved pointer to ({x:.0}, {y:.0})."))
-        }
+            Ok(format!(
+                "Moved pointer to ({x:.0}, {y:.0}).{}",
+                background_note.unwrap_or("")
+            ))        }
         ComputerAct::Click { x, y, modifiers } | ComputerAct::DoubleClick { x, y, modifiers } => {
             let clicks = usize::from(matches!(intent, ComputerAct::DoubleClick { .. }));
             let event_flags = flags(modifiers);
@@ -981,9 +1093,12 @@ fn perform_act(intent: &ComputerAct) -> Result<String, String> {
                 std::thread::sleep(Duration::from_millis(60));
             }
             Ok(if clicks == 0 {
-                format!("Clicked ({x:.0}, {y:.0}).")
+                format!("Clicked ({x:.0}, {y:.0}).{}", background_note.unwrap_or(""))
             } else {
-                format!("Double-clicked ({x:.0}, {y:.0}).")
+                format!(
+                    "Double-clicked ({x:.0}, {y:.0}).{}",
+                    background_note.unwrap_or("")
+                )
             })
         }
         ComputerAct::Scroll { dx, dy } => {
@@ -1003,7 +1118,10 @@ fn perform_act(intent: &ComputerAct) -> Result<String, String> {
                 .map_err(|_| "Could not create scroll event.".to_string())?;
                 post(&event);
             }
-            Ok(format!("Scrolled by ({dx:.0}, {dy:.0})."))
+            Ok(format!(
+                "Scrolled by ({dx:.0}, {dy:.0}).{}",
+                background_note.unwrap_or("")
+            ))
         }
         ComputerAct::Type { text } => {
             let mut typed = 0usize;
@@ -1019,7 +1137,10 @@ fn perform_act(intent: &ComputerAct) -> Result<String, String> {
                 post(&up);
                 typed += 1;
             }
-            Ok(format!("Typed {typed} characters."))
+            Ok(format!(
+                "Typed {typed} characters.{}",
+                background_note.unwrap_or("")
+            ))
         }
         ComputerAct::Press { key, modifiers } => {
             let keycode = match key.as_str() {
@@ -1043,7 +1164,7 @@ fn perform_act(intent: &ComputerAct) -> Result<String, String> {
                 .map_err(|_| "Could not create keyboard event.".to_string())?;
             up.set_flags(event_flags);
             post(&up);
-            Ok(format!("Pressed {key}."))
+            Ok(format!("Pressed {key}.{}", background_note.unwrap_or("")))
         }
     }
 }
@@ -1104,6 +1225,39 @@ mod tests {
         let act =
             parse_computer_act(r#"{"action":"press","key":"Enter","modifiers":["cmd"]}"#).unwrap();
         assert_eq!(act.approval_title(), "Press cmd+Enter");
+    }
+
+    #[test]
+    fn act_target_parsing() {
+        assert_eq!(parse_act_target(r#"{"action":"click","x":1,"y":2}"#).unwrap(), None);
+        assert_eq!(
+            parse_act_target(r#"{"action":"click","x":1,"y":2,"target":16958}"#).unwrap(),
+            Some(16958)
+        );
+        assert!(parse_act_target(r#"{"action":"click","target":-1}"#).is_err());
+        assert!(parse_act_target(r#"{"action":"click","target":"x"}"#).is_err());
+    }
+
+    #[test]
+    fn resolve_without_target_keeps_foreground_delivery() {
+        let intent = parse_computer_act(r#"{"action":"click","x":10,"y":20}"#).unwrap();
+        let targeted = resolve_target(intent, None).unwrap();
+        assert_eq!(targeted.pid, None);
+        assert_eq!(targeted.app, None);
+        assert!(matches!(
+            targeted.intent,
+            ComputerAct::Click { x: 10.0, y: 20.0, .. }
+        ));
+    }
+
+    #[test]
+    fn resolve_stale_target_errors_helpfully() {
+        let intent = parse_computer_act(r#"{"action":"click","x":10,"y":20}"#).unwrap();
+        let error = resolve_target(intent, Some(2_000_000_000)).unwrap_err();
+        #[cfg(target_os = "macos")]
+        assert!(error.contains("re-list"), "unexpected: {error}");
+        #[cfg(not(target_os = "macos"))]
+        assert!(error.contains("macOS"), "unexpected: {error}");
     }
 
     #[test]
@@ -1213,8 +1367,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     #[ignore]
-    async fn live_screenshot_attaches_image() {
-        let dir = tempfile::tempdir().unwrap();
+    async fn live_screenshot_attaches_image() {        let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join(".threadlane")).unwrap();
         std::fs::write(
             dir.path().join(".threadlane").join("permissions.json"),
@@ -1247,6 +1400,27 @@ mod tests {
             frame.is_some(),
             "stream poller should have produced a display frame"
         );
+    }
+
+    /// Live resolution: read-only window lookup plus coordinate shift. No
+    /// input is posted, so this is safe anywhere with a WindowServer.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn live_target_resolution_shifts_coordinates() {
+        let ids = super::mac::capture_window_ids();
+        let id = ids.into_iter().next().expect("a visible window");
+        let (pid, owner, (origin_x, origin_y)) =
+            super::mac::find_window(id).expect("window resolves");
+        assert!(pid > 0, "unexpected pid for {owner}");
+        let intent = parse_computer_act(r#"{"action":"click","x":10,"y":20}"#).unwrap();
+        let targeted = resolve_target(intent, Some(id as i64)).unwrap();
+        assert_eq!(targeted.pid, Some(pid));
+        assert_eq!(targeted.app.as_deref(), Some(owner.as_str()));
+        assert!(matches!(
+            targeted.intent,
+            ComputerAct::Click { x, y, .. } if x == 10.0 + origin_x && y == 20.0 + origin_y
+        ));
     }
 
     #[tokio::test]
