@@ -1462,7 +1462,17 @@ impl RightPanelView {
             .flex()
             .items_center()
             .gap_2()
-            .hover(|row| row.bg(theme.muted))
+            .bg(if is_selected {
+                theme.accent.opacity(0.12)
+            } else {
+                hsla(0.0, 0.0, 0.0, 0.0)
+            })
+            .hover(|row| row.bg(if is_selected {
+                theme.accent.opacity(0.16)
+            } else {
+                theme.muted
+            }))
+            .focus(|row| row.border_color(theme.primary))
             .child(
                 Checkbox::new(SharedString::from(format!("chk-{path}")))
                     .checked(is_selected)

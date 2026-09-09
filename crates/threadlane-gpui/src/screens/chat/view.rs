@@ -4191,7 +4191,7 @@ impl ChatListView {
                     .text_center()
                     .text_sm()
                     .text_color(theme.muted_foreground)
-                    .child("Waiting for progress…")
+                    .child("No messages yet — ask below to start.")
             }))
             .children(messages)
             .into_any_element()
@@ -5069,7 +5069,7 @@ impl ChatListView {
                         div()
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .child("Context is compacted automatically when needed."),
+                            .child("Context is compacted automatically when needed. Percent reflects the current model request."),
                     )
             });
 

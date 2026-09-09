@@ -1011,12 +1011,18 @@ impl Render for TerminalView {
         };
 
         div()
+            .id("pty-terminal-root")
             .size_full()
             .min_h_0()
             .flex()
             .flex_col()
             .bg(theme.background)
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .focus(|style| style.border_color(theme.primary))
             .track_focus(&self.focus_handle)
+            .role(Role::Terminal)
             .on_key_down(cx.listener(Self::key_down))
             .child(
                 div()

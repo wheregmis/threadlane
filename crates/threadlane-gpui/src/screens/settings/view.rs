@@ -321,6 +321,12 @@ impl SettingsView {
     fn empty_state(message: &str, colors: gpui_component::ThemeColor) -> AnyElement {
         div()
             .p_6()
+            .mx_6()
+            .rounded_lg()
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.muted.opacity(0.3))
+            .text_center()
             .text_sm()
             .text_color(colors.muted_foreground)
             .child(message.to_string())
@@ -2380,6 +2386,11 @@ impl SettingsView {
                                     .label("Install .wasm")
                                     .primary()
                                     .disabled(!self.install_globally && !project_available)
+                                    .tooltip(if !self.install_globally && !project_available {
+                                        "Select install scope or attach a project first"
+                                    } else {
+                                        "Install a compiled WASI extension"
+                                    })
                                     .on_click(move |_event, _window, cx| {
                                         let Some(path) = rfd::FileDialog::new()
                                             .set_title("Install a compiled WASI extension")
@@ -2544,7 +2555,7 @@ impl SettingsView {
                     )
             }))
             .when(self.extension_rows.is_empty(), |view| {
-                view.child(Self::empty_state("No WASI extensions found.", theme))
+                view.child(Self::empty_state("No WASI extensions found. Install one below.", theme))
             })
             .into_any_element()
     }
@@ -2571,6 +2582,11 @@ impl SettingsView {
                             .label("Disable all")
                             .outline()
                             .disabled(!has_project || !has_enabled_skills)
+                            .tooltip(if !has_project {
+                                "Attach a project to manage skills"
+                            } else {
+                                "Disable all project skills"
+                            })
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 let Some(project) = this.active_project(cx) else {
                                     this.capability_status =
@@ -2708,7 +2724,7 @@ impl SettingsView {
                     )
             }))
             .when(self.skill_rows.is_empty(), |view| {
-                view.child(Self::empty_state("No skills found.", theme))
+                view.child(Self::empty_state("No skills found. Attach a project to discover skills.", theme))
             })
             .into_any_element()
     }

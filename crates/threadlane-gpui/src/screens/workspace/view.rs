@@ -1836,11 +1836,13 @@ impl Render for WorkspaceView {
             .update(cx, |panel, cx| panel.render_git_dialog_layer(cx));
 
         div()
+            .id("workspace-root")
             .relative()
             .flex()
             .w_full()
             .h_full()
             .track_focus(&self.focus_handle)
+            .role(Role::Application)
             .on_action(cx.listener(Self::toggle_command_palette))
             .on_action(cx.listener(Self::toggle_sidebar_action))
             .on_action(cx.listener(Self::toggle_right_panel_action))
