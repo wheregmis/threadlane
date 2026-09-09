@@ -43,6 +43,8 @@ hotpath = "0.24"
 gpui-wry = { git = "https://github.com/longbridge/gpui-kit" }
 wry = { version = "0.53.3", package = "lb-wry" }
 raw-window-handle = "0.6"
+objc2 = { version = "0.6", features = ["std"] }
+block2 = "0.6"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # GPUI does not select a Linux window-system backend by default. Enable both

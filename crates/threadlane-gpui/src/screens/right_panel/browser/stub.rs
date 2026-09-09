@@ -27,6 +27,13 @@ impl BrowserView {
         Err("The embedded browser is available on macOS only.".to_string())
     }
 
+    pub(crate) fn take_snapshot(
+        &self,
+        _cx: &App,
+    ) -> Result<tokio::sync::oneshot::Receiver<Result<(Vec<u8>, u32, u32), String>>, String> {
+        Err("The embedded browser is available on macOS only.".to_string())
+    }
+
     pub fn set_visible(&mut self, _visible: bool, _cx: &mut Context<Self>) {}
 }
 

@@ -24,6 +24,9 @@ pub const BROWSER_CURRENT_URL_TOOL: &str = "browser_current_url";
 pub const BROWSER_SNAPSHOT_TOOL: &str = "browser_snapshot";
 pub const BROWSER_ACT_TOOL: &str = "browser_act";
 pub const BROWSER_EVALUATE_TOOL: &str = "browser_evaluate_script";
+pub const BROWSER_SCREENSHOT_TOOL: &str = "browser_screenshot";
+pub const BROWSER_CONSOLE_LOGS_TOOL: &str = "browser_console_logs";
+pub const BROWSER_WAIT_TOOL: &str = "browser_wait";
 
 const BROWSER_ROUND_TRIP_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -44,6 +47,13 @@ pub enum BrowserCommand {
         key: Option<String>,
     },
     Evaluate { script: String },
+    Screenshot,
+    ConsoleLogs { clear: bool, level: String },
+    Wait {
+        selector: Option<String>,
+        text: Option<String>,
+        timeout_ms: u64,
+    },
 }
 
 /// Addressable element for [`BrowserCommand::Act`]: a `browser_snapshot` ref
@@ -231,6 +241,58 @@ fn browser_tool_definitions() -> Arc<[AgentToolDefinition]> {
                 "additionalProperties": false
             }),
         ),
+        AgentToolDefinition::new(
+            BROWSER_SCREENSHOT_TOOL,
+            "Capture a screenshot of the embedded browser panel's current viewport. Returns the image directly for visual inspection of page layouts, CSS styling, canvas elements, and responsive designs.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        ),
+        AgentToolDefinition::new(
+            BROWSER_CONSOLE_LOGS_TOOL,
+            "Retrieve recent console errors, warnings, and unhandled JavaScript exceptions recorded in the embedded browser panel. Useful for diagnosing frontend runtime errors.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "clear": {
+                        "type": "boolean",
+                        "description": "Whether to clear retrieved logs from the buffer (default true)."
+                    },
+                    "level": {
+                        "type": "string",
+                        "enum": ["all", "error", "warn"],
+                        "description": "Filter by log level: error, warn, or all (default all)."
+                    }
+                },
+                "additionalProperties": false
+            }),
+        ),
+        AgentToolDefinition::new(
+            BROWSER_WAIT_TOOL,
+            "Wait for a CSS selector, specific text, or document load completion in the embedded browser panel. Use after navigation or actions to ensure single-page apps (SPAs) have hydrated before snapshotting.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "selector": {
+                        "type": "string",
+                        "description": "CSS selector to wait for until present in the DOM."
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Text substring to wait for until visible in the document body."
+                    },
+                    "timeout_ms": {
+                        "type": "integer",
+                        "minimum": 100,
+                        "maximum": 30000,
+                        "description": "Maximum time to wait in milliseconds (default 5000)."
+                    }
+                },
+                "additionalProperties": false
+            }),
+        ),
     ]
     .into()
 }
@@ -279,9 +341,89 @@ impl ToolExecutor for BrowserToolExecutor {
                     }
                 }
             }
+            BROWSER_SCREENSHOT_TOOL => BrowserCommand::Screenshot,
+            BROWSER_CONSOLE_LOGS_TOOL => {
+                let parsed: serde_json::Value =
+                    serde_json::from_str(args).unwrap_or_else(|_| serde_json::json!({}));
+                let clear = parsed.get("clear").and_then(|v| v.as_bool()).unwrap_or(true);
+                let level = parsed
+                    .get("level")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("all")
+                    .to_string();
+                BrowserCommand::ConsoleLogs { clear, level }
+            }
+            BROWSER_WAIT_TOOL => {
+                let parsed: serde_json::Value =
+                    serde_json::from_str(args).unwrap_or_else(|_| serde_json::json!({}));
+                let selector = parsed
+                    .get("selector")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string);
+                let text = parsed
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string);
+                let timeout_ms = parsed
+                    .get("timeout_ms")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(5000)
+                    .min(30000);
+                BrowserCommand::Wait {
+                    selector,
+                    text,
+                    timeout_ms,
+                }
+            }
             _ => return None,
         };
         Some(self.bridge.round_trip(command).await)
+    }
+
+    async fn execute_tool_with_output_in_workspace(
+        &self,
+        name: &str,
+        args: &str,
+        _work_dir: Option<&std::path::Path>,
+    ) -> Option<Result<threadlane_runtime::ToolOutput, String>> {
+        if name == BROWSER_SCREENSHOT_TOOL {
+            let res = self.bridge.round_trip(BrowserCommand::Screenshot).await;
+            match res {
+                Ok(payload) => {
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&payload) {
+                        if let Some(data_url) = parsed.get("data_url").and_then(|v| v.as_str()) {
+                            let width = parsed.get("width").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let height = parsed.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let content = if let Some(path) = parsed.get("path").and_then(|v| v.as_str()) {
+                                format!(
+                                    "Browser screenshot captured ({}x{} pixels). Saved to {}.",
+                                    width, height, path
+                                )
+                            } else {
+                                format!("Browser screenshot captured ({}x{} pixels).", width, height)
+                            };
+                            return Some(Ok(threadlane_runtime::ToolOutput {
+                                content,
+                                images: vec![threadlane_runtime::ImageAttachment {
+                                    data_url: data_url.to_string(),
+                                    display_name: "Embedded browser screenshot".to_string(),
+                                }],
+                            }));
+                        }
+                    }
+                    Some(Ok(threadlane_runtime::ToolOutput::from(payload)))
+                }
+                Err(err) => Some(Err(err)),
+            }
+        } else {
+            self.execute_tool(name, args)
+                .await
+                .map(|result| result.map(threadlane_runtime::ToolOutput::from))
+        }
     }
 }
 
@@ -399,7 +541,8 @@ mod tests {
     }
 
     #[test]
-    fn definitions_cover_all_tools() {        let definitions = browser_tool_definitions();
+    fn definitions_cover_all_tools() {
+        let definitions = browser_tool_definitions();
         let names: Vec<_> = definitions
             .iter()
             .map(|def| def.name.as_str())
@@ -414,6 +557,9 @@ mod tests {
                 BROWSER_SNAPSHOT_TOOL,
                 BROWSER_ACT_TOOL,
                 BROWSER_EVALUATE_TOOL,
+                BROWSER_SCREENSHOT_TOOL,
+                BROWSER_CONSOLE_LOGS_TOOL,
+                BROWSER_WAIT_TOOL,
             ]
         );
     }
@@ -440,6 +586,51 @@ mod tests {
             command,
             BrowserCommand::Act { target: ActTarget::Selector(_), .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn console_logs_and_wait_commands_parse() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bridge = BrowserBridge::new(tx);
+        let executor = BrowserToolExecutor::new(bridge);
+
+        let t1 = tokio::spawn({
+            let executor = BrowserToolExecutor::new(BrowserBridge::new(executor.bridge.tx.clone().unwrap()));
+            async move {
+                executor
+                    .execute_tool(BROWSER_CONSOLE_LOGS_TOOL, r#"{"clear":false,"level":"error"}"#)
+                    .await
+            }
+        });
+        let req = rx.recv().await.expect("req");
+        match req.command {
+            BrowserCommand::ConsoleLogs { clear, level } => {
+                assert!(!clear);
+                assert_eq!(level, "error");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        req.reply.send(Ok("logs".into())).expect("reply");
+        assert_eq!(t1.await.unwrap().unwrap().unwrap(), "logs");
+
+        let t2 = tokio::spawn({
+            let executor = BrowserToolExecutor::new(BrowserBridge::new(executor.bridge.tx.clone().unwrap()));
+            async move {
+                executor
+                    .execute_tool(BROWSER_WAIT_TOOL, r##"{"selector":"#ready","timeout_ms":2000}"##)
+                    .await
+            }
+        });
+        let req = rx.recv().await.expect("req");
+        match req.command {
+            BrowserCommand::Wait { selector, timeout_ms, .. } => {
+                assert_eq!(selector.as_deref(), Some("#ready"));
+                assert_eq!(timeout_ms, 2000);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        req.reply.send(Ok("waited".into())).expect("reply");
+        assert_eq!(t2.await.unwrap().unwrap().unwrap(), "waited");
     }
 
     #[test]
@@ -473,6 +664,9 @@ mod tests {
             BROWSER_SNAPSHOT_TOOL,
             BROWSER_ACT_TOOL,
             BROWSER_EVALUATE_TOOL,
+            BROWSER_SCREENSHOT_TOOL,
+            BROWSER_CONSOLE_LOGS_TOOL,
+            BROWSER_WAIT_TOOL,
         ] {
             assert!(
                 names.iter().any(|name| name == tool),

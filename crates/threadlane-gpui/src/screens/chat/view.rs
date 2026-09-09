@@ -299,6 +299,13 @@ pub struct ChatListView {
     dismiss_slash_menu: bool,
     permission_details_open: bool,
     context_meter_open: bool,
+    /// Selected options per question, keyed by `request_id\0question_id`.
+    /// Options toggle multi-select; Submit sends one answer per question.
+    question_selections: std::collections::HashMap<String, Vec<String>>,
+    /// Custom-text inputs per question allowing free text, keyed the same way.
+    /// Entities are created lazily when the card renders and dropped on
+    /// submit/dismiss/session-switch.
+    question_inputs: std::collections::HashMap<String, Entity<InputState>>,
     subagents_popover_open: bool,
     selected_subagent_run_id: Option<String>,
     copied_code_block: Option<(String, std::time::Instant)>,
@@ -544,6 +551,8 @@ impl ChatListView {
             dismiss_slash_menu: false,
             permission_details_open: false,
             context_meter_open: false,
+            question_selections: std::collections::HashMap::new(),
+            question_inputs: std::collections::HashMap::new(),
             subagents_popover_open: false,
             selected_subagent_run_id: None,
             copied_code_block: None,
@@ -3102,6 +3111,97 @@ impl ChatListView {
         cx.notify();
     }
 
+    fn question_selection_key(request_id: &str, question_id: &str) -> String {
+        format!("{request_id}\0{question_id}")
+    }
+
+    fn toggle_question_option(
+        &mut self,
+        request_id: &str,
+        question_id: &str,
+        option: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let key = Self::question_selection_key(request_id, question_id);
+        let entry = self.question_selections.entry(key).or_default();
+        if let Some(pos) = entry.iter().position(|item| item == option) {
+            entry.remove(pos);
+        } else {
+            entry.push(option.to_string());
+        }
+        cx.notify();
+    }
+
+    fn submit_active_question(&mut self, cx: &mut Context<Self>) {
+        let request = {
+            let state = self.model.read(cx);
+            state
+                .active_session_id
+                .as_ref()
+                .and_then(|session_id| state.pending_questions.get(session_id))
+                .cloned()
+        };
+        let Some(request) = request else {
+            return;
+        };
+        let answers = request
+            .questions
+            .iter()
+            .map(|item| {
+                let key = Self::question_selection_key(&request.id, &item.id);
+                let custom_text = self
+                    .question_inputs
+                    .get(&key)
+                    .map(|input| input.read(cx).value().to_string())
+                    .map(|text| text.trim().to_string())
+                    .filter(|text| !text.is_empty());
+                threadlane_session::QuestionItemAnswer {
+                    question_id: item.id.clone(),
+                    selected: self.question_selections.get(&key).cloned().unwrap_or_default(),
+                    custom_text,
+                }
+            })
+            .collect::<Vec<_>>();
+        let answer = threadlane_session::QuestionAnswer {
+            request_id: request.id.clone(),
+            answers,
+            dismissed: false,
+        };
+        let request_id = request.id.clone();
+        self.question_selections
+            .retain(|key, _| !key.starts_with(&format!("{request_id}\0")));
+        self.question_inputs
+            .retain(|key, _| !key.starts_with(&format!("{request_id}\0")));
+        self.model.update(cx, |state, cx| {
+            state.resolve_active_question_answer(&request_id, answer);
+            cx.notify();
+        });
+        cx.notify();
+    }
+
+    fn dismiss_active_question(&mut self, cx: &mut Context<Self>) {
+        let request_id = {
+            let state = self.model.read(cx);
+            state
+                .active_session_id
+                .as_ref()
+                .and_then(|session_id| state.pending_questions.get(session_id))
+                .map(|request| request.id.clone())
+        };
+        let Some(request_id) = request_id else {
+            return;
+        };
+        self.question_selections
+            .retain(|key, _| !key.starts_with(&format!("{request_id}\0")));
+        self.question_inputs
+            .retain(|key, _| !key.starts_with(&format!("{request_id}\0")));
+        self.model.update(cx, |state, cx| {
+            state.resolve_active_question(&request_id);
+            cx.notify();
+        });
+        cx.notify();
+    }
+
     fn complete_slash_command(
         &mut self,
         command_name: &str,
@@ -3558,6 +3658,179 @@ impl ChatListView {
                             false,
                             false,
                         )),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn render_question_prompt(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let state = self.model.read(cx);
+        let session_id = state.active_session_id.as_ref()?;
+        let request = state.pending_questions.get(session_id)?.clone();
+        let theme = cx.theme().colors;
+
+        // Lazily create one custom-text input per allow_custom question so
+        // the entity (and focus) survives re-renders.
+        for item in request.questions.iter().filter(|item| item.allow_custom) {
+            let key = Self::question_selection_key(&request.id, &item.id);
+            if !self.question_inputs.contains_key(&key) {
+                let input = cx.new(|cx| {
+                    InputState::new(window, cx).placeholder("Custom answer (optional)…")
+                });
+                self.question_inputs.insert(key, input);
+            }
+        }
+        // Drop state for superseded requests so a new question starts clean.
+        let prefix = format!("{}\0", request.id);
+        self.question_inputs
+            .retain(|key, _| key.starts_with(&prefix));
+        self.question_selections
+            .retain(|key, _| key.starts_with(&prefix));
+
+        let questions = request
+            .questions
+            .iter()
+            .map(|item| {
+                let key = Self::question_selection_key(&request.id, &item.id);
+                let selected = self
+                    .question_selections
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or_default();
+                let header = item.header.clone();
+                let body = item.question.clone();
+                let options = item
+                    .options
+                    .iter()
+                    .map(|option| {
+                        let option_label = option.clone();
+                        let is_selected = selected.iter().any(|item| item == option);
+                        let request_id = request.id.clone();
+                        let question_id = item.id.clone();
+                        let option_value = option.clone();
+                        Button::new(SharedString::from(format!(
+                            "question-{request_id}-{}-{}",
+                            item.id,
+                            option_label
+                        )))
+                        .label(option_label.clone())
+                        .small()
+                        .when(is_selected, |button| button.primary())
+                        .when(!is_selected, |button| button.ghost())
+                        .tooltip("Toggle this answer")
+                        .on_click(cx.listener(move |this, _event, _window, cx| {
+                            this.toggle_question_option(
+                                &request_id,
+                                &question_id,
+                                &option_value,
+                                cx,
+                            );
+                        }))
+                    })
+                    .collect::<Vec<_>>();
+                let custom_input = item.allow_custom.then(|| {
+                    self.question_inputs.get(&key).map(|input| {
+                        div().w_full().child(Input::new(input).small())
+                    })
+                }).flatten();
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.foreground)
+                            .child(header),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(body),
+                    )
+                    .child(div().flex().flex_wrap().gap_1().children(options))
+                    .children(custom_input)
+            })
+            .collect::<Vec<_>>();
+
+        Some(
+            div()
+                .w_full()
+                .flex_none()
+                .px_4()
+                .pt_1()
+                .bg(theme.background)
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(px(1000.0))
+                        .mx_auto()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.title_bar)
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_xs()
+                                        .text_color(theme.foreground)
+                                        .child("Model question"),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .truncate()
+                                        .child("The run waits for your answer."),
+                                ),
+                        )
+                        .children(questions)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    Button::new("question-dismiss")
+                                        .label("Dismiss")
+                                        .ghost()
+                                        .xsmall()
+                                        .tooltip("Dismiss without answering")
+                                        .on_click(cx.listener(|this, _event, _window, cx| {
+                                            this.dismiss_active_question(cx);
+                                        })),
+                                )
+                                .child(
+                                    Button::new("question-submit")
+                                        .label("Send answers")
+                                        .small()
+                                        .primary()
+                                        .tooltip("Send the selected answers")
+                                        .on_click(cx.listener(|this, _event, _window, cx| {
+                                            this.submit_active_question(cx);
+                                        })),
+                                ),
+                        ),
                 )
                 .into_any_element(),
         )
@@ -5198,6 +5471,8 @@ impl Render for ChatListView {
             self.selected_slash_index = 0;
             self.dismiss_slash_menu = false;
             self.permission_details_open = false;
+            self.question_selections.clear();
+            self.question_inputs.clear();
             self.trajectory_search_input.update(cx, |state, cx| {
                 state.set_value("", window, cx);
             });
@@ -5333,6 +5608,11 @@ impl Render for ChatListView {
             .children(
                 (self.current_tab == CentralTab::Chat)
                     .then(|| self.render_permission_prompt(cx))
+                    .flatten(),
+            )
+            .children(
+                (self.current_tab == CentralTab::Chat)
+                    .then(|| self.render_question_prompt(window, cx))
                     .flatten(),
             )
             .children((self.current_tab == CentralTab::Chat).then(|| self.render_composer(cx)))

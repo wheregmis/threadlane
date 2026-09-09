@@ -2,7 +2,8 @@ mod address;
 pub(crate) use address::{AddressTarget, resolve_address, search_url};
 mod scripts;
 pub(crate) use scripts::{
-    act_script, evaluate_script_wrap, snapshot_js, unwrap_callback_payload,
+    act_script, drain_console_logs_js, evaluate_script_wrap,
+    snapshot_js, unwrap_callback_payload, wait_check_js,
 };
 
 #[cfg(target_os = "macos")]

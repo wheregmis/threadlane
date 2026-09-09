@@ -141,6 +141,73 @@ impl RightPanelView {
                         BrowserReply::PendingEval(rx) => rx.await.map_err(|_| {
                             "The browser dropped the evaluation.".to_string()
                         }).map(|payload| finalize_browser_eval(&payload)),
+                        BrowserReply::PendingSnapshot(rx) => match rx.await {
+                            Ok(Ok((bytes, width, height))) => {
+                                let (path, data_url) = this
+                                    .update(cx, |this, _cx| {
+                                        this.save_browser_screenshot(&bytes)
+                                    })
+                                    .unwrap_or_else(|_| (None, base64_data_url(&bytes)));
+                                let payload = serde_json::json!({
+                                    "width": width,
+                                    "height": height,
+                                    "data_url": data_url,
+                                    "path": path,
+                                })
+                                .to_string();
+                                Ok(payload)
+                            }
+                            Ok(Err(err)) => Err(err),
+                            Err(_) => Err("The browser dropped the snapshot.".to_string()),
+                        },
+                        BrowserReply::PendingWait {
+                            selector,
+                            text,
+                            deadline,
+                        } => {
+                            let mut outcome = Err("Timed out waiting for condition in browser.".to_string());
+                            while std::time::Instant::now() < deadline {
+                                let check_script = super::browser::wait_check_js(
+                                    selector.as_deref(),
+                                    text.as_deref(),
+                                );
+                                let eval_rx = this.update(cx, |this, cx| {
+                                    this.start_browser_eval(&check_script, cx)
+                                });
+                                match eval_rx {
+                                    Ok(Ok(rx)) => {
+                                        if let Ok(raw) = rx.await {
+                                            let payload = super::browser::unwrap_callback_payload(&raw);
+                                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
+                                                if v.get("ok").and_then(|b| b.as_bool()) == Some(true) {
+                                                    let sel_found = v.get("selectorFound").and_then(|b| b.as_bool());
+                                                    let txt_found = v.get("textFound").and_then(|b| b.as_bool());
+                                                    let ready = v.get("readyState").and_then(|s| s.as_str()) == Some("complete");
+
+                                                    let sel_ok = selector.is_none() || sel_found == Some(true);
+                                                    let txt_ok = text.is_none() || txt_found == Some(true);
+                                                    let ready_ok = (selector.is_some() || text.is_some()) || ready;
+
+                                                    if sel_ok && txt_ok && ready_ok {
+                                                        outcome = Ok("Condition satisfied in browser.".to_string());
+                                                        break;
+                                                    }
+                                                } else if let Some(err) = v.get("error").and_then(|s| s.as_str()) {
+                                                    outcome = Err(err.to_string());
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        outcome = Err("Browser panel closed during wait.".to_string());
+                                        break;
+                                    }
+                                }
+                                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                            }
+                            outcome
+                        }
                     };
                     let _ = request.reply.send(reply);
                 }
@@ -931,6 +998,25 @@ impl RightPanelView {
             return Err("The browser panel is not ready.".to_string());
         };
         browser.update(cx, |browser, cx| browser.evaluate_script(script, cx))
+    }
+
+    fn save_browser_screenshot(&self, bytes: &[u8]) -> (Option<String>, String) {
+        let data_url = base64_data_url(bytes);
+        let Some(project) = &self.project else {
+            return (None, data_url);
+        };
+        let dir = project.join(".threadlane").join("previews");
+        if std::fs::create_dir_all(&dir).is_err() {
+            return (None, data_url);
+        }
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let path = dir.join(format!("browser-{stamp}.jpg"));
+        let _ = std::fs::write(&path, bytes);
+        let _ = std::fs::write(dir.join("latest-browser.jpg"), bytes);
+        (Some(path.display().to_string()), data_url)
     }
 
     /// Apply one agent browser command on the UI thread. Called from the
@@ -4121,10 +4207,16 @@ impl Render for RightPanelView {
 }
 
 /// One bridge-pump step: either a finished reply or a pending script
-/// evaluation whose channel the pump awaits without blocking the UI.
+/// evaluation/snapshot/wait whose channel the pump awaits without blocking the UI.
 enum BrowserReply {
     Ready(Result<String, String>),
     PendingEval(tokio::sync::oneshot::Receiver<String>),
+    PendingSnapshot(tokio::sync::oneshot::Receiver<Result<(Vec<u8>, u32, u32), String>>),
+    PendingWait {
+        selector: Option<String>,
+        text: Option<String>,
+        deadline: std::time::Instant,
+    },
 }
 
 /// Cap for evaluated script results. Snapshot JSON keeps url/title/count up
@@ -4137,53 +4229,132 @@ fn start_browser_request(
     cx: &mut Context<RightPanelView>,
 ) -> BrowserReply {
     use threadlane_session::BrowserCommand;
-    let script = match &command {
-        BrowserCommand::Snapshot => Some(super::browser::snapshot_js()),
-        BrowserCommand::Act {
-            action,
-            target,
-            text,
-            key,
-        } => {
-            let target_json = match target {
-                threadlane_session::ActTarget::Ref(number) => {
-                    serde_json::json!({"ref": number, "selector": serde_json::Value::Null})
-                }
-                threadlane_session::ActTarget::Selector(selector) => {
-                    serde_json::json!({"ref": serde_json::Value::Null, "selector": selector})
+    match command {
+        BrowserCommand::Screenshot => {
+            #[cfg(target_os = "macos")]
+            {
+                panel.open_surface(Surface::Browser, cx);
+                let Some(browser) = panel.browser.clone() else {
+                    return BrowserReply::Ready(Err("The browser panel is not ready.".to_string()));
+                };
+                match browser.update(cx, |browser, cx| browser.take_snapshot(cx)) {
+                    Ok(rx) => BrowserReply::PendingSnapshot(rx),
+                    Err(err) => BrowserReply::Ready(Err(err)),
                 }
             }
-            .to_string();
-            let text_json = serde_json::to_string(text).unwrap_or_else(|_| "null".into());
-            let key_json = serde_json::to_string(key).unwrap_or_else(|_| "null".into());
-            Some(super::browser::act_script(
-                action,
-                &target_json,
-                &text_json,
-                &key_json,
-            ))
+            #[cfg(not(target_os = "macos"))]
+            {
+                BrowserReply::Ready(Err("The embedded browser is available on macOS only.".to_string()))
+            }
         }
-        BrowserCommand::Evaluate { script } => {
-            Some(super::browser::evaluate_script_wrap(script))
+        BrowserCommand::Wait {
+            selector,
+            text,
+            timeout_ms,
+        } => {
+            panel.open_surface(Surface::Browser, cx);
+            let deadline = std::time::Instant::now()
+                + std::time::Duration::from_millis(timeout_ms.max(100));
+            BrowserReply::PendingWait {
+                selector,
+                text,
+                deadline,
+            }
         }
-        _ => None,
-    };
-    match script {
-        Some(script) => match panel.start_browser_eval(&script, cx) {
-            Ok(rx) => BrowserReply::PendingEval(rx),
-            Err(error) => BrowserReply::Ready(Err(error)),
-        },
-        None => BrowserReply::Ready(panel.apply_browser_command(command, cx)),
+        BrowserCommand::ConsoleLogs { clear, level } => {
+            let script = super::browser::drain_console_logs_js(clear, &level);
+            match panel.start_browser_eval(&script, cx) {
+                Ok(rx) => BrowserReply::PendingEval(rx),
+                Err(error) => BrowserReply::Ready(Err(error)),
+            }
+        }
+        _ => {
+            let script = match &command {
+                BrowserCommand::Snapshot => Some(super::browser::snapshot_js()),
+                BrowserCommand::Act {
+                    action,
+                    target,
+                    text,
+                    key,
+                } => {
+                    let target_json = match target {
+                        threadlane_session::ActTarget::Ref(number) => {
+                            serde_json::json!({"ref": number, "selector": serde_json::Value::Null})
+                        }
+                        threadlane_session::ActTarget::Selector(selector) => {
+                            serde_json::json!({"ref": serde_json::Value::Null, "selector": selector})
+                        }
+                    }
+                    .to_string();
+                    let text_json = serde_json::to_string(text).unwrap_or_else(|_| "null".into());
+                    let key_json = serde_json::to_string(key).unwrap_or_else(|_| "null".into());
+                    Some(super::browser::act_script(
+                        action,
+                        &target_json,
+                        &text_json,
+                        &key_json,
+                    ))
+                }
+                BrowserCommand::Evaluate { script } => {
+                    Some(super::browser::evaluate_script_wrap(script))
+                }
+                _ => None,
+            };
+            match script {
+                Some(script) => match panel.start_browser_eval(&script, cx) {
+                    Ok(rx) => BrowserReply::PendingEval(rx),
+                    Err(error) => BrowserReply::Ready(Err(error)),
+                },
+                None => BrowserReply::Ready(panel.apply_browser_command(command, cx)),
+            }
+        }
     }
 }
 
 fn finalize_browser_eval(payload: &str) -> String {
     let inner = super::browser::unwrap_callback_payload(payload);
+    // Format console logs if this payload is from drain_console_logs_js
+    if inner.contains("\"logs\":[") && inner.contains("\"count\":") {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&inner) {
+            if let Some(logs) = v.get("logs").and_then(|a| a.as_array()) {
+                if logs.is_empty() {
+                    return "No console errors or warnings recorded on the current page.".to_string();
+                }
+                let mut out = format!("Recorded console messages ({}):\n", logs.len());
+                for log in logs {
+                    let level = log
+                        .get("level")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("log")
+                        .to_uppercase();
+                    let msg = log.get("message").and_then(|s| s.as_str()).unwrap_or("");
+                    let line_info = match (
+                        log.get("source").and_then(|s| s.as_str()),
+                        log.get("line").and_then(|l| l.as_i64()),
+                    ) {
+                        (Some(src), Some(l)) => format!(" ({src}:{l})"),
+                        (Some(src), None) => format!(" ({src})"),
+                        _ => String::new(),
+                    };
+                    out.push_str(&format!("- [{level}]{line_info} {msg}\n"));
+                }
+                return out.trim_end().to_string();
+            }
+        }
+    }
     if inner.chars().count() <= MAX_BROWSER_EVAL_CHARS {
         return inner;
     }
     let head: String = inner.chars().take(MAX_BROWSER_EVAL_CHARS).collect();
     format!("{head}\n[... browser result truncated to {MAX_BROWSER_EVAL_CHARS} characters ...]")
+}
+
+fn base64_data_url(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    format!(
+        "data:image/jpeg;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    )
 }
 
 fn convert_node_to_tree_item(node: FileNode, expanded_paths: &HashSet<String>) -> TreeItem {

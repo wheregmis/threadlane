@@ -33,6 +33,7 @@ impl BrowserView {
         let builder = wry::WebViewBuilder::new();
         #[cfg(debug_assertions)]
         let builder = builder.with_devtools(true);
+        let builder = builder.with_initialization_script(super::scripts::console_interceptor_js());
         let wry_webview = builder
             .build_as_child(&window_handle)
             .expect("wry child webview");
@@ -108,6 +109,78 @@ impl BrowserView {
                 }
             })
             .map_err(|error| format!("Script evaluation failed to start: {error}"))?;
+        Ok(rx)
+    }
+
+    /// Capture the rendered viewport as JPEG bytes with width and height.
+    pub(crate) fn take_snapshot(
+        &self,
+        cx: &App,
+    ) -> Result<tokio::sync::oneshot::Receiver<Result<(Vec<u8>, u32, u32), String>>, String> {
+        use block2::RcBlock;
+        use objc2::runtime::AnyObject;
+        use wry::WebViewExtMacOS;
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let tx = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
+        let wry_wv = self.webview.read(cx).raw();
+        let wk_wv = wry_wv.webview();
+
+        let tx_block = tx.clone();
+        let block = RcBlock::new(move |image: *mut AnyObject, error: *mut AnyObject| {
+            let res = (|| -> Result<(Vec<u8>, u32, u32), String> {
+                if !error.is_null() {
+                    return Err("WKWebView snapshot returned an error.".to_string());
+                }
+                if image.is_null() {
+                    return Err("WKWebView snapshot returned empty image.".to_string());
+                }
+                unsafe {
+                    let tiff: *mut AnyObject = objc2::msg_send![image, TIFFRepresentation];
+                    if tiff.is_null() {
+                        return Err("Failed to extract TIFF from snapshot image.".to_string());
+                    }
+                    let cls = objc2::runtime::AnyClass::get(c"NSBitmapImageRep")
+                        .ok_or_else(|| "NSBitmapImageRep class missing.".to_string())?;
+                    let rep: *mut AnyObject = objc2::msg_send![cls, imageRepWithData: tiff];
+                    if rep.is_null() {
+                        return Err("Failed to create NSBitmapImageRep from TIFF.".to_string());
+                    }
+                    let width: isize = objc2::msg_send![rep, pixelsWide];
+                    let height: isize = objc2::msg_send![rep, pixelsHigh];
+
+                    // NSBitmapImageFileTypeJPEG = 3
+                    let nil_props: *mut AnyObject = std::ptr::null_mut();
+                    let jpeg: *mut AnyObject = objc2::msg_send![
+                        rep,
+                        representationUsingType: 3isize,
+                        properties: nil_props
+                    ];
+                    if jpeg.is_null() {
+                        return Err("Failed to encode snapshot as JPEG.".to_string());
+                    }
+                    let length: usize = objc2::msg_send![jpeg, length];
+                    let bytes_ptr: *const u8 = objc2::msg_send![jpeg, bytes];
+                    let bytes = std::slice::from_raw_parts(bytes_ptr, length).to_vec();
+                    Ok((bytes, width.max(1) as u32, height.max(1) as u32))
+                }
+            })();
+            if let Ok(mut slot) = tx_block.lock() {
+                if let Some(tx) = slot.take() {
+                    let _ = tx.send(res);
+                }
+            }
+        });
+
+        unsafe {
+            let nil_config: *mut AnyObject = std::ptr::null_mut();
+            let _: () = objc2::msg_send![
+                &*wk_wv,
+                takeSnapshotWithConfiguration: nil_config,
+                completionHandler: &*block
+            ];
+        }
+
         Ok(rx)
     }
 

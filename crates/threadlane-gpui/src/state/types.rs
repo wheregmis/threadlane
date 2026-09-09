@@ -38,13 +38,13 @@ impl SessionAttention {
 }
 
 pub(crate) fn derive_session_attention(
-    has_pending_permission: bool,
+    has_blocking_request: bool,
     health: &SessionHealth,
     runtime_status: Option<&SessionRuntimeStatus>,
     is_generating: bool,
     has_ready_work: bool,
 ) -> SessionAttention {
-    if has_pending_permission
+    if has_blocking_request
         || *health == SessionHealth::Warning
         || matches!(
             runtime_status,

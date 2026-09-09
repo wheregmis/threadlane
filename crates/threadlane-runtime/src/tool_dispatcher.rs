@@ -111,6 +111,9 @@ const CORE_TOOL_NAMES: &[&str] = &[
     "browser_snapshot",
     "browser_act",
     "browser_evaluate_script",
+    "browser_screenshot",
+    "browser_console_logs",
+    "browser_wait",
     // Native computer use (threadlane-session/src/computer.rs). Every
     // screenshot and input action re-prompts for approval, so the schemas
     // are safe to advertise; unattended sessions deny at execution.

@@ -61,6 +61,18 @@ pub(crate) fn act_script(action: &str, target_json: &str, text_json: &str, key_j
   const action = {action_json};
   const fire = (type, opts) => el.dispatchEvent(new Event(type, Object.assign({{ bubbles: true, cancelable: true }}, opts || {{}})));
   if (typeof el.scrollIntoView === 'function') el.scrollIntoView({{ block: 'center' }});
+  try {{
+    const prevOutline = el.style.outline;
+    const prevTransition = el.style.transition;
+    el.style.transition = 'outline 0.15s ease-in-out';
+    el.style.outline = '3px solid #3b82f6';
+    setTimeout(() => {{
+      try {{
+        el.style.outline = prevOutline;
+        el.style.transition = prevTransition;
+      }} catch (_) {{}}
+    }}, 800);
+  }} catch (_) {{}}
   if (action === 'click') {{
     el.click();
     return done('clicked <' + el.tagName.toLowerCase() + '>');
@@ -138,6 +150,106 @@ pub(crate) fn unwrap_callback_payload(payload: &str) -> String {
     }
 }
 
+/// Script injected into every page at document start to trap console errors,
+/// warnings, and uncaught exceptions into an in-memory ring buffer.
+pub(crate) fn console_interceptor_js() -> String {
+    r#"(() => {
+  if (window.__threadlane_logs_installed) return;
+  window.__threadlane_logs_installed = true;
+  window.__threadlane_logs = [];
+  const MAX = 100;
+  function push(level, message, source, line, col, stack) {
+    if (window.__threadlane_logs.length >= MAX) window.__threadlane_logs.shift();
+    window.__threadlane_logs.push({
+      level,
+      message: String(message || '').slice(0, 500),
+      source: source ? String(source).slice(0, 200) : null,
+      line: line || null,
+      col: col || null,
+      stack: stack ? String(stack).slice(0, 500) : null,
+      ts: Date.now()
+    });
+  }
+  const origErr = console.error;
+  console.error = function(...args) {
+    try {
+      push('error', args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '));
+    } catch (_) {}
+    return origErr.apply(this, args);
+  };
+  const origWarn = console.warn;
+  console.warn = function(...args) {
+    try {
+      push('warn', args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '));
+    } catch (_) {}
+    return origWarn.apply(this, args);
+  };
+  window.addEventListener('error', (e) => {
+    try {
+      push('error', e.message || 'Uncaught error', e.filename, e.lineno, e.colno, e.error && e.error.stack);
+    } catch (_) {}
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    try {
+      const r = e.reason;
+      const msg = r && (r.message || r.stack) ? (r.message || String(r)) : String(r);
+      push('error', 'Unhandled rejection: ' + msg, null, null, null, r && r.stack);
+    } catch (_) {}
+  });
+})()"#.to_string()
+}
+
+/// Script to extract captured console logs and optionally clear them.
+pub(crate) fn drain_console_logs_js(clear: bool, level: &str) -> String {
+    let level_json = serde_json::to_string(level).unwrap_or_else(|_| "\"all\"".into());
+    format!(
+        r#"(() => {{
+  const logs = window.__threadlane_logs || [];
+  const level = {level_json};
+  const filtered = logs.filter(l => level === 'all' || l.level === level);
+  if ({clear}) {{
+    if (level === 'all') {{
+      window.__threadlane_logs = [];
+    }} else {{
+      window.__threadlane_logs = logs.filter(l => l.level !== level);
+    }}
+  }}
+  return JSON.stringify({{ count: filtered.length, logs: filtered }});
+}})()"#
+    )
+}
+
+/// Script to check if document condition (selector, text, readyState) is met.
+pub(crate) fn wait_check_js(selector: Option<&str>, text: Option<&str>) -> String {
+    let sel_json = serde_json::to_string(&selector).unwrap_or_else(|_| "null".into());
+    let txt_json = serde_json::to_string(&text).unwrap_or_else(|_| "null".into());
+    format!(
+        r#"(() => {{
+  const readyState = document.readyState;
+  let selectorFound = null;
+  const sel = {sel_json};
+  if (sel) {{
+    try {{
+      selectorFound = !!document.querySelector(sel);
+    }} catch (e) {{
+      return JSON.stringify({{ ok: false, error: 'Invalid selector: ' + e.message }});
+    }}
+  }}
+  let textFound = null;
+  const txt = {txt_json};
+  if (txt) {{
+    textFound = (document.body ? document.body.innerText : '').includes(txt);
+  }}
+  return JSON.stringify({{
+    ok: true,
+    readyState,
+    selectorFound,
+    textFound
+  }});
+}})()"#
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,5 +293,28 @@ mod tests {
         let wrapped = evaluate_script_wrap("document.title");
         assert!(wrapped.starts_with("(() =>"));
         assert!(wrapped.contains("\"document.title\""));
+    }
+
+    #[test]
+    fn console_interceptor_defines_window_logs() {
+        let script = console_interceptor_js();
+        assert!(script.contains("__threadlane_logs"));
+        assert!(script.contains("console.error"));
+        assert!(script.contains("unhandledrejection"));
+    }
+
+    #[test]
+    fn drain_console_logs_embeds_options() {
+        let script = drain_console_logs_js(true, "error");
+        assert!(script.contains(r#"const level = "error";"#));
+        assert!(script.contains("if (true)"));
+    }
+
+    #[test]
+    fn wait_check_embeds_selectors() {
+        let script = wait_check_js(Some(".submit-btn"), Some("Submit"));
+        assert!(script.contains(r#"".submit-btn""#));
+        assert!(script.contains(r#""Submit""#));
+        assert!(script.contains("document.readyState"));
     }
 }

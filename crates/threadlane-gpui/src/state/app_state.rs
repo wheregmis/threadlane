@@ -828,8 +828,9 @@ impl AppState {
 
     /// Releases a pending `ask_question` request without an answer.
     ///
-    /// There is no answer UI yet, so the request is dismissed immediately and
-    /// surfaced as a visible transcript notice instead of blocking the turn.
+    /// Explicit dismiss path for the question card's Dismiss button. The
+    /// request stays pending until the user answers or dismisses, so the
+    /// turn blocks waiting instead of silently continuing on a guess.
     pub(crate) fn resolve_active_question(&mut self, request_id: &str) -> bool {
         let Some(session_id) = self.active_session_id.clone() else {
             return false;
@@ -839,6 +840,30 @@ impl AppState {
         };
         let session_file = self.session_file(&work_dir, &session_id);
         let answer = threadlane_session::QuestionAnswer::dismissed(request_id);
+        let resolved = self
+            .session_runtimes
+            .get(&session_file)
+            .is_some_and(|runtime| runtime.resolve_question(request_id, answer));
+        if resolved {
+            self.pending_questions.remove(&session_id);
+        }
+        resolved
+    }
+
+    /// Resolves a pending `ask_question` request with the user's answers.
+    /// Returns false when no runtime holds the request (stale UI).
+    pub(crate) fn resolve_active_question_answer(
+        &mut self,
+        request_id: &str,
+        answer: threadlane_session::QuestionAnswer,
+    ) -> bool {
+        let Some(session_id) = self.active_session_id.clone() else {
+            return false;
+        };
+        let Some(work_dir) = self.active_work_dir.clone() else {
+            return false;
+        };
+        let session_file = self.session_file(&work_dir, &session_id);
         let resolved = self
             .session_runtimes
             .get(&session_file)
@@ -984,7 +1009,8 @@ impl AppState {
         let branch_is_actionable = session.git_branch.is_some()
             && (linked_pr_is_active || (linked_pr.is_none() && actionable_git_work));
         derive_session_attention(
-            self.pending_permissions.contains_key(&session.id),
+            self.pending_permissions.contains_key(&session.id)
+                || self.pending_questions.contains_key(&session.id),
             &session.health,
             runtime_status.as_ref(),
             runtime.is_some_and(|runtime| runtime.is_generating())
@@ -3158,16 +3184,18 @@ impl AppState {
                                 id: format!("question-notice-{}", request.id),
                                 role: MessageRole::System,
                                 content: format!(
-                                    "The model asked a question, but question answering is not implemented in the UI yet, so it was dismissed. Reply in chat to answer it.\n{summary}"
+                                    "The model asked a question — answer it below so the run can continue.\n{summary}"
                                 ),
                                 tool_activities: Vec::new(),
                                 streaming: false,
                                 reasoning_content: None,
                                 reasoning_expanded: false,
                             });
+                            // Keep the request pending until the user answers
+                            // or dismisses it in the question card. Never
+                            // auto-resolve: the turn must block on the answer.
                             self.pending_questions
                                 .insert(session_id.clone(), request.clone());
-                            self.resolve_active_question(&request.id);
                         }
                         ChatAgentUpdate::Error(error) => {
                             changed = true;

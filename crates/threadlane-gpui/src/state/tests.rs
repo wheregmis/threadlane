@@ -387,7 +387,7 @@
     }
 
     #[test]
-    fn active_question_is_noticed_and_released_without_a_runtime() {
+    fn active_question_stays_pending_until_answered() {
         let mut state = AppState::load_from_registry(Vec::new());
         let session = test_session("active", Path::new("/project/active.jsonl"));
         state.active_session_id = Some(session.id.clone());
@@ -407,10 +407,14 @@
             message.role == MessageRole::System
                 && message.content.contains("Which scope should be used?")
         }));
+        // The request must stay pending: the run blocks until the user
+        // answers or explicitly dismisses. Never auto-resolve here.
+        assert_eq!(state.session_attention(&session), SessionAttention::NeedsYou);
         // No runtime is attached in the test, so nothing resolves the request;
-        // in production `resolve_active_question` releases it immediately, and
-        // the Finished arm always drops the pending entry.
+        // explicit dismiss still returns false without a runtime, and the
+        // Finished arm always drops the pending entry.
         assert!(!state.resolve_active_question(&request.id));
+        assert_eq!(state.pending_questions.get(&session.id), Some(&request));
         let changed = state.drain_chat_stream(vec![ChatStreamEvent::Finished {
             session_id: session.id.clone(),
             session_file: session.session_file.clone(),
