@@ -1093,7 +1093,7 @@ impl RightPanelView {
         let active = self.active_surface;
         div()
             .flex_none()
-            .pt(px(44.0))
+            .pt(crate::theme::WINDOW_CONTROLS_CLEARANCE)
             .pb_2()
             .px_3()
             .border_b_1()
@@ -1264,6 +1264,11 @@ impl RightPanelView {
                                         .small()
                                         .label("Save")
                                         .icon(IconName::Check)
+                                        .tooltip(if is_dirty {
+                                            "Save the open document"
+                                        } else {
+                                            "No unsaved changes"
+                                        })
                                         .disabled(!is_dirty)
                                         .on_click(cx.listener(|this, _event, _window, cx| {
                                             this.save_active_document(cx);
@@ -1465,7 +1470,7 @@ impl RightPanelView {
             .bg(if is_selected {
                 theme.accent.opacity(0.12)
             } else {
-                hsla(0.0, 0.0, 0.0, 0.0)
+                gpui::transparent_black()
             })
             .hover(|row| row.bg(if is_selected {
                 theme.accent.opacity(0.16)
@@ -2317,6 +2322,11 @@ impl RightPanelView {
                             .when(!self.git_message_pending, |button| button.label("Generate"))
                             .ghost()
                             .xsmall()
+                            .tooltip(if selected_count == 0 {
+                                "Select files below to generate a message"
+                            } else {
+                                "Generate a commit message from the selected changes"
+                            })
                             .disabled(
                                 self.git_busy || self.git_message_pending || selected_count == 0,
                             )
@@ -2348,6 +2358,11 @@ impl RightPanelView {
                             .primary()
                             .small()
                             .flex_1()
+                            .tooltip(if can_commit {
+                                "Commit the selected changes and push"
+                            } else {
+                                "Select files and write a message to commit"
+                            })
                             .disabled(!can_commit)
                             .on_click(cx.listener(|this, _event, window, cx| {
                                 this.run_git_action(GitAction::CommitAndPush, window, cx);
@@ -2358,6 +2373,11 @@ impl RightPanelView {
                             .label(commit_label)
                             .outline()
                             .small()
+                            .tooltip(if can_commit {
+                                "Commit the selected changes without pushing"
+                            } else {
+                                "Select files and write a message to commit"
+                            })
                             .disabled(!can_commit)
                             .on_click(cx.listener(|this, _event, window, cx| {
                                 this.run_git_action(GitAction::Commit, window, cx);
@@ -3531,7 +3551,7 @@ impl RightPanelView {
             .id("new-branch-modal-backdrop")
             .absolute()
             .inset_0()
-            .bg(hsla(0.0, 0.0, 0.0, 0.6))
+            .bg(crate::theme::overlay_scrim())
             .flex()
             .items_center()
             .justify_center()
@@ -3722,7 +3742,7 @@ impl RightPanelView {
             .id("merge-branch-modal-backdrop")
             .absolute()
             .inset_0()
-            .bg(hsla(0.0, 0.0, 0.0, 0.6))
+            .bg(crate::theme::overlay_scrim())
             .flex()
             .items_center()
             .justify_center()
@@ -3947,7 +3967,7 @@ impl RightPanelView {
             .id("switch-branch-modal-backdrop")
             .absolute()
             .inset_0()
-            .bg(hsla(0.0, 0.0, 0.0, 0.6))
+            .bg(crate::theme::overlay_scrim())
             .flex()
             .items_center()
             .justify_center()

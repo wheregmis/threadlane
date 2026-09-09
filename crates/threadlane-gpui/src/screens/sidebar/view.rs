@@ -431,7 +431,7 @@ impl SidebarView {
             .flex_col()
             .gap_0p5()
             .px_3()
-            .pt(px(48.0))
+            .pt(crate::theme::WINDOW_CONTROLS_CLEARANCE)
             .pb_1()
             .bg(theme.title_bar)
             .child(
@@ -442,6 +442,7 @@ impl SidebarView {
                     .small()
                     .w_full()
                     .justify_between()
+                    .tooltip("Start a new session (⌘N)")
                     .child(
                         div()
                             .px_1p5()
@@ -661,7 +662,6 @@ impl SidebarView {
                             .font_weight(FontWeight::MEDIUM)
                             .child(attention.label()),
                     )
-                    .group_hover("session-card", |style| style.opacity(0.0))
                     .into_any_element(),
             ),
             SessionAttention::Working => Some(
@@ -682,7 +682,6 @@ impl SidebarView {
                             .font_weight(FontWeight::MEDIUM)
                             .child(attention.label()),
                     )
-                    .group_hover("session-card", |style| style.opacity(0.0))
                     .into_any_element(),
             ),
             SessionAttention::Ready => Some(
@@ -708,7 +707,6 @@ impl SidebarView {
                             .font_weight(FontWeight::MEDIUM)
                             .child(attention.label()),
                     )
-                    .group_hover("session-card", |style| style.opacity(0.0))
                     .into_any_element(),
             ),
             SessionAttention::Idle => None,
@@ -1070,9 +1068,9 @@ impl SidebarView {
                                     .relative()
                                     .flex_none()
                                     .flex()
-                                    .w(px(76.0))
                                     .items_center()
                                     .justify_end()
+                                    .gap_1()
                                     .child(
                                         div()
                                             .flex()
@@ -1086,9 +1084,6 @@ impl SidebarView {
                                                         .text_color(theme.muted_foreground)
                                                         .child(time_ago),
                                                 )
-                                            })
-                                            .group_hover("session-card", |style| {
-                                                style.opacity(0.0)
                                             }),
                                     )
                                     .child(
@@ -1096,17 +1091,15 @@ impl SidebarView {
                                             "settle-session-{}",
                                             session.id
                                         )))
-                                        .label("Archive")
+                                        .icon(Icon::default().path("icons/archive.svg"))
                                         .ghost()
                                         .xsmall()
-                                        .compact()
-                                        .bg(theme.secondary)
-                                        .absolute()
-                                        .right(px(0.0))
-                                        .top(px(0.0))
-                                            .opacity(0.0)
-                                            .group_hover("session-card", |style| style.opacity(1.0))
-                                            .focus_visible(|style| style.opacity(1.0))
+                                        .accessibility_label("Archive session")
+                                        .opacity(0.0)
+                                        .group_hover("session-card", |style| {
+                                            style.opacity(1.0)
+                                        })
+                                        .focus_visible(|style| style.opacity(1.0))
                                         .tooltip("Archive session")
                                         // The card selects a session on mouse-down. Keep action buttons from
                                         // bubbling that event, otherwise archiving first selects the row and
@@ -1399,6 +1392,7 @@ impl SidebarView {
                 Button::new("sidebar-settings")
                     .debug_selector(|| "sidebar-settings".into())
                     .accessibility_label("Settings")
+                    .tooltip("Open settings")
                     .child(
                         div()
                             .w_full()

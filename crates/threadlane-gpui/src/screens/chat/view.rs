@@ -670,6 +670,8 @@ impl ChatListView {
             .gap_3()
             .px_4()
             .pl(self.header_left_padding)
+            // The workspace owns the rightmost 128px for command palette,
+            // environment, and panel buttons rendered as absolute overlays.
             .pr(px(128.0))
             .border_b_1()
             .border_color(theme.title_bar_border)
@@ -683,11 +685,19 @@ impl ChatListView {
                     .min_w_0()
                     .child(
                         div()
+                            .id("chat-header-title")
                             .truncate()
-                            .text_size(px(13.0))
+                            .text_sm()
                             .line_height(px(18.0))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.foreground)
+                            .tooltip({
+                                let title = active_title.clone();
+                                move |window, cx| {
+                                    gpui_component::tooltip::Tooltip::new(title.clone())
+                                        .build(window, cx)
+                                }
+                            })
                             .child(active_title),
                     ),
             )
@@ -763,7 +773,7 @@ impl ChatListView {
                 .rounded_full()
                 .border_1()
                 .border_color(colors.success)
-                .text_size(px(10.0))
+                .text_xs()
                 .font_weight(FontWeight::BOLD)
                 .text_color(colors.success)
                 .child("✓")
@@ -940,6 +950,13 @@ impl ChatListView {
             .child(
                 div()
                     .id(row_id)
+                    .tooltip({
+                        let summary = display_summary.clone();
+                        move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(summary.clone())
+                                .build(window, cx)
+                        }
+                    })
                     .h(px(28.0))
                     .px_1()
                     .rounded_md()
@@ -977,7 +994,7 @@ impl ChatListView {
                             .truncate()
                             .text_sm()
                             .text_color(theme.muted_foreground)
-                            .child(display_summary),
+                            .child(display_summary.clone()),
                     )
                     .children(has_detail.then(|| {
                         Icon::new(if activity.is_expanded {
@@ -1235,6 +1252,16 @@ impl ChatListView {
                 let view = cx.entity().clone();
                 div()
                     .id(SharedString::from(format!("trajectory-{all_index}")))
+                    .tooltip({
+                        let tip = match lane.clone() {
+                            Some(lane) => format!("{lane} · {preview}"),
+                            None => preview.to_string(),
+                        };
+                        move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(tip.clone())
+                                .build(window, cx)
+                        }
+                    })
                     .h(px(34.0))
                     .w_full()
                     .min_w_0()
@@ -1245,10 +1272,14 @@ impl ChatListView {
                     .border_b_1()
                     .border_color(theme.border.opacity(0.45))
                     .cursor_pointer()
+                    .border_l_2()
+                    .border_color(if selected {
+                        theme.accent
+                    } else {
+                        theme.border.opacity(0.0)
+                    })
                     .when(selected, |this| {
                         this.bg(theme.accent.opacity(0.16))
-                            .border_l_2()
-                            .border_color(theme.accent)
                     })
                     .hover(|style| style.bg(theme.muted.opacity(0.65)))
                     .child(div().size(px(6.0)).flex_none().rounded_full().bg(dot_color))
@@ -1268,7 +1299,7 @@ impl ChatListView {
                             .text_color(badge_fg)
                             .child(badge_label),
                     )
-                    .child(div().min_w_0().flex_1().text_sm().truncate().child(preview))
+                    .child(div().min_w_0().flex_1().text_sm().truncate().child(preview.clone()))
                     .children(exit_code.map(|code| {
                         let is_ok = code == 0;
                         div()
@@ -2409,9 +2440,19 @@ impl ChatListView {
                             )
                             .children(path_opt.map(|path| {
                                 div()
+                                    .id(SharedString::from(format!(
+                                        "code-path-{msg_id}-{block_index}"
+                                    )))
                                     .text_xs()
                                     .text_color(theme.muted_foreground)
                                     .truncate()
+                                    .tooltip({
+                                        let tip = path.clone();
+                                        move |window, cx| {
+                                            gpui_component::tooltip::Tooltip::new(tip.clone())
+                                                .build(window, cx)
+                                        }
+                                    })
                                     .child(path)
                             })),
                     )
@@ -3433,7 +3474,7 @@ impl ChatListView {
                 .id("permission-details-backdrop")
                 .absolute()
                 .inset_0()
-                .bg(hsla(0.0, 0.0, 0.0, 0.6))
+                .bg(crate::theme::overlay_scrim())
                 .flex()
                 .items_center()
                 .justify_center()
@@ -4189,11 +4230,22 @@ impl ChatListView {
             }))
             .children(messages.is_empty().then(|| {
                 div()
-                    .py_6()
-                    .text_center()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child("No messages yet — ask below to start.")
+                    .w_full()
+                    .flex()
+                    .justify_center()
+                    .py_4()
+                    .child(
+                        div()
+                            .px_4()
+                            .py_2()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.title_bar)
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("No messages yet — the subagent hasn't responded."),
+                    )
             }))
             .children(messages)
             .into_any_element()
@@ -4269,16 +4321,28 @@ impl ChatListView {
         // Selecting an ACP agent picks the *agent*; the agent then runs one of
         // its own models. Both are "which model am I on", so both belong in
         // this one control rather than split across two.
-        let acp_model_option = threadlane_session::is_acp_model(&selected_model)
-            .then(|| {
-                threadlane_session::config_option_for(
-                    self.model.read(cx).active_acp_config_options(),
-                    threadlane_session::ACP_CONFIG_CATEGORY_MODEL,
-                )
-                .cloned()
-            })
-            .flatten();
-        let acp_model_menu_model = self.model.clone();
+        // Per-agent model settings behind each "External agents" row: live
+        // options for the selected agent, launch-time cache for the rest, so
+        // every agent's models are visible before it is picked.
+        let acp_model_sections: HashMap<String, Vec<threadlane_session::AcpConfigOption>> = {
+            let state = self.model.read(cx);
+            let mut sections = HashMap::new();
+            for option in &model_options {
+                if option.provider != crate::model_catalog::ModelProvider::Acp {
+                    continue;
+                }
+                let Some(agent_id) = threadlane_session::acp_agent_id(&option.id) else {
+                    continue;
+                };
+                let options = if option.id == selected_model {
+                    state.active_acp_config_options()
+                } else {
+                    crate::model_catalog::cached_acp_config_options(agent_id)
+                };
+                sections.insert(agent_id.to_string(), options);
+            }
+            sections
+        };
         let model_for_picker = self.model.clone();
         let queue_model = self.model.clone();
         let steer_model = self.model.clone();
@@ -4315,7 +4379,20 @@ impl ChatListView {
                             .xsmall()
                             .text_color(theme.primary),
                     )
-                    .child(div().max_w(px(160.0)).truncate().child(name))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("pasted-image-{index}")))
+                            .max_w(px(160.0))
+                            .truncate()
+                            .tooltip({
+                                let tip = name.clone();
+                                move |window, cx| {
+                                    gpui_component::tooltip::Tooltip::new(tip.clone())
+                                        .build(window, cx)
+                                }
+                            })
+                            .child(name),
+                    )
                     .child(
                         Button::new(("remove-pasted-image", index))
                             .icon(IconName::Close)
@@ -4662,6 +4739,7 @@ impl ChatListView {
             model_picker
         };
         let selected_model_for_picker = selected_model.clone();
+        let submenu_click_model = self.model.clone();
         let model_picker = model_picker.dropdown_menu(move |menu, _window, _cx| {
             let menu = menu.check_side(gpui_component::Side::Right);
             let mut previous_provider = None;
@@ -4674,64 +4752,143 @@ impl ChatListView {
                         previous_provider = Some(option.provider);
                         menu.item(PopupMenuItem::label(option.provider.label()))
                     };
-                    let model = model_for_picker.clone();
+                    if option.provider != crate::model_catalog::ModelProvider::Acp {
+                        let model = model_for_picker.clone();
+                        let is_current = option.id == selected_model_for_picker;
+                        let label = if is_current {
+                            format!("{} · Current", option.label)
+                        } else {
+                            option.label
+                        };
+                        return menu.item(
+                            PopupMenuItem::new(label)
+                                .icon(Icon::default().path(option.provider.icon_path()))
+                                .checked(is_current)
+                                .on_click(move |_event, _window, cx| {
+                                    model.update(cx, |state, cx| {
+                                        controller::dispatch(
+                                            state,
+                                            AppAction::SelectModel(option.id.to_string()),
+                                        );
+                                        cx.notify();
+                                    });
+                                }),
+                        );
+                    }
+                    // External agents list their own models inline, fed by the
+                    // shared launch-time cache until this session's engine
+                    // connects. Picking one selects the agent and applies the
+                    // model in a single gesture — no hover, no pre-select.
+                    let agent_key = threadlane_session::acp_agent_id(&option.id)
+                        .unwrap_or_default()
+                        .to_string();
+                    let agent_options =
+                        acp_model_sections.get(&agent_key).cloned().unwrap_or_default();
+                    let agent_setting = threadlane_session::config_option_for(
+                        &agent_options,
+                        threadlane_session::ACP_CONFIG_CATEGORY_MODEL,
+                    )
+                    .cloned();
                     let is_current = option.id == selected_model_for_picker;
-                    let label = if is_current {
+                    let agent_label = if is_current {
                         format!("{} · Current", option.label)
                     } else {
-                        option.label
+                        option.label.clone()
                     };
-                    menu.item(
-                        PopupMenuItem::new(label)
+                    let select_model = submenu_click_model.clone();
+                    let select_id = option.id.clone();
+                    let menu = menu.item(
+                        PopupMenuItem::new(agent_label)
                             .icon(Icon::default().path(option.provider.icon_path()))
                             .checked(is_current)
                             .on_click(move |_event, _window, cx| {
-                                model.update(cx, |state, cx| {
+                                select_model.update(cx, |state, cx| {
                                     controller::dispatch(
                                         state,
-                                        AppAction::SelectModel(option.id.to_string()),
+                                        AppAction::SelectModel(select_id.clone()),
                                     );
                                     cx.notify();
                                 });
                             }),
-                    )
+                    );
+                    match agent_setting {
+                        Some(setting) => {
+                            let current = setting.current_value().map(str::to_string);
+                            let config_id = setting.id.clone();
+                            setting.options.into_iter().fold(
+                                menu,
+                                |menu, choice| {
+                                    let click_model = submenu_click_model.clone();
+                                    let select_id = option.id.clone();
+                                    let config_id = config_id.clone();
+                                    let value = choice.value.clone();
+                                    // Only the selected agent's live state can
+                                    // mark a current model; cached currents may
+                                    // be stale, so other agents show none.
+                                    let checked = is_current
+                                        && current.as_deref() == Some(choice.value.as_str());
+                                    let label = if checked {
+                                        format!("{} · Current", choice.name)
+                                    } else {
+                                        choice.name.clone()
+                                    };
+                                    menu.item(
+                                        PopupMenuItem::new(label).checked(checked).on_click(
+                                            move |_event, _window, cx| {
+                                                click_model.update(cx, |state, cx| {
+                                                    controller::dispatch(
+                                                        state,
+                                                        AppAction::SelectModel(
+                                                            select_id.clone(),
+                                                        ),
+                                                    );
+                                                    controller::dispatch(
+                                                        state,
+                                                        AppAction::SetAcpConfigOption {
+                                                            config_id: config_id.clone(),
+                                                            value: value.clone(),
+                                                        },
+                                                    );
+                                                    cx.notify();
+                                                });
+                                            },
+                                        ),
+                                    )
+                                },
+                            )
+                        }
+                        None => {
+                            let reason = crate::model_catalog::cached_acp_error(&agent_key)
+                                .map(|error| {
+                                    let short: String = error.chars().take(120).collect();
+                                    if error.chars().count() > 120 {
+                                        format!("{short}…")
+                                    } else {
+                                        short
+                                    }
+                                })
+                                .unwrap_or_else(|| {
+                                    format!("Connecting to {}…", option.label)
+                                });
+                            let settings_model = submenu_click_model.clone();
+                            menu.item(PopupMenuItem::new(reason).disabled(true)).item(
+                                PopupMenuItem::new("Check Settings → ACP Agents").on_click(
+                                    move |_event, _window, cx| {
+                                        settings_model.update(cx, |state, cx| {
+                                            controller::dispatch(
+                                                state,
+                                                AppAction::OpenSettings,
+                                            );
+                                            cx.notify();
+                                        });
+                                    },
+                                ),
+                            )
+                        }
+                    }
                 },
             );
-            let Some(acp_model) = acp_model_option.as_ref() else {
-                return menu;
-            };
-            let current = acp_model.current_value();
-            let config_id = acp_model.id.clone();
-            let menu = menu
-                .item(PopupMenuItem::separator())
-                .item(PopupMenuItem::label(acp_model.name.clone()));
-            acp_model.options.iter().fold(menu, |menu, choice| {
-                let model = acp_model_menu_model.clone();
-                let config_id = config_id.clone();
-                let value = choice.value.clone();
-                let is_current = current == Some(choice.value.as_str());
-                let label = if is_current {
-                    format!("{} · Current", choice.name)
-                } else {
-                    choice.name.clone()
-                };
-                menu.item(
-                    PopupMenuItem::new(label)
-                        .checked(is_current)
-                        .on_click(move |_event, _window, cx| {
-                            model.update(cx, |state, cx| {
-                                controller::dispatch(
-                                    state,
-                                    AppAction::SetAcpConfigOption {
-                                        config_id: config_id.clone(),
-                                        value: value.clone(),
-                                    },
-                                );
-                                cx.notify();
-                            });
-                        }),
-                )
-            })
+            menu
         });
 
         let effort_model = self.model.clone();
@@ -4871,7 +5028,7 @@ impl ChatListView {
                                     .bg(if is_active {
                                         theme.accent.opacity(0.16)
                                     } else {
-                                        hsla(0.0, 0.0, 0.0, 0.0)
+                                        gpui::transparent_black()
                                     })
                                     .hover(|style| style.bg(theme.list_hover))
                                     .cursor_pointer()

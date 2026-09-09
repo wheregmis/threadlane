@@ -2960,13 +2960,23 @@ impl AppState {
     }
 
     /// Settings the active session's external agent exposes.
-    pub(crate) fn active_acp_config_options(&self) -> &[AcpConfigOption] {
+    ///
+    /// Falls back to the launch-time cache when this session's engine has
+    /// not connected yet, so the picker offers the agent's models before the
+    /// first spawn. An engine that connected and found nothing stays empty:
+    /// only "never asked" falls back, never "asked and empty".
+    pub(crate) fn active_acp_config_options(&self) -> Vec<AcpConfigOption> {
         if !threadlane_session::is_acp_model(&self.selected_model) {
-            return &[];
+            return Vec::new();
         }
-        self.active_session_projection_key()
+        if let Some(options) = self
+            .active_session_projection_key()
             .and_then(|key| self.acp_config_options.get(&key))
-            .map(Vec::as_slice)
+        {
+            return options.clone();
+        }
+        threadlane_session::acp_agent_id(&self.selected_model)
+            .map(crate::model_catalog::cached_acp_config_options)
             .unwrap_or_default()
     }
 
@@ -2976,7 +2986,7 @@ impl AppState {
     /// the picker can never disagree about what is running.
     pub(crate) fn active_acp_model_label(&self) -> Option<String> {
         threadlane_session::config_option_for(
-            self.active_acp_config_options(),
+            &self.active_acp_config_options(),
             threadlane_session::ACP_CONFIG_CATEGORY_MODEL,
         )
         .and_then(AcpConfigOption::current_detail_label)

@@ -38,7 +38,8 @@ pub use controller::{ExecutionMode, SessionController, SessionStatus};
 pub use acp::{
     config_option_for, AcpAgentCapabilities, AcpAgentConfig, AcpAgentRecord, AcpAgentStatus,
     AcpAuthMethod, AcpConfigOption, AcpConfigOptionChoice, AcpConnection, AcpContentBlock,
-    AcpInitializeResult, AcpManager, AcpScope, AcpSession, AcpSessionNotification,
+    AcpInitializeResult, AcpManager, AcpPreloadedModels, AcpScope, AcpSession,
+    AcpSessionNotification,
     AcpSessionUpdate, AcpSettings, AcpToolCall, AcpToolCallStatus, AcpToolKind,
     ACP_CONFIG_CATEGORY_EFFORT, ACP_CONFIG_CATEGORY_MODE, ACP_CONFIG_CATEGORY_MODEL,
 };

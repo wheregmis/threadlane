@@ -20,6 +20,32 @@ use threadlane_session::{
 };
 use threadlane_updater::UpdateStatus;
 
+/// Fixed palette for the Appearance page's miniature theme previews. These
+/// depict the dark/light themes as static illustrations (audited exception to
+/// the token rule: the preview must show its own theme, not the active one),
+/// so they are defined once here instead of repeated at each swatch.
+fn preview_dark_surface() -> Hsla {
+    hsla(0.0, 0.0, 0.07, 1.0)
+}
+fn preview_dark_well() -> Hsla {
+    hsla(0.0, 0.0, 0.16, 1.0)
+}
+fn preview_light_surface() -> Hsla {
+    hsla(0.0, 0.0, 0.98, 1.0)
+}
+fn preview_light_well() -> Hsla {
+    hsla(0.0, 0.0, 0.88, 1.0)
+}
+fn preview_dot_close() -> Hsla {
+    hsla(0.0, 0.7, 0.6, 1.0)
+}
+fn preview_dot_minimize() -> Hsla {
+    hsla(0.12, 0.7, 0.6, 1.0)
+}
+fn preview_dot_zoom() -> Hsla {
+    hsla(0.35, 0.7, 0.6, 1.0)
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum SettingsPage {
     #[default]
@@ -314,6 +340,16 @@ impl SettingsView {
         if let Err(error) = settings::probe_acp_agents(project, self.settings_tx.clone()) {
             self.capability_status = Some(error);
         }
+        // Keep the shared model cache warm while the status probe runs: the
+        // picker in any session serves these without spawning its own agent.
+        // The cache TTL makes repeat visits cheap.
+        let cache_model = self.model.clone();
+        let cache_project = self.active_project(cx);
+        cx.spawn(async move |_view, cx| {
+            crate::model_catalog::refresh_acp_models_and_update(cache_model, cx, cache_project)
+                .await;
+        })
+        .detach();
     }
 
     /// Renders the muted "no items" placeholder shared by the extension,
@@ -346,7 +382,7 @@ impl SettingsView {
             .border_r_1()
             .border_color(theme.border)
             .bg(theme.title_bar)
-            .child(div().h(px(48.0)).flex_none())
+            .child(div().h(crate::theme::WINDOW_CONTROLS_CLEARANCE).flex_none())
             .child(
                 div()
                     .px_3()
@@ -1167,7 +1203,7 @@ impl SettingsView {
                                     .rounded_lg()
                                     .border_1()
                                     .border_color(theme.border)
-                                    .bg(hsla(0.0, 0.0, 0.07, 1.0))
+                                    .bg(preview_dark_surface())
                                     .p_3()
                                     .flex()
                                     .flex_col()
@@ -1180,19 +1216,19 @@ impl SettingsView {
                                                 div()
                                                     .size(px(8.0))
                                                     .rounded_full()
-                                                    .bg(hsla(0.0, 0.7, 0.6, 1.0)),
+                                                    .bg(preview_dot_close()),
                                             )
                                             .child(
                                                 div()
                                                     .size(px(8.0))
                                                     .rounded_full()
-                                                    .bg(hsla(0.12, 0.7, 0.6, 1.0)),
+                                                    .bg(preview_dot_minimize()),
                                             )
                                             .child(
                                                 div()
                                                     .size(px(8.0))
                                                     .rounded_full()
-                                                    .bg(hsla(0.35, 0.7, 0.6, 1.0)),
+                                                    .bg(preview_dot_zoom()),
                                             ),
                                     )
                                     .child(
@@ -1200,7 +1236,7 @@ impl SettingsView {
                                             .h(px(16.0))
                                             .w_3_4()
                                             .rounded_md()
-                                            .bg(hsla(0.0, 0.0, 0.16, 1.0)),
+                                            .bg(preview_dark_well()),
                                     ),
                             )
                             .child(
@@ -1257,7 +1293,7 @@ impl SettingsView {
                                     .rounded_lg()
                                     .border_1()
                                     .border_color(theme.border)
-                                    .bg(hsla(0.0, 0.0, 0.98, 1.0))
+                                    .bg(preview_light_surface())
                                     .p_3()
                                     .flex()
                                     .flex_col()
@@ -1270,19 +1306,19 @@ impl SettingsView {
                                                 div()
                                                     .size(px(8.0))
                                                     .rounded_full()
-                                                    .bg(hsla(0.0, 0.7, 0.6, 1.0)),
+                                                    .bg(preview_dot_close()),
                                             )
                                             .child(
                                                 div()
                                                     .size(px(8.0))
                                                     .rounded_full()
-                                                    .bg(hsla(0.12, 0.7, 0.6, 1.0)),
+                                                    .bg(preview_dot_minimize()),
                                             )
                                             .child(
                                                 div()
                                                     .size(px(8.0))
                                                     .rounded_full()
-                                                    .bg(hsla(0.35, 0.7, 0.6, 1.0)),
+                                                    .bg(preview_dot_zoom()),
                                             ),
                                     )
                                     .child(
@@ -1290,7 +1326,7 @@ impl SettingsView {
                                             .h(px(16.0))
                                             .w_3_4()
                                             .rounded_md()
-                                            .bg(hsla(0.0, 0.0, 0.88, 1.0)),
+                                            .bg(preview_light_well()),
                                     ),
                             )
                             .child(
@@ -3123,7 +3159,7 @@ impl Render for SettingsView {
                             .w_full()
                             .max_w(px(760.0))
                             .mx_auto()
-                            .child(div().h(px(48.0)).flex_none())
+                            .child(div().h(crate::theme::WINDOW_CONTROLS_CLEARANCE).flex_none())
                             .child(
                                 div()
                                     .text_xl()

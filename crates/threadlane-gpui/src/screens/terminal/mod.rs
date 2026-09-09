@@ -21,6 +21,18 @@ const TERMINAL_READ_CHUNK_BYTES: usize = 8192;
 const TERMINAL_OUTPUT_BUFFERED_CHUNKS: usize = 8;
 const TERMINAL_PARSE_BUDGET_PER_FRAME: usize = TERMINAL_READ_CHUNK_BYTES * 2;
 
+/// Terminal text metrics. The painted glyph size, row height, hit-testing,
+/// and resize math must all agree; they share these constants so a font
+/// change cannot drift click-to-select away from what is painted.
+/// Row height = font size × line height (13.0 × 1.35 = 17.55).
+/// The screen container uses `p_3`, so the content inset is 12px per side.
+const TERMINAL_FONT_SIZE: f32 = 13.0;
+const TERMINAL_LINE_HEIGHT: f32 = 1.35;
+const TERMINAL_ROW_HEIGHT: f32 = TERMINAL_FONT_SIZE * TERMINAL_LINE_HEIGHT;
+const TERMINAL_CONTENT_INSET: f32 = 12.0;
+/// Fallback advance width until the text system measures `.ZedMono`.
+const TERMINAL_CELL_WIDTH_FALLBACK: f32 = 7.8;
+
 fn terminal_frame_policy(saturated: bool) -> (Duration, usize) {
     if saturated {
         (
@@ -317,7 +329,7 @@ impl TerminalView {
             screen_bounds: None,
             selection_anchor: None,
             selection_head: None,
-            cell_width: 7.8,
+            cell_width: TERMINAL_CELL_WIDTH_FALLBACK,
             cursor_visible: true,
             scrollback_offset: 0,
             scroll_accumulator: 0.0,
@@ -652,8 +664,10 @@ impl TerminalView {
 
     fn cell_at(&self, position: Point<Pixels>) -> Option<(u16, u16)> {
         let bounds = self.screen_bounds?;
-        let x = ((position.x - bounds.left()).as_f32() - 12.0) / self.cell_width;
-        let y = ((position.y - bounds.top()).as_f32() - 12.0) / 17.55;
+        let x = ((position.x - bounds.left()).as_f32() - TERMINAL_CONTENT_INSET)
+            / self.cell_width;
+        let y = ((position.y - bounds.top()).as_f32() - TERMINAL_CONTENT_INSET)
+            / TERMINAL_ROW_HEIGHT;
         Some((
             y.floor()
                 .max(0.0)
@@ -828,7 +842,7 @@ impl Render for TerminalView {
         let font_id = window.text_system().resolve_font(&font(".ZedMono"));
         let measured_cell_width = window
             .text_system()
-            .layout_width(font_id, px(13.0), '0')
+            .layout_width(font_id, px(TERMINAL_FONT_SIZE), '0')
             .as_f32();
         if measured_cell_width > 0.0 {
             self.cell_width = measured_cell_width;
@@ -947,7 +961,7 @@ impl Render for TerminalView {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .h(px(17.55))
+                    .h(px(TERMINAL_ROW_HEIGHT))
                     .children(row_spans),
             );
         }
@@ -1033,22 +1047,31 @@ impl Render for TerminalView {
                     .min_h_0()
                     .p_3()
                     .font_family(".ZedMono")
-                    .text_size(px(13.0))
-                    .line_height(relative(1.35))
+                    // Raster-bound: glyph size must match TERMINAL_ROW_HEIGHT
+                    // and the measured cell width; not a type-scale step.
+                    .text_size(px(TERMINAL_FONT_SIZE))
+                    .line_height(relative(TERMINAL_LINE_HEIGHT))
                     .cursor_text()
                     .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
                         let delta = match event.delta {
                             ScrollDelta::Lines(lines) => lines.y * 2.0,
-                            ScrollDelta::Pixels(pixels) => pixels.y.as_f32() / 17.55,
+                            ScrollDelta::Pixels(pixels) => {
+                                pixels.y.as_f32() / TERMINAL_ROW_HEIGHT
+                            }
                         };
                         if delta.abs() > 0.01 {
                             this.scroll_by(delta, cx);
                         }
                     }))
                     .on_prepaint(move |bounds, _, cx| {
-                        let rows = ((bounds.size.height.as_f32() - 24.0) / 17.55).floor() as u16;
-                        let cols =
-                            ((bounds.size.width.as_f32() - 24.0) / cell_width).floor() as u16;
+                        let rows = ((bounds.size.height.as_f32()
+                            - TERMINAL_CONTENT_INSET * 2.0)
+                            / TERMINAL_ROW_HEIGHT)
+                            .floor() as u16;
+                        let cols = ((bounds.size.width.as_f32()
+                            - TERMINAL_CONTENT_INSET * 2.0)
+                            / cell_width)
+                            .floor() as u16;
                         terminal_resize.update(cx, |terminal, cx| {
                             terminal.screen_bounds = Some(bounds);
                             terminal.resize(rows, cols, cx);
