@@ -95,23 +95,23 @@ impl CodingAgent {
         self.agent.tool_dispatcher.tool_completion_recorder = recorder;
     }
 
-    async fn run_scheduled_agent_work(&mut self) {
+    async fn run_scheduled_agent_work(&mut self) -> Option<Result<String, String>> {
         // Extension follow-ups are queued through the same scheduler as native
         // work. ACP agents own their conversation, so routing those messages
         // through `AgentRuntime::run_follow_up` would send them to the
         // configured OpenAI provider instead of back to the ACP process.
         let model = self.agent.model();
         if let Some(agent_id) = crate::acp_bridge::acp_agent_id(&model) {
-            let _ = self.run_queued_acp_work(agent_id).await;
-        } else {
-            while self
-                .agent_work
-                .run_executor(&mut self.agent, self.session_file.as_deref())
-                .await
-            {
-                self.sync_harness_and_dispatch_assistant_hooks().await;
-            }
+            return self.run_queued_acp_work(agent_id).await;
         }
+        while self
+            .agent_work
+            .run_executor(&mut self.agent, self.session_file.as_deref())
+            .await
+        {
+            self.sync_harness_and_dispatch_assistant_hooks().await;
+        }
+        None
     }
 
     pub(crate) fn work_handle(&self) -> CodingAgentWorkHandle {
@@ -1123,7 +1123,9 @@ impl CodingAgent {
                         }
                     }
                 }
-                self.run_scheduled_agent_work().await;
+                // Close the command's harness run before draining follow-up work.
+                // ACP turns open their own run and reject nested runs while this
+                // extension command is still active.
                 if let Err(error) = self
                     .finish_harness_run(
                         harness_run_id.as_ref().map(|run| run.run_id.as_str()),
@@ -1133,6 +1135,9 @@ impl CodingAgent {
                     .await
                 {
                     return Some(Err(format!("Harness Error: {error}")));
+                }
+                if let Some(result) = self.run_scheduled_agent_work().await {
+                    return Some(result);
                 }
                 return Some(Ok(output));
             }
@@ -1222,7 +1227,6 @@ impl CodingAgent {
                             });
                         self.wasi_extensions
                             .enqueue_broker_results(dispatch.operation_results);
-                        self.run_scheduled_agent_work().await;
                         if result.api_version == 1 {
                             for effect in result.effects {
                                 match effect {
@@ -1289,6 +1293,12 @@ impl CodingAgent {
                             .await
                         {
                             return Some(Err(format!("Harness Error: {error}")));
+                        }
+                        // The command run must be closed before an ACP follow-up
+                        // can open its own harness run. Propagate follow-up errors
+                        // so the command is not reported as successfully complete.
+                        if let Some(scheduled_result) = self.run_scheduled_agent_work().await {
+                            return Some(scheduled_result);
                         }
                         result
                     }
