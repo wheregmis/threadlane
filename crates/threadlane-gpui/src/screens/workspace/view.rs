@@ -49,6 +49,19 @@ fn open_github_from_palette(state: &mut AppState, notify: impl FnOnce()) {
     notify();
 }
 
+fn update_notice_key(status: &UpdateStatus) -> String {
+    match status {
+        UpdateStatus::Idle => "idle".to_string(),
+        UpdateStatus::Checking => "checking".to_string(),
+        UpdateStatus::Available(info) => format!("available:{}", info.version),
+        UpdateStatus::UpToDate => "up-to-date".to_string(),
+        UpdateStatus::Downloading { version, .. } => format!("downloading:{version}"),
+        UpdateStatus::ReadyToInstall { info, .. } => format!("ready:{}", info.version),
+        UpdateStatus::Installing => "installing".to_string(),
+        UpdateStatus::Error(error) => format!("error:{error}"),
+    }
+}
+
 pub fn init(cx: &mut App) {
     crate::screens::github::view::init(cx);
     cx.bind_keys([
@@ -353,8 +366,12 @@ impl WorkspaceView {
                         }
                         for UpdaterEvent::Status(status) in updater_events {
                             this.model.update(cx, |state, cx| {
+                                let new_key = update_notice_key(&status);
+                                let old_key = update_notice_key(&state.update_status);
                                 state.update_status = status;
-                                state.update_notice_dismissed = false;
+                                if new_key != old_key {
+                                    state.update_notice_dismissed = false;
+                                }
                                 cx.notify();
                             });
                         }
@@ -825,8 +842,7 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    fn render_update_notice(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let status = {
+    fn render_update_notice(&self, cx: &mut Context<Self>) -> Option<AnyElement> {        let status = {
             let state = self.model.read(cx);
             if state.update_notice_dismissed {
                 return None;

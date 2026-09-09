@@ -515,6 +515,7 @@ impl SidebarView {
                     Button::new("sidebar-project-filter")
                         .icon(IconName::Folder)
                         .label(selected_label)
+                        .tooltip("Filter sessions by project")
                         .dropdown_caret(true)
                         .selected(true)
                         .w_full()
