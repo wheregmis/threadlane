@@ -4,6 +4,8 @@ pub mod acp_runtime;
 pub mod agents;
 pub mod browser;
 pub mod computer;
+#[cfg(target_os = "macos")]
+pub(crate) mod computer_stream;
 pub mod commands;
 pub mod config;
 pub mod context;

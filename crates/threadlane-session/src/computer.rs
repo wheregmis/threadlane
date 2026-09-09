@@ -28,10 +28,10 @@ pub const COMPUTER_UNAVAILABLE: &str = "Native computer use is available on macO
 
 const MAX_TYPE_CHARS: usize = 4_000;
 /// Screenshots larger than this ride as metadata only, never pixels.
-const MAX_IMAGE_BYTES: usize = 2_000_000;
+pub(crate) const MAX_IMAGE_BYTES: usize = 2_000_000;
 /// Capture width bound: enough for UI legibility, small enough for context.
-const SCREENSHOT_WIDTH: u32 = 1_560;
-const SCREENSHOT_JPEG_QUALITY: u8 = 70;
+pub(crate) const SCREENSHOT_WIDTH: u32 = 1_560;
+pub(crate) const SCREENSHOT_JPEG_QUALITY: u8 = 70;
 
 pub(crate) struct ComputerToolExecutor {
     permissions: Option<Arc<PermissionManager>>,
@@ -446,22 +446,36 @@ mod mac {
         max_width: u32,
         quality: u8,
     ) -> Result<(Vec<u8>, u32, u32), String> {
+        capture_composited_ids(&capture_window_ids(), max_width, quality)
+    }
+
+    /// Composite one window by id — the target-only capture the model should
+    /// use instead of guessing coordinates off a full display.
+    pub(super) fn capture_composited_window(
+        window_id: i32,
+        max_width: u32,
+        quality: u8,
+    ) -> Result<(Vec<u8>, u32, u32), String> {
+        capture_composited_ids(&[window_id], max_width, quality)
+    }
+
+    fn capture_composited_ids(
+        ids: &[i32],
+        max_width: u32,
+        quality: u8,
+    ) -> Result<(Vec<u8>, u32, u32), String> {
         use core_foundation::array::CFArray;
-        use core_foundation::number::CFNumber;
         use core_graphics::display::CGDisplay;
         use core_graphics::window::{create_image_from_array, kCGWindowImageDefault};
 
-        let ids: Vec<CFNumber> = capture_window_ids()
-            .into_iter()
-            .map(CFNumber::from)
-            .collect();
         if ids.is_empty() {
             return Err("No capturable windows.".to_string());
         }
-        let array = CFArray::from_CFTypes(&ids);
-        // create_image_from_array takes the untyped array; rewrap the same ref.
-        let array: CFArray =
-            unsafe { CFArray::wrap_under_get_rule(array.as_concrete_TypeRef()) };
+        // Raw u32 values with no CF callbacks, exactly like the system
+        // `create_window_list` array: WindowServer reads plain window numbers
+        // here, not CFNumber objects.
+        let raw: Vec<u32> = ids.iter().map(|id| *id as u32).collect();
+        let array = CFArray::from_copyable(&raw).to_untyped();
         let bounds = CGDisplay::main().bounds();
         let image = create_image_from_array(bounds, array, kCGWindowImageDefault)
             .ok_or_else(|| "Window composite failed.".to_string())?;
@@ -490,54 +504,13 @@ mod mac {
                 rgb.push(row[offset]);
             }
         }
-        if is_blank(&rgb) {
+        if crate::computer_stream::is_blank(&rgb) {
             return Err(
                 "Window composite is blank (Screen Recording permission likely missing)."
                     .to_string(),
             );
         }
-        encode_bounded_jpeg(&rgb, width, height, max_width, quality)
-    }
-
-    /// True when every pixel is identical: a denied TCC capture composites black.
-    fn is_blank(rgb: &[u8]) -> bool {
-        let (first, rest) = match rgb.split_first_chunk::<3>() {
-            Some(pair) => pair,
-            None => return true,
-        };
-        rest.chunks_exact(3).all(|pixel| pixel == first)
-    }
-
-    fn encode_bounded_jpeg(
-        rgb: &[u8],
-        width: u32,
-        height: u32,
-        max_width: u32,
-        quality: u8,
-    ) -> Result<(Vec<u8>, u32, u32), String> {
-        use image::codecs::jpeg::JpegEncoder;
-        use image::{ImageBuffer, Rgb};
-
-        let buffer: ImageBuffer<Rgb<u8>, _> =
-            ImageBuffer::from_raw(width, height, rgb.to_vec())
-                .ok_or_else(|| "Could not wrap capture pixels.".to_string())?;
-        let (buffer, width, height) = if width > max_width {
-            let height = ((height as u64) * (max_width as u64) / (width as u64)) as u32;
-            let resized = image::imageops::resize(
-                &buffer,
-                max_width,
-                height.max(1),
-                image::imageops::FilterType::Triangle,
-            );
-            (resized, max_width, height.max(1))
-        } else {
-            (buffer, width, height)
-        };
-        let mut bytes = Vec::new();
-        JpegEncoder::new_with_quality(&mut bytes, quality)
-            .encode_image(&buffer)
-            .map_err(|error| format!("JPEG encode failed: {error}"))?;
-        Ok((bytes, width, height))
+        crate::computer_stream::encode_bounded_jpeg(&rgb, width, height, max_width, quality)
     }
 
     /// Read one window dictionary by comparing key names. Comparing
@@ -704,13 +677,36 @@ impl ComputerToolExecutor {
             .map(|duration| duration.as_millis())
             .unwrap_or(0);
         let path = dir.join(format!("computer-{stamp}.jpg"));
-        // Composited capture first: it excludes our own windows, so a mirror
-        // popup cannot recurse. Falls back to `screencapture` (which owns the
-        // TCC prompt) when the composite is unavailable or blank.
-        let (bytes, dims) = match mac::capture_composited_jpeg(
-            SCREENSHOT_WIDTH,
-            SCREENSHOT_JPEG_QUALITY,
-        ) {
+        // Live stream first: a fresh frame for this exact target is instant
+        // and already excludes our own windows. Otherwise fall back to
+        // one-shot capture (which also warms the stream for next time).
+        let target = match window_id {
+            Some(id) => crate::computer_stream::StreamTarget::Window(id as u32),
+            None => crate::computer_stream::StreamTarget::Display,
+        };
+        crate::computer_stream::ensure_stream(target, Some(dir.join("latest-frame.jpg")));
+        if let Some(frame) = crate::computer_stream::fresh_frame(target) {
+            std::fs::write(&path, &frame.jpeg)
+                .map_err(|error| format!("Could not save screenshot: {error}"))?;
+            write_mirror_sidecar(&dir, Some(&path), &format!("Screenshot {} (live)", target.label()));
+            return Ok(attach_jpeg(
+                &path,
+                &frame.jpeg,
+                &format!("{}x{}", frame.width, frame.height),
+            ));
+        }
+        // One-shot capture, target-aware: a window id composites just that
+        // window so the model sees what it drives instead of a full display
+        // with Threadlane mixed in. Falls back to `screencapture` (which owns
+        // the TCC prompt) when the composite is unavailable or blank.
+        let (bytes, dims) = match match window_id {
+            Some(id) => mac::capture_composited_window(
+                id as i32,
+                SCREENSHOT_WIDTH,
+                SCREENSHOT_JPEG_QUALITY,
+            ),
+            None => mac::capture_composited_jpeg(SCREENSHOT_WIDTH, SCREENSHOT_JPEG_QUALITY),
+        } {
             Ok((bytes, width, height)) => {
                 std::fs::write(&path, &bytes)
                     .map_err(|error| format!("Could not save screenshot: {error}"))?;
@@ -727,36 +723,8 @@ impl ComputerToolExecutor {
                 (bytes, dims)
             }
         };
-        write_mirror_sidecar(&dir, Some(&path), &format!("Screenshot {target}"));
-        let content = format!(
-            "Screenshot saved to {} ({} pixels, {} bytes).",
-            path.display(),
-            dims,
-            bytes.len()
-        );
-        if bytes.len() > MAX_IMAGE_BYTES {
-            return Ok(ToolOutput {
-                content: format!(
-                    "{content} Image exceeded the {MAX_IMAGE_BYTES}-byte model limit, so only metadata is attached."
-                ),
-                images: Vec::new(),
-            });
-        }
-        use base64::Engine as _;
-        let data_url = format!(
-            "data:image/jpeg;base64,{}",
-            base64::engine::general_purpose::STANDARD.encode(&bytes)
-        );
-        Ok(ToolOutput {
-            content,
-            images: vec![threadlane_runtime::ImageAttachment {
-                display_name: path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "screenshot.jpg".into()),
-                data_url,
-            }],
-        })
+        write_mirror_sidecar(&dir, Some(&path), &format!("Screenshot {}", target.label()));
+        Ok(attach_jpeg(&path, &bytes, &dims))
     }
 
     async fn act(&self, args: &str, work_dir: Option<&Path>) -> Result<String, String> {
@@ -773,6 +741,69 @@ impl ComputerToolExecutor {
         }
         outcome
     }
+}
+
+/// Build the screenshot tool output: text metadata plus the JPEG for the
+/// model, unless it exceeds the model byte cap (metadata only then).
+fn attach_jpeg(path: &Path, bytes: &[u8], dims: &str) -> ToolOutput {
+    let content = format!(
+        "Screenshot saved to {} ({} pixels, {} bytes).",
+        path.display(),
+        dims,
+        bytes.len()
+    );
+    if bytes.len() > MAX_IMAGE_BYTES {
+        return ToolOutput {
+            content: format!(
+                "{content} Image exceeded the {MAX_IMAGE_BYTES}-byte model limit, so only metadata is attached."
+            ),
+            images: Vec::new(),
+        };
+    }
+    use base64::Engine as _;
+    let data_url = format!(
+        "data:image/jpeg;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    );
+    ToolOutput {
+        content,
+        images: vec![threadlane_runtime::ImageAttachment {
+            display_name: path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "screenshot.jpg".into()),
+            data_url,
+        }],
+    }
+}
+
+/// Target-aware one-shot composite for the stream poller: a single window by
+/// id, or the display minus our own windows.
+#[cfg(target_os = "macos")]
+pub(crate) fn capture_composited_for_target(
+    target: crate::computer_stream::StreamTarget,
+    max_width: u32,
+    quality: u8,
+) -> Result<(Vec<u8>, u32, u32), String> {
+    match target {
+        crate::computer_stream::StreamTarget::Window(id) => {
+            mac::capture_composited_window(id as i32, max_width, quality)
+        }
+        crate::computer_stream::StreamTarget::Display => {
+            mac::capture_composited_jpeg(max_width, quality)
+        }
+    }
+}
+
+/// Mirror-popup action line without a new preview (e.g. after an input
+/// action): keeps the last image, refreshes the status text.
+pub(crate) fn write_mirror_sidecar_action(dir: &Path, action: &str) {
+    let path = serde_json::from_str::<serde_json::Value>(
+        &std::fs::read_to_string(dir.join("latest.json")).unwrap_or_default(),
+    )
+    .ok()
+    .and_then(|value| value.get("path").and_then(|value| value.as_str()).map(PathBuf::from));
+    write_mirror_sidecar(dir, path.as_deref(), action);
 }
 
 /// Mirror-popup state for the GPUI frontend: the latest preview path (if any),
@@ -1109,6 +1140,74 @@ mod tests {
         assert_eq!(parse_sips_dimensions("garbage"), None);
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn debug_composite_apis() {
+        use core_foundation::array::CFArray;
+        use core_foundation::base::{CFType, TCFType};
+        use core_foundation::number::CFNumber;
+        use core_graphics::display::CGDisplay;
+        use core_graphics::window::{
+            create_image, create_image_from_array, create_window_list, kCGNullWindowID,
+            kCGWindowImageDefault, kCGWindowListOptionOnScreenOnly,
+        };
+        let bounds = CGDisplay::main().bounds();
+        eprintln!("bounds: {:?}", bounds);
+        let single = create_image(
+            bounds,
+            kCGWindowListOptionOnScreenOnly,
+            kCGNullWindowID,
+            kCGWindowImageDefault,
+        );
+        eprintln!("single-call image: {}", single.is_some());
+        if let Some(image) = single {
+            eprintln!("size: {}x{}", image.width(), image.height());
+        }
+        // Raw system list, unfiltered: ItemRef<u32> derefs to the id value.
+        let all = create_window_list(
+            kCGWindowListOptionOnScreenOnly,
+            kCGNullWindowID,
+        );
+        if let Some(all) = all {
+            eprintln!("system window count: {}", all.len());
+            let raw_ids: Vec<i32> = (0..all.len().min(5))
+                .filter_map(|i| all.get(i).map(|item| *item as i32))
+                .collect();
+            eprintln!("raw ids: {:?}", raw_ids);
+            // Variation 0: system array passed straight through.
+            let all2 = create_window_list(
+                kCGWindowListOptionOnScreenOnly,
+                kCGNullWindowID,
+            )
+            .expect("list");
+            let direct = create_image_from_array(
+                bounds,
+                all2.to_untyped(),
+                kCGWindowImageDefault,
+            );
+            eprintln!("from-array direct: {}", direct.is_some());
+            // Variation 1: single window id.
+            let one: Vec<CFType> = raw_ids
+                .iter()
+                .take(1)
+                .map(|id| CFNumber::from(*id).as_CFType())
+                .collect();
+            let arr1 = CFArray::from_CFTypes(&one).to_untyped();
+            let img1 = create_image_from_array(bounds, arr1, kCGWindowImageDefault);
+            eprintln!("from-array single: {}", img1.is_some());
+            // Variation 2: nominal resolution option.
+            use core_graphics::window::kCGWindowImageNominalResolution;
+            let typed: Vec<CFType> = raw_ids
+                .iter()
+                .map(|id| CFNumber::from(*id).as_CFType())
+                .collect();
+            let arr = CFArray::from_CFTypes(&typed).to_untyped();
+            let img = create_image_from_array(bounds, arr, kCGWindowImageNominalResolution);
+            eprintln!("from-array nominal: {}", img.is_some());
+        }
+    }
+
     /// Live capture: needs Screen Recording TCC, so ignored in CI. Run by
     /// hand with `-- --ignored` to prove pixels flow end to end.
     #[cfg(target_os = "macos")]
@@ -1140,6 +1239,14 @@ mod tests {
             .expect("screenshot ok");
         assert_eq!(output.images.len(), 1);
         assert!(output.images[0].data_url.starts_with("data:image/jpeg;base64,"));
+
+        // Let the poller warm up, then prove the stream serves frames.
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let frame = crate::computer_stream::fresh_frame(crate::computer_stream::StreamTarget::Display);
+        assert!(
+            frame.is_some(),
+            "stream poller should have produced a display frame"
+        );
     }
 
     #[tokio::test]
