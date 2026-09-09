@@ -16,7 +16,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use threadlane_protocol::RuntimeToolCall as ToolCall;
 use tokio::sync::broadcast;
@@ -94,6 +94,75 @@ struct CachedToolResult {
     content: String,
     is_error: bool,
     images: Vec<ImageAttachment>,
+    /// Canonicalized absolute path this entry depends on, if it reads one
+    /// file (currently only `read_file`). Lets same-path writes invalidate
+    /// precisely while unrelated writes keep their cache.
+    path: Option<PathBuf>,
+    /// File size + mtime at cache time, for external-mutation validation.
+    fingerprint: Option<FileFingerprint>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FileFingerprint {
+    size: u64,
+    mtime_secs: u64,
+    mtime_nanos: u32,
+}
+
+fn fingerprint_file(path: &Path) -> Option<FileFingerprint> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata.modified().ok()?;
+    let duration = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some(FileFingerprint {
+        size: metadata.len(),
+        mtime_secs: duration.as_secs(),
+        mtime_nanos: duration.subsec_nanos(),
+    })
+}
+
+/// Extract workspace file paths a tool call reads or writes, for
+/// path-precise invalidation. Returns an empty vec when the tool has no
+/// parseable path scope (unknown blast radius: bust everything).
+fn tool_paths(name: &str, args: &str) -> Vec<String> {
+    let parsed: serde_json::Value = match serde_json::from_str(args) {
+        Ok(parsed) => parsed,
+        Err(_) => return Vec::new(),
+    };
+    match name {
+        "read_file" | "write_file" | "edit_file_hashline" => parsed
+            .get("path")
+            .and_then(|value| value.as_str())
+            .map(|path| vec![path.to_string()])
+            .unwrap_or_default(),
+        "edit_files_hashline" => parsed
+            .get("files")
+            .and_then(|value| value.as_array())
+            .map(|files| {
+                files
+                    .iter()
+                    .filter_map(|file| file.get("path")?.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// Resolve a tool path argument against the workspace root. Falls back to
+/// the raw path when there is no work dir — identity comparison only needs
+/// both sides resolved the same way.
+fn resolve_workspace_path(work_dir: Option<&Path>, path: &str) -> PathBuf {
+    match work_dir {
+        Some(root) => {
+            let candidate = Path::new(path);
+            if candidate.is_absolute() {
+                candidate.to_path_buf()
+            } else {
+                root.join(candidate)
+            }
+        }
+        None => PathBuf::from(path),
+    }
 }
 
 /// Tools pure enough to serve from cache: deterministic reads whose inputs
@@ -116,34 +185,52 @@ const REPETITION_CACHE_CAP: usize = 64;
 
 const REPETITION_NOTE: &str = "Repeated invocation: identical arguments already ran earlier this turn and produced this same result (served from cache, not re-executed). If you need different information, change the arguments or use another tool.";
 
-impl RepetitionCacheHandle {
-    /// Returns the cached content (with steering note), images, and the
+impl RepetitionCacheHandle {    /// Returns the cached content (with steering note), images, and the
     /// original error flag for an identical call in the current version.
-    fn lookup(&self, name: &str, args: &str) -> Option<(ToolOutput, bool)> {
+    fn lookup(
+        &self,
+        name: &str,
+        args: &str,
+        work_dir: Option<&Path>,
+    ) -> Option<(ToolOutput, bool)> {
         if !CACHEABLE_TOOLS.contains(&name) {
             return None;
         }
-        let guard = self.inner.lock().ok()?;
-        let entry = guard
-            .entries
-            .get(&(name.to_string(), args.to_string()))?;
-        (entry.version == guard.version).then(|| {
-            (
-                ToolOutput {
-                    content: format!("{}\n\n[{REPETITION_NOTE}]", entry.content),
-                    images: entry.images.clone(),
-                },
-                entry.is_error,
-            )
-        })
+        let mut guard = self.inner.lock().ok()?;
+        let key = (name.to_string(), args.to_string());
+        let entry = guard.entries.get(&key)?;
+        if entry.version != guard.version {
+            return None;
+        }
+        // External-mutation guard: a file changed outside the tool loop
+        // (user edits, watchers, other agents) must not serve stale bytes.
+        // Size+mtime both compared: coarse filesystems can share mtimes.
+        if let Some(path) = entry.path.as_deref() {
+            if fingerprint_file(path) != entry.fingerprint {
+                guard.entries.remove(&key);
+                return None;
+            }
+            let _ = work_dir;
+        }
+        Some((
+            ToolOutput {
+                content: format!("{}\n\n[{REPETITION_NOTE}]", entry.content),
+                images: entry.images.clone(),
+            },
+            entry.is_error,
+        ))
     }
 
-    fn store(&self, name: &str, args: &str, output: &ToolOutput, is_error: bool) {
+    fn store(
+        &self,
+        name: &str,
+        args: &str,
+        output: &ToolOutput,
+        is_error: bool,
+        work_dir: Option<&Path>,
+    ) {
         if !CACHEABLE_TOOLS.contains(&name) {
-            // Unknown or mutating tools invalidate everything cached.
-            if let Ok(mut guard) = self.inner.lock() {
-                guard.version = guard.version.wrapping_add(1);
-            }
+            self.invalidate_for_mutation(name, args, work_dir);
             return;
         }
         // Errors cache too: identical error loops are worth short-circuiting,
@@ -153,6 +240,20 @@ impl RepetitionCacheHandle {
                 guard.entries.clear();
             }
             let version = guard.version;
+            let (path, fingerprint): (Option<PathBuf>, Option<FileFingerprint>) =
+                if name == "read_file" {
+                    tool_paths(name, args)
+                        .into_iter()
+                        .next()
+                        .map(|path| {
+                            let absolute = resolve_workspace_path(work_dir, &path);
+                            let fingerprint = fingerprint_file(&absolute);
+                            (Some(absolute), fingerprint)
+                        })
+                        .unwrap_or((None, None))
+                } else {
+                    (None, None)
+                };
             guard.entries.insert(
                 (name.to_string(), args.to_string()),
                 CachedToolResult {
@@ -160,9 +261,38 @@ impl RepetitionCacheHandle {
                     content: output.content.clone(),
                     is_error,
                     images: output.images.clone(),
+                    path,
+                    fingerprint,
                 },
             );
         }
+    }
+
+    /// A mutating tool ran: drop precisely what it could have touched.
+    /// Path-scoped writes bust the same-path reads plus every workspace-wide
+    /// read (grep/list/map depend on whole-tree contents); anything without
+    /// parseable paths busts the global version as before.
+    fn invalidate_for_mutation(&self, name: &str, args: &str, work_dir: Option<&Path>) {
+        let paths: Vec<PathBuf> = tool_paths(name, args)
+            .into_iter()
+            .map(|path| resolve_workspace_path(work_dir, &path))
+            .collect();
+        let Ok(mut guard) = self.inner.lock() else {
+            return;
+        };
+        if paths.is_empty() {
+            guard.version = guard.version.wrapping_add(1);
+            return;
+        }
+        guard.entries.retain(|(entry_name, _), entry| {
+            if entry_name != "read_file" {
+                return false;
+            }
+            match entry.path.as_deref() {
+                Some(path) => !paths.iter().any(|touched| touched == path),
+                None => false,
+            }
+        });
     }
 
     fn clear(&self) {
@@ -711,12 +841,16 @@ impl ToolDispatcher {
         // Error flag for cache hits: the cached content already carries the
         // original error text, so it must not be re-prefixed below.
         let mut cached_is_error = false;
+        let mut served_from_cache = false;
         if !context.skip_repetition_cache {
-            if let Some((cached, was_error)) =
-                context.repetition.lookup(&tc.function.name, &arguments)
-            {
+            if let Some((cached, was_error)) = context.repetition.lookup(
+                &tc.function.name,
+                &arguments,
+                context.work_dir.as_deref(),
+            ) {
                 execution_result = Some(Ok(cached));
                 cached_is_error = was_error;
+                served_from_cache = true;
             }
         }
         for route in context.tool_routes {
@@ -753,7 +887,7 @@ impl ToolDispatcher {
                 Vec::new(),
             ),
         };
-        if !context.skip_repetition_cache && !cached_is_error {
+        if !context.skip_repetition_cache && !served_from_cache {
             // Record fresh executions for identical-call dedup, including
             // fresh errors: identical error loops are worth short-circuiting,
             // and any later mutation invalidates by version. Cache hits never
@@ -766,6 +900,7 @@ impl ToolDispatcher {
                     images: images.clone(),
                 },
                 is_error,
+                context.work_dir.as_deref(),
             );
         }
         let duration_ms = start_time.elapsed().as_millis();
@@ -1093,6 +1228,93 @@ mod tests {
         dispatcher.execute_tools(&[call.clone()]).await;
         dispatcher.execute_tools_for_replay(&[call]).await;
         assert_eq!(call_count(&counters, "computer_windows"), 2);
+    }
+
+    #[test]
+    fn tool_paths_extracts_read_and_write_scopes() {
+        assert_eq!(
+            tool_paths("read_file", r#"{"path":"src/a.rs"}"#),
+            vec!["src/a.rs".to_string()]
+        );
+        assert_eq!(
+            tool_paths("edit_files_hashline", r#"{"files":[{"path":"x.rs"},{"path":"y.rs"}]}"#),
+            vec!["x.rs".to_string(), "y.rs".to_string()]
+        );
+        assert!(tool_paths("run_command", r#"{"command":"ls"}"#).is_empty());
+        assert!(tool_paths("read_file", "not-json").is_empty());
+    }
+
+    #[test]
+    fn same_path_write_busts_only_that_read() {
+        let cache = RepetitionCacheHandle::default();
+        let output = |text: &str| ToolOutput {
+            content: text.into(),
+            images: Vec::new(),
+        };
+        cache.store("read_file", r#"{"path":"a.rs"}"#, &output("A"), false, None);
+        cache.store("read_file", r#"{"path":"b.rs"}"#, &output("B"), false, None);
+        cache.store("grep_search", r#"{"pattern":"x"}"#, &output("G"), false, None);
+        // Same-path write busts read_file(a) plus all workspace-wide reads.
+        cache.invalidate_for_mutation("write_file", r#"{"path":"a.rs"}"#, None);
+        assert!(cache
+            .lookup("read_file", r#"{"path":"a.rs"}"#, None)
+            .is_none());
+        assert!(cache
+            .lookup("read_file", r#"{"path":"b.rs"}"#, None)
+            .is_some());
+        assert!(cache
+            .lookup("grep_search", r#"{"pattern":"x"}"#, None)
+            .is_none());
+    }
+
+    #[test]
+    fn external_modification_busts_the_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("watched.rs");
+        std::fs::write(&file, "version one!!!!").unwrap();
+        let args = r#"{"path":"watched.rs"}"#;
+        let work_dir = Some(dir.path());
+        let cache = RepetitionCacheHandle::default();
+        cache.store(
+            "read_file",
+            args,
+            &ToolOutput {
+                content: "version one!!!!".into(),
+                images: Vec::new(),
+            },
+            false,
+            work_dir,
+        );
+        assert!(cache.lookup("read_file", args, work_dir).is_some());
+        // External edit (different size forces detection even on filesystems
+        // with coarse mtime granularity).
+        std::fs::write(&file, "version two, changed").unwrap();
+        assert!(
+            cache.lookup("read_file", args, work_dir).is_none(),
+            "externally modified file must re-execute"
+        );
+    }
+
+    #[test]
+    fn deleted_file_busts_the_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("gone.rs");
+        std::fs::write(&file, "here").unwrap();
+        let args = r#"{"path":"gone.rs"}"#;
+        let work_dir = Some(dir.path());
+        let cache = RepetitionCacheHandle::default();
+        cache.store(
+            "read_file",
+            args,
+            &ToolOutput {
+                content: "here".into(),
+                images: Vec::new(),
+            },
+            false,
+            work_dir,
+        );
+        std::fs::remove_file(&file).unwrap();
+        assert!(cache.lookup("read_file", args, work_dir).is_none());
     }
 
     #[tokio::test]
