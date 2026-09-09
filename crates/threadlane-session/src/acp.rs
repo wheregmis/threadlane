@@ -1653,6 +1653,18 @@ pub struct AcpAgentRecord {
     pub status: AcpAgentStatus,
 }
 
+/// Settings one agent offers, read without opening a user-visible
+/// conversation. A failed agent carries the error and no options, so the
+/// picker can keep serving a previous successful load while settings shows
+/// why the fresh attempt failed.
+#[derive(Debug, Clone)]
+pub struct AcpPreloadedModels {
+    pub agent_id: String,
+    pub agent_name: String,
+    pub options: Vec<AcpConfigOption>,
+    pub error: Option<String>,
+}
+
 /// Discovers configured ACP agents and probes them for availability.
 pub struct AcpManager {
     global_dir: Option<PathBuf>,
@@ -1721,6 +1733,50 @@ impl AcpManager {
 
     pub async fn records(&self) -> Vec<AcpAgentRecord> {
         self.agents.lock().await.clone()
+    }
+
+    /// Opens one throwaway session per enabled agent and snapshots the
+    /// settings it offers (chiefly its models), then shuts the session down.
+    ///
+    /// Like [`Self::discover_and_connect`] this runs with [`AcpProbeClient`],
+    /// so an agent that issues filesystem or permission requests during
+    /// `initialize`/`session/new` is refused rather than handed access to the
+    /// current directory. The result seeds a shared cache: the picker can
+    /// offer a cached agent's models before any session's engine connects,
+    /// and each session's `AcpEngine` still opens its own conversation when
+    /// the user picks the agent or sends the first turn.
+    pub async fn preload_models(&self) -> Vec<AcpPreloadedModels> {
+        let mut preloaded = Vec::new();
+        for config in self.configs().into_iter().filter(|config| config.enabled) {
+            let handler: Arc<dyn AcpClientHandler> = Arc::new(AcpProbeClient);
+            // The session is discarded after the snapshot; root it at the
+            // project when there is one so project-scoped agents resolve the
+            // same working directory a real turn would use.
+            let cwd = self
+                .project_root
+                .clone()
+                .or_else(|| self.global_dir.clone())
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+            match AcpSession::start(&config, &cwd, handler).await {
+                Ok(session) => {
+                    let entry = AcpPreloadedModels {
+                        agent_id: config.id.clone(),
+                        agent_name: session.agent().agent_display_name(),
+                        options: session.config_options(),
+                        error: None,
+                    };
+                    session.shutdown().await;
+                    preloaded.push(entry);
+                }
+                Err(error) => preloaded.push(AcpPreloadedModels {
+                    agent_id: config.id.clone(),
+                    agent_name: config.name.clone(),
+                    options: Vec::new(),
+                    error: Some(error),
+                }),
+            }
+        }
+        preloaded
     }
 
     /// Completes a handshake and terminates the process.

@@ -19,6 +19,7 @@ impl AssetSource for Assets {
             }
             "icons/providers/acp.svg" => Some(include_bytes!("../assets/icons/providers/acp.svg")),
             "icons/effort.svg" => Some(include_bytes!("../assets/icons/effort.svg")),
+            "icons/archive.svg" => Some(include_bytes!("../assets/icons/archive.svg")),
             "icons/tabs/trajectory.svg" => {
                 Some(include_bytes!("../assets/icons/tabs/trajectory.svg"))
             }
@@ -47,6 +48,7 @@ impl AssetSource for Assets {
                 "icons/providers/opencode.svg",
                 "icons/providers/acp.svg",
                 "icons/effort.svg",
+                "icons/archive.svg",
                 "icons/tabs/trajectory.svg",
                 "icons/tabs/chat.svg",
                 "icons/tabs/editor.svg",

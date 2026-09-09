@@ -4321,16 +4321,28 @@ impl ChatListView {
         // Selecting an ACP agent picks the *agent*; the agent then runs one of
         // its own models. Both are "which model am I on", so both belong in
         // this one control rather than split across two.
-        let acp_model_option = threadlane_session::is_acp_model(&selected_model)
-            .then(|| {
-                threadlane_session::config_option_for(
-                    self.model.read(cx).active_acp_config_options(),
-                    threadlane_session::ACP_CONFIG_CATEGORY_MODEL,
-                )
-                .cloned()
-            })
-            .flatten();
-        let acp_model_menu_model = self.model.clone();
+        // Per-agent model settings behind each "External agents" row: live
+        // options for the selected agent, launch-time cache for the rest, so
+        // every agent's models are visible before it is picked.
+        let acp_model_sections: HashMap<String, Vec<threadlane_session::AcpConfigOption>> = {
+            let state = self.model.read(cx);
+            let mut sections = HashMap::new();
+            for option in &model_options {
+                if option.provider != crate::model_catalog::ModelProvider::Acp {
+                    continue;
+                }
+                let Some(agent_id) = threadlane_session::acp_agent_id(&option.id) else {
+                    continue;
+                };
+                let options = if option.id == selected_model {
+                    state.active_acp_config_options()
+                } else {
+                    crate::model_catalog::cached_acp_config_options(agent_id)
+                };
+                sections.insert(agent_id.to_string(), options);
+            }
+            sections
+        };
         let model_for_picker = self.model.clone();
         let queue_model = self.model.clone();
         let steer_model = self.model.clone();
@@ -4727,6 +4739,7 @@ impl ChatListView {
             model_picker
         };
         let selected_model_for_picker = selected_model.clone();
+        let submenu_click_model = self.model.clone();
         let model_picker = model_picker.dropdown_menu(move |menu, _window, _cx| {
             let menu = menu.check_side(gpui_component::Side::Right);
             let mut previous_provider = None;
@@ -4739,64 +4752,143 @@ impl ChatListView {
                         previous_provider = Some(option.provider);
                         menu.item(PopupMenuItem::label(option.provider.label()))
                     };
-                    let model = model_for_picker.clone();
+                    if option.provider != crate::model_catalog::ModelProvider::Acp {
+                        let model = model_for_picker.clone();
+                        let is_current = option.id == selected_model_for_picker;
+                        let label = if is_current {
+                            format!("{} · Current", option.label)
+                        } else {
+                            option.label
+                        };
+                        return menu.item(
+                            PopupMenuItem::new(label)
+                                .icon(Icon::default().path(option.provider.icon_path()))
+                                .checked(is_current)
+                                .on_click(move |_event, _window, cx| {
+                                    model.update(cx, |state, cx| {
+                                        controller::dispatch(
+                                            state,
+                                            AppAction::SelectModel(option.id.to_string()),
+                                        );
+                                        cx.notify();
+                                    });
+                                }),
+                        );
+                    }
+                    // External agents list their own models inline, fed by the
+                    // shared launch-time cache until this session's engine
+                    // connects. Picking one selects the agent and applies the
+                    // model in a single gesture — no hover, no pre-select.
+                    let agent_key = threadlane_session::acp_agent_id(&option.id)
+                        .unwrap_or_default()
+                        .to_string();
+                    let agent_options =
+                        acp_model_sections.get(&agent_key).cloned().unwrap_or_default();
+                    let agent_setting = threadlane_session::config_option_for(
+                        &agent_options,
+                        threadlane_session::ACP_CONFIG_CATEGORY_MODEL,
+                    )
+                    .cloned();
                     let is_current = option.id == selected_model_for_picker;
-                    let label = if is_current {
+                    let agent_label = if is_current {
                         format!("{} · Current", option.label)
                     } else {
-                        option.label
+                        option.label.clone()
                     };
-                    menu.item(
-                        PopupMenuItem::new(label)
+                    let select_model = submenu_click_model.clone();
+                    let select_id = option.id.clone();
+                    let menu = menu.item(
+                        PopupMenuItem::new(agent_label)
                             .icon(Icon::default().path(option.provider.icon_path()))
                             .checked(is_current)
                             .on_click(move |_event, _window, cx| {
-                                model.update(cx, |state, cx| {
+                                select_model.update(cx, |state, cx| {
                                     controller::dispatch(
                                         state,
-                                        AppAction::SelectModel(option.id.to_string()),
+                                        AppAction::SelectModel(select_id.clone()),
                                     );
                                     cx.notify();
                                 });
                             }),
-                    )
+                    );
+                    match agent_setting {
+                        Some(setting) => {
+                            let current = setting.current_value().map(str::to_string);
+                            let config_id = setting.id.clone();
+                            setting.options.into_iter().fold(
+                                menu,
+                                |menu, choice| {
+                                    let click_model = submenu_click_model.clone();
+                                    let select_id = option.id.clone();
+                                    let config_id = config_id.clone();
+                                    let value = choice.value.clone();
+                                    // Only the selected agent's live state can
+                                    // mark a current model; cached currents may
+                                    // be stale, so other agents show none.
+                                    let checked = is_current
+                                        && current.as_deref() == Some(choice.value.as_str());
+                                    let label = if checked {
+                                        format!("{} · Current", choice.name)
+                                    } else {
+                                        choice.name.clone()
+                                    };
+                                    menu.item(
+                                        PopupMenuItem::new(label).checked(checked).on_click(
+                                            move |_event, _window, cx| {
+                                                click_model.update(cx, |state, cx| {
+                                                    controller::dispatch(
+                                                        state,
+                                                        AppAction::SelectModel(
+                                                            select_id.clone(),
+                                                        ),
+                                                    );
+                                                    controller::dispatch(
+                                                        state,
+                                                        AppAction::SetAcpConfigOption {
+                                                            config_id: config_id.clone(),
+                                                            value: value.clone(),
+                                                        },
+                                                    );
+                                                    cx.notify();
+                                                });
+                                            },
+                                        ),
+                                    )
+                                },
+                            )
+                        }
+                        None => {
+                            let reason = crate::model_catalog::cached_acp_error(&agent_key)
+                                .map(|error| {
+                                    let short: String = error.chars().take(120).collect();
+                                    if error.chars().count() > 120 {
+                                        format!("{short}…")
+                                    } else {
+                                        short
+                                    }
+                                })
+                                .unwrap_or_else(|| {
+                                    format!("Connecting to {}…", option.label)
+                                });
+                            let settings_model = submenu_click_model.clone();
+                            menu.item(PopupMenuItem::new(reason).disabled(true)).item(
+                                PopupMenuItem::new("Check Settings → ACP Agents").on_click(
+                                    move |_event, _window, cx| {
+                                        settings_model.update(cx, |state, cx| {
+                                            controller::dispatch(
+                                                state,
+                                                AppAction::OpenSettings,
+                                            );
+                                            cx.notify();
+                                        });
+                                    },
+                                ),
+                            )
+                        }
+                    }
                 },
             );
-            let Some(acp_model) = acp_model_option.as_ref() else {
-                return menu;
-            };
-            let current = acp_model.current_value();
-            let config_id = acp_model.id.clone();
-            let menu = menu
-                .item(PopupMenuItem::separator())
-                .item(PopupMenuItem::label(acp_model.name.clone()));
-            acp_model.options.iter().fold(menu, |menu, choice| {
-                let model = acp_model_menu_model.clone();
-                let config_id = config_id.clone();
-                let value = choice.value.clone();
-                let is_current = current == Some(choice.value.as_str());
-                let label = if is_current {
-                    format!("{} · Current", choice.name)
-                } else {
-                    choice.name.clone()
-                };
-                menu.item(
-                    PopupMenuItem::new(label)
-                        .checked(is_current)
-                        .on_click(move |_event, _window, cx| {
-                            model.update(cx, |state, cx| {
-                                controller::dispatch(
-                                    state,
-                                    AppAction::SetAcpConfigOption {
-                                        config_id: config_id.clone(),
-                                        value: value.clone(),
-                                    },
-                                );
-                                cx.notify();
-                            });
-                        }),
-                )
-            })
+            menu
         });
 
         let effort_model = self.model.clone();

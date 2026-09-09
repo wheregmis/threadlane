@@ -188,6 +188,125 @@ fn merge_discovered_opencode_models(models: &mut Vec<ModelOption>) {
     }
 }
 
+/// Launch-time snapshot of one external agent's settings, read without
+/// opening a conversation. The picker serves these before any session's
+/// engine connects, so switching sessions never re-asks the agent what it
+/// offers. A failed agent keeps its error beside (possibly empty) options:
+/// revalidation runs in the background and must not take away a previous
+/// successful load.
+#[derive(Clone, Debug)]
+pub struct CachedAcpAgentModels {
+    pub agent_id: String,
+    pub agent_name: String,
+    pub options: Vec<threadlane_session::AcpConfigOption>,
+    pub error: Option<String>,
+}
+
+static CACHED_ACP_MODELS: std::sync::OnceLock<
+    std::sync::Mutex<(std::time::Instant, Vec<CachedAcpAgentModels>)>,
+> = std::sync::OnceLock::new();
+
+/// Opens every enabled external agent once and caches the settings each
+/// offers. Skips the spawns when the cache is still fresh; a failed agent
+/// keeps its previous options with the fresh error attached.
+pub async fn refresh_acp_models(project_root: Option<std::path::PathBuf>) {
+    let fresh = CACHED_ACP_MODELS
+        .get()
+        .and_then(|cache| cache.lock().ok())
+        .is_some_and(|guard| guard.0.elapsed() < std::time::Duration::from_secs(5 * 60));
+    if fresh {
+        return;
+    }
+    let manager = threadlane_session::AcpManager::new(
+        threadlane_session::default_global_threadlane_dir(),
+        project_root,
+    );
+    // ACP spawns agent subprocesses through `tokio::process`, which needs a
+    // Tokio reactor. GPUI background tasks run on GPUI's own executor, so
+    // hop onto the shared runtime and await the join handle back here.
+    // A join failure leaves the previous cache (and its timestamp) alone.
+    let preloaded = match threadlane_runtime::get_runtime()
+        .spawn(async move { manager.preload_models().await })
+        .await
+    {
+        Ok(preloaded) => preloaded,
+        Err(error) => {
+            tracing::warn!("external-agent model preload task failed: {error}");
+            return;
+        }
+    };
+    let mut cached: Vec<CachedAcpAgentModels> = preloaded
+        .into_iter()
+        .map(|preloaded| CachedAcpAgentModels {
+            agent_id: preloaded.agent_id,
+            agent_name: preloaded.agent_name,
+            options: preloaded.options,
+            error: preloaded.error,
+        })
+        .collect();
+    cached.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+    if let Some(cache) = CACHED_ACP_MODELS
+        .get_or_init(|| std::sync::Mutex::new((std::time::Instant::now(), Vec::new())))
+        .lock()
+        .ok()
+    {
+        let mut guard = cache;
+        guard.0 = std::time::Instant::now();
+        guard.1 = cached;
+    }
+}
+
+/// Refreshes the cached external-agent settings, then rebuilds the picker's
+/// model list. Call from a background task at startup and whenever the
+/// active project changes.
+pub async fn refresh_acp_models_and_update(
+    model: gpui::Entity<crate::state::AppState>,
+    cx: &mut gpui::AsyncApp,
+    project_root: Option<std::path::PathBuf>,
+) {
+    refresh_acp_models(project_root).await;
+    let _ = cx.update(|cx| {
+        model.update(cx, |state, cx| {
+            state.refresh_available_models();
+            cx.notify();
+        })
+    });
+}
+
+/// Cached settings for one external agent, if a launch-time (or later)
+/// background refresh has seen it. Served even while a fresh validation is
+/// failing: the picker must not lose models it already showed.
+pub fn cached_acp_config_options(agent_id: &str) -> Vec<threadlane_session::AcpConfigOption> {
+    CACHED_ACP_MODELS
+        .get()
+        .and_then(|cache| cache.lock().ok())
+        .and_then(|guard| {
+            guard
+                .1
+                .iter()
+                .find(|cached| cached.agent_id == agent_id)
+                .map(|cached| cached.options.clone())
+        })
+        .unwrap_or_default()
+}
+
+/// Latest background-validation error for one external agent, if the last
+/// refresh saw it fail. The picker shows this instead of silently omitting
+/// the agent's models; the models themselves keep coming from
+/// [`cached_acp_config_options`].
+pub fn cached_acp_error(agent_id: &str) -> Option<String> {
+    CACHED_ACP_MODELS
+        .get()
+        .and_then(|cache| cache.lock().ok())
+        .and_then(|guard| {
+            guard
+                .1
+                .iter()
+                .find(|cached| cached.agent_id == agent_id)
+                .and_then(|cached| cached.error.clone())
+        })
+}
+
 fn provider_for_id(id: &str, declared: Option<&str>) -> ModelProvider {
     match declared.unwrap_or_default().to_ascii_lowercase().as_str() {
         "openai" => ModelProvider::OpenAi,

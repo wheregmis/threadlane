@@ -340,6 +340,16 @@ impl SettingsView {
         if let Err(error) = settings::probe_acp_agents(project, self.settings_tx.clone()) {
             self.capability_status = Some(error);
         }
+        // Keep the shared model cache warm while the status probe runs: the
+        // picker in any session serves these without spawning its own agent.
+        // The cache TTL makes repeat visits cheap.
+        let cache_model = self.model.clone();
+        let cache_project = self.active_project(cx);
+        cx.spawn(async move |_view, cx| {
+            crate::model_catalog::refresh_acp_models_and_update(cache_model, cx, cache_project)
+                .await;
+        })
+        .detach();
     }
 
     /// Renders the muted "no items" placeholder shared by the extension,

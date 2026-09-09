@@ -437,6 +437,21 @@ impl WorkspaceView {
                     .await;
             })
             .detach();
+            // Connect each external agent once in the background and cache
+            // the models it offers, so every session's picker can offer them
+            // before its own engine spawns. Revalidation stays here: a
+            // failing agent keeps its cached models while settings shows why.
+            let acp_model = view.model.clone();
+            let acp_project = view.model.read(cx).active_work_dir.clone();
+            cx.spawn(async move |_view, cx| {
+                crate::model_catalog::refresh_acp_models_and_update(
+                    acp_model,
+                    cx,
+                    acp_project,
+                )
+                .await;
+            })
+            .detach();
         });
 
         let view_handle = view.downgrade();
