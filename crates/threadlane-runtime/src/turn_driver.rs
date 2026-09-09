@@ -16,6 +16,7 @@ use crate::provider::{
     ProviderBoundaryPreparer, ProviderBoundaryRequest, ProviderBoundaryResult, ProviderTraceEvent,
     ProviderTraceRecorder,
 };
+use crate::loop_detector::LoopDetector;
 use crate::rules::{StreamRule, StreamRuleMonitor};
 use crate::tool_dispatcher::ToolDispatcher;
 use crate::types::{AgentMessage, TokenUsage, ToolExecutionMode, TurnState};
@@ -181,6 +182,12 @@ impl<'a> TurnDriver<'a> {
         let mut stream_rule_recovery_attempted = false;
         let mut provider_fallback_attempted = false;
         let mut effective_model_override: Option<String> = None;
+        let mut loop_detector = LoopDetector::new(
+            self.config.loop_guard_enabled,
+            self.config.loop_identical_limit,
+            self.config.loop_pingpong_rounds,
+            self.config.loop_error_limit,
+        );
 
         'turns: loop {
             turn_number += 1;
@@ -923,6 +930,45 @@ impl<'a> TurnDriver<'a> {
                 turn_number,
                 tool_results: tool_results.clone(),
             });
+
+            // Loop circuit breaker: feed executed calls in order and stop
+            // terminally on repetition tripwires. Checked before the normal
+            // terminate break so a looping run reports the loop, not success.
+            let mut trip = None;
+            for (call, result) in captured_tool_calls.iter().zip(tool_results.iter()) {
+                if let Some(tripped) = loop_detector.observe(
+                    &call.function.name,
+                    &call.function.arguments,
+                    &result.content,
+                    result.is_error,
+                ) {
+                    trip = Some(tripped);
+                    break;
+                }
+            }
+            if let Some(trip) = trip {
+                let message = trip.message();
+                let assistant_msg = AgentMessage::Assistant {
+                    content: Some(message.clone()),
+                    tool_calls: None,
+                    stop_reason: Some("loop_guard".into()),
+                    deferred_handle: None,
+                };
+                if let Err(error) = self.persist_messages(&[assistant_msg.clone()]).await {
+                    self.emit_event(AgentEvent::AgentError {
+                        error: format!("failed to persist loop-guard message: {error}"),
+                    });
+                    return total_usage;
+                }
+                self.turn.lock().await.messages.push(assistant_msg);
+                self.emit_event(AgentEvent::StreamRuleTriggered {
+                    rule_id: "loop-guard".into(),
+                    rule_name: trip.rule_name().into(),
+                    matched_text: trip.message(),
+                    reminder: message,
+                });
+                break;
+            }
 
             if tool_results.iter().any(|r| r.terminate) {
                 break;

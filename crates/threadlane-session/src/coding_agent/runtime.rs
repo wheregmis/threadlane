@@ -2067,7 +2067,14 @@ mod compaction_sync_tests {
                 work_dir: dir.path().to_path_buf(),
                 session_file: Some(path.clone()),
                 system_prompt: SystemPromptConfig::default(),
-                agent_config: Some(AgentConfig::default()),
+                // This synthetic provider repeats one identical call 101
+                // times to stress compaction; the loop guard would rightly
+                // trip it in production, so it stays off here.
+                agent_config: Some(
+                    threadlane_runtime::AgentConfig::builder()
+                        .loop_guard_enabled(false)
+                        .build(),
+                ),
                 coding_config: None,
             browser: BrowserBridge::unavailable(),
             },
