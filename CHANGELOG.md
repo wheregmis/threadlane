@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.1.11](https://github.com/wheregmis/threadlane/compare/v0.1.10...v0.1.11) (2026-09-09)
+
+
+### Features
+
+* Add browser tools and question controls ([f8d00e9](https://github.com/wheregmis/threadlane/commit/f8d00e93028d4ea0239fbd6aac060920b2a047ba))
+* Add live computer-use mirror ([286c7c5](https://github.com/wheregmis/threadlane/commit/286c7c5e0871a0876edded682b9b6d7b5977d97a))
+* Attach screenshots to tool results ([45b42a9](https://github.com/wheregmis/threadlane/commit/45b42a9f48f40d3134160aff33278ed063bf70fa))
+* Computer Use and Embedded Browser ([a9bc1fa](https://github.com/wheregmis/threadlane/commit/a9bc1fafb25dd295541b9a4371aca4991efeb207))
+* **computer:** Add live frame polling ([236865c](https://github.com/wheregmis/threadlane/commit/236865cfb1a6436754767ee740cefd050e85d691))
+* **github:** Add project-scoped issue views ([3ce0366](https://github.com/wheregmis/threadlane/commit/3ce0366b7a27e74ae0a486ba6432f208ae930d64))
+* **gpui:** Improve control tooltips and loading states ([a0a9755](https://github.com/wheregmis/threadlane/commit/a0a9755a64c967909ec37a76a768457b7b349986))
+* **runtime:** Add tool loop guardrails ([9129d28](https://github.com/wheregmis/threadlane/commit/9129d2850fa338fa0e507d44453194e8d6196514))
+* **runtime:** Cache repeated tool reads per turn ([3cc4e47](https://github.com/wheregmis/threadlane/commit/3cc4e47a4514803ee3bc06b5654bf0eb684d7881))
+* **runtime:** Preserve failures and bust caches ([9bab533](https://github.com/wheregmis/threadlane/commit/9bab5334a129600c3b1966d69d07217b3c09de66))
+* Support targeted background computer input ([7a9c386](https://github.com/wheregmis/threadlane/commit/7a9c386120c8d9326173c68bcecbda350a9c84f0))
+
+
+### Bug Fixes
+
+* clarify computer-use approval and verification guidance ([346bc10](https://github.com/wheregmis/threadlane/commit/346bc1011b3d49b4ed029b1f4a880622518d74bc))
+* **gpui:** improve empty states and accessibility ([24809df](https://github.com/wheregmis/threadlane/commit/24809df6cd2fedd4dbbee69c69da589242d25843))
+* Improve computer-use capture handling ([6904b25](https://github.com/wheregmis/threadlane/commit/6904b2505512f9fb9b3aa033cd72ec6a497b51ec))
+* Preserve update notice dismissal state ([35084e5](https://github.com/wheregmis/threadlane/commit/35084e5955e193d81ea408f7aa329959dfdee4f6))
+
 ## [0.1.10](https://github.com/wheregmis/threadlane/compare/v0.1.9...v0.1.10) (2026-09-07)
 
 
