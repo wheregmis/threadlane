@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.1.12](https://github.com/wheregmis/threadlane/compare/v0.1.11...v0.1.12) (2026-09-09)
+
+
+### Features
+
+* **github:** automate issue branch push and draft PR creation ([50c88b1](https://github.com/wheregmis/threadlane/commit/50c88b192011a9441995f2b5c59ee1ac7c3a82fa))
+* **github:** automate issue branch push and draft PR creation ([06f0a13](https://github.com/wheregmis/threadlane/commit/06f0a13aa60765175cb8e4d14357bb3ee1f4fe9c))
+* **gpui:** preload ACP agent models and polish session archive button ([480364d](https://github.com/wheregmis/threadlane/commit/480364dda8206f9a2f28d7487cf20ce4b00fc176))
+* **gpui:** preload ACP agent models and polish session archive button ([aede862](https://github.com/wheregmis/threadlane/commit/aede8627fe822ef3596264722dc9ea4dfc2d9a67))
+
+
+### Bug Fixes
+
+* **github:** safely publish issue draft PRs ([8ff994c](https://github.com/wheregmis/threadlane/commit/8ff994c1f7309392b815b3b7c84d00ffd15a6fd2))
+* **gpui:** make ACP model picker scrollable ([658120b](https://github.com/wheregmis/threadlane/commit/658120b757395382cc45b640fa6f04dd5456a543))
+* **gpui:** unify tooltips, header tokens, and type scale ([d1c56a6](https://github.com/wheregmis/threadlane/commit/d1c56a671dcb7c30f991472a4e54d017e057eb5b))
+
+
+### Maintenance
+
+* **deps:** bump core-graphics from 0.24.0 to 0.25.0 ([b40a75d](https://github.com/wheregmis/threadlane/commit/b40a75da7af54eafc93a1123b3588ff8cda43cf1))
+* **deps:** bump core-graphics from 0.24.0 to 0.25.0 ([55f22dc](https://github.com/wheregmis/threadlane/commit/55f22dc26266988705862a3e1210fcc04cefe032))
+* **deps:** bump dirs from 6.0.0 to 7.0.0 ([80f9eb0](https://github.com/wheregmis/threadlane/commit/80f9eb05f02d96ebfadc47af6f2671c4c4d99c08))
+* **deps:** bump dirs from 6.0.0 to 7.0.0 ([d93e6ec](https://github.com/wheregmis/threadlane/commit/d93e6ec66f0386c691d1df616525845e1ce2b4da))
+* **deps:** bump gpui-component from `4833601` to `382fc28` ([29138a3](https://github.com/wheregmis/threadlane/commit/29138a367a19fcbcbe0eae7e029a7c50d1adc775))
+* **deps:** bump gpui-component from `4833601` to `382fc28` ([a3423be](https://github.com/wheregmis/threadlane/commit/a3423be359df308799e9378e00cec2d2838fda8d))
+* **deps:** bump wasmi from 1.1.0 to 2.0.0 ([9e04359](https://github.com/wheregmis/threadlane/commit/9e0435969a8796fde998ab5c9c8618afd0f17405))
+* **deps:** bump wasmi from 1.1.0 to 2.0.0 ([32c13a0](https://github.com/wheregmis/threadlane/commit/32c13a0e08127451c00cac76095c39aa0bf800a7))
+
 ## [0.1.11](https://github.com/wheregmis/threadlane/compare/v0.1.10...v0.1.11) (2026-09-09)
 
 
