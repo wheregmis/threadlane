@@ -96,12 +96,21 @@ impl CodingAgent {
     }
 
     async fn run_scheduled_agent_work(&mut self) {
-        while self
-            .agent_work
-            .run_executor(&mut self.agent, self.session_file.as_deref())
-            .await
-        {
-            self.sync_harness_and_dispatch_assistant_hooks().await;
+        // Extension follow-ups are queued through the same scheduler as native
+        // work. ACP agents own their conversation, so routing those messages
+        // through `AgentRuntime::run_follow_up` would send them to the
+        // configured OpenAI provider instead of back to the ACP process.
+        let model = self.agent.model();
+        if let Some(agent_id) = crate::acp_bridge::acp_agent_id(&model) {
+            let _ = self.run_queued_acp_work(agent_id).await;
+        } else {
+            while self
+                .agent_work
+                .run_executor(&mut self.agent, self.session_file.as_deref())
+                .await
+            {
+                self.sync_harness_and_dispatch_assistant_hooks().await;
+            }
         }
     }
 
