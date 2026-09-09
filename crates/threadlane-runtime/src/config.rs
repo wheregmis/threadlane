@@ -83,7 +83,7 @@ pub struct AgentConfig {
 
     /// When enabled, restricts the model-visible JSON tool schema to the essential core tools
     /// (read_file, edit_file_hashline, edit_files_hashline, write_file, run_command, subagent,
-    /// plus the browser_* panel tools).
+    /// plus the browser_* panel and computer_* native tools).
     /// Auxiliary tools remain executable directly or via the in-process `dyn` CLI.
     #[serde(default = "default_core_tool_schema_mode")]
     pub(crate) core_tool_schema_mode: bool,

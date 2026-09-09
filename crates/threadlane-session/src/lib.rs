@@ -3,6 +3,7 @@ pub mod acp_bridge;
 pub mod acp_runtime;
 pub mod agents;
 pub mod browser;
+pub mod computer;
 pub mod commands;
 pub mod config;
 pub mod context;

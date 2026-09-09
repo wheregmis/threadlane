@@ -111,6 +111,13 @@ const CORE_TOOL_NAMES: &[&str] = &[
     "browser_snapshot",
     "browser_act",
     "browser_evaluate_script",
+    // Native computer use (threadlane-session/src/computer.rs). Every
+    // screenshot and input action re-prompts for approval, so the schemas
+    // are safe to advertise; unattended sessions deny at execution.
+    "computer_status",
+    "computer_windows",
+    "computer_screenshot",
+    "computer_act",
 ];
 
 impl ToolDispatcher {

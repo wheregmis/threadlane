@@ -116,7 +116,6 @@ struct TerminalGroup {
     active_tab: usize,
 }
 
-
 fn git_result_matches_active(requested: &Path, active: &Path) -> bool {
     requested == active
 }
@@ -171,18 +170,19 @@ impl WorkspaceView {
         cx: &mut AsyncApp,
     ) {
         cx.spawn(async move |cx| {
-            let runtime_task = request
-                .runtime_options
-                .clone()
-                .map(|(work_dir, model, roles, browser)| {
-                    let session_file = request.session_file.clone();
-                    cx.background_executor().spawn(async move {
-                        SessionRuntime::new(
-                            coding_agent_options(work_dir, session_file, model, roles, browser),
-                            ExecutionMode::Interactive,
-                        )
-                    })
-                });
+            let runtime_task =
+                request
+                    .runtime_options
+                    .clone()
+                    .map(|(work_dir, model, roles, browser)| {
+                        let session_file = request.session_file.clone();
+                        cx.background_executor().spawn(async move {
+                            SessionRuntime::new(
+                                coding_agent_options(work_dir, session_file, model, roles, browser),
+                                ExecutionMode::Interactive,
+                            )
+                        })
+                    });
             if request.reload_messages {
                 let history_file = request.session_file.clone();
                 let history = cx
@@ -416,11 +416,8 @@ impl WorkspaceView {
             // `opencode-go/*` models appear in the picker without a restart.
             let discovery_model = view.model.clone();
             cx.spawn(async move |_view, cx| {
-                crate::model_catalog::refresh_discovered_models_and_update(
-                    discovery_model,
-                    cx,
-                )
-                .await;
+                crate::model_catalog::refresh_discovered_models_and_update(discovery_model, cx)
+                    .await;
             })
             .detach();
         });
@@ -530,12 +527,7 @@ impl WorkspaceView {
         group
     }
 
-    fn add_terminal_tab(
-        &mut self,
-        project: PathBuf,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn add_terminal_tab(&mut self, project: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let terminal = cx.new(|cx| TerminalView::new(project.clone(), cx));
         terminal.read(cx).focus_handle(cx).focus(window, cx);
         let group = self
@@ -1649,7 +1641,11 @@ impl Render for WorkspaceView {
                                         move |_event, window, cx| {
                                             if let Some(project) = &n_proj {
                                                 n_view.update(cx, |this, cx| {
-                                                    this.add_terminal_tab(project.clone(), window, cx);
+                                                    this.add_terminal_tab(
+                                                        project.clone(),
+                                                        window,
+                                                        cx,
+                                                    );
                                                 });
                                             }
                                         },

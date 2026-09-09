@@ -505,6 +505,7 @@ pub(crate) fn build_broker_dispatcher(
     Arc<CapabilityDispatcher>,
     ManagedProcessRegistry,
     PermissionHandle,
+    Arc<PermissionManager>,
 ) {
     let allowed_hosts: Arc<HashSet<String>> = Arc::new(
         std::env::var("THREADLANE_NETWORK_ALLOW_HOSTS")
@@ -540,7 +541,12 @@ pub(crate) fn build_broker_dispatcher(
             }),
         );
     }
-    (Arc::new(dispatcher), managed_processes, permission_handle)
+    (
+        Arc::new(dispatcher),
+        managed_processes,
+        permission_handle,
+        permissions,
+    )
 }
 
 pub(crate) async fn dispatch_hook_requests(

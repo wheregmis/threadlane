@@ -11,6 +11,7 @@ use super::capabilities::{
     McpCapability, PlanCapability, PrewalkCapability, QuestionCapability, SkillCapability,
     SubagentCapability, WasiCapability,
 };
+use crate::computer::ComputerCapability;
 use super::harness::{CodingSessionHarness, HarnessWatch, InterruptedSubagentRecoveryState};
 use crate::commands::{execute_slash_command, parse_slash_command, CommandAction};
 use crate::context::ProjectContext;
@@ -529,7 +530,8 @@ impl CodingAgent {
                 }))
             })
         });
-        let (broker_dispatcher, managed_processes, permission_handle) = build_broker_dispatcher(
+        let (broker_dispatcher, managed_processes, permission_handle, permissions) =
+            build_broker_dispatcher(
             tool_policy.clone(),
             wasi_extensions.clone(),
             true,
@@ -578,6 +580,9 @@ impl CodingAgent {
         }));
         registry.register(Box::new(BrowserCapability {
             bridge: options.browser.clone(),
+        }));
+        registry.register(Box::new(ComputerCapability {
+            permissions: Some(permissions.clone()),
         }));
         let (_wired, errors) = registry.wire_all(&mut agent.tool_dispatcher, &agent.hook_registry);
         for error in &errors {

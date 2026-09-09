@@ -146,6 +146,12 @@ A normal `cargo run` may be unsuitable for testing installation: update installa
 - Skills are toggled per project, not globally. `SkillSettings` persists disabled skill IDs in `<project>/.threadlane/skills.json`; skill discovery (`Discovery::finish`) applies those overrides so a disabled skill stays visible in the settings list with `enabled: false` but is excluded from the model catalog and rejected by `load_skill`.
 - A toggle must clear `capability_cache`, refresh the capabilities chip / slash commands via `refresh_project_capabilities`, and call `refresh_live_session_skills` so running sessions re-discover skills. `CodingAgent::refresh_skills` swaps the shared `SkillRegistry` `Arc`; note the already-registered `LoadSkillToolExecutor` holds the previous `Arc`, so an in-flight session keeps the catalog from its creation and a fresh session fully reflects the toggle.
 
+### Native Computer Use
+
+- `crates/threadlane-session/src/computer.rs` owns macOS window listing (`core-graphics` `CGWindowList`), screenshots (`screencapture` CLI into `<work_dir>/.threadlane/previews/`), and input (`CGEvent` post). It needs no UI-thread bridge: system calls run in `spawn_blocking` from the async executor.
+- Every screenshot and input action re-prompts through `PermissionManager::request_computer` (capability `computer`) unless the user allowed always, which persists one project-scoped `computer_allowed` flag in `.threadlane/permissions.json` next to the network host grants. Unattended sessions deny. New tools join `CORE_TOOL_NAMES` only with this approval gate in place. Threadlane's own windows (own PID) are hidden from `computer_windows` so the agent cannot drive its own approval UI in a loop.
+- Tool results are text-only in the provider-neutral loop, so screenshots reach the user as files while the model receives path/dimensions metadata. Feeding pixels to the model requires tool-result image support across the provider translations and is intentionally out of scope for text-side computer tools.
+
 ## External ACP Agents
 
 - Threadlane is an Agent Client Protocol *client*: it launches a third-party agent as a subprocess and speaks newline-delimited JSON-RPC 2.0 over its stdio pipes. It is not an ACP agent server, and ACP has no non-stdio transport, so an `AcpAgentConfig` is always a spawnable command.

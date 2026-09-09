@@ -175,6 +175,11 @@ pub(crate) fn build_system_prompt(options: SystemPromptBuildOptions<'_>) -> Stri
                 "To drive the embedded browser panel: open pages with `browser_navigate`, read the page with `browser_snapshot`, then operate elements with `browser_act` using snapshot refs. Refs expire on re-render, so take a fresh snapshot when an act reports a stale ref. Prefer snapshot/act over `browser_evaluate_script`. The panel is visible to the user, so narrate what you open.",
             );
         }
+        if available_tool_names.contains("computer_windows") {
+            add_tool_guideline(
+                "To operate the computer outside the embedded browser: list targets with `computer_windows`, capture context with `computer_screenshot`, then act with `computer_act` using display-pixel coordinates. The first screenshot/input asks the user for approval and they can allow always for the project; denied actions must not be retried verbatim. You receive screenshot metadata only, never pixels — quote coordinates from computer_windows, never guess them. Threadlane's own windows are hidden from you; never try to drive them.",
+            );
+        }
         if available_tool_names.contains("update_plan") {            add_tool_guideline(
                 "For multi-step work, maintain a concise plan with `update_plan`; keep at most one item in progress and skip plans for simple requests.",
             );
@@ -353,6 +358,28 @@ mod tests {
         let with_browser = build(&[tool("browser_navigate", "navigate")]);
         assert!(with_browser.contains("browser_snapshot"));
         assert!(with_browser.contains("browser_act"));
+    }
+
+    #[test]
+    fn computer_guideline_tracks_computer_tools() {
+        let config = SystemPromptConfig::default();
+        let context = ProjectContext::default();
+        let build = |tools: &[AgentToolDefinition]| {
+            build_system_prompt(SystemPromptBuildOptions {
+                config: &config,
+                work_dir: Path::new("/workspace"),
+                tools,
+                project_context: &context,
+                skill_catalog: None,
+                agent_catalog: None,
+                loaded_extension_count: 0,
+            })
+        };
+
+        assert!(!build(&[]).contains("computer_act"));
+        let with_computer = build(&[tool("computer_windows", "windows")]);
+        assert!(with_computer.contains("computer_act"));
+        assert!(with_computer.contains("computer_screenshot"));
     }
 
     #[test]

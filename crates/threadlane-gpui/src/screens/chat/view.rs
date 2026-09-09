@@ -841,7 +841,9 @@ impl ChatListView {
         let (marker, marker_color) = match activity.category.as_str() {
             "Error" => ("!", theme.danger),
             "Working" | "Thinking" => ("◌", theme.primary),
-            "Completed" | "Edited" | "Created" | "Ran" | "Loaded" => ("✓", theme.success),
+            "Completed" | "Edited" | "Created" | "Ran" | "Loaded" | "Explored" => {
+                ("✓", theme.success)
+            }
             _ => ("✓", theme.muted_foreground),
         };
         let model = self.model.clone();
@@ -5053,39 +5055,33 @@ impl ChatListView {
                             }),
                     ),
             )
-            .when(
-                metrics.turns > 0
-                    || metrics.tool_calls > 0
-                    || billed_input_tokens > 0
-                    || metrics.output_tokens > 0
-                    || subagent_count > 0,
-                |this| {
-                    this.child(
-                        div()
-                            .w_full()
-                            .max_w(px(1000.0))
-                            .mx_auto()
-                            .flex()
-                            .justify_center()
-                            .pt_1()
-                            .pb_2()
-                            .px_1()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(format!(
-                                "{} turns · {} tool calls{cache_hit} · {} input / {} output tokens · {} subagents",
-                                metrics.turns,
-                                metrics.tool_calls,
-                                crate::model_catalog::format_tokens(
-                                    billed_input_tokens.min(u64::from(u32::MAX)) as u32
-                                ),
-                                crate::model_catalog::format_tokens(
-                                    metrics.output_tokens.min(u64::from(u32::MAX)) as u32
-                                ),
-                                subagent_count,
-                            )),
-                    )
-                },
+            // Keep this summary mounted even before the first response metrics arrive.
+            // Otherwise the composer gains a new row mid-turn, shifting the transcript and
+            // input as soon as the first tool call or token count is reported.
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(1000.0))
+                    .mx_auto()
+                    .flex()
+                    .justify_center()
+                    .pt_1()
+                    .pb_2()
+                    .px_1()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(format!(
+                        "{} turns · {} tool calls{cache_hit} · {} input / {} output tokens · {} subagents",
+                        metrics.turns,
+                        metrics.tool_calls,
+                        crate::model_catalog::format_tokens(
+                            billed_input_tokens.min(u64::from(u32::MAX)) as u32
+                        ),
+                        crate::model_catalog::format_tokens(
+                            metrics.output_tokens.min(u64::from(u32::MAX)) as u32
+                        ),
+                        subagent_count,
+                    )),
             )
     }
 }
