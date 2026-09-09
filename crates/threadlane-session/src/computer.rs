@@ -830,8 +830,16 @@ impl ComputerToolExecutor {
         if let Some(app) = &targeted.app {
             title = format!("{title} in {app}");
         }
-        self.approve(title.clone(), format!("{title} on this Mac. Deny if the target looks wrong."))
-            .await?;
+        let delivery = if targeted.pid.is_some() {
+            "Background delivery: your cursor and focus stay untouched."
+        } else {
+            "Foreground delivery: the cursor will move and focus may change."
+        };
+        self.approve(
+            title.clone(),
+            format!("{title} on this Mac. {delivery} Deny if the target looks wrong."),
+        )
+        .await?;
         let outcome =
             tokio::task::spawn_blocking(move || perform_act(&targeted.intent, targeted.pid))
                 .await
