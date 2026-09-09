@@ -60,6 +60,7 @@ pub struct RightPanelView {
     git_busy: bool,
     git_message_pending: bool,
     pub(crate) git_feedback: Option<String>,
+    pending_git_notifications: Vec<Notification>,
     branch_popover_open: bool,
     branch_filter_input: Entity<InputState>,
     new_branch_dialog_open: bool,
@@ -261,6 +262,7 @@ impl RightPanelView {
             git_busy: false,
             git_message_pending: false,
             git_feedback: None,
+            pending_git_notifications: Vec::new(),
             branch_popover_open: false,
             branch_filter_input,
             new_branch_dialog_open: false,
@@ -642,9 +644,12 @@ impl RightPanelView {
                     Ok(message) => {
                         self.generated_commit_message = Some(message);
                         self.git_feedback = None;
+                        self.pending_git_notifications
+                            .push(Notification::success("Commit message generated."));
                     }
                     Err(error) => {
-                        self.git_feedback = Some(error);
+                        self.git_feedback = Some(error.clone());
+                        self.pending_git_notifications.push(Notification::error(error));
                     }
                 }
             }
@@ -680,23 +685,26 @@ impl RightPanelView {
                         self.switch_dialog_open = false;
                         self.switch_target_branch = None;
                         self.last_fetched_time = Some(std::time::Instant::now());
-                        self.git_feedback = Some(
-                            action_error
-                                .or_else(|| {
-                                    action_message.map(|message| {
-                                        if message.is_empty() {
-                                            "Pull request created successfully.".into()
-                                        } else {
-                                            format!("Pull request created: {message}")
-                                        }
-                                    })
+                        let message = action_error
+                            .or_else(|| {
+                                action_message.map(|message| {
+                                    if message.is_empty() {
+                                        "Pull request created successfully.".into()
+                                    } else {
+                                        format!("Pull request created: {message}")
+                                    }
                                 })
-                                .unwrap_or_else(|| "Git action completed successfully.".into()),
-                        );
+                            })
+                            .unwrap_or_else(|| "Git action completed successfully.".into());
+                        self.git_feedback = Some(message.clone());
+                        self.pending_git_notifications
+                            .push(Notification::success(message));
                     }
                     Err(status_error) => {
                         self.review_error = Some(status_error.clone());
-                        self.git_feedback = Some(action_error.unwrap_or(status_error));
+                        let message = action_error.unwrap_or(status_error);
+                        self.git_feedback = Some(message.clone());
+                        self.pending_git_notifications.push(Notification::error(message));
                     }
                 }
             }
@@ -2336,16 +2344,6 @@ impl RightPanelView {
                     ),
             )
             .child(Input::new(&self.commit_message_input).disabled(self.git_busy))
-            .children(self.git_feedback.as_ref().map(|feedback| {
-                div()
-                    .rounded_md()
-                    .bg(theme.muted)
-                    .px_2()
-                    .py_1()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(feedback.clone())
-            }))
             .child(
                 div()
                     .flex()
@@ -4199,6 +4197,9 @@ impl RightPanelView {
 impl Render for RightPanelView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_project(cx);
+        for notification in self.pending_git_notifications.drain(..) {
+            window.push_notification(notification, cx);
+        }
         if let Some(message) = self.generated_commit_message.take() {
             self.commit_message_input
                 .update(cx, |input, cx| input.set_value(message, window, cx));
