@@ -909,7 +909,7 @@ impl WorkspaceView {
                 .right(px(16.0))
                 .bottom(px(16.0))
                 .w(px(420.0))
-                .rounded_xl()
+                .rounded_lg()
                 .border_1()
                 .border_color(theme.border)
                 .bg(theme.title_bar)
@@ -1154,7 +1154,7 @@ impl WorkspaceView {
                 div()
                     .id("command-palette-modal")
                     .w(px(560.0))
-                    .rounded_xl()
+                    .rounded_lg()
                     .border_1()
                     .border_color(theme.border)
                     .bg(theme.title_bar)
@@ -1713,7 +1713,7 @@ impl Render for WorkspaceView {
                             .icon(IconName::Plus)
                             .tooltip("New terminal tab")
                             .ghost()
-                            .xsmall()
+                            .small()
                             .on_click(move |_event, window, cx| {
                                 new_view.update(cx, |this, cx| {
                                     this.add_terminal_tab(project.clone(), window, cx)
@@ -1725,7 +1725,7 @@ impl Render for WorkspaceView {
                             .icon(IconName::Undo2)
                             .tooltip("Clear terminal")
                             .ghost()
-                            .xsmall()
+                            .small()
                             .on_click(move |_event, _window, cx| {
                                 active_terminal_clear.update(cx, |t, cx| t.clear(cx));
                             }),
@@ -1735,7 +1735,7 @@ impl Render for WorkspaceView {
                             .icon(IconName::Redo)
                             .tooltip("Restart shell")
                             .ghost()
-                            .xsmall()
+                            .small()
                             .on_click(move |_event, _window, cx| {
                                 active_terminal_restart.update(cx, |t, cx| t.restart(cx));
                             }),
@@ -1745,7 +1745,7 @@ impl Render for WorkspaceView {
                             .icon(IconName::Close)
                             .tooltip("Hide terminal (Cmd+J)")
                             .ghost()
-                            .xsmall()
+                            .small()
                             .on_click(move |_event, _window, cx| {
                                 close_panel_view.update(cx, |this, cx| {
                                     this.bottom_panel_visible = false;
