@@ -670,6 +670,8 @@ impl ChatListView {
             .gap_3()
             .px_4()
             .pl(self.header_left_padding)
+            // The workspace owns the rightmost 128px for command palette,
+            // environment, and panel buttons rendered as absolute overlays.
             .pr(px(128.0))
             .border_b_1()
             .border_color(theme.title_bar_border)
@@ -683,11 +685,19 @@ impl ChatListView {
                     .min_w_0()
                     .child(
                         div()
+                            .id("chat-header-title")
                             .truncate()
-                            .text_size(px(13.0))
+                            .text_sm()
                             .line_height(px(18.0))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.foreground)
+                            .tooltip({
+                                let title = active_title.clone();
+                                move |window, cx| {
+                                    gpui_component::tooltip::Tooltip::new(title.clone())
+                                        .build(window, cx)
+                                }
+                            })
                             .child(active_title),
                     ),
             )
@@ -763,7 +773,7 @@ impl ChatListView {
                 .rounded_full()
                 .border_1()
                 .border_color(colors.success)
-                .text_size(px(10.0))
+                .text_xs()
                 .font_weight(FontWeight::BOLD)
                 .text_color(colors.success)
                 .child("✓")
@@ -940,6 +950,13 @@ impl ChatListView {
             .child(
                 div()
                     .id(row_id)
+                    .tooltip({
+                        let summary = display_summary.clone();
+                        move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(summary.clone())
+                                .build(window, cx)
+                        }
+                    })
                     .h(px(28.0))
                     .px_1()
                     .rounded_md()
@@ -977,7 +994,7 @@ impl ChatListView {
                             .truncate()
                             .text_sm()
                             .text_color(theme.muted_foreground)
-                            .child(display_summary),
+                            .child(display_summary.clone()),
                     )
                     .children(has_detail.then(|| {
                         Icon::new(if activity.is_expanded {
@@ -1235,6 +1252,16 @@ impl ChatListView {
                 let view = cx.entity().clone();
                 div()
                     .id(SharedString::from(format!("trajectory-{all_index}")))
+                    .tooltip({
+                        let tip = match lane.clone() {
+                            Some(lane) => format!("{lane} · {preview}"),
+                            None => preview.to_string(),
+                        };
+                        move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(tip.clone())
+                                .build(window, cx)
+                        }
+                    })
                     .h(px(34.0))
                     .w_full()
                     .min_w_0()
@@ -1245,10 +1272,14 @@ impl ChatListView {
                     .border_b_1()
                     .border_color(theme.border.opacity(0.45))
                     .cursor_pointer()
+                    .border_l_2()
+                    .border_color(if selected {
+                        theme.accent
+                    } else {
+                        theme.border.opacity(0.0)
+                    })
                     .when(selected, |this| {
                         this.bg(theme.accent.opacity(0.16))
-                            .border_l_2()
-                            .border_color(theme.accent)
                     })
                     .hover(|style| style.bg(theme.muted.opacity(0.65)))
                     .child(div().size(px(6.0)).flex_none().rounded_full().bg(dot_color))
@@ -1268,7 +1299,7 @@ impl ChatListView {
                             .text_color(badge_fg)
                             .child(badge_label),
                     )
-                    .child(div().min_w_0().flex_1().text_sm().truncate().child(preview))
+                    .child(div().min_w_0().flex_1().text_sm().truncate().child(preview.clone()))
                     .children(exit_code.map(|code| {
                         let is_ok = code == 0;
                         div()
@@ -2409,9 +2440,19 @@ impl ChatListView {
                             )
                             .children(path_opt.map(|path| {
                                 div()
+                                    .id(SharedString::from(format!(
+                                        "code-path-{msg_id}-{block_index}"
+                                    )))
                                     .text_xs()
                                     .text_color(theme.muted_foreground)
                                     .truncate()
+                                    .tooltip({
+                                        let tip = path.clone();
+                                        move |window, cx| {
+                                            gpui_component::tooltip::Tooltip::new(tip.clone())
+                                                .build(window, cx)
+                                        }
+                                    })
                                     .child(path)
                             })),
                     )
@@ -3433,7 +3474,7 @@ impl ChatListView {
                 .id("permission-details-backdrop")
                 .absolute()
                 .inset_0()
-                .bg(hsla(0.0, 0.0, 0.0, 0.6))
+                .bg(crate::theme::overlay_scrim())
                 .flex()
                 .items_center()
                 .justify_center()
@@ -4189,11 +4230,22 @@ impl ChatListView {
             }))
             .children(messages.is_empty().then(|| {
                 div()
-                    .py_6()
-                    .text_center()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child("No messages yet — ask below to start.")
+                    .w_full()
+                    .flex()
+                    .justify_center()
+                    .py_4()
+                    .child(
+                        div()
+                            .px_4()
+                            .py_2()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.title_bar)
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("No messages yet — the subagent hasn't responded."),
+                    )
             }))
             .children(messages)
             .into_any_element()
@@ -4315,7 +4367,20 @@ impl ChatListView {
                             .xsmall()
                             .text_color(theme.primary),
                     )
-                    .child(div().max_w(px(160.0)).truncate().child(name))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("pasted-image-{index}")))
+                            .max_w(px(160.0))
+                            .truncate()
+                            .tooltip({
+                                let tip = name.clone();
+                                move |window, cx| {
+                                    gpui_component::tooltip::Tooltip::new(tip.clone())
+                                        .build(window, cx)
+                                }
+                            })
+                            .child(name),
+                    )
                     .child(
                         Button::new(("remove-pasted-image", index))
                             .icon(IconName::Close)
@@ -4871,7 +4936,7 @@ impl ChatListView {
                                     .bg(if is_active {
                                         theme.accent.opacity(0.16)
                                     } else {
-                                        hsla(0.0, 0.0, 0.0, 0.0)
+                                        gpui::transparent_black()
                                     })
                                     .hover(|style| style.bg(theme.list_hover))
                                     .cursor_pointer()

@@ -431,7 +431,7 @@ impl SidebarView {
             .flex_col()
             .gap_0p5()
             .px_3()
-            .pt(px(48.0))
+            .pt(crate::theme::WINDOW_CONTROLS_CLEARANCE)
             .pb_1()
             .bg(theme.title_bar)
             .child(
@@ -442,6 +442,7 @@ impl SidebarView {
                     .small()
                     .w_full()
                     .justify_between()
+                    .tooltip("Start a new session (⌘N)")
                     .child(
                         div()
                             .px_1p5()
@@ -1104,7 +1105,7 @@ impl SidebarView {
                                         .absolute()
                                         .right(px(0.0))
                                         .top(px(0.0))
-                                            .opacity(0.0)
+                                            .opacity(if is_active { 1.0 } else { 0.0 })
                                             .group_hover("session-card", |style| style.opacity(1.0))
                                             .focus_visible(|style| style.opacity(1.0))
                                         .tooltip("Archive session")
@@ -1399,6 +1400,7 @@ impl SidebarView {
                 Button::new("sidebar-settings")
                     .debug_selector(|| "sidebar-settings".into())
                     .accessibility_label("Settings")
+                    .tooltip("Open settings")
                     .child(
                         div()
                             .w_full()

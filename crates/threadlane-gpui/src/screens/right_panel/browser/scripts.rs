@@ -8,6 +8,12 @@
 /// Maximum interactive elements per snapshot. Bounds both JS work and result size.
 pub(crate) const SNAPSHOT_MAX_ELEMENTS: usize = 200;
 
+/// Outline drawn around the acted-on element inside the page. This annotates
+/// third-party page content (audited exception to the token rule): it must
+/// stay legible on arbitrary websites independent of the app theme, so it is
+/// a fixed high-visibility blue defined once here, not a theme token.
+const ACT_HIGHLIGHT_OUTLINE: &str = "3px solid #3b82f6";
+
 /// Compact interactive-element tree: links, buttons, inputs, plus headings
 /// for orientation. Elements are stamped with `data-tlane-ref` so a later
 /// `browser_act` can address them by ref.
@@ -65,7 +71,7 @@ pub(crate) fn act_script(action: &str, target_json: &str, text_json: &str, key_j
     const prevOutline = el.style.outline;
     const prevTransition = el.style.transition;
     el.style.transition = 'outline 0.15s ease-in-out';
-    el.style.outline = '3px solid #3b82f6';
+    el.style.outline = '{highlight}';
     setTimeout(() => {{
       try {{
         el.style.outline = prevOutline;
@@ -123,6 +129,7 @@ pub(crate) fn act_script(action: &str, target_json: &str, text_json: &str, key_j
   return fail('unknown action: ' + action);
 }})()"#,
         action_json = action_json(action),
+        highlight = ACT_HIGHLIGHT_OUTLINE,
     )
 }
 

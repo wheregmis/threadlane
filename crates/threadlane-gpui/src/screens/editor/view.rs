@@ -644,7 +644,7 @@ impl EditorView {
                             })
                             .child(
                                 div()
-                                    .text_size(px(11.0))
+                                    .text_xs()
                                     .text_color(if tab.is_diff {
                                         theme.warning
                                     } else {
@@ -654,7 +654,7 @@ impl EditorView {
                             )
                             .child(
                                 div()
-                                    .text_size(px(12.0))
+                                    .text_xs()
                                     .font_weight(if is_selected {
                                         FontWeight::MEDIUM
                                     } else {
@@ -693,7 +693,7 @@ impl EditorView {
                     .px_1()
                     .child(if let Some((msg, is_error)) = self.visible_status() {
                         div()
-                            .text_size(px(11.0))
+                            .text_xs()
                             .text_color(if is_error {
                                 theme.danger
                             } else {
@@ -746,13 +746,13 @@ impl EditorView {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_size(px(24.0))
+                    .text_2xl()
                     .text_color(theme.muted_foreground)
                     .child(IconName::File),
             )
             .child(
                 div()
-                    .text_size(px(14.0))
+                    .text_sm()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.foreground)
                     .child("No files open in Editor"),
@@ -761,7 +761,7 @@ impl EditorView {
                 div()
                     .max_w(px(380.0))
                     .text_center()
-                    .text_size(px(12.0))
+                    .text_xs()
                     .text_color(theme.muted_foreground)
                     .child("Click a file in the Files panel or a changed file in Review to open and view here."),
             )

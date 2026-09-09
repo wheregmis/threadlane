@@ -83,6 +83,7 @@ A normal `cargo run` may be unsuitable for testing installation: update installa
 - Avoid holding locks across expensive work, UI callbacks, or async boundaries.
 - Preserve user work and persisted session data. Never casually delete `.threadlane` state or session files.
 - Accessibility: any element combining `.id(...)` with `track_focus(...)` must also set `.role(...)`, otherwise GPUI logs `focused element has no accessibility node` and screen readers announce the whole window.
+- Design tokens over literals: product-wide UI constants live in `threadlane-gpui/src/theme.rs` (`WINDOW_CONTROLS_CLEARANCE`, `overlay_scrim()`). Panel headers share the clearance inset so header content aligns; modal backdrops share the scrim. Terminal text metrics share `TERMINAL_*` consts in `screens/terminal/mod.rs` because paint, hit-testing, and resize math must agree. Audited exceptions (terminal ANSI palette, settings theme-preview swatches, browser page-content highlight) are defined once with a comment stating why they cannot be theme tokens.
 
 ## Session and Context-Menu Behavior
 

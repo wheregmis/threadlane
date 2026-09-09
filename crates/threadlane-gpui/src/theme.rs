@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use gpui::{App, SharedString};
+use gpui::{px, App, Hsla, Pixels, SharedString};
 use gpui_component::{ActiveTheme, Theme, ThemeConfig, ThemeMode, ThemeRegistry};
 use serde::{Deserialize, Serialize};
 
@@ -9,6 +9,23 @@ use crate::persistence::global_threadlane_dir;
 
 const DEFAULT_THEME_NAME: &str = "Threadlane Dark";
 const BUNDLED_THEMES: &str = include_str!("../themes/threadlane.json");
+
+/// Top clearance reserved under the macOS traffic lights (positioned at
+/// y=12 in a frameless window). All panel headers share this inset so
+/// coincident header content forms one continuous line. This is a physical
+/// platform-window boundary, hence fixed pixels rather than `rem`.
+pub const WINDOW_CONTROLS_CLEARANCE: Pixels = px(48.0);
+
+/// Dimming scrim behind modal overlays (permission details, dialogs).
+/// Defined once here so every overlay dims identically in any theme.
+pub fn overlay_scrim() -> Hsla {
+    Hsla {
+        h: 0.0,
+        s: 0.0,
+        l: 0.0,
+        a: 0.6,
+    }
+}
 
 #[derive(Default, Deserialize, Serialize)]
 struct ThemePreferences {

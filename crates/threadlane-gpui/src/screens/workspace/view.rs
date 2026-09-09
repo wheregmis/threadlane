@@ -878,6 +878,10 @@ impl WorkspaceView {
             }
             _ => return None,
         };
+        let error_details: Option<String> = match &status {
+            UpdateStatus::Error(error) => Some(error.clone()),
+            _ => None,
+        };
 
         let action = match &status {
             UpdateStatus::Available(info) => {
@@ -887,6 +891,10 @@ impl WorkspaceView {
                     Button::new("update-download")
                         .label("Download")
                         .primary()
+                        .tooltip(format!(
+                            "Download Threadlane {}",
+                            info.version
+                        ))
                         .on_click(move |_event, _window, _cx| {
                             updater::download(info.clone(), tx.clone());
                         }),
@@ -896,10 +904,14 @@ impl WorkspaceView {
                 let tx = self.updater_tx.clone();
                 let info = info.clone();
                 let bytes = bytes.clone();
+                let version = info.version.clone();
                 Some(
                     Button::new("update-install")
                         .label("Install and relaunch")
                         .primary()
+                        .tooltip(format!(
+                            "Install Threadlane {version} and relaunch"
+                        ))
                         .on_click(move |_event, _window, _cx| {
                             updater::install(info.clone(), bytes.clone(), tx.clone());
                         }),
@@ -911,6 +923,7 @@ impl WorkspaceView {
                     Button::new("update-retry")
                         .label("Retry")
                         .outline()
+                        .tooltip("Check for updates again")
                         .on_click(move |_event, _window, _cx| updater::check(tx.clone())),
                 )
             }
@@ -953,6 +966,16 @@ impl WorkspaceView {
                         ),
                 )
                 .children(action)
+                .children(error_details.map(|details| {
+                    Button::new("update-copy-error")
+                        .label("Copy details")
+                        .ghost()
+                        .xsmall()
+                        .tooltip("Copy the complete update error")
+                        .on_click(move |_event, _window, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(details.clone()));
+                        })
+                }))
                 .children(
                     matches!(status, UpdateStatus::Available(_) | UpdateStatus::Error(_)).then(
                         || {
@@ -1593,6 +1616,17 @@ impl Render for WorkspaceView {
                     let new_view = cx.entity().clone();
                     let is_selected = tab == active_terminal_tab;
                     let total_tabs = terminal_tabs.len();
+                    let tab_tooltip = match &terminal_project {
+                        Some(project) => format!(
+                            "Shell {} · {}",
+                            tab + 1,
+                            project
+                                .file_name()
+                                .map(|name| name.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| project.to_string_lossy().into_owned())
+                        ),
+                        None => format!("Shell {}", tab + 1),
+                    };
 
                     div()
                         .flex()
@@ -1605,6 +1639,7 @@ impl Render for WorkspaceView {
                                 .ghost()
                                 .selected(is_selected)
                                 .xsmall()
+                                .tooltip(tab_tooltip)
                                 .on_click(move |_event, window, cx| {
                                     if let Some(project) = &select_project {
                                         select_view.update(cx, |this, cx| {

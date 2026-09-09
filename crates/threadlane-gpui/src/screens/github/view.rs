@@ -2225,6 +2225,8 @@ impl GitHubView {
         let tab = self.tab;
         let content = div()
             .debug_selector(|| "github-result-list".into())
+            .id("github-result-list")
+            .role(Role::List)
             .relative()
             .size_full()
             .min_h_0()
@@ -2277,6 +2279,13 @@ impl GitHubView {
         let details = error.to_owned();
         div()
             .debug_selector(|| "github-list-warning".into())
+            .id("github-list-warning")
+            .tooltip({
+                let tip = format!("Some projects couldn’t load: {error}");
+                move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                }
+            })
             .w_full()
             .flex_none()
             .px_3()
@@ -3168,6 +3177,8 @@ impl GitHubView {
             .flex()
             .child(
                 div()
+                    .id("github-pr-file-list")
+                    .role(Role::List)
                     .relative()
                     .w_64()
                     .min_h_0()
