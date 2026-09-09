@@ -66,6 +66,7 @@ fn dump_config(args: &[String]) -> Result<(), String> {
 #[hotpath::main]
 fn main() {
     let args = std::env::args().collect::<Vec<_>>();
+    threadlane_gpui::process_environment::initialize_child_process_path();
     if args.iter().any(|arg| arg == "--dump-config") {
         if let Err(error) = dump_config(&args) {
             eprintln!("--dump-config: {error}");
