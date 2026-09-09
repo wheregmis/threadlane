@@ -6,7 +6,7 @@ description = "WASI WebAssembly extension sandbox host and capability broker for
 
 [dependencies]
 threadlane-runtime = { version = "0.1.0", path = "../threadlane-runtime" }
-wasmi = "1.1"
+wasmi = "2.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 async-trait = "0.1"
