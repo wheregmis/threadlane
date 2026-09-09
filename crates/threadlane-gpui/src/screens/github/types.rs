@@ -56,25 +56,162 @@ pub fn github_state_for_tab(state: GitHubStateFilter, tab: GitHubTab) -> GitHubS
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GitHubScope {
+    All,
+    Project(PathBuf),
+}
+
+impl GitHubScope {
+    pub fn label(&self, projects: &[(String, PathBuf)]) -> String {
+        match self {
+            Self::All => "All projects".into(),
+            Self::Project(work_dir) => projects
+                .iter()
+                .find(|(_, dir)| dir == work_dir)
+                .map(|(name, _)| name.clone())
+                .or_else(|| {
+                    work_dir
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| "Unknown project".into()),
+        }
+    }
+
+    pub fn projects(&self, all: &[(String, PathBuf)]) -> Vec<(String, PathBuf)> {
+        match self {
+            Self::All => all.to_vec(),
+            Self::Project(work_dir) => all
+                .iter()
+                .find(|(_, dir)| dir == work_dir)
+                .cloned()
+                .into_iter()
+                .collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct GitHubItemKey {
+    pub project: PathBuf,
+    pub number: u64,
+}
+
+impl GitHubItemKey {
+    pub fn new(project: PathBuf, number: u64) -> Self {
+        Self { project, number }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScopedIssue {
+    pub project: PathBuf,
+    pub project_name: String,
+    pub summary: GitHubIssueSummary,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScopedPr {
+    pub project: PathBuf,
+    pub project_name: String,
+    pub summary: GitHubPullRequestSummary,
+}
+
+fn scoped_order_key(updated_at: &str, project_name: &str, number: u64) -> (String, String, u64) {
+    (updated_at.to_owned(), project_name.to_owned(), number)
+}
+
+pub fn merge_scoped_issues(mut rows: Vec<ScopedIssue>, limit: usize) -> Vec<ScopedIssue> {
+    rows.sort_by(|left, right| {
+        scoped_order_key(
+            &right.summary.updated_at,
+            &right.project_name,
+            right.summary.issue.number,
+        )
+        .cmp(&scoped_order_key(
+            &left.summary.updated_at,
+            &left.project_name,
+            left.summary.issue.number,
+        ))
+    });
+    rows.truncate(limit);
+    rows
+}
+
+pub fn merge_scoped_prs(mut rows: Vec<ScopedPr>, limit: usize) -> Vec<ScopedPr> {
+    rows.sort_by(|left, right| {
+        scoped_order_key(
+            &right.summary.updated_at,
+            &right.project_name,
+            right.summary.number,
+        )
+        .cmp(&scoped_order_key(
+            &left.summary.updated_at,
+            &left.project_name,
+            left.summary.number,
+        ))
+    });
+    rows.truncate(limit);
+    rows
+}
+
+pub fn selected_scoped_issue_after_refresh(
+    selected: Option<GitHubItemKey>,
+    rows: &[ScopedIssue],
+) -> Option<GitHubItemKey> {
+    selected
+        .filter(|selected| {
+            rows.iter().any(|row| {
+                row.project == selected.project && row.summary.issue.number == selected.number
+            })
+        })
+        .or_else(|| {
+            rows.first().map(|row| GitHubItemKey {
+                project: row.project.clone(),
+                number: row.summary.issue.number,
+            })
+        })
+}
+
+pub fn selected_scoped_pr_after_refresh(
+    selected: Option<GitHubItemKey>,
+    rows: &[ScopedPr],
+) -> Option<GitHubItemKey> {
+    selected
+        .filter(|selected| {
+            rows.iter().any(|row| {
+                row.project == selected.project && row.summary.number == selected.number
+            })
+        })
+        .or_else(|| {
+            rows.first().map(|row| GitHubItemKey {
+                project: row.project.clone(),
+                number: row.summary.number,
+            })
+        })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitHubRequest {
-    pub work_dir: PathBuf,
+    pub scope: GitHubScope,
     pub tab: GitHubTab,
     pub query_revision: u64,
-    pub item_number: Option<u64>,
+    pub item: Option<GitHubItemKey>,
 }
 
 impl GitHubRequest {
     pub fn new(
-        work_dir: PathBuf,
+        scope: GitHubScope,
         tab: GitHubTab,
         query_revision: u64,
-        item_number: Option<u64>,
+        item: Option<GitHubItemKey>,
     ) -> Self {
         Self {
-            work_dir,
+            scope,
             tab,
             query_revision,
-            item_number,
+            item,
         }
     }
 }
@@ -89,13 +226,13 @@ pub fn github_result_matches_request(
 pub fn detail_result_matches_list(
     detail: &GitHubRequest,
     list: &GitHubRequest,
-    selected: Option<u64>,
+    selected: Option<GitHubItemKey>,
 ) -> bool {
-    list.item_number.is_none()
-        && detail.work_dir == list.work_dir
+    list.item.is_none()
+        && detail.scope == list.scope
         && detail.tab == list.tab
         && detail.query_revision == list.query_revision
-        && detail.item_number == selected
+        && detail.item == selected
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -630,8 +767,26 @@ pub fn pr_present_recovery_action(reply: bool, attempt: &PrCommentAttempt) -> Bu
 }
 
 pub enum GitHubListResult {
-    Issues(Result<Vec<GitHubIssueSummary>, String>),
-    PullRequests(Result<Vec<GitHubPullRequestSummary>, String>),
+    Issues(ScopedIssueList),
+    PullRequests(ScopedPrList),
+}
+
+#[derive(Clone, Debug)]
+pub struct ScopedIssueList {
+    pub rows: Vec<ScopedIssue>,
+    pub errors: Vec<String>,
+    pub has_more: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct ScopedPrList {
+    pub rows: Vec<ScopedPr>,
+    pub errors: Vec<String>,
+    pub has_more: bool,
+}
+
+pub fn scoped_list_error(errors: &[String]) -> Option<String> {
+    errors.first().cloned()
 }
 
 pub enum GitHubDetailResult {
@@ -639,6 +794,7 @@ pub enum GitHubDetailResult {
     PullRequest(Result<GitHubPrInfo, String>),
 }
 
+#[derive(Clone, Debug)]
 pub struct LinkedSession {
     pub project_name: String,
     pub session: SessionInfo,

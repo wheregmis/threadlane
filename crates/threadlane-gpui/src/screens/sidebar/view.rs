@@ -1386,11 +1386,8 @@ impl SidebarView {
     }
 
     fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let github_model = self.model.clone();
         let settings_model = self.model.clone();
         let theme = cx.theme().colors;
-        let github_selected =
-            self.model.read(cx).workspace_page == crate::state::WorkspacePage::GitHub;
         let settings_selected =
             self.model.read(cx).workspace_page == crate::state::WorkspacePage::Settings;
 
@@ -1398,32 +1395,6 @@ impl SidebarView {
             .flex_none()
             .px_3()
             .py_2()
-            .child(
-                Button::new("sidebar-github")
-                    .debug_selector(|| "sidebar-github".into())
-                    .accessibility_label("GitHub")
-                    .child(
-                        div()
-                            .w_full()
-                            .flex()
-                            .items_center()
-                            .justify_start()
-                            .gap_2()
-                            .child(IconName::Github)
-                            .child("GitHub"),
-                    )
-                    .ghost()
-                    .selected(github_selected)
-                    .w_full()
-                    .justify_start()
-                    .text_color(theme.muted_foreground)
-                    .on_click(move |_event, _window, cx| {
-                        github_model.update(cx, |state, cx| {
-                            controller::dispatch(state, AppAction::OpenGitHub);
-                            cx.notify();
-                        });
-                    }),
-            )
             .child(
                 Button::new("sidebar-settings")
                     .debug_selector(|| "sidebar-settings".into())
@@ -1720,7 +1691,7 @@ mod tests {
         }
 
         cx.update(|window, cx| window.focus_next(cx)); // Archive remains separate.
-        for page in [WorkspacePage::GitHub, WorkspacePage::Settings] {
+        for page in [WorkspacePage::Settings] {
             cx.update(|window, cx| {
                 window.focus_next(cx);
                 window.draw(cx).clear(cx);

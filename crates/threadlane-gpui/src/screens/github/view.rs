@@ -16,10 +16,10 @@ use gpui_component::status_bar::StatusBar;
 use gpui_component::tab::{Tab, TabBar};
 use gpui_component::tag::Tag;
 use gpui_component::text::{TextView, TextViewState};
+use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable};
 use threadlane_git::{
-    GitHubIssueDetail, GitHubIssueRef, GitHubIssueSummary, GitHubPrInfo,
-    GitHubPullRequestSummary, GitHubRepository,
+    GitHubIssueDetail, GitHubIssueRef, GitHubIssueSummary, GitHubPrInfo, GitHubRepository,
 };
 
 use crate::app::actions::AppAction;
@@ -82,6 +82,7 @@ fn github_empty_message(tab: GitHubTab, state: GitHubStateFilter, query: &str) -
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn selected_issue_after_refresh(
     selected: Option<u64>,
     issues: &[GitHubIssueSummary],
@@ -267,6 +268,7 @@ fn linked_session_fingerprint(session: &SessionInfo, pr: Option<&GitHubPrInfo>) 
     hasher.finish()
 }
 
+#[allow(dead_code)]
 fn selected_number_after_refresh<T>(
     selected: Option<u64>,
     rows: &[T],
@@ -277,8 +279,84 @@ fn selected_number_after_refresh<T>(
         .or_else(|| rows.first().map(number))
 }
 
-fn github_error_message(error: &str) -> String {
-    let normalized = error.to_lowercase();
+/// Days since 1970-01-01 for a civil date (Howard Hinnant's algorithm).
+fn days_since_epoch(year: i64, month: i64, day: i64) -> i64 {
+    let adjusted_year = if month <= 2 { year - 1 } else { year };
+    let era = adjusted_year.div_euclid(400);
+    let year_of_era = adjusted_year.rem_euclid(400);
+    let month_index = (month + 9).rem_euclid(12);
+    let day_of_year = (153 * month_index + 2).div_euclid(5) + day - 1;
+    let day_of_era =
+        year_of_era * 365 + year_of_era.div_euclid(4) - year_of_era.div_euclid(100) + day_of_year;
+    era * 146097 + day_of_era - 719468
+}
+
+fn parse_github_timestamp(value: &str) -> Option<u64> {
+    let value = value.trim().trim_end_matches('Z');
+    let (date, time) = value.split_once('T')?;
+    let mut date_parts = date.split('-');
+    let year: i64 = date_parts.next()?.parse().ok()?;
+    let month: i64 = date_parts.next()?.parse().ok()?;
+    let day: i64 = date_parts.next()?.parse().ok()?;
+    let mut time_parts = time.split(':');
+    let hour: i64 = time_parts.next()?.parse().ok()?;
+    let minute: i64 = time_parts.next()?.parse().ok()?;
+    let second: i64 = time_parts
+        .next()
+        .and_then(|part| part.split(['.', '+', '-']).next())
+        .and_then(|part| part.parse().ok())?;
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 60
+    {
+        return None;
+    }
+    let days = days_since_epoch(year, month, day);
+    u64::try_from(days * 86400 + hour * 3600 + minute * 60 + second).ok()
+}
+
+fn github_now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+/// Relative display for `gh` ISO-8601 timestamps; falls back to the raw value.
+fn format_github_time(value: &str, now: u64) -> String {
+    let Some(timestamp) = parse_github_timestamp(value) else {
+        return value.to_owned();
+    };
+    let seconds = now.saturating_sub(timestamp);
+    match seconds {
+        0..=59 => "just now".into(),
+        60..=3599 => format!("{}m ago", seconds / 60),
+        3600..=86399 => format!("{}h ago", seconds / 3600),
+        86400..=2592000 => format!("{}d ago", seconds / 86400),
+        _ => value
+            .split('T')
+            .next()
+            .unwrap_or(value)
+            .to_owned(),
+    }
+}
+
+/// `owner/repo · project`, collapsing the project when the repo already names it.
+fn scope_context_line(owner: &str, repo: &str, project_name: &str) -> String {
+    let full = format!("{owner}/{repo}");
+    if project_name.is_empty()
+        || repo == project_name
+        || full.ends_with(&format!("/{project_name}"))
+    {
+        full
+    } else {
+        format!("{full} · {project_name}")
+    }
+}
+
+fn github_error_message(error: &str) -> String {    let normalized = error.to_lowercase();
     if normalized.contains("rate limit")
         || normalized.contains("rate_limit")
         || normalized.contains("http 429")
@@ -301,15 +379,18 @@ pub struct GitHubView {
     model: Entity<AppState>,
     window_controls_inset: Option<Pixels>,
     project_work_dir: Option<PathBuf>,
+    scope: GitHubScope,
+    scope_initialized: bool,
+    last_targets: Vec<PathBuf>,
     repository: Option<GitHubRepository>,
     tab: GitHubTab,
     state_filter: GitHubStateFilter,
     query_input: Entity<InputState>,
     query_revision: u64,
-    issues: Vec<GitHubIssueSummary>,
-    pull_requests: Vec<GitHubPullRequestSummary>,
-    selected_issue: Option<u64>,
-    selected_pr: Option<u64>,
+    issues: Vec<ScopedIssue>,
+    pull_requests: Vec<ScopedPr>,
+    selected_issue: Option<GitHubItemKey>,
+    selected_pr: Option<GitHubItemKey>,
     issue_detail: Option<GitHubIssueDetail>,
     pr_detail: Option<GitHubPrInfo>,
     detail_body: Entity<TextViewState>,
@@ -359,7 +440,7 @@ impl GitHubView {
         cx: &mut Context<Self>,
     ) -> Self {
         let query_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Search this repository…"));
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search — e.g. is:open assignee:@me …"));
         let detail_body = cx.new(|cx| TextViewState::markdown("", cx));
         let pr_diff_body = cx.new(|cx| TextViewState::markdown("", cx));
         let pr_comment_input = cx.new(|cx| {
@@ -379,10 +460,40 @@ impl GitHubView {
 
         let model_subscription = cx.observe(&model, |this, model, cx| {
             let state = model.read(cx);
-            let work_dir = state.active_work_dir.clone();
             let linked_sessions_fingerprint = github_link_fingerprint(state);
-            if this.project_work_dir != work_dir {
-                this.switch_project(work_dir, cx);
+            let attached: Vec<PathBuf> =
+                state.projects.iter().map(|p| p.work_dir.clone()).collect();
+            let scope_valid = match &this.scope {
+                GitHubScope::All => true,
+                GitHubScope::Project(work_dir) => attached.contains(work_dir),
+            };
+            if !this.scope_initialized {
+                this.scope = GitHubScope::All;
+                this.scope_initialized = true;
+                this.project_work_dir = state.active_work_dir.clone();
+                this.reset_list_state(cx);
+                this.fetch_list(cx);
+            } else if !scope_valid {
+                this.select_scope(GitHubScope::All, cx);
+            } else {
+                // Scope is explicit and sticky: active chat session changes
+                // must not silently retarget the GitHub list.
+                this.project_work_dir = state.active_work_dir.clone();
+                let current_targets: Vec<PathBuf> = this
+                    .scope
+                    .projects(
+                        &state
+                            .projects
+                            .iter()
+                            .map(|p| (p.name.clone(), p.work_dir.clone()))
+                            .collect::<Vec<_>>(),
+                    )
+                    .into_iter()
+                    .map(|(_, dir)| dir)
+                    .collect();
+                if current_targets != this.last_targets {
+                    this.fetch_list(cx);
+                }
             }
             if this.linked_sessions_fingerprint != linked_sessions_fingerprint {
                 this.linked_sessions_fingerprint = linked_sessions_fingerprint;
@@ -435,6 +546,9 @@ impl GitHubView {
             model,
             window_controls_inset: None,
             project_work_dir: None,
+            scope: GitHubScope::All,
+            scope_initialized: false,
+            last_targets: Vec::new(),
             repository: None,
             tab: GitHubTab::Issues,
             state_filter: GitHubStateFilter::Open,
@@ -493,14 +607,39 @@ impl GitHubView {
     }
 
     pub(crate) fn sync_active_project(&mut self, cx: &mut Context<Self>) {
-        let work_dir = self.model.read(cx).active_work_dir.clone();
-        if self.project_work_dir != work_dir {
-            self.switch_project(work_dir, cx);
+        if !self.scope_initialized {
+            self.scope = GitHubScope::All;
+            self.scope_initialized = true;
+            self.project_work_dir = self.model.read(cx).active_work_dir.clone();
+            self.reset_list_state(cx);
+            self.fetch_list(cx);
         }
     }
 
-    fn switch_project(&mut self, work_dir: Option<PathBuf>, cx: &mut Context<Self>) {
-        self.project_work_dir = work_dir;
+    fn attached_projects(&self, cx: &App) -> Vec<(String, PathBuf)> {
+        self.model
+            .read(cx)
+            .projects
+            .iter()
+            .map(|project| (project.name.clone(), project.work_dir.clone()))
+            .collect()
+    }
+
+    fn scope_targets(&self, cx: &App) -> Vec<(String, PathBuf)> {
+        self.scope.projects(&self.attached_projects(cx))
+    }
+
+    fn select_scope(&mut self, scope: GitHubScope, cx: &mut Context<Self>) {
+        if self.scope_initialized && self.scope == scope {
+            return;
+        }
+        self.scope = scope;
+        self.scope_initialized = true;
+        self.reset_list_state(cx);
+        self.fetch_list(cx);
+    }
+
+    fn reset_list_state(&mut self, cx: &mut Context<Self>) {
         self.repository = None;
         self.issues.clear();
         self.pull_requests.clear();
@@ -536,10 +675,17 @@ impl GitHubView {
             .update(cx, |body, cx| body.set_text("", cx));
         self.reset_pr_diff_body(cx);
         self.query_revision = self.query_revision.saturating_add(1);
-        if self.project_work_dir.is_some() {
-            self.fetch_list(cx);
-        }
         cx.notify();
+    }
+
+    #[allow(dead_code)]
+    fn switch_project(&mut self, work_dir: Option<PathBuf>, cx: &mut Context<Self>) {
+        self.project_work_dir = work_dir.clone();
+        let scope = match work_dir {
+            Some(work_dir) => GitHubScope::Project(work_dir),
+            None => GitHubScope::All,
+        };
+        self.select_scope(scope, cx);
     }
 
     fn schedule_query(&mut self, _query: String, cx: &mut Context<Self>) {
@@ -547,7 +693,7 @@ impl GitHubView {
         self.issue_limit = PAGE_SIZE;
         self.pr_limit = PAGE_SIZE;
         self.active_list_request = None;
-        self.list_loading = self.project_work_dir.is_some();
+        self.list_loading = !self.scope_targets(cx).is_empty();
         self.list_error = None;
         let revision = self.query_revision;
         self.debounce_task = Some(cx.spawn(async move |this, cx| {
@@ -598,9 +744,14 @@ impl GitHubView {
     }
 
     fn fetch_list(&mut self, cx: &mut Context<Self>) {
-        let Some(work_dir) = self.project_work_dir.clone() else {
+        let targets = self.scope_targets(cx);
+        self.last_targets = targets.iter().map(|(_, dir)| dir.clone()).collect();
+        if targets.is_empty() {
+            self.list_loading = false;
+            self.list_error = None;
+            cx.notify();
             return;
-        };
+        }
         let tab = self.tab;
         let state = self.state_filter.value().to_owned();
         let query = self.query(cx);
@@ -608,11 +759,12 @@ impl GitHubView {
             GitHubTab::Issues => self.issue_limit,
             GitHubTab::PullRequests => self.pr_limit,
         };
+        let scope = self.scope.clone();
         let request = GitHubRequest {
-            work_dir: work_dir.clone(),
+            scope: scope.clone(),
             tab,
             query_revision: self.query_revision,
-            item_number: None,
+            item: None,
         };
         self.invalidate_detail(cx);
         self.active_list_request = Some(request.clone());
@@ -626,24 +778,72 @@ impl GitHubView {
                 .spawn(async move {
                     let server_query = github_server_query(&query);
                     match tab {
-                        GitHubTab::Issues => GitHubListResult::Issues(
-                            threadlane_git::list_github_issues(
-                                &work_dir,
-                                &state,
-                                server_query,
-                                limit,
-                            )
-                            .map_err(|error| error.message),
-                        ),
-                        GitHubTab::PullRequests => GitHubListResult::PullRequests(
-                            threadlane_git::list_github_pull_requests(
-                                &work_dir,
-                                &state,
-                                server_query,
-                                limit,
-                            )
-                            .map_err(|error| error.message),
-                        ),
+                        GitHubTab::Issues => {
+                            let mut rows = Vec::new();
+                            let mut errors = Vec::new();
+                            let mut has_more = false;
+                            for (project_name, work_dir) in &targets {
+                                match threadlane_git::list_github_issues(
+                                    work_dir,
+                                    &state,
+                                    server_query,
+                                    limit,
+                                ) {
+                                    Ok(summaries) => {
+                                        has_more = has_more || summaries.len() == limit;
+                                        rows.extend(summaries.into_iter().map(|summary| {
+                                            ScopedIssue {
+                                                project: work_dir.clone(),
+                                                project_name: project_name.clone(),
+                                                summary,
+                                            }
+                                        }));
+                                    }
+                                    Err(error) => errors.push(format!(
+                                        "{}: {}",
+                                        project_name, error.message
+                                    )),
+                                }
+                            }
+                            GitHubListResult::Issues(ScopedIssueList {
+                                rows: merge_scoped_issues(rows, limit),
+                                errors,
+                                has_more,
+                            })
+                        }
+                        GitHubTab::PullRequests => {
+                            let mut rows = Vec::new();
+                            let mut errors = Vec::new();
+                            let mut has_more = false;
+                            for (project_name, work_dir) in &targets {
+                                match threadlane_git::list_github_pull_requests(
+                                    work_dir,
+                                    &state,
+                                    server_query,
+                                    limit,
+                                ) {
+                                    Ok(summaries) => {
+                                        has_more = has_more || summaries.len() == limit;
+                                        rows.extend(summaries.into_iter().map(|summary| {
+                                            ScopedPr {
+                                                project: work_dir.clone(),
+                                                project_name: project_name.clone(),
+                                                summary,
+                                            }
+                                        }));
+                                    }
+                                    Err(error) => errors.push(format!(
+                                        "{}: {}",
+                                        project_name, error.message
+                                    )),
+                                }
+                            }
+                            GitHubListResult::PullRequests(ScopedPrList {
+                                rows: merge_scoped_prs(rows, limit),
+                                errors,
+                                has_more,
+                            })
+                        }
                     }
                 })
                 .await;
@@ -657,18 +857,21 @@ impl GitHubView {
                 }
                 this.list_loading = false;
                 match result {
-                    GitHubListResult::Issues(Ok(rows)) => {
-                        let previous_selected = this.selected_issue;
+                    GitHubListResult::Issues(list) => {
+                        let previous_selected = this.selected_issue.clone();
                         let old_count = this.issues.len() + usize::from(this.issue_has_more);
-                        this.issue_has_more = rows.len() == limit;
-                        this.repository = rows.first().map(|row| GitHubRepository {
-                            host: row.issue.host.clone(),
-                            owner: row.issue.owner.clone(),
-                            repo: row.issue.repo.clone(),
+                        this.issue_has_more = list.has_more;
+                        this.repository = list.rows.first().map(|row| GitHubRepository {
+                            host: row.summary.issue.host.clone(),
+                            owner: row.summary.issue.owner.clone(),
+                            repo: row.summary.issue.repo.clone(),
                         });
-                        this.issues = rows;
-                        this.selected_issue =
-                            selected_issue_after_refresh(this.selected_issue, &this.issues);
+                        this.issues = list.rows;
+                        this.selected_issue = selected_scoped_issue_after_refresh(
+                            this.selected_issue.clone(),
+                            &this.issues,
+                        );
+                        this.list_error = scoped_list_error(&list.errors);
                         let new_count = this.issues.len() + usize::from(this.issue_has_more);
                         reconcile_list_count(&this.issue_list_state, old_count, new_count);
                         if previous_selected != this.selected_issue {
@@ -678,17 +881,18 @@ impl GitHubView {
                         }
                         this.fetch_detail(cx);
                     }
-                    GitHubListResult::PullRequests(Ok(rows)) => {
-                        let previous_selected = this.selected_pr;
+                    GitHubListResult::PullRequests(list) => {
+                        let previous_selected = this.selected_pr.clone();
                         let old_count = this.pull_requests.len() + usize::from(this.pr_has_more);
-                        this.pr_has_more = rows.len() == limit;
-                        this.repository = rows.first().map(|row| row.repository.clone());
-                        this.pull_requests = rows;
-                        this.selected_pr = selected_number_after_refresh(
-                            this.selected_pr,
+                        this.pr_has_more = list.has_more;
+                        this.repository =
+                            list.rows.first().map(|row| row.summary.repository.clone());
+                        this.pull_requests = list.rows;
+                        this.selected_pr = selected_scoped_pr_after_refresh(
+                            this.selected_pr.clone(),
                             &this.pull_requests,
-                            |row| row.number,
                         );
+                        this.list_error = scoped_list_error(&list.errors);
                         let new_count = this.pull_requests.len() + usize::from(this.pr_has_more);
                         reconcile_list_count(&this.pr_list_state, old_count, new_count);
                         if previous_selected != this.selected_pr {
@@ -698,10 +902,6 @@ impl GitHubView {
                         }
                         this.fetch_detail(cx);
                     }
-                    GitHubListResult::Issues(Err(error))
-                    | GitHubListResult::PullRequests(Err(error)) => {
-                        this.list_error = Some(error);
-                    }
                 }
                 cx.notify();
             });
@@ -710,23 +910,21 @@ impl GitHubView {
     }
 
     fn fetch_detail(&mut self, cx: &mut Context<Self>) {
-        let Some(work_dir) = self.project_work_dir.clone() else {
-            return;
+        let selected = match self.tab {
+            GitHubTab::Issues => self.selected_issue.clone(),
+            GitHubTab::PullRequests => self.selected_pr.clone(),
         };
-        let number = match self.tab {
-            GitHubTab::Issues => self.selected_issue,
-            GitHubTab::PullRequests => self.selected_pr,
-        };
-        let Some(number) = number else {
+        let Some(selected) = selected else {
             self.detail_loading = false;
             return;
         };
         let tab = self.tab;
+        let scope = self.scope.clone();
         let request = GitHubRequest {
-            work_dir: work_dir.clone(),
+            scope,
             tab,
             query_revision: self.query_revision,
-            item_number: Some(number),
+            item: Some(selected.clone()),
         };
         self.active_detail_request = Some(request.clone());
         self.detail_loading = true;
@@ -739,12 +937,18 @@ impl GitHubView {
                 .spawn(async move {
                     match tab {
                         GitHubTab::Issues => GitHubDetailResult::Issue(
-                            threadlane_git::inspect_github_issue(&work_dir, number)
-                                .map_err(|error| error.message),
+                            threadlane_git::inspect_github_issue(
+                                &selected.project,
+                                selected.number,
+                            )
+                            .map_err(|error| error.message),
                         ),
                         GitHubTab::PullRequests => GitHubDetailResult::PullRequest(
-                            threadlane_git::inspect_pr_number(&work_dir, number)
-                                .map_err(|error| error.message),
+                            threadlane_git::inspect_pr_number(
+                                &selected.project,
+                                selected.number,
+                            )
+                            .map_err(|error| error.message),
                         ),
                     }
                 })
@@ -755,7 +959,7 @@ impl GitHubView {
                     .as_ref()
                     .is_some_and(|current| github_result_matches_request(&request, current));
                 let list_matches = this.active_list_request.as_ref().is_some_and(|list| {
-                    detail_result_matches_list(&request, list, this.selected_number())
+                    detail_result_matches_list(&request, list, this.selected_key())
                 });
                 if !detail_matches || !list_matches {
                     return;
@@ -781,7 +985,11 @@ impl GitHubView {
                     }
                     GitHubDetailResult::PullRequest(Ok(detail)) => {
                         let key = PrWorkspaceKey {
-                            project: request.work_dir.clone(),
+                            project: request
+                                .item
+                                .as_ref()
+                                .map(|item| item.project.clone())
+                                .unwrap_or_default(),
                             number: detail.number,
                         };
                         let previous_file =
@@ -848,23 +1056,32 @@ impl GitHubView {
 
     fn selected_ix(&self) -> Option<usize> {
         match self.tab {
-            GitHubTab::Issues => self.selected_issue.and_then(|number| {
-                self.issues
-                    .iter()
-                    .position(|row| row.issue.number == number)
+            GitHubTab::Issues => self.selected_issue.as_ref().and_then(|selected| {
+                self.issues.iter().position(|row| {
+                    row.project == selected.project
+                        && row.summary.issue.number == selected.number
+                })
             }),
-            GitHubTab::PullRequests => self.selected_pr.and_then(|number| {
-                self.pull_requests
-                    .iter()
-                    .position(|row| row.number == number)
+            GitHubTab::PullRequests => self.selected_pr.as_ref().and_then(|selected| {
+                self.pull_requests.iter().position(|row| {
+                    row.project == selected.project && row.summary.number == selected.number
+                })
             }),
         }
     }
 
+    #[allow(dead_code)]
     fn selected_number(&self) -> Option<u64> {
         match self.tab {
-            GitHubTab::Issues => self.selected_issue,
-            GitHubTab::PullRequests => self.selected_pr,
+            GitHubTab::Issues => self.selected_issue.as_ref().map(|key| key.number),
+            GitHubTab::PullRequests => self.selected_pr.as_ref().map(|key| key.number),
+        }
+    }
+
+    fn selected_key(&self) -> Option<GitHubItemKey> {
+        match self.tab {
+            GitHubTab::Issues => self.selected_issue.clone(),
+            GitHubTab::PullRequests => self.selected_pr.clone(),
         }
     }
 
@@ -872,9 +1089,10 @@ impl GitHubView {
         if self.tab != GitHubTab::PullRequests {
             return None;
         }
+        let selected = self.selected_pr.clone()?;
         Some(PrWorkspaceKey {
-            project: self.project_work_dir.clone()?,
-            number: self.selected_pr?,
+            project: selected.project,
+            number: selected.number,
         })
     }
 
@@ -1280,12 +1498,12 @@ impl GitHubView {
         .detach();
     }
 
-    fn linked_pr_task(&self, head_ref: &str, cx: &App) -> Option<SessionInfo> {
+    fn linked_pr_task(&self, project_work_dir: &PathBuf, head_ref: &str, cx: &App) -> Option<SessionInfo> {
         let state = self.model.read(cx);
         let project = state
             .projects
             .iter()
-            .find(|project| Some(&project.work_dir) == self.project_work_dir.as_ref())?;
+            .find(|project| &project.work_dir == project_work_dir)?;
         linked_pr_session(
             &project.sessions,
             head_ref,
@@ -1305,14 +1523,20 @@ impl GitHubView {
                 let Some(row) = self.issues.get(ix) else {
                     return;
                 };
-                self.selected_issue = Some(row.issue.number);
+                self.selected_issue = Some(GitHubItemKey {
+                    project: row.project.clone(),
+                    number: row.summary.issue.number,
+                });
                 self.issue_list_state.scroll_to_reveal_item(ix);
             }
             GitHubTab::PullRequests => {
                 let Some(row) = self.pull_requests.get(ix) else {
                     return;
                 };
-                self.selected_pr = Some(row.number);
+                self.selected_pr = Some(GitHubItemKey {
+                    project: row.project.clone(),
+                    number: row.summary.number,
+                });
                 self.pr_list_state.scroll_to_reveal_item(ix);
             }
         }
@@ -1349,10 +1573,14 @@ impl GitHubView {
     fn selected_detail_is_loaded(&self) -> bool {
         self.detail_error.is_none() && match self.tab {
             GitHubTab::Issues => self.issue_detail.as_ref().is_some_and(|detail| {
-                self.selected_issue == Some(detail.summary.issue.number)
+                self.selected_issue
+                    .as_ref()
+                    .is_some_and(|selected| selected.number == detail.summary.issue.number)
             }),
             GitHubTab::PullRequests => self.pr_detail.as_ref().is_some_and(|detail| {
-                self.selected_pr == Some(detail.number)
+                self.selected_pr
+                    .as_ref()
+                    .is_some_and(|selected| selected.number == detail.number)
             }),
         }
     }
@@ -1405,18 +1633,8 @@ impl GitHubView {
     fn render_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().colors;
         let close_model = self.model.clone();
-        let repository = self
-            .repository
-            .as_ref()
-            .map(|repo| format!("{}/{}", repo.owner, repo.repo))
-            .or_else(|| {
-                self.project_work_dir
-                    .as_ref()
-                    .and_then(|path| path.file_name())
-                    .and_then(|name| name.to_str())
-                    .map(str::to_owned)
-            })
-            .unwrap_or_else(|| "No project".into());
+        let projects = self.attached_projects(cx);
+        let scope_label = self.scope.label(&projects);
 
         div()
             .flex_none()
@@ -1448,7 +1666,7 @@ impl GitHubView {
                     .flex_1()
                     .text_sm()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(format!("GitHub · {repository}")),
+                    .child(format!("GitHub · {scope_label}")),
             )
             .child(
                 Button::new("github-tab-issues")
@@ -1468,14 +1686,77 @@ impl GitHubView {
                         cx.listener(|this, _, _, cx| this.select_tab(GitHubTab::PullRequests, cx)),
                     ),
             )
+            .into_any_element()
+    }
+
+    fn render_scope_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().colors;
+        let projects = self.attached_projects(cx);
+        let current = self.scope.clone();
+        let scope_label = current.label(&projects);
+        let view = cx.entity();
+        let mut names_by_dir: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for (name, _) in &projects {
+            *names_by_dir.entry(name.clone()).or_default() += 1;
+        }
+        div()
+            .debug_selector(|| "github-scope-row".into())
+            .flex_none()
+            .border_b_1()
+            .border_color(theme.border)
+            .px_3()
+            .py_2()
+            .flex()
+            .items_center()
+            .gap_2()
             .child(
-                Button::new("github-refresh")
-                    .icon(IconName::Redo)
-                    .tooltip("Refresh GitHub")
+                Button::new("github-scope-picker")
+                    .debug_selector(|| "github-scope-all".into())
+                    .icon(IconName::Folder)
+                    .label(scope_label)
+                    .tooltip("Project scope for GitHub issues and pull requests")
                     .ghost()
                     .small()
-                    .disabled(self.project_work_dir.is_none() || self.list_loading)
-                    .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
+                    .dropdown_caret(true)
+                    .dropdown_menu(move |menu, _window, _cx| {
+                        let view_for_all = view.clone();
+                        let mut menu = menu.item(
+                            PopupMenuItem::new("All projects")
+                                .checked(current == GitHubScope::All)
+                                .on_click(move |_event, _window, cx| {
+                                    view_for_all.update(cx, |view, cx| {
+                                        view.select_scope(GitHubScope::All, cx);
+                                    });
+                                }),
+                        );
+                        for (name, work_dir) in projects.clone() {
+                            let scope = GitHubScope::Project(work_dir.clone());
+                            let checked = current == scope;
+                            let disambiguated =
+                                if names_by_dir.get(&name).is_some_and(|count| *count > 1) {
+                                    let parent = work_dir
+                                        .parent()
+                                        .and_then(|parent| parent.file_name())
+                                        .and_then(|parent| parent.to_str())
+                                        .unwrap_or("…");
+                                    format!("{name} · …/{parent}")
+                                } else {
+                                    name.clone()
+                                };
+                            let view_for_project = view.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(disambiguated)
+                                    .checked(checked)
+                                    .on_click(move |_event, _window, cx| {
+                                        view_for_project.update(cx, |view, cx| {
+                                            view.select_scope(scope.clone(), cx);
+                                        });
+                                    }),
+                            );
+                        }
+                        menu
+                    }),
             )
             .into_any_element()
     }
@@ -1530,6 +1811,15 @@ impl GitHubView {
                     .flex_1()
                     .child(Input::new(&self.query_input).small()),
             )
+            .child(
+                Button::new("github-refresh")
+                    .icon(IconName::Redo)
+                    .tooltip("Refresh GitHub")
+                    .ghost()
+                    .small()
+                    .disabled(self.scope_targets(cx).is_empty() || self.list_loading)
+                    .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
+            )
             .children(self.list_loading.then(|| {
                 div()
                     .flex()
@@ -1551,15 +1841,86 @@ impl GitHubView {
         if ix == self.issues.len() && self.issue_has_more {
             return self.render_load_more(cx);
         }
-        let Some(issue) = self.issues.get(ix).cloned() else {
+        let Some(row) = self.issues.get(ix).cloned() else {
             return div().into_any_element();
         };
-        let selected = self.selected_issue == Some(issue.issue.number);
-        let linked_count = self.linked_sessions(&issue.issue, cx).len();
+        let issue = row.summary;
+        let row_project = row.project;
+        let row_project_name = row.project_name;
+        let selected = self.selected_issue.as_ref().is_some_and(|selected| {
+            selected.project == row_project && selected.number == issue.issue.number
+        });
+        let linked = self.linked_sessions(&issue.issue, cx);
+        let linked_count = linked.len();
+        let first_linked = linked.first().cloned();
         let number = issue.issue.number;
         let theme = cx.theme().colors;
+        let now = github_now_unix();
+        let context_line = scope_context_line(
+            &issue.issue.owner,
+            &issue.issue.repo,
+            &row_project_name,
+        );
+        let assignees_label = (!issue.assignees.is_empty())
+            .then(|| format!(" · @{}", issue.assignees.join(" @")));
+        let start_model = self.model.clone();
+        let start_work_dir = row_project.clone();
+        let start_issue = issue.issue.clone();
+        let start_title = issue.title.clone();
+        let open_model = self.model.clone();
+        let row_action = if let Some(first) = first_linked {
+            let work_dir = first.session.work_dir.clone();
+            let session_id = first.session.id.clone();
+            Button::new(SharedString::from(format!(
+                "github-issue-open-{}-{number}",
+                row_project.display()
+            )))
+                .label("Open →")
+                .ghost()
+                .xsmall()
+                .tooltip(format!("Open linked task · {}", first.session.title))
+                .on_click(move |_, _, cx| {
+                    open_model.update(cx, |state, cx| {
+                        controller::dispatch(
+                            state,
+                            AppAction::SelectSession {
+                                work_dir: work_dir.clone(),
+                                session_id: session_id.clone(),
+                            },
+                        );
+                        controller::dispatch(state, AppAction::CloseGitHub);
+                        cx.notify();
+                    });
+                })
+                .into_any_element()
+        } else {
+            Button::new(SharedString::from(format!(
+                "github-issue-start-{}-{number}",
+                row_project.display()
+            )))
+                .label("Start →")
+                .ghost()
+                .xsmall()
+                .tooltip("Start a task for this issue")
+                .on_click(move |_, window, cx| {
+                    open_issue_start_dialog(
+                        start_model.clone(),
+                        start_work_dir.clone(),
+                        start_issue.clone(),
+                        start_title.clone(),
+                        false,
+                        window,
+                        cx,
+                    );
+                })
+                .into_any_element()
+        };
+        let row_project_for_click = row_project.clone();
         div()
-            .id(SharedString::from(format!("github-issue-{number}")))
+            .id(SharedString::from(format!(
+                "github-issue-{}-{number}",
+                row_project.display()
+            )))
             .px_3()
             .py_2()
             .border_b_1()
@@ -1572,11 +1933,9 @@ impl GitHubView {
             .hover(|style| style.bg(theme.list_hover))
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.list_focus.focus(window, cx);
-                if let Some(ix) = this
-                    .issues
-                    .iter()
-                    .position(|row| row.issue.number == number)
-                {
+                if let Some(ix) = this.issues.iter().position(|row| {
+                    row.project == row_project_for_click && row.summary.issue.number == number
+                }) {
                     this.select_ix(ix, cx);
                 }
             }))
@@ -1612,16 +1971,38 @@ impl GitHubView {
                             )
                             .child(
                                 div()
+                                    .mt_0p5()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(context_line),
+                            )
+                            .child(
+                                div()
                                     .mt_1()
                                     .flex()
+                                    .flex_wrap()
                                     .items_center()
                                     .gap_1()
                                     .text_xs()
                                     .text_color(theme.muted_foreground)
-                                    .child(format!(
-                                        "#{number} · {} · {} · {} comments",
-                                        issue.author, issue.updated_at, issue.comments_count
-                                    ))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .flex_1()
+                                            .truncate()
+                                            .child(format!(
+                                                "#{number} · {} · {} · {} comments{}",
+                                                issue.author,
+                                                format_github_time(&issue.updated_at, now),
+                                                issue.comments_count,
+                                                assignees_label.unwrap_or_default()
+                                            )),
+                                    )
+                                    .child(
+                                        div().flex_none().child(
+                                            Tag::new().small().child(issue.state.clone()),
+                                        ),
+                                    )
                                     .children(
                                         issue.labels.iter().take(3).map(|label| {
                                             Tag::new().small().child(label.name.clone())
@@ -1634,7 +2015,8 @@ impl GitHubView {
                                         ))
                                     })),
                             ),
-                    ),
+                    )
+                    .child(div().flex_none().pt_0p5().child(row_action)),
             )
             .into_any_element()
     }
@@ -1643,16 +2025,59 @@ impl GitHubView {
         if ix == self.pull_requests.len() && self.pr_has_more {
             return self.render_load_more(cx);
         }
-        let Some(pr) = self.pull_requests.get(ix).cloned() else {
+        let Some(row) = self.pull_requests.get(ix).cloned() else {
             return div().into_any_element();
         };
-        let selected = self.selected_pr == Some(pr.number);
+        let pr = row.summary;
+        let row_project = row.project;
+        let row_project_name = row.project_name;
+        let selected = self.selected_pr.as_ref().is_some_and(|selected| {
+            selected.project == row_project && selected.number == pr.number
+        });
         let number = pr.number;
-        let linked_task = self.linked_pr_task(&pr.head_ref, cx);
+        let linked_task = self.linked_pr_task(&row_project, &pr.head_ref, cx);
         let checks_label = pr_check_label(&pr.checks);
         let theme = cx.theme().colors;
+        let now = github_now_unix();
+        let context_line = scope_context_line(
+            &pr.repository.owner,
+            &pr.repository.repo,
+            &row_project_name,
+        );
+        let open_model = self.model.clone();
+        let row_action = linked_task.clone().map(|session| {
+            let work_dir = session.work_dir.clone();
+            let session_id = session.id.clone();
+            let title = session.title.clone();
+            Button::new(SharedString::from(format!(
+                "github-pr-open-{}-{number}",
+                row_project.display()
+            )))
+                .label("Open →")
+                .ghost()
+                .xsmall()
+                .tooltip(format!("Open linked task · {title}"))
+                .on_click(move |_, _, cx| {
+                    open_model.update(cx, |state, cx| {
+                        controller::dispatch(
+                            state,
+                            AppAction::SelectSession {
+                                work_dir: work_dir.clone(),
+                                session_id: session_id.clone(),
+                            },
+                        );
+                        controller::dispatch(state, AppAction::CloseGitHub);
+                        cx.notify();
+                    });
+                })
+                .into_any_element()
+        });
+        let row_project_for_click = row_project.clone();
         div()
-            .id(SharedString::from(format!("github-pr-{number}")))
+            .id(SharedString::from(format!(
+                "github-pr-{}-{number}",
+                row_project.display()
+            )))
             .px_3()
             .py_2()
             .border_b_1()
@@ -1665,11 +2090,9 @@ impl GitHubView {
             .hover(|style| style.bg(theme.list_hover))
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.list_focus.focus(window, cx);
-                if let Some(ix) = this
-                    .pull_requests
-                    .iter()
-                    .position(|row| row.number == number)
-                {
+                if let Some(ix) = this.pull_requests.iter().position(|row| {
+                    row.project == row_project_for_click && row.summary.number == number
+                }) {
                     this.select_ix(ix, cx);
                 }
             }))
@@ -1705,21 +2128,36 @@ impl GitHubView {
                             )
                             .child(
                                 div()
+                                    .mt_0p5()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(context_line),
+                            )
+                            .child(
+                                div()
                                     .mt_1()
                                     .text_xs()
                                     .text_color(theme.muted_foreground)
                                     .child(format!(
                                         "#{number} · {} · {} · {} → {}",
-                                        pr.author, pr.updated_at, pr.head_ref, pr.base_ref,
+                                        pr.author,
+                                        format_github_time(&pr.updated_at, now),
+                                        pr.head_ref,
+                                        pr.base_ref,
                                     )),
                             )
                             .child(
                                 div()
                                     .mt_1()
                                     .flex()
+                                    .flex_wrap()
                                     .items_center()
                                     .gap_1()
-                                    .child(Tag::new().small().child(pr.state.clone()))
+                                    .child(
+                                        div().flex_none().child(
+                                            Tag::new().small().child(pr.state.clone()),
+                                        ),
+                                    )
                                     .children(
                                         pr.is_draft.then(|| Tag::new().small().child("Draft")),
                                     )
@@ -1735,7 +2173,8 @@ impl GitHubView {
                                             .child(format!("Task · {}", session.title))
                                     })),
                             ),
-                    ),
+                    )
+                    .children(row_action.map(|action| div().flex_none().pt_0p5().child(action))),
             )
             .into_any_element()
     }
@@ -1757,10 +2196,10 @@ impl GitHubView {
             .into_any_element()
     }
 
-    fn render_list(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_list(&mut self, _window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().colors;
-        if self.project_work_dir.is_none() {
-            return self.render_empty("Select a project to browse GitHub.", cx);
+        if self.scope_targets(cx).is_empty() {
+            return self.render_empty("Attach a project to browse GitHub.", cx);
         }
         let row_count = match self.tab {
             GitHubTab::Issues => self.issues.len(),
@@ -1790,11 +2229,7 @@ impl GitHubView {
             .size_full()
             .min_h_0()
             .border_1()
-            .border_color(if self.list_focus.is_focused(window) {
-                theme.primary
-            } else {
-                theme.border
-            })
+            .border_color(theme.border)
             .track_focus(&self.list_focus)
             .key_context(GITHUB_LIST_CONTEXT)
             .on_action(cx.listener(Self::select_previous))
@@ -1818,17 +2253,66 @@ impl GitHubView {
                     .child(Scrollbar::vertical(&list_state)),
             )
             .into_any_element();
-        if let Some(error) = &self.list_error {
-            div()
+        if let Some(error) = self.list_error.clone() {
+            // Partial failure (some projects loaded): a slim banner so the
+            // list keeps its space. Full card only when nothing loaded.
+            let banner = if row_count > 0 || has_more {
+                self.render_list_warning(&error, cx)
+            } else {
+                self.render_error("list", &error, cx)
+            };
+            return div()
                 .size_full()
                 .flex()
                 .flex_col()
-                .child(self.render_error("list", error, cx))
+                .child(banner)
                 .child(div().flex_1().min_h_0().child(content))
-                .into_any_element()
-        } else {
-            content
+                .into_any_element();
         }
+        content
+    }
+
+    fn render_list_warning(&self, error: &str, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().colors;
+        let details = error.to_owned();
+        div()
+            .debug_selector(|| "github-list-warning".into())
+            .w_full()
+            .flex_none()
+            .px_3()
+            .py_1p5()
+            .flex()
+            .items_center()
+            .gap_2()
+            .bg(theme.warning.opacity(0.12))
+            .text_xs()
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .truncate()
+                    .text_color(theme.foreground)
+                    .child(format!("Some projects couldn’t load: {error}")),
+            )
+            .child(
+                Button::new("github-list-warning-retry")
+                    .label("Retry")
+                    .ghost()
+                    .xsmall()
+                    .disabled(self.list_loading)
+                    .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
+            )
+            .child(
+                Button::new("github-list-warning-copy")
+                    .label("Copy")
+                    .tooltip("Copy the complete GitHub error")
+                    .ghost()
+                    .xsmall()
+                    .on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(details.clone()));
+                    }),
+            )
+            .into_any_element()
     }
 
     fn render_error(&self, id: &'static str, error: &str, cx: &mut Context<Self>) -> AnyElement {
@@ -1945,23 +2429,32 @@ impl GitHubView {
 
     fn handoff_pr_reply(&self, head_ref: &str, prompt: String, cx: &mut Context<Self>) {
         let model = self.model.clone();
-        let project_work_dir = self.project_work_dir.clone();
+        let selected_project = self.selected_pr.clone().map(|key| key.project);
         let head_ref = head_ref.to_owned();
         model.update(cx, |state, cx| {
-            let target = project_work_dir
-                .as_ref()
-                .and_then(|work_dir| {
-                    state
-                        .projects
-                        .iter()
-                        .find(|project| project.work_dir == *work_dir)
+            let target = state
+                .projects
+                .iter()
+                .filter(|project| {
+                    selected_project
+                        .as_ref()
+                        .is_none_or(|selected| &project.work_dir == selected)
                 })
-                .and_then(|project| {
+                .find_map(|project| {
                     linked_pr_session(
                         &project.sessions,
                         &head_ref,
                         state.active_session_id.as_deref(),
                     )
+                })
+                .or_else(|| {
+                    state.projects.iter().find_map(|project| {
+                        linked_pr_session(
+                            &project.sessions,
+                            &head_ref,
+                            state.active_session_id.as_deref(),
+                        )
+                    })
                 })
                 .map(|session| (session.work_dir.clone(), session.id.clone()));
             if let Some((work_dir, session_id)) = target {
@@ -2346,16 +2839,23 @@ impl GitHubView {
     }
 
     fn render_pr_summary(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let selected = self.selected_pr.clone();
         let Some(detail) = self
             .pr_detail
             .as_ref()
-            .filter(|detail| self.selected_pr == Some(detail.number))
+            .filter(|detail| {
+                selected
+                    .as_ref()
+                    .is_some_and(|selected| selected.number == detail.number)
+            })
         else {
             return self.render_empty("Loading details…", cx);
         };
         let detail = detail.clone();
         let theme = cx.theme().colors;
-        let linked = self.linked_pr_task(&detail.head_ref, cx);
+        let linked = selected
+            .as_ref()
+            .and_then(|selected| self.linked_pr_task(&selected.project, &detail.head_ref, cx));
         let comments = (0..self.pr_timeline_rows.len())
             .map(|ix| self.render_pr_timeline_row(ix, cx))
             .collect::<Vec<_>>();
@@ -2673,7 +3173,6 @@ impl GitHubView {
                     .min_h_0()
                     .border_1()
                     .border_color(theme.border)
-                    .focus(|style| style.border_color(theme.primary))
                     .track_focus(&self.pr_file_focus)
                     .key_context(GITHUB_PR_FILE_LIST_CONTEXT)
                     .on_action(cx.listener(Self::select_previous_pr_file))
@@ -2721,11 +3220,11 @@ impl GitHubView {
         }
         let theme = cx.theme().colors;
         let (number, title, url, state, author, head_ref, base_ref, updated_at) = {
-            let Some(detail) = self
-                .pr_detail
-                .as_ref()
-                .filter(|detail| self.selected_pr == Some(detail.number))
-            else {
+            let Some(detail) = self.pr_detail.as_ref().filter(|detail| {
+                self.selected_pr
+                    .as_ref()
+                    .is_some_and(|selected| selected.number == detail.number)
+            }) else {
                 return self.render_empty("Loading details…", cx);
             };
             (
@@ -2779,7 +3278,12 @@ impl GitHubView {
                             .text_color(theme.muted_foreground)
                             .child(format!(
                                 "#{} · {} · {} · {} → {} · {}",
-                                number, state, author, head_ref, base_ref, updated_at
+                                number,
+                                state,
+                                author,
+                                head_ref,
+                                base_ref,
+                                format_github_time(&updated_at, github_now_unix())
                             )),
                     )
                     .child(
@@ -2797,9 +3301,6 @@ impl GitHubView {
                                 div()
                                     .id("github-pr-detail-tabs-focus")
                                     .role(Role::TabList)
-                                    .border_1()
-                                    .border_color(theme.background)
-                                    .focus(|style| style.border_color(theme.primary))
                                     .track_focus(&self.pr_tabs_focus)
                                     .key_context(GITHUB_PR_TABS_CONTEXT)
                                     .on_action(cx.listener(Self::select_previous_pr_tab))
@@ -2831,11 +3332,11 @@ impl GitHubView {
 
         let (title, metadata, url, issue) = match self.tab {
             GitHubTab::Issues => {
-                let Some(detail) = self
-                    .issue_detail
-                    .as_ref()
-                    .filter(|detail| self.selected_issue == Some(detail.summary.issue.number))
-                else {
+                let Some(detail) = self.issue_detail.as_ref().filter(|detail| {
+                    self.selected_issue
+                        .as_ref()
+                        .is_some_and(|selected| selected.number == detail.summary.issue.number)
+                }) else {
                     return self.render_empty("Loading details…", cx);
                 };
                 (
@@ -2845,18 +3346,18 @@ impl GitHubView {
                         detail.summary.issue.number,
                         detail.summary.state,
                         detail.summary.author,
-                        detail.summary.updated_at
+                        format_github_time(&detail.summary.updated_at, github_now_unix())
                     ),
                     detail.summary.issue.url.clone(),
                     Some(detail.summary.issue.clone()),
                 )
             }
             GitHubTab::PullRequests => {
-                let Some(detail) = self
-                    .pr_detail
-                    .as_ref()
-                    .filter(|detail| self.selected_pr == Some(detail.number))
-                else {
+                let Some(detail) = self.pr_detail.as_ref().filter(|detail| {
+                    self.selected_pr
+                        .as_ref()
+                        .is_some_and(|selected| selected.number == detail.number)
+                }) else {
                     return self.render_empty("Loading details…", cx);
                 };
                 (
@@ -2879,7 +3380,11 @@ impl GitHubView {
             .map(|issue| self.linked_sessions(issue, cx))
             .unwrap_or_default();
         let start_model = self.model.clone();
-        let start_work_dir = self.project_work_dir.clone();
+        let start_work_dir = self
+            .selected_issue
+            .clone()
+            .map(|key| key.project)
+            .or_else(|| self.project_work_dir.clone());
         let start_issue = issue.clone();
         let start_title = title.clone();
         let start_has_linked_task = !linked_sessions.is_empty();
@@ -3066,7 +3571,7 @@ impl GitHubView {
             .into_any_element()
     }
 
-    fn render_status_bar(&self) -> impl IntoElement {
+    fn render_status_bar(&self, cx: &App) -> impl IntoElement {
         let count = match self.tab {
             GitHubTab::Issues => self.issues.len(),
             GitHubTab::PullRequests => self.pull_requests.len(),
@@ -3075,10 +3580,12 @@ impl GitHubView {
             GitHubTab::Issues => !self.issue_comment_draft.is_empty(),
             GitHubTab::PullRequests => !self.pr_review_draft.is_empty(),
         };
+        let projects = self.attached_projects(cx);
         StatusBar::new().left(format!(
-            "{} {} · {}{}",
+            "{} {} · {} · {}{}",
             count,
             self.tab.label().to_lowercase(),
+            self.scope.label(&projects).to_lowercase(),
             self.state_filter.value(),
             if has_draft { " · Unsaved draft" } else { "" }
         ))
@@ -3093,6 +3600,7 @@ impl Render for GitHubView {
             .min_h_0()
             .flex()
             .flex_col()
+            .child(self.render_scope_row(cx))
             .child(self.render_filters(cx))
             .child(div().flex_1().min_h_0().child(self.render_list(window, cx)));
         let detail = self.render_detail(window, cx);
@@ -3132,7 +3640,7 @@ impl Render for GitHubView {
             .flex_col()
             .child(self.render_toolbar(cx))
             .child(div().flex_1().min_h_0().child(content))
-            .child(self.render_status_bar())
+            .child(self.render_status_bar(cx))
     }
 }
 
@@ -3146,7 +3654,8 @@ mod tests {
         linked_session_ids, linked_session_status, linked_sessions_across_projects,
         list_count_splice, merge_pr_timeline, pr_check_label, pr_diff_result_matches_request,
         pr_file_action_ix, pr_publish_control, pr_publish_refresh_matches_selection,
-        prepare_selected_diff, selected_file_diff, selected_issue_after_refresh, GitHubRequest,
+        prepare_selected_diff, selected_file_diff, selected_issue_after_refresh,
+        GitHubItemKey, GitHubRequest, GitHubScope, ScopedIssue, ScopedPr,
         GitHubStateFilter, GitHubTab, GitHubView, PrCommentControl, PrCommentDrafts,
         PrCommentPhase, PrDetailTab, PrDiffRequest, PrFileAction, PrReadback, PrReplyTarget,
         PrTimelineKind, PrWorkspaceKey, PrWorkspaceSelections,
@@ -3211,13 +3720,22 @@ mod tests {
                 ..Default::default()
             },
         ];
-        view.project_work_dir = Some(project);
+        view.project_work_dir = Some(project.clone());
+        view.scope = GitHubScope::Project(project.clone());
+        view.scope_initialized = true;
         view.tab = GitHubTab::PullRequests;
-        view.selected_pr = Some(key.number);
-        view.pull_requests = vec![GitHubPullRequestSummary {
+        view.selected_pr = Some(GitHubItemKey {
+            project: project.clone(),
             number: key.number,
-            title: "Inspect PR".into(),
-            ..Default::default()
+        });
+        view.pull_requests = vec![ScopedPr {
+            project,
+            project_name: "app".into(),
+            summary: GitHubPullRequestSummary {
+                number: key.number,
+                title: "Inspect PR".into(),
+                ..Default::default()
+            },
         }];
         view.pr_detail = Some(GitHubPrInfo {
             number: key.number,
@@ -4041,7 +4559,10 @@ mod tests {
         );
         view.update_in(cx, |view, window, cx| {
             let second = pr_key("/projects/app", 43);
-            view.selected_pr = Some(43);
+            view.selected_pr = Some(GitHubItemKey {
+                project: PathBuf::from("/projects/app"),
+                number: 43,
+            });
             view.pr_drafts
                 .set_body(second.clone(), "second comment".into());
             view.pr_drafts
@@ -4070,7 +4591,10 @@ mod tests {
         );
         view.update_in(cx, |view, window, cx| {
             view.project_work_dir = Some("/projects/other".into());
-            view.selected_pr = Some(42);
+            view.selected_pr = Some(GitHubItemKey {
+                project: PathBuf::from("/projects/other"),
+                number: 42,
+            });
             let other = pr_key("/projects/other", 42);
             view.pr_drafts
                 .select_reply_target(other.clone(), reply_target("303", "carol"));
@@ -4083,7 +4607,10 @@ mod tests {
         );
         view.update_in(cx, |view, window, cx| {
             view.project_work_dir = Some("/projects/app".into());
-            view.selected_pr = Some(42);
+            view.selected_pr = Some(GitHubItemKey {
+                project: PathBuf::from("/projects/app"),
+                number: 42,
+            });
             view.sync_pr_draft_inputs(window, cx);
         });
         assert_eq!(
@@ -4095,16 +4622,19 @@ mod tests {
     #[test]
     fn github_result_matches_request_rejects_stale_project_tab_query_revision() {
         let current = GitHubRequest {
-            work_dir: PathBuf::from("/projects/current"),
+            scope: GitHubScope::Project(PathBuf::from("/projects/current")),
             tab: GitHubTab::Issues,
             query_revision: 4,
-            item_number: Some(12),
+            item: Some(GitHubItemKey {
+                project: PathBuf::from("/projects/current"),
+                number: 12,
+            }),
         };
 
         assert!(github_result_matches_request(&current, &current));
         for stale in [
             GitHubRequest {
-                work_dir: PathBuf::from("/projects/old"),
+                scope: GitHubScope::Project(PathBuf::from("/projects/old")),
                 ..current.clone()
             },
             GitHubRequest {
@@ -4116,7 +4646,14 @@ mod tests {
                 ..current.clone()
             },
             GitHubRequest {
-                item_number: Some(13),
+                item: Some(GitHubItemKey {
+                    project: PathBuf::from("/projects/current"),
+                    number: 13,
+                }),
+                ..current.clone()
+            },
+            GitHubRequest {
+                scope: GitHubScope::All,
                 ..current.clone()
             },
         ] {
@@ -4127,21 +4664,27 @@ mod tests {
     #[test]
     fn stale_detail_is_rejected_after_a_new_list_request() {
         let old_detail = GitHubRequest {
-            work_dir: PathBuf::from("/projects/current"),
+            scope: GitHubScope::Project(PathBuf::from("/projects/current")),
             tab: GitHubTab::Issues,
             query_revision: 4,
-            item_number: Some(42),
+            item: Some(GitHubItemKey {
+                project: PathBuf::from("/projects/current"),
+                number: 42,
+            }),
         };
         let new_list = GitHubRequest {
             query_revision: 5,
-            item_number: None,
+            item: None,
             ..old_detail.clone()
         };
 
         assert!(!detail_result_matches_list(
             &old_detail,
             &new_list,
-            Some(42)
+            Some(GitHubItemKey {
+                project: PathBuf::from("/projects/current"),
+                number: 42,
+            })
         ));
         assert!(!detail_result_matches_list(&old_detail, &new_list, None));
     }
@@ -4187,10 +4730,10 @@ mod tests {
             view.issue_limit = 100;
             view.pr_limit = 150;
             view.active_list_request = Some(GitHubRequest {
-                work_dir: view.project_work_dir.clone().unwrap(),
+                scope: view.scope.clone(),
                 tab: GitHubTab::PullRequests,
                 query_revision: view.query_revision,
-                item_number: None,
+                item: None,
             });
             view.query_revision += 1;
             view.schedule_query("older fix".into(), cx);
@@ -4213,6 +4756,142 @@ mod tests {
             Some(41)
         );
         assert_eq!(selected_issue_after_refresh(Some(42), &[]), None);
+    }
+
+    #[test]
+    fn scoped_issues_merge_sort_and_disambiguate_same_number() {
+        let older = ScopedIssue {
+            project: PathBuf::from("/projects/a"),
+            project_name: "a".into(),
+            summary: GitHubIssueSummary {
+                updated_at: "2026-08-30T12:00:00Z".into(),
+                ..issue(42)
+            },
+        };
+        let newer = ScopedIssue {
+            project: PathBuf::from("/projects/b"),
+            project_name: "b".into(),
+            summary: GitHubIssueSummary {
+                updated_at: "2026-09-01T12:00:00Z".into(),
+                ..issue(42)
+            },
+        };
+        let merged = super::merge_scoped_issues(vec![older.clone(), newer.clone()], 10);
+        assert_eq!(merged[0].project_name, "b");
+        assert_eq!(merged[1].project_name, "a");
+        let truncated = super::merge_scoped_issues(vec![older, newer], 1);
+        assert_eq!(truncated.len(), 1);
+
+        let rows = vec![ScopedIssue {
+            project: PathBuf::from("/projects/b"),
+            project_name: "b".into(),
+            summary: issue(7),
+        }];
+        let selected = GitHubItemKey {
+            project: PathBuf::from("/projects/b"),
+            number: 7,
+        };
+        assert_eq!(
+            super::selected_scoped_issue_after_refresh(Some(selected.clone()), &rows),
+            Some(selected)
+        );
+        assert_eq!(
+            super::selected_scoped_issue_after_refresh(
+                Some(GitHubItemKey {
+                    project: PathBuf::from("/projects/a"),
+                    number: 7,
+                }),
+                &rows,
+            ),
+            Some(GitHubItemKey {
+                project: PathBuf::from("/projects/b"),
+                number: 7,
+            })
+        );
+    }
+
+    #[test]
+    fn scoped_prs_merge_by_updated_desc() {
+        let first = ScopedPr {
+            project: PathBuf::from("/projects/a"),
+            project_name: "a".into(),
+            summary: GitHubPullRequestSummary {
+                updated_at: "2026-08-30T12:00:00Z".into(),
+                number: 1,
+                ..Default::default()
+            },
+        };
+        let second = ScopedPr {
+            project: PathBuf::from("/projects/b"),
+            project_name: "b".into(),
+            summary: GitHubPullRequestSummary {
+                updated_at: "2026-09-02T12:00:00Z".into(),
+                number: 2,
+                ..Default::default()
+            },
+        };
+        let merged = super::merge_scoped_prs(vec![first, second.clone()], 10);
+        assert_eq!(merged[0], second);
+        assert_eq!(
+            GitHubScope::All.label(&[
+                ("a".into(), PathBuf::from("/projects/a")),
+                ("b".into(), PathBuf::from("/projects/b")),
+            ]),
+            "All projects"
+        );
+        assert_eq!(
+            GitHubScope::Project(PathBuf::from("/projects/b")).label(&[
+                ("a".into(), PathBuf::from("/projects/a")),
+                ("b".into(), PathBuf::from("/projects/b")),
+            ]),
+            "b"
+        );
+    }
+
+    #[test]
+    fn github_timestamps_render_relative_and_fall_back_to_raw() {
+        // 2026-09-08T15:17:31Z == 1788880651.
+        assert_eq!(
+            super::parse_github_timestamp("2026-09-08T15:17:31Z"),
+            Some(1788880651)
+        );
+        assert_eq!(super::parse_github_timestamp("not a time"), None);
+        assert_eq!(
+            super::format_github_time("2026-09-08T15:17:31Z", 1788880651 + 30),
+            "just now"
+        );
+        assert_eq!(
+            super::format_github_time("2026-09-08T15:17:31Z", 1788880651 + 5 * 3600),
+            "5h ago"
+        );
+        assert_eq!(
+            super::format_github_time("2026-09-08T15:17:31Z", 1788880651 + 3 * 86400),
+            "3d ago"
+        );
+        assert_eq!(
+            super::format_github_time("2026-07-25T04:42:52Z", 1788880651),
+            "2026-07-25"
+        );
+        assert_eq!(
+            super::format_github_time("garbage", 1788880651),
+            "garbage"
+        );
+    }
+
+    #[test]
+    fn scope_context_line_collapses_redundant_project() {
+        assert_eq!(
+            super::scope_context_line(
+                "troescorpteam",
+                "bom_price_management_system",
+                "bom_price_management_system"
+            ),
+            "troescorpteam/bom_price_management_system"
+        );
+        assert_eq!(
+            super::scope_context_line("wheregmis", "threadlane", "mypi"),
+            "wheregmis/threadlane · mypi"
+        );
     }
 
     #[test]
@@ -4994,7 +5673,10 @@ mod tests {
 
         view.update(cx, |view, cx| {
             view.tab = GitHubTab::Issues;
-            view.selected_issue = Some(1);
+            view.selected_issue = Some(GitHubItemKey {
+                project: PathBuf::from("/projects/app"),
+                number: 1,
+            });
             view.issue_detail = Some(threadlane_git::GitHubIssueDetail {
                 summary: issue(1),
                 body: "Body".into(),
