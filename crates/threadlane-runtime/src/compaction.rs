@@ -66,6 +66,9 @@ pub(crate) fn estimate_message_tokens(message: &AgentMessage, config: &AgentConf
         AgentMessage::UserWithImages { images, .. } => {
             images.len().saturating_mul(config.estimated_image_tokens)
         }
+        AgentMessage::Tool { images, .. } => {
+            images.len().saturating_mul(config.estimated_image_tokens)
+        }
         _ => 0,
     };
     serialized_tokens.saturating_add(image_tokens)
@@ -490,8 +493,13 @@ pub fn prune_historical_tool_outputs(
                 content,
                 is_error,
                 terminate,
+                images,
             } => {
-                if keep_full[i] || content.len() <= INLINE_TOOL_OUTPUT_LIMIT {
+                let image_bytes: usize =
+                    images.iter().map(|image| image.data_url.len()).sum();
+                if keep_full[i]
+                    || content.len().saturating_add(image_bytes) <= INLINE_TOOL_OUTPUT_LIMIT
+                {
                     result.push(msg.clone());
                 } else {
                     let pruned_content = format!(
@@ -504,6 +512,9 @@ pub fn prune_historical_tool_outputs(
                         content: pruned_content,
                         is_error: *is_error,
                         terminate: *terminate,
+                        // Pruning bounds context: attached images age out
+                        // with the text they illustrated.
+                        images: Vec::new(),
                     });
                 }
             }
@@ -703,6 +714,7 @@ mod tests {
                 content: "result".repeat(1_000),
                 is_error: false,
                 terminate: false,
+                images: Vec::new(),
             },
             AgentMessage::User {
                 content: "continue".into(),
@@ -926,6 +938,7 @@ mod tests {
             content: "x".repeat(1_000),
             is_error: false,
             terminate: false,
+            images: Vec::new(),
         });
 
         let compacted = compact_messages_to_token_budget(&msgs, 1);
@@ -951,6 +964,7 @@ mod tests {
                 content: "running cargo test ... finished cleanly".into(),
                 is_error: false,
                 terminate: false,
+                images: Vec::new(),
             },
             AgentMessage::Assistant {
                 content: Some("GPUI component guidelines must be followed.".into()),
@@ -1016,6 +1030,7 @@ mod tests {
                 content: "a".repeat(5_000),
                 is_error: false,
                 terminate: false,
+                images: Vec::new(),
             });
         }
 

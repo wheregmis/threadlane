@@ -2179,6 +2179,7 @@ mod tests {
                     content: "ok".into(),
                     is_error: false,
                     terminate: false,
+                    images: Vec::new(),
                 },
                 surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
                 terminate: false,
@@ -2196,6 +2197,7 @@ mod tests {
                     content: "ok".into(),
                     is_error: false,
                     terminate: false,
+                    images: Vec::new(),
                 },
             )
             .unwrap();

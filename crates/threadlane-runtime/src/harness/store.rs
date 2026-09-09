@@ -471,6 +471,7 @@ mod tests {
                 content: "skill instructions".into(),
                 is_error: false,
                 terminate: false,
+                images: Vec::new(),
             },
         );
 

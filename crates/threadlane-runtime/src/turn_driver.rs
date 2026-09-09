@@ -903,6 +903,7 @@ impl<'a> TurnDriver<'a> {
                     content: result.content.clone(),
                     is_error: result.is_error,
                     terminate: result.terminate,
+                    images: result.images.clone(),
                 })
                 .collect::<Vec<_>>();
             if let Err(error) = self.persist_messages(&tool_messages).await {

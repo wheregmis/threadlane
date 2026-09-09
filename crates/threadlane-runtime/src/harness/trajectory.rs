@@ -1353,6 +1353,7 @@ mod tests {
                         content: "private snapshot body".into(),
                         is_error: false,
                         terminate: false,
+                        images: Vec::new(),
                     },
                     false,
                 ))

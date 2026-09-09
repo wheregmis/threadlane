@@ -245,6 +245,7 @@ pub fn interrupted_subagent_lanes(
                             ),
                             is_error: true,
                             terminate: false,
+                            images: Vec::new(),
                         },
                     ));
                 }

@@ -8510,6 +8510,7 @@ name = "threadlane-session"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64",
  "core-foundation 0.10.1",
  "core-graphics 0.24.0",
  "directories",

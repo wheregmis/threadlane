@@ -301,6 +301,7 @@ impl ToolDispatcher {
                             content: format!("Tool execution task failed: {error}"),
                             is_error: true,
                             terminate: false,
+                            images: Vec::new(),
                         };
                         slots[index] = Some(result);
                     }
@@ -383,6 +384,7 @@ impl ToolDispatcher {
                     ),
                     is_error: true,
                     terminate: false,
+                    images: Vec::new(),
                 };
                 let _ = self.event_tx.send(AgentEvent::ToolExecutionEnd {
                     tool_call_id: tc.id.clone(),
@@ -420,6 +422,7 @@ impl ToolDispatcher {
                     },
                     is_error: nested_result.is_error,
                     terminate: nested_result.terminate,
+                    images: nested_result.images,
                 };
             }
         }
@@ -458,6 +461,7 @@ impl ToolDispatcher {
                 ),
                 is_error: true,
                 terminate: false,
+                images: Vec::new(),
             };
             let _ = context.event_tx.send(AgentEvent::ToolExecutionEnd {
                 tool_call_id: tc.id,
@@ -491,6 +495,7 @@ impl ToolDispatcher {
                     content: reason,
                     is_error: true,
                     terminate: false,
+                    images: Vec::new(),
                 };
                 let _ = context.event_tx.send(AgentEvent::ToolExecutionEnd {
                     tool_call_id: tc.id.clone(),
@@ -509,6 +514,7 @@ impl ToolDispatcher {
                     content: error,
                     is_error: true,
                     terminate: false,
+                    images: Vec::new(),
                 };
                 let _ = context.event_tx.send(AgentEvent::ToolExecutionEnd {
                     tool_call_id: tc.id,
@@ -561,6 +567,7 @@ impl ToolDispatcher {
                     content: format!("Failed to persist tool execution start: {error}"),
                     is_error: true,
                     terminate: false,
+                    images: Vec::new(),
                 };
             }
         }
@@ -581,7 +588,7 @@ impl ToolDispatcher {
             }
             if let Some(result) = route
                 .executor
-                .execute_tool_in_workspace(
+                .execute_tool_with_output_in_workspace(
                     &agent_tool_call.name,
                     &arguments,
                     context.work_dir.as_deref(),
@@ -598,9 +605,13 @@ impl ToolDispatcher {
                 tc.function.name, tc.function.name
             ))
         });
-        let (content, is_error) = match execution_result {
-            Ok(content) => (content, false),
-            Err(error) => (format!("Tool executor error: {error}"), true),
+        let (content, is_error, images) = match execution_result {
+            Ok(output) => (output.content, false, output.images),
+            Err(error) => (
+                format!("Tool executor error: {error}"),
+                true,
+                Vec::new(),
+            ),
         };
         let duration_ms = start_time.elapsed().as_millis();
         if is_error {
@@ -620,6 +631,7 @@ impl ToolDispatcher {
             content,
             is_error,
             terminate: false,
+            images,
         };
 
         let hook_ctx = HookContext {

@@ -1212,6 +1212,7 @@ impl CodingAgent {
                     content: result.content,
                     is_error: result.is_error,
                     terminate: false,
+                    images: Vec::new(),
                 })
                 .collect::<Vec<_>>();
             let unsafe_tool_ids = lane

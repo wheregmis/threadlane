@@ -299,6 +299,11 @@ pub enum AgentMessage {
         is_error: bool,
         #[serde(default)]
         terminate: bool,
+        /// Model-visible images attached by the tool (e.g. screenshots).
+        /// Empty for text-only results; serialized inline so durable reload
+        /// reproduces the exact provider-visible context.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<ImageAttachment>,
     },
     Custom {
         custom_type: String,
@@ -391,6 +396,27 @@ pub struct AgentToolResult {
     pub content: String,
     pub is_error: bool,
     pub(crate) terminate: bool,
+    /// Model-visible images attached by the tool. Serialized inline so the
+    /// durable transcript reproduces the exact provider-visible context.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageAttachment>,
+}
+
+/// Rich tool output: text plus optional model-visible images. Executors keep
+/// returning plain strings; only image-producing tools build this directly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolOutput {
+    pub content: String,
+    pub images: Vec<ImageAttachment>,
+}
+
+impl From<String> for ToolOutput {
+    fn from(content: String) -> Self {
+        Self {
+            content,
+            images: Vec::new(),
+        }
+    }
 }
 
 impl AgentToolResult {
@@ -415,6 +441,7 @@ impl AgentToolResult {
             content: content.into(),
             is_error,
             terminate: false,
+            images: Vec::new(),
         }
     }
 }

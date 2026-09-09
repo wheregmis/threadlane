@@ -1476,6 +1476,7 @@ mod tests {
                     content: "contents".into(),
                     is_error: false,
                     terminate: false,
+                    images: Vec::new(),
                 },
                 false,
             ))
@@ -1547,6 +1548,7 @@ mod tests {
                     content: "contents".into(),
                     is_error: false,
                     terminate: false,
+                    images: Vec::new(),
                 },
                 false,
             ))
@@ -2034,6 +2036,7 @@ mod tests {
                     content: "ok".into(),
                     is_error: false,
                     terminate: false,
+                    images: Vec::new(),
                 },
                 false,
             ))

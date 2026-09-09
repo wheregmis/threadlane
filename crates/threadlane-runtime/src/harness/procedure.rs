@@ -1599,6 +1599,7 @@ impl AbortProcedure {
                             content: "Tool execution was interrupted by abort.".into(),
                             is_error: true,
                             terminate: false,
+                            images: Vec::new(),
                         },
                         surface_op: super::types::SurfaceOperation::Append,
                         terminate: false,
@@ -2217,6 +2218,7 @@ impl ToolBatchProcedure {
                     content: result.content,
                     is_error: result.is_error,
                     terminate: result.terminate,
+                    images: result.images.clone(),
                 },
                 surface_op: super::types::SurfaceOperation::Append,
                 terminate: result.terminate,
@@ -2353,6 +2355,7 @@ impl ToolBatchProcedure {
                 content,
                 is_error: true,
                 terminate: false,
+                images: Vec::new(),
             };
             effects.park(EffectAction::AppendEntry {
                 entry: Entry {
@@ -2367,6 +2370,7 @@ impl ToolBatchProcedure {
                         content: result.content.clone(),
                         is_error: result.is_error,
                         terminate: result.terminate,
+                        images: result.images.clone(),
                     },
                     surface_op: super::types::SurfaceOperation::Append,
                     terminate: result.terminate,

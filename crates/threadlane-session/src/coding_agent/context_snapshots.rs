@@ -508,6 +508,7 @@ mod tests {
                 content: read_output,
                 is_error: false,
                 terminate: false,
+                images: Vec::new(),
             })
             .unwrap();
         let context_id = harness
@@ -626,6 +627,7 @@ mod tests {
                     content: format!("body-{index}"),
                     is_error: false,
                     terminate: false,
+                    images: Vec::new(),
                 })
                 .unwrap();
             harness

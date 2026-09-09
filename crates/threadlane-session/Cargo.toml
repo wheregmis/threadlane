@@ -28,6 +28,7 @@ threadlane-wasi = { version = "0.1.0", path = "../threadlane-wasi" }
 tokio = { version = "1.38", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+base64 = "0.22"
 async-trait = "0.1"
 futures = "0.3"
 md5 = "0.8"

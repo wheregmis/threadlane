@@ -1577,6 +1577,7 @@ impl CodingSessionHarness {
                                         .unwrap_or_else(|| "Tool execution cancelled.".into()),
                                     is_error: true,
                                     terminate: false,
+                                    images: Vec::new(),
                                 },
                             )?;
                             any_provisioned = true;
@@ -2720,6 +2721,7 @@ impl CodingSessionHarness {
             content,
             is_error,
             terminate,
+            images,
         } = message
         else {
             return Ok(());
@@ -2734,6 +2736,7 @@ impl CodingSessionHarness {
                     content: content.clone(),
                     is_error: *is_error,
                     terminate: *terminate,
+                    images: images.clone(),
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -2758,12 +2761,14 @@ impl CodingSessionHarness {
                     content: result.content.clone(),
                     is_error: result.is_error,
                     terminate: result.terminates(),
+                    images: result.images.clone(),
                 },
             )
             .map_err(|error| error.to_string())?;
         self.store
             .drive_to_completion()
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        Ok(())
     }
 
     /// Finish a replayed tool result.
@@ -2782,6 +2787,7 @@ impl CodingSessionHarness {
                     content: result.content.clone(),
                     is_error: result.is_error,
                     terminate: result.terminates(),
+                    images: result.images.clone(),
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -2908,6 +2914,7 @@ impl CodingSessionHarness {
                         content: persisted_result.0,
                         is_error: persisted_result.1,
                         terminate,
+                        images: Vec::new(),
                     },
                 )
                 .map_err(|error| error.to_string())?;
@@ -3085,6 +3092,7 @@ impl CodingSessionHarness {
                     content: result.content.clone(),
                     is_error: result.is_error,
                     terminate: result.terminates(),
+                    images: result.images.clone(),
                 },
                 surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
                 terminate: result.terminates(),
@@ -3386,6 +3394,7 @@ impl CodingSessionHarness {
                 content: result.content.clone(),
                 is_error: result.is_error,
                 terminate: result.terminates(),
+                images: result.images.clone(),
             };
             let entry_id = self.append_message_to_lane(lane, run_id, msg)?;
             let _ = self.finish_tool_result(run_id, result);
@@ -4437,6 +4446,7 @@ mod tests {
                         content: "contents".into(),
                         is_error: false,
                         terminate: false,
+                        images: Vec::new(),
                     },
                 ],
             )
@@ -4741,9 +4751,10 @@ mod tests {
             tool_call_id: "call-1".into(),
             name: "read_file".into(),
             content: "contents".into(),
-            is_error: false,
-            terminate: false,
-        };
+                is_error: false,
+                terminate: false,
+                images: Vec::new(),
+            };
         harness.sync_messages(&[result.clone()]).unwrap();
 
         let state = Reducer::reduce(&harness.store).unwrap();
@@ -4879,6 +4890,7 @@ mod tests {
                 content: read_output.clone(),
                 is_error: false,
                 terminate: false,
+                images: Vec::new(),
             })
             .unwrap();
         std::fs::write(dir.path().join("README.md"), "changed after read").unwrap();
@@ -4984,6 +4996,7 @@ mod tests {
                 content: read_output.clone(),
                 is_error: false,
                 terminate: false,
+                images: Vec::new(),
             })
             .unwrap();
 
@@ -5060,6 +5073,7 @@ mod tests {
                 content: read_output.clone(),
                 is_error: false,
                 terminate: false,
+                images: Vec::new(),
             })
             .unwrap();
         let context_id = harness
@@ -5086,6 +5100,7 @@ mod tests {
                     content: "later non-indexed duplicate tool body".into(),
                     is_error: false,
                     terminate: false,
+                    images: Vec::new(),
                 },
                 surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
                 terminate: false,
@@ -5296,6 +5311,7 @@ mod tests {
                 content: "not found".into(),
                 is_error: true,
                 terminate: false,
+                images: Vec::new(),
             })
             .unwrap();
         let virtual_entry = harness
@@ -5305,6 +5321,7 @@ mod tests {
                 content: "body".into(),
                 is_error: false,
                 terminate: false,
+                images: Vec::new(),
             })
             .unwrap();
         let remote_entry = harness
@@ -5314,6 +5331,7 @@ mod tests {
                 content: "body".into(),
                 is_error: false,
                 terminate: false,
+                images: Vec::new(),
             })
             .unwrap();
         let unbound_entry = harness
@@ -5323,6 +5341,7 @@ mod tests {
                 content: "body without an execution-bound digest".into(),
                 is_error: false,
                 terminate: false,
+                images: Vec::new(),
             })
             .unwrap();
         let unrecorded_entry = harness
@@ -5332,6 +5351,7 @@ mod tests {
                 content: "body".into(),
                 is_error: false,
                 terminate: false,
+                images: Vec::new(),
             })
             .unwrap();
 
@@ -5409,16 +5429,18 @@ mod tests {
             tool_call_id: "call-1".into(),
             name: "read_file".into(),
             content: "first".into(),
-            is_error: false,
-            terminate: false,
-        };
+                is_error: false,
+                terminate: false,
+                images: Vec::new(),
+            };
         let second_tool = AgentMessage::Tool {
             tool_call_id: "call-2".into(),
             name: "grep".into(),
             content: "second".into(),
-            is_error: false,
-            terminate: false,
-        };
+                is_error: false,
+                terminate: false,
+                images: Vec::new(),
+            };
         let final_assistant = AgentMessage::Assistant {
             content: Some("done".into()),
             tool_calls: None,

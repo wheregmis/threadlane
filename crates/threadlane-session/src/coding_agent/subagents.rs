@@ -1008,6 +1008,7 @@ mod result_tests {
                     .unwrap(),
                     is_error: false,
                     terminate: false,
+                    images: Vec::new(),
                 })
                 .unwrap();
             context_ids.push(
@@ -1451,6 +1452,7 @@ mod result_tests {
             content: "large child tool output".repeat(1000),
             is_error: false,
             terminate: false,
+            images: Vec::new(),
         }];
         result.messages = history.clone();
         let mut completed = lane("scout", SubagentLaneStatus::Completed);

@@ -1,5 +1,5 @@
 use super::queue::SteerPriority;
-use crate::types::{AgentMessage, ReasoningEffort, TokenUsage};
+use crate::types::{AgentMessage, ImageAttachment, ReasoningEffort, TokenUsage};
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
@@ -389,6 +389,10 @@ pub struct ToolResult {
     pub content: String,
     pub is_error: bool,
     pub terminate: bool,
+    /// Model-visible images (screenshots). Serialized inline so reload
+    /// reproduces the exact provider-visible context; skipped when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageAttachment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

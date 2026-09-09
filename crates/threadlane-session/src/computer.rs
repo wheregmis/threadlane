@@ -1,24 +1,21 @@
 //! Native computer-use tools: window introspection, screenshots, input control.
 //!
-//! Waku-shaped and Threadlane-gated: observations are text, and screenshots
-//! and input actions require user approval through the session
+//! Waku-shaped and Threadlane-gated: screenshots and input actions require
+//! user approval through the session
 //! [`PermissionManager`](crate::permission::PermissionManager). The first
 //! action prompts with Once/Always scopes and an Always grant is remembered
 //! per project; unattended sessions deny by default, matching the ACP
 //! reject-by-default policy. macOS-only; other platforms get a helpful error.
 //!
-//! What the model does NOT get yet: pixels. Tool results are text-only in
-//! the provider-neutral loop, so screenshots land in
-//! `<work_dir>/.threadlane/previews/` for the user to see while the model
-//! receives path, dimensions, and capture metadata. Feeding pixels to the
-//! model needs tool-result image support across the provider translations
-//! and is tracked as the follow-up.
+//! Screenshots reach the model as JPEG images attached to the tool result
+//! alongside text metadata; the full file also lands in
+//! `<work_dir>/.threadlane/previews/` for the user.
 
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use threadlane_runtime::{AgentToolDefinition, Capability, ToolExecutor};
+use threadlane_runtime::{AgentToolDefinition, Capability, ToolExecutor, ToolOutput};
 
 use crate::permission::{PermissionDecision, PermissionManager};
 
@@ -30,8 +27,11 @@ pub const COMPUTER_STATUS_TOOL: &str = "computer_status";
 pub const COMPUTER_UNAVAILABLE: &str = "Native computer use is available on macOS only.";
 
 const MAX_TYPE_CHARS: usize = 4_000;
-const MAX_SCREENSHOT_BYTES: usize = 6_000_000;
-const SCREENSHOT_DOWNSCALE_WIDTH: u32 = 1_920;
+/// Screenshots larger than this ride as metadata only, never pixels.
+const MAX_IMAGE_BYTES: usize = 2_000_000;
+/// Capture width bound: enough for UI legibility, small enough for context.
+const SCREENSHOT_WIDTH: u32 = 1_560;
+const SCREENSHOT_JPEG_QUALITY: u32 = 70;
 
 pub(crate) struct ComputerToolExecutor {
     permissions: Option<Arc<PermissionManager>>,
@@ -79,7 +79,7 @@ fn computer_tool_definitions() -> Arc<[AgentToolDefinition]> {
         ),
         AgentToolDefinition::new(
             COMPUTER_SCREENSHOT_TOOL,
-            "Capture the main display (or one window by id from computer_windows) to a preview file. The user sees the image and must approve; you receive path, dimensions, and size — not pixels. Prefer the embedded browser tools for web pages.",
+            "Capture the main display (or one window by id from computer_windows). You receive the image plus its path and dimensions; the user sees the same file and must approve each capture. Prefer the embedded browser tools for web pages.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -345,6 +345,23 @@ impl ToolExecutor for ComputerToolExecutor {
             _ => None,
         }
     }
+
+    /// Screenshots ride the rich path so pixels reach the provider payload;
+    /// every other tool keeps the default string mapping.
+    #[cfg(target_os = "macos")]
+    async fn execute_tool_with_output_in_workspace(
+        &self,
+        name: &str,
+        args: &str,
+        work_dir: Option<&Path>,
+    ) -> Option<Result<ToolOutput, String>> {
+        if name == COMPUTER_SCREENSHOT_TOOL {
+            return Some(self.screenshot_with_image(args, work_dir).await);
+        }
+        self.execute_tool_in_workspace(name, args, work_dir)
+            .await
+            .map(|result| result.map(ToolOutput::from))
+    }
 }
 
 fn computer_status() -> String {
@@ -368,16 +385,6 @@ mod mac {
             .unwrap_or_else(|| Path::new("."))
             .join(".threadlane")
             .join("previews")
-    }
-
-    /// Read PNG width/height from the IHDR chunk without an image decoder.
-    pub(super) fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
-        if bytes.len() < 24 || &bytes[..8] != b"\x89PNG\r\n\x1a\n" {
-            return None;
-        }
-        let width = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
-        let height = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
-        (width > 0 && height > 0).then_some((width, height))
     }
 
     pub(super) fn list_windows() -> Result<String, String> {
@@ -546,6 +553,14 @@ fn list_windows() -> Result<String, String> {
 #[cfg(target_os = "macos")]
 impl ComputerToolExecutor {
     async fn screenshot(&self, args: &str, work_dir: Option<&Path>) -> Result<String, String> {
+        Ok(self.screenshot_with_image(args, work_dir).await?.content)
+    }
+
+    async fn screenshot_with_image(
+        &self,
+        args: &str,
+        work_dir: Option<&Path>,
+    ) -> Result<ToolOutput, String> {
         let window_id: Option<i64> = serde_json::from_str::<serde_json::Value>(args)
             .ok()
             .and_then(|value| value.get("window_id")?.as_i64());
@@ -556,7 +571,7 @@ impl ComputerToolExecutor {
         self.approve(
             format!("Screenshot {target}"),
             format!(
-                "Capture {target} to a preview file. You will see the image; the agent only receives its path and dimensions."
+                "Capture {target}. You will see the image; the agent receives it too."
             ),
         )
         .await?;
@@ -567,14 +582,43 @@ impl ComputerToolExecutor {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_millis())
             .unwrap_or(0);
-        let path = dir.join(format!("computer-{stamp}.png"));
-        let outcome = tokio::task::spawn_blocking({
+        let path = dir.join(format!("computer-{stamp}.jpg"));
+        let bytes = tokio::task::spawn_blocking({
             let path = path.clone();
-            move || capture_png(window_id, &path)
+            move || capture_jpeg(window_id, &path)
         })
         .await
         .map_err(|error| format!("Screenshot task failed: {error}"))??;
-        Ok(outcome)
+        let dims = jpeg_dimensions(&path).unwrap_or_else(|| "unknown size".to_string());
+        let content = format!(
+            "Screenshot saved to {} ({} pixels, {} bytes).",
+            path.display(),
+            dims,
+            bytes.len()
+        );
+        if bytes.len() > MAX_IMAGE_BYTES {
+            return Ok(ToolOutput {
+                content: format!(
+                    "{content} Image exceeded the {MAX_IMAGE_BYTES}-byte model limit, so only metadata is attached."
+                ),
+                images: Vec::new(),
+            });
+        }
+        use base64::Engine as _;
+        let data_url = format!(
+            "data:image/jpeg;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&bytes)
+        );
+        Ok(ToolOutput {
+            content,
+            images: vec![threadlane_runtime::ImageAttachment {
+                display_name: path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "screenshot.jpg".into()),
+                data_url,
+            }],
+        })
     }
 
     async fn act(&self, args: &str) -> Result<String, String> {
@@ -589,11 +633,12 @@ impl ComputerToolExecutor {
 }
 
 /// Capture via the system `screencapture` CLI (blocking): it owns TCC prompts
-/// and PNG encoding, so no new native deps are needed for pixels.
+/// and encoding, so no new native deps are needed for pixels. Returns the
+/// normalized JPEG bytes; the file stays behind for the user.
 #[cfg(target_os = "macos")]
-fn capture_png(window_id: Option<i64>, path: &Path) -> Result<String, String> {
+fn capture_jpeg(window_id: Option<i64>, path: &Path) -> Result<Vec<u8>, String> {
     let mut command = std::process::Command::new("/usr/sbin/screencapture");
-    command.args(["-x", "-t", "png"]);
+    command.args(["-x", "-t", "jpg"]);
     match window_id {
         Some(id) => {
             command.args(["-o", "-l", &id.to_string()]);
@@ -610,14 +655,8 @@ fn capture_png(window_id: Option<i64>, path: &Path) -> Result<String, String> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(screenshot_error_hint(&stderr));
     }
-    let bytes = std::fs::read(path).map_err(|error| format!("Screenshot missing: {error}"))?;
-    if bytes.len() as u64 > MAX_SCREENSHOT_BYTES as u64 {
-        downscale_png(path)?;
-        let bytes =
-            std::fs::read(path).map_err(|error| format!("Screenshot missing: {error}"))?;
-        return Ok(describe_png(path, &bytes));
-    }
-    Ok(describe_png(path, &bytes))
+    normalize_jpeg(path)?;
+    std::fs::read(path).map_err(|error| format!("Screenshot missing: {error}"))
 }
 
 #[cfg(target_os = "macos")]
@@ -633,10 +672,17 @@ fn screenshot_error_hint(stderr: &str) -> String {
     }
 }
 
+/// Bound capture size for context: 1560px wide JPEG at quality 70.
 #[cfg(target_os = "macos")]
-fn downscale_png(path: &Path) -> Result<(), String> {
+fn normalize_jpeg(path: &Path) -> Result<(), String> {
     let output = std::process::Command::new("/usr/bin/sips")
-        .args(["-Z", &SCREENSHOT_DOWNSCALE_WIDTH.to_string()])
+        .args([
+            "-Z",
+            &SCREENSHOT_WIDTH.to_string(),
+            "-s",
+            "formatOptions",
+            &SCREENSHOT_JPEG_QUALITY.to_string(),
+        ])
         .arg(path)
         .output()
         .map_err(|error| format!("Could not start sips: {error}"))?;
@@ -644,23 +690,40 @@ fn downscale_png(path: &Path) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "sips downscale failed: {}",
+            "sips normalize failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         ))
     }
 }
 
+/// Dimensions via `sips` (JPEG headers need an SOF walk; the CLI is cheaper).
 #[cfg(target_os = "macos")]
-fn describe_png(path: &Path, bytes: &[u8]) -> String {
-    let dims = mac::png_dimensions(bytes)
-        .map(|(width, height)| format!("{width}x{height}"))
-        .unwrap_or_else(|| "unknown size".to_string());
-    format!(
-        "Screenshot saved to {} ({} pixels, {} bytes). The user can see this image; it is not sent to the model.",
-        path.display(),
-        dims,
-        bytes.len()
-    )
+fn jpeg_dimensions(path: &Path) -> Option<String> {
+    let output = std::process::Command::new("/usr/bin/sips")
+        .args(["-g", "pixelWidth", "-g", "pixelHeight"])
+        .arg(path)
+        .output()
+        .ok()?;
+    parse_sips_dimensions(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[cfg(target_os = "macos")]
+fn parse_sips_dimensions(text: &str) -> Option<String> {
+    let mut width = None;
+    let mut height = None;
+    for line in text.lines() {
+        let mut parts = line.split(':');
+        match (parts.next(), parts.next()) {
+            (Some(key), Some(value)) if key.trim() == "pixelWidth" => {
+                width = value.trim().parse::<u32>().ok()
+            }
+            (Some(key), Some(value)) if key.trim() == "pixelHeight" => {
+                height = value.trim().parse::<u32>().ok()
+            }
+            _ => {}
+        }
+    }
+    Some(format!("{}x{}", width?, height?))
 }
 
 #[cfg(target_os = "macos")]
@@ -880,15 +943,43 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn png_dimensions_parse_ihdr() {
-        let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
-        bytes.extend_from_slice(&[0, 0, 0, 13]);
-        bytes.extend_from_slice(b"IHDR");
-        bytes.extend_from_slice(&3840u32.to_be_bytes());
-        bytes.extend_from_slice(&2160u32.to_be_bytes());
-        bytes.extend_from_slice(&[8, 2, 0, 0, 0]);
-        assert_eq!(mac::png_dimensions(&bytes), Some((3840, 2160)));
-        assert_eq!(mac::png_dimensions(b"nope"), None);
+    fn sips_dimensions_parse() {
+        let sample = "/tmp/shot.jpg\n  pixelWidth: 1560\n  pixelHeight: 960\n";
+        assert_eq!(parse_sips_dimensions(sample).as_deref(), Some("1560x960"));
+        assert_eq!(parse_sips_dimensions("garbage"), None);
+    }
+
+    /// Live capture: needs Screen Recording TCC, so ignored in CI. Run by
+    /// hand with `-- --ignored` to prove pixels flow end to end.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[ignore]
+    async fn live_screenshot_attaches_image() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".threadlane")).unwrap();
+        std::fs::write(
+            dir.path().join(".threadlane").join("permissions.json"),
+            r#"{"computer_allowed":true}"#,
+        )
+        .unwrap();
+        let (event_tx, _) = tokio::sync::broadcast::channel(4);
+        let permissions = Arc::new(crate::permission::PermissionManager::new(
+            dir.path().to_path_buf(),
+            event_tx,
+        ));
+        assert!(permissions.computer_is_approved());
+        let executor = ComputerToolExecutor::new(Some(permissions));
+        let output = executor
+            .execute_tool_with_output_in_workspace(
+                COMPUTER_SCREENSHOT_TOOL,
+                "{}",
+                Some(dir.path()),
+            )
+            .await
+            .expect("handled")
+            .expect("screenshot ok");
+        assert_eq!(output.images.len(), 1);
+        assert!(output.images[0].data_url.starts_with("data:image/jpeg;base64,"));
     }
 
     #[tokio::test]
