@@ -37,7 +37,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 portable-pty = "0.9"
 vt100 = "0.16"
 notify = "8.2"
-hotpath = "0.24"
+hotpath = "0.25"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui-wry = { git = "https://github.com/longbridge/gpui-kit" }
