@@ -185,6 +185,11 @@ impl<'a> TurnDriver<'a> {
         'turns: loop {
             turn_number += 1;
 
+            // Repetition cache is per-turn: identical reads may legitimately
+            // recur across turns, but serving turn-1 results in turn-5 would
+            // be stale. Mutations within a turn invalidate by version.
+            self.tool_dispatcher.clear_repetition_cache();
+
             // Persist the complete steering batch before removing it from the
             // queue or exposing it to provider context.
             if !self.steering_queue.is_empty() {
