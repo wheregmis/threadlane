@@ -4992,12 +4992,13 @@ mod tests {
             confirmation.branch_preview,
             "issue/42-fix-linked-task-browser-xxxxxx"
         );
-        assert_eq!(confirmation.copy, "Local Threadlane task");
+        assert!(confirmation.copy.contains("push its issue branch to origin"));
+        assert!(confirmation.copy.contains("draft pull request on GitHub"));
+        assert_eq!(confirmation.start_label, "Start, push & create draft PR");
         assert_eq!(
             confirmation.branch_disclosure,
             "A unique six-character suffix is assigned when the task starts."
         );
-        assert!(!confirmation.copy.to_lowercase().contains("assigned"));
     }
 
     #[test]
@@ -5012,7 +5013,10 @@ mod tests {
         );
 
         assert!(confirmation.show_open_task);
-        assert_eq!(confirmation.start_label, "Start another");
+        assert_eq!(
+            confirmation.start_label,
+            "Start another, push & create draft PR"
+        );
     }
 
     #[test]

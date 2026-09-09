@@ -30,7 +30,7 @@ pub fn issue_start_confirmation(
     has_linked_task: bool,
 ) -> IssueStartConfirmation {
     IssueStartConfirmation {
-        copy: "Local Threadlane task".into(),
+        copy: "Threadlane will create an isolated worktree, then the agent will push its issue branch to origin and open a draft pull request on GitHub after completing the task.".into(),
         model: model.into(),
         reasoning_effort: reasoning_effort.into(),
         branch_preview: AppState::issue_branch_name(issue.number, title, "xxxxxx"),
@@ -40,9 +40,9 @@ pub fn issue_start_confirmation(
             .then_some("This project is not a Git repository.".into()),
         show_open_task: has_linked_task,
         start_label: if has_linked_task {
-            "Start another"
+            "Start another, push & create draft PR"
         } else {
-            "Start task"
+            "Start, push & create draft PR"
         },
     }
 }
@@ -191,6 +191,7 @@ pub fn open_issue_start_dialog(
         has_linked_task,
     );
     let start_enabled = confirmation.start_enabled;
+    let start_label = confirmation.start_label;
     let disabled_reason = confirmation.start_disabled_reason.clone();
     let dialog_state = cx.new(|_| IssueStartDialog {
         model,
@@ -204,7 +205,7 @@ pub fn open_issue_start_dialog(
         let confirm_state = dialog_state.clone();
         let on_ok_state = dialog_state.clone();
         dialog
-            .title("Start local task?")
+            .title("Start task and publish draft PR?")
             .child(dialog_state.clone())
             .footer(
                 div()
@@ -219,7 +220,7 @@ pub fn open_issue_start_dialog(
                     .child(
                         Button::new("confirm-issue-task")
                             .primary()
-                            .label("Start task")
+                            .label(start_label)
                             .disabled(!start_enabled)
                             .tooltip(disabled_reason.clone().unwrap_or_default())
                             .on_click(move |_, window, cx| {

@@ -7,9 +7,8 @@ use super::subagents::*;
 use super::broker::ManagedProcessRegistry;
 use super::capabilities::{
     build_broker_dispatcher, render_agent_catalog, restored_tool_policy, BrowserCapability,
-    ContextCapability,
-    McpCapability, PlanCapability, PrewalkCapability, QuestionCapability, SkillCapability,
-    SubagentCapability, WasiCapability,
+    ContextCapability, GitHubCapability, McpCapability, PlanCapability, PrewalkCapability,
+    QuestionCapability, SkillCapability, SubagentCapability, WasiCapability,
 };
 use crate::computer::ComputerCapability;
 use super::harness::{CodingSessionHarness, HarnessWatch, InterruptedSubagentRecoveryState};
@@ -360,6 +359,9 @@ impl CodingAgent {
             },
             None => (None, None),
         };
+        let github_issue_work = harness
+            .as_ref()
+            .is_some_and(|harness| harness.store.facts().contains_key("github_issue"));
         let mut initial_plan = threadlane_runtime::SessionPlan::default();
         if let Some(h) = harness.as_ref() {
             if let Some(model) = h.store.facts().get("model") {
@@ -565,6 +567,11 @@ impl CodingAgent {
         if let Some(session_file) = options.session_file.clone() {
             registry.register(Box::new(ContextCapability {
                 session_file,
+                work_dir: options.work_dir.clone(),
+            }));
+        }
+        if github_issue_work {
+            registry.register(Box::new(GitHubCapability {
                 work_dir: options.work_dir.clone(),
             }));
         }

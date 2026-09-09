@@ -8527,6 +8527,7 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.20",
+ "threadlane-git",
  "threadlane-mcp",
  "threadlane-protocol",
  "threadlane-provider",

@@ -29,6 +29,7 @@ use threadlane_wasi::WasiExtensionManager;
 use tokio::sync::broadcast;
 
 const SUBAGENT_TOOL_NAME: &str = "subagent";
+const CREATE_DRAFT_PR_TOOL_NAME: &str = "create_draft_pull_request";
 pub(crate) const PREWALK_HANDOFF_TOOL_NAME: &str = "complete_prewalk";
 
 // ── Capability implementations ─────────────────────────────────────────
@@ -81,6 +82,83 @@ impl Capability for ContextCapability {
             self.session_file.clone(),
             self.work_dir.clone(),
         ))]
+    }
+}
+
+pub(crate) struct GitHubCapability {
+    pub(crate) work_dir: PathBuf,
+}
+
+impl Capability for GitHubCapability {
+    fn id(&self) -> &str {
+        "github"
+    }
+
+    fn tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
+        vec![Arc::new(GitHubToolExecutor {
+            work_dir: self.work_dir.clone(),
+        })]
+    }
+}
+
+struct GitHubToolExecutor {
+    work_dir: PathBuf,
+}
+
+#[async_trait]
+impl ToolExecutor for GitHubToolExecutor {
+    fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
+        vec![AgentToolDefinition {
+            name: CREATE_DRAFT_PR_TOOL_NAME.into(),
+            description: Some(
+                "Publish the current branch to origin and create a GitHub draft pull request using Threadlane's configured credentials. Call only after committing the intended changes.".into(),
+            ),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "base": { "type": "string", "description": "Base branch for the pull request." },
+                    "title": { "type": "string", "description": "Pull request title." },
+                    "body": { "type": "string", "description": "Pull request description." }
+                },
+                "required": ["base", "title", "body"],
+                "additionalProperties": false
+            }),
+            strict: Some(true),
+        }]
+        .into()
+    }
+
+    async fn execute_tool(&self, name: &str, args: &str) -> Option<Result<String, String>> {
+        if name != CREATE_DRAFT_PR_TOOL_NAME {
+            return None;
+        }
+        let args: Value = match serde_json::from_str(args) {
+            Ok(args) => args,
+            Err(error) => return Some(Err(format!("invalid arguments: {error}"))),
+        };
+        let required = |field| {
+            args.get(field)
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("missing required string field `{field}`"))
+        };
+        let base = match required("base") {
+            Ok(value) => value,
+            Err(error) => return Some(Err(error)),
+        };
+        let title = match required("title") {
+            Ok(value) => value,
+            Err(error) => return Some(Err(error)),
+        };
+        let body = match required("body") {
+            Ok(value) => value,
+            Err(error) => return Some(Err(error)),
+        };
+        let result = threadlane_git::push(&self.work_dir)
+            .and_then(|()| {
+                threadlane_git::create_draft_pull_request(&self.work_dir, base, title, body)
+            })
+            .map_err(|error| error.to_string());
+        Some(result)
     }
 }
 
@@ -848,5 +926,43 @@ impl ToolExecutor for BrokerAwareWasiToolExecutor {
                 });
             return Some(Ok(broker_message.unwrap_or(immediate_message)));
         }
+    }
+}
+
+#[cfg(test)]
+mod github_tests {
+    use super::*;
+
+    #[test]
+    fn draft_pr_tool_discloses_publish_behavior_and_requires_pr_fields() {
+        let executor = GitHubToolExecutor {
+            work_dir: PathBuf::from("."),
+        };
+        let definitions = executor.tool_definitions();
+        let definition = &definitions[0];
+
+        assert_eq!(definition.name, CREATE_DRAFT_PR_TOOL_NAME);
+        assert!(definition
+            .description
+            .as_deref()
+            .is_some_and(|description| description.contains("Publish the current branch")));
+        assert_eq!(
+            definition.parameters["required"],
+            serde_json::json!(["base", "title", "body"])
+        );
+    }
+
+    #[tokio::test]
+    async fn draft_pr_tool_rejects_missing_fields_before_git_operations() {
+        let executor = GitHubToolExecutor {
+            work_dir: PathBuf::from("."),
+        };
+        let result = executor
+            .execute_tool(CREATE_DRAFT_PR_TOOL_NAME, r#"{"base":"main"}"#)
+            .await
+            .expect("tool should handle its own name")
+            .expect_err("missing fields should fail");
+
+        assert_eq!(result, "missing required string field `title`");
     }
 }
