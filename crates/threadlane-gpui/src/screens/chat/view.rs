@@ -8,6 +8,7 @@ use base64::Engine as _;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants, Toggle, ToggleVariants};
+use gpui_component::Root;
 use gpui_component::hover_card::HoverCard;
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_component::spinner::Spinner;
@@ -22,6 +23,7 @@ use gpui_component::theme::ActiveTheme;
 use gpui_component::{Disableable, Icon, IconName, Selectable, Sizable, WindowExt};
 
 use crate::app::{actions::AppAction, controller};
+use crate::screens::computer_mirror::MirrorView;
 use crate::screens::editor::EditorView;
 use crate::state::{
     AppState, ChatMessageInfo, ChatStreamEvent, MessageRole, SubagentActivityInfo,
@@ -80,6 +82,63 @@ fn visible_session_status<'a>(
                 message.role == MessageRole::Error && message.content == *status
             })
     })
+}
+
+/// Open the computer-use mirror popup: a small non-activating window in the
+/// bottom-right corner showing the latest screenshot plus current action.
+/// Guarded by `AppState::mirror_open` so repeated triggers reuse the window.
+fn open_computer_mirror(model: &Entity<AppState>, cx: &mut AsyncApp) {
+    let previews_dir = model.update(cx, |state, _cx| {
+        if state.mirror_open {
+            return None;
+        }
+        state
+            .active_work_dir
+            .clone()
+            .map(|work_dir| work_dir.join(".threadlane").join("previews"))
+    });
+    let Some(previews_dir) = previews_dir else {
+        return;
+    };
+    let bounds = cx.update(|cx| {
+        cx.primary_display().map(|display| {
+            let area = display.visible_bounds();
+            Bounds {
+                origin: point(
+                    area.origin.x + area.size.width - px(496.0),
+                    area.origin.y + area.size.height - px(376.0),
+                ),
+                size: size(px(480.0), px(360.0)),
+            }
+        })
+    });
+    let Some(bounds) = bounds else {
+        return;
+    };
+    let opened = cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            titlebar: None,
+            focus: false,
+            show: true,
+            kind: WindowKind::PopUp,
+            is_movable: true,
+            is_resizable: false,
+            is_minimizable: false,
+            ..Default::default()
+        },
+        {
+            let model = model.clone();
+            move |window, cx| {
+                let view =
+                    MirrorView::build(model.clone(), previews_dir.clone(), window, cx);
+                cx.new(|cx| Root::new(view, window, cx))
+            }
+        },
+    );
+    if opened.is_ok() {
+        let _ = model.update(cx, |state, _cx| state.mirror_open = true);
+    }
 }
 
 fn render_chat_error(
@@ -423,6 +482,11 @@ impl ChatListView {
                     }
                     changed
                 });
+                let mirror_trigger =
+                    stream_model.update(cx, |state, _cx| state.take_computer_mirror_trigger());
+                if mirror_trigger {
+                    open_computer_mirror(&stream_model, cx);
+                }
                 cx.background_executor()
                     .timer(Duration::from_millis(30))
                     .await;

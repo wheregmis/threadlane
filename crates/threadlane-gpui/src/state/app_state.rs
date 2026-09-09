@@ -79,6 +79,12 @@ pub struct AppState {
     /// app; the first constructed right panel claims the receiver and pumps
     /// agent browser commands into the live view.
     pub(crate) browser_bridge: threadlane_session::BrowserBridge,
+    /// Whether the computer-use mirror popup is currently open. Set when the
+    /// popup opens and cleared by its close button; guards duplicate popups.
+    pub(crate) mirror_open: bool,
+    /// Seen computer trigger ids (permission requests and tool activities)
+    /// so the mirror opens once per new activity, not per pump tick.
+    mirror_seen: HashSet<String>,
 }
 
 impl Default for AppState {
@@ -274,6 +280,8 @@ impl AppState {
             session_runtimes,
             deferred_stream_events: HashMap::new(),
             browser_bridge: threadlane_session::BrowserBridge::channel(),
+            mirror_open: false,
+            mirror_seen: HashSet::new(),
             pending_permissions: HashMap::new(),
             pending_questions: HashMap::new(),
             pending_hydrations: Vec::new(),
@@ -3307,6 +3315,33 @@ impl AppState {
             }
         }
         changed
+    }
+
+    /// True once per unseen computer-use trigger: a pending `computer`
+    /// approval request, or fresh `computer_*` tool activity in the visible
+    /// transcript. The chat pump uses this to open the mirror popup exactly
+    /// once per new activity instead of once per pump tick.
+    pub(crate) fn take_computer_mirror_trigger(&mut self) -> bool {
+        for (id, request) in &self.pending_permissions {
+            if request.capability == "computer"
+                && self.mirror_seen.insert(format!("permission:{id}"))
+            {
+                return true;
+            }
+        }
+        let mut fresh = false;
+        for message in self.messages.iter() {
+            for activity in message.tool_activities.iter() {
+                if activity.title.starts_with("computer_")
+                    && self
+                        .mirror_seen
+                        .insert(format!("tool:{}", activity.id))
+                {
+                    fresh = true;
+                }
+            }
+        }
+        fresh
     }
 
     pub(crate) fn active_pending_composer_message(&self) -> Option<&str> {

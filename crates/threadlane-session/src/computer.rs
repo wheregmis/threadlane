@@ -31,7 +31,7 @@ const MAX_TYPE_CHARS: usize = 4_000;
 const MAX_IMAGE_BYTES: usize = 2_000_000;
 /// Capture width bound: enough for UI legibility, small enough for context.
 const SCREENSHOT_WIDTH: u32 = 1_560;
-const SCREENSHOT_JPEG_QUALITY: u32 = 70;
+const SCREENSHOT_JPEG_QUALITY: u8 = 70;
 
 pub(crate) struct ComputerToolExecutor {
     permissions: Option<Arc<PermissionManager>>,
@@ -334,11 +334,11 @@ impl ToolExecutor for ComputerToolExecutor {
             COMPUTER_ACT_TOOL => {
                 #[cfg(target_os = "macos")]
                 {
-                    Some(self.act(args).await)
+                    Some(self.act(args, work_dir).await)
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
-                    let _ = args;
+                    let _ = (args, work_dir);
                     Some(Err(COMPUTER_UNAVAILABLE.to_string()))
                 }
             }
@@ -379,6 +379,11 @@ fn computer_status() -> String {
 #[cfg(target_os = "macos")]
 mod mac {
     use super::*;
+    use core_foundation::base::TCFType;
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::number::CFNumber;
+    use core_foundation::string::{CFString, CFStringRef};
 
     pub(super) fn previews_dir(work_dir: Option<&Path>) -> PathBuf {
         work_dir
@@ -388,39 +393,176 @@ mod mac {
     }
 
     pub(super) fn list_windows() -> Result<String, String> {
-        use core_foundation::base::{CFIndex, TCFType};
-        use core_foundation::boolean::CFBoolean;
-        use core_foundation::dictionary::CFDictionary;
-        use core_foundation::number::CFNumber;
-        use core_foundation::string::{CFString, CFStringRef};
-        use core_graphics::window::{
-            copy_window_info, kCGNullWindowID, kCGWindowListExcludeDesktopElements,
-            kCGWindowListOptionOnScreenOnly,
-        };
-
-        /// Read one window dictionary by comparing key names. Comparing
-        /// content (not pointers) keeps this independent of CF key-callback
-        /// details; the kCGWindow* names are stable API.
-        struct WindowInfo {
-            id: i32,
-            owner: String,
-            title: String,
-            pid: i32,
-            layer: i32,
-            alpha: f64,
-            bounds: (f64, f64, f64, f64),
-            onscreen: bool,
+        let own_pid = std::process::id() as i32;
+        let mut rows = Vec::new();
+        for window in window_infos()?.into_iter().filter(|window| {
+            window.onscreen && window.pid != own_pid && window.id >= 0
+        }) {
+            rows.push(format!(
+                "id={} app={:?} title={:?} pid={} layer={} alpha={:.2} x={:.0} y={:.0} w={:.0} h={:.0}",
+                window.id,
+                window.owner,
+                window.title,
+                window.pid,
+                window.layer,
+                window.alpha,
+                window.bounds.0,
+                window.bounds.1,
+                window.bounds.2,
+                window.bounds.3
+            ));
+            if rows.len() >= 50 {
+                break;
+            }
         }
+        if rows.is_empty() {
+            return Ok("No on-screen windows found.".to_string());
+        }
+        Ok(format!(
+            "On-screen windows (display pixels; Threadlane's own windows are hidden — never act on them):\n{}",
+            rows.join("\n")
+        ))
+    }
 
-        fn cf_string(ptr: *const std::ffi::c_void) -> String {
+    /// On-screen window ids excluding our own PID, for recursion-free capture.
+    /// Hide our own windows: the agent must never drive Threadlane itself,
+    /// or approvals and focus chase each other in a loop.
+    pub(super) fn capture_window_ids() -> Vec<i32> {
+        let own_pid = std::process::id() as i32;
+        window_infos()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|window| window.onscreen && window.pid != own_pid && window.id >= 0)
+            .map(|window| window.id)
+            .collect()
+    }
+
+    /// Composite every on-screen window except ours into a bounded JPEG.
+    /// Returns (jpeg bytes, width, height). Unlike `screencapture` this never
+    /// includes Threadlane's own windows, so a mirror popup cannot recurse.
+    /// Fails closed (Err) when the composite is blank, e.g. without Screen
+    /// Recording permission — the caller falls back to `screencapture`.
+    pub(super) fn capture_composited_jpeg(
+        max_width: u32,
+        quality: u8,
+    ) -> Result<(Vec<u8>, u32, u32), String> {
+        use core_foundation::array::CFArray;
+        use core_foundation::number::CFNumber;
+        use core_graphics::display::CGDisplay;
+        use core_graphics::window::{create_image_from_array, kCGWindowImageDefault};
+
+        let ids: Vec<CFNumber> = capture_window_ids()
+            .into_iter()
+            .map(CFNumber::from)
+            .collect();
+        if ids.is_empty() {
+            return Err("No capturable windows.".to_string());
+        }
+        let array = CFArray::from_CFTypes(&ids);
+        // create_image_from_array takes the untyped array; rewrap the same ref.
+        let array: CFArray =
+            unsafe { CFArray::wrap_under_get_rule(array.as_concrete_TypeRef()) };
+        let bounds = CGDisplay::main().bounds();
+        let image = create_image_from_array(bounds, array, kCGWindowImageDefault)
+            .ok_or_else(|| "Window composite failed.".to_string())?;
+        let width = image.width() as u32;
+        let height = image.height() as u32;
+        if width == 0 || height == 0 {
+            return Err("Window composite is empty.".to_string());
+        }
+        if image.bits_per_pixel() != 32 {
+            return Err(format!(
+                "Unexpected composite depth: {}bpp.",
+                image.bits_per_pixel()
+            ));
+        }
+        let stride = image.bytes_per_row();
+        let pixels = image.data();
+        let raw = pixels.bytes();
+        // BGRA, honoring row stride, alpha assumed opaque (window server output).
+        let mut rgb = Vec::with_capacity((width as usize) * (height as usize) * 3);
+        for y in 0..height as usize {
+            let row = &raw[y * stride..];
+            for x in 0..width as usize {
+                let offset = x * 4;
+                rgb.push(row[offset + 2]);
+                rgb.push(row[offset + 1]);
+                rgb.push(row[offset]);
+            }
+        }
+        if is_blank(&rgb) {
+            return Err(
+                "Window composite is blank (Screen Recording permission likely missing)."
+                    .to_string(),
+            );
+        }
+        encode_bounded_jpeg(&rgb, width, height, max_width, quality)
+    }
+
+    /// True when every pixel is identical: a denied TCC capture composites black.
+    fn is_blank(rgb: &[u8]) -> bool {
+        let (first, rest) = match rgb.split_first_chunk::<3>() {
+            Some(pair) => pair,
+            None => return true,
+        };
+        rest.chunks_exact(3).all(|pixel| pixel == first)
+    }
+
+    fn encode_bounded_jpeg(
+        rgb: &[u8],
+        width: u32,
+        height: u32,
+        max_width: u32,
+        quality: u8,
+    ) -> Result<(Vec<u8>, u32, u32), String> {
+        use image::codecs::jpeg::JpegEncoder;
+        use image::{ImageBuffer, Rgb};
+
+        let buffer: ImageBuffer<Rgb<u8>, _> =
+            ImageBuffer::from_raw(width, height, rgb.to_vec())
+                .ok_or_else(|| "Could not wrap capture pixels.".to_string())?;
+        let (buffer, width, height) = if width > max_width {
+            let height = ((height as u64) * (max_width as u64) / (width as u64)) as u32;
+            let resized = image::imageops::resize(
+                &buffer,
+                max_width,
+                height.max(1),
+                image::imageops::FilterType::Triangle,
+            );
+            (resized, max_width, height.max(1))
+        } else {
+            (buffer, width, height)
+        };
+        let mut bytes = Vec::new();
+        JpegEncoder::new_with_quality(&mut bytes, quality)
+            .encode_image(&buffer)
+            .map_err(|error| format!("JPEG encode failed: {error}"))?;
+        Ok((bytes, width, height))
+    }
+
+    /// Read one window dictionary by comparing key names. Comparing
+    /// content (not pointers) keeps this independent of CF key-callback
+    /// details; the kCGWindow* names are stable API.
+    struct WindowInfo {
+        id: i32,
+        owner: String,
+        title: String,
+        pid: i32,
+        layer: i32,
+        alpha: f64,
+        bounds: (f64, f64, f64, f64),
+        onscreen: bool,
+    }
+
+    fn cf_string(ptr: *const std::ffi::c_void) -> String {
             unsafe { CFString::wrap_under_get_rule(ptr as CFStringRef) }.to_string()
         }
 
-        fn cf_number(value: &core_foundation::base::CFType) -> Option<CFNumber> {
-            value.downcast::<CFNumber>()
-        }
+    fn cf_number(value: &core_foundation::base::CFType) -> Option<CFNumber> {
+        value.downcast::<CFNumber>()
+    }
 
-        fn read_dictionary(dict: &CFDictionary) -> WindowInfo {
+    fn read_dictionary(dict: &CFDictionary) -> WindowInfo {
             let mut strings = std::collections::HashMap::new();
             let mut numbers = std::collections::HashMap::new();
             let mut onscreen = false;
@@ -494,60 +636,39 @@ mod mac {
             }
         }
 
-        let info = copy_window_info(
-            kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
-            kCGNullWindowID,
-        )
-        .ok_or_else(|| "Could not list windows.".to_string())?;
-        // Hide our own windows: the agent must never drive Threadlane itself,
-        // or approvals and focus chase each other in a loop.
-        let own_pid = std::process::id() as i32;
-        let mut rows = Vec::new();
-        for index in 0..info.len().min(50) {
-            let Some(item) = info.get(index as CFIndex) else {
-                continue;
+        fn window_infos() -> Result<Vec<WindowInfo>, String> {
+            use core_foundation::base::{CFIndex, TCFType};
+            use core_foundation::dictionary::CFDictionary;
+            use core_graphics::window::{
+                copy_window_info, kCGNullWindowID, kCGWindowListExcludeDesktopElements,
+                kCGWindowListOptionOnScreenOnly,
             };
-            let raw: *const std::ffi::c_void = *item;
-            let dict = unsafe {
-                core_foundation::base::CFType::wrap_under_get_rule(raw)
-            };
-            let Some(dict) = dict.downcast::<CFDictionary>() else {
-                continue;
-            };
-            let window = read_dictionary(&dict);
-            if !window.onscreen {
-                continue;
+
+            let info = copy_window_info(
+                kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+                kCGNullWindowID,
+            )
+            .ok_or_else(|| "Could not list windows.".to_string())?;
+            let mut windows = Vec::new();
+            for index in 0..info.len().min(50) {
+                let Some(item) = info.get(index as CFIndex) else {
+                    continue;
+                };
+                let raw: *const std::ffi::c_void = *item;
+                let dict = unsafe {
+                    core_foundation::base::CFType::wrap_under_get_rule(raw)
+                };
+                let Some(dict) = dict.downcast::<CFDictionary>() else {
+                    continue;
+                };
+                windows.push(read_dictionary(&dict));
             }
-            if window.pid == own_pid {
-                continue;
-            }
-            rows.push(format!(
-                "id={} app={:?} title={:?} pid={} layer={} alpha={:.2} x={:.0} y={:.0} w={:.0} h={:.0}",
-                window.id,
-                window.owner,
-                window.title,
-                window.pid,
-                window.layer,
-                window.alpha,
-                window.bounds.0,
-                window.bounds.1,
-                window.bounds.2,
-                window.bounds.3
-            ));
+            Ok(windows)
         }
-        if rows.is_empty() {
-            return Ok("No on-screen windows found.".to_string());
-        }
-        Ok(format!(
-            "On-screen windows (display pixels; Threadlane's own windows are hidden — never act on them):\n{}",
-            rows.join("\n")
-        ))
-    }
 }
 
 #[cfg(target_os = "macos")]
-fn list_windows() -> Result<String, String> {
-    mac::list_windows()
+fn list_windows() -> Result<String, String> {    mac::list_windows()
 }
 
 #[cfg(target_os = "macos")]
@@ -583,13 +704,30 @@ impl ComputerToolExecutor {
             .map(|duration| duration.as_millis())
             .unwrap_or(0);
         let path = dir.join(format!("computer-{stamp}.jpg"));
-        let bytes = tokio::task::spawn_blocking({
-            let path = path.clone();
-            move || capture_jpeg(window_id, &path)
-        })
-        .await
-        .map_err(|error| format!("Screenshot task failed: {error}"))??;
-        let dims = jpeg_dimensions(&path).unwrap_or_else(|| "unknown size".to_string());
+        // Composited capture first: it excludes our own windows, so a mirror
+        // popup cannot recurse. Falls back to `screencapture` (which owns the
+        // TCC prompt) when the composite is unavailable or blank.
+        let (bytes, dims) = match mac::capture_composited_jpeg(
+            SCREENSHOT_WIDTH,
+            SCREENSHOT_JPEG_QUALITY,
+        ) {
+            Ok((bytes, width, height)) => {
+                std::fs::write(&path, &bytes)
+                    .map_err(|error| format!("Could not save screenshot: {error}"))?;
+                (bytes, format!("{width}x{height}"))
+            }
+            Err(_) => {
+                let bytes = tokio::task::spawn_blocking({
+                    let path = path.clone();
+                    move || capture_jpeg(window_id, &path)
+                })
+                .await
+                .map_err(|error| format!("Screenshot task failed: {error}"))??;
+                let dims = jpeg_dimensions(&path).unwrap_or_else(|| "unknown size".to_string());
+                (bytes, dims)
+            }
+        };
+        write_mirror_sidecar(&dir, Some(&path), &format!("Screenshot {target}"));
         let content = format!(
             "Screenshot saved to {} ({} pixels, {} bytes).",
             path.display(),
@@ -621,15 +759,37 @@ impl ComputerToolExecutor {
         })
     }
 
-    async fn act(&self, args: &str) -> Result<String, String> {
+    async fn act(&self, args: &str, work_dir: Option<&Path>) -> Result<String, String> {
         let intent = parse_computer_act(args)?;
         let title = intent.approval_title();
         self.approve(title.clone(), format!("{title} on this Mac. Deny if the target looks wrong."))
             .await?;
-        tokio::task::spawn_blocking(move || perform_act(&intent))
+        let outcome = tokio::task::spawn_blocking(move || perform_act(&intent))
             .await
-            .map_err(|error| format!("Input task failed: {error}"))?
+            .map_err(|error| format!("Input task failed: {error}"))?;
+        if let Ok(outcome) = &outcome {
+            let dir = mac::previews_dir(work_dir);
+            write_mirror_sidecar(&dir, None, &format!("{title} — {outcome}"));
+        }
+        outcome
     }
+}
+
+/// Mirror-popup state for the GPUI frontend: the latest preview path (if any),
+/// the last computer action, and when it happened. Polled, never pushed, so
+/// the session crate keeps no UI dependency.
+fn write_mirror_sidecar(dir: &Path, path: Option<&Path>, action: &str) {
+    let ts_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    let sidecar = serde_json::json!({
+        "path": path.map(|path| path.to_string_lossy().to_string()),
+        "action": action,
+        "ts_ms": ts_ms,
+    });
+    let _ = std::fs::create_dir_all(dir);
+    let _ = std::fs::write(dir.join("latest.json"), sidecar.to_string());
 }
 
 /// Capture via the system `screencapture` CLI (blocking): it owns TCC prompts

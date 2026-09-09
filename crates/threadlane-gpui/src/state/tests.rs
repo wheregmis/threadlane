@@ -3486,3 +3486,50 @@
             "live subagents missing from the snapshot must survive hydration"
         );
     }
+
+    fn computer_permission_request(id: &str) -> threadlane_session::PermissionRequest {
+        threadlane_session::PermissionRequest {
+            id: id.into(),
+            capability: "computer".into(),
+            title: "Click at (1, 1)".into(),
+            detail: "click".into(),
+            scopes: vec![threadlane_session::PermissionScope::Once],
+        }
+    }
+
+    #[test]
+    fn mirror_trigger_fires_once_per_computer_activity() {
+        let mut state = AppState::load_from_registry(Vec::new());
+        assert!(!state.take_computer_mirror_trigger());
+
+        state
+            .pending_permissions
+            .insert("perm-1".into(), computer_permission_request("perm-1"));
+        assert!(state.take_computer_mirror_trigger());
+        assert!(
+            !state.take_computer_mirror_trigger(),
+            "same permission must not retrigger"
+        );
+
+        state.messages_mut().push(ChatMessageInfo {
+            id: "streaming-session-0".into(),
+            role: MessageRole::Assistant,
+            content: String::new(),
+            tool_activities: vec![ToolActivityInfo {
+                id: "call-shot".into(),
+                category: "Working".into(),
+                display_summary: "shot".into(),
+                title: "computer_screenshot".into(),
+                detail: String::new(),
+                is_expanded: false,
+            }],
+            streaming: true,
+            reasoning_content: None,
+            reasoning_expanded: false,
+        });
+        assert!(state.take_computer_mirror_trigger());
+        assert!(
+            !state.take_computer_mirror_trigger(),
+            "same tool call must not retrigger"
+        );
+    }
