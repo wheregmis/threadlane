@@ -11,7 +11,7 @@ hotpath = ["hotpath/hotpath"]
 hotpath-alloc = ["hotpath/hotpath-alloc"]
 
 [dependencies]
-hotpath = "0.24"
+hotpath = "0.25"
 tempfile = "3.10"
 threadlane-mcp = { version = "0.1.0", path = "../threadlane-mcp" }
 threadlane-runtime = { version = "0.1.0", path = "../threadlane-runtime" }
