@@ -826,7 +826,10 @@ impl WorkspaceView {
                 let refresh_delay = session_pr_refresh_delay(result.is_ok());
                 if let Ok(pr) = result {
                     self.model.update(cx, |state, cx| {
-                        state.git_prs.insert((work_dir, branch), pr);
+                        state.git_prs.insert((work_dir.clone(), branch.clone()), pr.clone());
+                        if let Some(info) = pr.as_ref() {
+                            state.auto_address_pr_reviews(work_dir.clone(), branch.clone(), info);
+                        }
                         cx.notify();
                     });
                 }

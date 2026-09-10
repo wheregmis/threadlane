@@ -2487,6 +2487,66 @@ impl GitHubView {
         });
     }
 
+    fn address_all_pr_reviews(&self, cx: &mut Context<Self>) {
+        let Some(pr) = self.pr_detail.clone() else {
+            return;
+        };
+        let head_ref = pr.head_ref.clone();
+        let selected_project = self.selected_pr.clone().map(|key| key.project);
+        let model = self.model.clone();
+        model.update(cx, |state, cx| {
+            let work_dir = selected_project
+                .clone()
+                .or_else(|| state.active_work_dir.clone())
+                .unwrap_or_default();
+            match state.address_pr_reviews_manual(work_dir, head_ref.clone(), &pr) {
+                Ok(prompt) => {
+                    let target = state
+                        .projects
+                        .iter()
+                        .filter(|project| {
+                            selected_project
+                                .as_ref()
+                                .is_none_or(|selected| &project.work_dir == selected)
+                        })
+                        .find_map(|project| {
+                            linked_pr_session(
+                                &project.sessions,
+                                &head_ref,
+                                state.active_session_id.as_deref(),
+                            )
+                        })
+                        .or_else(|| {
+                            state.projects.iter().find_map(|project| {
+                                linked_pr_session(
+                                    &project.sessions,
+                                    &head_ref,
+                                    state.active_session_id.as_deref(),
+                                )
+                            })
+                        })
+                        .map(|session| (session.work_dir.clone(), session.id.clone()));
+                    if let Some((work_dir, session_id)) = target {
+                        controller::dispatch(
+                            state,
+                            AppAction::SelectSession {
+                                work_dir,
+                                session_id: session_id.clone(),
+                            },
+                        );
+                    }
+                    state.request_composer_prompt(prompt);
+                    controller::dispatch(state, AppAction::CloseGitHub);
+                    cx.notify();
+                }
+                Err(error) => {
+                    state.session_status = Some(error);
+                    cx.notify();
+                }
+            }
+        });
+    }
+
     fn render_pr_comment_editor(&mut self, cx: &mut Context<Self>) -> AnyElement {
         self.render_pr_conversation_editor(false, cx).unwrap()
     }
@@ -3249,6 +3309,10 @@ impl GitHubView {
                 detail.updated_at.clone(),
             )
         };
+        let has_actionable_reviews = self.pr_detail.as_ref().is_some_and(|pr| {
+            pr.state.eq_ignore_ascii_case("open")
+                && !crate::services::pr_review::collect_actionable_pr_feedback(pr).is_empty()
+        });
         let tab = self.current_pr_tab();
         let tabs_focus = self.pr_tabs_focus.clone();
         let tabs = TabBar::new("github-pr-detail-tabs")
@@ -3308,6 +3372,15 @@ impl GitHubView {
                                     .href(url)
                                     .child("Open on GitHub"),
                             )
+                            .children(has_actionable_reviews.then(|| {
+                                Button::new("github-address-pr-reviews")
+                                    .label("Address reviews")
+                                    .ghost()
+                                    .xsmall()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.address_all_pr_reviews(cx);
+                                    }))
+                            }))
                             .child(
                                 div()
                                     .id("github-pr-detail-tabs-focus")

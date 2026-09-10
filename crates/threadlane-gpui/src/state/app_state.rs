@@ -54,6 +54,10 @@ pub struct AppState {
     pub(crate) pending_hydrations: Vec<SessionHydrationRequest>,
     pub(crate) git_statuses: HashMap<PathBuf, threadlane_git::GitStatus>,
     pub(crate) git_prs: HashMap<(PathBuf, String), Option<threadlane_git::GitHubPrInfo>>,
+    pub(crate) auto_address_pr_reviews_enabled: bool,
+    /// Persistent PR review tracking per project, loaded on demand and cached.
+    pub(crate) pr_review_tracking:
+        HashMap<PathBuf, crate::services::pr_review::PrReviewTrackingStore>,
 
     pub(crate) selected_model: String,
     model_roles: threadlane_session::ModelRoles,
@@ -287,6 +291,9 @@ impl AppState {
             pending_hydrations: Vec::new(),
             git_statuses: HashMap::new(),
             git_prs: HashMap::new(),
+            auto_address_pr_reviews_enabled:
+                crate::services::pr_review::load_auto_address_pr_reviews_enabled(),
+            pr_review_tracking: HashMap::new(),
         };
         if let (Some(session_id), Some(session_file)) = (
             state.active_session_id.clone(),
@@ -328,6 +335,15 @@ impl AppState {
         for runtime in self.session_runtimes.values() {
             let _ = runtime.try_set_needle_enabled(enabled);
         }
+        Ok(())
+    }
+
+    pub(crate) fn set_auto_address_pr_reviews_enabled(
+        &mut self,
+        enabled: bool,
+    ) -> Result<(), String> {
+        crate::services::pr_review::save_auto_address_pr_reviews_enabled(enabled)?;
+        self.auto_address_pr_reviews_enabled = enabled;
         Ok(())
     }
 
@@ -969,6 +985,153 @@ impl AppState {
         self.session_runtimes
             .get(session_file)
             .is_some_and(|runtime| runtime.is_generating())
+    }
+
+    /// Auto-address new PR review feedback for an open PR.
+    ///
+    /// Only active (non-archived) sessions reach this path: archived sessions
+    /// live under `.threadlane/sessions/archive/` and are excluded from
+    /// discovery, so `sync_session_prs` never polls them. Returns the queued
+    /// prompt when a new agent turn was started.
+    pub(crate) fn auto_address_pr_reviews(
+        &mut self,
+        work_dir: PathBuf,
+        branch: String,
+        pr: &threadlane_git::GitHubPrInfo,
+    ) -> Option<String> {
+        if !self.auto_address_pr_reviews_enabled {
+            return None;
+        }
+        if !pr.state.eq_ignore_ascii_case("open") {
+            return None;
+        }
+        let (session_id, session_file, runtime_work_dir) = self
+            .projects
+            .iter()
+            .flat_map(|project| project.sessions.iter())
+            .find(|session| {
+                session.work_dir == work_dir && session.git_branch.as_deref() == Some(&branch)
+            })
+            .map(|session| {
+                (
+                    session.id.clone(),
+                    session.session_file.clone(),
+                    session.runtime_work_dir.clone(),
+                    session.worktree_available,
+                )
+            })
+            .and_then(|(id, file, dir, available)| available.then(|| (id, file, dir)))?;
+        // Skip sessions whose checkout is gone; the agent cannot fix or push.
+
+        // Guard against overwriting uncommitted user work when agent is not generating.
+        if !self.session_is_generating(&session_file) {
+            if let Some(status) = self.git_statuses.get(&runtime_work_dir) {
+                if status.has_changes {
+                    return None;
+                }
+            }
+        }
+
+        let feedback_items = crate::services::pr_review::collect_actionable_pr_feedback(pr);
+        if feedback_items.is_empty() {
+            return None;
+        }
+
+        let store = self
+            .pr_review_tracking
+            .entry(work_dir.clone())
+            .or_insert_with(|| crate::services::pr_review::load_pr_review_tracking(&work_dir));
+
+        let new_items = match crate::services::pr_review::check_and_record_fresh_feedback(
+            store,
+            &branch,
+            &feedback_items,
+        ) {
+            crate::services::pr_review::FeedbackSyncResult::BaselineInitialized => {
+                let _ = crate::services::pr_review::save_pr_review_tracking(&work_dir, store);
+                return None;
+            }
+            crate::services::pr_review::FeedbackSyncResult::UpToDate => return None,
+            crate::services::pr_review::FeedbackSyncResult::NewFeedback(items) => {
+                let _ = crate::services::pr_review::save_pr_review_tracking(&work_dir, store);
+                items
+            }
+        };
+
+        let prompt = crate::services::pr_review::build_auto_address_prompt(
+            pr.number,
+            &branch,
+            &new_items,
+        );
+        let runtime = self.ensure_session_runtime(runtime_work_dir, session_file);
+        if runtime.is_generating() {
+            // An active turn will pick the queued follow-up up via
+            // `run_scheduled_agent_work`; queueing alone never starts a run.
+            if runtime
+                .work_handle
+                .try_queue_follow_up_with_images(prompt.clone(), Vec::new())
+                .is_err()
+            {
+                return None;
+            }
+        } else {
+            let model = runtime.model().to_owned();
+            let (api_key, _) = provider_credentials(&model);
+            if api_key.is_empty() && !threadlane_session::is_acp_model(&model) {
+                return None;
+            }
+            if crate::services::chat::execute_prompt(
+                runtime,
+                session_id.clone(),
+                prompt.clone(),
+                Vec::new(),
+                self.reasoning_effort,
+                self.stream_tx.clone(),
+            )
+            .is_err()
+            {
+                return None;
+            }
+            if self.active_session_id.as_deref() == Some(&session_id) {
+                self.is_generating = true;
+                self.session_status = Some("Working…".into());
+            }
+        }
+        self.push_optimistic_follow_up(&session_id, prompt.clone(), "pr-review");
+        Some(prompt)
+    }
+
+    /// Manually address actionable review feedback for a PR on demand.
+    ///
+    /// Unlike auto-addressing, this processes all current actionable review comments,
+    /// marks them seen in the persistent tracking store so subsequent auto-polls won't re-run them,
+    /// and returns the generated prompt.
+    pub(crate) fn address_pr_reviews_manual(
+        &mut self,
+        work_dir: PathBuf,
+        branch: String,
+        pr: &threadlane_git::GitHubPrInfo,
+    ) -> Result<String, String> {
+        let feedback_items = crate::services::pr_review::collect_actionable_pr_feedback(pr);
+        if feedback_items.is_empty() {
+            return Err("No actionable review feedback found on this PR.".into());
+        }
+
+        let store = self
+            .pr_review_tracking
+            .entry(work_dir.clone())
+            .or_insert_with(|| crate::services::pr_review::load_pr_review_tracking(&work_dir));
+
+        crate::services::pr_review::mark_feedback_seen(store, &branch, &feedback_items);
+        let _ = crate::services::pr_review::save_pr_review_tracking(&work_dir, store);
+
+        let prompt = crate::services::pr_review::build_auto_address_prompt(
+            pr.number,
+            &branch,
+            &feedback_items,
+        );
+
+        Ok(prompt)
     }
 
     pub(crate) fn session_attention(&self, session: &SessionInfo) -> SessionAttention {
