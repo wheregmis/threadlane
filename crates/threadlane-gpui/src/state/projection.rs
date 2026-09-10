@@ -1,12 +1,12 @@
 use std::path::{Path, PathBuf};
-use threadlane_session::harness::{JsonlStore, SessionStore};
 use threadlane_session::AgentMessage;
+use threadlane_session::harness::{JsonlStore, SessionStore};
 
+use super::AppState;
 use super::types::{
     ChatMessageInfo, MessageRole, SessionProjectionResult, SubagentActivityInfo,
     SubagentActivityStatus, ToolActivityInfo,
 };
-use super::AppState;
 use crate::services::sessions::SessionRuntimeStatus;
 
 pub(crate) fn extract_session_title(store: &impl SessionStore, fallback_id: &str) -> String {
@@ -57,7 +57,7 @@ pub(crate) fn load_session_messages(session_file: &Path) -> Vec<ChatMessageInfo>
 pub(crate) fn compute_session_messages(
     session_file: &Path,
 ) -> Result<Vec<ChatMessageInfo>, String> {
-    use threadlane_session::harness::{read_transcript_page, TranscriptItem};
+    use threadlane_session::harness::{TranscriptItem, read_transcript_page};
 
     // The durable pager is the single transcript source, but exhaust it here:
     // GPUI state continues to expose complete chronological history.
@@ -257,6 +257,7 @@ pub(crate) fn project_subagents_from_store(store: &impl SessionStore) -> Vec<Sub
             status,
             messages: project_agent_messages(messages),
             error,
+            isolation: None,
         });
     }
     rows

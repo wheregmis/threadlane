@@ -7,6 +7,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use gpui_component::Root;
 use gpui_component::button::{Button, ButtonVariants, Toggle, ToggleVariants};
 use gpui_component::hover_card::HoverCard;
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
@@ -19,7 +20,6 @@ use gpui_component::spinner::Spinner;
 use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::text::{TextView, TextViewState};
 use gpui_component::theme::ActiveTheme;
-use gpui_component::Root;
 use gpui_component::{Disableable, Icon, IconName, Selectable, Sizable, WindowExt};
 
 use crate::app::{actions::AppAction, controller};
@@ -211,7 +211,7 @@ fn render_chat_error(id: &str, error: &str, model: &Entity<AppState>, cx: &App) 
             ),
     )
 }
-use threadlane_session::commands::{available_slash_commands, SlashCommandInfo};
+use threadlane_session::commands::{SlashCommandInfo, available_slash_commands};
 use threadlane_session::{ImageAttachment, PlanItemStatus, SessionPlan};
 
 actions!(
@@ -4035,11 +4035,12 @@ impl ChatListView {
                 .find(|item| item.journal_run_id.as_deref() == Some(run_id.as_str()))
         });
         let mut rows = Vec::new();
-        for (index, item) in subagents.iter().enumerate() {
+        for item in &subagents {
             let run_id = item
                 .journal_run_id
                 .clone()
                 .unwrap_or_else(|| format!("queued-{}-{}", item.batch_run_id, item.task_index));
+            let row_id = run_id.clone();
             let is_selected = selected_run_id.as_deref() == Some(run_id.as_str());
             let (marker, color, status) = match item.status {
                 SubagentActivityStatus::Queued => ("○", theme.muted_foreground, "Queued"),
@@ -4050,7 +4051,7 @@ impl ChatListView {
             };
             let entity = cx.entity();
             rows.push(
-                Button::new(SharedString::from(format!("subagent-popup-row-{index}")))
+                Button::new(SharedString::from(format!("subagent-popup-row-{row_id}")))
                     .accessibility_label(format!("{} · {status}", item.agent))
                     .ghost()
                     .h_auto()
@@ -4060,7 +4061,6 @@ impl ChatListView {
                     .rounded_md()
                     .cursor_pointer()
                     .when(is_selected, |row| row.bg(theme.muted))
-                    .hover(|row| row.bg(theme.muted))
                     .flex()
                     .items_start()
                     .text_left()
@@ -4217,12 +4217,10 @@ impl ChatListView {
             .rev()
             .map(|message| self.render_message(message, cx))
             .collect::<Vec<_>>();
-        let workspace = item.journal_run_id.as_deref().and_then(|run_id| {
-            self.model
-                .read(cx)
-                .active_git_work_dir()
-                .map(|root| threadlane_session::subagent_workspace(&root, run_id))
-        });
+        let workspace = item
+            .isolation
+            .as_ref()
+            .map(|isolation| (isolation.workspace.clone(), isolation.branch.clone()));
         let branch_controls = workspace.map(|(worktree, branch)| {
             let inspect_model = self.model.clone();
             let inspect_root = self.model.read(cx).active_git_work_dir().unwrap();

@@ -5,10 +5,10 @@ use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::command::{Command, CommandGroup, CommandItem, CommandState};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
-use gpui_component::resizable::{h_resizable, resizable_panel, v_resizable, ResizableState};
+use gpui_component::resizable::{ResizableState, h_resizable, resizable_panel, v_resizable};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::status_bar::StatusBar;
-use gpui_component::{v_flex, ActiveTheme, Icon, IconName, Root, Selectable, Sizable};
+use gpui_component::{ActiveTheme, Icon, IconName, Root, Selectable, Sizable, v_flex};
 
 actions!(
     threadlane_workspace,
@@ -39,8 +39,8 @@ use crate::screens::terminal::TerminalView;
 use crate::services::sessions::{ExecutionMode, SessionRuntime};
 use crate::services::updater::{self, UpdaterEvent};
 use crate::state::{
-    coding_agent_options, compute_full_session_projection, compute_session_messages,
-    runtime_status_text, AppState, SessionHydrationRequest, SessionInfo, WorkspacePage,
+    AppState, SessionHydrationRequest, SessionInfo, WorkspacePage, coding_agent_options,
+    compute_full_session_projection, compute_session_messages, runtime_status_text,
 };
 use threadlane_updater::UpdateStatus;
 
@@ -310,7 +310,11 @@ impl WorkspaceView {
                     model.update(cx, |state, _cx| state.requested_terminal_work_dir.take())
                 {
                     this.bottom_panel_visible = true;
-                    this.get_or_create_active_terminal(&work_dir, cx);
+                    if let Some(project) = model.read(cx).active_work_dir.clone() {
+                        this.add_terminal_tab_for_project(project, work_dir, cx);
+                    } else {
+                        this.get_or_create_active_terminal(&work_dir, cx);
+                    }
                 }
                 let _ = model_wake_tx.send(());
                 cx.notify();
@@ -571,6 +575,19 @@ impl WorkspaceView {
                 tabs: Vec::new(),
                 active_tab: 0,
             });
+        group.tabs.push(terminal);
+        group.active_tab = group.tabs.len() - 1;
+        cx.notify();
+    }
+
+    fn add_terminal_tab_for_project(
+        &mut self,
+        project: PathBuf,
+        work_dir: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        let terminal = cx.new(|cx| TerminalView::new(work_dir, cx));
+        let group = self.get_or_create_terminal_group(&project, cx);
         group.tabs.push(terminal);
         group.active_tab = group.tabs.len() - 1;
         cx.notify();
@@ -1992,9 +2009,9 @@ impl Render for WorkspaceView {
 #[cfg(test)]
 mod tests {
     use super::{
-        active_project_git_status, git_result_matches_active, next_workspace_event,
-        open_github_from_palette, session_pr_refresh_delay, session_pr_target_is_active, GitEvent,
-        WorkspacePumpEvent,
+        GitEvent, WorkspacePumpEvent, active_project_git_status, git_result_matches_active,
+        next_workspace_event, open_github_from_palette, session_pr_refresh_delay,
+        session_pr_target_is_active,
     };
     use crate::services::updater::UpdaterEvent;
     use crate::state::{AppState, SessionInfo, WorkspacePage};
@@ -2066,17 +2083,19 @@ mod tests {
             tokio::sync::mpsc::unbounded_channel::<(PathBuf, Vec<SessionInfo>)>();
         let (model_tx, mut model_rx) = tokio::sync::mpsc::unbounded_channel();
 
-        assert!(tokio::time::timeout(
-            std::time::Duration::from_millis(10),
-            next_workspace_event(
-                &mut git_rx,
-                &mut updater_rx,
-                &mut sessions_rx,
-                &mut model_rx,
-            ),
-        )
-        .await
-        .is_err());
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(10),
+                next_workspace_event(
+                    &mut git_rx,
+                    &mut updater_rx,
+                    &mut sessions_rx,
+                    &mut model_rx,
+                ),
+            )
+            .await
+            .is_err()
+        );
         model_tx.send(()).unwrap();
         assert!(matches!(
             next_workspace_event(

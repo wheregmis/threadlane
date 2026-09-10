@@ -247,6 +247,7 @@ pub struct SubagentActivityInfo {
     pub(crate) model: Option<String>,
     pub(crate) status: SubagentActivityStatus,
     pub(crate) messages: Vec<ChatMessageInfo>,
+    pub(crate) isolation: Option<threadlane_runtime::SubagentIsolation>,
     pub(crate) error: Option<String>,
 }
 

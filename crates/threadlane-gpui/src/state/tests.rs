@@ -2,8 +2,8 @@ use super::*;
 use crate::services::sessions::SessionRuntimeStatus;
 use std::process::Command;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
 };
 use threadlane_session::coding_agent::harness::CodingSessionHarness;
 use threadlane_session::harness::{
@@ -239,11 +239,13 @@ fn model_picker_preserves_current_selection_while_runtime_is_busy() {
     let _settings = runtime.agent.try_lock().unwrap();
     state.set_selected_model("opencode-go/minimax-m2.7".into());
     assert_eq!(state.selected_model, "gpt-4o");
-    assert!(state
-        .session_status
-        .as_deref()
-        .unwrap()
-        .contains("settings are still loading"));
+    assert!(
+        state
+            .session_status
+            .as_deref()
+            .unwrap()
+            .contains("settings are still loading")
+    );
     assert!(Arc::ptr_eq(
         &state.session_runtimes[&session_file],
         &runtime
@@ -273,11 +275,13 @@ fn model_picker_ignores_acp_replies_from_replaced_or_inactive_runtimes() {
         ChatStreamEvent::AcpConfigOptions {
             session_id: "session".into(),
             source: Arc::downgrade(runtime),
-            options: vec![serde_json::from_value(serde_json::json!({
-                "id": "model", "name": "Model", "category": "model",
-                "currentValue": "model", "options": [{ "value": "model", "name": label }]
-            }))
-            .unwrap()],
+            options: vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "model", "name": "Model", "category": "model",
+                    "currentValue": "model", "options": [{ "value": "model", "name": label }]
+                }))
+                .unwrap(),
+            ],
             error: error.map(str::to_string),
         }
     };
@@ -721,10 +725,12 @@ fn removing_worktree_session_removes_checkout_and_metadata_stub() {
 
     assert!(!worktree.exists());
     assert!(!stub.exists());
-    assert!(threadlane_git::list_worktrees(&project)
-        .unwrap()
-        .iter()
-        .all(|entry| entry.branch.as_deref() != Some("worktree/session")));
+    assert!(
+        threadlane_git::list_worktrees(&project)
+            .unwrap()
+            .iter()
+            .all(|entry| entry.branch.as_deref() != Some("worktree/session"))
+    );
 }
 
 #[test]
@@ -945,9 +951,11 @@ fn issue_work_session_persists_link_and_uses_isolated_worktree() {
                 .as_ref()
         )
     );
-    assert!(facts
-        .get("git_branch")
-        .is_some_and(|branch| branch.starts_with("issue/42-fix-flaky-auth-")));
+    assert!(
+        facts
+            .get("git_branch")
+            .is_some_and(|branch| branch.starts_with("issue/42-fix-flaky-auth-"))
+    );
     assert_eq!(
         facts.get("github_issue"),
         Some(&serde_json::to_string(&issue).unwrap())
@@ -1261,8 +1269,8 @@ impl threadlane_protocol::ProviderPort for ReportedShapeProvider {
 
 async fn generated_reported_session_path() -> PathBuf {
     use threadlane_runtime::AgentConfig;
-    use threadlane_session::coding_agent::CodingAgentOptions;
     use threadlane_session::SystemPromptConfig;
+    use threadlane_session::coding_agent::CodingAgentOptions;
 
     let root = tempfile::tempdir().unwrap().keep();
     let skill_dir = root.join(".agents/skills/reported-shape");
@@ -1334,7 +1342,7 @@ async fn reported_session_shape_keeps_total_processed_separate() {
     assert!(!projected_context.context_limit_is_estimate);
 
     // Inspect the production journal again, independently of the GPUI projection above.
-    use threadlane_session::harness::{read_transcript_page, CompactionReason, TranscriptItem};
+    use threadlane_session::harness::{CompactionReason, TranscriptItem, read_transcript_page};
 
     let store = JsonlStore::open(&path).unwrap();
     let records = store.records();
@@ -1404,11 +1412,11 @@ async fn reported_session_shape_keeps_total_processed_separate() {
             .expect("manifest after post-compaction provider request start");
         assert_eq!(manifest_generation, generation);
         assert!(
-                checkpoint_seq < compaction_seq
-                    && compaction_seq < next_start_seq
-                    && next_start_seq < manifest_seq,
-                "checkpoint={checkpoint_seq}, compaction={compaction_seq}, provider_start={next_start_seq}, manifest={manifest_seq}"
-            );
+            checkpoint_seq < compaction_seq
+                && compaction_seq < next_start_seq
+                && next_start_seq < manifest_seq,
+            "checkpoint={checkpoint_seq}, compaction={compaction_seq}, provider_start={next_start_seq}, manifest={manifest_seq}"
+        );
     }
     assert_eq!(checkpoint_sequences.len(), adaptive_compaction_count);
 
@@ -1693,9 +1701,11 @@ async fn transcript_marker_survives_reload_without_summary_content() {
         first.iter().map(|row| &row.id).collect::<Vec<_>>(),
         second.iter().map(|row| &row.id).collect::<Vec<_>>()
     );
-    assert!(!first
-        .iter()
-        .any(|message| message.content.contains("Context checkpoint from")));
+    assert!(
+        !first
+            .iter()
+            .any(|message| message.content.contains("Context checkpoint from"))
+    );
     assert!(first.iter().any(|message| {
         message.role == MessageRole::User && message.content == "continue the cached tool loop"
     }));
@@ -1730,10 +1740,12 @@ fn legacy_session_without_compaction_has_no_fabricated_marker() {
         })
         .unwrap();
     drop(store);
-    assert!(compute_session_messages(&path)
-        .unwrap()
-        .iter()
-        .all(|message| message.role != MessageRole::ContextMarker));
+    assert!(
+        compute_session_messages(&path)
+            .unwrap()
+            .iter()
+            .all(|message| message.role != MessageRole::ContextMarker)
+    );
     assert_eq!(
         compute_full_session_projection(&path)
             .unwrap()
@@ -2627,10 +2639,12 @@ fn durable_subagent_projection_ignores_unrelated_named_lanes() {
         .unwrap();
     drop(store);
 
-    assert!(compute_full_session_projection(&path)
-        .unwrap()
-        .subagents
-        .is_empty());
+    assert!(
+        compute_full_session_projection(&path)
+            .unwrap()
+            .subagents
+            .is_empty()
+    );
 }
 
 #[test]
@@ -2658,6 +2672,7 @@ fn live_subagent_updates_are_isolated_from_main_transcript() {
         agent: "scout".into(),
         task: "inspect".into(),
         model: "gpt-5.6-luna".into(),
+        isolation: None,
     });
     state.record_subagent_activity(&AgentEvent::SubagentUpdate {
         run_id: 1,
@@ -2696,6 +2711,7 @@ fn live_subagent_events_contribute_to_composer_metrics() {
                 agent: "scout".into(),
                 task: "inspect".into(),
                 model: "gpt-5.6-luna".into(),
+                isolation: None,
             },
         },
         ChatStreamEvent::Agent {
@@ -3007,9 +3023,11 @@ fn durable_trajectory_hydrates_after_session_switch() {
 
     let trajectory = &state.trajectory_by_session[&cached_key(&state, "old-session")];
     assert!(trajectory.iter().any(|entry| entry.category == "Operation"));
-    assert!(trajectory
-        .iter()
-        .any(|entry| { entry.category == "Input" && entry.detail == "old prompt" }));
+    assert!(
+        trajectory
+            .iter()
+            .any(|entry| { entry.category == "Input" && entry.detail == "old prompt" })
+    );
     assert!(trajectory.iter().any(|entry| entry.category == "Step"));
     assert!(trajectory.iter().any(|entry| {
         entry.category == "Tool"
@@ -3465,12 +3483,16 @@ fn branch_consistency_trajectory_is_session_wide_audit_log_while_chat_is_active_
         .trajectory_by_session
         .get(&cached_key(&state, "branch-session"))
         .unwrap();
-    assert!(trajectory
-        .iter()
-        .any(|t| t.run_id.as_deref() == Some("run-branch-a")));
-    assert!(trajectory
-        .iter()
-        .any(|t| t.run_id.as_deref() == Some("run-branch-b")));
+    assert!(
+        trajectory
+            .iter()
+            .any(|t| t.run_id.as_deref() == Some("run-branch-a"))
+    );
+    assert!(
+        trajectory
+            .iter()
+            .any(|t| t.run_id.as_deref() == Some("run-branch-b"))
+    );
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -3572,6 +3594,7 @@ fn hydration_merge_subagents_by_identity() {
         model: None,
         status: SubagentActivityStatus::Running,
         messages: Vec::new(),
+        isolation: None,
         error: None,
     };
     let merged = merge_live_subagents(vec![activity(1, 0)], &[activity(1, 0), activity(1, 1)]);

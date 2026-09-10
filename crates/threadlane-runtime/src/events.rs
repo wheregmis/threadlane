@@ -2,6 +2,12 @@ use crate::types::{AgentMessage, AgentToolResult, SessionPlan, TokenUsage};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubagentIsolation {
+    pub workspace: std::path::PathBuf,
+    pub branch: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
     AgentStart,
@@ -57,6 +63,8 @@ pub enum AgentEvent {
         agent: String,
         task: String,
         model: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        isolation: Option<SubagentIsolation>,
     },
     SubagentUpdate {
         run_id: u64,

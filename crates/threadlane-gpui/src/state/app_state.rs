@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
+use std::sync::mpsc::{self, Sender};
 use std::time::{SystemTime, UNIX_EPOCH};
 use threadlane_session::harness::JsonlStore;
 use threadlane_session::{
@@ -9,7 +9,7 @@ use threadlane_session::{
     SubagentProgressUpdate, TokenUsage,
 };
 
-use crate::adapters::agent_events::{adapt_agent_event, ChatAgentUpdate};
+use crate::adapters::agent_events::{ChatAgentUpdate, adapt_agent_event};
 use crate::persistence::load_project_registry;
 use crate::services::sessions::{ExecutionMode, SessionRuntime};
 
@@ -2702,6 +2702,7 @@ impl AppState {
                     status: SubagentActivityStatus::Queued,
                     messages: Vec::new(),
                     error: None,
+                    isolation: None,
                 });
             }
             AgentEvent::SubagentStarted {
@@ -2712,6 +2713,7 @@ impl AppState {
                 agent,
                 task,
                 model,
+                isolation,
             } => {
                 let Some(subagents) = self.active_subagents_mut() else {
                     return;
@@ -2725,6 +2727,7 @@ impl AppState {
                     subagent.task = task.clone();
                     subagent.model = Some(model.clone());
                     subagent.status = SubagentActivityStatus::Running;
+                    subagent.isolation = isolation.clone();
                 }
             }
             AgentEvent::SubagentUpdate {

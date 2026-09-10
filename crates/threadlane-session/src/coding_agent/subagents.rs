@@ -3,8 +3,8 @@ use super::capabilities::{
     build_broker_dispatcher, create_after_tool_hook_handler, extension_before_tool_hook_handler,
 };
 use super::context_snapshots::{
-    resolve_context_snapshot, snapshot_location, MAX_SUBAGENT_CONTEXT_CHARS,
-    MAX_SUBAGENT_CONTEXT_REFS,
+    MAX_SUBAGENT_CONTEXT_CHARS, MAX_SUBAGENT_CONTEXT_REFS, resolve_context_snapshot,
+    snapshot_location,
 };
 use super::harness::{AcceptedRun, CodingSessionHarness, SubagentLaneIdentity, SubagentStartError};
 use super::scheduler::AgentWorkScheduler;
@@ -12,7 +12,7 @@ use super::scheduler::AgentWorkScheduler;
 use super::scheduler::{
     AgentWork, AgentWorkObserver, DeterministicSubagentToolExecutor, SubagentBoundaryObserver,
 };
-use crate::agents::{discover_agents, AgentDefinition, AgentScope};
+use crate::agents::{AgentDefinition, AgentScope, discover_agents};
 #[cfg(test)]
 use crate::browser::BrowserBridge;
 use crate::policy::ToolPolicy;
@@ -22,17 +22,17 @@ use std::collections::HashSet;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use threadlane_runtime::harness::HookKind;
 use threadlane_runtime::{
     AgentEvent, AgentMessage, AgentRuntime, SubagentProgressUpdate, TurnState,
 };
 use threadlane_wasi::WasiExtensionManager;
 use tokio::sync::broadcast;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 pub(crate) const MAX_SUBAGENT_TASKS: usize = 8;
 pub(crate) const MAX_SUBAGENT_TASK_CHARS: usize = 32_000;
@@ -495,15 +495,6 @@ pub(crate) async fn run_subagents_with_context(
             };
             let result = match start {
                 Ok((identity, accepted)) => {
-                    let _ = event_tx.send(AgentEvent::SubagentStarted {
-                        run_id,
-                        task_index,
-                        journal_run_id: identity.run_id.clone(),
-                        lane: identity.lane_name.clone(),
-                        agent: lane_agent.clone(),
-                        task: lane_task.clone(),
-                        model: resolved_model.clone(),
-                    });
                     #[cfg(test)]
                     if let Some(observer) = context.child_work_observer.as_ref() {
                         observer();
@@ -521,6 +512,26 @@ pub(crate) async fn run_subagents_with_context(
                     } else {
                         Ok(None)
                     };
+                    let isolation = workspace
+                        .as_ref()
+                        .ok()
+                        .and_then(|workspace| workspace.as_ref())
+                        .map(
+                            |(workspace, branch)| threadlane_runtime::SubagentIsolation {
+                                workspace: workspace.clone(),
+                                branch: branch.clone(),
+                            },
+                        );
+                    let _ = event_tx.send(AgentEvent::SubagentStarted {
+                        run_id,
+                        task_index,
+                        journal_run_id: identity.run_id.clone(),
+                        lane: identity.lane_name.clone(),
+                        agent: lane_agent.clone(),
+                        task: lane_task.clone(),
+                        model: resolved_model.clone(),
+                        isolation,
+                    });
                     let result = match workspace {
                         Ok(workspace) => {
                             let parent_work_dir = context.work_dir.clone();
@@ -720,6 +731,11 @@ async fn isolated_subagent_workspace(
         let root = threadlane_git::primary_worktree_root(&parent_work_dir)
             .map_err(|error| error.to_string())?;
         let (worktree, branch) = subagent_workspace(&root, &journal_run_id);
+        let status = threadlane_git::inspect(&parent_work_dir)
+            .map_err(|error| format!("Failed to inspect parent worktree: {error}"))?;
+        if status.has_changes {
+            return Err("Parallel isolated subagents require a clean parent worktree (commit or stash staged, unstaged, and untracked changes first)".into());
+        }
         threadlane_git::create_worktree(&parent_work_dir, &worktree, &branch)
             .map_err(|error| error.to_string())?;
         Ok((worktree, branch))
@@ -1239,33 +1255,37 @@ mod result_tests {
         });
         let mut child = task("worker");
         child.context_refs = vec!["ctx-missing".into()];
-        assert!(run_subagents_with_context(
-            vec![child],
-            false,
-            None,
-            test_context(
-                dir.path().into(),
-                session_file.clone(),
-                Some(observer.clone())
-            ),
-        )
-        .await
-        .unwrap_err()
-        .contains("missing"));
+        assert!(
+            run_subagents_with_context(
+                vec![child],
+                false,
+                None,
+                test_context(
+                    dir.path().into(),
+                    session_file.clone(),
+                    Some(observer.clone())
+                ),
+            )
+            .await
+            .unwrap_err()
+            .contains("missing")
+        );
         assert!(!observed.load(Ordering::SeqCst));
 
         std::fs::write(dir.path().join("first.rs"), "stale").unwrap();
         let mut child = task("worker");
         child.context_refs = vec![context_ids[0].clone()];
-        assert!(run_subagents_with_context(
-            vec![child],
-            false,
-            None,
-            test_context(dir.path().into(), session_file, Some(observer)),
-        )
-        .await
-        .unwrap_err()
-        .contains("stale"));
+        assert!(
+            run_subagents_with_context(
+                vec![child],
+                false,
+                None,
+                test_context(dir.path().into(), session_file, Some(observer)),
+            )
+            .await
+            .unwrap_err()
+            .contains("stale")
+        );
         assert!(!observed.load(Ordering::SeqCst));
     }
 
