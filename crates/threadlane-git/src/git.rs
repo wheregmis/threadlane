@@ -1132,6 +1132,18 @@ pub fn is_git_repo(work_dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Returns the primary checkout root even when `work_dir` is itself a worktree.
+pub fn primary_worktree_root(work_dir: &Path) -> Result<PathBuf, GitError> {
+    let common_dir = command(
+        work_dir,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?;
+    PathBuf::from(common_dir.trim())
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| GitError::new(work_dir, "Git common directory has no parent"))
+}
+
 /// Creates a new Git worktree at `worktree_path` checked out on `branch_name`.
 pub fn create_worktree(
     repo_path: &Path,

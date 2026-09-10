@@ -1015,6 +1015,10 @@
 
         let worktree_dir = dir.path().join(".threadlane/worktrees/task_1");
         create_worktree(dir.path(), &worktree_dir, "worktree/task_1").unwrap();
+        assert_eq!(
+            primary_worktree_root(&worktree_dir).unwrap(),
+            dir.path().canonicalize().unwrap()
+        );
         assert!(worktree_dir.join("base.txt").exists());
 
         let worktrees = list_worktrees(dir.path()).unwrap();

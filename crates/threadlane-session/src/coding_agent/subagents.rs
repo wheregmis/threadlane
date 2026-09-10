@@ -405,6 +405,7 @@ pub(crate) async fn run_subagents_with_context(
         if let Some(t) = &task.tools {
             config.tools = Some(t.clone());
         }
+        let isolate_workspace = parallel && subagent_can_write(&config);
 
         let context = context.clone();
         let completed_lanes = context.completed_lanes.clone();
@@ -513,21 +514,49 @@ pub(crate) async fn run_subagents_with_context(
                         .child_run_override
                         .as_ref()
                         .map_or(child_timeout, |(duration, _)| *duration);
-                    let result = timeout(
-                        child_timeout,
-                        run_subagent_task(
-                            config,
-                            task.task,
-                            context,
-                            run_id,
-                            task_index,
-                            identity.clone(),
-                            accepted,
-                            Vec::new(),
-                        ),
-                    )
-                    .await
-                    .unwrap_or_else(|_| Err("Subagent timed out".to_string()));
+                    let workspace = if isolate_workspace {
+                        isolated_subagent_workspace(
+                            &context.work_dir,
+                            &identity.run_id,
+                        )
+                        .await
+                        .map(Some)
+                    } else {
+                        Ok(None)
+                    };
+                    let result = match workspace {
+                        Ok(workspace) => {
+                            let mut child_context = context;
+                            if let Some((work_dir, _)) = &workspace {
+                                child_context.work_dir = work_dir.clone();
+                            }
+                            let mut result = timeout(
+                                child_timeout,
+                                run_subagent_task(
+                                    config,
+                                    task.task,
+                                    child_context,
+                                    run_id,
+                                    task_index,
+                                    identity.clone(),
+                                    accepted,
+                                    Vec::new(),
+                                ),
+                            )
+                            .await
+                            .unwrap_or_else(|_| Err("Subagent timed out".to_string()));
+                            if let (Ok(result), Some((work_dir, branch))) = (&mut result, workspace)
+                            {
+                                result.output = format!(
+                                    "Isolated worktree: {}\nBranch: {branch}\n{}",
+                                    work_dir.display(),
+                                    result.output
+                                );
+                            }
+                            result
+                        }
+                        Err(error) => Err(error),
+                    };
                     (result, identity)
                 }
                 Err(SubagentStartError { identity, error }) => (
@@ -652,6 +681,54 @@ fn configure_subagent_tools(config: &mut AgentDefinition) -> ToolPolicy {
     ToolPolicy::ReadOnly
 }
 
+fn subagent_can_write(config: &AgentDefinition) -> bool {
+    config.tools.as_ref().is_none_or(|tools| {
+        tools.iter().any(|tool| {
+            matches!(
+                tool.as_str(),
+                "write_file"
+                    | "edit_file"
+                    | "edit_file_hashline"
+                    | "edit_files_hashline"
+                    | "apply_workspace_edit_plan"
+                    | "write"
+                    | "edit"
+            )
+        })
+    })
+}
+
+async fn isolated_subagent_workspace(
+    parent_work_dir: &Path,
+    journal_run_id: &str,
+) -> Result<(PathBuf, String), String> {
+    let parent_work_dir = parent_work_dir.to_path_buf();
+    let lane = journal_run_id
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let branch = format!("threadlane/subagent-{lane}");
+    let branch_for_worktree = branch.clone();
+    tokio::task::spawn_blocking(move || {
+        let root = threadlane_git::primary_worktree_root(&parent_work_dir)
+            .map_err(|error| error.to_string())?;
+        let worktree = root
+            .join(".threadlane/worktrees/subagents")
+            .join(&lane);
+        threadlane_git::create_worktree(&parent_work_dir, &worktree, &branch_for_worktree)
+            .map_err(|error| error.to_string())?;
+        Ok((worktree, branch_for_worktree))
+    })
+    .await
+    .map_err(|error| format!("Failed to provision subagent worktree: {error}"))?
+}
+
 pub(crate) async fn run_subagent_task(
     mut config: AgentDefinition,
     task: String,
@@ -698,7 +775,7 @@ pub(crate) async fn run_subagent_task(
     let system_prompt = format!(
         "{}
 
-You are an isolated subagent working in {}. Complete only the assigned task and return a concise final report to your parent agent.",
+You are an isolated subagent working in {}. Complete only the assigned task and return a concise final report to your parent agent. If you change files, commit them before finishing so the parent can integrate your branch.",
         config.system_prompt,
         context.work_dir.display(),
     );
@@ -1052,7 +1129,7 @@ mod result_tests {
             agent: agent.into(),
             task: format!("{agent} task"),
             instructions: None,
-            tools: None,
+            tools: Some(vec!["read_file".into()]),
             model: None,
             context_refs: Vec::new(),
         }
@@ -1441,6 +1518,23 @@ mod result_tests {
             ToolPolicy::FullAccess
         );
         assert!(config.tools.unwrap().contains(&"run_command".into()));
+    }
+
+    #[test]
+    fn only_write_capable_subagents_need_isolated_workspaces() {
+        let config = |tools| AgentDefinition {
+            name: "worker".into(),
+            description: String::new(),
+            tools,
+            model: None,
+            system_prompt: String::new(),
+            source: crate::agents::AgentSource::Project,
+            file_path: PathBuf::new(),
+        };
+
+        assert!(subagent_can_write(&config(None)));
+        assert!(subagent_can_write(&config(Some(vec!["edit_file_hashline".into()]))));
+        assert!(!subagent_can_write(&config(Some(vec!["read_file".into()]))));
     }
 
     #[test]
