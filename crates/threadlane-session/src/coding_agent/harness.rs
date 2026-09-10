@@ -2015,9 +2015,7 @@ impl CodingSessionHarness {
                     attempt,
                     request_id: Some(request_id),
                     ..
-                } if provider_run_id == run_id
-                    && !finished_ids.contains(request_id.as_str()) =>
-                {
+                } if provider_run_id == run_id && !finished_ids.contains(request_id.as_str()) => {
                     Some((*attempt, request_id.clone()))
                 }
                 _ => None,
@@ -2230,16 +2228,14 @@ impl CodingSessionHarness {
         // and nested `entries.iter().any` scans.
         let reduced = Reducer::reduce(&self.store).ok();
         let main_lane = reduced.as_ref().and_then(|state| state.lane("main"));
-        let parent_id = main_lane
-            .and_then(|lane| lane.leaf_id.clone())
-            .or_else(|| {
-                self.store
-                    .entries()
-                    .iter()
-                    .rev()
-                    .find(|entry| entry.lane == "main")
-                    .map(|entry| entry.id.clone())
-            });
+        let parent_id = main_lane.and_then(|lane| lane.leaf_id.clone()).or_else(|| {
+            self.store
+                .entries()
+                .iter()
+                .rev()
+                .find(|entry| entry.lane == "main")
+                .map(|entry| entry.id.clone())
+        });
         let entry_ids: std::collections::HashSet<&str> = self
             .store
             .entries()
@@ -4751,10 +4747,10 @@ mod tests {
             tool_call_id: "call-1".into(),
             name: "read_file".into(),
             content: "contents".into(),
-                is_error: false,
-                terminate: false,
-                images: Vec::new(),
-            };
+            is_error: false,
+            terminate: false,
+            images: Vec::new(),
+        };
         harness.sync_messages(&[result.clone()]).unwrap();
 
         let state = Reducer::reduce(&harness.store).unwrap();
@@ -5429,18 +5425,18 @@ mod tests {
             tool_call_id: "call-1".into(),
             name: "read_file".into(),
             content: "first".into(),
-                is_error: false,
-                terminate: false,
-                images: Vec::new(),
-            };
+            is_error: false,
+            terminate: false,
+            images: Vec::new(),
+        };
         let second_tool = AgentMessage::Tool {
             tool_call_id: "call-2".into(),
             name: "grep".into(),
             content: "second".into(),
-                is_error: false,
-                terminate: false,
-                images: Vec::new(),
-            };
+            is_error: false,
+            terminate: false,
+            images: Vec::new(),
+        };
         let final_assistant = AgentMessage::Assistant {
             content: Some("done".into()),
             tool_calls: None,

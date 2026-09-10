@@ -7,10 +7,9 @@ use std::time::{Duration, Instant};
 use crate::error::GitError;
 use crate::github::{fresh_cache_value, inspect_pr, invalidate_pr_cache, repository_key};
 use crate::types::{
-    GitBranchInfo, GitCommitInfo, GitFile, GitStashInfo, GitStatus, GIT_FIELD_SEPARATOR,
+    GitBranchInfo, GitCommitInfo, GitFile, GitStashInfo, GitStatus, GitWorktreeInfo,
+    GIT_FIELD_SEPARATOR,
 };
-#[cfg(test)]
-use crate::types::GitWorktreeInfo;
 
 #[cfg(test)]
 thread_local! {
@@ -40,10 +39,7 @@ pub(crate) fn command(work_dir: &Path, args: &[&str]) -> Result<String, GitError
             .current_dir(work_dir)
             .env("GIT_TERMINAL_PROMPT", "0")
             .output()
-            .map_err(|error| GitError::new(
-                work_dir,
-                format!("could not start git: {error}"),
-            ))?;
+            .map_err(|error| GitError::new(work_dir, format!("could not start git: {error}")))?;
 
         if output.status.success() {
             return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
@@ -712,10 +708,8 @@ pub fn ignore_file(work_dir: &Path, relative_path: &str) -> Result<(), GitError>
         }
         current_content.push_str(&entry);
         current_content.push('\n');
-        std::fs::write(&gitignore_path, current_content).map_err(|e| GitError::new(
-            work_dir,
-            format!("Failed to update .gitignore: {e}"),
-        ))?;
+        std::fs::write(&gitignore_path, current_content)
+            .map_err(|e| GitError::new(work_dir, format!("Failed to update .gitignore: {e}")))?;
     }
 
     let _ = command(work_dir, &["rm", "--cached", "-r", "--", relative_path]);
@@ -736,10 +730,8 @@ pub fn ignore_extension(work_dir: &Path, ext: &str) -> Result<(), GitError> {
         }
         current_content.push_str(&entry);
         current_content.push('\n');
-        std::fs::write(&gitignore_path, current_content).map_err(|e| GitError::new(
-            work_dir,
-            format!("Failed to update .gitignore: {e}"),
-        ))?;
+        std::fs::write(&gitignore_path, current_content)
+            .map_err(|e| GitError::new(work_dir, format!("Failed to update .gitignore: {e}")))?;
     }
 
     let _ = command(
@@ -968,6 +960,23 @@ pub fn merge(work_dir: &Path, branch: &str) -> Result<String, GitError> {
     command(work_dir, &["merge", "--no-edit", branch])
 }
 
+pub fn diff_branch(work_dir: &Path, branch: &str) -> Result<String, GitError> {
+    let branch = validate_branch_name(work_dir, branch)?;
+    command(
+        work_dir,
+        &["diff", "--stat", "--patch", &format!("HEAD...{branch}")],
+    )
+}
+
+pub fn delete_branch(work_dir: &Path, branch: &str, force: bool) -> Result<(), GitError> {
+    let branch = validate_branch_name(work_dir, branch)?;
+    command(
+        work_dir,
+        &["branch", if force { "-D" } else { "-d" }, &branch],
+    )?;
+    Ok(())
+}
+
 pub fn stage_file(work_dir: &Path, path: &str) -> Result<(), GitError> {
     command(work_dir, &["add", "--", path])?;
     Ok(())
@@ -989,10 +998,7 @@ pub fn unstage_all(work_dir: &Path) -> Result<(), GitError> {
 }
 
 pub(crate) fn validate_diff_path(work_dir: &Path, path: &str) -> Result<(), GitError> {
-    let invalid = || GitError::new(
-        work_dir,
-        format!("path is outside the workspace: {path}"),
-    );
+    let invalid = || GitError::new(work_dir, format!("path is outside the workspace: {path}"));
     let relative = Path::new(path);
     if relative.is_absolute()
         || relative
@@ -1002,10 +1008,9 @@ pub(crate) fn validate_diff_path(work_dir: &Path, path: &str) -> Result<(), GitE
         return Err(invalid());
     }
 
-    let root = work_dir.canonicalize().map_err(|error| GitError::new(
-        work_dir,
-        format!("could not resolve workspace: {error}"),
-    ))?;
+    let root = work_dir.canonicalize().map_err(|error| {
+        GitError::new(work_dir, format!("could not resolve workspace: {error}"))
+    })?;
     let mut existing = work_dir.join(relative);
     while !existing.exists() {
         if !existing.pop() {
@@ -1014,10 +1019,7 @@ pub(crate) fn validate_diff_path(work_dir: &Path, path: &str) -> Result<(), GitE
     }
     if !existing
         .canonicalize()
-        .map_err(|error| GitError::new(
-            work_dir,
-            format!("could not resolve path: {error}"),
-        ))?
+        .map_err(|error| GitError::new(work_dir, format!("could not resolve path: {error}")))?
         .starts_with(&root)
     {
         return Err(invalid());
@@ -1132,6 +1134,18 @@ pub fn is_git_repo(work_dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Returns the primary checkout root even when `work_dir` is itself a worktree.
+pub fn primary_worktree_root(work_dir: &Path) -> Result<PathBuf, GitError> {
+    let common_dir = command(
+        work_dir,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?;
+    PathBuf::from(common_dir.trim())
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| GitError::new(work_dir, "Git common directory has no parent"))
+}
+
 /// Creates a new Git worktree at `worktree_path` checked out on `branch_name`.
 pub fn create_worktree(
     repo_path: &Path,
@@ -1139,15 +1153,16 @@ pub fn create_worktree(
     branch_name: &str,
 ) -> Result<(), GitError> {
     if let Some(parent) = worktree_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| GitError::new(
-            repo_path,
-            format!("Failed to create parent directory for worktree: {e}"),
-        ))?;
+        std::fs::create_dir_all(parent).map_err(|e| {
+            GitError::new(
+                repo_path,
+                format!("Failed to create parent directory for worktree: {e}"),
+            )
+        })?;
     }
-    let worktree_str = worktree_path.to_str().ok_or_else(|| GitError::new(
-        repo_path,
-        "Invalid worktree path",
-    ))?;
+    let worktree_str = worktree_path
+        .to_str()
+        .ok_or_else(|| GitError::new(repo_path, "Invalid worktree path"))?;
 
     // If the branch already exists, attach to it; otherwise create a new branch.
     let branch_exists = command(
@@ -1176,10 +1191,9 @@ pub fn remove_worktree(
     worktree_path: &Path,
     force: bool,
 ) -> Result<(), GitError> {
-    let worktree_str = worktree_path.to_str().ok_or_else(|| GitError::new(
-        repo_path,
-        "Invalid worktree path",
-    ))?;
+    let worktree_str = worktree_path
+        .to_str()
+        .ok_or_else(|| GitError::new(repo_path, "Invalid worktree path"))?;
     let mut args = vec!["worktree", "remove"];
     if force {
         args.push("--force");
@@ -1190,8 +1204,7 @@ pub fn remove_worktree(
 }
 
 /// Lists all worktrees in the repository.
-#[cfg(test)]
-pub(crate) fn list_worktrees(repo_path: &Path) -> Result<Vec<GitWorktreeInfo>, GitError> {
+pub fn list_worktrees(repo_path: &Path) -> Result<Vec<GitWorktreeInfo>, GitError> {
     let output = command(repo_path, &["worktree", "list", "--porcelain"])?;
     let mut worktrees = Vec::new();
     let mut current = GitWorktreeInfo::default();
@@ -1234,6 +1247,12 @@ pub(crate) fn list_worktrees(repo_path: &Path) -> Result<Vec<GitWorktreeInfo>, G
     }
 
     Ok(worktrees)
+}
+
+/// Removes stale administrative worktree records.
+pub fn prune_worktrees(repo_path: &Path) -> Result<(), GitError> {
+    command(repo_path, &["worktree", "prune"])?;
+    Ok(())
 }
 
 fn discover_default_branch(work_dir: &Path) -> Option<String> {

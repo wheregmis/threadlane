@@ -149,8 +149,9 @@ pub(crate) fn validate_cwd_in_workspace(
     Ok(canonical_target)
 }
 
-pub(crate) static FUZZY_PATH_CACHE: LazyLock<RwLock<HashMap<(PathBuf, String), (PathBuf, String)>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
+pub(crate) static FUZZY_PATH_CACHE: LazyLock<
+    RwLock<HashMap<(PathBuf, String), (PathBuf, String)>>,
+> = LazyLock::new(|| RwLock::new(HashMap::new()));
 
 /// Searches the workspace for candidate files matching `path_input` as a relative suffix
 /// or filename when an exact path lookup fails.

@@ -69,7 +69,11 @@ fn http_client() -> &'static reqwest::Client {
     HTTP_CLIENT.get_or_init(reqwest::Client::new)
 }
 
-async fn fetch_available_models_network(api_key: String, cache_key: u64, now: Instant) -> Vec<String> {
+async fn fetch_available_models_network(
+    api_key: String,
+    cache_key: u64,
+    now: Instant,
+) -> Vec<String> {
     let base_url = OpenCodeGoClient::get_base_url();
     let url = format!("{}/models", base_url.trim_end_matches('/'));
     let mut request = http_client()
@@ -110,7 +114,10 @@ async fn fetch_available_models_network(api_key: String, cache_key: u64, now: In
             }
         }
     }
-    FALLBACK_MODELS.iter().map(|model| model.to_string()).collect()
+    FALLBACK_MODELS
+        .iter()
+        .map(|model| model.to_string())
+        .collect()
 }
 
 /// Lists bare Zen model ids from the OpenAI-compatible `/models` endpoint.
@@ -142,7 +149,10 @@ pub async fn fetch_available_models() -> Vec<String> {
             .spawn(fetch_available_models_network(api_key, cache_key, now));
         match handle.await {
             Ok(models) => models,
-            Err(_) => FALLBACK_MODELS.iter().map(|model| model.to_string()).collect(),
+            Err(_) => FALLBACK_MODELS
+                .iter()
+                .map(|model| model.to_string())
+                .collect(),
         }
     }
 }

@@ -185,7 +185,8 @@ const REPETITION_CACHE_CAP: usize = 64;
 
 const REPETITION_NOTE: &str = "Repeated invocation: identical arguments already ran earlier this turn and produced this same result (served from cache, not re-executed). If you need different information, change the arguments or use another tool.";
 
-impl RepetitionCacheHandle {    /// Returns the cached content (with steering note), images, and the
+impl RepetitionCacheHandle {
+    /// Returns the cached content (with steering note), images, and the
     /// original error flag for an identical call in the current version.
     fn lookup(
         &self,
@@ -881,11 +882,7 @@ impl ToolDispatcher {
         });
         let (content, is_error, images) = match execution_result {
             Ok(output) => (output.content, cached_is_error, output.images),
-            Err(error) => (
-                format!("Tool executor error: {error}"),
-                true,
-                Vec::new(),
-            ),
+            Err(error) => (format!("Tool executor error: {error}"), true, Vec::new()),
         };
         if !context.skip_repetition_cache && !served_from_cache {
             // Record fresh executions for identical-call dedup, including
@@ -1124,15 +1121,17 @@ mod tests {
         }
 
         async fn execute_tool(&self, _name: &str, _args: &str) -> Option<Result<String, String>> {
-            self.calls
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Some(Ok(self.result.clone()))
         }
     }
 
     fn counting_dispatcher(
         tools: &[(&str, &str)],
-    ) -> (ToolDispatcher, std::collections::HashMap<String, Arc<std::sync::atomic::AtomicUsize>>) {
+    ) -> (
+        ToolDispatcher,
+        std::collections::HashMap<String, Arc<std::sync::atomic::AtomicUsize>>,
+    ) {
         let (event_tx, _) = broadcast::channel(8);
         let mut dispatcher = ToolDispatcher::new(event_tx, HookRegistry::default());
         let mut counters = std::collections::HashMap::new();
@@ -1237,7 +1236,10 @@ mod tests {
             vec!["src/a.rs".to_string()]
         );
         assert_eq!(
-            tool_paths("edit_files_hashline", r#"{"files":[{"path":"x.rs"},{"path":"y.rs"}]}"#),
+            tool_paths(
+                "edit_files_hashline",
+                r#"{"files":[{"path":"x.rs"},{"path":"y.rs"}]}"#
+            ),
             vec!["x.rs".to_string(), "y.rs".to_string()]
         );
         assert!(tool_paths("run_command", r#"{"command":"ls"}"#).is_empty());
@@ -1253,7 +1255,13 @@ mod tests {
         };
         cache.store("read_file", r#"{"path":"a.rs"}"#, &output("A"), false, None);
         cache.store("read_file", r#"{"path":"b.rs"}"#, &output("B"), false, None);
-        cache.store("grep_search", r#"{"pattern":"x"}"#, &output("G"), false, None);
+        cache.store(
+            "grep_search",
+            r#"{"pattern":"x"}"#,
+            &output("G"),
+            false,
+            None,
+        );
         // Same-path write busts read_file(a) plus all workspace-wide reads.
         cache.invalidate_for_mutation("write_file", r#"{"path":"a.rs"}"#, None);
         assert!(cache

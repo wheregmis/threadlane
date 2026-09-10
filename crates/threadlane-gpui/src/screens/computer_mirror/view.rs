@@ -84,7 +84,10 @@ impl MirrorView {
         let mut changed = false;
         if let Ok(bytes) = std::fs::read(self.previews_dir.join("latest.json")) {
             if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                let ts = value.get("ts_ms").and_then(|value| value.as_u64()).unwrap_or(0);
+                let ts = value
+                    .get("ts_ms")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(0);
                 if ts > self.last_ts {
                     self.last_ts = ts;
                     if let Some(action) = value.get("action").and_then(|value| value.as_str()) {
@@ -160,7 +163,8 @@ fn newest_capture(dir: &std::path::Path) -> Option<PathBuf> {
                     .and_then(|name| name.to_str())
                     .is_some_and(|name| name.starts_with("computer-") || name == "latest-frame.jpg")
         })
-        .max_by_key(|path| file_mtime_ms(path).unwrap_or(0))}
+        .max_by_key(|path| file_mtime_ms(path).unwrap_or(0))
+}
 
 fn file_mtime_ms(path: &std::path::Path) -> Option<u64> {
     std::fs::metadata(path)
@@ -225,12 +229,7 @@ impl Render for MirrorView {
                     .gap_2()
                     .border_b_1()
                     .border_color(theme.border)
-                    .child(
-                        div()
-                            .size(px(8.0))
-                            .rounded_full()
-                            .bg(theme.success),
-                    )
+                    .child(div().size(px(8.0)).rounded_full().bg(theme.success))
                     .child(
                         div()
                             .flex_1()

@@ -226,24 +226,25 @@ impl GatedEffects {
         &'a self,
         run_id: &'a str,
     ) -> impl Iterator<Item = u32> + 'a {
-        self.pending_records().filter_map(move |record| match record {
-            Record::StepAttempt {
-                run_id: record_run_id,
-                attempt,
-                ..
-            }
-            | Record::RetryConsumed {
-                run_id: record_run_id,
-                attempt,
-                ..
-            } if record_run_id == run_id => Some(*attempt),
-            Record::Usage {
-                run_id: Some(record_run_id),
-                attempt: Some(attempt),
-                ..
-            } if record_run_id == run_id => Some(*attempt),
-            _ => None,
-        })
+        self.pending_records()
+            .filter_map(move |record| match record {
+                Record::StepAttempt {
+                    run_id: record_run_id,
+                    attempt,
+                    ..
+                }
+                | Record::RetryConsumed {
+                    run_id: record_run_id,
+                    attempt,
+                    ..
+                } if record_run_id == run_id => Some(*attempt),
+                Record::Usage {
+                    run_id: Some(record_run_id),
+                    attempt: Some(attempt),
+                    ..
+                } if record_run_id == run_id => Some(*attempt),
+                _ => None,
+            })
     }
 
     pub fn is_closed(&self) -> bool {

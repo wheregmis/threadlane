@@ -99,7 +99,10 @@ pub(crate) fn parse_slash_command(input: &str) -> Option<CommandAction> {
     }
 }
 
-pub(crate) async fn execute_slash_command(action: CommandAction, agent: &mut AgentRuntime) -> String {
+pub(crate) async fn execute_slash_command(
+    action: CommandAction,
+    agent: &mut AgentRuntime,
+) -> String {
     match action {
         CommandAction::SwitchModel(new_model) => {
             if new_model.is_empty() {

@@ -41,7 +41,11 @@ impl MemoryStore {
     }
 
     #[cfg(test)]
-    pub(crate) fn append_message(&mut self, parent_id: Option<String>, message: AgentMessage) -> String {
+    pub(crate) fn append_message(
+        &mut self,
+        parent_id: Option<String>,
+        message: AgentMessage,
+    ) -> String {
         self.try_append_message(parent_id, message)
             .expect("valid durable entry")
     }

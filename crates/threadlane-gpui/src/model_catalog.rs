@@ -96,8 +96,9 @@ pub(crate) fn available_models_for_project(
 /// Live-discovered Zen models, refreshed in the background by
 /// [`refresh_discovered_models`]. Lets new `opencode-go/*` models appear in
 /// the picker without a code change or a `models.json` entry.
-static DISCOVERED_OPENCODE: std::sync::OnceLock<std::sync::Mutex<(std::time::Instant, Vec<ModelOption>)>> =
-    std::sync::OnceLock::new();
+static DISCOVERED_OPENCODE: std::sync::OnceLock<
+    std::sync::Mutex<(std::time::Instant, Vec<ModelOption>)>,
+> = std::sync::OnceLock::new();
 
 fn pretty_bare_label(bare_id: &str) -> String {
     let mut label = String::new();
@@ -134,22 +135,20 @@ pub async fn refresh_discovered_models() {
     if fresh {
         return;
     }
-    let mut discovered: Vec<ModelOption> =
-        threadlane_provider::opencode::fetch_available_models()
-            .await
-            .into_iter()
-            .map(|bare_id| ModelOption {
-                id: format!("opencode-go/{bare_id}"),
-                label: pretty_bare_label(&bare_id),
-                provider: ModelProvider::OpenCode,
-            })
-            .collect();
+    let mut discovered: Vec<ModelOption> = threadlane_provider::opencode::fetch_available_models()
+        .await
+        .into_iter()
+        .map(|bare_id| ModelOption {
+            id: format!("opencode-go/{bare_id}"),
+            label: pretty_bare_label(&bare_id),
+            provider: ModelProvider::OpenCode,
+        })
+        .collect();
     discovered.sort_by(|a, b| a.id.cmp(&b.id));
-    if let Some(cache) = DISCOVERED_OPENCODE.get_or_init(|| {
-        std::sync::Mutex::new((std::time::Instant::now(), Vec::new()))
-    })
-    .lock()
-    .ok()
+    if let Some(cache) = DISCOVERED_OPENCODE
+        .get_or_init(|| std::sync::Mutex::new((std::time::Instant::now(), Vec::new())))
+        .lock()
+        .ok()
     {
         let mut guard = cache;
         guard.0 = std::time::Instant::now();
@@ -460,10 +459,7 @@ pub fn is_available(model_id: &str) -> bool {
     is_available_for_project(model_id, None)
 }
 
-fn is_available_for_project(
-    model_id: &str,
-    project_root: Option<&std::path::Path>,
-) -> bool {
+fn is_available_for_project(model_id: &str, project_root: Option<&std::path::Path>) -> bool {
     available_option_for_project(model_id, project_root).is_some()
 }
 
@@ -511,7 +507,10 @@ mod tests {
         }];
         assert_eq!(selection_label("acp/claude", &models), "Claude Code");
         assert_eq!(selection_label("gpt-5.5", &models), "GPT-5.5");
-        assert_eq!(selection_label("acp/removed-agent", &models), "acp/removed-agent");
+        assert_eq!(
+            selection_label("acp/removed-agent", &models),
+            "acp/removed-agent"
+        );
     }
 
     #[test]
@@ -582,7 +581,9 @@ mod tests {
         }
         merge_discovered_opencode_models(&mut models);
         assert_eq!(models.len(), before + 1);
-        assert!(models.iter().any(|model| model.id == "opencode-go/kimi-k2.6"));
+        assert!(models
+            .iter()
+            .any(|model| model.id == "opencode-go/kimi-k2.6"));
     }
 
     #[test]

@@ -12,11 +12,11 @@ use crate::harness::{
     ContextItemSource, ContextItemStatus, ContextManifestItem, ErrorCategory, ProviderErrorSummary,
     ProviderOutcome, TraceString,
 };
+use crate::loop_detector::LoopDetector;
 use crate::provider::{
     ProviderBoundaryPreparer, ProviderBoundaryRequest, ProviderBoundaryResult, ProviderTraceEvent,
     ProviderTraceRecorder,
 };
-use crate::loop_detector::LoopDetector;
 use crate::rules::{StreamRule, StreamRuleMonitor};
 use crate::tool_dispatcher::ToolDispatcher;
 use crate::types::{AgentMessage, TokenUsage, ToolExecutionMode, TurnState};

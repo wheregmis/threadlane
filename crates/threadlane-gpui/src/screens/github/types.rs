@@ -180,9 +180,8 @@ pub fn selected_scoped_pr_after_refresh(
 ) -> Option<GitHubItemKey> {
     selected
         .filter(|selected| {
-            rows.iter().any(|row| {
-                row.project == selected.project && row.summary.number == selected.number
-            })
+            rows.iter()
+                .any(|row| row.project == selected.project && row.summary.number == selected.number)
         })
         .or_else(|| {
             rows.first().map(|row| GitHubItemKey {
@@ -216,10 +215,7 @@ impl GitHubRequest {
     }
 }
 
-pub fn github_result_matches_request(
-    result: &GitHubRequest,
-    current: &GitHubRequest,
-) -> bool {
+pub fn github_result_matches_request(result: &GitHubRequest, current: &GitHubRequest) -> bool {
     result == current
 }
 
@@ -641,7 +637,11 @@ impl PrCommentDrafts {
         self.begin_recheck_for(key, true)
     }
 
-    pub fn begin_recheck_for(&mut self, key: &PrWorkspaceKey, reply: bool) -> Option<PrCommentAttempt> {
+    pub fn begin_recheck_for(
+        &mut self,
+        key: &PrWorkspaceKey,
+        reply: bool,
+    ) -> Option<PrCommentAttempt> {
         let publish = if reply {
             &self.by_pr.get(key)?.reply.as_ref()?.publish
         } else {

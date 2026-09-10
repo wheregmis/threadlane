@@ -6,9 +6,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::checkbox::Checkbox;
-use gpui_component::input::{
-    Editor, EditorState, Input, InputEvent, InputState, TabSize,
-};
+use gpui_component::input::{Editor, EditorState, Input, InputEvent, InputState, TabSize};
 use gpui_component::list::ListItem;
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::notification::Notification;
@@ -18,9 +16,7 @@ use gpui_component::spinner::Spinner;
 use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::text::{TextView, TextViewState};
 use gpui_component::tree::{Tree, TreeEvent, TreeItem, TreeState};
-use gpui_component::{
-    ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable, WindowExt,
-};
+use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable, WindowExt};
 use threadlane_git::{GitBranchInfo, GitCommitInfo, GitFile, GitStatus};
 
 use crate::screens::next_event_batch;
@@ -28,12 +24,11 @@ use crate::services::watcher::WorkspaceWatcher;
 use crate::state::AppState;
 
 use super::browser::BrowserView;
-use super::draft_pr::{
-    draft_pr_prefill, DraftPrContextKey, DraftPrDialogView,
-};
+use super::draft_pr::{draft_pr_prefill, DraftPrContextKey, DraftPrDialogView};
 pub(crate) use super::types::{
-    can_create_pull_request, can_publish_branch, detect_language, message_generated_matches_active_project,
-    normalize_generated_commit_message, FileNode, GitAction, PanelEvent, ReviewTab, Surface,
+    can_create_pull_request, can_publish_branch, detect_language,
+    message_generated_matches_active_project, normalize_generated_commit_message, FileNode,
+    GitAction, PanelEvent, ReviewTab, Surface,
 };
 
 pub struct RightPanelView {
@@ -134,20 +129,19 @@ impl RightPanelView {
                         })
                         .unwrap_or_else(|_| {
                             BrowserReply::Ready(Err(
-                                "The browser panel is no longer available.".to_string(),
+                                "The browser panel is no longer available.".to_string()
                             ))
                         });
                     let reply = match step {
                         BrowserReply::Ready(reply) => reply,
-                        BrowserReply::PendingEval(rx) => rx.await.map_err(|_| {
-                            "The browser dropped the evaluation.".to_string()
-                        }).map(|payload| finalize_browser_eval(&payload)),
+                        BrowserReply::PendingEval(rx) => rx
+                            .await
+                            .map_err(|_| "The browser dropped the evaluation.".to_string())
+                            .map(|payload| finalize_browser_eval(&payload)),
                         BrowserReply::PendingSnapshot(rx) => match rx.await {
                             Ok(Ok((bytes, width, height))) => {
                                 let (path, data_url) = this
-                                    .update(cx, |this, _cx| {
-                                        this.save_browser_screenshot(&bytes)
-                                    })
+                                    .update(cx, |this, _cx| this.save_browser_screenshot(&bytes))
                                     .unwrap_or_else(|_| (None, base64_data_url(&bytes)));
                                 let payload = serde_json::json!({
                                     "width": width,
@@ -166,7 +160,8 @@ impl RightPanelView {
                             text,
                             deadline,
                         } => {
-                            let mut outcome = Err("Timed out waiting for condition in browser.".to_string());
+                            let mut outcome =
+                                Err("Timed out waiting for condition in browser.".to_string());
                             while std::time::Instant::now() < deadline {
                                 let check_script = super::browser::wait_check_js(
                                     selector.as_deref(),
@@ -178,22 +173,42 @@ impl RightPanelView {
                                 match eval_rx {
                                     Ok(Ok(rx)) => {
                                         if let Ok(raw) = rx.await {
-                                            let payload = super::browser::unwrap_callback_payload(&raw);
-                                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) {
-                                                if v.get("ok").and_then(|b| b.as_bool()) == Some(true) {
-                                                    let sel_found = v.get("selectorFound").and_then(|b| b.as_bool());
-                                                    let txt_found = v.get("textFound").and_then(|b| b.as_bool());
-                                                    let ready = v.get("readyState").and_then(|s| s.as_str()) == Some("complete");
+                                            let payload =
+                                                super::browser::unwrap_callback_payload(&raw);
+                                            if let Ok(v) =
+                                                serde_json::from_str::<serde_json::Value>(&payload)
+                                            {
+                                                if v.get("ok").and_then(|b| b.as_bool())
+                                                    == Some(true)
+                                                {
+                                                    let sel_found = v
+                                                        .get("selectorFound")
+                                                        .and_then(|b| b.as_bool());
+                                                    let txt_found = v
+                                                        .get("textFound")
+                                                        .and_then(|b| b.as_bool());
+                                                    let ready = v
+                                                        .get("readyState")
+                                                        .and_then(|s| s.as_str())
+                                                        == Some("complete");
 
-                                                    let sel_ok = selector.is_none() || sel_found == Some(true);
-                                                    let txt_ok = text.is_none() || txt_found == Some(true);
-                                                    let ready_ok = (selector.is_some() || text.is_some()) || ready;
+                                                    let sel_ok = selector.is_none()
+                                                        || sel_found == Some(true);
+                                                    let txt_ok =
+                                                        text.is_none() || txt_found == Some(true);
+                                                    let ready_ok = (selector.is_some()
+                                                        || text.is_some())
+                                                        || ready;
 
                                                     if sel_ok && txt_ok && ready_ok {
-                                                        outcome = Ok("Condition satisfied in browser.".to_string());
+                                                        outcome =
+                                                            Ok("Condition satisfied in browser."
+                                                                .to_string());
                                                         break;
                                                     }
-                                                } else if let Some(err) = v.get("error").and_then(|s| s.as_str()) {
+                                                } else if let Some(err) =
+                                                    v.get("error").and_then(|s| s.as_str())
+                                                {
                                                     outcome = Err(err.to_string());
                                                     break;
                                                 }
@@ -201,7 +216,8 @@ impl RightPanelView {
                                         }
                                     }
                                     _ => {
-                                        outcome = Err("Browser panel closed during wait.".to_string());
+                                        outcome =
+                                            Err("Browser panel closed during wait.".to_string());
                                         break;
                                     }
                                 }
@@ -649,7 +665,8 @@ impl RightPanelView {
                     }
                     Err(error) => {
                         self.git_feedback = Some(error.clone());
-                        self.pending_git_notifications.push(Notification::error(error));
+                        self.pending_git_notifications
+                            .push(Notification::error(error));
                     }
                 }
             }
@@ -708,7 +725,8 @@ impl RightPanelView {
                         self.review_error = Some(status_error.clone());
                         let message = action_error.unwrap_or(status_error);
                         self.git_feedback = Some(message.clone());
-                        self.pending_git_notifications.push(Notification::error(message));
+                        self.pending_git_notifications
+                            .push(Notification::error(message));
                     }
                 }
             }
@@ -982,7 +1000,11 @@ impl RightPanelView {
         cx.notify();
     }
 
-    fn ensure_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<BrowserView> {
+    fn ensure_browser(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<BrowserView> {
         if let Some(browser) = &self.browser {
             return browser.clone();
         }
@@ -1045,7 +1067,7 @@ impl RightPanelView {
         }
         #[cfg(target_os = "macos")]
         {
-            use super::browser::{AddressTarget, resolve_address, search_url};
+            use super::browser::{resolve_address, search_url, AddressTarget};
             use threadlane_session::BrowserCommand;
             let Some(browser) = self.browser.clone() else {
                 return Err("The browser panel is not ready.".to_string());
@@ -1093,11 +1115,7 @@ impl RightPanelView {
     fn render_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let browser = self.ensure_browser(window, cx);
         browser.update(cx, |browser, cx| browser.set_visible(true, cx));
-        div()
-            .flex_1()
-            .min_h_0()
-            .child(browser)
-            .into_any_element()
+        div().flex_1().min_h_0().child(browser).into_any_element()
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1484,11 +1502,13 @@ impl RightPanelView {
             } else {
                 gpui::transparent_black()
             })
-            .hover(|row| row.bg(if is_selected {
-                theme.accent.opacity(0.16)
-            } else {
-                theme.muted
-            }))
+            .hover(|row| {
+                row.bg(if is_selected {
+                    theme.accent.opacity(0.16)
+                } else {
+                    theme.muted
+                })
+            })
             .focus(|row| row.border_color(theme.primary))
             .child(
                 Checkbox::new(SharedString::from(format!("chk-{path}")))
@@ -2169,10 +2189,10 @@ impl RightPanelView {
                                 .on_click(cx.listener(move |this, checked, _window, cx| {
                                     if *checked {
                                         this.selected_files = this
-                                             .review_files
-                                             .iter()
-                                             .map(|f| f.path.clone())
-                                             .collect();
+                                            .review_files
+                                            .iter()
+                                            .map(|f| f.path.clone())
+                                            .collect();
                                     } else {
                                         this.selected_files.clear();
                                     }
@@ -4289,7 +4309,9 @@ fn start_browser_request(
             }
             #[cfg(not(target_os = "macos"))]
             {
-                BrowserReply::Ready(Err("The embedded browser is available on macOS only.".to_string()))
+                BrowserReply::Ready(Err(
+                    "The embedded browser is available on macOS only.".to_string()
+                ))
             }
         }
         BrowserCommand::Wait {
@@ -4298,8 +4320,8 @@ fn start_browser_request(
             timeout_ms,
         } => {
             panel.open_surface(Surface::Browser, cx);
-            let deadline = std::time::Instant::now()
-                + std::time::Duration::from_millis(timeout_ms.max(100));
+            let deadline =
+                std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms.max(100));
             BrowserReply::PendingWait {
                 selector,
                 text,
@@ -4363,7 +4385,8 @@ fn finalize_browser_eval(payload: &str) -> String {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&inner) {
             if let Some(logs) = v.get("logs").and_then(|a| a.as_array()) {
                 if logs.is_empty() {
-                    return "No console errors or warnings recorded on the current page.".to_string();
+                    return "No console errors or warnings recorded on the current page."
+                        .to_string();
                 }
                 let mut out = format!("Recorded console messages ({}):\n", logs.len());
                 for log in logs {

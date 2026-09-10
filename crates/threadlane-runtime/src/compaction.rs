@@ -495,8 +495,7 @@ pub fn prune_historical_tool_outputs(
                 terminate,
                 images,
             } => {
-                let image_bytes: usize =
-                    images.iter().map(|image| image.data_url.len()).sum();
+                let image_bytes: usize = images.iter().map(|image| image.data_url.len()).sum();
                 if keep_full[i]
                     || content.len().saturating_add(image_bytes) <= INLINE_TOOL_OUTPUT_LIMIT
                 {
@@ -610,7 +609,10 @@ fn build_findings(dropped: &[(&AgentMessage, bool)]) -> String {
     for (message, _) in dropped {
         match message {
             AgentMessage::Tool {
-                name, content, is_error, ..
+                name,
+                content,
+                is_error,
+                ..
             } if *is_error => {
                 let first_line: String = content
                     .lines()
@@ -629,9 +631,10 @@ fn build_findings(dropped: &[(&AgentMessage, bool)]) -> String {
                     None => failures.push((name.clone(), 1, first_line)),
                 }
             }
-            AgentMessage::Assistant { content: Some(content), .. }
-                if content.starts_with("Stopped:") =>
-            {
+            AgentMessage::Assistant {
+                content: Some(content),
+                ..
+            } if content.starts_with("Stopped:") => {
                 let line: String = content.chars().take(MAX_FINDING_CHARS).collect();
                 if !trips.contains(&line) {
                     trips.push(line);

@@ -664,10 +664,9 @@ impl TerminalView {
 
     fn cell_at(&self, position: Point<Pixels>) -> Option<(u16, u16)> {
         let bounds = self.screen_bounds?;
-        let x = ((position.x - bounds.left()).as_f32() - TERMINAL_CONTENT_INSET)
-            / self.cell_width;
-        let y = ((position.y - bounds.top()).as_f32() - TERMINAL_CONTENT_INSET)
-            / TERMINAL_ROW_HEIGHT;
+        let x = ((position.x - bounds.left()).as_f32() - TERMINAL_CONTENT_INSET) / self.cell_width;
+        let y =
+            ((position.y - bounds.top()).as_f32() - TERMINAL_CONTENT_INSET) / TERMINAL_ROW_HEIGHT;
         Some((
             y.floor()
                 .max(0.0)
@@ -1055,21 +1054,17 @@ impl Render for TerminalView {
                     .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
                         let delta = match event.delta {
                             ScrollDelta::Lines(lines) => lines.y * 2.0,
-                            ScrollDelta::Pixels(pixels) => {
-                                pixels.y.as_f32() / TERMINAL_ROW_HEIGHT
-                            }
+                            ScrollDelta::Pixels(pixels) => pixels.y.as_f32() / TERMINAL_ROW_HEIGHT,
                         };
                         if delta.abs() > 0.01 {
                             this.scroll_by(delta, cx);
                         }
                     }))
                     .on_prepaint(move |bounds, _, cx| {
-                        let rows = ((bounds.size.height.as_f32()
-                            - TERMINAL_CONTENT_INSET * 2.0)
+                        let rows = ((bounds.size.height.as_f32() - TERMINAL_CONTENT_INSET * 2.0)
                             / TERMINAL_ROW_HEIGHT)
                             .floor() as u16;
-                        let cols = ((bounds.size.width.as_f32()
-                            - TERMINAL_CONTENT_INSET * 2.0)
+                        let cols = ((bounds.size.width.as_f32() - TERMINAL_CONTENT_INSET * 2.0)
                             / cell_width)
                             .floor() as u16;
                         terminal_resize.update(cx, |terminal, cx| {

@@ -2,10 +2,10 @@ pub mod broker;
 pub mod packages;
 
 pub use broker::*;
+pub(crate) use packages::validate_extension_id;
 pub use packages::{
     default_global_threadlane_dir, ExtensionManager, ExtensionRecord, ExtensionScope,
 };
-pub(crate) use packages::validate_extension_id;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -752,10 +752,7 @@ impl WasiExtensionManager {
     }
 
     /// Removes events queued for one extension, matching the next-invocation delivery path.
-    fn drain_events_for(
-        &self,
-        extension_name: &str,
-    ) -> Result<Vec<WasiExtensionEvent>, String> {
+    fn drain_events_for(&self, extension_name: &str) -> Result<Vec<WasiExtensionEvent>, String> {
         let scope = self.session_scope()?;
         Ok(self
             .pending_events

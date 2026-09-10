@@ -28,14 +28,16 @@ pub(crate) fn load(project_root: &Path) -> SubagentSettings {
 }
 
 pub(crate) fn save(project_root: &Path, settings: &SubagentSettings) -> Result<(), String> {
-    if settings.reasoning_effort.is_some_and(|effort| {
-        ReasoningEffort::from_label(effort.label()).is_none()
-    }) {
+    if settings
+        .reasoning_effort
+        .is_some_and(|effort| ReasoningEffort::from_label(effort.label()).is_none())
+    {
         return Err("Unsupported subagent reasoning effort.".into());
     }
-    if settings.fast_reasoning_effort.is_some_and(|effort| {
-        ReasoningEffort::from_label(effort.label()).is_none()
-    }) {
+    if settings
+        .fast_reasoning_effort
+        .is_some_and(|effort| ReasoningEffort::from_label(effort.label()).is_none())
+    {
         return Err("Unsupported fast model reasoning effort.".into());
     }
     let target = path(project_root);

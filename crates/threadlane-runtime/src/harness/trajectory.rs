@@ -338,11 +338,13 @@ pub fn project_trajectory<S: SessionStore>(store: &S) -> SessionTrajectory {
     #[cfg(debug_assertions)]
     {
         debug_assert!(store.entries().windows(2).all(|w| w[0].seq <= w[1].seq));
-        debug_assert!(store.records().windows(2).all(|w| {
-            w[0].seq() <= w[1].seq()
-        }));
+        debug_assert!(store
+            .records()
+            .windows(2)
+            .all(|w| { w[0].seq() <= w[1].seq() }));
     }
-    let mut journal: Vec<JournalItem> = Vec::with_capacity(store.entries().len() + store.records().len());
+    let mut journal: Vec<JournalItem> =
+        Vec::with_capacity(store.entries().len() + store.records().len());
     {
         let mut entries = store.entries().iter().peekable();
         let mut records = store.records().iter().peekable();
@@ -1049,8 +1051,10 @@ pub fn project_trajectory<S: SessionStore>(store: &S) -> SessionTrajectory {
         for period in [2usize, 3] {
             let mut start = 0;
             while start + period * PING_PONG_MIN_ROUNDS <= tools.len() {
-                let block: Vec<String> =
-                    tools[start..start + period].iter().map(|t| key(t)).collect();
+                let block: Vec<String> = tools[start..start + period]
+                    .iter()
+                    .map(|t| key(t))
+                    .collect();
                 let mut rounds = 1;
                 while start + (rounds + 1) * period <= tools.len()
                     && tools[start + rounds * period..start + (rounds + 1) * period]
@@ -1108,7 +1112,11 @@ pub fn project_trajectory<S: SessionStore>(store: &S) -> SessionTrajectory {
                     "{}|{}|{}",
                     provider.provider,
                     provider.model,
-                    error.code.as_ref().map(|code| code.as_str()).unwrap_or_default()
+                    error
+                        .code
+                        .as_ref()
+                        .map(|code| code.as_str())
+                        .unwrap_or_default()
                 )
             });
             let matches_run = match (run.last(), &signature) {

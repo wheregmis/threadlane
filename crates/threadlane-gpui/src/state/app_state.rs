@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
+use std::sync::mpsc::{self, Sender};
 use std::time::{SystemTime, UNIX_EPOCH};
 use threadlane_session::harness::JsonlStore;
 use threadlane_session::{
@@ -9,7 +9,7 @@ use threadlane_session::{
     SubagentProgressUpdate, TokenUsage,
 };
 
-use crate::adapters::agent_events::{adapt_agent_event, ChatAgentUpdate};
+use crate::adapters::agent_events::{ChatAgentUpdate, adapt_agent_event};
 use crate::persistence::load_project_registry;
 use crate::services::sessions::{ExecutionMode, SessionRuntime};
 
@@ -72,12 +72,13 @@ pub struct AppState {
     pub(crate) requested_editor_target: Option<RequestedEditorTarget>,
     pub(crate) requested_composer_prompt: Option<String>,
     pub(crate) requested_terminal_command: Option<String>,
+    pub(crate) requested_terminal_work_dir: Option<PathBuf>,
     stream_tx: tokio::sync::mpsc::UnboundedSender<ChatStreamEvent>,
     pub(crate) stream_rx: Option<tokio::sync::mpsc::UnboundedReceiver<ChatStreamEvent>>,
     session_refresh_tx: Sender<PathBuf>,
     pub(crate) session_refresh_rx:
         Option<tokio::sync::mpsc::UnboundedReceiver<(PathBuf, Vec<SessionInfo>)>>,
-    pub(crate)     session_runtimes: HashMap<PathBuf, Arc<SessionRuntime>>,
+    pub(crate) session_runtimes: HashMap<PathBuf, Arc<SessionRuntime>>,
     deferred_stream_events: HashMap<String, Vec<ChatStreamEvent>>,
     /// Bridge to the embedded browser panel. The channel is created with the
     /// app; the first constructed right panel claims the receiver and pumps
@@ -277,6 +278,7 @@ impl AppState {
             requested_editor_target: None,
             requested_composer_prompt: None,
             requested_terminal_command: None,
+            requested_terminal_work_dir: None,
             stream_tx,
             stream_rx: Some(stream_rx),
             session_refresh_tx,
@@ -666,6 +668,10 @@ impl AppState {
         self.requested_terminal_command = Some(command);
     }
 
+    pub(crate) fn request_open_terminal(&mut self, work_dir: PathBuf) {
+        self.requested_terminal_work_dir = Some(work_dir);
+    }
+
     pub(crate) fn select_session(
         &mut self,
         work_dir: PathBuf,
@@ -762,8 +768,30 @@ impl AppState {
         let file_name = session_file
             .file_name()
             .ok_or_else(|| "Session file has no file name".to_string())?;
-        std::fs::rename(&session_file, archive_dir.join(file_name))
-            .map_err(|error| error.to_string())?;
+        let archive_file = archive_dir.join(file_name);
+        if let Some(worktree_dir) = self.session_worktree_path(&work_dir, &session_id) {
+            if worktree_dir.exists() {
+                if threadlane_git::inspect(&worktree_dir)
+                    .map_err(|error| error.to_string())?
+                    .has_changes
+                {
+                    return Err("Commit or discard worktree changes before archiving".into());
+                }
+                std::fs::copy(&session_file, &archive_file).map_err(|error| error.to_string())?;
+                if let Err(error) = threadlane_git::remove_worktree(&work_dir, &worktree_dir, false)
+                {
+                    let _ = std::fs::remove_file(&archive_file);
+                    return Err(error.to_string());
+                }
+            } else {
+                std::fs::rename(&session_file, &archive_file).map_err(|error| error.to_string())?;
+            }
+            let stub = Self::canonical_session_file(&work_dir, &session_id);
+            Self::remove_file_if_present(&stub)?;
+            let _ = threadlane_git::prune_worktrees(&work_dir);
+        } else {
+            std::fs::rename(&session_file, archive_file).map_err(|error| error.to_string())?;
+        }
         self.finish_session_removal(&work_dir, &session_id);
         Ok(())
     }
@@ -781,7 +809,16 @@ impl AppState {
         {
             return Err("Stop the running generation before deleting this session".into());
         }
-        std::fs::remove_file(session_file).map_err(|error| error.to_string())?;
+        if let Some(worktree_dir) = self.session_worktree_path(&work_dir, &session_id) {
+            if worktree_dir.exists() {
+                threadlane_git::remove_worktree(&work_dir, &worktree_dir, true)
+                    .map_err(|error| error.to_string())?;
+            }
+            Self::remove_file_if_present(&Self::canonical_session_file(&work_dir, &session_id))?;
+            let _ = threadlane_git::prune_worktrees(&work_dir);
+        } else {
+            std::fs::remove_file(session_file).map_err(|error| error.to_string())?;
+        }
         self.finish_session_removal(&work_dir, &session_id);
         Ok(())
     }
@@ -920,6 +957,33 @@ impl AppState {
             .unwrap_or_else(|| work_dir.to_path_buf())
     }
 
+    fn canonical_session_file(work_dir: &Path, session_id: &str) -> PathBuf {
+        work_dir
+            .join(".threadlane/sessions")
+            .join(format!("{session_id}.jsonl"))
+    }
+
+    fn session_worktree_path(&self, work_dir: &Path, session_id: &str) -> Option<PathBuf> {
+        self.projects
+            .iter()
+            .find(|project| project.work_dir == work_dir)
+            .and_then(|project| {
+                project
+                    .sessions
+                    .iter()
+                    .find(|session| session.id == session_id && session.is_worktree)
+            })
+            .map(|session| session.runtime_work_dir.clone())
+    }
+
+    fn remove_file_if_present(path: &Path) -> Result<(), String> {
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
     fn projection_key(session_id: &str, session_file: &Path) -> SessionProjectionKey {
         SessionProjectionKey {
             session_id: session_id.to_owned(),
@@ -949,7 +1013,8 @@ impl AppState {
         self.pending_questions.remove(session_id);
         self.deferred_stream_events.remove(session_id);
         self.pending_composer_messages.remove(session_id);
-        self.acp_config_options.remove(&Self::projection_key(session_id, &session_file));
+        self.acp_config_options
+            .remove(&Self::projection_key(session_id, &session_file));
         if let Some(project) = self
             .projects
             .iter_mut()
@@ -1053,12 +1118,9 @@ impl AppState {
             crate::services::pr_review::FeedbackSyncResult::NewFeedback(items) => items,
         };
 
-        let prompt = crate::services::pr_review::build_auto_address_prompt(
-            pr.number,
-            &branch,
-            &new_items,
-        );
-        let runtime = self.ensure_session_runtime(runtime_work_dir, session_file);
+        let prompt =
+            crate::services::pr_review::build_auto_address_prompt(pr.number, &branch, &new_items);
+        let runtime = self.ensure_session_runtime(runtime_work_dir.clone(), session_file);
         if runtime.is_generating() {
             // An active turn will pick the queued follow-up up via
             // `run_scheduled_agent_work`; queueing alone never starts a run.
@@ -1077,6 +1139,7 @@ impl AppState {
             }
             if crate::services::chat::execute_prompt(
                 runtime,
+                runtime_work_dir,
                 session_id.clone(),
                 prompt.clone(),
                 Vec::new(),
@@ -1092,7 +1155,8 @@ impl AppState {
                 self.session_status = Some("Working…".into());
             }
         }
-        self.pr_review_tracking.insert(work_dir.clone(), candidate_store);
+        self.pr_review_tracking
+            .insert(work_dir.clone(), candidate_store);
         if let Some(store) = self.pr_review_tracking.get(&work_dir) {
             let _ = crate::services::pr_review::save_pr_review_tracking(&work_dir, store);
         }
@@ -2515,7 +2579,8 @@ impl AppState {
 pub(crate) fn merge_live_trajectory(
     fresh: Vec<TrajectoryEntry>,
     live: &[TrajectoryEntry],
-) -> Vec<TrajectoryEntry> {    let fresh_correlations: HashSet<String> = fresh
+) -> Vec<TrajectoryEntry> {
+    let fresh_correlations: HashSet<String> = fresh
         .iter()
         .filter_map(|entry| entry.correlation_id.clone())
         .collect();
@@ -2530,8 +2595,7 @@ pub(crate) fn merge_live_trajectory(
         }
         let covered = match entry.correlation_id.as_deref() {
             Some(correlation) => fresh_correlations.contains(correlation),
-            None => fresh_summaries
-                .contains(&(entry.category.clone(), entry.summary.clone())),
+            None => fresh_summaries.contains(&(entry.category.clone(), entry.summary.clone())),
         };
         if !covered {
             merged.push(entry.clone());
@@ -2582,11 +2646,15 @@ impl AppState {
             .is_some_and(|runtime| runtime.is_generating());
         if generating {
             let live_trajectory = self.trajectory_by_session.remove(&key).unwrap_or_default();
-            self.trajectory_by_session
-                .insert(key.clone(), merge_live_trajectory(result.trajectory, &live_trajectory));
+            self.trajectory_by_session.insert(
+                key.clone(),
+                merge_live_trajectory(result.trajectory, &live_trajectory),
+            );
             let live_subagents = self.subagents_by_session.remove(&key).unwrap_or_default();
-            self.subagents_by_session
-                .insert(key.clone(), merge_live_subagents(result.subagents, &live_subagents));
+            self.subagents_by_session.insert(
+                key.clone(),
+                merge_live_subagents(result.subagents, &live_subagents),
+            );
         } else {
             self.trajectory_by_session
                 .insert(key.clone(), result.trajectory);
@@ -2634,6 +2702,7 @@ impl AppState {
                     status: SubagentActivityStatus::Queued,
                     messages: Vec::new(),
                     error: None,
+                    isolation: None,
                 });
             }
             AgentEvent::SubagentStarted {
@@ -2644,6 +2713,7 @@ impl AppState {
                 agent,
                 task,
                 model,
+                isolation,
             } => {
                 let Some(subagents) = self.active_subagents_mut() else {
                     return;
@@ -2657,6 +2727,7 @@ impl AppState {
                     subagent.task = task.clone();
                     subagent.model = Some(model.clone());
                     subagent.status = SubagentActivityStatus::Running;
+                    subagent.isolation = isolation.clone();
                 }
             }
             AgentEvent::SubagentUpdate {
@@ -3476,9 +3547,11 @@ impl AppState {
                     let Some(runtime) = source.upgrade() else {
                         continue;
                     };
-                    if !self.session_runtimes.get(&runtime.session_file).is_some_and(|current| {
-                        Arc::ptr_eq(current, &runtime)
-                    }) {
+                    if !self
+                        .session_runtimes
+                        .get(&runtime.session_file)
+                        .is_some_and(|current| Arc::ptr_eq(current, &runtime))
+                    {
                         continue;
                     }
                     let is_active = self.active_session_matches(&session_id, &runtime.session_file);
@@ -3553,9 +3626,7 @@ impl AppState {
         for message in self.messages.iter() {
             for activity in message.tool_activities.iter() {
                 if activity.title.starts_with("computer_")
-                    && self
-                        .mirror_seen
-                        .insert(format!("tool:{}", activity.id))
+                    && self.mirror_seen.insert(format!("tool:{}", activity.id))
                 {
                     fresh = true;
                 }
@@ -3715,9 +3786,10 @@ impl AppState {
             return Ok(());
         }
 
-        let runtime = self.ensure_session_runtime(runtime_work_dir, session_file.clone());
+        let runtime = self.ensure_session_runtime(runtime_work_dir.clone(), session_file.clone());
         crate::services::chat::execute_prompt(
             runtime,
+            runtime_work_dir,
             session_id.clone(),
             text.clone(),
             images.clone(),
@@ -3875,7 +3947,6 @@ fn project_recovery_diagnostics(
     }
     rows
 }
-
 
 #[path = "tests.rs"]
 #[cfg(test)]

@@ -10,6 +10,7 @@ use gpui_component::spinner::Spinner;
 use gpui_component::theme::ActiveTheme;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Icon, IconName, Selectable, Sizable, WindowExt};
+use gpui_kit_assets::IconName as AssetIconName;
 
 use crate::app::{actions::AppAction, controller};
 use crate::state::{AppState, SessionAttention, SessionInfo, TrajectoryEntry};
@@ -454,10 +455,8 @@ impl SidebarView {
                             .child("⌘N"),
                     )
                     .on_click(move |_event, window, cx| {
-                        window.dispatch_action(
-                            Box::new(crate::screens::workspace::BeginNewTask),
-                            cx,
-                        );
+                        window
+                            .dispatch_action(Box::new(crate::screens::workspace::BeginNewTask), cx);
                     }),
             )
             .child(
@@ -650,12 +649,7 @@ impl SidebarView {
                     .rounded_full()
                     .bg(theme.warning.opacity(0.15))
                     .text_color(theme.warning)
-                    .child(
-                        div()
-                            .size(px(6.0))
-                            .rounded_full()
-                            .bg(theme.warning),
-                    )
+                    .child(div().size(px(6.0)).rounded_full().bg(theme.warning))
                     .child(
                         div()
                             .text_xs()
@@ -695,12 +689,7 @@ impl SidebarView {
                     .rounded_full()
                     .bg(theme.success.opacity(0.12))
                     .text_color(theme.success)
-                    .child(
-                        div()
-                            .size(px(6.0))
-                            .rounded_full()
-                            .bg(theme.success),
-                    )
+                    .child(div().size(px(6.0)).rounded_full().bg(theme.success))
                     .child(
                         div()
                             .text_xs()
@@ -773,29 +762,33 @@ impl SidebarView {
             let is_closed = state_upper == "CLOSED";
             let tooltip = pr_status_tooltip(&pr);
 
-            let (pr_bg, pr_fg, pr_label) = if is_merged {
+            let (pr_bg, pr_fg, pr_label, pr_icon) = if is_merged {
                 (
                     theme.success.opacity(0.18),
                     theme.success,
                     format!("#{}", pr.number),
+                    Icon::new(AssetIconName::GitMerge),
                 )
             } else if is_draft {
                 (
                     theme.secondary,
                     theme.muted_foreground,
                     format!("#{}", pr.number),
+                    Icon::default().path("icons/git/compare.svg"),
                 )
             } else if is_closed {
                 (
                     theme.danger.opacity(0.12),
                     theme.danger,
                     format!("#{}", pr.number),
+                    Icon::default().path("icons/git/compare.svg"),
                 )
             } else {
                 (
                     theme.primary.opacity(0.12),
                     theme.primary,
                     format!("#{}", pr.number),
+                    Icon::default().path("icons/git/compare.svg"),
                 )
             };
 
@@ -878,7 +871,7 @@ impl SidebarView {
                         "session-pr-{}-{}",
                         session.id, pr.number
                     )))
-                    .icon(Icon::default().path("icons/git/compare.svg"))
+                    .icon(pr_icon)
                     .label(pr_label)
                     .tooltip(tooltip)
                     .ghost()
@@ -1022,46 +1015,46 @@ impl SidebarView {
                                     "session-title-{}",
                                     session.id
                                 )))
-                                    .debug_selector({
-                                        let id = session.id.clone();
-                                        move || format!("session-title-{id}")
-                                    })
-                                    .accessibility_label(session_title.clone())
-                                    .ghost()
-                                    .xsmall()
-                                    .compact()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .px_0()
-                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation();
-                                    })
-                                    .on_click(move |_, _, cx| {
-                                        title_model.update(cx, |state, cx| {
-                                            controller::dispatch(
-                                                state,
-                                                AppAction::SelectSession {
-                                                    work_dir: title_work_dir.clone(),
-                                                    session_id: title_session_id.clone(),
-                                                },
-                                            );
-                                            cx.notify();
-                                        });
-                                    })
-                                    .child(
-                                        div()
-                                            .w_full()
-                                            .min_w_0()
-                                            .text_sm()
-                                            .font_weight(if is_active {
-                                                FontWeight::SEMIBOLD
-                                            } else {
-                                                FontWeight::MEDIUM
-                                            })
-                                            .text_color(title_color)
-                                            .truncate()
-                                            .child(session_title),
-                                    ),
+                                .debug_selector({
+                                    let id = session.id.clone();
+                                    move || format!("session-title-{id}")
+                                })
+                                .accessibility_label(session_title.clone())
+                                .ghost()
+                                .xsmall()
+                                .compact()
+                                .flex_1()
+                                .min_w_0()
+                                .px_0()
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation();
+                                })
+                                .on_click(move |_, _, cx| {
+                                    title_model.update(cx, |state, cx| {
+                                        controller::dispatch(
+                                            state,
+                                            AppAction::SelectSession {
+                                                work_dir: title_work_dir.clone(),
+                                                session_id: title_session_id.clone(),
+                                            },
+                                        );
+                                        cx.notify();
+                                    });
+                                })
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .min_w_0()
+                                        .text_sm()
+                                        .font_weight(if is_active {
+                                            FontWeight::SEMIBOLD
+                                        } else {
+                                            FontWeight::MEDIUM
+                                        })
+                                        .text_color(title_color)
+                                        .truncate()
+                                        .child(session_title),
+                                ),
                             )
                             .child(
                                 div()
@@ -1096,9 +1089,7 @@ impl SidebarView {
                                         .xsmall()
                                         .accessibility_label("Archive session")
                                         .opacity(0.0)
-                                        .group_hover("session-card", |style| {
-                                            style.opacity(1.0)
-                                        })
+                                        .group_hover("session-card", |style| style.opacity(1.0))
                                         .focus_visible(|style| style.opacity(1.0))
                                         .tooltip("Archive session")
                                         // The card selects a session on mouse-down. Keep action buttons from
@@ -1384,37 +1375,33 @@ impl SidebarView {
         let settings_selected =
             self.model.read(cx).workspace_page == crate::state::WorkspacePage::Settings;
 
-        div()
-            .flex_none()
-            .px_3()
-            .py_2()
-            .child(
-                Button::new("sidebar-settings")
-                    .debug_selector(|| "sidebar-settings".into())
-                    .accessibility_label("Settings")
-                    .tooltip("Open settings")
-                    .child(
-                        div()
-                            .w_full()
-                            .flex()
-                            .items_center()
-                            .justify_start()
-                            .gap_2()
-                            .child(IconName::Settings)
-                            .child("Settings"),
-                    )
-                    .ghost()
-                    .selected(settings_selected)
-                    .w_full()
-                    .justify_start()
-                    .text_color(theme.muted_foreground)
-                    .on_click(move |_event, _window, cx| {
-                        settings_model.update(cx, |state, cx| {
-                            controller::dispatch(state, AppAction::OpenSettings);
-                            cx.notify();
-                        });
-                    }),
-            )
+        div().flex_none().px_3().py_2().child(
+            Button::new("sidebar-settings")
+                .debug_selector(|| "sidebar-settings".into())
+                .accessibility_label("Settings")
+                .tooltip("Open settings")
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .justify_start()
+                        .gap_2()
+                        .child(IconName::Settings)
+                        .child("Settings"),
+                )
+                .ghost()
+                .selected(settings_selected)
+                .w_full()
+                .justify_start()
+                .text_color(theme.muted_foreground)
+                .on_click(move |_event, _window, cx| {
+                    settings_model.update(cx, |state, cx| {
+                        controller::dispatch(state, AppAction::OpenSettings);
+                        cx.notify();
+                    });
+                }),
+        )
     }
 
     /// Filter, group, and sort sessions for the history list. Only runs when
@@ -1602,7 +1589,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn sidebar_task_title_and_navigation_support_keyboard_activation(cx: &mut gpui::TestAppContext) {
+    fn sidebar_task_title_and_navigation_support_keyboard_activation(
+        cx: &mut gpui::TestAppContext,
+    ) {
         use crate::state::{AppState, WorkspacePage};
         use gpui::*;
         use std::{cell::Cell, rc::Rc};

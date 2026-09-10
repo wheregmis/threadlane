@@ -57,7 +57,10 @@ pub fn issue_start_activation(
     start().map(|()| true)
 }
 
-pub fn issue_start_dialog_result(result: Result<bool, String>, on_error: impl FnOnce(String)) -> bool {
+pub fn issue_start_dialog_result(
+    result: Result<bool, String>,
+    on_error: impl FnOnce(String),
+) -> bool {
     match result {
         Ok(started) => started,
         Err(error) => {

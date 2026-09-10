@@ -87,10 +87,7 @@ pub struct SqliteStore {
 unsafe impl Send for SqliteStore {}
 
 impl SqliteStore {
-    fn open(
-        path: impl AsRef<Path>,
-        session_id: impl Into<String>,
-    ) -> Result<Self, ReduceError> {
+    fn open(path: impl AsRef<Path>, session_id: impl Into<String>) -> Result<Self, ReduceError> {
         let lock_path = path.as_ref().with_extension("sqlite.lock");
         if let Some(parent) = path
             .as_ref()
@@ -100,8 +97,7 @@ impl SqliteStore {
             fs::create_dir_all(parent).map_err(storage)?;
         }
         let writer_lock = writer_claim(&lock_path)?;
-        let append_gate =
-            append_gate_for(&super::jsonl::canonical_writer_key(path.as_ref()));
+        let append_gate = append_gate_for(&super::jsonl::canonical_writer_key(path.as_ref()));
         let path = CString::new(path.as_ref().to_string_lossy().as_bytes())
             .map_err(|error| ReduceError::Storage(error.to_string()))?;
         let mut db = ptr::null_mut();

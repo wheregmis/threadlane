@@ -1545,7 +1545,11 @@ impl AcpSession {
     /// A value the agent does not offer is refused here rather than sent: an
     /// agent is free to reject it however it likes, including by failing the
     /// call, and a rejected setting must not look applied.
-    pub(crate) async fn set_config_option(&self, category: &str, value: &str) -> Result<(), String> {
+    pub(crate) async fn set_config_option(
+        &self,
+        category: &str,
+        value: &str,
+    ) -> Result<(), String> {
         let config_id = {
             let options = self.config_options();
             let Some(option) = config_option_for(&options, category) else {
@@ -1605,7 +1609,10 @@ impl AcpSession {
             .await
     }
 
-    pub(crate) async fn prompt(&self, blocks: Vec<AcpContentBlock>) -> Result<AcpStopReason, String> {
+    pub(crate) async fn prompt(
+        &self,
+        blocks: Vec<AcpContentBlock>,
+    ) -> Result<AcpStopReason, String> {
         self.connection.prompt(&self.session_id, blocks).await
     }
 

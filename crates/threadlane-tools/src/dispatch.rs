@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use serde_json::{Value};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::definitions::tool_definitions;
@@ -64,7 +64,11 @@ pub(crate) fn execute_tool(name: &str, args_json: &str) -> String {
 }
 
 #[cfg(test)]
-pub(crate) fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &Path) -> String {
+pub(crate) fn execute_tool_in_workspace(
+    name: &str,
+    args_json: &str,
+    workspace_root: &Path,
+) -> String {
     try_execute_tool_in_workspace(name, args_json, workspace_root).unwrap_or_else(|error| error)
 }
 
@@ -401,6 +405,9 @@ pub fn try_execute_tool_in_workspace(
             let mut cmd = Command::new("sh");
             cmd.arg("-c").arg(cmd_str);
             cmd.current_dir(&validated_cwd);
+            if let Some(target_dir) = worktree_cargo_target_dir(workspace_root) {
+                cmd.env("CARGO_TARGET_DIR", target_dir);
+            }
 
             match cmd.output() {
                 Ok(output) => {
@@ -443,6 +450,23 @@ pub fn try_execute_tool_in_workspace(
         "consolidate_memory" => consolidate_memory_impl(workspace_root, &args),
         unknown => Err(format!("Error: Unknown tool '{unknown}'")),
     }
+}
+
+pub(crate) fn worktree_cargo_target_dir(workspace_root: &Path) -> Option<PathBuf> {
+    let worktrees = workspace_root
+        .ancestors()
+        .find(|path| path.file_name().is_some_and(|name| name == "worktrees"))?;
+    let threadlane = worktrees
+        .parent()
+        .filter(|path| path.file_name().is_some_and(|name| name == ".threadlane"))?;
+    let lane = workspace_root
+        .strip_prefix(worktrees)
+        .ok()?
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("-");
+    (!lane.is_empty()).then(|| threadlane.join("cache/target").join(lane))
 }
 
 /// Dispatches an in-process CLI tool invocation via `dyn <tool> [args]`.

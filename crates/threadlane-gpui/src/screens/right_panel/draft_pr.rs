@@ -259,7 +259,12 @@ impl DraftPrDialogView {
         })
     }
 
-    pub(crate) fn start_request(&mut self, check: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn start_request(
+        &mut self,
+        check: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.created || self.attempts.is_busy() || (!check && self.attempts.is_uncertain()) {
             return;
         }

@@ -44,7 +44,12 @@ const SNAPSHOT_TEMPLATE: &str = r#"(() => {
 
 /// Build the act script. Target is located by stamped ref first, then CSS
 /// selector. Returns a JSON string shaped `{ok, message}`.
-pub(crate) fn act_script(action: &str, target_json: &str, text_json: &str, key_json: &str) -> String {
+pub(crate) fn act_script(
+    action: &str,
+    target_json: &str,
+    text_json: &str,
+    key_json: &str,
+) -> String {
     format!(
         r#"(() => {{
   const fail = (message) => JSON.stringify({{ ok: false, message }});
@@ -289,10 +294,7 @@ mod tests {
     fn snapshot_bakes_in_element_cap() {
         let script = snapshot_js();
         assert!(!script.contains("__MAX__"));
-        assert!(script.contains(&format!(
-            "const MAX = {};",
-            SNAPSHOT_MAX_ELEMENTS
-        )));
+        assert!(script.contains(&format!("const MAX = {};", SNAPSHOT_MAX_ELEMENTS)));
     }
 
     #[test]

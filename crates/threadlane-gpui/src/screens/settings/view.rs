@@ -705,9 +705,7 @@ impl SettingsView {
                     .into_iter()
                     .map(Some),
                 );
-                options
-                .into_iter()
-                .fold(menu, |menu, effort| {
+                options.into_iter().fold(menu, |menu, effort| {
                     let entity = entity.clone();
                     let project = project.clone();
                     menu.item(
@@ -820,9 +818,7 @@ impl SettingsView {
                         .into_iter()
                         .map(Some),
                 );
-                options
-                .into_iter()
-                .fold(menu, |menu, effort| {
+                options.into_iter().fold(menu, |menu, effort| {
                     let entity = entity.clone();
                     let project = project.clone();
                     menu.item(
@@ -2659,7 +2655,10 @@ impl SettingsView {
                     )
             }))
             .when(self.extension_rows.is_empty(), |view| {
-                view.child(Self::empty_state("No WASI extensions found. Install one below.", theme))
+                view.child(Self::empty_state(
+                    "No WASI extensions found. Install one below.",
+                    theme,
+                ))
             })
             .into_any_element()
     }
@@ -2828,7 +2827,10 @@ impl SettingsView {
                     )
             }))
             .when(self.skill_rows.is_empty(), |view| {
-                view.child(Self::empty_state("No skills found. Attach a project to discover skills.", theme))
+                view.child(Self::empty_state(
+                    "No skills found. Attach a project to discover skills.",
+                    theme,
+                ))
             })
             .into_any_element()
     }

@@ -2,9 +2,9 @@
 // HarnessSupervisor is publicly exported but most methods are currently
 // exercised only in tests; dead-code warnings are intentionally suppressed.
 #![allow(dead_code)]
-use crate::coding_agent::harness::CodingSessionHarness;
 #[cfg(test)]
 use crate::browser::BrowserBridge;
+use crate::coding_agent::harness::CodingSessionHarness;
 use crate::coding_agent::{CodingAgentOptions, SubagentCancellationGuard};
 use crate::controller::{ExecutionMode, SessionController};
 use crate::project_registry::{

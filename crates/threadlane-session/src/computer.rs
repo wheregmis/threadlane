@@ -44,9 +44,7 @@ impl ComputerToolExecutor {
 
     async fn approve(&self, title: String, detail: String) -> Result<(), String> {
         let Some(permissions) = &self.permissions else {
-            return Err(
-                "Computer use has no permission channel in this session.".to_string(),
-            );
+            return Err("Computer use has no permission channel in this session.".to_string());
         };
         match permissions.request_computer(&title, &detail).await {
             PermissionDecision::Deny => Err(format!(
@@ -148,9 +146,13 @@ pub(crate) fn parse_act_target(args: &str) -> Result<Option<i64>, String> {
         None => Ok(None),
         // Window id 0 is kCGNullWindowID and never names a window; a zero
         // target is always a caller defaulting the field, not a real target.
-        Some(value) => value.as_i64().filter(|id| *id > 0).map(Some).ok_or_else(|| {
-            "`computer_act` target must be a window id from computer_windows.".to_string()
-        }),
+        Some(value) => value
+            .as_i64()
+            .filter(|id| *id > 0)
+            .map(Some)
+            .ok_or_else(|| {
+                "`computer_act` target must be a window id from computer_windows.".to_string()
+            }),
     }
 }
 
@@ -167,10 +169,9 @@ fn resolve_target(intent: ComputerAct, target: Option<i64>) -> Result<TargetedAc
             app: None,
         });
     };
-    let (pid, owner, (origin_x, origin_y)) =
-        mac::find_window(id as i32).ok_or_else(|| {
-            format!("Window {id} is gone; re-list with computer_windows and pick a live id.")
-        })?;
+    let (pid, owner, (origin_x, origin_y)) = mac::find_window(id as i32).ok_or_else(|| {
+        format!("Window {id} is gone; re-list with computer_windows and pick a live id.")
+    })?;
     let shift = |x: f64, y: f64| (x + origin_x, y + origin_y);
     let intent = match intent {
         ComputerAct::Click { x, y, modifiers } => {
@@ -211,12 +212,31 @@ fn resolve_target(intent: ComputerAct, target: Option<i64>) -> Result<TargetedAc
 /// execution is macOS-only.
 #[derive(Debug, PartialEq)]
 pub(crate) enum ComputerAct {
-    Click { x: f64, y: f64, modifiers: Vec<String> },
-    DoubleClick { x: f64, y: f64, modifiers: Vec<String> },
-    Move { x: f64, y: f64 },
-    Scroll { dx: f64, dy: f64 },
-    Type { text: String },
-    Press { key: String, modifiers: Vec<String> },
+    Click {
+        x: f64,
+        y: f64,
+        modifiers: Vec<String>,
+    },
+    DoubleClick {
+        x: f64,
+        y: f64,
+        modifiers: Vec<String>,
+    },
+    Move {
+        x: f64,
+        y: f64,
+    },
+    Scroll {
+        dx: f64,
+        dy: f64,
+    },
+    Type {
+        text: String,
+    },
+    Press {
+        key: String,
+        modifiers: Vec<String>,
+    },
 }
 
 impl ComputerAct {
@@ -246,7 +266,16 @@ impl ComputerAct {
 
 const VALID_MODIFIERS: &[&str] = &["shift", "ctrl", "alt", "cmd"];
 const VALID_KEYS: &[&str] = &[
-    "Enter", "Escape", "Tab", "Space", "Backspace", "Delete", "Up", "Down", "Left", "Right",
+    "Enter",
+    "Escape",
+    "Tab",
+    "Space",
+    "Backspace",
+    "Delete",
+    "Up",
+    "Down",
+    "Left",
+    "Right",
 ];
 
 fn parse_point(args: &serde_json::Value) -> Result<(f64, f64), String> {
@@ -280,8 +309,7 @@ fn parse_modifiers(args: &serde_json::Value) -> Result<Vec<String>, String> {
                         .contains(&name)
                         .then(|| name.to_string())
                         .ok_or_else(|| {
-                            "`computer_act` modifiers must be shift, ctrl, alt, or cmd."
-                                .to_string()
+                            "`computer_act` modifiers must be shift, ctrl, alt, or cmd.".to_string()
                         })
                 })
         })
@@ -368,7 +396,10 @@ pub(crate) fn parse_computer_act(args: &str) -> Result<ComputerAct, String> {
                 modifiers: parse_modifiers(&parsed)?,
             })
         }
-        _ => Err("`computer_act` action must be one of click, double_click, move, scroll, type, press.".into()),
+        _ => Err(
+            "`computer_act` action must be one of click, double_click, move, scroll, type, press."
+                .into(),
+        ),
     }
 }
 
@@ -480,9 +511,10 @@ mod mac {
     pub(super) fn list_windows() -> Result<String, String> {
         let own_pid = std::process::id() as i32;
         let mut rows = Vec::new();
-        for window in window_infos()?.into_iter().filter(|window| {
-            window.onscreen && window.pid != own_pid && window.id >= 0
-        }) {
+        for window in window_infos()?
+            .into_iter()
+            .filter(|window| window.onscreen && window.pid != own_pid && window.id >= 0)
+        {
             rows.push(format!(
                 "id={} app={:?} title={:?} pid={} layer={} alpha={:.2} x={:.0} y={:.0} w={:.0} h={:.0}",
                 window.id,
@@ -573,7 +605,9 @@ mod mac {
                 })
             })
             .ok_or_else(|| {
-                format!("Window {window_id} is gone; re-list with computer_windows and pick a live id.")
+                format!(
+                    "Window {window_id} is gone; re-list with computer_windows and pick a live id."
+                )
             })?;
         let display_points = CGDisplay::main().bounds().size.width;
         if display_points <= 0.0 {
@@ -691,116 +725,115 @@ mod mac {
         pub(super) onscreen: bool,
     }
     fn cf_string(ptr: *const std::ffi::c_void) -> String {
-            unsafe { CFString::wrap_under_get_rule(ptr as CFStringRef) }.to_string()
-        }
+        unsafe { CFString::wrap_under_get_rule(ptr as CFStringRef) }.to_string()
+    }
 
     fn cf_number(value: &core_foundation::base::CFType) -> Option<CFNumber> {
         value.downcast::<CFNumber>()
     }
 
     fn read_dictionary(dict: &CFDictionary) -> WindowInfo {
-            let mut strings = std::collections::HashMap::new();
-            let mut numbers = std::collections::HashMap::new();
-            let mut onscreen = false;
-            let mut bounds = (0.0, 0.0, 0.0, 0.0);
-            let (keys, values) = dict.get_keys_and_values();
-            for (key, value) in keys.iter().zip(values.iter()) {
-                let name = cf_string(*key);
-                let value = unsafe {
-                    core_foundation::base::CFType::wrap_under_get_rule(*value)
-                };
-                if name == "kCGWindowBounds" {
-                    if let Some(rect) = value.downcast::<CFDictionary>() {
-                        let (rect_keys, rect_values) = rect.get_keys_and_values();
-                        let mut components = std::collections::HashMap::new();
-                        for (rect_key, rect_value) in
-                            rect_keys.iter().zip(rect_values.iter())
-                        {
-                            let rect_value = unsafe {
-                                core_foundation::base::CFType::wrap_under_get_rule(*rect_value)
-                            };
-                            if let Some(number) = cf_number(&rect_value) {
-                                if let Some(component) = number.to_f64() {
-                                    components.insert(cf_string(*rect_key), component);
-                                }
+        let mut strings = std::collections::HashMap::new();
+        let mut numbers = std::collections::HashMap::new();
+        let mut onscreen = false;
+        let mut bounds = (0.0, 0.0, 0.0, 0.0);
+        let (keys, values) = dict.get_keys_and_values();
+        for (key, value) in keys.iter().zip(values.iter()) {
+            let name = cf_string(*key);
+            let value = unsafe { core_foundation::base::CFType::wrap_under_get_rule(*value) };
+            if name == "kCGWindowBounds" {
+                if let Some(rect) = value.downcast::<CFDictionary>() {
+                    let (rect_keys, rect_values) = rect.get_keys_and_values();
+                    let mut components = std::collections::HashMap::new();
+                    for (rect_key, rect_value) in rect_keys.iter().zip(rect_values.iter()) {
+                        let rect_value = unsafe {
+                            core_foundation::base::CFType::wrap_under_get_rule(*rect_value)
+                        };
+                        if let Some(number) = cf_number(&rect_value) {
+                            if let Some(component) = number.to_f64() {
+                                components.insert(cf_string(*rect_key), component);
                             }
                         }
-                        bounds = (
-                            components.get("X").copied().unwrap_or(0.0),
-                            components.get("Y").copied().unwrap_or(0.0),
-                            components.get("Width").copied().unwrap_or(0.0),
-                            components.get("Height").copied().unwrap_or(0.0),
-                        );
                     }
-                    continue;
+                    bounds = (
+                        components.get("X").copied().unwrap_or(0.0),
+                        components.get("Y").copied().unwrap_or(0.0),
+                        components.get("Width").copied().unwrap_or(0.0),
+                        components.get("Height").copied().unwrap_or(0.0),
+                    );
                 }
-                if name == "kCGWindowIsOnscreen" {
-                    onscreen = value
-                        .downcast::<CFBoolean>()
-                        .is_some_and(|flag| flag == CFBoolean::true_value());
-                    continue;
-                }
-                if let Some(text) = value.downcast::<CFString>() {
-                    strings.insert(name, text.to_string());
-                    continue;
-                }
-                if let Some(number) = cf_number(&value) {
-                    numbers.insert(name, number);
-                    continue;
-                }
+                continue;
             }
-            let integer = |name: &str, fallback: i32| {
-                numbers
-                    .get(name)
-                    .and_then(|number| {
-                        number.to_i32().or_else(|| number.to_f64().map(|value| value as i32))
-                    })
-                    .unwrap_or(fallback)
-            };
-            WindowInfo {
-                id: integer("kCGWindowNumber", -1),
-                owner: strings.get("kCGWindowOwnerName").cloned().unwrap_or_default(),
-                title: strings.get("kCGWindowName").cloned().unwrap_or_default(),
-                pid: integer("kCGWindowOwnerPID", -1),
-                layer: integer("kCGWindowLayer", -1),
-                alpha: numbers
-                    .get("kCGWindowAlpha")
-                    .and_then(|number| number.to_f64())
-                    .unwrap_or(1.0),
-                bounds,
-                onscreen,
+            if name == "kCGWindowIsOnscreen" {
+                onscreen = value
+                    .downcast::<CFBoolean>()
+                    .is_some_and(|flag| flag == CFBoolean::true_value());
+                continue;
+            }
+            if let Some(text) = value.downcast::<CFString>() {
+                strings.insert(name, text.to_string());
+                continue;
+            }
+            if let Some(number) = cf_number(&value) {
+                numbers.insert(name, number);
+                continue;
             }
         }
-
-        pub(super) fn window_infos() -> Result<Vec<WindowInfo>, String> {
-            use core_foundation::base::{CFIndex, TCFType};
-            use core_foundation::dictionary::CFDictionary;
-            use core_graphics::window::{
-                copy_window_info, kCGNullWindowID, kCGWindowListExcludeDesktopElements,
-                kCGWindowListOptionOnScreenOnly,
-            };
-
-            let info = copy_window_info(
-                kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
-                kCGNullWindowID,
-            )
-            .ok_or_else(|| "Could not list windows.".to_string())?;
-            let mut windows = Vec::new();
-            for index in 0..info.len().min(50) {
-                let Some(item) = info.get(index as CFIndex) else {
-                    continue;
-                };
-                let raw: *const std::ffi::c_void = *item;
-                let dict = unsafe {
-                    core_foundation::base::CFType::wrap_under_get_rule(raw)
-                };
-                let Some(dict) = dict.downcast::<CFDictionary>() else {
-                    continue;
-                };
-                windows.push(read_dictionary(&dict));
-            }
-            Ok(windows)
+        let integer = |name: &str, fallback: i32| {
+            numbers
+                .get(name)
+                .and_then(|number| {
+                    number
+                        .to_i32()
+                        .or_else(|| number.to_f64().map(|value| value as i32))
+                })
+                .unwrap_or(fallback)
+        };
+        WindowInfo {
+            id: integer("kCGWindowNumber", -1),
+            owner: strings
+                .get("kCGWindowOwnerName")
+                .cloned()
+                .unwrap_or_default(),
+            title: strings.get("kCGWindowName").cloned().unwrap_or_default(),
+            pid: integer("kCGWindowOwnerPID", -1),
+            layer: integer("kCGWindowLayer", -1),
+            alpha: numbers
+                .get("kCGWindowAlpha")
+                .and_then(|number| number.to_f64())
+                .unwrap_or(1.0),
+            bounds,
+            onscreen,
         }
+    }
+
+    pub(super) fn window_infos() -> Result<Vec<WindowInfo>, String> {
+        use core_foundation::base::{CFIndex, TCFType};
+        use core_foundation::dictionary::CFDictionary;
+        use core_graphics::window::{
+            copy_window_info, kCGNullWindowID, kCGWindowListExcludeDesktopElements,
+            kCGWindowListOptionOnScreenOnly,
+        };
+
+        let info = copy_window_info(
+            kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+            kCGNullWindowID,
+        )
+        .ok_or_else(|| "Could not list windows.".to_string())?;
+        let mut windows = Vec::new();
+        for index in 0..info.len().min(50) {
+            let Some(item) = info.get(index as CFIndex) else {
+                continue;
+            };
+            let raw: *const std::ffi::c_void = *item;
+            let dict = unsafe { core_foundation::base::CFType::wrap_under_get_rule(raw) };
+            let Some(dict) = dict.downcast::<CFDictionary>() else {
+                continue;
+            };
+            windows.push(read_dictionary(&dict));
+        }
+        Ok(windows)
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -828,9 +861,7 @@ impl ComputerToolExecutor {
         };
         self.approve(
             format!("Screenshot {target}"),
-            format!(
-                "Capture {target}. You will see the image; the agent receives it too."
-            ),
+            format!("Capture {target}. You will see the image; the agent receives it too."),
         )
         .await?;
         let dir = mac::previews_dir(work_dir);
@@ -851,10 +882,7 @@ impl ComputerToolExecutor {
             Some(id) => crate::computer_stream::StreamTarget::Window(id as u32),
             None => crate::computer_stream::StreamTarget::Display,
         };
-        crate::computer_stream::ensure_stream(
-            target,
-            Some(mirror_dir.join("latest-frame.jpg")),
-        );
+        crate::computer_stream::ensure_stream(target, Some(mirror_dir.join("latest-frame.jpg")));
         if let Some(frame) = crate::computer_stream::fresh_frame(target) {
             std::fs::write(&path, &frame.jpeg)
                 .map_err(|error| format!("Could not save screenshot: {error}"))?;
@@ -878,21 +906,15 @@ impl ComputerToolExecutor {
         // Each arm yields (bytes, dims text, source points width) so clicks
         // convert image pixels back to display points exactly.
         let (bytes, dims, src_points_width) = match match window_id {
-            Some(id) => mac::capture_composited_window(
-                id as i32,
-                SCREENSHOT_WIDTH,
-                SCREENSHOT_JPEG_QUALITY,
-            ),
+            Some(id) => {
+                mac::capture_composited_window(id as i32, SCREENSHOT_WIDTH, SCREENSHOT_JPEG_QUALITY)
+            }
             None => mac::capture_composited_jpeg(SCREENSHOT_WIDTH, SCREENSHOT_JPEG_QUALITY),
         } {
             Ok((bytes, width, height, src_points_width)) => {
                 std::fs::write(&path, &bytes)
                     .map_err(|error| format!("Could not save screenshot: {error}"))?;
-                (
-                    bytes,
-                    format!("{width}x{height}"),
-                    src_points_width,
-                )
+                (bytes, format!("{width}x{height}"), src_points_width)
             }
             Err(_) => {
                 let bytes = tokio::task::spawn_blocking({
@@ -909,8 +931,7 @@ impl ComputerToolExecutor {
                     .unwrap_or(SCREENSHOT_WIDTH);
                 // screencapture covers the display: fall back to display scale
                 // (source points = served pixels × scale).
-                let src_points_width =
-                    served_width as f64 * mac::display_scale_for(served_width);
+                let src_points_width = served_width as f64 * mac::display_scale_for(served_width);
                 (bytes, dims, src_points_width)
             }
         };
@@ -946,9 +967,9 @@ impl ComputerToolExecutor {
         let scale = scale_target
             .and_then(crate::computer_stream::served_scale)
             .unwrap_or(1.0);
-        let scale_note = if scale_target.is_some_and(|target| {
-            crate::computer_stream::served_scale(target).is_none()
-        }) {
+        let scale_note = if scale_target
+            .is_some_and(|target| crate::computer_stream::served_scale(target).is_none())
+        {
             " (no scale reference on file — screenshot the target first for precise clicks)"
         } else {
             ""
@@ -962,9 +983,7 @@ impl ComputerToolExecutor {
                 *y *= scale;
             }
             // Scroll deltas are wheel units, not screen positions.
-            ComputerAct::Scroll { .. }
-            | ComputerAct::Type { .. }
-            | ComputerAct::Press { .. } => {}
+            ComputerAct::Scroll { .. } | ComputerAct::Type { .. } | ComputerAct::Press { .. } => {}
         }
         let targeted = resolve_target(intent, raw_target)?;
         let mut title = targeted.intent.approval_title();
@@ -986,12 +1005,10 @@ impl ComputerToolExecutor {
                 .await
                 .map_err(|error| format!("Input task failed: {error}"))?;
         if let Ok(outcome) = &outcome {
-            let dir = global_previews_dir()
-                .unwrap_or_else(|| mac::previews_dir(work_dir));
+            let dir = global_previews_dir().unwrap_or_else(|| mac::previews_dir(work_dir));
             write_mirror_sidecar(&dir, None, &format!("{title} — {outcome}{scale_note}"));
         }
-        outcome
-        .map(|outcome| format!("{outcome}{scale_note}"))
+        outcome.map(|outcome| format!("{outcome}{scale_note}"))
     }
 }
 
@@ -1078,7 +1095,12 @@ pub(crate) fn write_mirror_sidecar_action(dir: &Path, action: &str) {
         &std::fs::read_to_string(dir.join("latest.json")).unwrap_or_default(),
     )
     .ok()
-    .and_then(|value| value.get("path").and_then(|value| value.as_str()).map(PathBuf::from));
+    .and_then(|value| {
+        value
+            .get("path")
+            .and_then(|value| value.as_str())
+            .map(PathBuf::from)
+    });
     write_mirror_sidecar(dir, path.as_deref(), action);
 }
 
@@ -1226,7 +1248,9 @@ fn perform_act(intent: &ComputerAct, pid: Option<i32>) -> Result<String, String>
     };
     // Fire-and-forget delivery cannot confirm Chromium/Electron targets, which
     // drop per-PID clicks at the renderer boundary; say so in the result.
-    let background_note = pid.is_some().then_some(" (background — cursor untouched; Chromium/Electron targets may ignore it)");
+    let background_note = pid
+        .is_some()
+        .then_some(" (background — cursor untouched; Chromium/Electron targets may ignore it)");
     let point = |x: f64, y: f64| CGPoint::new(x, y);
     let flags = |modifiers: &[String]| {
         let mut flags = CGEventFlags::empty();
@@ -1254,7 +1278,8 @@ fn perform_act(intent: &ComputerAct, pid: Option<i32>) -> Result<String, String>
             Ok(format!(
                 "Moved pointer to ({x:.0}, {y:.0}).{}",
                 background_note.unwrap_or("")
-            ))        }
+            ))
+        }
         ComputerAct::Click { x, y, modifiers } | ComputerAct::DoubleClick { x, y, modifiers } => {
             let clicks = usize::from(matches!(intent, ComputerAct::DoubleClick { .. }));
             let event_flags = flags(modifiers);
@@ -1391,7 +1416,9 @@ impl Capability for ComputerCapability {
     }
 
     fn tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
-        vec![Arc::new(ComputerToolExecutor::new(self.permissions.clone()))]
+        vec![Arc::new(ComputerToolExecutor::new(
+            self.permissions.clone(),
+        ))]
     }
 }
 
@@ -1421,15 +1448,21 @@ mod tests {
         assert!(parse_computer_act(r#"{"action":"scroll","dx":0,"dy":0}"#).is_err());
         assert!(parse_computer_act(r#"{"action":"type","text":""}"#).is_err());
         assert!(parse_computer_act(r#"{"action":"press","key":"F13"}"#).is_err());
-        assert!(parse_computer_act(r#"{"action":"press","key":"Enter","modifiers":["super"]}"#)
-            .is_err());
+        assert!(
+            parse_computer_act(r#"{"action":"press","key":"Enter","modifiers":["super"]}"#)
+                .is_err()
+        );
         assert!(parse_computer_act(r#"{"action":"dance"}"#).is_err());
     }
 
     #[test]
     fn act_validation_caps_type_length() {
         let long = "x".repeat(MAX_TYPE_CHARS + 1);
-        assert!(parse_computer_act(&format!(r#"{{"action":"type","text":{}}}"#, serde_json::json!(long))).is_err());
+        assert!(parse_computer_act(&format!(
+            r#"{{"action":"type","text":{}}}"#,
+            serde_json::json!(long)
+        ))
+        .is_err());
     }
 
     #[test]
@@ -1464,7 +1497,10 @@ mod tests {
 
     #[test]
     fn act_target_parsing() {
-        assert_eq!(parse_act_target(r#"{"action":"click","x":1,"y":2}"#).unwrap(), None);
+        assert_eq!(
+            parse_act_target(r#"{"action":"click","x":1,"y":2}"#).unwrap(),
+            None
+        );
         assert_eq!(
             parse_act_target(r#"{"action":"click","x":1,"y":2,"target":16958}"#).unwrap(),
             Some(16958)
@@ -1481,7 +1517,11 @@ mod tests {
         assert_eq!(targeted.app, None);
         assert!(matches!(
             targeted.intent,
-            ComputerAct::Click { x: 10.0, y: 20.0, .. }
+            ComputerAct::Click {
+                x: 10.0,
+                y: 20.0,
+                ..
+            }
         ));
     }
 
@@ -1535,10 +1575,9 @@ mod tests {
         let path = dir.path().join("computer-1.jpg");
         std::fs::write(&path, b"fake-jpeg").unwrap();
         write_mirror_sidecar(dir.path(), Some(&path), "Screenshot live");
-        let sidecar: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(dir.path().join("latest.json")).unwrap(),
-        )
-        .unwrap();
+        let sidecar: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("latest.json")).unwrap())
+                .unwrap();
         assert_eq!(sidecar["action"], "Screenshot live");
         assert!(sidecar["path"]
             .as_str()
@@ -1578,10 +1617,7 @@ mod tests {
             eprintln!("size: {}x{}", image.width(), image.height());
         }
         // Raw system list, unfiltered: ItemRef<u32> derefs to the id value.
-        let all = create_window_list(
-            kCGWindowListOptionOnScreenOnly,
-            kCGNullWindowID,
-        );
+        let all = create_window_list(kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
         if let Some(all) = all {
             eprintln!("system window count: {}", all.len());
             let raw_ids: Vec<i32> = (0..all.len().min(5))
@@ -1589,16 +1625,9 @@ mod tests {
                 .collect();
             eprintln!("raw ids: {:?}", raw_ids);
             // Variation 0: system array passed straight through.
-            let all2 = create_window_list(
-                kCGWindowListOptionOnScreenOnly,
-                kCGNullWindowID,
-            )
-            .expect("list");
-            let direct = create_image_from_array(
-                bounds,
-                all2.to_untyped(),
-                kCGWindowImageDefault,
-            );
+            let all2 =
+                create_window_list(kCGWindowListOptionOnScreenOnly, kCGNullWindowID).expect("list");
+            let direct = create_image_from_array(bounds, all2.to_untyped(), kCGWindowImageDefault);
             eprintln!("from-array direct: {}", direct.is_some());
             // Variation 1: single window id.
             let one: Vec<CFType> = raw_ids
@@ -1626,7 +1655,8 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     #[ignore]
-    async fn live_screenshot_attaches_image() {        let dir = tempfile::tempdir().unwrap();
+    async fn live_screenshot_attaches_image() {
+        let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join(".threadlane")).unwrap();
         std::fs::write(
             dir.path().join(".threadlane").join("permissions.json"),
@@ -1641,20 +1671,19 @@ mod tests {
         assert!(permissions.computer_is_approved());
         let executor = ComputerToolExecutor::new(Some(permissions));
         let output = executor
-            .execute_tool_with_output_in_workspace(
-                COMPUTER_SCREENSHOT_TOOL,
-                "{}",
-                Some(dir.path()),
-            )
+            .execute_tool_with_output_in_workspace(COMPUTER_SCREENSHOT_TOOL, "{}", Some(dir.path()))
             .await
             .expect("handled")
             .expect("screenshot ok");
         assert_eq!(output.images.len(), 1);
-        assert!(output.images[0].data_url.starts_with("data:image/jpeg;base64,"));
+        assert!(output.images[0]
+            .data_url
+            .starts_with("data:image/jpeg;base64,"));
 
         // Let the poller warm up, then prove the stream serves frames.
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let frame = crate::computer_stream::fresh_frame(crate::computer_stream::StreamTarget::Display);
+        let frame =
+            crate::computer_stream::fresh_frame(crate::computer_stream::StreamTarget::Display);
         assert!(
             frame.is_some(),
             "stream poller should have produced a display frame"
@@ -1728,17 +1757,18 @@ mod tests {
         // strips every non-core schema from the provider payload.
         let dir = tempfile::tempdir().unwrap();
         let session_file = dir.path().join("session.jsonl");
-        let agent = crate::coding_agent::CodingAgent::new(crate::coding_agent::CodingAgentOptions {
-            api_key: "test-key".into(),
-            account_id: None,
-            model: "gpt-4o".into(),
-            work_dir: dir.path().to_path_buf(),
-            session_file: Some(session_file),
-            system_prompt: Default::default(),
-            agent_config: None,
-            coding_config: None,
-            browser: crate::browser::BrowserBridge::unavailable(),
-        });
+        let agent =
+            crate::coding_agent::CodingAgent::new(crate::coding_agent::CodingAgentOptions {
+                api_key: "test-key".into(),
+                account_id: None,
+                model: "gpt-4o".into(),
+                work_dir: dir.path().to_path_buf(),
+                session_file: Some(session_file),
+                system_prompt: Default::default(),
+                agent_config: None,
+                coding_config: None,
+                browser: crate::browser::BrowserBridge::unavailable(),
+            });
         let names: Vec<String> = agent
             .agent
             .configured_tool_definitions()

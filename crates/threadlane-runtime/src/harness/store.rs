@@ -88,8 +88,7 @@ impl SessionIdGenerator {
         }
         let base = format!("{session}-{kind}");
         // One hash build so probing is O(1) per candidate instead of O(n).
-        let used: std::collections::HashSet<&str> =
-            used_ids.iter().map(String::as_str).collect();
+        let used: std::collections::HashSet<&str> = used_ids.iter().map(String::as_str).collect();
         let mut counter = 1u64;
         loop {
             let candidate = format!("{base}-{counter}");

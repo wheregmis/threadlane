@@ -7,7 +7,9 @@ use serde_json::Value;
 
 use crate::repo_map::path_matches;
 
-pub(crate) fn commit_text_transaction(files: &[(String, PathBuf, String, String)]) -> Result<(), String> {
+pub(crate) fn commit_text_transaction(
+    files: &[(String, PathBuf, String, String)],
+) -> Result<(), String> {
     use std::io::Write;
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)

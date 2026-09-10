@@ -491,7 +491,9 @@ async fn an_acp_turn_is_journaled_so_the_transcript_survives_a_reload() {
     use threadlane_session::harness::{
         read_transcript_page, JsonlStore, SessionStore, TranscriptItem,
     };
-    use threadlane_session::{AgentMessage, BrowserBridge, CodingAgent, CodingAgentOptions, PlanItemStatus};
+    use threadlane_session::{
+        AgentMessage, BrowserBridge, CodingAgent, CodingAgentOptions, PlanItemStatus,
+    };
 
     let temp = tempfile::tempdir().unwrap();
     let work = work_dir(&temp);

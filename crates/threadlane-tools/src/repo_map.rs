@@ -4,7 +4,10 @@ use std::path::Path;
 use crate::dispatch::truncate_tool_output;
 use crate::workspace::validate_path_in_workspace;
 
-pub(crate) fn get_repo_map_impl(workspace_root: &Path, rel_path: Option<&str>) -> Result<String, String> {
+pub(crate) fn get_repo_map_impl(
+    workspace_root: &Path,
+    rel_path: Option<&str>,
+) -> Result<String, String> {
     let target_dir = match rel_path {
         Some(path) => validate_path_in_workspace(path, workspace_root)?,
         None => workspace_root.to_path_buf(),

@@ -8,11 +8,11 @@ use super::broker::ManagedProcessRegistry;
 use super::capabilities::{
     build_broker_dispatcher, render_agent_catalog, restored_tool_policy, BrowserCapability,
     ContextCapability, GitHubCapability, McpCapability, PlanCapability, PrewalkCapability,
-    QuestionCapability, SkillCapability, SubagentCapability, WasiCapability,
+    QuestionCapability, SkillCapability, SubagentCapability, WasiCapability, WorktreeCapability,
 };
-use crate::computer::ComputerCapability;
 use super::harness::{CodingSessionHarness, HarnessWatch, InterruptedSubagentRecoveryState};
 use crate::commands::{execute_slash_command, parse_slash_command, CommandAction};
+use crate::computer::ComputerCapability;
 use crate::context::ProjectContext;
 use crate::extension_broker::CapabilityDispatcher;
 use crate::plan::SessionPlanStore;
@@ -199,7 +199,9 @@ impl CodingAgent {
     ///
     /// Returns an empty list for a non-ACP model rather than an error: asking
     /// what an agent offers is a question the UI may ask about any selection.
-    pub(crate) async fn acp_config_options(&mut self) -> Result<Vec<crate::acp::AcpConfigOption>, String> {
+    pub(crate) async fn acp_config_options(
+        &mut self,
+    ) -> Result<Vec<crate::acp::AcpConfigOption>, String> {
         let model = self.agent.model();
         let Some(agent_id) = crate::acp_bridge::acp_agent_id(&model) else {
             return Ok(Vec::new());
@@ -543,15 +545,15 @@ impl CodingAgent {
         });
         let (broker_dispatcher, managed_processes, permission_handle, permissions) =
             build_broker_dispatcher(
-            tool_policy.clone(),
-            wasi_extensions.clone(),
-            true,
-            options.work_dir.clone(),
-            agent.event_tx.clone(),
-            agent_work.clone(),
-            Some(agent_runner.clone()),
-            options.session_file.clone(),
-        );
+                tool_policy.clone(),
+                wasi_extensions.clone(),
+                true,
+                options.work_dir.clone(),
+                agent.event_tx.clone(),
+                agent_work.clone(),
+                Some(agent_runner.clone()),
+                options.session_file.clone(),
+            );
         let mcp_manager = Arc::new(McpManager::new(
             default_global_threadlane_dir(),
             Some(options.work_dir.clone()),
@@ -581,6 +583,11 @@ impl CodingAgent {
         }
         if github_issue_work {
             registry.register(Box::new(GitHubCapability {
+                work_dir: options.work_dir.clone(),
+            }));
+        }
+        if threadlane_git::is_git_repo(&options.work_dir) {
+            registry.register(Box::new(WorktreeCapability {
                 work_dir: options.work_dir.clone(),
             }));
         }
@@ -1932,7 +1939,7 @@ mod compaction_sync_tests {
                 system_prompt: SystemPromptConfig::default(),
                 agent_config: None,
                 coding_config: None,
-            browser: BrowserBridge::unavailable(),
+                browser: BrowserBridge::unavailable(),
             },
             provider.clone(),
         );
@@ -2102,7 +2109,7 @@ mod compaction_sync_tests {
                         .build(),
                 ),
                 coding_config: None,
-            browser: BrowserBridge::unavailable(),
+                browser: BrowserBridge::unavailable(),
             },
             provider.clone(),
         );

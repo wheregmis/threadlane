@@ -244,7 +244,10 @@ impl AssistantAttemptProcedure {
         // number would otherwise produce colliding ids. The pending queue
         // counts too so a double-parked finish is a no-op, not a later
         // `DuplicateId` at commit.
-        if !store.records().iter().any(|record| matches!(record, Record::StepAttempt { id, .. } if id == &step_id))
+        if !store
+            .records()
+            .iter()
+            .any(|record| matches!(record, Record::StepAttempt { id, .. } if id == &step_id))
             && !effects.has_pending_record_with_id(&step_id)
         {
             effects.park(EffectAction::AppendRecord {
@@ -2414,19 +2417,11 @@ fn open_lane<S: SessionStore>(
     Ok(lane.clone())
 }
 
-fn current_attempt<S: SessionStore>(
-    store: &S,
-    effects: &GatedEffects,
-    run_id: &str,
-) -> u32 {
+fn current_attempt<S: SessionStore>(store: &S, effects: &GatedEffects, run_id: &str) -> u32 {
     highest_attempt(store, effects, run_id).max(1)
 }
 
-fn highest_attempt<S: SessionStore>(
-    store: &S,
-    effects: &GatedEffects,
-    run_id: &str,
-) -> u32 {
+fn highest_attempt<S: SessionStore>(store: &S, effects: &GatedEffects, run_id: &str) -> u32 {
     store
         .records()
         .iter()

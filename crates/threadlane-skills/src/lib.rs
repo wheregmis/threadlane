@@ -387,11 +387,7 @@ impl SkillManager {
         self.discover_skills_with_home(project_root, dirs_home().as_deref());
     }
 
-    fn discover_skills_with_home(
-        &mut self,
-        project_root: Option<&Path>,
-        home_dir: Option<&Path>,
-    ) {
+    fn discover_skills_with_home(&mut self, project_root: Option<&Path>, home_dir: Option<&Path>) {
         let options = SkillDiscoveryOptions::new(
             project_root.map(Path::to_path_buf),
             home_dir.map(Path::to_path_buf),

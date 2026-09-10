@@ -3,8 +3,8 @@ use super::capabilities::{
     build_broker_dispatcher, create_after_tool_hook_handler, extension_before_tool_hook_handler,
 };
 use super::context_snapshots::{
-    resolve_context_snapshot, snapshot_location, MAX_SUBAGENT_CONTEXT_CHARS,
-    MAX_SUBAGENT_CONTEXT_REFS,
+    MAX_SUBAGENT_CONTEXT_CHARS, MAX_SUBAGENT_CONTEXT_REFS, resolve_context_snapshot,
+    snapshot_location,
 };
 use super::harness::{AcceptedRun, CodingSessionHarness, SubagentLaneIdentity, SubagentStartError};
 use super::scheduler::AgentWorkScheduler;
@@ -12,7 +12,7 @@ use super::scheduler::AgentWorkScheduler;
 use super::scheduler::{
     AgentWork, AgentWorkObserver, DeterministicSubagentToolExecutor, SubagentBoundaryObserver,
 };
-use crate::agents::{discover_agents, AgentDefinition, AgentScope};
+use crate::agents::{AgentDefinition, AgentScope, discover_agents};
 #[cfg(test)]
 use crate::browser::BrowserBridge;
 use crate::policy::ToolPolicy;
@@ -22,17 +22,17 @@ use std::collections::HashSet;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use threadlane_runtime::harness::HookKind;
 use threadlane_runtime::{
     AgentEvent, AgentMessage, AgentRuntime, SubagentProgressUpdate, TurnState,
 };
 use threadlane_wasi::WasiExtensionManager;
 use tokio::sync::broadcast;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 pub(crate) const MAX_SUBAGENT_TASKS: usize = 8;
 pub(crate) const MAX_SUBAGENT_TASK_CHARS: usize = 32_000;
@@ -405,6 +405,7 @@ pub(crate) async fn run_subagents_with_context(
         if let Some(t) = &task.tools {
             config.tools = Some(t.clone());
         }
+        let isolate_workspace = parallel && subagent_can_write(&config);
 
         let context = context.clone();
         let completed_lanes = context.completed_lanes.clone();
@@ -494,15 +495,6 @@ pub(crate) async fn run_subagents_with_context(
             };
             let result = match start {
                 Ok((identity, accepted)) => {
-                    let _ = event_tx.send(AgentEvent::SubagentStarted {
-                        run_id,
-                        task_index,
-                        journal_run_id: identity.run_id.clone(),
-                        lane: identity.lane_name.clone(),
-                        agent: lane_agent.clone(),
-                        task: lane_task.clone(),
-                        model: resolved_model.clone(),
-                    });
                     #[cfg(test)]
                     if let Some(observer) = context.child_work_observer.as_ref() {
                         observer();
@@ -513,21 +505,81 @@ pub(crate) async fn run_subagents_with_context(
                         .child_run_override
                         .as_ref()
                         .map_or(child_timeout, |(duration, _)| *duration);
-                    let result = timeout(
-                        child_timeout,
-                        run_subagent_task(
-                            config,
-                            task.task,
-                            context,
-                            run_id,
-                            task_index,
-                            identity.clone(),
-                            accepted,
-                            Vec::new(),
-                        ),
-                    )
-                    .await
-                    .unwrap_or_else(|_| Err("Subagent timed out".to_string()));
+                    let workspace = if isolate_workspace {
+                        isolated_subagent_workspace(&context.work_dir, &identity.run_id)
+                            .await
+                            .map(Some)
+                    } else {
+                        Ok(None)
+                    };
+                    let isolation = workspace
+                        .as_ref()
+                        .ok()
+                        .and_then(|workspace| workspace.as_ref())
+                        .map(
+                            |(workspace, branch)| threadlane_runtime::SubagentIsolation {
+                                workspace: workspace.clone(),
+                                branch: branch.clone(),
+                            },
+                        );
+                    let _ = event_tx.send(AgentEvent::SubagentStarted {
+                        run_id,
+                        task_index,
+                        journal_run_id: identity.run_id.clone(),
+                        lane: identity.lane_name.clone(),
+                        agent: lane_agent.clone(),
+                        task: lane_task.clone(),
+                        model: resolved_model.clone(),
+                        isolation,
+                    });
+                    let result = match workspace {
+                        Ok(workspace) => {
+                            let parent_work_dir = context.work_dir.clone();
+                            let mut child_context = context;
+                            if let Some((work_dir, _)) = &workspace {
+                                child_context.work_dir = work_dir.clone();
+                            }
+                            let mut result = timeout(
+                                child_timeout,
+                                run_subagent_task(
+                                    config,
+                                    task.task,
+                                    child_context,
+                                    run_id,
+                                    task_index,
+                                    identity.clone(),
+                                    accepted,
+                                    Vec::new(),
+                                ),
+                            )
+                            .await
+                            .unwrap_or_else(|_| Err("Subagent timed out".to_string()));
+                            if let Some((work_dir, branch)) = workspace {
+                                let note = match threadlane_git::remove_worktree(
+                                    &parent_work_dir,
+                                    &work_dir,
+                                    false,
+                                ) {
+                                    Ok(()) => {
+                                        let _ = threadlane_git::prune_worktrees(&parent_work_dir);
+                                        format!("Branch: {branch}")
+                                    }
+                                    Err(_) => format!(
+                                        "Isolated worktree retained: {}\nBranch: {branch}",
+                                        work_dir.display()
+                                    ),
+                                };
+                                match &mut result {
+                                    Ok(result) => {
+                                        result.output = format!("{note}\n{}", result.output)
+                                    }
+                                    Err(error) => *error = format!("{error}\n{note}"),
+                                }
+                            }
+                            result
+                        }
+                        Err(error) => Err(error),
+                    };
                     (result, identity)
                 }
                 Err(SubagentStartError { identity, error }) => (
@@ -652,6 +704,64 @@ fn configure_subagent_tools(config: &mut AgentDefinition) -> ToolPolicy {
     ToolPolicy::ReadOnly
 }
 
+fn subagent_can_write(config: &AgentDefinition) -> bool {
+    config.tools.as_ref().is_none_or(|tools| {
+        tools.iter().any(|tool| {
+            matches!(
+                tool.as_str(),
+                "write_file"
+                    | "edit_file"
+                    | "edit_file_hashline"
+                    | "edit_files_hashline"
+                    | "apply_workspace_edit_plan"
+                    | "write"
+                    | "edit"
+            )
+        })
+    })
+}
+
+async fn isolated_subagent_workspace(
+    parent_work_dir: &Path,
+    journal_run_id: &str,
+) -> Result<(PathBuf, String), String> {
+    let parent_work_dir = parent_work_dir.to_path_buf();
+    let journal_run_id = journal_run_id.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let root = threadlane_git::primary_worktree_root(&parent_work_dir)
+            .map_err(|error| error.to_string())?;
+        let (worktree, branch) = subagent_workspace(&root, &journal_run_id);
+        let status = threadlane_git::inspect(&parent_work_dir)
+            .map_err(|error| format!("Failed to inspect parent worktree: {error}"))?;
+        if status.has_changes {
+            return Err("Parallel isolated subagents require a clean parent worktree (commit or stash staged, unstaged, and untracked changes first)".into());
+        }
+        threadlane_git::create_worktree(&parent_work_dir, &worktree, &branch)
+            .map_err(|error| error.to_string())?;
+        Ok((worktree, branch))
+    })
+    .await
+    .map_err(|error| format!("Failed to provision subagent worktree: {error}"))?
+}
+
+pub fn subagent_workspace(repo_root: &Path, journal_run_id: &str) -> (PathBuf, String) {
+    let lane = journal_run_id
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let branch = format!("threadlane/subagent-{lane}");
+    (
+        repo_root.join(".threadlane/worktrees/subagents").join(lane),
+        branch,
+    )
+}
+
 pub(crate) async fn run_subagent_task(
     mut config: AgentDefinition,
     task: String,
@@ -698,7 +808,7 @@ pub(crate) async fn run_subagent_task(
     let system_prompt = format!(
         "{}
 
-You are an isolated subagent working in {}. Complete only the assigned task and return a concise final report to your parent agent.",
+You are an isolated subagent working in {}. Complete only the assigned task and return a concise final report to your parent agent. If you change files, commit them before finishing so the parent can integrate your branch.",
         config.system_prompt,
         context.work_dir.display(),
     );
@@ -1052,7 +1162,7 @@ mod result_tests {
             agent: agent.into(),
             task: format!("{agent} task"),
             instructions: None,
-            tools: None,
+            tools: Some(vec!["read_file".into()]),
             model: None,
             context_refs: Vec::new(),
         }
@@ -1145,33 +1255,37 @@ mod result_tests {
         });
         let mut child = task("worker");
         child.context_refs = vec!["ctx-missing".into()];
-        assert!(run_subagents_with_context(
-            vec![child],
-            false,
-            None,
-            test_context(
-                dir.path().into(),
-                session_file.clone(),
-                Some(observer.clone())
-            ),
-        )
-        .await
-        .unwrap_err()
-        .contains("missing"));
+        assert!(
+            run_subagents_with_context(
+                vec![child],
+                false,
+                None,
+                test_context(
+                    dir.path().into(),
+                    session_file.clone(),
+                    Some(observer.clone())
+                ),
+            )
+            .await
+            .unwrap_err()
+            .contains("missing")
+        );
         assert!(!observed.load(Ordering::SeqCst));
 
         std::fs::write(dir.path().join("first.rs"), "stale").unwrap();
         let mut child = task("worker");
         child.context_refs = vec![context_ids[0].clone()];
-        assert!(run_subagents_with_context(
-            vec![child],
-            false,
-            None,
-            test_context(dir.path().into(), session_file, Some(observer)),
-        )
-        .await
-        .unwrap_err()
-        .contains("stale"));
+        assert!(
+            run_subagents_with_context(
+                vec![child],
+                false,
+                None,
+                test_context(dir.path().into(), session_file, Some(observer)),
+            )
+            .await
+            .unwrap_err()
+            .contains("stale")
+        );
         assert!(!observed.load(Ordering::SeqCst));
     }
 
@@ -1441,6 +1555,25 @@ mod result_tests {
             ToolPolicy::FullAccess
         );
         assert!(config.tools.unwrap().contains(&"run_command".into()));
+    }
+
+    #[test]
+    fn only_write_capable_subagents_need_isolated_workspaces() {
+        let config = |tools| AgentDefinition {
+            name: "worker".into(),
+            description: String::new(),
+            tools,
+            model: None,
+            system_prompt: String::new(),
+            source: crate::agents::AgentSource::Project,
+            file_path: PathBuf::new(),
+        };
+
+        assert!(subagent_can_write(&config(None)));
+        assert!(subagent_can_write(&config(Some(vec![
+            "edit_file_hashline".into()
+        ]))));
+        assert!(!subagent_can_write(&config(Some(vec!["read_file".into()]))));
     }
 
     #[test]

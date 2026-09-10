@@ -5,10 +5,10 @@ use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::command::{Command, CommandGroup, CommandItem, CommandState};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
-use gpui_component::resizable::{h_resizable, resizable_panel, v_resizable, ResizableState};
+use gpui_component::resizable::{ResizableState, h_resizable, resizable_panel, v_resizable};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::status_bar::StatusBar;
-use gpui_component::{v_flex, ActiveTheme, Icon, IconName, Root, Selectable, Sizable};
+use gpui_component::{ActiveTheme, Icon, IconName, Root, Selectable, Sizable, v_flex};
 
 actions!(
     threadlane_workspace,
@@ -39,8 +39,8 @@ use crate::screens::terminal::TerminalView;
 use crate::services::sessions::{ExecutionMode, SessionRuntime};
 use crate::services::updater::{self, UpdaterEvent};
 use crate::state::{
-    coding_agent_options, compute_full_session_projection, compute_session_messages,
-    runtime_status_text, AppState, SessionHydrationRequest, SessionInfo, WorkspacePage,
+    AppState, SessionHydrationRequest, SessionInfo, WorkspacePage, coding_agent_options,
+    compute_full_session_projection, compute_session_messages, runtime_status_text,
 };
 use threadlane_updater::UpdateStatus;
 
@@ -306,6 +306,16 @@ impl WorkspaceView {
                         term.send_input(&format!("{trimmed}\n"));
                     });
                 }
+                if let Some(work_dir) =
+                    model.update(cx, |state, _cx| state.requested_terminal_work_dir.take())
+                {
+                    this.bottom_panel_visible = true;
+                    if let Some(project) = model.read(cx).active_work_dir.clone() {
+                        this.add_terminal_tab_for_project(project, work_dir, cx);
+                    } else {
+                        this.get_or_create_active_terminal(&work_dir, cx);
+                    }
+                }
                 let _ = model_wake_tx.send(());
                 cx.notify();
             });
@@ -444,12 +454,8 @@ impl WorkspaceView {
             let acp_model = view.model.clone();
             let acp_project = view.model.read(cx).active_work_dir.clone();
             cx.spawn(async move |_view, cx| {
-                crate::model_catalog::refresh_acp_models_and_update(
-                    acp_model,
-                    cx,
-                    acp_project,
-                )
-                .await;
+                crate::model_catalog::refresh_acp_models_and_update(acp_model, cx, acp_project)
+                    .await;
             })
             .detach();
         });
@@ -569,6 +575,19 @@ impl WorkspaceView {
                 tabs: Vec::new(),
                 active_tab: 0,
             });
+        group.tabs.push(terminal);
+        group.active_tab = group.tabs.len() - 1;
+        cx.notify();
+    }
+
+    fn add_terminal_tab_for_project(
+        &mut self,
+        project: PathBuf,
+        work_dir: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        let terminal = cx.new(|cx| TerminalView::new(work_dir, cx));
+        let group = self.get_or_create_terminal_group(&project, cx);
         group.tabs.push(terminal);
         group.active_tab = group.tabs.len() - 1;
         cx.notify();
@@ -826,7 +845,9 @@ impl WorkspaceView {
                 let refresh_delay = session_pr_refresh_delay(result.is_ok());
                 if let Ok(pr) = result {
                     self.model.update(cx, |state, cx| {
-                        state.git_prs.insert((work_dir.clone(), branch.clone()), pr.clone());
+                        state
+                            .git_prs
+                            .insert((work_dir.clone(), branch.clone()), pr.clone());
                         if let Some(info) = pr.as_ref() {
                             state.auto_address_pr_reviews(work_dir.clone(), branch.clone(), info);
                         }
@@ -860,7 +881,8 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    fn render_update_notice(&self, cx: &mut Context<Self>) -> Option<AnyElement> {        let status = {
+    fn render_update_notice(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let status = {
             let state = self.model.read(cx);
             if state.update_notice_dismissed {
                 return None;
@@ -909,10 +931,7 @@ impl WorkspaceView {
                     Button::new("update-download")
                         .label("Download")
                         .primary()
-                        .tooltip(format!(
-                            "Download Threadlane {}",
-                            info.version
-                        ))
+                        .tooltip(format!("Download Threadlane {}", info.version))
                         .on_click(move |_event, _window, _cx| {
                             updater::download(info.clone(), tx.clone());
                         }),
@@ -927,9 +946,7 @@ impl WorkspaceView {
                     Button::new("update-install")
                         .label("Install and relaunch")
                         .primary()
-                        .tooltip(format!(
-                            "Install Threadlane {version} and relaunch"
-                        ))
+                        .tooltip(format!("Install Threadlane {version} and relaunch"))
                         .on_click(move |_event, _window, _cx| {
                             updater::install(info.clone(), bytes.clone(), tx.clone());
                         }),
@@ -1992,9 +2009,9 @@ impl Render for WorkspaceView {
 #[cfg(test)]
 mod tests {
     use super::{
-        active_project_git_status, git_result_matches_active, next_workspace_event,
-        open_github_from_palette, session_pr_refresh_delay, session_pr_target_is_active, GitEvent,
-        WorkspacePumpEvent,
+        GitEvent, WorkspacePumpEvent, active_project_git_status, git_result_matches_active,
+        next_workspace_event, open_github_from_palette, session_pr_refresh_delay,
+        session_pr_target_is_active,
     };
     use crate::services::updater::UpdaterEvent;
     use crate::state::{AppState, SessionInfo, WorkspacePage};
@@ -2066,17 +2083,19 @@ mod tests {
             tokio::sync::mpsc::unbounded_channel::<(PathBuf, Vec<SessionInfo>)>();
         let (model_tx, mut model_rx) = tokio::sync::mpsc::unbounded_channel();
 
-        assert!(tokio::time::timeout(
-            std::time::Duration::from_millis(10),
-            next_workspace_event(
-                &mut git_rx,
-                &mut updater_rx,
-                &mut sessions_rx,
-                &mut model_rx,
-            ),
-        )
-        .await
-        .is_err());
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(10),
+                next_workspace_event(
+                    &mut git_rx,
+                    &mut updater_rx,
+                    &mut sessions_rx,
+                    &mut model_rx,
+                ),
+            )
+            .await
+            .is_err()
+        );
         model_tx.send(()).unwrap();
         assert!(matches!(
             next_workspace_event(

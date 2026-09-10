@@ -48,12 +48,7 @@ impl ModelInfo {
     }
 }
 
-fn builtin_entry(
-    id: &str,
-    label: &str,
-    provider: &str,
-    context_window: usize,
-) -> ModelInfo {
+fn builtin_entry(id: &str, label: &str, provider: &str, context_window: usize) -> ModelInfo {
     ModelInfo {
         id: id.to_string(),
         label: label.to_string(),
@@ -229,7 +224,10 @@ mod tests {
         assert!(effort.is_custom());
         let json = serde_json::to_string(&effort).unwrap();
         assert_eq!(json, "\"ultra\"");
-        assert_eq!(serde_json::from_str::<ReasoningEffort>(&json).unwrap(), effort);
+        assert_eq!(
+            serde_json::from_str::<ReasoningEffort>(&json).unwrap(),
+            effort
+        );
         assert_eq!(effort.as_api_str(), Some("ultra"));
     }
 

@@ -1,11 +1,12 @@
-use super::cancellation::{recover_v2_subagent_records, AgentRunTask};
+use super::cancellation::{AgentRunTask, recover_v2_subagent_records};
 use super::capabilities::dispatch_hook_requests;
 use super::harness::{
     CodingSessionHarness, InterruptedSubagentRecoveryState, SubagentLaneIdentity,
 };
 use super::runtime::CodingAgent;
 use super::subagents::{
-    run_subagent_task, SubagentLaneStatus, SubagentRunContext, NEXT_SUBAGENT_UI_RUN_ID,
+    NEXT_SUBAGENT_UI_RUN_ID, SubagentLaneStatus, SubagentRunContext, run_subagent_task,
+    subagent_workspace,
 };
 use crate::agents::AgentDefinition;
 use crate::commands::{execute_slash_command, parse_slash_command};
@@ -14,8 +15,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use threadlane_runtime::harness::{
     HookContext, HookKind, JsonlStore, OperationOutcome, PromptSnapshot, Record as HarnessRecord,
     Reducer, SessionStore,
@@ -133,11 +134,7 @@ pub(crate) fn compaction_retained_tail(messages: &[AgentMessage]) -> Vec<AgentMe
 }
 
 impl CodingAgent {
-    fn install_run_trace_recorders(
-        &mut self,
-        path: PathBuf,
-        run_id: String,
-    ) -> Result<(), String> {
+    fn install_run_trace_recorders(&mut self, path: PathBuf, run_id: String) -> Result<(), String> {
         let trace_harness = Arc::new(tokio::sync::Mutex::new(CodingSessionHarness::open(&path)?));
         let provider_harness = trace_harness.clone();
         let provider_run_id = run_id.clone();
@@ -1281,6 +1278,11 @@ impl CodingAgent {
             let accepted = journal
                 .accepted_subagent_run(&identity)
                 .map_err(&retrying)?;
+            let recovery_work_dir = threadlane_git::primary_worktree_root(&self.work_dir)
+                .ok()
+                .map(|root| subagent_workspace(&root, &lane.run_id).0)
+                .filter(|worktree| worktree.is_dir())
+                .unwrap_or_else(|| self.work_dir.clone());
             let result = run_subagent_task(
                 AgentDefinition {
                     name: "recovered".into(),
@@ -1302,7 +1304,7 @@ impl CodingAgent {
                         .subagent_reasoning_effort
                         .unwrap_or_else(|| self.agent.reasoning_effort()),
                     parent_session_id: self.session_id.clone(),
-                    work_dir: self.work_dir.clone(),
+                    work_dir: recovery_work_dir,
                     extensions: self.wasi_extensions.clone(),
                     parent_event_tx: self.agent.event_tx.clone(),
                     parent_leaf_id: lane.source_leaf_id.clone(),

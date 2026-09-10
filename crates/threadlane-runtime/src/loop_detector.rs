@@ -146,7 +146,8 @@ impl LoopDetector {
         let hashes: Vec<u64> = self.history.iter().map(|(hash, _)| *hash).collect();
         for period in 2..=3 {
             if cycle_rounds(&hashes, period) >= self.pingpong_rounds {
-                let cycle: Vec<String> = self.history
+                let cycle: Vec<String> = self
+                    .history
                     .iter()
                     .skip(self.history.len() - period)
                     .map(|(_, name)| name.clone())

@@ -36,6 +36,7 @@ impl Drop for RunCleanup {
 
 pub(crate) fn execute_prompt(
     runtime: Arc<SessionRuntime>,
+    work_dir: PathBuf,
     session_id: String,
     text: String,
     images: Vec<ImageAttachment>,
@@ -70,22 +71,12 @@ pub(crate) fn execute_prompt(
             stream_tx: task_stream_tx.clone(),
             error: None,
         };
-        let work_dir = task_runtime
-            .session_file
-            .parent()
-            .and_then(std::path::Path::parent)
-            .and_then(std::path::Path::parent)
-            .map(std::path::Path::to_path_buf);
-        let git_branch = match work_dir {
-            Some(work_dir) => {
-                tokio::task::spawn_blocking(move || threadlane_git::current_branch(&work_dir))
-                    .await
-                    .ok()
-                    .and_then(Result::ok)
-                    .flatten()
-            }
-            None => None,
-        };
+        let git_branch =
+            tokio::task::spawn_blocking(move || threadlane_git::current_branch(&work_dir))
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .flatten();
         let mut agent = task_runtime.agent.lock().await;
         if let Some(branch) = git_branch {
             if let Err(error) = agent.set_fact("git_branch", &branch) {

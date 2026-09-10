@@ -43,7 +43,10 @@ pub(crate) fn save_memory_impl(workspace_root: &Path, args: &Value) -> Result<St
         .map_err(|e| format!("Error writing to .threadlane/memory.md: {e}"))
 }
 
-pub(crate) fn consolidate_memory_impl(workspace_root: &Path, args: &Value) -> Result<String, String> {
+pub(crate) fn consolidate_memory_impl(
+    workspace_root: &Path,
+    args: &Value,
+) -> Result<String, String> {
     let parse_array = |key: &str| -> Vec<String> {
         args.get(key)
             .and_then(|v| v.as_array())
