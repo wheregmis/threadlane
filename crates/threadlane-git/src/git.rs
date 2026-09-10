@@ -967,6 +967,20 @@ pub fn merge(work_dir: &Path, branch: &str) -> Result<String, GitError> {
     command(work_dir, &["merge", "--no-edit", branch])
 }
 
+pub fn diff_branch(work_dir: &Path, branch: &str) -> Result<String, GitError> {
+    let branch = validate_branch_name(work_dir, branch)?;
+    command(
+        work_dir,
+        &["diff", "--stat", "--patch", &format!("HEAD...{branch}")],
+    )
+}
+
+pub fn delete_branch(work_dir: &Path, branch: &str, force: bool) -> Result<(), GitError> {
+    let branch = validate_branch_name(work_dir, branch)?;
+    command(work_dir, &["branch", if force { "-D" } else { "-d" }, &branch])?;
+    Ok(())
+}
+
 pub fn stage_file(work_dir: &Path, path: &str) -> Result<(), GitError> {
     command(work_dir, &["add", "--", path])?;
     Ok(())

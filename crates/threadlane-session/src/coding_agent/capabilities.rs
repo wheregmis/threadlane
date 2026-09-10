@@ -29,6 +29,7 @@ use threadlane_wasi::WasiExtensionManager;
 use tokio::sync::broadcast;
 
 const SUBAGENT_TOOL_NAME: &str = "subagent";
+const MANAGE_SUBAGENT_BRANCH_TOOL_NAME: &str = "manage_subagent_branch";
 const CREATE_DRAFT_PR_TOOL_NAME: &str = "create_draft_pull_request";
 pub(crate) const PREWALK_HANDOFF_TOOL_NAME: &str = "complete_prewalk";
 
@@ -98,6 +99,133 @@ impl Capability for GitHubCapability {
         vec![Arc::new(GitHubToolExecutor {
             work_dir: self.work_dir.clone(),
         })]
+    }
+}
+
+pub(crate) struct WorktreeCapability {
+    pub(crate) work_dir: PathBuf,
+}
+
+impl Capability for WorktreeCapability {
+    fn id(&self) -> &str {
+        "worktree"
+    }
+
+    fn tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
+        vec![Arc::new(WorktreeToolExecutor {
+            work_dir: self.work_dir.clone(),
+        })]
+    }
+}
+
+struct WorktreeToolExecutor {
+    work_dir: PathBuf,
+}
+
+#[async_trait]
+impl ToolExecutor for WorktreeToolExecutor {
+    fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
+        vec![AgentToolDefinition {
+            name: MANAGE_SUBAGENT_BRANCH_TOOL_NAME.into(),
+            description: Some(
+                "Inspect, integrate, or discard a branch created by a parallel Threadlane subagent. Integration requires a clean parent checkout.".into(),
+            ),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["inspect", "integrate", "discard"]
+                    },
+                    "branch": {
+                        "type": "string",
+                        "description": "Exact threadlane/subagent-* branch returned by the subagent."
+                    }
+                },
+                "required": ["action", "branch"],
+                "additionalProperties": false
+            }),
+            strict: Some(true),
+        }]
+        .into()
+    }
+
+    async fn execute_tool(&self, name: &str, args: &str) -> Option<Result<String, String>> {
+        if name != MANAGE_SUBAGENT_BRANCH_TOOL_NAME {
+            return None;
+        }
+        Some(self.execute(args))
+    }
+}
+
+impl WorktreeToolExecutor {
+    fn execute(&self, args: &str) -> Result<String, String> {
+        let args: Value = serde_json::from_str(args)
+            .map_err(|error| format!("invalid arguments: {error}"))?;
+        let branch = args
+            .get("branch")
+            .and_then(Value::as_str)
+            .filter(|branch| branch.starts_with("threadlane/subagent-"))
+            .ok_or_else(|| "branch must start with `threadlane/subagent-`".to_string())?;
+        let action = args
+            .get("action")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "missing required string field `action`".to_string())?;
+        let worktree = threadlane_git::list_worktrees(&self.work_dir)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .find(|worktree| worktree.branch.as_deref() == Some(branch));
+
+        match action {
+            "inspect" => {
+                let mut diff = threadlane_git::diff_branch(&self.work_dir, branch)
+                    .map_err(|error| error.to_string())?;
+                if diff.len() > 64 * 1024 {
+                    let end = (0..=64 * 1024)
+                        .rev()
+                        .find(|end| diff.is_char_boundary(*end))
+                        .unwrap_or(0);
+                    diff.truncate(end);
+                    diff.push_str("\n[diff truncated]");
+                }
+                Ok(match worktree {
+                    Some(worktree) => format!(
+                        "Branch: {branch}\nWorktree: {}\n{diff}",
+                        worktree.path.display()
+                    ),
+                    None => format!("Branch: {branch}\n{diff}"),
+                })
+            }
+            "integrate" => {
+                if threadlane_git::inspect(&self.work_dir)
+                    .map_err(|error| error.to_string())?
+                    .has_changes
+                {
+                    return Err("parent checkout has uncommitted changes".into());
+                }
+                if let Some(worktree) = worktree {
+                    threadlane_git::remove_worktree(&self.work_dir, &worktree.path, false)
+                        .map_err(|_| "subagent worktree has uncommitted changes".to_string())?;
+                }
+                let output = threadlane_git::merge(&self.work_dir, branch)
+                    .map_err(|error| error.to_string())?;
+                threadlane_git::delete_branch(&self.work_dir, branch, false)
+                    .map_err(|error| error.to_string())?;
+                let _ = threadlane_git::prune_worktrees(&self.work_dir);
+                Ok(format!("Integrated and removed {branch}.\n{output}"))
+            }
+            "discard" => {
+                if let Some(worktree) = worktree {
+                    threadlane_git::remove_worktree(&self.work_dir, &worktree.path, true)
+                        .map_err(|error| error.to_string())?;
+                }
+                threadlane_git::delete_branch(&self.work_dir, branch, true)
+                    .map_err(|error| error.to_string())?;
+                let _ = threadlane_git::prune_worktrees(&self.work_dir);
+                Ok(format!("Discarded {branch}."))
+            }
+            _ => Err("action must be `inspect`, `integrate`, or `discard`".into()),
+        }
     }
 }
 
@@ -369,6 +497,17 @@ mod subagent_definition_tests {
             .unwrap();
         assert!(description.contains("Accepted but ignored"));
         assert!(description.contains("project settings"));
+    }
+
+    #[test]
+    fn worktree_tool_rejects_non_subagent_branches() {
+        let executor = WorktreeToolExecutor {
+            work_dir: PathBuf::from("/unused"),
+        };
+        let error = executor
+            .execute(r#"{"action":"discard","branch":"main"}"#)
+            .unwrap_err();
+        assert!(error.contains("threadlane/subagent-"));
     }
 }
 
@@ -675,6 +814,7 @@ pub fn extension_before_tool_hook_handler(
                         | "write"
                         | "edit"
                         | "run_command"
+                        | MANAGE_SUBAGENT_BRANCH_TOOL_NAME
                 )
             {
                 return Err(format!(

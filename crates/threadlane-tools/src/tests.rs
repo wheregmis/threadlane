@@ -1,6 +1,7 @@
     use super::*;
     use serde_json::json;
     use std::fs;
+    use std::path::{Path, PathBuf};
     use tempfile::tempdir;
 
     #[test]
@@ -11,6 +12,18 @@
         assert_eq!(canonical_workspace_root(&root).unwrap(), expected);
         std::fs::remove_dir(&root).unwrap();
         assert_eq!(canonical_workspace_root(&root).unwrap(), expected);
+    }
+
+    #[test]
+    fn cargo_targets_are_partitioned_by_worktree_lane() {
+        let root = PathBuf::from("/project/.threadlane/worktrees/subagents/lane-1");
+        assert_eq!(
+            worktree_cargo_target_dir(&root),
+            Some(PathBuf::from(
+                "/project/.threadlane/cache/target/subagents-lane-1"
+            ))
+        );
+        assert_eq!(worktree_cargo_target_dir(Path::new("/project")), None);
     }
 
     #[test]

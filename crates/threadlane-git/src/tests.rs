@@ -742,10 +742,18 @@
         checkout(dir.path(), "main").unwrap();
         let status = inspect(dir.path()).unwrap();
         assert_eq!(status.branch.as_deref(), Some("main"));
+        assert!(diff_branch(dir.path(), "feature-1")
+            .unwrap()
+            .contains("feature.txt"));
 
         // Merge feature-1 into main
         merge(dir.path(), "feature-1").unwrap();
         assert!(dir.path().join("feature.txt").exists());
+        delete_branch(dir.path(), "feature-1", false).unwrap();
+        assert!(!list_branches_detailed(dir.path(), None)
+            .unwrap()
+            .iter()
+            .any(|branch| branch.name == "feature-1"));
     }
 
     #[test]

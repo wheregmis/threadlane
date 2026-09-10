@@ -9,6 +9,7 @@ use super::capabilities::{
     build_broker_dispatcher, render_agent_catalog, restored_tool_policy, BrowserCapability,
     ContextCapability, GitHubCapability, McpCapability, PlanCapability, PrewalkCapability,
     QuestionCapability, SkillCapability, SubagentCapability, WasiCapability,
+    WorktreeCapability,
 };
 use crate::computer::ComputerCapability;
 use super::harness::{CodingSessionHarness, HarnessWatch, InterruptedSubagentRecoveryState};
@@ -581,6 +582,11 @@ impl CodingAgent {
         }
         if github_issue_work {
             registry.register(Box::new(GitHubCapability {
+                work_dir: options.work_dir.clone(),
+            }));
+        }
+        if threadlane_git::is_git_repo(&options.work_dir) {
+            registry.register(Box::new(WorktreeCapability {
                 work_dir: options.work_dir.clone(),
             }));
         }
