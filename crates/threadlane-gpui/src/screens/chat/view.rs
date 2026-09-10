@@ -657,7 +657,7 @@ impl ChatListView {
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (active_title, active_attention) = {
+        let (active_title, active_attention, linked_issue) = {
             let state = self.model.read(cx);
             let active_session = state
                 .projects
@@ -670,7 +670,8 @@ impl ChatListView {
             let attention = active_session
                 .map(|session| state.session_attention(session))
                 .unwrap_or(SessionAttention::Idle);
-            (title, attention)
+            let linked_issue = active_session.and_then(|session| session.github_issue.clone());
+            (title, attention, linked_issue)
         };
         let theme = cx.theme().colors;
         let editor_tab_count = self.editor.read(cx).tab_count();
@@ -780,7 +781,22 @@ impl ChatListView {
                             })
                             .child(active_title),
                     )
-                    .children(status_badge),
+                    .children(status_badge)
+                    .children(linked_issue.clone().map(|issue| {
+                        let model = self.model.clone();
+                        Button::new("chat-open-task-context")
+                            .label(format!("#{}", issue.number))
+                            .icon(IconName::Github)
+                            .tooltip(format!("{} / {} · Open task context", issue.owner, issue.repo))
+                            .ghost()
+                            .xsmall()
+                            .on_click(move |_, _, cx| {
+                                model.update(cx, |state, cx| {
+                                    controller::dispatch(state, AppAction::OpenGitHub);
+                                    cx.notify();
+                                });
+                            })
+                    }))
             )
             .child(
                 div()

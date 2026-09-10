@@ -2625,9 +2625,10 @@ pub(crate) fn merge_live_trajectory(
     merged
 }
 
-/// Merge live subagent activity over a fresh file projection, keyed by
-/// (batch run id, task index) — the same identity `record_subagent_activity`
-/// deduplicates on.
+/// Merge live subagent activity over a fresh file projection. Hydrated rows do
+/// not retain the runtime batch identity, so prefer the durable child run id
+/// when both sides have one and fall back to (batch run id, task index) only
+/// for purely live rows.
 pub(crate) fn merge_live_subagents(
     fresh: Vec<SubagentActivityInfo>,
     live: &[SubagentActivityInfo],
@@ -2635,7 +2636,16 @@ pub(crate) fn merge_live_subagents(
     let mut merged = fresh;
     for activity in live {
         let covered = merged.iter().any(|entry| {
-            entry.batch_run_id == activity.batch_run_id && entry.task_index == activity.task_index
+            match (
+                entry.journal_run_id.as_deref(),
+                activity.journal_run_id.as_deref(),
+            ) {
+                (Some(entry_run_id), Some(activity_run_id)) => entry_run_id == activity_run_id,
+                _ => {
+                    entry.batch_run_id == activity.batch_run_id
+                        && entry.task_index == activity.task_index
+                }
+            }
         });
         if !covered {
             merged.push(activity.clone());

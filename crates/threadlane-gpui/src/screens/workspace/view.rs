@@ -167,6 +167,7 @@ pub struct WorkspaceView {
     bottom_panel_visible: bool,
     command_palette_open: bool,
     command_state: Entity<CommandState>,
+    recent_palette_actions: Vec<&'static str>,
     last_git_work_dir: Option<PathBuf>,
     last_git_pr_targets: HashSet<(PathBuf, String)>,
     sidebar_resizable_state: Entity<ResizableState>,
@@ -413,6 +414,7 @@ impl WorkspaceView {
                 bottom_panel_visible: false,
                 command_palette_open: false,
                 command_state,
+                recent_palette_actions: Vec::new(),
                 last_git_work_dir: None,
                 last_git_pr_targets: HashSet::new(),
                 sidebar_resizable_state,
@@ -700,6 +702,11 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         let model = self.model.clone();
+        if action_key != "go_task" {
+            self.recent_palette_actions.retain(|key| *key != action_key);
+            self.recent_palette_actions.insert(0, action_key);
+            self.recent_palette_actions.truncate(5);
+        }
         match action_key {
             "new" => {
                 self.begin_new_task_action(&BeginNewTask, window, cx);
@@ -1321,6 +1328,20 @@ impl WorkspaceView {
             commands_group = commands_group.item(item);
         }
 
+        let mut recent_group = CommandGroup::new().label("Recently Used");
+        for action_key in &self.recent_palette_actions {
+            if let Some((name, _, _, icon, keywords, _)) =
+                commands.iter().find(|(_, _, key, _, _, _)| key == action_key)
+            {
+                recent_group = recent_group.item(
+                    CommandItem::new()
+                        .label(*name)
+                        .icon(icon.clone())
+                        .keywords(keywords.iter().copied()),
+                );
+            }
+        }
+
         let mut session_entries = Vec::new();
         let mut sessions_group = CommandGroup::new().label("Sessions");
         for project in &state.projects {
@@ -1388,6 +1409,7 @@ impl WorkspaceView {
                             .bordered(false)
                             .placeholder("Type a command or search sessions…")
                             .max_h(px(420.0))
+                            .group(recent_group)
                             .group(commands_group)
                             .group(sessions_group)
                             .on_cancel(move |_window, cx| {
@@ -1400,25 +1422,19 @@ impl WorkspaceView {
                                 let _ = view.update(cx, |this, cx| {
                                     this.command_palette_open = false;
                                     if index.section == 0 {
-                                        if let Some((_, _, action_key, _, _, _)) =
-                                            commands.get(index.row)
-                                        {
+                                        if let Some(action_key) = this.recent_palette_actions.get(index.row) {
                                             this.execute_palette_action(action_key, window, cx);
                                         }
                                     } else if index.section == 1 {
-                                        if let Some((work_dir, session_id)) =
-                                            session_entries.get(index.row)
-                                        {
+                                        if let Some((_, _, action_key, _, _, _)) = commands.get(index.row) {
+                                            this.execute_palette_action(action_key, window, cx);
+                                        }
+                                    } else if index.section == 2 {
+                                        if let Some((work_dir, session_id)) = session_entries.get(index.row) {
                                             let work_dir = work_dir.clone();
                                             let session_id = session_id.clone();
                                             this.model.update(cx, |state, cx| {
-                                                controller::dispatch(
-                                                    state,
-                                                    AppAction::SelectSession {
-                                                        work_dir,
-                                                        session_id,
-                                                    },
-                                                );
+                                                controller::dispatch(state, AppAction::SelectSession { work_dir, session_id });
                                                 cx.notify();
                                             });
                                         }
