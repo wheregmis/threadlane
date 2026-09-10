@@ -30,7 +30,7 @@ pub use coding_agent::harness::{
 };
 pub use coding_agent::{
     AgentRunTask, CodingAgent, CodingAgentCancellation, CodingAgentOptions, CodingAgentWorkHandle,
-    HarnessCompositionSnapshot, SubagentCancellationGuard,
+    HarnessCompositionSnapshot, SubagentCancellationGuard, subagent_workspace,
 };
 pub use controller::{ExecutionMode, SessionController, SessionStatus};
 

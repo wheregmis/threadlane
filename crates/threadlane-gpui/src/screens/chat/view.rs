@@ -4275,7 +4275,7 @@ impl ChatListView {
                                             .map_err(|error| error.to_string())
                                     });
                                     let model = inspect_model.clone();
-                                    cx.spawn(async move |_, cx| {
+                                    cx.spawn(async move |cx| {
                                         let result = task.await;
                                         let _ = model.update(cx, |state, cx| {
                                             match result {
@@ -4352,7 +4352,7 @@ impl ChatListView {
                                         Ok(format!("Applied {branch}"))
                                     });
                                     let model = apply_model.clone();
-                                    cx.spawn(async move |_, cx| {
+                                    cx.spawn(async move |cx| {
                                         let result = task.await;
                                         let _ = model.update(cx, |state, cx| {
                                             state.session_status = Some(result.unwrap_or_else(|error| error));
@@ -4372,7 +4372,7 @@ impl ChatListView {
                                     let branch = discard_branch.clone();
                                     let worktree = discard_worktree.clone();
                                     let model = discard_model.clone();
-                                    cx.spawn(async move |_, cx| {
+                                    cx.spawn(async move |cx| {
                                         let confirmed = rfd::AsyncMessageDialog::new()
                                             .set_title("Discard subagent branch?")
                                             .set_description(format!(

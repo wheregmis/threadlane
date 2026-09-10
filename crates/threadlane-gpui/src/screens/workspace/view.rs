@@ -310,10 +310,7 @@ impl WorkspaceView {
                     model.update(cx, |state, _cx| state.requested_terminal_work_dir.take())
                 {
                     this.bottom_panel_visible = true;
-                    this.get_or_create_active_terminal(&work_dir, cx)
-                        .read(cx)
-                        .focus_handle(cx)
-                        .focus(window, cx);
+                    this.get_or_create_active_terminal(&work_dir, cx);
                 }
                 let _ = model_wake_tx.send(());
                 cx.notify();
