@@ -8345,7 +8345,7 @@ dependencies = [
 
 [[package]]
 name = "threadlane-gpui"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8513,7 +8513,7 @@ dependencies = [
 
 [[package]]
 name = "threadlane-updater"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "cargo-packager-updater",
 ]

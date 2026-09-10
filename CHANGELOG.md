@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.1.14](https://github.com/wheregmis/threadlane/compare/v0.1.13...v0.1.14) (2026-09-10)
+
+
+### Features
+
+* add recent commands and linked GitHub issue context ([88f4400](https://github.com/wheregmis/threadlane/commit/88f440047b2aed3382434e96ef0348a8cc9117e0))
+* add recent commands and linked GitHub issue context ([69cba32](https://github.com/wheregmis/threadlane/commit/69cba32df8eee06532142bcf194fd6569c24eef1))
+* bug fixes ([09899b4](https://github.com/wheregmis/threadlane/commit/09899b4420a482aa92050a0e60029f740619bf51))
+* bug fixes ([26e67e0](https://github.com/wheregmis/threadlane/commit/26e67e05ecd2983e7dc3e903a79fb053d8440b10))
+* **chat:** add session attention badges, progress summary, and caching improvements ([e682066](https://github.com/wheregmis/threadlane/commit/e682066628bd02783ddfadf7d31b3601182bf5cf))
+
+
+### Bug Fixes
+
+* support GitHub Enterprise hosts for remote refs ([a3bf934](https://github.com/wheregmis/threadlane/commit/a3bf9348c5aa6715188dabc90b7ca4b0369db784))
+
+
+### Maintenance
+
+* refactoring alot of stuffs ([cccc100](https://github.com/wheregmis/threadlane/commit/cccc100437de178a9c76d2d81b2710f7aff0eb19))
+
 ## [0.1.13](https://github.com/wheregmis/threadlane/compare/v0.1.12...v0.1.13) (2026-09-10)
 
 
