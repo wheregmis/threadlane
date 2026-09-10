@@ -399,11 +399,8 @@ impl AntigravityClient {
                 "Antigravity API error ({status}, runtime model {runtime_model}): {}",
                 safe_error_text(&text)
             );
-            // 4xx errors (e.g. 429 RESOURCE_EXHAUSTED / quota, 401 Unauthorized, 403
-            // Forbidden, 404 model not found) from the production endpoint are
-            // authoritative account responses and must not be masked by falling back
-            // to internal daily sandbox endpoints (which may not host the same model
-            // and would surface a misleading 404).
+            // Production 4xx responses are authoritative for this account/model.
+            // Falling through turns a useful quota error into unrelated daily-host noise.
             if status.is_client_error() {
                 break;
             }
@@ -773,6 +770,10 @@ fn convert_openai_payload(payload: &Value) -> Result<(String, Value), String> {
         .and_then(Value::as_u64)
         .unwrap_or(8192);
     generation.insert("maxOutputTokens".to_string(), json!(max_output_tokens));
+    generation.insert(
+        "thinkingConfig".to_string(),
+        thinking_config(&runtime_model, effort),
+    );
     request.insert("generationConfig".to_string(), Value::Object(generation));
 
     if let Some(tools) = payload.get("tools").and_then(Value::as_array) {
@@ -806,7 +807,7 @@ fn convert_openai_payload(payload: &Value) -> Result<(String, Value), String> {
                 "tools".to_string(),
                 json!([{ "functionDeclarations": declarations }]),
             );
-            if let Some(mode) = tool_choice_mode(payload.get("tool_choice"), needs_legacy_schema) {
+            if let Some(mode) = tool_choice_mode(payload.get("tool_choice")) {
                 request.insert(
                     "toolConfig".to_string(),
                     json!({ "functionCallingConfig": { "mode": mode } }),
@@ -1004,14 +1005,43 @@ fn map_schema(schema: Value, keep: &impl Fn(&str, &Value) -> bool) -> Value {
     }
 }
 
-fn tool_choice_mode(choice: Option<&Value>, claude_default: bool) -> Option<&'static str> {
+fn tool_choice_mode(choice: Option<&Value>) -> Option<&'static str> {
     match choice {
         Some(Value::String(value)) if value == "none" => Some("NONE"),
         Some(Value::String(value)) if value == "required" || value == "any" => Some("ANY"),
         Some(_) => Some("AUTO"),
-        None if claude_default => Some("VALIDATED"),
         None => None,
     }
+}
+
+fn thinking_config(model: &str, effort: &str) -> Value {
+    let enabled = effort != "off";
+    let budget = if !enabled {
+        0
+    } else if model.starts_with("claude-") {
+        1024
+    } else if model.starts_with("gpt-oss-") {
+        8192
+    } else if model.starts_with("gemini-3.5-") || model == "gemini-3-flash-agent" {
+        match effort {
+            "high" | "xhigh" => 10_000,
+            "medium" => 4_000,
+            _ => 1_000,
+        }
+    } else if model.starts_with("gemini-3.1-") || model == "gemini-pro-agent" {
+        if matches!(effort, "high" | "xhigh") {
+            10_001
+        } else {
+            1_001
+        }
+    } else if matches!(effort, "high" | "xhigh") {
+        -1
+    } else if effort == "medium" {
+        4_000
+    } else {
+        1_000
+    };
+    json!({ "includeThoughts": enabled, "thinkingBudget": budget })
 }
 
 #[derive(Debug, Default)]
@@ -1450,6 +1480,10 @@ mod tests {
             "Be precise"
         );
         assert_eq!(
+            request["generationConfig"]["thinkingConfig"],
+            json!({ "includeThoughts": true, "thinkingBudget": -1 })
+        );
+        assert_eq!(
             request["contents"][1]["parts"][0]["functionCall"]["name"],
             "read_file"
         );
@@ -1529,10 +1563,7 @@ mod tests {
         assert!(declaration["parameters"]["properties"]["mode"]
             .get("default")
             .is_none());
-        assert_eq!(
-            request["toolConfig"]["functionCallingConfig"]["mode"],
-            "VALIDATED"
-        );
+        assert!(request.get("toolConfig").is_none());
     }
 
     #[test]

@@ -10,7 +10,6 @@ use gpui_component::spinner::Spinner;
 use gpui_component::theme::ActiveTheme;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Icon, IconName, Selectable, Sizable, WindowExt};
-use gpui_kit_assets::IconName as AssetIconName;
 
 use crate::app::{actions::AppAction, controller};
 use crate::state::{AppState, SessionAttention, SessionInfo, TrajectoryEntry};
@@ -767,7 +766,7 @@ impl SidebarView {
                     theme.success.opacity(0.18),
                     theme.success,
                     format!("#{}", pr.number),
-                    Icon::new(AssetIconName::GitMerge),
+                    Icon::default().path("icons/git/branch.svg"),
                 )
             } else if is_draft {
                 (
