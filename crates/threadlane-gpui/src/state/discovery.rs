@@ -57,6 +57,21 @@ pub(crate) fn resolve_session_transcript_file(
     }
 }
 
+fn effective_session_git_branch(
+    runtime_work_dir: &Path,
+    is_worktree: bool,
+    recorded: Option<String>,
+) -> Option<String> {
+    if is_worktree {
+        threadlane_git::current_branch(runtime_work_dir)
+            .ok()
+            .flatten()
+            .or(recorded)
+    } else {
+        recorded
+    }
+}
+
 pub(crate) fn discover_session_stubs_in_project(work_dir: &Path) -> Vec<SessionInfo> {
     let Ok(entries) = std::fs::read_dir(work_dir.join(".threadlane/sessions")) else {
         return Vec::new();
@@ -76,7 +91,7 @@ pub(crate) fn discover_session_stubs_in_project(work_dir: &Path) -> Vec<SessionI
                 return None;
             }
             let id = path.file_stem()?.to_string_lossy().to_string();
-            let (runtime_work_dir, git_branch, github_issue, is_worktree) =
+            let (runtime_work_dir, recorded_branch, github_issue, is_worktree) =
                 JsonlStore::open_read_only(&path)
                     .ok()
                     .map(|store| {
@@ -95,6 +110,11 @@ pub(crate) fn discover_session_stubs_in_project(work_dir: &Path) -> Vec<SessionI
                     .unwrap_or((canonical_work_dir.clone(), None, None, false));
             let session_file =
                 resolve_session_transcript_file(&path, &runtime_work_dir, &id, is_worktree);
+            let git_branch = effective_session_git_branch(
+                &runtime_work_dir,
+                is_worktree,
+                recorded_branch,
+            );
             let worktree_available = !is_worktree || runtime_work_dir.is_dir();
             Some(SessionInfo {
                 title: id.clone(),
@@ -186,7 +206,7 @@ pub(crate) fn discover_sessions_in_project_cached(
                     };
                 let session_file =
                     resolve_session_transcript_file(&path, &runtime_work_dir, &id, is_worktree);
-                let (title, health, git_branch) = match JsonlStore::open_read_only(&session_file) {
+                let (title, health, recorded_branch) = match JsonlStore::open_read_only(&session_file) {
                     Ok(store) => (
                         extract_session_title(&store, &id),
                         SessionHealth::Healthy,
@@ -198,6 +218,11 @@ pub(crate) fn discover_sessions_in_project_cached(
                         stub_branch,
                     ),
                 };
+                let git_branch = effective_session_git_branch(
+                    &runtime_work_dir,
+                    is_worktree,
+                    recorded_branch,
+                );
                 let metadata = std::fs::metadata(&session_file).ok();
                 let len = metadata.as_ref().map_or(0, |metadata| metadata.len());
                 let modified = metadata.and_then(|metadata| metadata.modified().ok());

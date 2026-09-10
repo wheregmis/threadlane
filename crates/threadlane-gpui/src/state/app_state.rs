@@ -1058,7 +1058,7 @@ impl AppState {
             &branch,
             &new_items,
         );
-        let runtime = self.ensure_session_runtime(runtime_work_dir, session_file);
+        let runtime = self.ensure_session_runtime(runtime_work_dir.clone(), session_file);
         if runtime.is_generating() {
             // An active turn will pick the queued follow-up up via
             // `run_scheduled_agent_work`; queueing alone never starts a run.
@@ -1077,6 +1077,7 @@ impl AppState {
             }
             if crate::services::chat::execute_prompt(
                 runtime,
+                runtime_work_dir,
                 session_id.clone(),
                 prompt.clone(),
                 Vec::new(),
@@ -3715,9 +3716,11 @@ impl AppState {
             return Ok(());
         }
 
-        let runtime = self.ensure_session_runtime(runtime_work_dir, session_file.clone());
+        let runtime =
+            self.ensure_session_runtime(runtime_work_dir.clone(), session_file.clone());
         crate::services::chat::execute_prompt(
             runtime,
+            runtime_work_dir,
             session_id.clone(),
             text.clone(),
             images.clone(),
