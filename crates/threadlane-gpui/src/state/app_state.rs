@@ -150,11 +150,15 @@ impl AppState {
         #[cfg(not(test))]
         let mut registry_projects = registry_projects;
         #[cfg(not(test))]
+        registry_projects.retain(|project| is_attachable_project_root(&project.path));
+        #[cfg(not(test))]
         if registry_projects.is_empty() {
             if let Ok(curr) = std::env::current_dir().and_then(std::fs::canonicalize) {
-                let project = AttachedProject::from_path(curr);
-                registry_projects.push(project.clone());
-                let _ = threadlane_session::save_project_registry(&registry_projects);
+                if is_attachable_project_root(&curr) {
+                    let project = AttachedProject::from_path(curr);
+                    registry_projects.push(project.clone());
+                    let _ = threadlane_session::save_project_registry(&registry_projects);
+                }
             }
         }
 
@@ -2569,6 +2573,10 @@ impl AppState {
             self.messages = Arc::new(messages);
         }
     }
+}
+
+pub(super) fn is_attachable_project_root(path: &Path) -> bool {
+    path.parent().is_some()
 }
 
 /// Merge live-recorded trajectory entries over a fresh file projection.

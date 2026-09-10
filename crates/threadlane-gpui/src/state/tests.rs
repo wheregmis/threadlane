@@ -11,6 +11,12 @@ use threadlane_session::harness::{
 };
 
 #[test]
+fn filesystem_root_is_not_an_attachable_project() {
+    assert!(!app_state::is_attachable_project_root(Path::new("/")));
+    assert!(app_state::is_attachable_project_root(Path::new("/project")));
+}
+
+#[test]
 fn active_git_work_dir_uses_the_active_session_checkout_when_available() {
     let local_project = PathBuf::from("/projects/local");
     let worktree = PathBuf::from("/projects/local/.threadlane/worktrees/session");
