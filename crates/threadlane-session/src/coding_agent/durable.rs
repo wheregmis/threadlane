@@ -235,8 +235,13 @@ impl CodingAgent {
         let prewalk_arc = self.prewalk.clone();
         let event_tx = self.agent.event_tx.clone();
         let turn_arc = self.agent.turn.clone();
+        // Shared provider cell: rotating the credential here (rather than
+        // replacing the client) keeps the in-flight turn loop, background
+        // workers, and title requests on the new key immediately.
+        let handoff_provider = self.agent.provider_client_arc();
         self.agent.tool_dispatcher.tool_completion_recorder = Some(Arc::new(move |result| {
             let harness = completion_harness.clone();
+            let provider = handoff_provider.clone();
             let run_id = completion_run_id.clone();
             let result = result.clone();
             let prewalk = prewalk_arc.clone();
@@ -330,6 +335,13 @@ impl CodingAgent {
                                 .push_str(&crate::orchestrator::build_checklist_directive());
                         }
                     }
+                    // The handoff crosses providers mid-turn: re-resolve the
+                    // signing credential for the fast model now, or its first
+                    // request fails with the frontier provider's key (401).
+                    crate::credentials::refresh_provider_for_model(
+                        &provider,
+                        &target_model,
+                    );
                     let effort_info = target_effort
                         .map(|e| format!(" with reasoning effort `{}`", e.label()))
                         .unwrap_or_default();
@@ -1348,6 +1360,22 @@ impl CodingAgent {
                 .map(|root| subagent_workspace(&root, &lane.run_id).0)
                 .filter(|worktree| worktree.is_dir())
                 .unwrap_or_else(|| self.work_dir.clone());
+            let child_model = self
+                .agent_config
+                .subagent_model
+                .clone()
+                .unwrap_or(model);
+            // Resolve live: the parent may have switched providers since the
+            // session (or the interrupted child) started. Falls back to the
+            // session key when nothing is stored.
+            let (recovery_api_key, recovery_account_id) = {
+                let (key, account) = crate::credentials::provider_credentials(&child_model);
+                if key.trim().is_empty() {
+                    (self.agent.api_key.clone(), self.agent.account_id.clone())
+                } else {
+                    (key, account)
+                }
+            };
             let result = run_subagent_task(
                 AgentDefinition {
                     name: "recovered".into(),
@@ -1361,9 +1389,9 @@ impl CodingAgent {
                 },
                 lane.task.clone(),
                 SubagentRunContext {
-                    api_key: self.agent.api_key.clone(),
-                    account_id: self.agent.account_id.clone(),
-                    child_model: self.agent_config.subagent_model.clone().unwrap_or(model),
+                    api_key: recovery_api_key,
+                    account_id: recovery_account_id,
+                    child_model,
                     child_reasoning_effort: self
                         .agent_config
                         .subagent_reasoning_effort

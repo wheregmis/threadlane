@@ -299,7 +299,37 @@ impl CodingAgent {
         self.agent.turn.lock().await.model = model.to_string();
         self.agent_work
             .set_acp_model(crate::acp_bridge::is_acp_model(model));
+        self.refresh_provider_credentials();
         Ok(())
+    }
+
+    /// Re-resolve the signing credential for the current turn model and
+    /// rotate the shared provider cell. In-place model changes (slash
+    /// `/model`, prewalk handoffs) otherwise keep the previous provider's
+    /// credential — e.g. a Google `ya29` token sent to `api.openai.com`
+    /// (401 `invalid_api_key`) after switching off an Antigravity model.
+    /// Skips silently when nothing usable resolves, preserving legacy
+    /// behavior for credential-less contexts.
+    pub(crate) fn refresh_provider_credentials(&mut self) {
+        let model = self
+            .agent
+            .turn
+            .try_lock()
+            .map(|turn| turn.model.clone())
+            .unwrap_or_default();
+        Self::rotate_credentials_for(&mut self.agent, &model);
+    }
+
+    pub(crate) fn rotate_credentials_for(
+        agent: &mut threadlane_runtime::AgentRuntime,
+        model: &str,
+    ) {
+        let (key, account) = crate::credentials::provider_credentials(model);
+        if key.trim().is_empty() {
+            return;
+        }
+        agent.set_credentials(key, account);
+        crate::credentials::refresh_provider_for_model(&agent.provider_client_arc(), model);
     }
 
     fn set_name(&mut self, name: String) -> Result<(), String> {
@@ -523,6 +553,18 @@ impl CodingAgent {
                     .subagent_model
                     .clone()
                     .unwrap_or_else(|| model.clone());
+                // Resolve live: the parent may have switched providers since
+                // construction (slash `/model`, prewalk handoff). Falls back
+                // to the construction key when nothing is stored.
+                let (api_key, account_id) = {
+                    let (key, account) =
+                        crate::credentials::provider_credentials(&child_model);
+                    if key.trim().is_empty() {
+                        (api_key, account_id)
+                    } else {
+                        (key, account)
+                    }
+                };
                 let child_reasoning_effort = runner_config
                     .subagent_reasoning_effort
                     .unwrap_or(parent_reasoning_effort);
@@ -593,6 +635,16 @@ impl CodingAgent {
                 // The revived run keeps the lane's original model so history
                 // and behavior stay continuous.
                 let child_model = req.model.clone();
+                // Resolve live (see the foreground runner above).
+                let (api_key, account_id) = {
+                    let (key, account) =
+                        crate::credentials::provider_credentials(&child_model);
+                    if key.trim().is_empty() {
+                        (api_key, account_id)
+                    } else {
+                        (key, account)
+                    }
+                };
                 revive_subagent_lane(
                     ReviveLaneRequest {
                         lane_name: req.lane_name,
@@ -1818,6 +1870,101 @@ mod compaction_sync_tests {
         AgentMessage::Custom {
             custom_type: "compaction_summary".into(),
             payload: serde_json::json!({"summary": "older context"}),
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingProvider {
+        refreshed: Arc<Mutex<Vec<(String, Option<String>)>>>,
+    }
+
+    #[async_trait]
+    impl ProviderPort for RecordingProvider {
+        async fn stream_request(
+            &self,
+            _request: RuntimeRequest,
+            events: tokio::sync::mpsc::Sender<RuntimeStreamEvent>,
+        ) {
+            let _ = events
+                .send(RuntimeStreamEvent::Finished {
+                    tool_calls: vec![],
+                    usage: RuntimeUsage::default(),
+                })
+                .await;
+        }
+
+        async fn fetch_deferred(
+            &self,
+            _model: &str,
+            _handle_id: &str,
+        ) -> Result<DeferredResponse, String> {
+            Ok(DeferredResponse::Pending)
+        }
+
+        async fn cancel_deferred(&self, _model: &str, _handle_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn refresh_openai_credentials(&self, key: String, account: Option<String>) {
+            self.refreshed.lock().unwrap().push((key, account));
+        }
+
+        fn provider_kind(&self, _model: &str) -> &'static str {
+            "test"
+        }
+    }
+
+    #[tokio::test]
+    async fn set_model_rotates_provider_credentials_across_providers() {
+        // Reproduces the mid-task 401: a session constructed with a Google
+        // `ya29` token that switches to an OpenAI model must stop signing
+        // with the stale key. Assertions use the same resolver production
+        // uses, so they hold with or without stored credentials.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let refreshed = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(RecordingProvider {
+            refreshed: refreshed.clone(),
+        });
+        let mut agent = CodingAgent::new_with_provider(
+            CodingAgentOptions {
+                api_key: "ya29.stale-google-token".into(),
+                account_id: None,
+                model: "antigravity/gemini-3.7-flash".into(),
+                work_dir: dir.path().to_path_buf(),
+                session_file: Some(path),
+                system_prompt: SystemPromptConfig::default(),
+                agent_config: None,
+                coding_config: None,
+                browser: BrowserBridge::unavailable(),
+            },
+            provider,
+        );
+        let (openai_key, openai_account) =
+            crate::credentials::provider_credentials("gpt-4o");
+        agent.set_model("gpt-4o".into()).await.unwrap();
+        if openai_key.trim().is_empty() {
+            // Credential-less contexts keep legacy behavior: untouched.
+            assert_eq!(agent.agent.api_key, "ya29.stale-google-token");
+            assert!(refreshed.lock().unwrap().is_empty());
+        } else {
+            assert_eq!(agent.agent.api_key, openai_key);
+            assert_eq!(
+                *refreshed.lock().unwrap(),
+                vec![(openai_key, openai_account)]
+            );
+        }
+        // Switching to a non-OpenAI model never touches the shared cell.
+        let before = refreshed.lock().unwrap().len();
+        let (ag_key, _) =
+            crate::credentials::provider_credentials("antigravity/gemini-3.1-pro");
+        agent
+            .set_model("antigravity/gemini-3.1-pro".into())
+            .await
+            .unwrap();
+        assert_eq!(refreshed.lock().unwrap().len(), before);
+        if !ag_key.trim().is_empty() {
+            assert_eq!(agent.agent.api_key, ag_key);
         }
     }
 

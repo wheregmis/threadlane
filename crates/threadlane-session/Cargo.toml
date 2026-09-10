@@ -20,6 +20,7 @@ test-support = []
 [dependencies]
 threadlane-runtime = { version = "0.1.0", path = "../threadlane-runtime" }
 threadlane-protocol = { version = "0.1.0", path = "../threadlane-protocol" }
+threadlane-auth = { version = "0.1.0", path = "../threadlane-auth" }
 threadlane-tools = { version = "0.1.0", path = "../threadlane-tools" }
 threadlane-provider = { version = "0.1.0", path = "../threadlane-provider" }
 threadlane-mcp = { version = "0.1.0", path = "../threadlane-mcp" }

@@ -215,6 +215,10 @@ impl ProviderPort for ProviderClient {
     fn provider_kind(&self, model: &str) -> &'static str {
         self.provider_kind(model)
     }
+
+    fn refresh_openai_credentials(&self, api_key: String, account_id: Option<String>) {
+        self.openai.refresh_credentials(api_key, account_id);
+    }
 }
 
 impl ProviderClient {

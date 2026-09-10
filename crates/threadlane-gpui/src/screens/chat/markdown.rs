@@ -1,4 +1,5 @@
 use std::path::{Component, Path, PathBuf};
+use std::sync::OnceLock;
 
 use gpui::Entity;
 use gpui_component::text::TextViewState;
@@ -62,30 +63,52 @@ pub enum MarkdownSegment {
 }
 
 pub fn is_terminal_runnable_language(lang: &str) -> bool {
-    matches!(
-        lang.to_lowercase().as_str(),
-        "bash" | "sh" | "zsh" | "shell" | "terminal" | "console" | "cmd" | "powershell"
-    )
+    lang.eq_ignore_ascii_case("bash")
+        || lang.eq_ignore_ascii_case("sh")
+        || lang.eq_ignore_ascii_case("zsh")
+        || lang.eq_ignore_ascii_case("shell")
+        || lang.eq_ignore_ascii_case("terminal")
+        || lang.eq_ignore_ascii_case("console")
+        || lang.eq_ignore_ascii_case("cmd")
+        || lang.eq_ignore_ascii_case("powershell")
+}
+
+/// Cached active shell name, resolved once from `$SHELL`.
+fn cached_shell() -> &'static str {
+    static SHELL: OnceLock<String> = OnceLock::new();
+    SHELL.get_or_init(|| {
+        std::env::var("SHELL")
+            .ok()
+            .and_then(|path| {
+                Path::new(&path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_ascii_lowercase)
+            })
+            .unwrap_or_else(|| "sh".into())
+    })
 }
 
 pub fn active_shell_supports_language(lang: &str) -> bool {
-    let shell = std::env::var("SHELL")
-        .ok()
-        .and_then(|path| {
-            Path::new(&path)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(str::to_ascii_lowercase)
-        })
-        .unwrap_or_else(|| "sh".into());
-    match lang.trim().to_ascii_lowercase().as_str() {
-        "bash" => shell == "bash",
-        "zsh" => shell == "zsh",
-        "sh" => matches!(shell.as_str(), "sh" | "bash" | "zsh"),
-        "cmd" => matches!(shell.as_str(), "cmd" | "cmd.exe"),
-        "powershell" => matches!(shell.as_str(), "pwsh" | "powershell"),
-        "shell" | "terminal" | "console" => true,
-        _ => false,
+    let shell = cached_shell();
+    let lang = lang.trim();
+    if lang.eq_ignore_ascii_case("bash") {
+        shell == "bash"
+    } else if lang.eq_ignore_ascii_case("zsh") {
+        shell == "zsh"
+    } else if lang.eq_ignore_ascii_case("sh") {
+        matches!(shell, "sh" | "bash" | "zsh")
+    } else if lang.eq_ignore_ascii_case("cmd") {
+        matches!(shell, "cmd" | "cmd.exe")
+    } else if lang.eq_ignore_ascii_case("powershell") {
+        matches!(shell, "pwsh" | "powershell")
+    } else if lang.eq_ignore_ascii_case("shell")
+        || lang.eq_ignore_ascii_case("terminal")
+        || lang.eq_ignore_ascii_case("console")
+    {
+        true
+    } else {
+        false
     }
 }
 

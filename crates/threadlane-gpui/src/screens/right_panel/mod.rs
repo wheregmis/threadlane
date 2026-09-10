@@ -5,5 +5,5 @@ mod tests;
 mod types;
 mod view;
 
-pub(crate) use types::GitAction;
+pub(crate) use types::{GitAction, Surface};
 pub(crate) use view::RightPanelView;

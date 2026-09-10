@@ -768,11 +768,21 @@ async fn fetch_subscription_models_inner() -> Vec<String> {
         .collect()
 }
 
-#[derive(Clone)]
-pub struct OpenAIClient {
+#[derive(Clone, Debug, Default)]
+struct OpenAICredentials {
     api_key: String,
     account_id: Option<String>,
     codex_account_id: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct OpenAIClient {
+    /// Shared across clones so a mid-session model switch rotates the key
+    /// for in-flight turn loops, background workers, and title requests at
+    /// once. Without this, switching from e.g. an Antigravity model to an
+    /// OpenAI one keeps sending the Google OAuth token to `api.openai.com`
+    /// (401 `invalid_api_key`).
+    credentials: Arc<StdMutex<OpenAICredentials>>,
     client: reqwest::Client,
     codex_ws: Arc<Mutex<CodexWsState>>,
 }
@@ -793,22 +803,68 @@ impl OpenAIClient {
             .then(|| threadlane_auth::openai_auth::codex_account_id_for_token(&api_key))
             .flatten();
         Self {
-            api_key,
-            account_id,
-            codex_account_id,
+            credentials: Arc::new(StdMutex::new(OpenAICredentials {
+                api_key,
+                account_id,
+                codex_account_id,
+            })),
             client: http_client().clone(),
             codex_ws: Arc::new(Mutex::new(CodexWsState::new())),
         }
     }
 
+    fn credentials(&self) -> OpenAICredentials {
+        self.credentials
+            .lock()
+            .ok()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
+    }
+
+    /// Rotate the credential used for subsequent OpenAI-branch requests.
+    /// Called when the session model changes providers mid-task (slash
+    /// `/model`, picker rebuilds skip this by constructing fresh clients,
+    /// prewalk handoffs). A changed account identity also drops the cached
+    /// Codex websocket, whose handshake embeds the previous Bearer token.
+    pub(crate) fn refresh_credentials(&self, api_key: String, account_id: Option<String>) {
+        let codex_account_id = (account_id.is_some() || api_key.starts_with("ey"))
+            .then(|| threadlane_auth::openai_auth::codex_account_id_for_token(&api_key))
+            .flatten();
+        let rotated_account = {
+            let mut guard = match self.credentials.lock() {
+                Ok(guard) => guard,
+                Err(_) => return,
+            };
+            let rotated = guard.account_id != account_id
+                || guard.codex_account_id != codex_account_id;
+            *guard = OpenAICredentials {
+                api_key,
+                account_id,
+                codex_account_id,
+            };
+            rotated
+        };
+        if rotated_account {
+            // Best-effort: the next request reconnects. Deliberately not
+            // awaited — rotation must stay callable from sync contexts.
+            if let Ok(mut state) = self.codex_ws.try_lock() {
+                state.socket = None;
+                state.session_key = None;
+                state.opened_at = None;
+            }
+        }
+    }
+
     pub(crate) fn is_codex(&self) -> bool {
-        self.account_id.is_some() || self.api_key.starts_with("ey")
+        let credentials = self.credentials();
+        credentials.account_id.is_some() || credentials.api_key.starts_with("ey")
     }
 
     async fn access_token(&self) -> Result<String, String> {
-        match self.codex_account_id.as_deref() {
+        let credentials = self.credentials();
+        match credentials.codex_account_id.as_deref() {
             Some(id) => threadlane_auth::openai_auth::get_valid_codex_account_token(id).await,
-            None => Ok(self.api_key.clone()),
+            None => Ok(credentials.api_key.clone()),
         }
     }
 
@@ -832,7 +888,7 @@ impl OpenAIClient {
                 format!("Bearer {}", self.access_token().await?),
             )
             .header(CONTENT_TYPE, "application/json");
-        if let Some(account_id) = &self.account_id {
+        if let Some(account_id) = &self.credentials().account_id {
             request = request.header("chatgpt-account-id", account_id);
         }
         if is_codex {
@@ -929,7 +985,7 @@ impl OpenAIClient {
             HeaderValue::from_str(&format!("Bearer {}", self.access_token().await?))
                 .map_err(|error| error.to_string())?;
         headers.insert("authorization", authorization);
-        if let Some(account_id) = &self.account_id {
+        if let Some(account_id) = &self.credentials().account_id {
             headers.insert(
                 "chatgpt-account-id",
                 HeaderValue::from_str(account_id).map_err(|error| error.to_string())?,
@@ -1210,7 +1266,7 @@ impl OpenAIClient {
             .post(url)
             .header(AUTHORIZATION, format!("Bearer {access_token}"))
             .header(CONTENT_TYPE, "application/json");
-        if let Some(account_id) = &self.account_id {
+        if let Some(account_id) = &self.credentials().account_id {
             request = request.header("chatgpt-account-id", account_id);
         }
         if is_codex {
@@ -1487,6 +1543,21 @@ mod tests {
             vec!["gpt-5-5-thinking", "gpt-5-6", "gpt-5-6-instant", "gpt-6-pro"]
         );
         assert!(parse_subscription_models(&json!({})).is_empty());
+    }
+
+    #[tokio::test]
+    async fn refresh_credentials_rotates_signing_key_for_all_clones() {
+        let client = OpenAIClient::new("sk-test".into(), None);
+        assert!(!client.is_codex());
+        let clone = client.clone();
+        clone.refresh_credentials("eyJhbGciOiJIUzI1NiJ9.test".into(), Some("acc-1".into()));
+        // The shared cell makes the rotation visible through every clone,
+        // including in-flight turn loops holding an older Arc.
+        assert!(client.is_codex());
+        assert_eq!(
+            client.access_token().await.unwrap(),
+            "eyJhbGciOiJIUzI1NiJ9.test"
+        );
     }
 
     #[test]

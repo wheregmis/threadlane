@@ -3387,11 +3387,16 @@ impl AppState {
                     match adapt_agent_event(event) {
                         ChatAgentUpdate::TextDelta(delta) => {
                             changed = true;
-                            let stream_prefix = format!("streaming-{session_id}-");
                             if let Some(message) =
                                 self.messages_mut().last_mut().filter(|message| {
+                                    let id = message.id.as_str();
+                                    let stream_id = id.strip_prefix("streaming-");
                                     message.role == MessageRole::Assistant
-                                        && message.id.starts_with(&stream_prefix)
+                                        && stream_id.is_some_and(|stream_id| {
+                                            stream_id
+                                                .strip_prefix(session_id.as_str())
+                                                .is_some_and(|suffix| suffix.starts_with('-'))
+                                        })
                                         && message.tool_activities.is_empty()
                                 })
                             {

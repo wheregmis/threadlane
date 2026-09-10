@@ -367,31 +367,7 @@ pub(crate) fn runtime_status_text(status: SessionRuntimeStatus) -> Option<String
 }
 
 pub(crate) fn provider_credentials(model: &str) -> (String, Option<String>) {
-    if threadlane_provider::router::is_antigravity_model(model) {
-        return (
-            threadlane_provider::antigravity_auth::load_antigravity_credentials()
-                .map(|credentials| credentials.access_token)
-                .unwrap_or_default(),
-            None,
-        );
-    }
-    if threadlane_provider::router::is_opencode_model(model) {
-        return (
-            threadlane_auth::opencode_auth::load_opencode_api_key().unwrap_or_default(),
-            None,
-        );
-    }
-    if let Some(api_key) =
-        threadlane_auth::openai_auth::load_openai_api_key().filter(|key| !key.trim().is_empty())
-    {
-        return (api_key, None);
-    }
-    if let Some(credentials) = threadlane_auth::openai_auth::load_credentials()
-        .filter(|credentials| threadlane_auth::openai_auth::is_own_source(&credentials.source))
-    {
-        return (credentials.access_token, credentials.account_id);
-    }
-    (std::env::var("OPENAI_API_KEY").unwrap_or_default(), None)
+    threadlane_session::provider_credentials(model)
 }
 
 pub(crate) fn coding_agent_options(

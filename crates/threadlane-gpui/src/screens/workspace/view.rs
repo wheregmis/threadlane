@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use gpui::*;
+use gpui::prelude::FluentBuilder;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::command::{Command, CommandGroup, CommandItem, CommandState};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
@@ -746,6 +747,49 @@ impl WorkspaceView {
             "panel" => {
                 self.right_panel_visible = !self.right_panel_visible;
             }
+            "go_task" => {
+                // Focus the session search in the palette itself — just clear the
+                // query so the sessions group is prominent.
+                self.command_palette_open = true;
+                self.command_state.update(cx, |state, cx| {
+                    state.set_query("", window, cx);
+                    state.focus(window, cx);
+                });
+                return; // keep palette open
+            }
+            "open_file" => {
+                self.right_panel_visible = true;
+                self.right_panel.update(cx, |panel, cx| {
+                    panel.open_surface(crate::screens::right_panel::Surface::Files, cx);
+                });
+            }
+            "run_terminal" => {
+                self.toggle_terminal_action(&ToggleTerminal, window, cx);
+            }
+            "open_issue" => {
+                model.update(cx, |state, cx| {
+                    open_github_from_palette(state, || cx.notify());
+                });
+            }
+            "switch_worktree" => {
+                use crate::state::WorkMode;
+                model.update(cx, |state, cx| {
+                    let new_mode = match state.draft_work_mode {
+                        WorkMode::Local => WorkMode::Worktree,
+                        WorkMode::Worktree => WorkMode::Local,
+                    };
+                    state.set_work_mode(new_mode);
+                    cx.notify();
+                });
+            }
+            "ask_agent" => {
+                self.chat_list.update(cx, |chat, cx| {
+                    chat.input_state.update(cx, |input, cx| {
+                        input.set_value("".to_string(), window, cx);
+                    });
+                });
+                self.focus_composer_action(&FocusComposer, window, cx);
+            }
             "goal" | "model" | "compact" => {
                 let value = if action_key == "compact" {
                     "/compact".to_string()
@@ -1055,13 +1099,62 @@ impl WorkspaceView {
         let model = self.model.clone();
         let state = model.read(cx);
 
-        let commands: [(&str, &str, &str, IconName, &[&str]); 15] = [
+        let commands: [(&str, &str, &str, IconName, &[&str], &str); 21] = [
             (
                 "New Task",
                 "Start a fresh session",
                 "new",
                 IconName::Plus,
                 &["task", "fresh", "session", "new"],
+                "⌘N",
+            ),
+            (
+                "Go to Task…",
+                "Jump to a recent task or session",
+                "go_task",
+                IconName::Search,
+                &["go", "task", "jump", "find", "session", "recent"],
+                "",
+            ),
+            (
+                "Open File…",
+                "Browse project files in the right panel",
+                "open_file",
+                IconName::File,
+                &["open", "file", "browse", "tree", "explorer"],
+                "",
+            ),
+            (
+                "Run Terminal Command…",
+                "Open or focus the integrated terminal",
+                "run_terminal",
+                IconName::SquareTerminal,
+                &["run", "terminal", "command", "shell", "exec"],
+                "⌘J",
+            ),
+            (
+                "Open Issue/PR…",
+                "Browse GitHub issues and pull requests",
+                "open_issue",
+                IconName::Github,
+                &["issue", "pr", "pull", "request", "github", "browse"],
+                "",
+            ),
+            (
+                "Switch Worktree…",
+                "Toggle between local and worktree mode",
+                "switch_worktree",
+                IconName::FolderOpen,
+                &["switch", "worktree", "mode", "local", "branch"],
+                "",
+            ),
+            (
+                "Ask Agent to…",
+                "Focus the composer to prompt the agent",
+                "ask_agent",
+                IconName::Bot,
+                &["ask", "agent", "prompt", "chat", "ai", "help"],
+                "⌘L",
             ),
             (
                 "Add Project",
@@ -1069,6 +1162,7 @@ impl WorkspaceView {
                 "attach",
                 IconName::FolderOpen,
                 &["folder", "workspace", "attach", "open", "project"],
+                "",
             ),
             (
                 "Goal Planning (/goal)",
@@ -1076,6 +1170,7 @@ impl WorkspaceView {
                 "goal",
                 IconName::Bot,
                 &["goal", "planning", "loop", "agent", "autonomous"],
+                "",
             ),
             (
                 "Model Selection (/model)",
@@ -1083,6 +1178,7 @@ impl WorkspaceView {
                 "model",
                 IconName::Cpu,
                 &["model", "llm", "switch", "provider", "select"],
+                "",
             ),
             (
                 "Compact History (/compact)",
@@ -1090,6 +1186,7 @@ impl WorkspaceView {
                 "compact",
                 IconName::Minimize,
                 &["compact", "history", "context", "clean"],
+                "",
             ),
             (
                 "Git Review & Commit",
@@ -1097,6 +1194,7 @@ impl WorkspaceView {
                 "git",
                 IconName::Github,
                 &["git", "diff", "review", "commit", "stage"],
+                "",
             ),
             (
                 "GitHub",
@@ -1104,6 +1202,7 @@ impl WorkspaceView {
                 "github",
                 IconName::Github,
                 &["github", "issues", "pull requests", "repository"],
+                "",
             ),
             (
                 "Git: Switch Branch",
@@ -1111,6 +1210,7 @@ impl WorkspaceView {
                 "git_branch",
                 IconName::Github,
                 &["git", "branch", "switch", "checkout"],
+                "",
             ),
             (
                 "Git: New Branch",
@@ -1118,6 +1218,7 @@ impl WorkspaceView {
                 "git_new_branch",
                 IconName::Plus,
                 &["git", "branch", "new", "create"],
+                "",
             ),
             (
                 "Git: Merge Branch",
@@ -1125,6 +1226,7 @@ impl WorkspaceView {
                 "git_merge",
                 IconName::Redo,
                 &["git", "merge", "branch", "integrate"],
+                "",
             ),
             (
                 "Git: Restore Stashed Changes",
@@ -1132,6 +1234,7 @@ impl WorkspaceView {
                 "git_stash_pop",
                 IconName::Undo2,
                 &["git", "stash", "pop", "restore", "unstash"],
+                "",
             ),
             (
                 "Git: Pull Origin",
@@ -1139,6 +1242,7 @@ impl WorkspaceView {
                 "git_pull",
                 IconName::Redo,
                 &["git", "pull", "origin", "fetch", "sync"],
+                "",
             ),
             (
                 "Toggle Sidebar",
@@ -1146,6 +1250,7 @@ impl WorkspaceView {
                 "sidebar",
                 IconName::PanelLeft,
                 &["sidebar", "toggle", "hide", "show", "projects"],
+                "⌘B",
             ),
             (
                 "Toggle Right Panel",
@@ -1153,6 +1258,7 @@ impl WorkspaceView {
                 "panel",
                 IconName::PanelRight,
                 &["panel", "right", "terminal", "review", "toggle"],
+                "⌘R",
             ),
             (
                 "Settings",
@@ -1160,33 +1266,57 @@ impl WorkspaceView {
                 "settings",
                 IconName::Settings,
                 &["settings", "keys", "provider", "preferences", "config"],
+                "⌘,",
             ),
         ];
 
         let mut commands_group = CommandGroup::new().label("Commands & Actions");
-        for (name, desc, _action_key, icon, keywords) in &commands {
+        for (name, desc, _action_key, icon, keywords, shortcut) in &commands {
             let name_str = name.to_string();
             let desc_str = desc.to_string();
+            let shortcut_str = shortcut.to_string();
             let item = CommandItem::new()
                 .label(*name)
                 .icon(icon.clone())
                 .keywords(keywords.iter().copied())
                 .child(move |_window, cx| {
                     let colors = cx.theme().colors;
-                    v_flex()
-                        .gap_0p5()
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
                         .child(
-                            div()
-                                .text_sm()
-                                .font_weight(FontWeight::MEDIUM)
-                                .child(name_str.clone()),
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .gap_0p5()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child(name_str.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(colors.muted_foreground)
+                                        .child(desc_str.clone()),
+                                ),
                         )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(colors.muted_foreground)
-                                .child(desc_str.clone()),
-                        )
+                        .when(!shortcut_str.is_empty(), |el| {
+                            el.child(
+                                div()
+                                    .flex_none()
+                                    .ml_2()
+                                    .px_1p5()
+                                    .py_0p5()
+                                    .rounded_sm()
+                                    .bg(colors.muted.opacity(0.5))
+                                    .text_xs()
+                                    .text_color(colors.muted_foreground)
+                                    .child(shortcut_str.clone()),
+                            )
+                        })
                 });
             commands_group = commands_group.item(item);
         }
@@ -1270,7 +1400,7 @@ impl WorkspaceView {
                                 let _ = view.update(cx, |this, cx| {
                                     this.command_palette_open = false;
                                     if index.section == 0 {
-                                        if let Some((_, _, action_key, _, _)) =
+                                        if let Some((_, _, action_key, _, _, _)) =
                                             commands.get(index.row)
                                         {
                                             this.execute_palette_action(action_key, window, cx);
