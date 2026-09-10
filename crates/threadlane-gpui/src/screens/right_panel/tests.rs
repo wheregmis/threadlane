@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use threadlane_git::GitStatus;
@@ -9,8 +10,46 @@ use super::draft_pr::{
 use super::types::{
     can_create_pull_request, can_publish_branch, message_generated_matches_active_project,
 };
-use super::view::scan_project_tree;
+use super::view::{retain_review_selection, scan_project_tree};
 
+fn paths(values: &[&str]) -> HashSet<String> {
+    values.iter().map(|value| (*value).to_string()).collect()
+}
+
+#[test]
+fn review_refresh_defaults_once_then_preserves_an_empty_selection() {
+    let mut selected = HashSet::new();
+    let mut initialized = false;
+
+    retain_review_selection(
+        &mut selected,
+        paths(&["src/a.rs", "src/b.rs"]),
+        &mut initialized,
+    );
+    assert_eq!(selected, paths(&["src/a.rs", "src/b.rs"]));
+
+    selected.clear();
+    retain_review_selection(
+        &mut selected,
+        paths(&["src/a.rs", "src/b.rs", "src/c.rs"]),
+        &mut initialized,
+    );
+    assert!(selected.is_empty());
+}
+
+#[test]
+fn review_refresh_does_not_select_everything_when_selected_files_disappear() {
+    let mut selected = paths(&["src/removed.rs"]);
+    let mut initialized = true;
+
+    retain_review_selection(
+        &mut selected,
+        paths(&["src/a.rs", "src/b.rs"]),
+        &mut initialized,
+    );
+
+    assert!(selected.is_empty());
+}
 #[test]
 fn generated_commit_messages_only_apply_to_the_originating_checkout() {
     let origin = std::path::Path::new("/projects/app/.threadlane/worktrees/session-a");

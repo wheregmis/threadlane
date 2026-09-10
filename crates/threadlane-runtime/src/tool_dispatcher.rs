@@ -1126,6 +1126,71 @@ mod tests {
         }
     }
 
+    struct PanickingExecutor;
+
+    #[async_trait::async_trait]
+    impl ToolExecutor for PanickingExecutor {
+        fn executor_id(&self) -> &str {
+            "panicking"
+        }
+
+        fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
+            vec![stub_tool("panic_tool")].into()
+        }
+
+        async fn execute_tool(&self, _name: &str, _args: &str) -> Option<Result<String, String>> {
+            panic!("tool panic")
+        }
+
+        async fn execute_tool_with_call(
+            &self,
+            _call: &AgentToolCall,
+            _args: &str,
+        ) -> Option<Result<String, String>> {
+            panic!("tool panic")
+        }
+    }
+
+    #[tokio::test]
+    async fn sequential_tool_panic_records_completion() {
+        let (event_tx, _) = broadcast::channel(8);
+        let mut dispatcher = ToolDispatcher::new(event_tx, HookRegistry::default());
+        dispatcher
+            .register_tool_executor(Arc::new(PanickingExecutor))
+            .unwrap();
+        let completions = Arc::new(std::sync::Mutex::new(Vec::new()));
+        dispatcher.tool_completion_recorder = Some({
+            let completions = completions.clone();
+            Arc::new(move |result| {
+                let result = result.clone();
+                let completions = completions.clone();
+                Box::pin(async move {
+                    completions.lock().unwrap().push(result);
+                    Ok(())
+                })
+            })
+        });
+
+        let results = dispatcher
+            .execute_tools_without_intent_recording(&[ToolCall {
+                id: "panic_call".into(),
+                r#type: "function".into(),
+                function: threadlane_protocol::RuntimeToolCallFunction {
+                    name: "panic_tool".into(),
+                    arguments: "{}".into(),
+                },
+                thought_signature: None,
+            }])
+            .await;
+
+        assert!(results[0].is_error);
+        assert!(results[0].content.contains("panicked during execution"));
+        let completions = completions.lock().unwrap();
+        assert_eq!(completions.len(), 1);
+        assert_eq!(completions[0].tool_call_id, "panic_call");
+        assert!(completions[0].is_error);
+    }
+
     fn counting_dispatcher(
         tools: &[(&str, &str)],
     ) -> (
