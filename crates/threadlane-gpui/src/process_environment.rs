@@ -16,10 +16,17 @@ use std::path::{Path, PathBuf};
 /// protocol streams, or have unrelated side effects. Users with nonstandard
 /// locations can continue to configure their login environment or provide an
 /// absolute executable path where supported.
+/// The directories macOS normally searches when a GUI-launched process has no
+/// inherited `PATH`. Keep these entries so bare commands such as `git` and
+/// `sh` continue to work in sanitized launch environments.
+#[cfg(target_os = "macos")]
+const MACOS_SYSTEM_PATH: &str = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+
 pub fn initialize_child_process_path() {
     #[cfg(target_os = "macos")]
     {
-        let current = env::var_os("PATH").unwrap_or_default();
+        let current =
+            env::var_os("PATH").unwrap_or_else(|| std::ffi::OsString::from(MACOS_SYSTEM_PATH));
         let home = env::var_os("HOME").map(PathBuf::from);
         let candidates = [
             PathBuf::from("/opt/homebrew/bin"),
