@@ -685,6 +685,7 @@ impl RightPanelView {
                         self.switch_dialog_open = false;
                         self.switch_target_branch = None;
                         self.last_fetched_time = Some(std::time::Instant::now());
+                        let action_failed = action_error.is_some();
                         let message = action_error
                             .or_else(|| {
                                 action_message.map(|message| {
@@ -697,8 +698,11 @@ impl RightPanelView {
                             })
                             .unwrap_or_else(|| "Git action completed successfully.".into());
                         self.git_feedback = Some(message.clone());
-                        self.pending_git_notifications
-                            .push(Notification::success(message));
+                        self.pending_git_notifications.push(if action_failed {
+                            Notification::error(message)
+                        } else {
+                            Notification::success(message)
+                        });
                     }
                     Err(status_error) => {
                         self.review_error = Some(status_error.clone());
@@ -1920,7 +1924,7 @@ impl RightPanelView {
             let failing_checks = pr.failing_checks;
             let pending_checks = pr.pending_checks;
             let total_checks = pr.total_checks;
-            let comments_count = pr.comments_count;
+            let comments_count = crate::services::pr_review::collect_actionable_pr_feedback(pr).len();
 
             let failing_check_names: Vec<String> = pr
                 .checks

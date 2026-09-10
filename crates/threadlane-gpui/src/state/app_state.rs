@@ -1132,7 +1132,10 @@ impl AppState {
             .ok_or_else(|| "No active task is linked to this pull request branch.".to_string())?;
         let session_work_dir = session.work_dir.clone();
         let session_id = session.id.clone();
-        let _ = self.select_session(session_work_dir, session_id);
+        let _ = self.select_session(session_work_dir, session_id.clone());
+        if self.active_session_id.as_deref() != Some(session_id.as_str()) {
+            return Err("Couldn't select the linked task for this pull request.".into());
+        }
         let model = self.selected_model.clone();
         let (api_key, _) = provider_credentials(&model);
         if api_key.is_empty() && !threadlane_session::is_acp_model(&model) {
