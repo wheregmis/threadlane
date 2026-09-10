@@ -477,26 +477,41 @@ impl ModelRoles {
     }
 }
 
-/// Orchestration mode governing automatic /prewalk engagement.
+/// Orchestration mode governing explicit /prewalk engagement.
+///
+/// Prewalk is off by default (oh-my-pi parity): it is a one-shot handoff from
+/// the active model to a faster/cheaper model after planning reaches
+/// implementation. It is armed explicitly via `/prewalk` or `Always` mode;
+/// there is no LLM intent classifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum OrchestratorMode {
-    /// Automatically engage /prewalk on actionable coding tasks if a fast model is available.
-    #[default]
+    /// Deprecated: previously ran an LLM intent classifier. Now behaves as
+    /// `Off` (direct execution) to preserve deserialization of old configs
+    /// without paying classifier latency/cost.
+    #[serde(alias = "auto")]
     Auto,
-    /// Always engage /prewalk on all incoming prompts.
+    /// Arm prewalk on all incoming prompts.
     Always,
     /// Direct execution only (explicit /prewalk command required).
+    #[default]
     Off,
 }
 
 impl OrchestratorMode {
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Auto => "Auto (Complex Tasks)",
+            // Auto is retained only for backward compat; it no longer engages.
+            Self::Auto => "Off (Manual /prewalk)",
             Self::Always => "Always",
             Self::Off => "Off (Manual /prewalk)",
         }
+    }
+
+    /// Whether this mode arms prewalk automatically. `Auto` is intentionally
+    /// inert (see variant docs).
+    pub fn arms_automatically(&self) -> bool {
+        matches!(self, Self::Always)
     }
 }
 

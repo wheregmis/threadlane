@@ -48,6 +48,14 @@ pub struct AppState {
     /// Keyed by session rather than by model id because two sessions on the
     /// same configured agent can hold different settings.
     acp_config_options: HashMap<SessionProjectionKey, Vec<AcpConfigOption>>,
+    /// Pending ACP `config_id -> value` selections made before a session
+    /// exists (New task), keyed by agent id.
+    ///
+    /// The picker is usable before the first turn, but applying a setting
+    /// requires a live agent runtime. Selections made there are stored here,
+    /// shown optimistically via the launch-time cache, and applied to the
+    /// next runtime before its first turn.
+    pending_acp_config: HashMap<String, HashMap<String, String>>,
     stashed_prompts: HashMap<String, String>,
     pub(crate) pending_permissions: HashMap<String, threadlane_session::PermissionRequest>,
     pub(crate) pending_questions: HashMap<String, threadlane_session::QuestionRequest>,
@@ -70,6 +78,7 @@ pub struct AppState {
     pub(crate) update_status: threadlane_updater::UpdateStatus,
     pub(crate) update_notice_dismissed: bool,
     pub(crate) requested_editor_target: Option<RequestedEditorTarget>,
+    pub(crate) requested_github_issue: Option<(PathBuf, u64)>,
     pub(crate) requested_composer_prompt: Option<String>,
     pub(crate) requested_terminal_command: Option<String>,
     pub(crate) requested_terminal_work_dir: Option<PathBuf>,
@@ -268,6 +277,7 @@ impl AppState {
             session_metrics: HashMap::new(),
             context_windows: HashMap::new(),
             acp_config_options: HashMap::new(),
+            pending_acp_config: HashMap::new(),
             stashed_prompts: HashMap::new(),
             selected_model,
             model_roles,
@@ -280,6 +290,7 @@ impl AppState {
             update_status: threadlane_updater::UpdateStatus::Idle,
             update_notice_dismissed: false,
             requested_editor_target: None,
+            requested_github_issue: None,
             requested_composer_prompt: None,
             requested_terminal_command: None,
             requested_terminal_work_dir: None,
@@ -501,6 +512,11 @@ impl AppState {
 
     pub(crate) fn open_github(&mut self) {
         self.workspace_page = WorkspacePage::GitHub;
+    }
+
+    pub(crate) fn open_github_issue(&mut self, work_dir: PathBuf, number: u64) {
+        self.workspace_page = WorkspacePage::GitHub;
+        self.requested_github_issue = Some((work_dir, number));
     }
 
     pub(crate) fn close_github(&mut self) {
@@ -1141,6 +1157,9 @@ impl AppState {
             if api_key.is_empty() && !threadlane_session::is_acp_model(&model) {
                 return None;
             }
+            let pending_acp = threadlane_session::acp_agent_id(&model)
+                .map(|agent_id| self.take_pending_acp_config(agent_id))
+                .unwrap_or_default();
             if crate::services::chat::execute_prompt(
                 runtime,
                 runtime_work_dir,
@@ -1149,6 +1168,7 @@ impl AppState {
                 Vec::new(),
                 self.reasoning_effort,
                 self.stream_tx.clone(),
+                pending_acp,
             )
             .is_err()
             {
@@ -2612,9 +2632,10 @@ pub(crate) fn merge_live_trajectory(
     merged
 }
 
-/// Merge live subagent activity over a fresh file projection, keyed by
-/// (batch run id, task index) — the same identity `record_subagent_activity`
-/// deduplicates on.
+/// Merge live subagent activity over a fresh file projection. Hydrated rows do
+/// not retain the runtime batch identity, so prefer the durable child run id
+/// when both sides have one and fall back to (batch run id, task index) only
+/// for purely live rows.
 pub(crate) fn merge_live_subagents(
     fresh: Vec<SubagentActivityInfo>,
     live: &[SubagentActivityInfo],
@@ -2622,7 +2643,16 @@ pub(crate) fn merge_live_subagents(
     let mut merged = fresh;
     for activity in live {
         let covered = merged.iter().any(|entry| {
-            entry.batch_run_id == activity.batch_run_id && entry.task_index == activity.task_index
+            match (
+                entry.journal_run_id.as_deref(),
+                activity.journal_run_id.as_deref(),
+            ) {
+                (Some(entry_run_id), Some(activity_run_id)) => entry_run_id == activity_run_id,
+                _ => {
+                    entry.batch_run_id == activity.batch_run_id
+                        && entry.task_index == activity.task_index
+                }
+            }
         });
         if !covered {
             merged.push(activity.clone());
@@ -3190,7 +3220,43 @@ impl AppState {
     /// Applies one of the selected external agent's settings.
     pub(crate) fn set_acp_config_option(&mut self, config_id: String, value: String) {
         let Some((runtime, session_id)) = self.active_session_runtime() else {
-            self.session_status = Some("Open a session before changing agent settings".into());
+            // No session yet (New task): remember the choice, show it
+            // optimistically via the launch-time cache, and apply it to the
+            // next runtime before its first turn. Without this the picker
+            // silently keeps the agent's default (e.g. DeepSeek) no matter
+            // what the user clicks.
+            let Some(agent_id) = threadlane_session::acp_agent_id(&self.selected_model)
+                .map(str::to_string)
+            else {
+                self.session_status =
+                    Some("Open a session before changing agent settings".into());
+                return;
+            };
+            // Refuse values the agent does not offer when the cache knows
+            // them; an unknown cache (empty) still stores optimistically.
+            let cached = crate::model_catalog::cached_acp_config_options(&agent_id);
+            if !cached.is_empty() {
+                let known = cached
+                    .iter()
+                    .find(|option| option.id == config_id)
+                    .is_some_and(|option| option.has_choice(&value));
+                if !known {
+                    self.session_status =
+                        Some(format!("This agent does not offer '{value}'"));
+                    return;
+                }
+            }
+            self.pending_acp_config
+                .entry(agent_id)
+                .or_default()
+                .insert(config_id, value);
+            if self
+                .session_status
+                .as_deref()
+                .is_some_and(|status| status == "Open a session before changing agent settings")
+            {
+                self.session_status = None;
+            }
             return;
         };
         // A refusal here *is* worth surfacing: the user picked something and
@@ -3198,12 +3264,35 @@ impl AppState {
         if let Err(error) = crate::services::chat::set_acp_config_option(
             runtime,
             session_id,
-            config_id,
-            value,
+            config_id.clone(),
+            value.clone(),
             self.stream_tx.clone(),
         ) {
             self.session_status = Some(error);
+            return;
         }
+        // A live session now owns the setting; drop any New-task pending for
+        // the same agent so a later draft does not re-apply a stale choice.
+        if let Some(agent_id) = threadlane_session::acp_agent_id(&self.selected_model) {
+            if let Some(pending) = self.pending_acp_config.get_mut(agent_id) {
+                pending.remove(&config_id);
+                if pending.is_empty() {
+                    self.pending_acp_config.remove(agent_id);
+                }
+            }
+        }
+    }
+
+    /// Takes pending ACP `config_id -> value` selections for `agent_id`,
+    /// clearing them so they apply exactly once to the next runtime.
+    pub(crate) fn take_pending_acp_config(
+        &mut self,
+        agent_id: &str,
+    ) -> Vec<(String, String)> {
+        self.pending_acp_config
+            .remove(agent_id)
+            .map(|map| map.into_iter().collect())
+            .unwrap_or_default()
     }
 
     /// The active session's runtime, creating it if this is its first use.
@@ -3226,6 +3315,8 @@ impl AppState {
     /// not connected yet, so the picker offers the agent's models before the
     /// first spawn. An engine that connected and found nothing stays empty:
     /// only "never asked" falls back, never "asked and empty".
+    /// Pending New-task selections override the cached current value so the
+    /// picker and status bar show what will run, not the agent default.
     pub(crate) fn active_acp_config_options(&self) -> Vec<AcpConfigOption> {
         if !threadlane_session::is_acp_model(&self.selected_model) {
             return Vec::new();
@@ -3236,9 +3327,16 @@ impl AppState {
         {
             return options.clone();
         }
-        threadlane_session::acp_agent_id(&self.selected_model)
+        let agent_id = threadlane_session::acp_agent_id(&self.selected_model);
+        let cached = agent_id
             .map(crate::model_catalog::cached_acp_config_options)
-            .unwrap_or_default()
+            .unwrap_or_default();
+        match agent_id.and_then(|id| self.pending_acp_config.get(id)) {
+            Some(pending) => {
+                threadlane_session::apply_pending_config_values(cached, pending)
+            }
+            None => cached,
+        }
     }
 
     /// Model the active session's external agent reports it is running.
@@ -3306,11 +3404,16 @@ impl AppState {
                     match adapt_agent_event(event) {
                         ChatAgentUpdate::TextDelta(delta) => {
                             changed = true;
-                            let stream_prefix = format!("streaming-{session_id}-");
                             if let Some(message) =
                                 self.messages_mut().last_mut().filter(|message| {
+                                    let id = message.id.as_str();
+                                    let stream_id = id.strip_prefix("streaming-");
                                     message.role == MessageRole::Assistant
-                                        && message.id.starts_with(&stream_prefix)
+                                        && stream_id.is_some_and(|stream_id| {
+                                            stream_id
+                                                .strip_prefix(session_id.as_str())
+                                                .is_some_and(|suffix| suffix.starts_with('-'))
+                                        })
                                         && message.tool_activities.is_empty()
                                 })
                             {
@@ -3551,6 +3654,7 @@ impl AppState {
                     source,
                     options,
                     error,
+                    failed_config,
                 } => {
                     let Some(runtime) = source.upgrade() else {
                         continue;
@@ -3564,6 +3668,15 @@ impl AppState {
                     }
                     let is_active = self.active_session_matches(&session_id, &runtime.session_file);
                     if let Some(error) = error {
+                        if let (Some((config_id, value)), Some(agent_id)) = (
+                            failed_config,
+                            threadlane_session::acp_agent_id(&self.selected_model),
+                        ) {
+                            self.pending_acp_config
+                                .entry(agent_id.to_string())
+                                .or_default()
+                                .insert(config_id, value);
+                        }
                         if is_active {
                             self.session_status = Some(error);
                             changed = true;
@@ -3795,6 +3908,12 @@ impl AppState {
         }
 
         let runtime = self.ensure_session_runtime(runtime_work_dir.clone(), session_file.clone());
+        // New-task ACP picks have no session to apply to yet; they wait here
+        // and are applied inside the turn task before generation starts, so
+        // the first turn runs the model the picker shows.
+        let pending_acp = threadlane_session::acp_agent_id(&model)
+            .map(|agent_id| self.take_pending_acp_config(agent_id))
+            .unwrap_or_default();
         crate::services::chat::execute_prompt(
             runtime,
             runtime_work_dir,
@@ -3803,6 +3922,7 @@ impl AppState {
             images.clone(),
             self.reasoning_effort,
             self.stream_tx.clone(),
+            pending_acp,
         )?;
         let prompt_detail = if images.is_empty() {
             text.clone()

@@ -4,6 +4,7 @@ pub(crate) mod capabilities;
 pub(crate) mod context_snapshots;
 pub(crate) mod durable;
 pub mod harness;
+pub(crate) mod mailbox;
 pub mod options;
 pub mod runtime;
 pub mod scheduler;

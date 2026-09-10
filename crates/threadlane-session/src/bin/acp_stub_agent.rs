@@ -16,6 +16,9 @@
 //!   which is how a test observes that the notification arrived without
 //!   inspecting global process state.
 //! * `no_images` — declares no image support, and echoes the prompt back.
+//! * `dismissed_question` — emits a `question` tool call that fails unseen
+//!   with a dismissal (as opencode does under ACP), then echoes the prompt
+//!   back so tests can observe per-turn prompt changes.
 //! * `config` — exposes model and effort settings and replies with the values
 //!   currently applied, so a test can prove a setting crossed the wire.
 //! * `queued` — pauses selected prompts and reports session/prompt counters.
@@ -195,6 +198,62 @@ fn handle_prompt(
             }
         }
         "no_images" => {
+            let text = prompt_text(message);
+            notify_update(serde_json::json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": format!("echo:{text}") },
+            }));
+            reply(id, serde_json::json!({ "stopReason": "end_turn" }));
+        }
+        // Mirrors opencode's `question` tool under ACP: its interactive
+        // prompt has no client binding, so it never emits
+        // `session/request_permission` and fails unseen with a dismissal.
+        "dismissed_question" => {
+            notify_update(serde_json::json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call_q",
+                "title": "question",
+                "kind": "other",
+                "rawInput": {},
+            }));
+            notify_update(serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_q",
+                "status": "in_progress",
+                "title": "question",
+                "rawInput": {
+                    "questions": [{
+                        "question": "What should we build?",
+                        "header": "Focus",
+                        "options": [
+                            {"label": "Explore", "description": "Look around."},
+                            {"label": "Build", "description": "Start fresh."},
+                        ],
+                    }],
+                },
+            }));
+            notify_update(serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_q",
+                "status": "failed",
+                "title": "question",
+                "rawInput": {
+                    "questions": [{
+                        "question": "What should we build?",
+                        "header": "Focus",
+                        "options": [
+                            {"label": "Explore", "description": "Look around."},
+                            {"label": "Build", "description": "Start fresh."},
+                        ],
+                    }],
+                },
+                "content": [{
+                    "type": "content",
+                    "content": { "type": "text", "text": "The user dismissed this question" },
+                }],
+            }));
+            // Echo the received prompt so the test can prove the reminder
+            // note rode along on the following turn.
             let text = prompt_text(message);
             notify_update(serde_json::json!({
                 "sessionUpdate": "agent_message_chunk",

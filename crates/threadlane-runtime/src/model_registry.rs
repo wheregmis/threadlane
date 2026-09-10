@@ -249,6 +249,19 @@ mod tests {
     }
 
     #[test]
+    fn off_only_efforts_yield_off() {
+        let info = ModelInfo {
+            id: "test/no-reason".into(),
+            label: "No Reason".into(),
+            provider: None,
+            context_window: None,
+            supported_efforts: vec!["off".into()],
+            default_effort: None,
+        };
+        assert_eq!(info.efforts(), vec![ReasoningEffort::Off]);
+    }
+
+    #[test]
     fn file_models_parse_list_and_wrapped_shapes() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("models.json");

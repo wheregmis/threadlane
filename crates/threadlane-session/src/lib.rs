@@ -10,6 +10,7 @@ pub(crate) mod computer_stream;
 pub mod config;
 pub mod context;
 pub mod controller;
+pub mod credentials;
 pub mod error;
 pub mod extension_broker;
 pub mod orchestrator;
@@ -36,17 +37,19 @@ pub use controller::{ExecutionMode, SessionController, SessionStatus};
 
 // ── Re-exports ───────────────────────────────────────────────────────
 pub use acp::{
-    config_option_for, AcpAgentCapabilities, AcpAgentConfig, AcpAgentRecord, AcpAgentStatus,
-    AcpAuthMethod, AcpConfigOption, AcpConfigOptionChoice, AcpConnection, AcpContentBlock,
-    AcpInitializeResult, AcpManager, AcpPreloadedModels, AcpScope, AcpSession,
-    AcpSessionNotification, AcpSessionUpdate, AcpSettings, AcpToolCall, AcpToolCallStatus,
-    AcpToolKind, ACP_CONFIG_CATEGORY_EFFORT, ACP_CONFIG_CATEGORY_MODE, ACP_CONFIG_CATEGORY_MODEL,
+    apply_pending_config_values, config_option_for, AcpAgentCapabilities, AcpAgentConfig,
+    AcpAgentRecord, AcpAgentStatus, AcpAuthMethod, AcpConfigOption, AcpConfigOptionChoice,
+    AcpConnection, AcpContentBlock, AcpInitializeResult, AcpManager, AcpPreloadedModels, AcpScope,
+    AcpSession, AcpSessionNotification, AcpSessionUpdate, AcpSettings, AcpToolCall,
+    AcpToolCallStatus, AcpToolKind, ACP_CONFIG_CATEGORY_EFFORT, ACP_CONFIG_CATEGORY_MODE,
+    ACP_CONFIG_CATEGORY_MODEL,
 };
 pub use acp_bridge::{acp_agent_id, acp_model_id, is_acp_model};
 pub use acp_runtime::AcpEngine;
 pub use browser::{ActTarget, BrowserBridge, BrowserCommand, BrowserRequest};
 pub use commands::{available_slash_commands, SlashCommandInfo};
 pub use config::CodingAgentConfig;
+pub use credentials::provider_credentials;
 pub use permission::{PermissionDecision, PermissionHandle};
 pub use policy::ToolPolicy;
 pub use project_registry::{

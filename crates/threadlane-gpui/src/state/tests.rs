@@ -267,6 +267,30 @@ fn model_picker_preserves_current_selection_while_runtime_is_busy() {
 }
 
 #[test]
+fn new_task_acp_pick_is_remembered_until_first_turn() {
+    // New task has no session/runtime, so the picker cannot talk to an
+    // agent yet. The choice must wait as pending instead of failing with
+    // "Open a session..." and leaving the default (DeepSeek) selected.
+    let mut state = AppState::load_from_registry(Vec::new());
+    state.active_work_dir = Some(PathBuf::from("/project"));
+    state.active_session_id = None;
+    state.is_new_task = true;
+    state.selected_model = "acp/opencode2".into();
+
+    state.set_acp_config_option("model".into(), "muse".into());
+
+    assert_eq!(
+        state.pending_acp_config.get("opencode2").and_then(|m| m.get("model")).map(String::as_str),
+        Some("muse")
+    );
+    assert!(state.session_status.is_none());
+    // Cleared exactly once when the first turn takes it.
+    let taken = state.take_pending_acp_config("opencode2");
+    assert_eq!(taken, vec![("model".to_string(), "muse".to_string())]);
+    assert!(!state.pending_acp_config.contains_key("opencode2"));
+}
+
+#[test]
 fn model_picker_ignores_acp_replies_from_replaced_or_inactive_runtimes() {
     let temp = tempfile::tempdir().unwrap();
     let file_a = temp.path().join("a/session.jsonl");

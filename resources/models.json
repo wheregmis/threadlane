@@ -1,18 +1,25 @@
 {
   "models": [
     {
-      "id": "antigravity/gemini-3.7-flash",
-      "label": "Gemini 3.7 Flash",
-      "provider": "antigravity",
-      "context_window": 1000000,
-      "supported_efforts": ["low", "medium", "high", "xhigh"]
-    },
-    {
       "id": "opencode-go/minimax-m2.7",
       "label": "MiniMax M2.7",
       "provider": "opencode",
       "context_window": 128000,
       "supported_efforts": ["low", "medium", "high"]
+    },
+    {
+      "id": "gpt-4o",
+      "label": "GPT-4o",
+      "provider": "openai",
+      "context_window": 128000,
+      "supported_efforts": ["off"]
+    },
+    {
+      "id": "gpt-4o-mini",
+      "label": "GPT-4o Mini",
+      "provider": "openai",
+      "context_window": 128000,
+      "supported_efforts": ["off"]
     }
   ]
 }

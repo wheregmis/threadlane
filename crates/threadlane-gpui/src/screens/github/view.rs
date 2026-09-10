@@ -76,9 +76,9 @@ fn github_server_query(query: &str) -> Option<&str> {
 fn github_empty_message(tab: GitHubTab, state: GitHubStateFilter, query: &str) -> String {
     let items = tab.label().to_lowercase();
     if github_server_query(query).is_some() {
-        format!("No matching {items}. Try another search or state filter.")
+        format!("No matching {items} in the attached repository. Try another search or state filter.")
     } else {
-        format!("No {} {items}.", state.value())
+        format!("No {} {items} in the attached repository.", state.value())
     }
 }
 
@@ -627,6 +627,16 @@ impl GitHubView {
         self.scope.projects(&self.attached_projects(cx))
     }
 
+    pub(crate) fn open_linked_task(&mut self, work_dir: PathBuf, number: u64, cx: &mut Context<Self>) {
+        self.tab = GitHubTab::Issues;
+        self.project_work_dir = Some(work_dir.clone());
+        self.scope = GitHubScope::Project(work_dir.clone());
+        self.scope_initialized = true;
+        self.reset_list_state(cx);
+        self.selected_issue = Some(GitHubItemKey { project: work_dir, number });
+        self.fetch_list(cx);
+    }
+
     fn select_scope(&mut self, scope: GitHubScope, cx: &mut Context<Self>) {
         if self.scope_initialized && self.scope == scope {
             return;
@@ -636,7 +646,6 @@ impl GitHubView {
         self.reset_list_state(cx);
         self.fetch_list(cx);
     }
-
     fn reset_list_state(&mut self, cx: &mut Context<Self>) {
         self.repository = None;
         self.issues.clear();
@@ -2191,7 +2200,7 @@ impl GitHubView {
     fn render_list(&mut self, _window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().colors;
         if self.scope_targets(cx).is_empty() {
-            return self.render_empty("Attach a project to browse GitHub.", cx);
+            return self.render_no_project(cx);
         }
         let row_count = match self.tab {
             GitHubTab::Issues => self.issues.len(),
@@ -2319,6 +2328,7 @@ impl GitHubView {
     fn render_error(&self, id: &'static str, error: &str, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().colors;
         let details = error.to_owned();
+        let model = self.model.clone();
         div()
             .debug_selector(move || format!("github-{id}-error"))
             .w_full()
@@ -2362,6 +2372,18 @@ impl GitHubView {
                             .on_click(move |_, _, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(details.clone()));
                             }),
+                    )
+                    .child(
+                        Button::new(format!("github-{id}-settings"))
+                            .label("Open repository settings")
+                            .ghost()
+                            .small()
+                            .on_click(move |_, _, cx| {
+                                model.update(cx, |state, cx| {
+                                    controller::dispatch(state, AppAction::OpenSettings);
+                                    cx.notify();
+                                });
+                            }),
                     ),
             )
             .into_any_element()
@@ -2381,6 +2403,63 @@ impl GitHubView {
             .text_color(theme.muted_foreground)
             .children(self.list_loading.then(|| Spinner::new().small()))
             .child(message.to_owned())
+            .into_any_element()
+    }
+
+    fn render_no_project(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().colors;
+        let model = self.model.clone();
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .px_6()
+            .text_sm()
+            .text_color(theme.muted_foreground)
+            .child("No project or repository is attached")
+            .child(
+                div()
+                    .text_xs()
+                    .text_center()
+                    .child("Attach a project to load its GitHub issues and pull requests."),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(
+                        Button::new("github-attach-project")
+                            .label("Attach project")
+                            .small()
+                            .on_click(move |_, _, cx| {
+                                let model = model.clone();
+                                cx.spawn(async move |cx| {
+                                    let Some(folder) = rfd::AsyncFileDialog::new().pick_folder().await else {
+                                        return;
+                                    };
+                                    let _ = model.update(cx, |state, cx| {
+                                        controller::dispatch(state, AppAction::AttachProject(folder.path().to_path_buf()));
+                                        cx.notify();
+                                    });
+                                }).detach();
+                            }),
+                    )
+                    .child(
+                        Button::new("github-open-settings")
+                            .label("Configure GitHub")
+                            .ghost()
+                            .small()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.model.update(cx, |state, cx| {
+                                    controller::dispatch(state, AppAction::OpenSettings);
+                                    cx.notify();
+                                });
+                            })),
+                    ),
+            )
             .into_any_element()
     }
 

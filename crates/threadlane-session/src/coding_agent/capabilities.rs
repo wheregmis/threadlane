@@ -3,6 +3,7 @@ use super::broker::{
 };
 use super::cancellation::AgentRunTask;
 use super::context_snapshots::{ContextSnapshotToolExecutor, MAX_SUBAGENT_CONTEXT_REFS};
+use super::mailbox::{HubToolExecutor, ReviveHook};
 use super::scheduler::AgentWorkScheduler;
 use super::subagents::{AgentRunner, MAX_SUBAGENT_TASKS};
 use crate::agents::{discover_agents, AgentScope};
@@ -31,7 +32,11 @@ use tokio::sync::broadcast;
 const SUBAGENT_TOOL_NAME: &str = "subagent";
 const MANAGE_SUBAGENT_BRANCH_TOOL_NAME: &str = "manage_subagent_branch";
 const CREATE_DRAFT_PR_TOOL_NAME: &str = "create_draft_pull_request";
-pub(crate) const PREWALK_HANDOFF_TOOL_NAME: &str = "complete_prewalk";
+// HUB_TOOL_NAME / MESSAGE_PEER_TOOL_NAME live in `super::mailbox` (single
+// channel shared by parent `hub` and child `message_peer`).
+// NOTE: oh-my-pi parity removed the explicit `complete_prewalk` handoff tool.
+// The handoff is automatic at the first qualifying edit/write behind an
+// opened `update_plan` todo gate (see `crate::orchestrator`).
 
 // ── Capability implementations ─────────────────────────────────────────
 // Each wraps a subsystem and implements [`crate::capability_registry::Capability`]
@@ -51,15 +56,24 @@ impl Capability for SkillCapability {
 
 pub(crate) struct SubagentCapability {
     pub(crate) agent_runner: AgentRunner,
+    pub(crate) hub: super::mailbox::SubagentHub,
+    pub(crate) session_file: Option<PathBuf>,
+    pub(crate) revive_hook: Option<ReviveHook>,
 }
 impl Capability for SubagentCapability {
     fn id(&self) -> &str {
         "subagent"
     }
     fn tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
-        vec![Arc::new(SubagentToolExecutor::new(
-            self.agent_runner.clone(),
-        ))]
+        let hub_executor = HubToolExecutor::new(self.hub.clone(), self.session_file.clone());
+        let hub_executor = match self.revive_hook.clone() {
+            Some(hook) => hub_executor.with_revive_hook(hook),
+            None => hub_executor,
+        };
+        vec![
+            Arc::new(SubagentToolExecutor::new(self.agent_runner.clone())),
+            Arc::new(hub_executor),
+        ]
     }
 }
 
@@ -290,42 +304,6 @@ impl ToolExecutor for GitHubToolExecutor {
     }
 }
 
-pub(crate) struct PrewalkCapability;
-
-impl Capability for PrewalkCapability {
-    fn id(&self) -> &str {
-        "prewalk"
-    }
-
-    fn tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
-        vec![Arc::new(PrewalkToolExecutor)]
-    }
-}
-
-struct PrewalkToolExecutor;
-
-#[async_trait]
-impl ToolExecutor for PrewalkToolExecutor {
-    fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
-        vec![AgentToolDefinition {
-            name: PREWALK_HANDOFF_TOOL_NAME.into(),
-            description: Some(
-                "Signal that the foundational prewalk change is implemented and verified.".into(),
-            ),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            }),
-            strict: None,
-        }]
-        .into()
-    }
-
-    async fn execute_tool(&self, name: &str, _args: &str) -> Option<Result<String, String>> {
-        (name == PREWALK_HANDOFF_TOOL_NAME).then(|| Ok("Prewalk handoff requested.".into()))
-    }
-}
 impl Capability for PlanCapability {
     fn id(&self) -> &str {
         "plan"
@@ -432,7 +410,7 @@ fn subagent_tool_definition() -> AgentToolDefinition {
     AgentToolDefinition {
         name: SUBAGENT_TOOL_NAME.to_string(),
         description: Some(
-            "Delegate one or more tasks to subagents in parallel or sequentially. Choose the role, task, instructions, and tools; project settings control child model and reasoning.".to_string(),
+            "Delegate one or more tasks to subagents in parallel or sequentially. Choose the role, task, instructions, and tools; project settings control child model and reasoning. Parallel siblings can coordinate live via `message_peer`; persistent background workers (wait=false) are steered via `hub`.".to_string(),
         ),
         parameters: serde_json::json!({
             "type": "object",
@@ -458,7 +436,7 @@ fn subagent_tool_definition() -> AgentToolDefinition {
                             "tools": {
                                 "type": "array",
                                 "items": { "type": "string" },
-                                "description": "Optional whitelist of tool names exposed to this subagent (e.g. ['read_file', 'edit_file_hashline'])."
+                                "description": "Optional whitelist of tool names exposed to this subagent (e.g. ['read_file', 'edit_file_hashline']). `message_peer` is always added for parallel batches."
                             },
                             "model": {
                                 "type": "string",
@@ -477,6 +455,10 @@ fn subagent_tool_definition() -> AgentToolDefinition {
                 "parallel": {
                     "type": "boolean",
                     "description": "Set to true to run tasks concurrently in parallel, false for a sequential chain."
+                },
+                "wait": {
+                    "type": "boolean",
+                    "description": "Set to false to spawn persistent background workers and return immediately with lane IDs; use `hub list`/`hub send`/`hub read` to supervise. Defaults to true (block until all children finish)."
                 }
             },
             "required": ["tasks"]
@@ -498,6 +480,17 @@ mod subagent_definition_tests {
             .unwrap();
         assert!(description.contains("Accepted but ignored"));
         assert!(description.contains("project settings"));
+    }
+
+    #[test]
+    fn subagent_tool_supports_background_wait_flag() {
+        let definition = subagent_tool_definition();
+        assert!(definition.parameters["properties"]["wait"].is_object());
+        assert!(definition
+            .description
+            .as_deref()
+            .unwrap_or_default()
+            .contains("hub"));
     }
 
     #[test]
@@ -609,6 +602,25 @@ impl SubagentToolExecutor {
             .get("parallel")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let wait = parsed
+            .get("wait")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+
+        if !wait {
+            // Persistent background workers: return immediately so the parent
+            // can supervise via `hub list`/`hub send`/`hub read`. Completion
+            // lands in the shared completed-lane sink and commits on a later
+            // turn; failures are observed via `hub read`, not here.
+            let runner = self.runner.clone();
+            let count = tasks.len();
+            tokio::spawn(async move {
+                let _ = runner(tasks, parallel, tool_call_id).await;
+            });
+            return Some(Ok(format!(
+                "Spawned {count} background subagent worker(s). Use `hub list` to see lanes, `hub send` to steer live lanes, `hub read` for outputs."
+            )));
+        }
 
         match (self.runner)(tasks, parallel, tool_call_id).await {
             Ok(val) => {
@@ -681,7 +693,7 @@ pub(crate) fn render_agent_catalog(work_dir: &Path) -> String {
     agents.truncate(32);
 
     let mut catalog = String::from(
-        "=== Subagent Task Execution ===\nYou have access to the native `subagent` tool to spin off subagents in parallel or sequentially. You can use preset agent roles or spin dynamic subagents on the fly by providing custom `instructions` (system prompt), a whitelist of `tools`, and an optional `model` override for each task.\n\nPrefer delegating subtasks (research, searching, edits, tests, code reviews) to subagents so work finishes faster in parallel.\n",
+        "=== Subagent Task Execution ===\nYou have access to the native `subagent` tool to spin off subagents in parallel or sequentially. You can use preset agent roles or spin dynamic subagents on the fly by providing custom `instructions` (system prompt), a whitelist of `tools`, and an optional `model` override for each task.\n\nPrefer delegating subtasks (research, searching, edits, tests, code reviews) to subagents so work finishes faster in parallel.\n\nAgent-to-agent messaging: parallel siblings coordinate live via their `message_peer` tool (address by agent role, lane name, or `all`; one call both sends and drains the inbox). Pass `wait=false` to spawn persistent background workers and supervise them with `hub list` (roster), `hub send` (steer a live lane), `hub read` (latest output + recent activity), `hub revive` (restart a settled lane on its history), `hub kill` (stop a live lane), and `hub wait` (block until lanes settle).\n",
     );
     if !agents.is_empty() {
         catalog.push_str("\nAvailable Preset Agent Roles:\n");

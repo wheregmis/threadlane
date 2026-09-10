@@ -62,6 +62,38 @@ pub struct AcpEngine {
     global_dir: Option<PathBuf>,
     work_dir: PathBuf,
     active: Option<ActiveSession>,
+    /// Whether this agent's `question` tool has dismissed unseen in the
+    /// current conversation.
+    ///
+    /// Some agents (notably opencode under ACP) implement `question` with an
+    /// interactive prompt that has no client binding: it never emits
+    /// `session/request_permission`, so nothing is shown and the tool fails
+    /// immediately. Once seen, every later turn in this conversation carries
+    /// [`QUESTION_TOOL_UNAVAILABLE_NOTE`] so the model asks in plain text
+    /// instead of failing the same way again.
+    question_tool_unavailable: bool,
+}
+
+/// Appended to an ACP prompt once [`AcpEngine::question_tool_unavailable`]
+/// is set. Short by design: it rides along every later turn of the session.
+const QUESTION_TOOL_UNAVAILABLE_NOTE: &str =
+    "[Client note: the `question` tool cannot display questions to the user in \
+     this client — its prompts are dismissed unseen. Ask any clarifying \
+     questions in plain text and wait for the user's reply instead of calling it.]";
+
+/// Whether a journaled ACP tool activity is a question prompt that was
+/// dismissed without reaching the user.
+///
+/// Matches the rewritten guidance text (the bridge replaces the agent's
+/// "dismissed" wording before journaling), so detection works on both the
+/// live turn outcome and reloaded transcripts.
+fn is_unseen_question_dismissal_activity(tool: &AcpTurnToolActivity) -> bool {
+    tool.name.eq_ignore_ascii_case("question")
+        && tool.result.as_ref().is_some_and(|result| {
+            result.is_error
+                && (result.content.contains("cannot display questions")
+                    || result.content.contains("dismissed this question"))
+        })
 }
 
 struct ActiveSession {
@@ -132,6 +164,7 @@ impl AcpEngine {
             global_dir,
             work_dir,
             active: None,
+            question_tool_unavailable: false,
         }
     }
 
@@ -189,6 +222,16 @@ impl AcpEngine {
             .expect("ensure_session leaves a live session on success");
         let session = active.session.clone();
         let session_id = session.session_id().to_string();
+        // Once this conversation has shown the `question` tool dismisses
+        // unseen, say so on every later turn: without the reminder the model
+        // keeps calling it and the user keeps seeing nothing.
+        let prompt_owned;
+        let prompt = if self.question_tool_unavailable {
+            prompt_owned = format!("{prompt}\n\n{QUESTION_TOOL_UNAVAILABLE_NOTE}");
+            prompt_owned.as_str()
+        } else {
+            prompt
+        };
         let blocks = prompt_blocks(
             prompt,
             images,
@@ -258,6 +301,11 @@ impl AcpEngine {
                 &mut plan,
             );
         }
+        // Remember an unseen question dismissal for later turns (the bridge
+        // rewrites the wording before journaling, so match that text).
+        if tools.iter().any(is_unseen_question_dismissal_activity) {
+            self.question_tool_unavailable = true;
+        }
         guard.completed = true;
 
         match outcome {
@@ -325,7 +373,6 @@ impl AcpEngine {
         // Switching agents ends the previous conversation; leaving the old
         // subprocess running would leak it for the life of the app.
         self.shutdown().await;
-
         let (updates_tx, updates_rx) = mpsc::unbounded_channel();
         let (permission_turn, permission_rx) = watch::channel(PermissionTurn::default());
         let handler = AcpWorkspaceClient::new(self.work_dir.clone())
@@ -438,6 +485,9 @@ impl AcpEngine {
 
     /// Ends the conversation and stops the agent subprocess.
     pub async fn shutdown(&mut self) {
+        // A new conversation may run an agent whose `question` tool works, so
+        // the unavailability learned above must not leak across sessions.
+        self.question_tool_unavailable = false;
         if let Some(active) = self.active.take() {
             active.session.shutdown().await;
         }

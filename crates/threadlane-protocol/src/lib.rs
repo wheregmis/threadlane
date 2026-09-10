@@ -71,6 +71,12 @@ pub trait ProviderPort: Send + Sync {
     ) -> Result<DeferredResponse, String>;
     async fn cancel_deferred(&self, model: &str, handle_id: &str) -> Result<(), String>;
     fn provider_kind(&self, model: &str) -> &'static str;
+    /// Rotate the OpenAI-branch credential for subsequent requests. Used
+    /// when the session model changes providers mid-task (slash `/model`,
+    /// prewalk handoffs); the shared cell inside `ProviderClient` makes the
+    /// rotation visible to in-flight turn loops. Default no-op so test
+    /// doubles and non-OpenAI clients compile unchanged.
+    fn refresh_openai_credentials(&self, _api_key: String, _account_id: Option<String>) {}
 }
 
 /// Transport-agnostic daemon schemas (issue #79, Phase 1).

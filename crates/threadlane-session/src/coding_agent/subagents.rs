@@ -133,6 +133,10 @@ pub(crate) struct SubagentRunContext {
     pub(crate) parent_leaf_id: Option<String>,
     pub(crate) session_file: Option<PathBuf>,
     pub(crate) completed_lanes: Arc<std::sync::Mutex<Vec<CompletedSubagentLane>>>,
+    /// Live agent-to-agent mailbox shared by sibling lanes and the parent
+    /// `hub` tool. Inbox keys are agent role names (stable, known upfront)
+    /// plus resolved lane names.
+    pub(crate) hub: super::mailbox::SubagentHub,
     #[cfg(test)]
     pub(crate) scheduler_observer: Option<AgentWorkObserver>,
     #[cfg(test)]
@@ -373,6 +377,20 @@ pub(crate) async fn run_subagents_with_context(
     let lane_key = tool_call_id
         .map(|id| format!("tool-{id}"))
         .unwrap_or_else(|| "explicit".into());
+    // Sibling agent roles for `message_peer` validation + child prompts.
+    // Deduplicated, stable order; includes every batch member so late
+    // starters validate even before peers register with the hub.
+    let sibling_names: Vec<String> = {
+        let mut seen = std::collections::HashSet::new();
+        let mut names = Vec::new();
+        for task in &tasks {
+            if seen.insert(task.agent.clone()) {
+                names.push(task.agent.clone());
+            }
+        }
+        names
+    };
+    let enable_peer_messaging = parallel && tasks.len() > 1;
     let run_one = |task_index: usize, task: AgentRunTask| {
         let candidate = candidates
             .iter()
@@ -384,7 +402,7 @@ pub(crate) async fn run_subagents_with_context(
             None => {
                 let sys_prompt = task.instructions.clone().unwrap_or_else(|| {
                     format!(
-                        "You are a specialized subagent acting as {}. Complete only the assigned task and report results clearly to the parent agent.",
+                        "You are a specialized subagent acting as {}. Complete strictly the assigned task without unrequested changes, tangents, or conversational filler. Report exact findings, changed files, and validation results directly.",
                         task.agent
                     )
                 });
@@ -413,6 +431,8 @@ pub(crate) async fn run_subagents_with_context(
         let lane_task = task.task.clone();
         let lane_agent = task.agent.clone();
         let lane_key = lane_key.clone();
+        let sibling_names = sibling_names.clone();
+        let hub_for_outcome = context.hub.clone();
         async move {
             let parent_leaf_id = context.parent_leaf_id.clone();
             let lane_hint = format!(
@@ -532,6 +552,22 @@ pub(crate) async fn run_subagents_with_context(
                         model: resolved_model.clone(),
                         isolation,
                     });
+                    // Register the live lane so `hub list` and peer
+                    // addressing resolve by lane name or agent role.
+                    context.hub.register(
+                        identity.lane_name.clone(),
+                        identity.run_id.clone(),
+                        lane_agent.clone(),
+                        lane_task.clone(),
+                        resolved_model.clone(),
+                    );
+                    let peer_info = if enable_peer_messaging {
+                        Some((sibling_names.clone(), lane_agent.clone()))
+                    } else {
+                        None
+                    };
+                    let hub_for_settle = context.hub.clone();
+                    let settle_lane = identity.lane_name.clone();
                     let result = match workspace {
                         Ok(workspace) => {
                             let parent_work_dir = context.work_dir.clone();
@@ -550,10 +586,12 @@ pub(crate) async fn run_subagents_with_context(
                                     identity.clone(),
                                     accepted,
                                     Vec::new(),
+                                    peer_info,
                                 ),
                             )
                             .await
                             .unwrap_or_else(|_| Err("Subagent timed out".to_string()));
+                            hub_for_settle.mark_settled(&settle_lane, false);
                             if let Some((work_dir, branch)) = workspace {
                                 let note = match threadlane_git::remove_worktree(
                                     &parent_work_dir,
@@ -610,6 +648,17 @@ pub(crate) async fn run_subagents_with_context(
                 succeeded,
                 error,
             });
+            // Record the terminal outcome for `hub list`/`hub wait`. A lane
+            // killed via `hub kill` keeps its `killed` outcome instead of
+            // being relabeled by the natural completion path.
+            if hub_for_outcome.is_killed(&identity.lane_name, &lane_agent) {
+                hub_for_outcome.set_outcome(&identity.lane_name, "killed");
+            } else {
+                hub_for_outcome.set_outcome(
+                    &identity.lane_name,
+                    if succeeded { "completed" } else { "failed" },
+                );
+            }
             let lane = CompletedSubagentLane {
                 lane_name: identity.lane_name,
                 run_id: identity.run_id,
@@ -671,6 +720,172 @@ pub(crate) async fn run_subagents_with_context(
     let results = results.into_iter().collect::<Result<Vec<_>, String>>()?;
     let (tool_results, lanes): (Vec<_>, Vec<_>) = results.into_iter().unzip();
     aggregate_subagent_results(tasks, tool_results, lanes)
+}
+
+/// Follow-up request for reviving a settled lane on its existing history.
+pub(crate) struct ReviveLaneRequest {
+    pub(crate) lane_name: String,
+    pub(crate) agent: String,
+    pub(crate) task: String,
+    pub(crate) model: String,
+    pub(crate) message: String,
+}
+
+/// Revive a settled lane (`hub revive` parity with oh-my-pi's parked-agent
+/// revive): open a follow-up operation on the SAME lane so history stays
+/// continuous, then run it as a background worker.
+///
+/// Queued inbox notes (e.g. from `hub send` to the settled lane) are drained
+/// up front and folded into the follow-up prompt. The revived run executes
+/// in the parent workdir without worktree isolation; completion commits
+/// through the shared completed-lane sink on a later parent turn.
+pub(crate) async fn revive_subagent_lane(
+    req: ReviveLaneRequest,
+    context: SubagentRunContext,
+) -> Result<String, String> {
+    let session_file = context
+        .session_file
+        .clone()
+        .ok_or_else(|| "revive requires session persistence".to_string())?;
+    // Fold queued inbox notes into the follow-up prompt so a `hub send`
+    // issued while the lane was settled is not lost.
+    let queued = super::mailbox::drain_lane_inbox(&context.hub, &req.lane_name, &req.agent);
+    let mut prompt = req.message.clone();
+    if !queued.is_empty() {
+        let notes = queued
+            .iter()
+            .map(|message| format!("[queued from {}] {}", message.from, message.body))
+            .collect::<Vec<_>>()
+            .join("\n");
+        prompt.push_str(&format!("\n\nQueued notes from the parent/siblings:\n{notes}"));
+    }
+    let (identity, accepted) = {
+        let mut journal = CodingSessionHarness::open(&session_file)?;
+        journal.resume_subagent_lane(&req.lane_name, &prompt)?
+    };
+    context.hub.register(
+        identity.lane_name.clone(),
+        identity.run_id.clone(),
+        req.agent.clone(),
+        req.task.clone(),
+        req.model.clone(),
+    );
+    let ui_run_id = NEXT_SUBAGENT_UI_RUN_ID.fetch_add(1, Ordering::Relaxed);
+    let _ = context.parent_event_tx.send(AgentEvent::SubagentStarted {
+        run_id: ui_run_id,
+        task_index: 0,
+        journal_run_id: identity.run_id.clone(),
+        lane: identity.lane_name.clone(),
+        agent: req.agent.clone(),
+        task: req.task.clone(),
+        model: req.model.clone(),
+        isolation: None,
+    });
+    let candidates = discover_agents(&context.work_dir, AgentScope::Both).agents;
+    let config = candidates
+        .into_iter()
+        .find(|candidate| candidate.name == req.agent)
+        .unwrap_or_else(|| AgentDefinition {
+            name: req.agent.clone(),
+            description: format!("Revived subagent for {}", req.agent),
+            tools: None,
+            model: None,
+            system_prompt: format!(
+                "You are a specialized subagent acting as {}. Continue the assigned task from the lane history and report results clearly to the parent agent.",
+                req.agent
+            ),
+            source: crate::agents::AgentSource::Project,
+            file_path: context.work_dir.clone(),
+        });
+    let permit = context
+        .semaphore
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| "Subagent concurrency limiter closed".to_string())?;
+    let ReviveLaneRequest {
+        lane_name,
+        agent: lane_agent,
+        task: lane_task,
+        model: resolved_model,
+        ..
+    } = req;
+    let hub = context.hub.clone();
+    let event_tx = context.parent_event_tx.clone();
+    let completed_lanes = context.completed_lanes.clone();
+    let settle_run_id = identity.run_id.clone();
+    let settle_lane = identity.lane_name.clone();
+    tokio::spawn(async move {
+        let _permit = permit;
+        let child_context = context;
+        let result = timeout(
+            SUBAGENT_TIMEOUT,
+            run_subagent_task(
+                config,
+                prompt,
+                child_context,
+                ui_run_id,
+                0,
+                identity,
+                Some(accepted),
+                Vec::new(),
+                None,
+            ),
+        )
+        .await
+        .unwrap_or_else(|_| Err("Subagent timed out".to_string()));
+        let (succeeded, error) = match &result {
+            Ok(result) if result.error.is_none() => (true, None),
+            Ok(result) => (false, result.error.clone()),
+            Err(error) => (false, Some(error.clone())),
+        };
+        log::info!(
+            "revived subagent finished lane={} journal_run_id={} succeeded={succeeded}",
+            settle_lane,
+            settle_run_id
+        );
+        let _ = event_tx.send(AgentEvent::SubagentFinished {
+            run_id: ui_run_id,
+            task_index: 0,
+            journal_run_id: settle_run_id.clone(),
+            succeeded,
+            error: error.clone(),
+        });
+        if hub.is_killed(&settle_lane, &lane_agent) {
+            hub.set_outcome(&settle_lane, "killed");
+        } else {
+            hub.set_outcome(
+                &settle_lane,
+                if succeeded { "completed" } else { "failed" },
+            );
+        }
+        hub.mark_settled(&settle_lane, false);
+        let lane = CompletedSubagentLane {
+            lane_name: settle_lane,
+            run_id: settle_run_id,
+            task: lane_task,
+            agent: lane_agent,
+            model: resolved_model,
+            status: if succeeded {
+                SubagentLaneStatus::Completed
+            } else {
+                SubagentLaneStatus::Failed
+            },
+            messages: result
+                .as_ref()
+                .map(|result| result.messages.clone())
+                .unwrap_or_default(),
+            error: result
+                .as_ref()
+                .ok()
+                .and_then(|result| result.error.clone())
+                .or_else(|| result.as_ref().err().cloned()),
+        };
+        let _ = accept_completed_subagent_lanes(&completed_lanes, vec![lane]);
+    });
+    Ok(format!(
+        "Revived lane {lane_name} with a follow-up turn. Use `hub wait` to block until it settles and `hub read {lane_name}` for output."
+    ))
 }
 
 fn configure_subagent_tools(config: &mut AgentDefinition) -> ToolPolicy {
@@ -771,6 +986,8 @@ pub(crate) async fn run_subagent_task(
     identity: SubagentLaneIdentity,
     accepted: Option<AcceptedRun>,
     resume_messages: Vec<AgentMessage>,
+    // (sibling agent roles, own agent role) when peer messaging applies.
+    peer_info: Option<(Vec<String>, String)>,
 ) -> Result<SubagentResult, String> {
     #[cfg(test)]
     if let Some((_, run)) = &context.child_run_override {
@@ -805,13 +1022,54 @@ pub(crate) async fn run_subagent_task(
     if let Some(tools) = config.tools.clone() {
         agent.set_allowed_tool_names(Some(tools.into_iter().collect()));
     }
-    let system_prompt = format!(
-        "{}
-
-You are an isolated subagent working in {}. Complete only the assigned task and return a concise final report to your parent agent. If you change files, commit them before finishing so the parent can integrate your branch.",
-        config.system_prompt,
-        context.work_dir.display(),
-    );
+    // Live peer channel (oh-my-pi IRC parity). Always registered when the
+    // batch supplies peer info; a whitelist (if any) is extended so the
+    // tool is not filtered out of the child schema. Full-access children
+    // keep `allowed=None` so later-registered tools stay visible.
+    if let Some((ref siblings, ref own_agent)) = peer_info {
+        let peer_executor = Arc::new(super::mailbox::MessagePeerToolExecutor::new(
+            context.hub.clone(),
+            lane_name.clone(),
+            own_agent.clone(),
+            siblings.clone(),
+        ));
+        if config.tools.is_some() {
+            let mut allowed: std::collections::HashSet<String> = agent
+                .configured_tool_definitions()
+                .into_iter()
+                .map(|tool| tool.name)
+                .collect();
+            allowed.insert(super::mailbox::MESSAGE_PEER_TOOL_NAME.to_string());
+            agent.set_allowed_tool_names(Some(allowed));
+        }
+        let _ = agent.register_tool_executor(peer_executor);
+    }
+    let system_prompt = if let Some((ref siblings, _)) = peer_info {
+        let peers: Vec<String> = siblings
+            .iter()
+            .filter(|sibling| *sibling != &config.name)
+            .cloned()
+            .collect();
+        let peer_line = if peers.is_empty() {
+            "No sibling subagents in this batch.".to_string()
+        } else {
+            format!(
+                "Sibling subagents in this parallel batch: {}. Use `message_peer` (to = role, lane, or `all`) to coordinate shared files, interfaces, or findings; one call both sends and drains your inbox. Check your inbox before finalizing shared work.",
+                peers.join(", ")
+            )
+        };
+        format!(
+            "{}\n\nYou are an isolated subagent working in {}. Complete strictly the assigned task without unrequested changes, tangents, or conversational filler. Return a concise, direct report to your parent agent detailing exact actions and verification evidence. {peer_line} The parent may also steer you via `hub send`; treat drained inbox messages as instructions for your next steps. If you change files, commit them before finishing so the parent can integrate your branch.",
+            config.system_prompt,
+            context.work_dir.display(),
+        )
+    } else {
+        format!(
+            "{}\n\nYou are an isolated subagent working in {}. Complete strictly the assigned task without unrequested changes, tangents, or conversational filler. Return a concise, direct report to your parent agent detailing exact actions and verification evidence. If you change files, commit them before finishing so the parent can integrate your branch.",
+            config.system_prompt,
+            context.work_dir.display(),
+        )
+    };
     agent.set_system_prompt(system_prompt).await;
     let is_recovery = !resume_messages.is_empty();
     if is_recovery {
@@ -988,18 +1246,73 @@ You are an isolated subagent working in {}. Complete only the assigned task and 
         subagent_harness
             .validate_accepted_run(accepted_run)
             .map_err(|error| format!("Invalid subagent accepted run token: {error}"))?;
-        agent
-            .run_accepted(
+        // `hub kill` parity with oh-my-pi's Agent Hub kill: race the turn
+        // loop against the hub kill flag so shutdown lands at the next await
+        // point instead of waiting out the whole run. Dropping the
+        // `run_accepted` future cancels the in-flight provider stream; the
+        // partial transcript below is still committed through the normal
+        // completed-lane path with a killed error.
+        let killed = tokio::select! {
+            _ = agent.run_accepted(
                 &accepted_run.run_id,
                 &accepted_run.lane,
                 accepted_run.accepted_through_seq,
-            )
-            .await;
+            ) => false,
+            _ = context.hub.wait_killed(&lane_name, &config.name) => true,
+        };
+        if killed {
+            checkpoint_task.abort();
+            let state = agent.get_state().await;
+            let thinking: Vec<AgentMessage> = state
+                .messages
+                .iter()
+                .filter(|message| matches!(message, AgentMessage::Custom { custom_type, .. } if custom_type == "thinking"))
+                .cloned()
+                .collect();
+            let error = format!("Subagent '{}' killed via hub.", config.name);
+            return Ok(SubagentResult {
+                output: error.clone(),
+                thinking,
+                error: Some(error),
+                messages: state
+                    .messages
+                    .into_iter()
+                    .filter(|message| !matches!(message, AgentMessage::System { .. }))
+                    .collect(),
+            });
+        }
     } else {
         agent.steer(AgentMessage::user(prompt_text.to_string(), Vec::new()));
         agent.run_steer().await;
     }
     while agent_work.run_executor(&mut agent, None).await {}
+
+    // Inbox follow-up loop (parent `hub send` / late sibling messages).
+    // Bounded to 3 extra turns so a chatty peer cannot loop the child.
+    // A `hub kill` landing mid-loop stops further follow-ups.
+    if peer_info.is_some() {
+        let own_agent = peer_info.as_ref().map(|(_, agent)| agent.clone()).unwrap_or_default();
+        for _ in 0..3 {
+            if context.hub.is_killed(&lane_name, &own_agent) {
+                break;
+            }
+            let pending = super::mailbox::drain_lane_inbox(&context.hub, &lane_name, &own_agent);
+            if pending.is_empty() {
+                break;
+            }
+            let body = pending
+                .iter()
+                .map(|message| format!("[inbox from {}] {}", message.from, message.body))
+                .collect::<Vec<_>>()
+                .join("\n");
+            agent.steer(AgentMessage::user(
+                format!("Live messages for you (from parent hub / sibling peers). Incorporate them into your next steps, then continue your assigned task:\n{body}"),
+                Vec::new(),
+            ));
+            agent.run_steer().await;
+            while agent_work.run_executor(&mut agent, None).await {}
+        }
+    }
 
     let mut checkpoint_cursor = checkpoint_task
         .await
@@ -1149,6 +1462,7 @@ mod result_tests {
             parent_leaf_id: None,
             session_file: Some(session_file),
             completed_lanes: Arc::default(),
+            hub: crate::coding_agent::mailbox::SubagentHub::new(),
             scheduler_observer: Some(Arc::new(std::sync::Mutex::new(Vec::new()))),
             child_work_observer: observer,
             child_tool_observer: None,

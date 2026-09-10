@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModelProvider {
     OpenAi,
@@ -89,7 +91,9 @@ pub(crate) fn available_models_for_project(
     );
     merge_registry_models(&mut models, project_root);
     merge_discovered_opencode_models(&mut models);
+    merge_discovered_openai_models(&mut models);
     append_acp_models(&mut models, project_root);
+    retain_available_antigravity_models(&mut models, project_root);
     models
 }
 
@@ -185,6 +189,234 @@ fn merge_discovered_opencode_models(models: &mut Vec<ModelOption>) {
             models.push(option);
         }
     }
+}
+
+/// Live `GET /v1/models` results, refreshed in the background by
+/// [`refresh_openai_models`]. Merged additively like the Zen list: unknown
+/// ids appear with generated labels, curated seeds are never relabeled, and
+/// nothing is ever removed (the seeds are the offline guarantee).
+static DISCOVERED_OPENAI: std::sync::OnceLock<
+    std::sync::Mutex<(std::time::Instant, Vec<ModelOption>)>,
+> = std::sync::OnceLock::new();
+
+/// Pulls the live OpenAI model list and caches it for the picker. Skips the
+/// network without credentials or while the cache is fresh; failures keep
+/// the previous cache, and the next trigger retries once the TTL lapses.
+pub async fn refresh_openai_models() {
+    if !credentials_allow(ModelProvider::OpenAi) {
+        return;
+    }
+    let fresh = DISCOVERED_OPENAI
+        .get()
+        .and_then(|cache| cache.lock().ok())
+        .is_some_and(|guard| guard.0.elapsed() < std::time::Duration::from_secs(5 * 60));
+    if fresh {
+        return;
+    }
+    // Same precedence as session credential resolution: stored API key,
+    // ChatGPT login, environment. A Codex-subscription token 401s on
+    // `/v1/models` and yields the static fallback, which merges as a no-op —
+    // subscription models arrive via the ChatGPT backend below instead.
+    let (api_key, account_id) = crate::state::provider_credentials("gpt-4o");
+    if api_key.trim().is_empty() {
+        return;
+    }
+    let mut discovered: Vec<ModelOption> =
+        threadlane_provider::openai::fetch_available_models(&api_key, account_id.as_deref())
+            .await
+            .into_iter()
+            .map(|bare_id| ModelOption {
+                id: bare_id.clone(),
+                label: pretty_bare_label(&bare_id),
+                provider: ModelProvider::OpenAi,
+            })
+            .collect();
+    // ChatGPT subscriptions never see `/v1/models`; their inventory lives on
+    // the ChatGPT backend and includes models (e.g. newer GPT generations)
+    // the static seeds predate.
+    for bare_id in threadlane_provider::openai::fetch_subscription_models().await {
+        if !discovered.iter().any(|model| model.id == bare_id) {
+            discovered.push(ModelOption {
+                id: bare_id.clone(),
+                label: pretty_bare_label(&bare_id),
+                provider: ModelProvider::OpenAi,
+            });
+        }
+    }
+    discovered.sort_by(|a, b| a.id.cmp(&b.id));
+    if let Some(cache) = DISCOVERED_OPENAI
+        .get_or_init(|| std::sync::Mutex::new((std::time::Instant::now(), Vec::new())))
+        .lock()
+        .ok()
+    {
+        let mut guard = cache;
+        guard.0 = std::time::Instant::now();
+        guard.1 = discovered;
+    }
+}
+
+/// Refreshes the live OpenAI list, then rebuilds the picker's model list.
+pub async fn refresh_openai_models_and_update(
+    model: gpui::Entity<crate::state::AppState>,
+    cx: &mut gpui::AsyncApp,
+) {
+    refresh_openai_models().await;
+    let _ = cx.update(|cx| {
+        model.update(cx, |state, cx| {
+            state.refresh_available_models();
+            cx.notify();
+        })
+    });
+}
+
+fn merge_discovered_openai_models(models: &mut Vec<ModelOption>) {
+    if !credentials_allow(ModelProvider::OpenAi) {
+        return;
+    }
+    let discovered = DISCOVERED_OPENAI
+        .get()
+        .and_then(|cache| cache.lock().ok())
+        .map(|guard| guard.1.clone())
+        .unwrap_or_default();
+    for option in discovered {
+        if !models.iter().any(|model| model.id == option.id) {
+            models.push(option);
+        }
+    }
+}
+
+/// Live Antigravity runtime ids from `fetchAvailableModels`, refreshed in
+/// the background by [`refresh_antigravity_models`]. `None` means no refresh
+/// has ever succeeded: the static catalog stays authoritative rather than
+/// wiping the picker on a failed fetch.
+static DISCOVERED_ANTIGRAVITY: std::sync::OnceLock<
+    std::sync::Mutex<(std::time::Instant, Option<HashSet<String>>)>,
+> = std::sync::OnceLock::new();
+
+/// Pulls the live Antigravity inventory for this account and caches the
+/// runtime ids. Skips the network without stored credentials or while the
+/// cache is fresh; an empty result keeps the previous success, and the next
+/// trigger retries once the TTL lapses.
+pub async fn refresh_antigravity_models() {
+    if threadlane_provider::antigravity_auth::load_antigravity_credentials().is_none() {
+        return;
+    }
+    let fresh = DISCOVERED_ANTIGRAVITY
+        .get()
+        .and_then(|cache| cache.lock().ok())
+        .is_some_and(|guard| guard.0.elapsed() < std::time::Duration::from_secs(5 * 60));
+    if fresh {
+        return;
+    }
+    let live = threadlane_provider::antigravity::fetch_available_models().await;
+    if live.is_empty() {
+        return;
+    }
+    let ids = live.into_iter().map(|model| model.id).collect();
+    if let Some(cache) = DISCOVERED_ANTIGRAVITY
+        .get_or_init(|| std::sync::Mutex::new((std::time::Instant::now(), None)))
+        .lock()
+        .ok()
+    {
+        let mut guard = cache;
+        guard.0 = std::time::Instant::now();
+        guard.1 = Some(ids);
+    }
+}
+
+/// Refreshes the live Antigravity inventory, then rebuilds the picker's
+/// model list.
+pub async fn refresh_antigravity_models_and_update(
+    model: gpui::Entity<crate::state::AppState>,
+    cx: &mut gpui::AsyncApp,
+) {
+    refresh_antigravity_models().await;
+    let _ = cx.update(|cx| {
+        model.update(cx, |state, cx| {
+            state.refresh_available_models();
+            cx.notify();
+        })
+    });
+}
+
+/// Drops static Antigravity options whose runtime mapping no live refresh
+/// has confirmed. A catalog entry survives when any of its supported
+/// efforts resolves to a runtime id the backend advertises (e.g.
+/// `gemini-3.7-flash` via `-tiered`); entries for retired models disappear
+/// instead of failing at request time with 404/429.
+/// True when any of the model's supported efforts resolves to a runtime id
+/// the backend advertises. Pure so the availability rule is pinned without
+/// network access or global-cache seeding.
+fn antigravity_entry_available(
+    model_id: &str,
+    efforts: &[threadlane_runtime::ReasoningEffort],
+    available: &HashSet<String>,
+) -> bool {
+    efforts.iter().any(|effort| {
+        available.contains(
+            &threadlane_provider::antigravity::runtime_model_for(
+                model_id,
+                &effort.label().to_ascii_lowercase(),
+            ),
+        )
+    })
+}
+
+fn retain_available_antigravity_models(
+    models: &mut Vec<ModelOption>,
+    project_root: Option<&std::path::Path>,
+) {
+    let available = live_antigravity_runtime_ids();
+    if available.is_empty() {
+        return;
+    }
+    models.retain(|model| {
+        if model.provider != ModelProvider::Acp
+            && threadlane_provider::router::is_antigravity_model(&model.id)
+        {
+            let efforts =
+                threadlane_runtime::model_registry::supported_efforts_for(&model.id, project_root);
+            antigravity_entry_available(&model.id, &efforts, &available)
+        } else {
+            true
+        }
+    });
+    synthesize_live_antigravity_models(models, &available);
+}
+
+fn live_antigravity_runtime_ids() -> HashSet<String> {
+    DISCOVERED_ANTIGRAVITY
+        .get()
+        .and_then(|cache| cache.lock().ok())
+        .and_then(|guard| guard.1.clone())
+        .unwrap_or_default()
+}
+
+/// Adds picker entries for live generations with no static catalog row.
+/// Newer flash generations expose only a `-tiered` router model (verified
+/// live: no suffixed variants for 3.7/3.8); the logical id drops the suffix
+/// and the runtime map routes every effort back to it. Static and registry
+/// rows always win — this only fills gaps, never relabels.
+fn synthesize_live_antigravity_models(models: &mut Vec<ModelOption>, available: &HashSet<String>) {
+    let mut synthesized: Vec<ModelOption> = available
+        .iter()
+        .filter_map(|runtime_id| {
+            let base = runtime_id
+                .strip_suffix("-tiered")
+                .filter(|base| base.starts_with("gemini-"))?;
+            let logical_id = format!("antigravity/{base}");
+            if models.iter().any(|model| model.id == logical_id) {
+                return None;
+            }
+            Some(ModelOption {
+                id: logical_id,
+                label: pretty_bare_label(base),
+                provider: ModelProvider::Antigravity,
+            })
+        })
+        .collect();
+    synthesized.sort_by(|a, b| a.id.cmp(&b.id));
+    models.extend(synthesized);
 }
 
 /// Launch-time snapshot of one external agent's settings, read without
@@ -369,6 +601,26 @@ pub(crate) fn efforts_for_model(
     threadlane_runtime::model_registry::supported_efforts_for(model_id, project_root)
 }
 
+/// Whether the reasoning-effort control applies to a model. ACP agents run
+/// their own models (the native picker never reaches them), and registry
+/// entries declaring only `off` have no thinking to tune — both hide the
+/// control instead of offering dead options. Unknown models stay permissive
+/// so new providers work before their registry entry lands.
+pub(crate) fn supports_reasoning(
+    model_id: &str,
+    project_root: Option<&std::path::Path>,
+) -> bool {
+    // An unset model inherits its effort, so the control stays visible.
+    if model_id.trim().is_empty() {
+        return true;
+    }
+    if model_id.starts_with("acp/") {
+        return false;
+    }
+    threadlane_runtime::model_registry::supported_efforts_for(model_id, project_root)
+        != vec![threadlane_runtime::ReasoningEffort::Off]
+}
+
 fn models_for_credentials(
     has_openai: bool,
     has_antigravity: bool,
@@ -496,6 +748,155 @@ mod tests {
     #[test]
     fn no_credentials_produce_no_provider_models() {
         assert!(models_for_credentials(false, false, false).is_empty());
+    }
+
+    #[test]
+    fn reasoning_support_hides_acp_and_off_only_models() {
+        // ACP agents run their own models; the native picker never reaches them.
+        assert!(!supports_reasoning("acp/claude", None));
+        // Unset inherits, unknown stays permissive.
+        assert!(supports_reasoning("", None));
+        assert!(supports_reasoning("some-future/model", None));
+        // Bundled registry data: non-reasoning vs reasoning models.
+        assert!(!supports_reasoning("gpt-4o", None));
+        assert!(!supports_reasoning("gpt-4o-mini", None));
+        assert!(supports_reasoning("gpt-5.5", None));
+        assert!(supports_reasoning("antigravity/gemini-3.7-flash", None));
+    }
+
+    #[test]
+    fn antigravity_availability_follows_live_runtime_ids() {
+        use threadlane_runtime::ReasoningEffort;
+        let available: HashSet<String> =
+            ["gemini-3.7-flash-tiered".to_string()].into_iter().collect();
+        // 3.7-flash resolves to -tiered at every effort.
+        assert!(antigravity_entry_available(
+            "antigravity/gemini-3.7-flash",
+            &[ReasoningEffort::Low, ReasoningEffort::Medium],
+            &available,
+        ));
+        // 3.6-flash medium/low/high exist only as suffixed ids.
+        assert!(!antigravity_entry_available(
+            "antigravity/gemini-3.6-flash",
+            &[ReasoningEffort::Medium],
+            &available,
+        ));
+        assert!(antigravity_entry_available(
+            "antigravity/gemini-3.6-flash",
+            &[ReasoningEffort::Medium],
+            &["gemini-3.6-flash-medium".to_string()].into_iter().collect(),
+        ));
+    }
+
+    /// Seeds the process-global Antigravity cache, restoring it afterwards
+    /// so parallel tests never observe the fixture.
+    fn with_antigravity_cache(stub: Option<HashSet<String>>, run: impl FnOnce()) {
+        let saved = DISCOVERED_ANTIGRAVITY
+            .get_or_init(|| std::sync::Mutex::new((std::time::Instant::now(), None)))
+            .lock()
+            .ok()
+            .map(|guard| (guard.0, guard.1.clone()));
+        if let Some(cache) = DISCOVERED_ANTIGRAVITY.get().and_then(|cache| cache.lock().ok()) {
+            let mut guard = cache;
+            guard.0 = std::time::Instant::now();
+            guard.1 = stub;
+        }
+        run();
+        if let (Some(saved), Some(cache)) = (
+            saved,
+            DISCOVERED_ANTIGRAVITY.get().and_then(|cache| cache.lock().ok()),
+        ) {
+            let mut guard = cache;
+            guard.0 = saved.0;
+            guard.1 = saved.1;
+        }
+    }
+
+    #[test]
+    fn retired_antigravity_models_drop_out_once_confirmed() {
+        with_antigravity_cache(
+            Some(["gemini-3.7-flash-tiered".to_string()].into_iter().collect()),
+            || {
+                let mut models = vec![
+                    ModelOption {
+                        id: "antigravity/gemini-3.7-flash".into(),
+                        label: "Gemini 3.7 Flash".into(),
+                        provider: ModelProvider::Antigravity,
+                    },
+                    ModelOption {
+                        id: "antigravity/gemini-3.6-flash".into(),
+                        label: "Gemini 3.6 Flash".into(),
+                        provider: ModelProvider::Antigravity,
+                    },
+                    ModelOption {
+                        id: "gpt-5.5".into(),
+                        label: "GPT-5.5".into(),
+                        provider: ModelProvider::OpenAi,
+                    },
+                ];
+                retain_available_antigravity_models(&mut models, None);
+                let ids: Vec<_> = models.iter().map(|model| model.id.as_str()).collect();
+                assert!(ids.contains(&"antigravity/gemini-3.7-flash"));
+                assert!(!ids.contains(&"antigravity/gemini-3.6-flash"));
+                assert!(ids.contains(&"gpt-5.5"));
+            },
+        );
+    }
+
+    #[test]
+    fn unconfirmed_antigravity_catalog_stays_intact() {
+        // No successful refresh yet: static list is authoritative.
+        with_antigravity_cache(None, || {
+            let mut models = vec![ModelOption {
+                id: "antigravity/gemini-3.6-flash".into(),
+                label: "Gemini 3.6 Flash".into(),
+                provider: ModelProvider::Antigravity,
+            }];
+            retain_available_antigravity_models(&mut models, None);
+            assert_eq!(models.len(), 1);
+        });
+    }
+
+    #[test]
+    fn live_tiered_generations_synthesize_missing_entries() {
+        with_antigravity_cache(
+            Some(
+                [
+                    "gemini-3.7-flash-tiered".to_string(),
+                    "gemini-3.8-flash-tiered".to_string(),
+                    "gemini-3.6-flash-medium".to_string(),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+            || {
+                let mut models = vec![ModelOption {
+                    id: "antigravity/gemini-3.6-flash".into(),
+                    label: "Gemini 3.6 Flash".into(),
+                    provider: ModelProvider::Antigravity,
+                }];
+                retain_available_antigravity_models(&mut models, None);
+                let ids: Vec<_> = models.iter().map(|model| model.id.as_str()).collect();
+                // Static 3.6 row survives (medium confirmed); 3.8 appears
+                // with a generated label; non-gemini runtime ids are ignored.
+                assert!(ids.contains(&"antigravity/gemini-3.6-flash"));
+                assert!(ids.contains(&"antigravity/gemini-3.8-flash"));
+                let synthesized = models
+                    .iter()
+                    .find(|model| model.id == "antigravity/gemini-3.8-flash")
+                    .unwrap();
+                assert_eq!(synthesized.label, "Gemini 3.8 Flash");
+                // Second pass is idempotent: no duplicate logical rows.
+                retain_available_antigravity_models(&mut models, None);
+                assert_eq!(
+                    models
+                        .iter()
+                        .filter(|model| model.id == "antigravity/gemini-3.8-flash")
+                        .count(),
+                    1
+                );
+            },
+        );
     }
 
     #[test]

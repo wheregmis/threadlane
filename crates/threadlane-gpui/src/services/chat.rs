@@ -42,6 +42,7 @@ pub(crate) fn execute_prompt(
     images: Vec<ImageAttachment>,
     reasoning_effort: ReasoningEffort,
     stream_tx: Sender<ChatStreamEvent>,
+    pending_acp: Vec<(String, String)>,
 ) -> Result<(), String> {
     runtime.begin_generation()?;
     let executor = match executor() {
@@ -62,8 +63,6 @@ pub(crate) fn execute_prompt(
             return;
         };
 
-        let turn_span = tracing::info_span!("chat.turn", session_id = %task_session_id);
-        tracing::info!(parent: &turn_span, "starting chat turn");
         let mut cleanup = RunCleanup {
             runtime: task_runtime.clone(),
             registration_id,
@@ -71,6 +70,41 @@ pub(crate) fn execute_prompt(
             stream_tx: task_stream_tx.clone(),
             error: None,
         };
+
+        // Apply New-task ACP selections before the first turn. A failure must
+        // abort this turn: otherwise the prompt would run under the agent's
+        // default configuration rather than the picker selection.
+        for (config_id, value) in pending_acp {
+            let source = Arc::downgrade(&task_runtime);
+            match task_runtime
+                .set_acp_config_option(&config_id, &value)
+                .await
+            {
+                Ok(options) => {
+                    let _ = task_stream_tx.send(ChatStreamEvent::AcpConfigOptions {
+                        session_id: task_session_id.clone(),
+                        source,
+                        options,
+                        error: None,
+                        failed_config: None,
+                    });
+                }
+                Err(error) => {
+                    cleanup.error = Some(error.clone());
+                    let _ = task_stream_tx.send(ChatStreamEvent::AcpConfigOptions {
+                        session_id: task_session_id.clone(),
+                        source,
+                        options: Vec::new(),
+                        error: Some(error),
+                        failed_config: Some((config_id, value)),
+                    });
+                    return;
+                }
+            }
+        }
+
+        let turn_span = tracing::info_span!("chat.turn", session_id = %task_session_id);
+        tracing::info!(parent: &turn_span, "starting chat turn");
         let git_branch =
             tokio::task::spawn_blocking(move || threadlane_git::current_branch(&work_dir))
                 .await
@@ -160,6 +194,7 @@ pub(crate) fn execute_prompt(
                 source: Arc::downgrade(&task_runtime),
                 options: acp_options,
                 error: None,
+                failed_config: None,
             });
         }
         drop(agent);
@@ -241,6 +276,7 @@ where
             source,
             options,
             error,
+            failed_config: None,
         });
     });
     Ok(())

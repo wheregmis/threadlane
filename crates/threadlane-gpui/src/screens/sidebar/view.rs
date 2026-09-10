@@ -223,6 +223,7 @@ pub struct SidebarView {
     history_fingerprint: u64,
     /// Flattened, sorted rows cached per fingerprint for the virtual list.
     history_cache: Option<(u64, Vec<HistoryRow>)>,
+    attention_filter: Option<SessionAttention>,
     history_list_state: ListState,
     _subscriptions: Vec<Subscription>,
 }
@@ -297,7 +298,9 @@ fn sidebar_fingerprint(state: &AppState, now: u64) -> u64 {
     state.active_session_id.hash(&mut hasher);
     state.workspace_page.hash(&mut hasher);
     state.sidebar_project_filter.hash(&mut hasher);
-    state.search_query.trim().to_lowercase().hash(&mut hasher);
+    for byte in state.search_query.trim().bytes() {
+        hasher.write_u8(byte.to_ascii_lowercase());
+    }
     (now / 60).hash(&mut hasher);
     for project in &state.projects {
         project.name.hash(&mut hasher);
@@ -307,11 +310,11 @@ fn sidebar_fingerprint(state: &AppState, now: u64) -> u64 {
                 .hash(&mut hasher);
         }
     }
-    let mut git_work_dirs: Vec<&std::path::PathBuf> = state.git_statuses.keys().collect();
-    git_work_dirs.sort();
-    for work_dir in git_work_dirs {
+    // Hash-map iteration is stable between notifications unless the map changes;
+    // avoiding temporary sorted key vectors keeps streaming notifications cheap.
+    for (work_dir, status) in &state.git_statuses {
         work_dir.hash(&mut hasher);
-        if let Some(pr) = state.git_statuses[work_dir].pr.as_ref() {
+        if let Some(pr) = status.pr.as_ref() {
             pr.number.hash(&mut hasher);
             pr.state.hash(&mut hasher);
             pr.is_draft.hash(&mut hasher);
@@ -321,9 +324,7 @@ fn sidebar_fingerprint(state: &AppState, now: u64) -> u64 {
             pr.passing_checks.hash(&mut hasher);
         }
     }
-    let mut git_prs: Vec<_> = state.git_prs.iter().collect();
-    git_prs.sort_by(|left, right| left.0.cmp(right.0));
-    for ((work_dir, branch), pr) in git_prs {
+    for ((work_dir, branch), pr) in &state.git_prs {
         work_dir.hash(&mut hasher);
         branch.hash(&mut hasher);
         if let Some(pr) = pr {
@@ -417,6 +418,7 @@ impl SidebarView {
             model,
             search_input,
             history_fingerprint,
+            attention_filter: None,
             history_cache: None,
             history_list_state: ListState::new(0, ListAlignment::Top, px(72.0)),
             _subscriptions: vec![sub1, sub2],
@@ -581,7 +583,7 @@ impl SidebarView {
             .bg(theme.title_bar)
     }
 
-    fn render_history_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_history_header(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
         let state = self.model.read(cx);
         let session_count = state
@@ -595,6 +597,24 @@ impl SidebarView {
             })
             .map(|project| project.sessions.len())
             .sum::<usize>();
+        let mut attention_counts = [0usize; 3];
+        for project in &state.projects {
+            if state
+                .sidebar_project_filter
+                .as_ref()
+                .is_some_and(|selected| &project.work_dir != selected)
+            {
+                continue;
+            }
+            for session in &project.sessions {
+                match state.session_attention(session) {
+                    SessionAttention::NeedsYou => attention_counts[0] += 1,
+                    SessionAttention::Working => attention_counts[1] += 1,
+                    SessionAttention::Ready => attention_counts[2] += 1,
+                    SessionAttention::Idle => {}
+                }
+            }
+        }
 
         div()
             .flex()
@@ -625,6 +645,35 @@ impl SidebarView {
                             .text_color(theme.muted_foreground)
                             .child(session_count.to_string()),
                     ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .children([
+                        (SessionAttention::NeedsYou, attention_counts[0], theme.warning),
+                        (SessionAttention::Working, attention_counts[1], theme.primary),
+                        (SessionAttention::Ready, attention_counts[2], theme.success),
+                    ]
+                    .into_iter()
+                    .map(|(attention, count, color)| {
+                        let selected = self.attention_filter == Some(attention);
+                        Button::new(format!("sidebar-filter-{}", attention.label()))
+                            .label(format!("{} {}", count, attention.label()))
+                            .xsmall()
+                            .ghost()
+                            .selected(selected)
+                            .text_color(color)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.attention_filter = if this.attention_filter == Some(attention) {
+                                    None
+                                } else {
+                                    Some(attention)
+                                };
+                                cx.notify();
+                            }))
+                    })),
             )
     }
 
@@ -1429,7 +1478,11 @@ impl SidebarView {
             {
                 continue;
             }
-            sessions.push((session.clone(), state.session_attention(session)));
+            let attention = state.session_attention(session);
+            if self.attention_filter.is_some_and(|filter| filter != attention) {
+                continue;
+            }
+            sessions.push((session.clone(), attention));
         }
         flatten_history_sessions(sessions, now)
     }
@@ -1480,7 +1533,13 @@ impl SidebarView {
         let query = state.search_query.trim().to_lowercase();
         let now = now_unix_secs();
 
-        let fingerprint = sidebar_fingerprint(state, now);
+        let mut fingerprint = sidebar_fingerprint(state, now);
+        if let Some(filter) = self.attention_filter {
+            use std::hash::{Hash, Hasher};
+            let mut filter_hasher = std::collections::hash_map::DefaultHasher::new();
+            filter.label().hash(&mut filter_hasher);
+            fingerprint ^= filter_hasher.finish();
+        }
         self.history_fingerprint = fingerprint;
         let cache_matches = self
             .history_cache

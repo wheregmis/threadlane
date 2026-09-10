@@ -462,7 +462,7 @@ impl RightPanelView {
         base_input.update(cx, |input, cx| input.focus(window, cx));
     }
 
-    fn open_surface(&mut self, surface: Surface, cx: &mut Context<Self>) {
+    pub(crate) fn open_surface(&mut self, surface: Surface, cx: &mut Context<Self>) {
         if self.active_surface != Some(surface) {
             self.document_title = None;
             self.document_state
@@ -1118,6 +1118,58 @@ impl RightPanelView {
         div().flex_1().min_h_0().child(browser).into_any_element()
     }
 
+    fn render_workspace_context(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().colors;
+        let repository = self
+            .project
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .and_then(|name| name.to_str())
+            .unwrap_or("No repository")
+            .to_owned();
+        let branch = self
+            .git_status
+            .as_ref()
+            .and_then(|status| status.branch.as_deref())
+            .unwrap_or("no branch")
+            .to_owned();
+        let git_state = match self.git_status.as_ref() {
+            Some(status) if status.has_changes => "dirty",
+            Some(_) => "clean",
+            None => "Git not initialized",
+        };
+        let git_color = if git_state == "dirty" {
+            theme.warning
+        } else if git_state == "clean" {
+            theme.success
+        } else {
+            theme.muted_foreground
+        };
+        let file_context = self.document_title.clone().unwrap_or_else(|| "No active file".to_owned());
+        div()
+            .flex_none()
+            .px_3()
+            .py_1p5()
+            .bg(theme.muted.opacity(0.12))
+            .text_xs()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().font_weight(FontWeight::MEDIUM).child(repository))
+                    .child(div().text_color(theme.muted_foreground).child(format!("· {branch}")))
+                    .child(div().text_color(git_color).child(git_state)),
+            )
+            .child(
+                div()
+                    .mt_0p5()
+                    .text_color(theme.muted_foreground)
+                    .truncate()
+                    .child(format!("{} · {}", if self.worktree_unavailable { "worktree unavailable" } else { "active worktree" }, file_context)),
+            )
+    }
+
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
         let active = self.active_surface;
@@ -1162,6 +1214,7 @@ impl RightPanelView {
                             })),
                     ),
             )
+            .child(self.render_workspace_context(cx))
     }
 
     fn render_chooser(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -4211,6 +4264,7 @@ impl RightPanelView {
             .flex_col()
             .items_center()
             .justify_center()
+            .gap_3()
             .child(
                 div()
                     .text_sm()
@@ -4223,6 +4277,17 @@ impl RightPanelView {
                     .text_xs()
                     .text_color(theme.muted_foreground)
                     .child(description.to_string()),
+            )
+            .child(
+                Button::new("right-panel-use-local")
+                    .label("Use project folder")
+                    .small()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.model.update(cx, |state, cx| {
+                            state.set_work_mode(crate::state::WorkMode::Local);
+                            cx.notify();
+                        });
+                    })),
             )
             .into_any_element()
     }
