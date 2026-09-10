@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.1.13](https://github.com/wheregmis/threadlane/compare/v0.1.12...v0.1.13) (2026-09-10)
+
+
+### Features
+
+* add automatic PR review feedback addressing ([0100fa6](https://github.com/wheregmis/threadlane/commit/0100fa68ca6144ba0196847c4d59b42c01358b6a))
+* **gpui:** add OpenCode and Antigravity ACP presets ([2e288e2](https://github.com/wheregmis/threadlane/commit/2e288e21129554eb9e1693537b6dd88515109e98))
+* **gpui:** normalize child process PATH on macOS ([6cf4cbc](https://github.com/wheregmis/threadlane/commit/6cf4cbc0f46df049446aea75e6b99e77ffea1d67))
+
+
+### Bug Fixes
+
+* dispatch PR review feedback to linked sessions ([1432339](https://github.com/wheregmis/threadlane/commit/1432339840ddba5030526ef8d4fbc424676b0685))
+* finish extension runs before ACP follow-ups ([beca9e3](https://github.com/wheregmis/threadlane/commit/beca9e37461e60ee0e42a8f6c39615ceecad7832))
+* **git:** show git action feedback as notifications ([8ee1ce8](https://github.com/wheregmis/threadlane/commit/8ee1ce81ce5f4013976a60cb79f9634deecd88f3))
+* **gpui:** harden PR review automation ([079babe](https://github.com/wheregmis/threadlane/commit/079babe8f2f8d977e5e8d72b848ed7b175db4259))
+* **gpui:** persist PR feedback after dispatch ([5b36deb](https://github.com/wheregmis/threadlane/commit/5b36deb64d1659332188b470e412e5fb1d62512d))
+* **gpui:** preserve system PATH when unset ([1c19c00](https://github.com/wheregmis/threadlane/commit/1c19c00cec1b65cbc1a924505f33e82664700c52))
+* initialize child process PATH ([25045b9](https://github.com/wheregmis/threadlane/commit/25045b957ea00b4db99289448d91d18cd4426813))
+* preserve subagent worktree isolation ([dbb20c3](https://github.com/wheregmis/threadlane/commit/dbb20c37d8b6852a11e988a37e3663747ca72527))
+* route /goal follow-ups through ACP agents ([ab842d9](https://github.com/wheregmis/threadlane/commit/ab842d91efdf6563b6779ed509b96ddb43649292))
+* route goal follow-ups through ACP agents ([1eccf21](https://github.com/wheregmis/threadlane/commit/1eccf21ddd9a2f32d089fe6f49f8357094068868))
+* **sidebar:** show merge icon for merged pull requests ([a1bb64d](https://github.com/wheregmis/threadlane/commit/a1bb64def9d3a8dd38b84e300ce48f0d8e2ed1d2))
+
+
+### Maintenance
+
+* **deps:** bump hotpath from 0.24.0 to 0.25.1 ([e7f1134](https://github.com/wheregmis/threadlane/commit/e7f1134a529682d979dd38f3637b021225c8dc56))
+
 ## [0.1.12](https://github.com/wheregmis/threadlane/compare/v0.1.11...v0.1.12) (2026-09-09)
 
 
