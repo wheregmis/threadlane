@@ -275,6 +275,8 @@ pub enum ChatStreamEvent {
         source: std::sync::Weak<SessionRuntime>,
         options: Vec<AcpConfigOption>,
         error: Option<String>,
+        /// Restores a New-task picker selection when applying it failed.
+        failed_config: Option<(String, String)>,
     },
 }
 

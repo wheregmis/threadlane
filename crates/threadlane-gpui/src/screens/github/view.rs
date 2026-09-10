@@ -627,6 +627,16 @@ impl GitHubView {
         self.scope.projects(&self.attached_projects(cx))
     }
 
+    pub(crate) fn open_linked_task(&mut self, work_dir: PathBuf, number: u64, cx: &mut Context<Self>) {
+        self.tab = GitHubTab::Issues;
+        self.project_work_dir = Some(work_dir.clone());
+        self.scope = GitHubScope::Project(work_dir.clone());
+        self.scope_initialized = true;
+        self.reset_list_state(cx);
+        self.selected_issue = Some(GitHubItemKey { project: work_dir, number });
+        self.fetch_list(cx);
+    }
+
     fn select_scope(&mut self, scope: GitHubScope, cx: &mut Context<Self>) {
         if self.scope_initialized && self.scope == scope {
             return;
@@ -636,7 +646,6 @@ impl GitHubView {
         self.reset_list_state(cx);
         self.fetch_list(cx);
     }
-
     fn reset_list_state(&mut self, cx: &mut Context<Self>) {
         self.repository = None;
         self.issues.clear();

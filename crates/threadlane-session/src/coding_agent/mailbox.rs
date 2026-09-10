@@ -273,22 +273,17 @@ impl SubagentHub {
             .lock()
             .map_err(|_| "Subagent hub is unavailable".to_string())?;
         let targets: Vec<String> = if to == "all" {
-            let mut keys: Vec<String> = inner
-                .inbox
-                .keys()
-                .filter(|key| key.as_str() != from)
-                .cloned()
-                .collect();
-            // Include registered lanes without an inbox yet so a broadcast
-            // at batch start reaches late starters via their agent key.
-            for info in inner.lanes.values() {
-                for key in [&info.lane_name, &info.agent] {
-                    if key != from && !keys.iter().any(|existing| existing == key) {
-                        keys.push(key.clone());
-                    }
-                }
-            }
-            keys
+            // Registered lanes own exactly one inbox, keyed by lane name. Do
+            // not address aliases or arbitrary pending inboxes here: doing so
+            // duplicates sibling delivery and can echo to the sender.
+            inner
+                .lanes
+                .iter()
+                .filter_map(|(lane_name, info)| {
+                    (info.live && lane_name.as_str() != from && info.agent != from)
+                        .then(|| lane_name.clone())
+                })
+                .collect()
         } else if let Some(resolved) = Self::resolve_key_locked(&inner, to) {
             vec![resolved]
         } else {

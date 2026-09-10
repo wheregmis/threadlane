@@ -657,7 +657,7 @@ impl ChatListView {
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (active_title, active_attention, linked_issue) = {
+        let (active_title, active_attention, linked_issue, active_work_dir) = {
             let state = self.model.read(cx);
             let active_session = state
                 .projects
@@ -671,7 +671,8 @@ impl ChatListView {
                 .map(|session| state.session_attention(session))
                 .unwrap_or(SessionAttention::Idle);
             let linked_issue = active_session.and_then(|session| session.github_issue.clone());
-            (title, attention, linked_issue)
+            let work_dir = active_session.map(|session| session.work_dir.clone());
+            (title, attention, linked_issue, work_dir)
         };
         let theme = cx.theme().colors;
         let editor_tab_count = self.editor.read(cx).tab_count();
@@ -791,10 +792,18 @@ impl ChatListView {
                             .ghost()
                             .xsmall()
                             .on_click(move |_, _, cx| {
-                                model.update(cx, |state, cx| {
-                                    controller::dispatch(state, AppAction::OpenGitHub);
-                                    cx.notify();
-                                });
+                                if let Some(work_dir) = active_work_dir.clone() {
+                                    model.update(cx, |state, cx| {
+                                        controller::dispatch(
+                                            state,
+                                            AppAction::OpenGitHubIssue {
+                                                work_dir,
+                                                number: issue.number,
+                                            },
+                                        );
+                                        cx.notify();
+                                    });
+                                }
                             })
                     }))
             )

@@ -78,6 +78,7 @@ pub struct AppState {
     pub(crate) update_status: threadlane_updater::UpdateStatus,
     pub(crate) update_notice_dismissed: bool,
     pub(crate) requested_editor_target: Option<RequestedEditorTarget>,
+    pub(crate) requested_github_issue: Option<(PathBuf, u64)>,
     pub(crate) requested_composer_prompt: Option<String>,
     pub(crate) requested_terminal_command: Option<String>,
     pub(crate) requested_terminal_work_dir: Option<PathBuf>,
@@ -289,6 +290,7 @@ impl AppState {
             update_status: threadlane_updater::UpdateStatus::Idle,
             update_notice_dismissed: false,
             requested_editor_target: None,
+            requested_github_issue: None,
             requested_composer_prompt: None,
             requested_terminal_command: None,
             requested_terminal_work_dir: None,
@@ -510,6 +512,11 @@ impl AppState {
 
     pub(crate) fn open_github(&mut self) {
         self.workspace_page = WorkspacePage::GitHub;
+    }
+
+    pub(crate) fn open_github_issue(&mut self, work_dir: PathBuf, number: u64) {
+        self.workspace_page = WorkspacePage::GitHub;
+        self.requested_github_issue = Some((work_dir, number));
     }
 
     pub(crate) fn close_github(&mut self) {
@@ -3647,6 +3654,7 @@ impl AppState {
                     source,
                     options,
                     error,
+                    failed_config,
                 } => {
                     let Some(runtime) = source.upgrade() else {
                         continue;
@@ -3660,6 +3668,15 @@ impl AppState {
                     }
                     let is_active = self.active_session_matches(&session_id, &runtime.session_file);
                     if let Some(error) = error {
+                        if let (Some((config_id, value)), Some(agent_id)) = (
+                            failed_config,
+                            threadlane_session::acp_agent_id(&self.selected_model),
+                        ) {
+                            self.pending_acp_config
+                                .entry(agent_id.to_string())
+                                .or_default()
+                                .insert(config_id, value);
+                        }
                         if is_active {
                             self.session_status = Some(error);
                             changed = true;

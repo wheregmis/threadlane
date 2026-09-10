@@ -790,11 +790,6 @@ impl WorkspaceView {
                 });
             }
             "ask_agent" => {
-                self.chat_list.update(cx, |chat, cx| {
-                    chat.input_state.update(cx, |input, cx| {
-                        input.set_value("".to_string(), window, cx);
-                    });
-                });
                 self.focus_composer_action(&FocusComposer, window, cx);
             }
             "goal" | "model" | "compact" => {
@@ -1765,6 +1760,9 @@ impl WorkspaceView {
 
 impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some((work_dir, number)) = self.model.update(cx, |state, _cx| state.requested_github_issue.take()) {
+            self.github.update(cx, |github, cx| github.open_linked_task(work_dir, number, cx));
+        }
         let workspace_page = self.model.read(cx).workspace_page;
         let terminal_project = self.model.read(cx).active_work_dir.clone();
         let (terminal_tabs, active_terminal_tab, active_terminal) =
