@@ -1907,6 +1907,7 @@ impl RightPanelView {
             .child(sync_actions);
 
         let pr_card = self.git_status.as_ref().and_then(|s| s.pr.as_ref()).map(|pr| {
+            let comments_pr = pr.clone();
             let pr_url = pr.url.clone();
             let pr_num = pr.number;
             let pr_title = pr.title.clone();
@@ -2074,8 +2075,8 @@ impl RightPanelView {
                         }),
                 )
                 .when(comments_count > 0, |card| {
-                    let comments_pr_num = pr_num;
-                    let comments_pr_title = pr_title.clone();
+                    let comments_pr = comments_pr.clone();
+                    let comments_project = self.project.clone();
                     card.child(
                         div()
                             .flex()
@@ -2116,13 +2117,22 @@ impl RightPanelView {
                                     .xsmall()
                                     .tooltip("Ask AI to address PR comments")
                                     .on_click(cx.listener(move |this, _event, _window, cx| {
-                                        let prompt = format!(
-                                            "Please review and address comments and feedback on PR #{comments_pr_num} ({comments_pr_title})."
-                                        );
-                                        this.model.update(cx, |state, _cx| {
-                                            state.request_composer_prompt(prompt);
+                                        let Some(work_dir) = comments_project.clone() else {
+                                            return;
+                                        };
+                                        this.model.update(cx, |state, cx| {
+                                            match state.address_pr_reviews_manual(
+                                                work_dir,
+                                                comments_pr.head_ref.clone(),
+                                                &comments_pr,
+                                            ) {
+                                                Ok(_) => state.session_status = Some(
+                                                    "Addressing PR review feedback…".into(),
+                                                ),
+                                                Err(error) => state.session_status = Some(error),
+                                            }
+                                            cx.notify();
                                         });
-                                        cx.notify();
                                     })),
                             ),
                     )

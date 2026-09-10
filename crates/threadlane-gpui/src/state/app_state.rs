@@ -1041,21 +1041,15 @@ impl AppState {
             .pr_review_tracking
             .entry(work_dir.clone())
             .or_insert_with(|| crate::services::pr_review::load_pr_review_tracking(&work_dir));
+        let previous_store = store.clone();
 
         let new_items = match crate::services::pr_review::check_and_record_fresh_feedback(
             store,
             &branch,
             &feedback_items,
         ) {
-            crate::services::pr_review::FeedbackSyncResult::BaselineInitialized => {
-                let _ = crate::services::pr_review::save_pr_review_tracking(&work_dir, store);
-                return None;
-            }
             crate::services::pr_review::FeedbackSyncResult::UpToDate => return None,
-            crate::services::pr_review::FeedbackSyncResult::NewFeedback(items) => {
-                let _ = crate::services::pr_review::save_pr_review_tracking(&work_dir, store);
-                items
-            }
+            crate::services::pr_review::FeedbackSyncResult::NewFeedback(items) => items,
         };
 
         let prompt = crate::services::pr_review::build_auto_address_prompt(
@@ -1072,12 +1066,14 @@ impl AppState {
                 .try_queue_follow_up_with_images(prompt.clone(), Vec::new())
                 .is_err()
             {
+                self.pr_review_tracking.insert(work_dir, previous_store);
                 return None;
             }
         } else {
             let model = runtime.model().to_owned();
             let (api_key, _) = provider_credentials(&model);
             if api_key.is_empty() && !threadlane_session::is_acp_model(&model) {
+                self.pr_review_tracking.insert(work_dir, previous_store);
                 return None;
             }
             if crate::services::chat::execute_prompt(
@@ -1090,12 +1086,16 @@ impl AppState {
             )
             .is_err()
             {
+                self.pr_review_tracking.insert(work_dir, previous_store);
                 return None;
             }
             if self.active_session_id.as_deref() == Some(&session_id) {
                 self.is_generating = true;
                 self.session_status = Some("Working…".into());
             }
+        }
+        if let Some(store) = self.pr_review_tracking.get(&work_dir) {
+            let _ = crate::services::pr_review::save_pr_review_tracking(&work_dir, store);
         }
         self.push_optimistic_follow_up(&session_id, prompt.clone(), "pr-review");
         Some(prompt)
@@ -1104,8 +1104,7 @@ impl AppState {
     /// Manually address actionable review feedback for a PR on demand.
     ///
     /// Unlike auto-addressing, this processes all current actionable review comments,
-    /// marks them seen in the persistent tracking store so subsequent auto-polls won't re-run them,
-    /// and returns the generated prompt.
+    /// starts the linked session immediately, and marks feedback seen only after dispatch succeeds.
     pub(crate) fn address_pr_reviews_manual(
         &mut self,
         work_dir: PathBuf,
@@ -1117,20 +1116,38 @@ impl AppState {
             return Err("No actionable review feedback found on this PR.".into());
         }
 
-        let store = self
-            .pr_review_tracking
-            .entry(work_dir.clone())
-            .or_insert_with(|| crate::services::pr_review::load_pr_review_tracking(&work_dir));
-
-        crate::services::pr_review::mark_feedback_seen(store, &branch, &feedback_items);
-        let _ = crate::services::pr_review::save_pr_review_tracking(&work_dir, store);
-
         let prompt = crate::services::pr_review::build_auto_address_prompt(
             pr.number,
             &branch,
             &feedback_items,
         );
 
+        let session = self
+            .projects
+            .iter()
+            .flat_map(|project| project.sessions.iter())
+            .find(|session| {
+                session.work_dir == work_dir && session.git_branch.as_deref() == Some(&branch)
+            })
+            .ok_or_else(|| "No active task is linked to this pull request branch.".to_string())?;
+        let session_work_dir = session.work_dir.clone();
+        let session_id = session.id.clone();
+        let _ = self.select_session(session_work_dir, session_id);
+        let model = self.selected_model.clone();
+        let (api_key, _) = provider_credentials(&model);
+        if api_key.is_empty() && !threadlane_session::is_acp_model(&model) {
+            return Err(format!(
+                "No API key configured for model `{model}`. Open Settings and save the provider credential."
+            ));
+        }
+        self.send_prompt(prompt.clone())?;
+
+        let store = self
+            .pr_review_tracking
+            .entry(work_dir.clone())
+            .or_insert_with(|| crate::services::pr_review::load_pr_review_tracking(&work_dir));
+        crate::services::pr_review::mark_feedback_seen(store, &branch, &feedback_items);
+        let _ = crate::services::pr_review::save_pr_review_tracking(&work_dir, store);
         Ok(prompt)
     }
 

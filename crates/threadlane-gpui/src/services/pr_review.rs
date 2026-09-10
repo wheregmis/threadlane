@@ -171,8 +171,6 @@ pub fn collect_actionable_pr_feedback(pr: &GitHubPrInfo) -> Vec<PrFeedbackItem> 
 /// Outcome of checking fresh feedback against the tracking store.
 #[derive(Debug, PartialEq, Eq)]
 pub enum FeedbackSyncResult {
-    /// Cold-start: baseline was initialized for this branch without triggering runs.
-    BaselineInitialized,
     /// Previously initialized branch, but no new feedback items arrived.
     UpToDate,
     /// New feedback items arrived that need to be addressed.
@@ -181,9 +179,7 @@ pub enum FeedbackSyncResult {
 
 /// Check actionable feedback against the tracking store, updating seen IDs in place.
 ///
-/// If this is the first time the branch is seen (`!initialized_branches.contains(branch)`),
-/// it establishes the baseline by marking all current items as seen and returns `BaselineInitialized`.
-/// On subsequent calls, only unseen items are returned as `NewFeedback`.
+/// Returns every unseen item as `NewFeedback`, including feedback present on the first poll.
 pub fn check_and_record_fresh_feedback(
     store: &mut PrReviewTrackingStore,
     branch: &str,
@@ -191,14 +187,7 @@ pub fn check_and_record_fresh_feedback(
 ) -> FeedbackSyncResult {
     let seen = store.branches.entry(branch.to_owned()).or_default();
 
-    if !store.initialized_branches.contains(branch) {
-        // Cold start: record all existing comments as the baseline
-        for item in items {
-            seen.insert(item.remote_id.clone());
-        }
-        store.initialized_branches.insert(branch.to_owned());
-        return FeedbackSyncResult::BaselineInitialized;
-    }
+    store.initialized_branches.insert(branch.to_owned());
 
     let mut fresh = Vec::new();
     for item in items {
@@ -357,7 +346,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cold_start_baseline_prevents_replay() {
+    fn test_cold_start_addresses_existing_feedback_once() {
         let mut store = PrReviewTrackingStore::default();
         let branch = "feature/test";
         let items = vec![
@@ -379,9 +368,9 @@ mod tests {
             },
         ];
 
-        // First poll: cold start baseline initialization
+        // First poll: existing feedback is actionable when auto-addressing is enabled.
         let result = check_and_record_fresh_feedback(&mut store, branch, &items);
-        assert_eq!(result, FeedbackSyncResult::BaselineInitialized);
+        assert_eq!(result, FeedbackSyncResult::NewFeedback(items.clone()));
         assert!(store.initialized_branches.contains(branch));
         assert_eq!(store.branches[branch].len(), 2);
 

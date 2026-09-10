@@ -2500,43 +2500,9 @@ impl GitHubView {
                 .or_else(|| state.active_work_dir.clone())
                 .unwrap_or_default();
             match state.address_pr_reviews_manual(work_dir, head_ref.clone(), &pr) {
-                Ok(prompt) => {
-                    let target = state
-                        .projects
-                        .iter()
-                        .filter(|project| {
-                            selected_project
-                                .as_ref()
-                                .is_none_or(|selected| &project.work_dir == selected)
-                        })
-                        .find_map(|project| {
-                            linked_pr_session(
-                                &project.sessions,
-                                &head_ref,
-                                state.active_session_id.as_deref(),
-                            )
-                        })
-                        .or_else(|| {
-                            state.projects.iter().find_map(|project| {
-                                linked_pr_session(
-                                    &project.sessions,
-                                    &head_ref,
-                                    state.active_session_id.as_deref(),
-                                )
-                            })
-                        })
-                        .map(|session| (session.work_dir.clone(), session.id.clone()));
-                    if let Some((work_dir, session_id)) = target {
-                        controller::dispatch(
-                            state,
-                            AppAction::SelectSession {
-                                work_dir,
-                                session_id: session_id.clone(),
-                            },
-                        );
-                    }
-                    state.request_composer_prompt(prompt);
+                Ok(_) => {
                     controller::dispatch(state, AppAction::CloseGitHub);
+                    state.session_status = Some("Addressing PR review feedback…".into());
                     cx.notify();
                 }
                 Err(error) => {
