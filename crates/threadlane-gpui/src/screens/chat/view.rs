@@ -2544,6 +2544,11 @@ impl ChatListView {
                                         } else {
                                             IconName::Copy
                                         })
+                                        .accessibility_label(if is_copied {
+                                            "Code copied"
+                                        } else {
+                                            "Copy code"
+                                        })
                                         .xsmall()
                                         .ghost()
                                         .tooltip(if is_copied {
@@ -3301,6 +3306,7 @@ impl ChatListView {
             state.set_value(&value, window, cx);
             let cursor = value.len();
             state.set_selected_range(cursor..cursor, cx);
+            state.focus(window, cx);
         });
         self.selected_slash_index = 0;
         self.slash_scroll_handle.scroll_to_item(0);
@@ -4622,6 +4628,7 @@ impl ChatListView {
                     .child(
                         Button::new(("remove-pasted-image", index))
                             .icon(IconName::Close)
+                            .accessibility_label("Remove image")
                             .xsmall()
                             .ghost()
                             .tooltip("Remove image")
@@ -4901,6 +4908,7 @@ impl ChatListView {
                 .child(
                     Button::new("queue-pending-message")
                         .icon(IconName::Plus)
+                        .accessibility_label("Queue pending message")
                         .xsmall()
                         .secondary()
                         .tooltip("Queue after the current response")
@@ -4914,6 +4922,7 @@ impl ChatListView {
                 .child(
                     Button::new("steer-pending-message")
                         .icon(IconName::ArrowRight)
+                        .accessibility_label("Steer with pending message")
                         .xsmall()
                         .primary()
                         .disabled(!supports_live_steering)
@@ -4928,6 +4937,7 @@ impl ChatListView {
                 .child(
                     Button::new("dismiss-pending-message")
                         .icon(IconName::Undo2)
+                        .accessibility_label("Edit pending message")
                         .xsmall()
                         .ghost()
                         .tooltip("Edit message in the composer")
@@ -5207,6 +5217,7 @@ impl ChatListView {
                     .child(
                         div()
                             .id("slash-command-list")
+                            .role(Role::List)
                             .relative()
                             .mt_1()
                             .track_scroll(&self.slash_scroll_handle)
@@ -5227,12 +5238,16 @@ impl ChatListView {
                             })
                             .children(commands.into_iter().enumerate().map(|(idx, command)| {
                                 let is_active = idx == selected_idx;
+                                let command_label =
+                                    format!("/{}: {}", &command.name, &command.description);
                                 let command_name = command.name.clone();
                                 div()
                                     .id(SharedString::from(format!(
                                         "composer-command-{}",
                                         command.name
                                     )))
+                                    .role(Role::Button)
+                                    .aria_label(command_label)
                                     .h(px(30.0))
                                     .flex()
                                     .items_center()
@@ -5524,6 +5539,7 @@ impl ChatListView {
                         .child(
                             Button::new("dismiss-stashed-draft")
                                 .icon(IconName::Close)
+                                .accessibility_label("Discard stashed draft")
                                 .ghost()
                                 .xsmall()
                                 .tooltip("Discard stash")
@@ -5545,6 +5561,7 @@ impl ChatListView {
             let do_stash_session_id = active_session_id.clone();
             Button::new("stash-prompt-btn")
                 .icon(IconName::Folder)
+                .accessibility_label("Stash draft")
                 .tooltip("Stash draft")
                 .ghost()
                 .small()
@@ -5719,6 +5736,7 @@ impl ChatListView {
                                             .into_any_element(),
                                         Button::new("composer-stop-btn")
                                             .icon(IconName::CircleX)
+                                            .accessibility_label("Stop generation")
                                             .small()
                                             .danger()
                                             .tooltip("Stop generation (Esc)")
@@ -5739,6 +5757,7 @@ impl ChatListView {
                                         .w(px(34.0))
                                         .h(px(34.0))
                                         .icon(IconName::ArrowUp)
+                                        .accessibility_label("Send message")
                                         .tooltip(if needs_provider {
                                             "Connect a model provider in Settings before sending"
                                         } else if has_prompt {
