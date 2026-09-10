@@ -10,6 +10,7 @@ use gpui_component::spinner::Spinner;
 use gpui_component::theme::ActiveTheme;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Icon, IconName, Selectable, Sizable, WindowExt};
+use gpui_kit_assets::IconName as AssetIconName;
 
 use crate::app::{actions::AppAction, controller};
 use crate::state::{AppState, SessionAttention, SessionInfo, TrajectoryEntry};
@@ -761,29 +762,33 @@ impl SidebarView {
             let is_closed = state_upper == "CLOSED";
             let tooltip = pr_status_tooltip(&pr);
 
-            let (pr_bg, pr_fg, pr_label) = if is_merged {
+            let (pr_bg, pr_fg, pr_label, pr_icon) = if is_merged {
                 (
                     theme.success.opacity(0.18),
                     theme.success,
                     format!("#{}", pr.number),
+                    Icon::new(AssetIconName::GitMerge),
                 )
             } else if is_draft {
                 (
                     theme.secondary,
                     theme.muted_foreground,
                     format!("#{}", pr.number),
+                    Icon::default().path("icons/git/compare.svg"),
                 )
             } else if is_closed {
                 (
                     theme.danger.opacity(0.12),
                     theme.danger,
                     format!("#{}", pr.number),
+                    Icon::default().path("icons/git/compare.svg"),
                 )
             } else {
                 (
                     theme.primary.opacity(0.12),
                     theme.primary,
                     format!("#{}", pr.number),
+                    Icon::default().path("icons/git/compare.svg"),
                 )
             };
 
@@ -866,7 +871,7 @@ impl SidebarView {
                         "session-pr-{}-{}",
                         session.id, pr.number
                     )))
-                    .icon(Icon::default().path("icons/git/compare.svg"))
+                    .icon(pr_icon)
                     .label(pr_label)
                     .tooltip(tooltip)
                     .ghost()
