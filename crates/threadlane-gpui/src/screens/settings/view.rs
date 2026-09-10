@@ -946,7 +946,9 @@ impl SettingsView {
             .unwrap_or_else(|| "No active project".to_string());
         let project_count = state.projects.len();
         let needle_enabled = state.needle_enabled;
-        let toggle_view = cx.entity().downgrade();
+        let auto_address_pr_reviews_enabled = state.auto_address_pr_reviews_enabled;
+        let toggle_view_needle = cx.entity().downgrade();
+        let toggle_view_auto_address = cx.entity().downgrade();
         let update_status_label = match &state.update_status {
             UpdateStatus::Checking => "Checking for updates...",
             UpdateStatus::Available(_) => "Update available",
@@ -1151,9 +1153,75 @@ impl SettingsView {
                                 "Enable Needle routing"
                             })
                             .on_click(move |checked, _window, cx| {
-                                let _ = toggle_view.update(cx, |this, cx| {
+                                let _ = toggle_view_needle.update(cx, |this, cx| {
                                     let result = this.model.update(cx, |state, _cx| {
                                         state.set_needle_enabled(*checked)
+                                    });
+                                    if let Err(error) = result {
+                                        this.capability_status = Some(error);
+                                    }
+                                    cx.notify();
+                                });
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.title_bar)
+                    .p_4()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme.foreground)
+                                            .child("Auto-Address PR Reviews"),
+                                    )
+                                    .child(
+                                        Tag::new()
+                                            .child(if auto_address_pr_reviews_enabled { "Enabled" } else { "Disabled" })
+                                            .with_variant(if auto_address_pr_reviews_enabled {
+                                                TagVariant::Success
+                                            } else {
+                                                TagVariant::Secondary
+                                            })
+                                            .small(),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .mt_1()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child("Automatically trigger the agent to address new code review feedback on open pull requests."),
+                            ),
+                    )
+                    .child(
+                        Switch::new("general-auto-address-pr-reviews-switch")
+                            .checked(auto_address_pr_reviews_enabled)
+                            .tooltip(if auto_address_pr_reviews_enabled {
+                                "Disable automatic PR review addressing"
+                            } else {
+                                "Enable automatic PR review addressing"
+                            })
+                            .on_click(move |checked, _window, cx| {
+                                let _ = toggle_view_auto_address.update(cx, |this, cx| {
+                                    let result = this.model.update(cx, |state, _cx| {
+                                        state.set_auto_address_pr_reviews_enabled(*checked)
                                     });
                                     if let Err(error) = result {
                                         this.capability_status = Some(error);

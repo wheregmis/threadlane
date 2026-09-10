@@ -60,6 +60,7 @@ pub struct RightPanelView {
     git_busy: bool,
     git_message_pending: bool,
     pub(crate) git_feedback: Option<String>,
+    pending_git_notifications: Vec<Notification>,
     branch_popover_open: bool,
     branch_filter_input: Entity<InputState>,
     new_branch_dialog_open: bool,
@@ -261,6 +262,7 @@ impl RightPanelView {
             git_busy: false,
             git_message_pending: false,
             git_feedback: None,
+            pending_git_notifications: Vec::new(),
             branch_popover_open: false,
             branch_filter_input,
             new_branch_dialog_open: false,
@@ -642,9 +644,12 @@ impl RightPanelView {
                     Ok(message) => {
                         self.generated_commit_message = Some(message);
                         self.git_feedback = None;
+                        self.pending_git_notifications
+                            .push(Notification::success("Commit message generated."));
                     }
                     Err(error) => {
-                        self.git_feedback = Some(error);
+                        self.git_feedback = Some(error.clone());
+                        self.pending_git_notifications.push(Notification::error(error));
                     }
                 }
             }
@@ -680,23 +685,30 @@ impl RightPanelView {
                         self.switch_dialog_open = false;
                         self.switch_target_branch = None;
                         self.last_fetched_time = Some(std::time::Instant::now());
-                        self.git_feedback = Some(
-                            action_error
-                                .or_else(|| {
-                                    action_message.map(|message| {
-                                        if message.is_empty() {
-                                            "Pull request created successfully.".into()
-                                        } else {
-                                            format!("Pull request created: {message}")
-                                        }
-                                    })
+                        let action_failed = action_error.is_some();
+                        let message = action_error
+                            .or_else(|| {
+                                action_message.map(|message| {
+                                    if message.is_empty() {
+                                        "Pull request created successfully.".into()
+                                    } else {
+                                        format!("Pull request created: {message}")
+                                    }
                                 })
-                                .unwrap_or_else(|| "Git action completed successfully.".into()),
-                        );
+                            })
+                            .unwrap_or_else(|| "Git action completed successfully.".into());
+                        self.git_feedback = Some(message.clone());
+                        self.pending_git_notifications.push(if action_failed {
+                            Notification::error(message)
+                        } else {
+                            Notification::success(message)
+                        });
                     }
                     Err(status_error) => {
                         self.review_error = Some(status_error.clone());
-                        self.git_feedback = Some(action_error.unwrap_or(status_error));
+                        let message = action_error.unwrap_or(status_error);
+                        self.git_feedback = Some(message.clone());
+                        self.pending_git_notifications.push(Notification::error(message));
                     }
                 }
             }
@@ -1899,6 +1911,7 @@ impl RightPanelView {
             .child(sync_actions);
 
         let pr_card = self.git_status.as_ref().and_then(|s| s.pr.as_ref()).map(|pr| {
+            let comments_pr = pr.clone();
             let pr_url = pr.url.clone();
             let pr_num = pr.number;
             let pr_title = pr.title.clone();
@@ -1911,7 +1924,7 @@ impl RightPanelView {
             let failing_checks = pr.failing_checks;
             let pending_checks = pr.pending_checks;
             let total_checks = pr.total_checks;
-            let comments_count = pr.comments_count;
+            let comments_count = crate::services::pr_review::collect_actionable_pr_feedback(pr).len();
 
             let failing_check_names: Vec<String> = pr
                 .checks
@@ -2066,8 +2079,8 @@ impl RightPanelView {
                         }),
                 )
                 .when(comments_count > 0, |card| {
-                    let comments_pr_num = pr_num;
-                    let comments_pr_title = pr_title.clone();
+                    let comments_pr = comments_pr.clone();
+                    let comments_project = self.project.clone();
                     card.child(
                         div()
                             .flex()
@@ -2108,13 +2121,22 @@ impl RightPanelView {
                                     .xsmall()
                                     .tooltip("Ask AI to address PR comments")
                                     .on_click(cx.listener(move |this, _event, _window, cx| {
-                                        let prompt = format!(
-                                            "Please review and address comments and feedback on PR #{comments_pr_num} ({comments_pr_title})."
-                                        );
-                                        this.model.update(cx, |state, _cx| {
-                                            state.request_composer_prompt(prompt);
+                                        let Some(work_dir) = comments_project.clone() else {
+                                            return;
+                                        };
+                                        this.model.update(cx, |state, cx| {
+                                            match state.address_pr_reviews_manual(
+                                                work_dir,
+                                                comments_pr.head_ref.clone(),
+                                                &comments_pr,
+                                            ) {
+                                                Ok(_) => state.session_status = Some(
+                                                    "Addressing PR review feedback…".into(),
+                                                ),
+                                                Err(error) => state.session_status = Some(error),
+                                            }
+                                            cx.notify();
                                         });
-                                        cx.notify();
                                     })),
                             ),
                     )
@@ -2336,16 +2358,6 @@ impl RightPanelView {
                     ),
             )
             .child(Input::new(&self.commit_message_input).disabled(self.git_busy))
-            .children(self.git_feedback.as_ref().map(|feedback| {
-                div()
-                    .rounded_md()
-                    .bg(theme.muted)
-                    .px_2()
-                    .py_1()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(feedback.clone())
-            }))
             .child(
                 div()
                     .flex()
@@ -4199,6 +4211,9 @@ impl RightPanelView {
 impl Render for RightPanelView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_project(cx);
+        for notification in self.pending_git_notifications.drain(..) {
+            window.push_notification(notification, cx);
+        }
         if let Some(message) = self.generated_commit_message.take() {
             self.commit_message_input
                 .update(cx, |input, cx| input.set_value(message, window, cx));
