@@ -108,6 +108,7 @@ pub(crate) fn dispatch(state: &mut AppState, action: AppAction) -> Option<Sessio
         }
         AppAction::OpenFileInEditor(path) => state.request_open_file(path),
         AppAction::RunTerminalCommand(cmd) => state.request_run_terminal_command(cmd),
+        AppAction::OpenTerminalAt(work_dir) => state.request_open_terminal(work_dir),
     }
     None
 }

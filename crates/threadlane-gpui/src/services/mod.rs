@@ -1,9 +1,9 @@
 pub(crate) mod chat;
+pub(crate) mod pr_review;
 pub mod projects;
 pub mod provider_auth;
 pub mod sessions;
 pub mod settings;
 pub(crate) mod subagent_settings;
-pub(crate) mod pr_review;
 pub mod updater;
 pub mod watcher;

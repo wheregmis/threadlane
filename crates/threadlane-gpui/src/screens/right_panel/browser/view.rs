@@ -15,7 +15,7 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{ActiveTheme, IconName, Sizable};
 
-use super::address::{AddressTarget, resolve_address, search_url};
+use super::address::{resolve_address, search_url, AddressTarget};
 
 const DEFAULT_URL: &str = "https://gpui-kit.com";
 
@@ -39,8 +39,7 @@ impl BrowserView {
             .expect("wry child webview");
         let webview = cx.new(|cx| gpui_wry::WebView::new(wry_webview, window, cx));
 
-        let address_input =
-            cx.new(|cx| InputState::new(window, cx).default_value(DEFAULT_URL));
+        let address_input = cx.new(|cx| InputState::new(window, cx).default_value(DEFAULT_URL));
         webview.update(cx, |view, _| view.load_url(DEFAULT_URL));
 
         cx.subscribe(

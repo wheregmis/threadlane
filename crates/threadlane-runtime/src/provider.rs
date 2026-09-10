@@ -936,7 +936,8 @@ mod normalize_tool_arguments_tests {
     }
 
     #[test]
-    fn normalizes_empty_tool_ids_after_explicit_ids() {        let messages = vec![
+    fn normalizes_empty_tool_ids_after_explicit_ids() {
+        let messages = vec![
             AgentMessage::Assistant {
                 content: None,
                 tool_calls: Some(vec![
@@ -1005,10 +1006,7 @@ mod normalize_tool_arguments_tests {
         assert_eq!(content[0]["type"], "text");
         assert_eq!(content[0]["text"], "Screenshot saved.");
         assert_eq!(content[1]["type"], "image_url");
-        assert_eq!(
-            content[1]["image_url"]["url"],
-            "data:image/jpeg;base64,AAA"
-        );
+        assert_eq!(content[1]["image_url"]["url"], "data:image/jpeg;base64,AAA");
 
         let (_, codex) = convert_to_codex_llm(&messages);
         assert_eq!(codex[0]["type"], "function_call_output");

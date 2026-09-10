@@ -125,9 +125,7 @@ pub(super) fn frame_unchanged_since_with_scale(
         ServedFrame {
             hash,
             ts_ms: now_ms(),
-            points_per_pixel: points_per_pixel
-                .or(carried_scale)
-                .unwrap_or(1.0),
+            points_per_pixel: points_per_pixel.or(carried_scale).unwrap_or(1.0),
         },
     );
     None
@@ -308,14 +306,8 @@ mod tests {
 
     #[test]
     fn stream_target_labels() {
-        assert_eq!(
-            super::StreamTarget::Window(42).label(),
-            "window 42"
-        );
-        assert_eq!(
-            super::StreamTarget::Display.label(),
-            "the main display"
-        );
+        assert_eq!(super::StreamTarget::Window(42).label(), "window 42");
+        assert_eq!(super::StreamTarget::Display.label(), "the main display");
     }
 
     #[test]

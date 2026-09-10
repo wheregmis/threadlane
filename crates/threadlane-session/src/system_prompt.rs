@@ -180,7 +180,8 @@ pub(crate) fn build_system_prompt(options: SystemPromptBuildOptions<'_>) -> Stri
                 "To operate the computer outside the embedded browser: list targets with `computer_windows`, capture context with `computer_screenshot` (you receive the image — read positions off it), then act with `computer_act`. Prefer these native tools over shell workarounds (`open`, `osascript`, pasted JS): they keep coordinates, approvals, and verification in one loop. Pass target with a window id to act in the background: coordinates become window-relative and your cursor and focus stay untouched. Omit target only for foreground control with display coordinates. A window-targeted screenshot shows just that window — prefer it over full-display shots before acting, and re-screenshot after any act that changes the UI to verify the effect before continuing. A stale window id or snapshot ref means re-list, never guessing. Chromium/Electron apps may ignore background clicks; say so and ask the user rather than hammering. For anything inside a web page, prefer the embedded browser tools (DOM refs beat pixels). The first screenshot/input asks the user for approval and they can allow always for the project; denied actions must not be retried verbatim. Threadlane's own windows are hidden from you; never try to drive them.",
             );
         }
-        if available_tool_names.contains("update_plan") {            add_tool_guideline(
+        if available_tool_names.contains("update_plan") {
+            add_tool_guideline(
                 "For multi-step work, maintain a concise plan with `update_plan`; keep at most one item in progress and skip plans for simple requests.",
             );
             add_tool_guideline(

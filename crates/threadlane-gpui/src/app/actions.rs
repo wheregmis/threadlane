@@ -63,4 +63,5 @@ pub enum AppAction {
     ToggleReasoningExpanded(String),
     OpenFileInEditor(String),
     RunTerminalCommand(String),
+    OpenTerminalAt(PathBuf),
 }

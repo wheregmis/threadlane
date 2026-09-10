@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use serde_json::{Value};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::definitions::tool_definitions;
@@ -64,7 +64,11 @@ pub(crate) fn execute_tool(name: &str, args_json: &str) -> String {
 }
 
 #[cfg(test)]
-pub(crate) fn execute_tool_in_workspace(name: &str, args_json: &str, workspace_root: &Path) -> String {
+pub(crate) fn execute_tool_in_workspace(
+    name: &str,
+    args_json: &str,
+    workspace_root: &Path,
+) -> String {
     try_execute_tool_in_workspace(name, args_json, workspace_root).unwrap_or_else(|error| error)
 }
 

@@ -1403,8 +1403,14 @@ mod tests {
             "ANTIGRAVITY_RUNTIME_MODEL_MAP_JSON",
             r#"{"new-model": {"ultra": "new-model-ultra", "*": "new-model-default"}}"#,
         );
-        assert_eq!(runtime_model_override("new-model", "ultra"), Some("new-model-ultra".into()));
-        assert_eq!(runtime_model_override("new-model", "low"), Some("new-model-default".into()));
+        assert_eq!(
+            runtime_model_override("new-model", "ultra"),
+            Some("new-model-ultra".into())
+        );
+        assert_eq!(
+            runtime_model_override("new-model", "low"),
+            Some("new-model-default".into())
+        );
         assert_eq!(
             resolve_runtime_model("antigravity/new-model", "ultra"),
             "new-model-ultra"

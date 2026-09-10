@@ -35,7 +35,9 @@ pub const BROWSER_UNAVAILABLE: &str = "The embedded browser is unavailable (macO
 /// A single intent for the panel's browser view.
 #[derive(Debug)]
 pub enum BrowserCommand {
-    Navigate { url: String },
+    Navigate {
+        url: String,
+    },
     Back,
     Reload,
     CurrentUrl,
@@ -46,9 +48,14 @@ pub enum BrowserCommand {
         text: Option<String>,
         key: Option<String>,
     },
-    Evaluate { script: String },
+    Evaluate {
+        script: String,
+    },
     Screenshot,
-    ConsoleLogs { clear: bool, level: String },
+    ConsoleLogs {
+        clear: bool,
+        level: String,
+    },
     Wait {
         selector: Option<String>,
         text: Option<String>,
@@ -116,7 +123,10 @@ impl BrowserBridge {
     }
 
     pub async fn round_trip(&self, command: BrowserCommand) -> Result<String, String> {
-        let tx = self.tx.as_ref().ok_or_else(|| BROWSER_UNAVAILABLE.to_string())?;
+        let tx = self
+            .tx
+            .as_ref()
+            .ok_or_else(|| BROWSER_UNAVAILABLE.to_string())?;
         let (reply_tx, reply_rx) = oneshot::channel();
         tx.send(BrowserRequest {
             command,
@@ -310,9 +320,9 @@ impl ToolExecutor for BrowserToolExecutor {
     async fn execute_tool(&self, name: &str, args: &str) -> Option<Result<String, String>> {
         let command = match name {
             BROWSER_NAVIGATE_TOOL => {
-                let parsed: serde_json::Value = serde_json::from_str(args).map_err(|error| {
-                    format!("Invalid {BROWSER_NAVIGATE_TOOL} arguments: {error}")
-                }).ok()?;
+                let parsed: serde_json::Value = serde_json::from_str(args)
+                    .map_err(|error| format!("Invalid {BROWSER_NAVIGATE_TOOL} arguments: {error}"))
+                    .ok()?;
                 match parsed.get("url").and_then(|value| value.as_str()) {
                     Some(url) if !url.trim().is_empty() => BrowserCommand::Navigate {
                         url: url.trim().to_string(),
@@ -345,7 +355,10 @@ impl ToolExecutor for BrowserToolExecutor {
             BROWSER_CONSOLE_LOGS_TOOL => {
                 let parsed: serde_json::Value =
                     serde_json::from_str(args).unwrap_or_else(|_| serde_json::json!({}));
-                let clear = parsed.get("clear").and_then(|v| v.as_bool()).unwrap_or(true);
+                let clear = parsed
+                    .get("clear")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
                 let level = parsed
                     .get("level")
                     .and_then(|v| v.as_str())
@@ -398,14 +411,18 @@ impl ToolExecutor for BrowserToolExecutor {
                         if let Some(data_url) = parsed.get("data_url").and_then(|v| v.as_str()) {
                             let width = parsed.get("width").and_then(|v| v.as_u64()).unwrap_or(0);
                             let height = parsed.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
-                            let content = if let Some(path) = parsed.get("path").and_then(|v| v.as_str()) {
-                                format!(
-                                    "Browser screenshot captured ({}x{} pixels). Saved to {}.",
-                                    width, height, path
-                                )
-                            } else {
-                                format!("Browser screenshot captured ({}x{} pixels).", width, height)
-                            };
+                            let content =
+                                if let Some(path) = parsed.get("path").and_then(|v| v.as_str()) {
+                                    format!(
+                                        "Browser screenshot captured ({}x{} pixels). Saved to {}.",
+                                        width, height, path
+                                    )
+                                } else {
+                                    format!(
+                                        "Browser screenshot captured ({}x{} pixels).",
+                                        width, height
+                                    )
+                                };
                             return Some(Ok(threadlane_runtime::ToolOutput {
                                 content,
                                 images: vec![threadlane_runtime::ImageAttachment {
@@ -450,9 +467,7 @@ fn parse_act_command(args: &str) -> Result<BrowserCommand, String> {
         (Some(number), None) => ActTarget::Ref(number.min(u32::MAX as u64) as u32),
         (None, Some(selector)) => ActTarget::Selector(selector.to_string()),
         (Some(_), Some(_)) => {
-            return Err(
-                "`browser_act` takes exactly one of ref or selector, not both.".into(),
-            );
+            return Err("`browser_act` takes exactly one of ref or selector, not both.".into());
         }
         (None, None) => {
             return Err(
@@ -512,12 +527,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_tool_is_not_claimed() {
         let executor = BrowserToolExecutor::new(BrowserBridge::unavailable());
-        assert!(
-            executor
-                .execute_tool("read_file", "{}")
-                .await
-                .is_none()
-        );
+        assert!(executor.execute_tool("read_file", "{}").await.is_none());
     }
 
     #[tokio::test]
@@ -535,7 +545,10 @@ mod tests {
             BrowserCommand::Navigate { url } => assert_eq!(url, "example.com"),
             other => panic!("unexpected command: {other:?}"),
         }
-        request.reply.send(Ok("Opened https://example.com".into())).expect("reply");
+        request
+            .reply
+            .send(Ok("Opened https://example.com".into()))
+            .expect("reply");
         let result = task.await.expect("task").expect("handled");
         assert_eq!(result.unwrap(), "Opened https://example.com");
     }
@@ -543,10 +556,7 @@ mod tests {
     #[test]
     fn definitions_cover_all_tools() {
         let definitions = browser_tool_definitions();
-        let names: Vec<_> = definitions
-            .iter()
-            .map(|def| def.name.as_str())
-            .collect();
+        let names: Vec<_> = definitions.iter().map(|def| def.name.as_str()).collect();
         assert_eq!(
             names,
             [
@@ -578,13 +588,19 @@ mod tests {
         let command = parse_act_command(r#"{"action":"type","ref":3,"text":"hi"}"#).unwrap();
         assert!(matches!(
             command,
-            BrowserCommand::Act { target: ActTarget::Ref(3), .. }
+            BrowserCommand::Act {
+                target: ActTarget::Ref(3),
+                ..
+            }
         ));
         let command =
             parse_act_command(r#"{"action":"press","selector":"input","key":"Enter"}"#).unwrap();
         assert!(matches!(
             command,
-            BrowserCommand::Act { target: ActTarget::Selector(_), .. }
+            BrowserCommand::Act {
+                target: ActTarget::Selector(_),
+                ..
+            }
         ));
     }
 
@@ -595,10 +611,14 @@ mod tests {
         let executor = BrowserToolExecutor::new(bridge);
 
         let t1 = tokio::spawn({
-            let executor = BrowserToolExecutor::new(BrowserBridge::new(executor.bridge.tx.clone().unwrap()));
+            let executor =
+                BrowserToolExecutor::new(BrowserBridge::new(executor.bridge.tx.clone().unwrap()));
             async move {
                 executor
-                    .execute_tool(BROWSER_CONSOLE_LOGS_TOOL, r#"{"clear":false,"level":"error"}"#)
+                    .execute_tool(
+                        BROWSER_CONSOLE_LOGS_TOOL,
+                        r#"{"clear":false,"level":"error"}"#,
+                    )
                     .await
             }
         });
@@ -614,16 +634,24 @@ mod tests {
         assert_eq!(t1.await.unwrap().unwrap().unwrap(), "logs");
 
         let t2 = tokio::spawn({
-            let executor = BrowserToolExecutor::new(BrowserBridge::new(executor.bridge.tx.clone().unwrap()));
+            let executor =
+                BrowserToolExecutor::new(BrowserBridge::new(executor.bridge.tx.clone().unwrap()));
             async move {
                 executor
-                    .execute_tool(BROWSER_WAIT_TOOL, r##"{"selector":"#ready","timeout_ms":2000}"##)
+                    .execute_tool(
+                        BROWSER_WAIT_TOOL,
+                        r##"{"selector":"#ready","timeout_ms":2000}"##,
+                    )
                     .await
             }
         });
         let req = rx.recv().await.expect("req");
         match req.command {
-            BrowserCommand::Wait { selector, timeout_ms, .. } => {
+            BrowserCommand::Wait {
+                selector,
+                timeout_ms,
+                ..
+            } => {
                 assert_eq!(selector.as_deref(), Some("#ready"));
                 assert_eq!(timeout_ms, 2000);
             }
@@ -639,17 +667,18 @@ mod tests {
         // the provider payload. The browser tools must stay model-visible.
         let dir = tempfile::tempdir().unwrap();
         let session_file = dir.path().join("session.jsonl");
-        let agent = crate::coding_agent::CodingAgent::new(crate::coding_agent::CodingAgentOptions {
-            api_key: "test-key".into(),
-            account_id: None,
-            model: "gpt-4o".into(),
-            work_dir: dir.path().to_path_buf(),
-            session_file: Some(session_file),
-            system_prompt: Default::default(),
-            agent_config: None,
-            coding_config: None,
-            browser: BrowserBridge::unavailable(),
-        });
+        let agent =
+            crate::coding_agent::CodingAgent::new(crate::coding_agent::CodingAgentOptions {
+                api_key: "test-key".into(),
+                account_id: None,
+                model: "gpt-4o".into(),
+                work_dir: dir.path().to_path_buf(),
+                session_file: Some(session_file),
+                system_prompt: Default::default(),
+                agent_config: None,
+                coding_config: None,
+                browser: BrowserBridge::unavailable(),
+            });
         let names: Vec<String> = agent
             .agent
             .configured_tool_definitions()

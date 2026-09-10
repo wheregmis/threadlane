@@ -333,8 +333,14 @@ pub mod daemon {
         #[test]
         fn permission_response_variants_decode() {
             for (json, expected) in [
-                (r#"{"decision":"allow_once"}"#, PermissionResponse::AllowOnce),
-                (r#"{"decision":"allow_always"}"#, PermissionResponse::AllowAlways),
+                (
+                    r#"{"decision":"allow_once"}"#,
+                    PermissionResponse::AllowOnce,
+                ),
+                (
+                    r#"{"decision":"allow_always"}"#,
+                    PermissionResponse::AllowAlways,
+                ),
                 (r#"{"decision":"deny"}"#, PermissionResponse::Deny),
                 (r#"{"decision":"cancelled"}"#, PermissionResponse::Cancelled),
             ] {

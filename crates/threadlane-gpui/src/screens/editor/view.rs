@@ -111,7 +111,11 @@ pub struct EditorView {
 }
 
 impl EditorView {
-    pub(crate) fn new(model: Entity<AppState>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        model: Entity<AppState>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let model_clone = model.clone();
         let sub = cx.observe(&model_clone, |_this, _model, cx| {
             cx.notify();
@@ -163,7 +167,12 @@ impl EditorView {
         }
     }
 
-    pub(crate) fn open_file(&mut self, project: PathBuf, relative_path: &str, cx: &mut Context<Self>) {
+    pub(crate) fn open_file(
+        &mut self,
+        project: PathBuf,
+        relative_path: &str,
+        cx: &mut Context<Self>,
+    ) {
         self.pending_open = Some(PendingOpen::File {
             project,
             path: relative_path.to_string(),

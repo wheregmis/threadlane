@@ -3,10 +3,10 @@ pub mod acp_bridge;
 pub mod acp_runtime;
 pub mod agents;
 pub mod browser;
+pub mod commands;
 pub mod computer;
 #[cfg(target_os = "macos")]
 pub(crate) mod computer_stream;
-pub mod commands;
 pub mod config;
 pub mod context;
 pub mod controller;
@@ -29,8 +29,8 @@ pub use coding_agent::harness::{
     CodingSessionHarness, HarnessRecord, InterruptedSubagentRecoveryState,
 };
 pub use coding_agent::{
-    AgentRunTask, CodingAgent, CodingAgentCancellation, CodingAgentOptions,
-    CodingAgentWorkHandle, HarnessCompositionSnapshot, SubagentCancellationGuard,
+    AgentRunTask, CodingAgent, CodingAgentCancellation, CodingAgentOptions, CodingAgentWorkHandle,
+    HarnessCompositionSnapshot, SubagentCancellationGuard,
 };
 pub use controller::{ExecutionMode, SessionController, SessionStatus};
 
@@ -39,9 +39,8 @@ pub use acp::{
     config_option_for, AcpAgentCapabilities, AcpAgentConfig, AcpAgentRecord, AcpAgentStatus,
     AcpAuthMethod, AcpConfigOption, AcpConfigOptionChoice, AcpConnection, AcpContentBlock,
     AcpInitializeResult, AcpManager, AcpPreloadedModels, AcpScope, AcpSession,
-    AcpSessionNotification,
-    AcpSessionUpdate, AcpSettings, AcpToolCall, AcpToolCallStatus, AcpToolKind,
-    ACP_CONFIG_CATEGORY_EFFORT, ACP_CONFIG_CATEGORY_MODE, ACP_CONFIG_CATEGORY_MODEL,
+    AcpSessionNotification, AcpSessionUpdate, AcpSettings, AcpToolCall, AcpToolCallStatus,
+    AcpToolKind, ACP_CONFIG_CATEGORY_EFFORT, ACP_CONFIG_CATEGORY_MODE, ACP_CONFIG_CATEGORY_MODEL,
 };
 pub use acp_bridge::{acp_agent_id, acp_model_id, is_acp_model};
 pub use acp_runtime::AcpEngine;
@@ -49,12 +48,12 @@ pub use browser::{ActTarget, BrowserBridge, BrowserCommand, BrowserRequest};
 pub use commands::{available_slash_commands, SlashCommandInfo};
 pub use config::CodingAgentConfig;
 pub use permission::{PermissionDecision, PermissionHandle};
-pub use question::QuestionHandle;
 pub use policy::ToolPolicy;
 pub use project_registry::{
     load_project_registry, register_project, save_project_registry, select_project, ProjectRecord,
 };
 pub use prompt_templates::PromptTemplate;
+pub use question::QuestionHandle;
 pub use system_prompt::SystemPromptConfig;
 
 // Re-export the runtime crate's public API so downstream crates (GPUI)

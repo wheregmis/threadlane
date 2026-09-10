@@ -515,12 +515,9 @@ pub(crate) async fn run_subagents_with_context(
                         .as_ref()
                         .map_or(child_timeout, |(duration, _)| *duration);
                     let workspace = if isolate_workspace {
-                        isolated_subagent_workspace(
-                            &context.work_dir,
-                            &identity.run_id,
-                        )
-                        .await
-                        .map(Some)
+                        isolated_subagent_workspace(&context.work_dir, &identity.run_id)
+                            .await
+                            .map(Some)
                     } else {
                         Ok(None)
                     };
@@ -718,6 +715,20 @@ async fn isolated_subagent_workspace(
     journal_run_id: &str,
 ) -> Result<(PathBuf, String), String> {
     let parent_work_dir = parent_work_dir.to_path_buf();
+    let journal_run_id = journal_run_id.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let root = threadlane_git::primary_worktree_root(&parent_work_dir)
+            .map_err(|error| error.to_string())?;
+        let (worktree, branch) = subagent_workspace(&root, &journal_run_id);
+        threadlane_git::create_worktree(&parent_work_dir, &worktree, &branch)
+            .map_err(|error| error.to_string())?;
+        Ok((worktree, branch))
+    })
+    .await
+    .map_err(|error| format!("Failed to provision subagent worktree: {error}"))?
+}
+
+pub fn subagent_workspace(repo_root: &Path, journal_run_id: &str) -> (PathBuf, String) {
     let lane = journal_run_id
         .chars()
         .map(|character| {
@@ -729,19 +740,10 @@ async fn isolated_subagent_workspace(
         })
         .collect::<String>();
     let branch = format!("threadlane/subagent-{lane}");
-    let branch_for_worktree = branch.clone();
-    tokio::task::spawn_blocking(move || {
-        let root = threadlane_git::primary_worktree_root(&parent_work_dir)
-            .map_err(|error| error.to_string())?;
-        let worktree = root
-            .join(".threadlane/worktrees/subagents")
-            .join(&lane);
-        threadlane_git::create_worktree(&parent_work_dir, &worktree, &branch_for_worktree)
-            .map_err(|error| error.to_string())?;
-        Ok((worktree, branch_for_worktree))
-    })
-    .await
-    .map_err(|error| format!("Failed to provision subagent worktree: {error}"))?
+    (
+        repo_root.join(".threadlane/worktrees/subagents").join(lane),
+        branch,
+    )
 }
 
 pub(crate) async fn run_subagent_task(
@@ -1548,7 +1550,9 @@ mod result_tests {
         };
 
         assert!(subagent_can_write(&config(None)));
-        assert!(subagent_can_write(&config(Some(vec!["edit_file_hashline".into()]))));
+        assert!(subagent_can_write(&config(Some(vec![
+            "edit_file_hashline".into()
+        ]))));
         assert!(!subagent_can_write(&config(Some(vec!["read_file".into()]))));
     }
 

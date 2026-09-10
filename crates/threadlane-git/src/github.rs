@@ -442,10 +442,9 @@ pub(crate) fn inspect_pr_uncached(
             "number,title,url,state,isDraft,body,comments,reviews,commits,files,statusCheckRollup,headRefName,headRefOid,baseRefName,updatedAt,author,reviewDecision",
         ],
     );
-    let output = command.output().map_err(|error| GitError::new(
-        work_dir,
-        format!("could not start gh: {error}"),
-    ))?;
+    let output = command
+        .output()
+        .map_err(|error| GitError::new(work_dir, format!("could not start gh: {error}")))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
@@ -461,10 +460,12 @@ pub(crate) fn inspect_pr_uncached(
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut info = parse_gh_pr_json(&stdout).map_err(|error| GitError::new(
-        work_dir,
-        format!("could not parse gh pull request response: {error}"),
-    ))?;
+    let mut info = parse_gh_pr_json(&stdout).map_err(|error| {
+        GitError::new(
+            work_dir,
+            format!("could not parse gh pull request response: {error}"),
+        )
+    })?;
 
     // `gh pr view --json comments` exposes issue comments only. Inline
     // review comments live on the REST review-comments endpoint.
@@ -600,7 +601,11 @@ pub(crate) fn validated_github_pr_list_state(state: &str) -> Result<&str, String
     }
 }
 
-pub(crate) fn create_draft_pr_args(base: &str, title: &str, body: &str) -> Result<Vec<String>, String> {
+pub(crate) fn create_draft_pr_args(
+    base: &str,
+    title: &str,
+    body: &str,
+) -> Result<Vec<String>, String> {
     Ok(vec![
         "pr".to_owned(),
         "create".to_owned(),
@@ -695,10 +700,9 @@ pub(crate) fn review_comment_payloads(
 pub(crate) fn execute_gh(work_dir: &Path, args: &[String]) -> Result<String, GitError> {
     let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
     let (mut command, stored_token) = gh_command_with_captured_token(work_dir, &refs);
-    let output = command.output().map_err(|error| GitError::new(
-        work_dir,
-        format!("could not start gh: {error}"),
-    ))?;
+    let output = command
+        .output()
+        .map_err(|error| GitError::new(work_dir, format!("could not start gh: {error}")))?;
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned());
     }
@@ -722,26 +726,18 @@ pub(crate) fn execute_gh_json(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = command.spawn().map_err(|error| GitError::new(
-        work_dir,
-        format!("could not start gh: {error}"),
-    ))?;
+    let mut child = command
+        .spawn()
+        .map_err(|error| GitError::new(work_dir, format!("could not start gh: {error}")))?;
     child
         .stdin
         .take()
-        .ok_or_else(|| GitError::new(
-            work_dir,
-            "could not open gh input".to_owned(),
-        ))?
+        .ok_or_else(|| GitError::new(work_dir, "could not open gh input".to_owned()))?
         .write_all(payload.to_string().as_bytes())
-        .map_err(|error| GitError::new(
-            work_dir,
-            format!("could not write gh input: {error}"),
-        ))?;
-    let output = child.wait_with_output().map_err(|error| GitError::new(
-        work_dir,
-        format!("could not wait for gh: {error}"),
-    ))?;
+        .map_err(|error| GitError::new(work_dir, format!("could not write gh input: {error}")))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|error| GitError::new(work_dir, format!("could not wait for gh: {error}")))?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
     } else {
@@ -761,36 +757,29 @@ pub fn list_github_issues(
     query: Option<&str>,
     limit: usize,
 ) -> Result<Vec<GitHubIssueSummary>, GitError> {
-    let args = github_issue_list_args(state, query, limit).map_err(|message| GitError::new(
-        work_dir,
-        message,
-    ))?;
+    let args = github_issue_list_args(state, query, limit)
+        .map_err(|message| GitError::new(work_dir, message))?;
     let output = execute_gh(work_dir, &args)?;
-    let values: Vec<serde_json::Value> =
-        serde_json::from_str(&output).map_err(|error| GitError::new(
+    let values: Vec<serde_json::Value> = serde_json::from_str(&output).map_err(|error| {
+        GitError::new(
             work_dir,
             format!("could not parse GitHub issue list: {error}"),
-        ))?;
+        )
+    })?;
     values
         .into_iter()
         .map(|value| parse_github_issue_json(&value.to_string()).map(|detail| detail.summary))
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| GitError::new(
-            work_dir,
-            format!("could not parse GitHub issue: {error}"),
-        ))
+        .map_err(|error| GitError::new(work_dir, format!("could not parse GitHub issue: {error}")))
 }
 
 pub fn inspect_github_issue(work_dir: &Path, number: u64) -> Result<GitHubIssueDetail, GitError> {
-    let args = github_issue_view_args(number).map_err(|message| GitError::new(
-        work_dir,
-        message,
-    ))?;
+    let args =
+        github_issue_view_args(number).map_err(|message| GitError::new(work_dir, message))?;
     let output = execute_gh(work_dir, &args)?;
-    parse_github_issue_json(&output).map_err(|message| GitError::new(
-        work_dir,
-        format!("could not parse GitHub issue: {message}"),
-    ))
+    parse_github_issue_json(&output).map_err(|message| {
+        GitError::new(work_dir, format!("could not parse GitHub issue: {message}"))
+    })
 }
 
 pub fn list_github_pull_requests(
@@ -799,16 +788,15 @@ pub fn list_github_pull_requests(
     query: Option<&str>,
     limit: usize,
 ) -> Result<Vec<GitHubPullRequestSummary>, GitError> {
-    let args = github_pr_list_args(state, query, limit).map_err(|message| GitError::new(
-        work_dir,
-        message,
-    ))?;
+    let args = github_pr_list_args(state, query, limit)
+        .map_err(|message| GitError::new(work_dir, message))?;
     let output = execute_gh(work_dir, &args)?;
-    let values: Vec<serde_json::Value> =
-        serde_json::from_str(&output).map_err(|error| GitError::new(
+    let values: Vec<serde_json::Value> = serde_json::from_str(&output).map_err(|error| {
+        GitError::new(
             work_dir,
             format!("could not parse GitHub pull request list: {error}"),
-        ))?;
+        )
+    })?;
     values
         .into_iter()
         .map(|value| {
@@ -830,47 +818,48 @@ pub fn list_github_pull_requests(
             })
         })
         .collect::<Result<Vec<_>, String>>()
-        .map_err(|message| GitError::new(
-            work_dir,
-            format!("could not parse GitHub pull request: {message}"),
-        ))
+        .map_err(|message| {
+            GitError::new(
+                work_dir,
+                format!("could not parse GitHub pull request: {message}"),
+            )
+        })
 }
 
 pub fn inspect_pr_number(work_dir: &Path, number: u64) -> Result<GitHubPrInfo, GitError> {
-    validate_github_number(number, "pull request").map_err(|message| GitError::new(
-        work_dir,
-        message,
-    ))?;
-    inspect_pr_uncached(work_dir, &number.to_string())?.ok_or_else(|| GitError::new(
-        work_dir,
-        format!("GitHub pull request #{number} was not found"),
-    ))
+    validate_github_number(number, "pull request")
+        .map_err(|message| GitError::new(work_dir, message))?;
+    inspect_pr_uncached(work_dir, &number.to_string())?.ok_or_else(|| {
+        GitError::new(
+            work_dir,
+            format!("GitHub pull request #{number} was not found"),
+        )
+    })
 }
 
 pub fn pull_request_diff(work_dir: &Path, number: u64) -> Result<String, GitError> {
-    validate_github_number(number, "pull request").map_err(|message| GitError::new(
-        work_dir,
-        message,
-    ))?;
+    validate_github_number(number, "pull request")
+        .map_err(|message| GitError::new(work_dir, message))?;
     execute_gh(work_dir, &["pr".into(), "diff".into(), number.to_string()])
 }
 
 pub fn create_pull_request(work_dir: &Path) -> Result<String, GitError> {
-    let branch = current_branch(work_dir)?.ok_or_else(|| GitError::new(
-        work_dir,
-        "cannot create a pull request from a detached HEAD; check out a named branch first"
-            .to_owned(),
-    ))?;
+    let branch = current_branch(work_dir)?.ok_or_else(|| {
+        GitError::new(
+            work_dir,
+            "cannot create a pull request from a detached HEAD; check out a named branch first"
+                .to_owned(),
+        )
+    })?;
 
     push(work_dir)?;
     invalidate_pr_cache(work_dir, &branch);
 
     let (mut command, stored_token) =
         gh_command_with_captured_token(work_dir, &["pr", "create", "--fill"]);
-    let output = command.output().map_err(|error| GitError::new(
-        work_dir,
-        format!("could not start gh: {error}"),
-    ))?;
+    let output = command
+        .output()
+        .map_err(|error| GitError::new(work_dir, format!("could not start gh: {error}")))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
@@ -892,11 +881,13 @@ pub fn create_draft_pull_request(
     title: &str,
     body: &str,
 ) -> Result<String, GitError> {
-    let branch = current_branch(work_dir)?.ok_or_else(|| GitError::new(
-        work_dir,
-        "cannot create a pull request from a detached HEAD; check out a named branch first"
-            .to_owned(),
-    ))?;
+    let branch = current_branch(work_dir)?.ok_or_else(|| {
+        GitError::new(
+            work_dir,
+            "cannot create a pull request from a detached HEAD; check out a named branch first"
+                .to_owned(),
+        )
+    })?;
     let has_upstream = command(
         work_dir,
         &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
@@ -906,14 +897,11 @@ pub fn create_draft_pull_request(
     if !has_upstream {
         return Err(GitError::new(
             work_dir,
-            "cannot create a draft pull request before publishing the current branch"
-                .to_owned(),
+            "cannot create a draft pull request before publishing the current branch".to_owned(),
         ));
     }
-    let args = create_draft_pr_args(base, title, body).map_err(|message| GitError::new(
-        work_dir,
-        message,
-    ))?;
+    let args = create_draft_pr_args(base, title, body)
+        .map_err(|message| GitError::new(work_dir, message))?;
     invalidate_pr_cache(work_dir, &branch);
     execute_gh(work_dir, &args)
 }
@@ -923,14 +911,9 @@ pub fn comment_on_github_issue(
     number: u64,
     body: &str,
 ) -> Result<String, GitError> {
-    validate_github_number(number, "issue").map_err(|message| GitError::new(
-        work_dir,
-        message,
-    ))?;
-    let body = validated_text(body, "comment body").map_err(|message| GitError::new(
-        work_dir,
-        message,
-    ))?;
+    validate_github_number(number, "issue").map_err(|message| GitError::new(work_dir, message))?;
+    let body =
+        validated_text(body, "comment body").map_err(|message| GitError::new(work_dir, message))?;
     execute_gh(
         work_dir,
         &[
@@ -948,10 +931,8 @@ pub fn comment_on_pull_request(
     number: u64,
     body: &str,
 ) -> Result<String, GitError> {
-    let args = github_pr_comment_args(number, body).map_err(|message| GitError::new(
-        work_dir,
-        message,
-    ))?;
+    let args =
+        github_pr_comment_args(number, body).map_err(|message| GitError::new(work_dir, message))?;
     execute_gh(work_dir, &args)
 }
 
@@ -989,19 +970,12 @@ pub fn reply_to_pull_request_review_comment(
     comment_id: u64,
     body: &str,
 ) -> Result<String, GitError> {
-    validate_github_number(comment_id, "review comment").map_err(|message| GitError::new(
-        work_dir,
-        message,
-    ))?;
-    let body = validated_text(body, "reply body").map_err(|message| GitError::new(
-        work_dir,
-        message,
-    ))?;
-    let (repository, number) =
-        parse_pull_request_url(pull_request_url).map_err(|message| GitError::new(
-            work_dir,
-            message,
-        ))?;
+    validate_github_number(comment_id, "review comment")
+        .map_err(|message| GitError::new(work_dir, message))?;
+    let body =
+        validated_text(body, "reply body").map_err(|message| GitError::new(work_dir, message))?;
+    let (repository, number) = parse_pull_request_url(pull_request_url)
+        .map_err(|message| GitError::new(work_dir, message))?;
     let endpoint = format!(
         "repos/{}/{}/pulls/{number}/comments/{comment_id}/replies",
         repository.owner, repository.repo
@@ -1023,28 +997,18 @@ pub fn submit_pull_request_review(
     body: &str,
     comments: &[PullRequestReviewCommentDraft],
 ) -> Result<String, GitError> {
-    validate_github_number(pull_request.number, "pull request").map_err(|message| GitError::new(
-        work_dir,
-        message,
-    ))?;
-    let args =
-        github_pr_review_args(pull_request.number, verdict, body).map_err(|message| GitError::new(
-            work_dir,
-            message,
-        ))?;
+    validate_github_number(pull_request.number, "pull request")
+        .map_err(|message| GitError::new(work_dir, message))?;
+    let args = github_pr_review_args(pull_request.number, verdict, body)
+        .map_err(|message| GitError::new(work_dir, message))?;
     let comment_payloads = if comments.is_empty() {
         Vec::new()
     } else {
-        review_comment_payloads(&pull_request.head_oid, comments).map_err(|message| GitError::new(
-            work_dir,
-            message,
-        ))?
+        review_comment_payloads(&pull_request.head_oid, comments)
+            .map_err(|message| GitError::new(work_dir, message))?
     };
-    let (repository, _review_endpoint) =
-        validated_review_endpoint(pull_request).map_err(|message| GitError::new(
-            work_dir,
-            message,
-        ))?;
+    let (repository, _review_endpoint) = validated_review_endpoint(pull_request)
+        .map_err(|message| GitError::new(work_dir, message))?;
     let review = execute_gh(work_dir, &args)?;
     let endpoint = format!(
         "repos/{}/{}/pulls/{}/comments",

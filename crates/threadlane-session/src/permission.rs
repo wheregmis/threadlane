@@ -279,11 +279,7 @@ impl PermissionManager {
     /// Ask the user to approve one computer-use action (screenshot or input).
     /// A remembered project grant skips the prompt; otherwise every action
     /// re-prompts with Once/Always scopes. Unattended sessions deny.
-    pub(crate) async fn request_computer(
-        &self,
-        title: &str,
-        detail: &str,
-    ) -> PermissionDecision {
+    pub(crate) async fn request_computer(&self, title: &str, detail: &str) -> PermissionDecision {
         let id = self.generate_request_id();
         let interactive = self.handle.inner.interactive.load(Ordering::SeqCst);
         let persisted = self.computer_is_approved();
@@ -768,7 +764,9 @@ mod tests {
         handle.set_interactive(true);
         let request_manager = manager.clone();
         let task = tokio::spawn(async move {
-            request_manager.request_computer("Click at (1, 1)", "click").await
+            request_manager
+                .request_computer("Click at (1, 1)", "click")
+                .await
         });
         let AgentEvent::PermissionRequested { request } = events.recv().await.unwrap() else {
             panic!("expected permission request");
@@ -786,7 +784,10 @@ mod tests {
             restored.request_computer("Type", "type").await,
             PermissionDecision::AllowOnce
         );
-        assert!(events.try_recv().is_err(), "remembered grant must not prompt");
+        assert!(
+            events.try_recv().is_err(),
+            "remembered grant must not prompt"
+        );
     }
 
     #[tokio::test]

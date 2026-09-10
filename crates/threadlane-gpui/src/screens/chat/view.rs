@@ -8,18 +8,18 @@ use base64::Engine as _;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants, Toggle, ToggleVariants};
-use gpui_component::Root;
 use gpui_component::hover_card::HoverCard;
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
-use gpui_component::spinner::Spinner;
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_component::notification::Notification;
 use gpui_component::popover::Popover;
 use gpui_component::progress::ProgressCircle;
 use gpui_component::scroll::ScrollableElement;
+use gpui_component::spinner::Spinner;
 use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::text::{TextView, TextViewState};
 use gpui_component::theme::ActiveTheme;
+use gpui_component::Root;
 use gpui_component::{Disableable, Icon, IconName, Selectable, Sizable, WindowExt};
 
 use crate::app::{actions::AppAction, controller};
@@ -59,7 +59,10 @@ fn chat_error_summary(error: &str) -> (String, bool) {
             true,
         );
     }
-    let first_line = error.lines().find(|line| !line.trim().is_empty()).unwrap_or("");
+    let first_line = error
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("");
     let mut chars = first_line.trim().chars();
     let mut summary: String = chars.by_ref().take(240).collect();
     if chars.next().is_some() {
@@ -134,8 +137,7 @@ fn open_computer_mirror(model: &Entity<AppState>, cx: &mut AsyncApp) {
         {
             let model = model.clone();
             move |window, cx| {
-                let view =
-                    MirrorView::build(model.clone(), previews_dir.clone(), window, cx);
+                let view = MirrorView::build(model.clone(), previews_dir.clone(), window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             }
         },
@@ -145,12 +147,7 @@ fn open_computer_mirror(model: &Entity<AppState>, cx: &mut AsyncApp) {
     }
 }
 
-fn render_chat_error(
-    id: &str,
-    error: &str,
-    model: &Entity<AppState>,
-    cx: &App,
-) -> Div {
+fn render_chat_error(id: &str, error: &str, model: &Entity<AppState>, cx: &App) -> Div {
     let theme = cx.theme().colors;
     let (summary, needs_provider_settings) = chat_error_summary(error);
     let details = error.to_owned();
@@ -205,7 +202,10 @@ fn render_chat_error(
                             .debug_selector(|| "chat-error-copy".into())
                             .on_click(move |_, window, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(details.clone()));
-                                window.push_notification(Notification::info("Copied error details"), cx);
+                                window.push_notification(
+                                    Notification::info("Copied error details"),
+                                    cx,
+                                );
                             }),
                     ),
             ),
@@ -517,7 +517,10 @@ impl ChatListView {
 
         let composer_key = {
             let state = model.read(cx);
-            (state.active_work_dir.clone(), state.active_session_id.clone())
+            (
+                state.active_work_dir.clone(),
+                state.active_session_id.clone(),
+            )
         };
         Self {
             model,
@@ -566,7 +569,10 @@ impl ChatListView {
     fn sync_composer_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let key = {
             let state = self.model.read(cx);
-            (state.active_work_dir.clone(), state.active_session_id.clone())
+            (
+                state.active_work_dir.clone(),
+                state.active_session_id.clone(),
+            )
         };
         if key == self.composer_key {
             return;
@@ -581,7 +587,10 @@ impl ChatListView {
         if !draft.text.is_empty() || !draft.images.is_empty() {
             self.composer_drafts.insert(previous, draft);
         }
-        let draft = self.composer_drafts.remove(&self.composer_key).unwrap_or_default();
+        let draft = self
+            .composer_drafts
+            .remove(&self.composer_key)
+            .unwrap_or_default();
         self.pasted_images = draft.images;
         self.input_state.update(cx, |input, cx| {
             input.set_value(draft.text, window, cx);
@@ -953,8 +962,7 @@ impl ChatListView {
                     .tooltip({
                         let summary = display_summary.clone();
                         move |window, cx| {
-                            gpui_component::tooltip::Tooltip::new(summary.clone())
-                                .build(window, cx)
+                            gpui_component::tooltip::Tooltip::new(summary.clone()).build(window, cx)
                         }
                     })
                     .h(px(28.0))
@@ -1258,8 +1266,7 @@ impl ChatListView {
                             None => preview.to_string(),
                         };
                         move |window, cx| {
-                            gpui_component::tooltip::Tooltip::new(tip.clone())
-                                .build(window, cx)
+                            gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
                         }
                     })
                     .h(px(34.0))
@@ -1278,9 +1285,7 @@ impl ChatListView {
                     } else {
                         theme.border.opacity(0.0)
                     })
-                    .when(selected, |this| {
-                        this.bg(theme.accent.opacity(0.16))
-                    })
+                    .when(selected, |this| this.bg(theme.accent.opacity(0.16)))
                     .hover(|style| style.bg(theme.muted.opacity(0.65)))
                     .child(div().size(px(6.0)).flex_none().rounded_full().bg(dot_color))
                     .child(
@@ -1299,7 +1304,14 @@ impl ChatListView {
                             .text_color(badge_fg)
                             .child(badge_label),
                     )
-                    .child(div().min_w_0().flex_1().text_sm().truncate().child(preview.clone()))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .text_sm()
+                            .truncate()
+                            .child(preview.clone()),
+                    )
                     .children(exit_code.map(|code| {
                         let is_ok = code == 0;
                         div()
@@ -2716,7 +2728,9 @@ impl ChatListView {
                 has_running = true;
             }
             match t.title.as_str() {
-                "read_file" | "view_file" | "grep_search" | "find_by_name" | "list_dir" => reads += 1,
+                "read_file" | "view_file" | "grep_search" | "find_by_name" | "list_dir" => {
+                    reads += 1
+                }
                 "write_to_file" | "replace_file_content" | "apply_diff" | "edit_file" => edits += 1,
                 "run_command" | "execute" => runs += 1,
                 _ => others += 1,
@@ -2725,16 +2739,28 @@ impl ChatListView {
 
         let mut parts = Vec::new();
         if reads > 0 {
-            parts.push(format!("inspected {reads} file{}", if reads == 1 { "" } else { "s" }));
+            parts.push(format!(
+                "inspected {reads} file{}",
+                if reads == 1 { "" } else { "s" }
+            ));
         }
         if edits > 0 {
-            parts.push(format!("edited {edits} file{}", if edits == 1 { "" } else { "s" }));
+            parts.push(format!(
+                "edited {edits} file{}",
+                if edits == 1 { "" } else { "s" }
+            ));
         }
         if runs > 0 {
-            parts.push(format!("ran {runs} command{}", if runs == 1 { "" } else { "s" }));
+            parts.push(format!(
+                "ran {runs} command{}",
+                if runs == 1 { "" } else { "s" }
+            ));
         }
         if others > 0 {
-            parts.push(format!("{others} other tool{}", if others == 1 { "" } else { "s" }));
+            parts.push(format!(
+                "{others} other tool{}",
+                if others == 1 { "" } else { "s" }
+            ));
         }
         let summary = if parts.is_empty() {
             format!("Ran {} tools", tools.len())
@@ -2748,18 +2774,30 @@ impl ChatListView {
 
         let group_key = format!("tool-group-{msg_id}");
         let is_expanded = if has_running {
-            !self.expanded_tool_aggregates.contains(&format!("collapsed-{group_key}"))
+            !self
+                .expanded_tool_aggregates
+                .contains(&format!("collapsed-{group_key}"))
         } else {
-            self.expanded_tool_aggregates.contains(&format!("expanded-{group_key}"))
+            self.expanded_tool_aggregates
+                .contains(&format!("expanded-{group_key}"))
         };
 
         let theme = cx.theme().colors;
         let status_icon = if has_running {
-            Spinner::new().xsmall().color(theme.primary).into_any_element()
+            Spinner::new()
+                .xsmall()
+                .color(theme.primary)
+                .into_any_element()
         } else if has_error {
-            Icon::new(IconName::CircleX).xsmall().text_color(theme.danger).into_any_element()
+            Icon::new(IconName::CircleX)
+                .xsmall()
+                .text_color(theme.danger)
+                .into_any_element()
         } else {
-            Icon::new(IconName::CircleCheck).xsmall().text_color(theme.success).into_any_element()
+            Icon::new(IconName::CircleCheck)
+                .xsmall()
+                .text_color(theme.success)
+                .into_any_element()
         };
 
         let toggle_key = group_key.clone();
@@ -2821,7 +2859,10 @@ impl ChatListView {
                 cx.notify();
             }));
 
-        let tool_rows = tools.iter().map(|t| self.render_tool_activity(t, cx)).collect::<Vec<_>>();
+        let tool_rows = tools
+            .iter()
+            .map(|t| self.render_tool_activity(t, cx))
+            .collect::<Vec<_>>();
         let detail_rows = is_expanded.then(|| {
             div()
                 .flex()
@@ -3200,7 +3241,11 @@ impl ChatListView {
                     .filter(|text| !text.is_empty());
                 threadlane_session::QuestionItemAnswer {
                     question_id: item.id.clone(),
-                    selected: self.question_selections.get(&key).cloned().unwrap_or_default(),
+                    selected: self
+                        .question_selections
+                        .get(&key)
+                        .cloned()
+                        .unwrap_or_default(),
                     custom_text,
                 }
             })
@@ -3721,9 +3766,8 @@ impl ChatListView {
         for item in request.questions.iter().filter(|item| item.allow_custom) {
             let key = Self::question_selection_key(&request.id, &item.id);
             if !self.question_inputs.contains_key(&key) {
-                let input = cx.new(|cx| {
-                    InputState::new(window, cx).placeholder("Custom answer (optional)…")
-                });
+                let input = cx
+                    .new(|cx| InputState::new(window, cx).placeholder("Custom answer (optional)…"));
                 self.question_inputs.insert(key, input);
             }
         }
@@ -3757,29 +3801,33 @@ impl ChatListView {
                         let option_value = option.clone();
                         Button::new(SharedString::from(format!(
                             "question-{request_id}-{}-{}",
-                            item.id,
-                            option_label
+                            item.id, option_label
                         )))
                         .label(option_label.clone())
                         .small()
                         .when(is_selected, |button| button.primary())
                         .when(!is_selected, |button| button.ghost())
                         .tooltip("Toggle this answer")
-                        .on_click(cx.listener(move |this, _event, _window, cx| {
-                            this.toggle_question_option(
-                                &request_id,
-                                &question_id,
-                                &option_value,
-                                cx,
-                            );
-                        }))
+                        .on_click(cx.listener(
+                            move |this, _event, _window, cx| {
+                                this.toggle_question_option(
+                                    &request_id,
+                                    &question_id,
+                                    &option_value,
+                                    cx,
+                                );
+                            },
+                        ))
                     })
                     .collect::<Vec<_>>();
-                let custom_input = item.allow_custom.then(|| {
-                    self.question_inputs.get(&key).map(|input| {
-                        div().w_full().child(Input::new(input).small())
+                let custom_input = item
+                    .allow_custom
+                    .then(|| {
+                        self.question_inputs
+                            .get(&key)
+                            .map(|input| div().w_full().child(Input::new(input).small()))
                     })
-                }).flatten();
+                    .flatten();
                 div()
                     .flex()
                     .flex_col()
@@ -4169,6 +4217,194 @@ impl ChatListView {
             .rev()
             .map(|message| self.render_message(message, cx))
             .collect::<Vec<_>>();
+        let workspace = item.journal_run_id.as_deref().and_then(|run_id| {
+            self.model
+                .read(cx)
+                .active_git_work_dir()
+                .map(|root| threadlane_session::subagent_workspace(&root, run_id))
+        });
+        let branch_controls = workspace.map(|(worktree, branch)| {
+            let inspect_model = self.model.clone();
+            let inspect_root = self.model.read(cx).active_git_work_dir().unwrap();
+            let inspect_branch = branch.clone();
+            let apply_model = self.model.clone();
+            let apply_root = inspect_root.clone();
+            let apply_branch = branch.clone();
+            let apply_worktree = worktree.clone();
+            let discard_model = self.model.clone();
+            let discard_root = inspect_root.clone();
+            let discard_branch = branch.clone();
+            let discard_worktree = worktree.clone();
+            let terminal_model = self.model.clone();
+            let terminal_worktree = worktree.clone();
+            let worktree_available = worktree.is_dir();
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .p_2()
+                .rounded_md()
+                .border_1()
+                .border_color(theme.border)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(Icon::default().path("icons/git/branch.svg").xsmall())
+                        .child(branch.clone()),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            Button::new(SharedString::from(format!("inspect-{branch}")))
+                                .label("Inspect diff")
+                                .outline()
+                                .xsmall()
+                                .on_click(move |_, _, cx| {
+                                    let branch = inspect_branch.clone();
+                                    let root = inspect_root.clone();
+                                    let task = cx.background_executor().spawn(async move {
+                                        threadlane_git::diff_branch(&root, &branch)
+                                            .map(|diff| (root, branch, diff))
+                                            .map_err(|error| error.to_string())
+                                    });
+                                    let model = inspect_model.clone();
+                                    cx.spawn(async move |_, cx| {
+                                        let result = task.await;
+                                        let _ = model.update(cx, |state, cx| {
+                                            match result {
+                                                Ok((root, branch, diff)) => state.request_open_diff(
+                                                    root,
+                                                    format!("{branch}.diff"),
+                                                    if diff.is_empty() {
+                                                        "No committed changes on this branch."
+                                                            .into()
+                                                    } else {
+                                                        diff
+                                                    },
+                                                ),
+                                                Err(error) => state.session_status = Some(error),
+                                            }
+                                            cx.notify();
+                                        });
+                                    })
+                                    .detach();
+                                }),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("terminal-{branch}")))
+                                .label("Terminal")
+                                .ghost()
+                                .xsmall()
+                                .disabled(!worktree_available)
+                                .tooltip(if worktree_available {
+                                    format!("Open terminal in {}", worktree.display())
+                                } else {
+                                    "This worktree was cleaned up; the branch is still available."
+                                        .into()
+                                })
+                                .on_click(move |_, _, cx| {
+                                    terminal_model.update(cx, |state, cx| {
+                                        controller::dispatch(
+                                            state,
+                                            AppAction::OpenTerminalAt(terminal_worktree.clone()),
+                                        );
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("apply-{branch}")))
+                                .label("Apply")
+                                .xsmall()
+                                .disabled(item.status != SubagentActivityStatus::Completed)
+                                .on_click(move |_, _, cx| {
+                                    let root = apply_root.clone();
+                                    let branch = apply_branch.clone();
+                                    let worktree = apply_worktree.clone();
+                                    let task = cx.background_executor().spawn(async move {
+                                        let parent = threadlane_git::inspect(&root)
+                                            .map_err(|error| error.to_string())?;
+                                        if parent.has_changes {
+                                            return Err("Commit or stash parent changes before applying a subagent branch.".into());
+                                        }
+                                        if worktree.is_dir()
+                                            && threadlane_git::inspect(&worktree)
+                                                .map_err(|error| error.to_string())?
+                                                .has_changes
+                                        {
+                                            return Err("The subagent worktree has uncommitted changes; commit them before applying.".into());
+                                        }
+                                        threadlane_git::merge(&root, &branch)
+                                            .map_err(|error| error.to_string())?;
+                                        if worktree.is_dir() {
+                                            threadlane_git::remove_worktree(&root, &worktree, false)
+                                                .map_err(|error| error.to_string())?;
+                                        }
+                                        threadlane_git::delete_branch(&root, &branch, false)
+                                            .map_err(|error| error.to_string())?;
+                                        Ok(format!("Applied {branch}"))
+                                    });
+                                    let model = apply_model.clone();
+                                    cx.spawn(async move |_, cx| {
+                                        let result = task.await;
+                                        let _ = model.update(cx, |state, cx| {
+                                            state.session_status = Some(result.unwrap_or_else(|error| error));
+                                            cx.notify();
+                                        });
+                                    })
+                                    .detach();
+                                }),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("discard-{branch}")))
+                                .label("Discard…")
+                                .ghost()
+                                .xsmall()
+                                .on_click(move |_, _, cx| {
+                                    let root = discard_root.clone();
+                                    let branch = discard_branch.clone();
+                                    let worktree = discard_worktree.clone();
+                                    let model = discard_model.clone();
+                                    cx.spawn(async move |_, cx| {
+                                        let confirmed = rfd::AsyncMessageDialog::new()
+                                            .set_title("Discard subagent branch?")
+                                            .set_description(format!(
+                                                "Delete {branch} and its worktree? This cannot be undone."
+                                            ))
+                                            .set_buttons(rfd::MessageButtons::YesNo)
+                                            .show()
+                                            .await;
+                                        if !matches!(confirmed, rfd::MessageDialogResult::Yes) {
+                                            return;
+                                        }
+                                        let task = cx.background_executor().spawn(async move {
+                                            if worktree.is_dir() {
+                                                threadlane_git::remove_worktree(&root, &worktree, true)
+                                                    .map_err(|error| error.to_string())?;
+                                            }
+                                            threadlane_git::delete_branch(&root, &branch, true)
+                                                .map_err(|error| error.to_string())?;
+                                            let _ = threadlane_git::prune_worktrees(&root);
+                                            Ok::<_, String>(format!("Discarded {branch}"))
+                                        });
+                                        let result = task.await;
+                                        let _ = model.update(cx, |state, cx| {
+                                            state.session_status = Some(result.unwrap_or_else(|error| error));
+                                            cx.notify();
+                                        });
+                                    })
+                                    .detach();
+                                }),
+                        ),
+                )
+        });
         div()
             .w_full()
             .flex()
@@ -4219,6 +4455,7 @@ impl ChatListView {
                         )
                     }),
             )
+            .children(branch_controls)
             .children(item.error.as_ref().map(|error| {
                 div()
                     .p_2()
@@ -4229,23 +4466,18 @@ impl ChatListView {
                     .child(error.clone())
             }))
             .children(messages.is_empty().then(|| {
-                div()
-                    .w_full()
-                    .flex()
-                    .justify_center()
-                    .py_4()
-                    .child(
-                        div()
-                            .px_4()
-                            .py_2()
-                            .rounded_md()
-                            .border_1()
-                            .border_color(theme.border)
-                            .bg(theme.title_bar)
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child("No messages yet — the subagent hasn't responded."),
-                    )
+                div().w_full().flex().justify_center().py_4().child(
+                    div()
+                        .px_4()
+                        .py_2()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.title_bar)
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child("No messages yet — the subagent hasn't responded."),
+                )
             }))
             .children(messages)
             .into_any_element()
@@ -4374,11 +4606,7 @@ impl ChatListView {
                     .bg(theme.secondary)
                     .text_xs()
                     .text_color(theme.foreground)
-                    .child(
-                        Icon::new(IconName::File)
-                            .xsmall()
-                            .text_color(theme.primary),
-                    )
+                    .child(Icon::new(IconName::File).xsmall().text_color(theme.primary))
                     .child(
                         div()
                             .id(SharedString::from(format!("pasted-image-{index}")))
@@ -4782,8 +5010,10 @@ impl ChatListView {
                     let agent_key = threadlane_session::acp_agent_id(&option.id)
                         .unwrap_or_default()
                         .to_string();
-                    let agent_options =
-                        acp_model_sections.get(&agent_key).cloned().unwrap_or_default();
+                    let agent_options = acp_model_sections
+                        .get(&agent_key)
+                        .cloned()
+                        .unwrap_or_default();
                     let agent_setting = threadlane_session::config_option_for(
                         &agent_options,
                         threadlane_session::ACP_CONFIG_CATEGORY_MODEL,
@@ -4815,47 +5045,40 @@ impl ChatListView {
                         Some(setting) => {
                             let current = setting.current_value().map(str::to_string);
                             let config_id = setting.id.clone();
-                            setting.options.into_iter().fold(
-                                menu,
-                                |menu, choice| {
-                                    let click_model = submenu_click_model.clone();
-                                    let select_id = option.id.clone();
-                                    let config_id = config_id.clone();
-                                    let value = choice.value.clone();
-                                    // Only the selected agent's live state can
-                                    // mark a current model; cached currents may
-                                    // be stale, so other agents show none.
-                                    let checked = is_current
-                                        && current.as_deref() == Some(choice.value.as_str());
-                                    let label = if checked {
-                                        format!("{} · Current", choice.name)
-                                    } else {
-                                        choice.name.clone()
-                                    };
-                                    menu.item(
-                                        PopupMenuItem::new(label).checked(checked).on_click(
-                                            move |_event, _window, cx| {
-                                                click_model.update(cx, |state, cx| {
-                                                    controller::dispatch(
-                                                        state,
-                                                        AppAction::SelectModel(
-                                                            select_id.clone(),
-                                                        ),
-                                                    );
-                                                    controller::dispatch(
-                                                        state,
-                                                        AppAction::SetAcpConfigOption {
-                                                            config_id: config_id.clone(),
-                                                            value: value.clone(),
-                                                        },
-                                                    );
-                                                    cx.notify();
-                                                });
-                                            },
-                                        ),
-                                    )
-                                },
-                            )
+                            setting.options.into_iter().fold(menu, |menu, choice| {
+                                let click_model = submenu_click_model.clone();
+                                let select_id = option.id.clone();
+                                let config_id = config_id.clone();
+                                let value = choice.value.clone();
+                                // Only the selected agent's live state can
+                                // mark a current model; cached currents may
+                                // be stale, so other agents show none.
+                                let checked =
+                                    is_current && current.as_deref() == Some(choice.value.as_str());
+                                let label = if checked {
+                                    format!("{} · Current", choice.name)
+                                } else {
+                                    choice.name.clone()
+                                };
+                                menu.item(PopupMenuItem::new(label).checked(checked).on_click(
+                                    move |_event, _window, cx| {
+                                        click_model.update(cx, |state, cx| {
+                                            controller::dispatch(
+                                                state,
+                                                AppAction::SelectModel(select_id.clone()),
+                                            );
+                                            controller::dispatch(
+                                                state,
+                                                AppAction::SetAcpConfigOption {
+                                                    config_id: config_id.clone(),
+                                                    value: value.clone(),
+                                                },
+                                            );
+                                            cx.notify();
+                                        });
+                                    },
+                                ))
+                            })
                         }
                         None => {
                             let reason = crate::model_catalog::cached_acp_error(&agent_key)
@@ -4867,18 +5090,13 @@ impl ChatListView {
                                         short
                                     }
                                 })
-                                .unwrap_or_else(|| {
-                                    format!("Connecting to {}…", option.label)
-                                });
+                                .unwrap_or_else(|| format!("Connecting to {}…", option.label));
                             let settings_model = submenu_click_model.clone();
                             menu.item(PopupMenuItem::new(reason).disabled(true)).item(
                                 PopupMenuItem::new("Check Settings → ACP Agents").on_click(
                                     move |_event, _window, cx| {
                                         settings_model.update(cx, |state, cx| {
-                                            controller::dispatch(
-                                                state,
-                                                AppAction::OpenSettings,
-                                            );
+                                            controller::dispatch(state, AppAction::OpenSettings);
                                             cx.notify();
                                         });
                                     },
@@ -4892,10 +5110,8 @@ impl ChatListView {
         });
 
         let effort_model = self.model.clone();
-        let effort_options = crate::model_catalog::efforts_for_model(
-            &selected_model,
-            project_root.as_deref(),
-        );
+        let effort_options =
+            crate::model_catalog::efforts_for_model(&selected_model, project_root.as_deref());
         let effort_picker = Button::new("composer-reasoning-effort-picker")
             .icon(Icon::default().path("icons/effort.svg"))
             .label(reasoning_effort.label())
@@ -4905,25 +5121,25 @@ impl ChatListView {
             .dropdown_menu(move |menu, _window, _cx| {
                 let menu = menu.check_side(gpui_component::Side::Right);
                 effort_options
-                .clone()
-                .into_iter()
-                .fold(menu, |menu, effort| {
-                    let model = effort_model.clone();
-                    menu.item(
-                        PopupMenuItem::new(effort.label())
-                            .icon(Icon::default().path("icons/effort.svg"))
-                            .checked(effort == reasoning_effort)
-                            .on_click(move |_event, _window, cx| {
-                                model.update(cx, |state, cx| {
-                                    controller::dispatch(
-                                        state,
-                                        AppAction::SelectReasoningEffort(effort),
-                                    );
-                                    cx.notify();
-                                });
-                            }),
-                    )
-                })
+                    .clone()
+                    .into_iter()
+                    .fold(menu, |menu, effort| {
+                        let model = effort_model.clone();
+                        menu.item(
+                            PopupMenuItem::new(effort.label())
+                                .icon(Icon::default().path("icons/effort.svg"))
+                                .checked(effort == reasoning_effort)
+                                .on_click(move |_event, _window, cx| {
+                                    model.update(cx, |state, cx| {
+                                        controller::dispatch(
+                                            state,
+                                            AppAction::SelectReasoningEffort(effort),
+                                        );
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                    })
             });
 
         let input_value = self.input_state.read(cx).value().to_string();

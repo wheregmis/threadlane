@@ -11,9 +11,8 @@ pub(crate) use projection::{
 };
 pub(crate) use types::{
     ChatMessageInfo, ChatStreamEvent, MessageRole, ProjectInfo, RequestedEditorTarget,
-    SessionAttention, SessionHealth, SessionHydrationRequest, SessionInfo,
-    SubagentActivityInfo, SubagentActivityStatus, ToolActivityInfo, TrajectoryEntry, WorkMode,
-    WorkspacePage,
+    SessionAttention, SessionHealth, SessionHydrationRequest, SessionInfo, SubagentActivityInfo,
+    SubagentActivityStatus, ToolActivityInfo, TrajectoryEntry, WorkMode, WorkspacePage,
 };
 
 #[cfg(test)]

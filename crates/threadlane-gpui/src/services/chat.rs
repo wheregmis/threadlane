@@ -71,13 +71,12 @@ pub(crate) fn execute_prompt(
             stream_tx: task_stream_tx.clone(),
             error: None,
         };
-        let git_branch = tokio::task::spawn_blocking(move || {
-            threadlane_git::current_branch(&work_dir)
-        })
-        .await
-        .ok()
-        .and_then(Result::ok)
-        .flatten();
+        let git_branch =
+            tokio::task::spawn_blocking(move || threadlane_git::current_branch(&work_dir))
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .flatten();
         let mut agent = task_runtime.agent.lock().await;
         if let Some(branch) = git_branch {
             if let Err(error) = agent.set_fact("git_branch", &branch) {

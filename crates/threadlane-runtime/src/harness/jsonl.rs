@@ -1039,7 +1039,7 @@ impl Record {
             | Self::ContextSnapshotLoaded { .. }
             | Self::ContextCompacted { .. }
             | Self::ProviderResponseAttached { .. } => SyncPolicy::Data,
-            | Self::RunContextCaptured { .. }
+            Self::RunContextCaptured { .. }
             | Self::ProviderRequestStarted { .. }
             | Self::ProviderRequestFinished { .. }
             | Self::StreamCheckpoint { .. } => SyncPolicy::All,

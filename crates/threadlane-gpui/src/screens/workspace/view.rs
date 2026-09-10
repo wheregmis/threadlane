@@ -306,6 +306,15 @@ impl WorkspaceView {
                         term.send_input(&format!("{trimmed}\n"));
                     });
                 }
+                if let Some(work_dir) =
+                    model.update(cx, |state, _cx| state.requested_terminal_work_dir.take())
+                {
+                    this.bottom_panel_visible = true;
+                    this.get_or_create_active_terminal(&work_dir, cx)
+                        .read(cx)
+                        .focus_handle(cx)
+                        .focus(window, cx);
+                }
                 let _ = model_wake_tx.send(());
                 cx.notify();
             });
@@ -444,12 +453,8 @@ impl WorkspaceView {
             let acp_model = view.model.clone();
             let acp_project = view.model.read(cx).active_work_dir.clone();
             cx.spawn(async move |_view, cx| {
-                crate::model_catalog::refresh_acp_models_and_update(
-                    acp_model,
-                    cx,
-                    acp_project,
-                )
-                .await;
+                crate::model_catalog::refresh_acp_models_and_update(acp_model, cx, acp_project)
+                    .await;
             })
             .detach();
         });
@@ -826,7 +831,9 @@ impl WorkspaceView {
                 let refresh_delay = session_pr_refresh_delay(result.is_ok());
                 if let Ok(pr) = result {
                     self.model.update(cx, |state, cx| {
-                        state.git_prs.insert((work_dir.clone(), branch.clone()), pr.clone());
+                        state
+                            .git_prs
+                            .insert((work_dir.clone(), branch.clone()), pr.clone());
                         if let Some(info) = pr.as_ref() {
                             state.auto_address_pr_reviews(work_dir.clone(), branch.clone(), info);
                         }
@@ -860,7 +867,8 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    fn render_update_notice(&self, cx: &mut Context<Self>) -> Option<AnyElement> {        let status = {
+    fn render_update_notice(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let status = {
             let state = self.model.read(cx);
             if state.update_notice_dismissed {
                 return None;
@@ -909,10 +917,7 @@ impl WorkspaceView {
                     Button::new("update-download")
                         .label("Download")
                         .primary()
-                        .tooltip(format!(
-                            "Download Threadlane {}",
-                            info.version
-                        ))
+                        .tooltip(format!("Download Threadlane {}", info.version))
                         .on_click(move |_event, _window, _cx| {
                             updater::download(info.clone(), tx.clone());
                         }),
@@ -927,9 +932,7 @@ impl WorkspaceView {
                     Button::new("update-install")
                         .label("Install and relaunch")
                         .primary()
-                        .tooltip(format!(
-                            "Install Threadlane {version} and relaunch"
-                        ))
+                        .tooltip(format!("Install Threadlane {version} and relaunch"))
                         .on_click(move |_event, _window, _cx| {
                             updater::install(info.clone(), bytes.clone(), tx.clone());
                         }),

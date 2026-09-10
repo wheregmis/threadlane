@@ -597,11 +597,17 @@ pub(crate) fn is_chat_capable_model(id: &str) -> bool {
         "audio-",
         "image-",
     ];
-    if EXCLUDED_PREFIXES.iter().any(|prefix| id_lower.starts_with(prefix))
+    if EXCLUDED_PREFIXES
+        .iter()
+        .any(|prefix| id_lower.starts_with(prefix))
         || EXCLUDED_CONTAINS.iter().any(|part| id_lower.contains(part))
     {
         let extra = std::env::var("OPENAI_MODELS_ALLOW_EXTRA").unwrap_or_default();
-        for token in extra.split(',').map(str::trim).filter(|token| !token.is_empty()) {
+        for token in extra
+            .split(',')
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+        {
             if id_lower.contains(&token.to_ascii_lowercase()) {
                 return true;
             }

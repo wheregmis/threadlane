@@ -67,9 +67,7 @@ pub(crate) fn adapt_agent_event(event: AgentEvent) -> ChatAgentUpdate {
         AgentEvent::PermissionRequested { request } => {
             ChatAgentUpdate::PermissionRequested(request)
         }
-        AgentEvent::QuestionRequested { request } => {
-            ChatAgentUpdate::QuestionRequested(request)
-        }
+        AgentEvent::QuestionRequested { request } => ChatAgentUpdate::QuestionRequested(request),
         _ => ChatAgentUpdate::Ignore,
     }
 }

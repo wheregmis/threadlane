@@ -755,7 +755,10 @@ impl HarnessEventHub {
             .clone()
     }
 
-    pub(crate) fn subscribe<S: SessionStore>(&self, store: &S) -> Result<Subscription, ReduceError> {
+    pub(crate) fn subscribe<S: SessionStore>(
+        &self,
+        store: &S,
+    ) -> Result<Subscription, ReduceError> {
         self.subscribe_for_lane(store, None)
     }
 

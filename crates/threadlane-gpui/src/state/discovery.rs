@@ -110,11 +110,8 @@ pub(crate) fn discover_session_stubs_in_project(work_dir: &Path) -> Vec<SessionI
                     .unwrap_or((canonical_work_dir.clone(), None, None, false));
             let session_file =
                 resolve_session_transcript_file(&path, &runtime_work_dir, &id, is_worktree);
-            let git_branch = effective_session_git_branch(
-                &runtime_work_dir,
-                is_worktree,
-                recorded_branch,
-            );
+            let git_branch =
+                effective_session_git_branch(&runtime_work_dir, is_worktree, recorded_branch);
             let worktree_available = !is_worktree || runtime_work_dir.is_dir();
             Some(SessionInfo {
                 title: id.clone(),
@@ -206,23 +203,21 @@ pub(crate) fn discover_sessions_in_project_cached(
                     };
                 let session_file =
                     resolve_session_transcript_file(&path, &runtime_work_dir, &id, is_worktree);
-                let (title, health, recorded_branch) = match JsonlStore::open_read_only(&session_file) {
-                    Ok(store) => (
-                        extract_session_title(&store, &id),
-                        SessionHealth::Healthy,
-                        store.facts().get("git_branch").cloned().or(stub_branch),
-                    ),
-                    Err(_) => (
-                        "Unreadable session".to_string(),
-                        SessionHealth::Warning,
-                        stub_branch,
-                    ),
-                };
-                let git_branch = effective_session_git_branch(
-                    &runtime_work_dir,
-                    is_worktree,
-                    recorded_branch,
-                );
+                let (title, health, recorded_branch) =
+                    match JsonlStore::open_read_only(&session_file) {
+                        Ok(store) => (
+                            extract_session_title(&store, &id),
+                            SessionHealth::Healthy,
+                            store.facts().get("git_branch").cloned().or(stub_branch),
+                        ),
+                        Err(_) => (
+                            "Unreadable session".to_string(),
+                            SessionHealth::Warning,
+                            stub_branch,
+                        ),
+                    };
+                let git_branch =
+                    effective_session_git_branch(&runtime_work_dir, is_worktree, recorded_branch);
                 let metadata = std::fs::metadata(&session_file).ok();
                 let len = metadata.as_ref().map_or(0, |metadata| metadata.len());
                 let modified = metadata.and_then(|metadata| metadata.modified().ok());

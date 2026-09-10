@@ -144,6 +144,9 @@ mod tests {
     #[test]
     fn display_hides_https_only() {
         assert_eq!(display_url("https://example.com"), "example.com");
-        assert_eq!(display_url("http://localhost:3000"), "http://localhost:3000");
+        assert_eq!(
+            display_url("http://localhost:3000"),
+            "http://localhost:3000"
+        );
     }
 }

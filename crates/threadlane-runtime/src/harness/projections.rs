@@ -139,9 +139,9 @@ pub fn project_chat_messages(agent_messages: &[AgentMessage]) -> Vec<UiChatMessa
                     .last()
                     .filter(|message| {
                         message.role == UiMessageRole::Assistant
-                        && message.content.is_empty()
-                        && message.tool_activities.is_empty()
-                        && message.reasoning_content.is_some()
+                            && message.content.is_empty()
+                            && message.tool_activities.is_empty()
+                            && message.reasoning_content.is_some()
                     })
                     .and_then(|message| message.reasoning_content.clone());
                 if reasoning_content.is_some() {
@@ -172,8 +172,7 @@ pub fn project_chat_messages(agent_messages: &[AgentMessage]) -> Vec<UiChatMessa
                 ..
             } => {
                 let category = if *is_error { "Error" } else { "Result" };
-                if let Some((msg_idx, act_idx)) =
-                    activity_index.get(tool_call_id.as_str()).copied()
+                if let Some((msg_idx, act_idx)) = activity_index.get(tool_call_id.as_str()).copied()
                 {
                     if let Some(activity) = result
                         .get_mut(msg_idx)

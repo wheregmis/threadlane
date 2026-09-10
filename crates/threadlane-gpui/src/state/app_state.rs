@@ -72,12 +72,13 @@ pub struct AppState {
     pub(crate) requested_editor_target: Option<RequestedEditorTarget>,
     pub(crate) requested_composer_prompt: Option<String>,
     pub(crate) requested_terminal_command: Option<String>,
+    pub(crate) requested_terminal_work_dir: Option<PathBuf>,
     stream_tx: tokio::sync::mpsc::UnboundedSender<ChatStreamEvent>,
     pub(crate) stream_rx: Option<tokio::sync::mpsc::UnboundedReceiver<ChatStreamEvent>>,
     session_refresh_tx: Sender<PathBuf>,
     pub(crate) session_refresh_rx:
         Option<tokio::sync::mpsc::UnboundedReceiver<(PathBuf, Vec<SessionInfo>)>>,
-    pub(crate)     session_runtimes: HashMap<PathBuf, Arc<SessionRuntime>>,
+    pub(crate) session_runtimes: HashMap<PathBuf, Arc<SessionRuntime>>,
     deferred_stream_events: HashMap<String, Vec<ChatStreamEvent>>,
     /// Bridge to the embedded browser panel. The channel is created with the
     /// app; the first constructed right panel claims the receiver and pumps
@@ -277,6 +278,7 @@ impl AppState {
             requested_editor_target: None,
             requested_composer_prompt: None,
             requested_terminal_command: None,
+            requested_terminal_work_dir: None,
             stream_tx,
             stream_rx: Some(stream_rx),
             session_refresh_tx,
@@ -666,6 +668,10 @@ impl AppState {
         self.requested_terminal_command = Some(command);
     }
 
+    pub(crate) fn request_open_terminal(&mut self, work_dir: PathBuf) {
+        self.requested_terminal_work_dir = Some(work_dir);
+    }
+
     pub(crate) fn select_session(
         &mut self,
         work_dir: PathBuf,
@@ -778,8 +784,7 @@ impl AppState {
                     return Err(error.to_string());
                 }
             } else {
-                std::fs::rename(&session_file, &archive_file)
-                    .map_err(|error| error.to_string())?;
+                std::fs::rename(&session_file, &archive_file).map_err(|error| error.to_string())?;
             }
             let stub = Self::canonical_session_file(&work_dir, &session_id);
             Self::remove_file_if_present(&stub)?;
@@ -809,10 +814,7 @@ impl AppState {
                 threadlane_git::remove_worktree(&work_dir, &worktree_dir, true)
                     .map_err(|error| error.to_string())?;
             }
-            Self::remove_file_if_present(&Self::canonical_session_file(
-                &work_dir,
-                &session_id,
-            ))?;
+            Self::remove_file_if_present(&Self::canonical_session_file(&work_dir, &session_id))?;
             let _ = threadlane_git::prune_worktrees(&work_dir);
         } else {
             std::fs::remove_file(session_file).map_err(|error| error.to_string())?;
@@ -1011,7 +1013,8 @@ impl AppState {
         self.pending_questions.remove(session_id);
         self.deferred_stream_events.remove(session_id);
         self.pending_composer_messages.remove(session_id);
-        self.acp_config_options.remove(&Self::projection_key(session_id, &session_file));
+        self.acp_config_options
+            .remove(&Self::projection_key(session_id, &session_file));
         if let Some(project) = self
             .projects
             .iter_mut()
@@ -1115,11 +1118,8 @@ impl AppState {
             crate::services::pr_review::FeedbackSyncResult::NewFeedback(items) => items,
         };
 
-        let prompt = crate::services::pr_review::build_auto_address_prompt(
-            pr.number,
-            &branch,
-            &new_items,
-        );
+        let prompt =
+            crate::services::pr_review::build_auto_address_prompt(pr.number, &branch, &new_items);
         let runtime = self.ensure_session_runtime(runtime_work_dir.clone(), session_file);
         if runtime.is_generating() {
             // An active turn will pick the queued follow-up up via
@@ -1155,7 +1155,8 @@ impl AppState {
                 self.session_status = Some("Working…".into());
             }
         }
-        self.pr_review_tracking.insert(work_dir.clone(), candidate_store);
+        self.pr_review_tracking
+            .insert(work_dir.clone(), candidate_store);
         if let Some(store) = self.pr_review_tracking.get(&work_dir) {
             let _ = crate::services::pr_review::save_pr_review_tracking(&work_dir, store);
         }
@@ -2578,7 +2579,8 @@ impl AppState {
 pub(crate) fn merge_live_trajectory(
     fresh: Vec<TrajectoryEntry>,
     live: &[TrajectoryEntry],
-) -> Vec<TrajectoryEntry> {    let fresh_correlations: HashSet<String> = fresh
+) -> Vec<TrajectoryEntry> {
+    let fresh_correlations: HashSet<String> = fresh
         .iter()
         .filter_map(|entry| entry.correlation_id.clone())
         .collect();
@@ -2593,8 +2595,7 @@ pub(crate) fn merge_live_trajectory(
         }
         let covered = match entry.correlation_id.as_deref() {
             Some(correlation) => fresh_correlations.contains(correlation),
-            None => fresh_summaries
-                .contains(&(entry.category.clone(), entry.summary.clone())),
+            None => fresh_summaries.contains(&(entry.category.clone(), entry.summary.clone())),
         };
         if !covered {
             merged.push(entry.clone());
@@ -2645,11 +2646,15 @@ impl AppState {
             .is_some_and(|runtime| runtime.is_generating());
         if generating {
             let live_trajectory = self.trajectory_by_session.remove(&key).unwrap_or_default();
-            self.trajectory_by_session
-                .insert(key.clone(), merge_live_trajectory(result.trajectory, &live_trajectory));
+            self.trajectory_by_session.insert(
+                key.clone(),
+                merge_live_trajectory(result.trajectory, &live_trajectory),
+            );
             let live_subagents = self.subagents_by_session.remove(&key).unwrap_or_default();
-            self.subagents_by_session
-                .insert(key.clone(), merge_live_subagents(result.subagents, &live_subagents));
+            self.subagents_by_session.insert(
+                key.clone(),
+                merge_live_subagents(result.subagents, &live_subagents),
+            );
         } else {
             self.trajectory_by_session
                 .insert(key.clone(), result.trajectory);
@@ -3539,9 +3544,11 @@ impl AppState {
                     let Some(runtime) = source.upgrade() else {
                         continue;
                     };
-                    if !self.session_runtimes.get(&runtime.session_file).is_some_and(|current| {
-                        Arc::ptr_eq(current, &runtime)
-                    }) {
+                    if !self
+                        .session_runtimes
+                        .get(&runtime.session_file)
+                        .is_some_and(|current| Arc::ptr_eq(current, &runtime))
+                    {
                         continue;
                     }
                     let is_active = self.active_session_matches(&session_id, &runtime.session_file);
@@ -3616,9 +3623,7 @@ impl AppState {
         for message in self.messages.iter() {
             for activity in message.tool_activities.iter() {
                 if activity.title.starts_with("computer_")
-                    && self
-                        .mirror_seen
-                        .insert(format!("tool:{}", activity.id))
+                    && self.mirror_seen.insert(format!("tool:{}", activity.id))
                 {
                     fresh = true;
                 }
@@ -3778,8 +3783,7 @@ impl AppState {
             return Ok(());
         }
 
-        let runtime =
-            self.ensure_session_runtime(runtime_work_dir.clone(), session_file.clone());
+        let runtime = self.ensure_session_runtime(runtime_work_dir.clone(), session_file.clone());
         crate::services::chat::execute_prompt(
             runtime,
             runtime_work_dir,
@@ -3940,7 +3944,6 @@ fn project_recovery_diagnostics(
     }
     rows
 }
-
 
 #[path = "tests.rs"]
 #[cfg(test)]

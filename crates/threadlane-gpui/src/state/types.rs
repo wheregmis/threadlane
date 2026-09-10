@@ -2,9 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
-use threadlane_session::{
-    AcpConfigOption, AgentEvent, ImageAttachment, SessionPlan, TokenUsage,
-};
+use threadlane_session::{AcpConfigOption, AgentEvent, ImageAttachment, SessionPlan, TokenUsage};
 
 use super::AppState;
 use crate::services::sessions::{SessionRuntime, SessionRuntimeStatus};

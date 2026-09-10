@@ -9,7 +9,11 @@ pub struct PrDiffRequest {
 
 impl PrDiffRequest {
     pub fn new(key: PrWorkspaceKey, path: String, revision: u64) -> Self {
-        Self { key, path, revision }
+        Self {
+            key,
+            path,
+            revision,
+        }
     }
 }
 

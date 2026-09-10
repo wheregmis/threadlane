@@ -133,11 +133,7 @@ pub(crate) fn compaction_retained_tail(messages: &[AgentMessage]) -> Vec<AgentMe
 }
 
 impl CodingAgent {
-    fn install_run_trace_recorders(
-        &mut self,
-        path: PathBuf,
-        run_id: String,
-    ) -> Result<(), String> {
+    fn install_run_trace_recorders(&mut self, path: PathBuf, run_id: String) -> Result<(), String> {
         let trace_harness = Arc::new(tokio::sync::Mutex::new(CodingSessionHarness::open(&path)?));
         let provider_harness = trace_harness.clone();
         let provider_run_id = run_id.clone();

@@ -12,8 +12,8 @@ use crate::extension_broker::{
 };
 use crate::permission::{PermissionHandle, PermissionManager};
 use crate::plan::{SessionPlanStore, UpdatePlanToolExecutor};
-use crate::question::{AskQuestionToolExecutor, QuestionHandle};
 use crate::policy::ToolPolicy;
+use crate::question::{AskQuestionToolExecutor, QuestionHandle};
 use async_trait::async_trait;
 use log::warn;
 use serde_json::Value;
@@ -160,8 +160,8 @@ impl ToolExecutor for WorktreeToolExecutor {
 
 impl WorktreeToolExecutor {
     fn execute(&self, args: &str) -> Result<String, String> {
-        let args: Value = serde_json::from_str(args)
-            .map_err(|error| format!("invalid arguments: {error}"))?;
+        let args: Value =
+            serde_json::from_str(args).map_err(|error| format!("invalid arguments: {error}"))?;
         let branch = args
             .get("branch")
             .and_then(Value::as_str)
@@ -395,7 +395,8 @@ impl Capability for WasiCapability {
 
 pub(crate) struct McpCapability {
     pub(crate) mcp_manager: Arc<McpManager>,
-}impl Capability for McpCapability {
+}
+impl Capability for McpCapability {
     fn id(&self) -> &str {
         "mcp"
     }
