@@ -11,7 +11,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, Mutex, OnceCell};
 
 const PROD_BASE_URL: &str = "https://cloudcode-pa.googleapis.com";
-const DAILY_BASE_URL: &str = "https://daily-cloudcode-pa.sandbox.googleapis.com";
+/// Daily host the official client uses for control- and data-plane traffic.
+/// Verified live: generation that 429s on prod returns 200 here.
+const DAILY_BASE_URL: &str = "https://daily-cloudcode-pa.googleapis.com";
 const STREAM_PATH: &str = "/v1internal:streamGenerateContent?alt=sse";
 const CLIENT_VERSION: &str = "1.15.8";
 
@@ -205,6 +207,10 @@ pub fn build_gemini_request(
 pub struct AntigravityClient {
     client: reqwest::Client,
     project_cache: ProjectCache,
+    /// Index into `endpoint_candidates()` that last succeeded. Generation
+    /// tries it first so steady state costs one request even when the other
+    /// host is dead for the account; a fallback success re-points it.
+    endpoint_hint: Arc<Mutex<Option<usize>>>,
 }
 
 impl Default for AntigravityClient {
@@ -218,6 +224,7 @@ impl AntigravityClient {
         Self {
             client: reqwest::Client::new(),
             project_cache: Arc::new(Mutex::new(HashMap::new())),
+            endpoint_hint: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -359,8 +366,16 @@ impl AntigravityClient {
         runtime_model: &str,
         envelope: &Value,
     ) -> Result<reqwest::Response, String> {
+        let candidates = endpoint_candidates();
+        // Steady state costs one request: start from the host that last
+        // succeeded for this client instead of always probing prod first.
+        let mut order: Vec<usize> = (0..candidates.len()).collect();
+        if let Some(hint) = *self.endpoint_hint.lock().await {
+            order.sort_by_key(|index| usize::from(*index != hint));
+        }
         let mut last_error = "no Antigravity endpoint was available".to_string();
-        for endpoint in endpoint_candidates() {
+        for index in order {
+            let endpoint = &candidates[index];
             let mut headers = antigravity_headers(token);
             if runtime_model.starts_with("claude-") {
                 headers.insert(
@@ -388,6 +403,7 @@ impl AntigravityClient {
             };
             if response.status().is_success() {
                 tracing::debug!("Antigravity endpoint {endpoint} returned HTTP 200");
+                *self.endpoint_hint.lock().await = Some(index);
                 return Ok(response);
             }
             let status = response.status();
@@ -399,12 +415,15 @@ impl AntigravityClient {
                 "Antigravity API error ({status}, runtime model {runtime_model}): {}",
                 safe_error_text(&text)
             );
-            // Production 4xx responses are authoritative for this account/model.
-            // Falling through turns a useful quota error into unrelated daily-host noise.
-            if status.is_client_error() {
+            // A 429 is not authoritative: prod can 429 every generation call
+            // for an account while daily returns 200 (verified live), so fall
+            // through and let the other host try. Other 4xx responses (bad
+            // token, unknown model, malformed request) would fail identically
+            // everywhere, so keep them terminal.
+            if status.is_client_error() && status.as_u16() != 429 {
                 break;
             }
-            if !matches!(status.as_u16(), 500 | 502 | 503 | 504) {
+            if !matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504) {
                 break;
             }
         }
@@ -520,7 +539,10 @@ fn endpoint_candidates() -> Vec<String> {
             }
         }
     }
-    vec![PROD_BASE_URL.to_string(), DAILY_BASE_URL.to_string()]
+    // Daily first, matching the official client (verified live: generation
+    // that 429s on prod returns 200 on daily). `send_stream_request` still
+    // falls through on 429/5xx and sticks to the last-good host.
+    vec![DAILY_BASE_URL.to_string(), PROD_BASE_URL.to_string()]
 }
 
 fn antigravity_headers(token: &str) -> reqwest::header::HeaderMap {
@@ -604,6 +626,89 @@ fn runtime_model_override(model: &str, effort: &str) -> Option<String> {
     None
 }
 
+/// Live inventory entry from `fetchAvailableModels`: backend runtime id
+/// plus its display name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AntigravityModelInfo {
+    pub id: String,
+    pub display_name: String,
+}
+
+/// Backend runtime id for a logical `antigravity/*` model id and lowercase
+/// effort label. Thin wrapper so catalog code can validate entries against
+/// the live inventory without depending on request internals.
+pub fn runtime_model_for(model_id: &str, effort: &str) -> String {
+    resolve_runtime_model(model_id, effort)
+}
+
+/// Parse a `fetchAvailableModels` body into inventory entries. Pure so the
+/// shape is pinned by unit tests without network access.
+fn parse_available_models(value: &Value) -> Vec<AntigravityModelInfo> {
+    let Some(models) = value.get("models").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let mut entries: Vec<AntigravityModelInfo> = models
+        .iter()
+        .filter(|(_, info)| info.is_object())
+        .map(|(id, info)| AntigravityModelInfo {
+            id: id.clone(),
+            display_name: info
+                .get("displayName")
+                .and_then(Value::as_str)
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or(id)
+                .to_string(),
+        })
+        .collect();
+    entries.sort_by(|a, b| a.id.cmp(&b.id));
+    entries
+}
+
+/// Live model inventory for this account via `fetchAvailableModels` (daily
+/// host, prod fallback). Empty on any failure — callers keep their cached or
+/// static lists instead of wiping the picker.
+///
+/// Hops onto the shared Tokio runtime when the caller has none: GPUI
+/// background tasks run on GPUI's executor, where hyper panics without a
+/// reactor.
+pub async fn fetch_available_models() -> Vec<AntigravityModelInfo> {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        fetch_available_models_inner().await
+    } else {
+        let handle = threadlane_runtime::get_runtime().spawn(fetch_available_models_inner());
+        handle.await.unwrap_or_default()
+    }
+}
+
+async fn fetch_available_models_inner() -> Vec<AntigravityModelInfo> {
+    let Ok(token) = get_valid_antigravity_token().await else {
+        return Vec::new();
+    };
+    let probe = AntigravityClient::new();
+    let project = probe.resolve_project(&token).await;
+    let client = reqwest::Client::new();
+    for endpoint in endpoint_candidates() {
+        let response = client
+            .post(format!("{endpoint}/v1internal:fetchAvailableModels"))
+            .headers(antigravity_headers(&token))
+            .json(&json!({ "project": project }))
+            .send()
+            .await;
+        let Ok(response) = response else { continue };
+        if !response.status().is_success() {
+            continue;
+        }
+        let Ok(value) = response.json::<Value>().await else {
+            continue;
+        };
+        let entries = parse_available_models(&value);
+        if !entries.is_empty() {
+            return entries;
+        }
+    }
+    Vec::new()
+}
+
 fn resolve_runtime_model(model_id: &str, effort: &str) -> String {
     if let Ok(model) = std::env::var("ANTIGRAVITY_RUNTIME_MODEL") {
         if !model.trim().is_empty() {
@@ -615,11 +720,6 @@ fn resolve_runtime_model(model_id: &str, effort: &str) -> String {
         return mapped;
     }
     match model {
-        "gemini-3.7-flash" => match effort {
-            "medium" => "gemini-3.7-flash-medium",
-            "high" | "xhigh" => "gemini-3.7-flash-high",
-            _ => "gemini-3.7-flash-low",
-        },
         "gemini-3.6-flash" => match effort {
             "medium" => "gemini-3.6-flash-medium",
             "high" | "xhigh" => "gemini-3.6-flash-high",
@@ -637,9 +737,24 @@ fn resolve_runtime_model(model_id: &str, effort: &str) -> String {
         "claude-opus-4-6" => "claude-opus-4-6-thinking",
         "claude-sonnet-4-6" => "claude-sonnet-4-6",
         "gpt-oss-120b" => "gpt-oss-120b-medium",
+        // Newer flash generations only expose a `-tiered` router model (no
+        // suffixed variants); the backend picks the effort tier. The picker
+        // synthesizes these logical entries from the live inventory, and the
+        // availability filter drops the row again if the backend ever stops
+        // advertising the runtime id — so this arm cannot strand a selection.
+        flashed if flashed.starts_with("gemini-") && flashed.ends_with("-flash") => {
+            return format!("{flashed}-tiered");
+        }
         other => other,
     }
     .to_string()
+}
+
+/// Models that reject tool-call replay without a thoughtSignature (400
+/// INVALID_ARGUMENT, verified live). Calls lacking one are dropped before
+/// the request is sent; replaying them would fail the whole turn.
+fn requires_thought_signature(runtime_model: &str) -> bool {
+    runtime_model.starts_with("gemini-3.6-") || runtime_model.ends_with("-tiered")
 }
 
 fn convert_openai_payload(payload: &Value) -> Result<(String, Value), String> {
@@ -717,7 +832,7 @@ fn convert_openai_payload(payload: &Value) -> Result<(String, Value), String> {
                     .get("thoughtSignature")
                     .or_else(|| call.get("thought_signature"))
                     .and_then(Value::as_str);
-                if runtime_model.starts_with("gemini-3.6-") && thought_signature.is_none() {
+                if requires_thought_signature(&runtime_model) && thought_signature.is_none() {
                     if !id.is_empty() {
                         unreplayable_call_ids.insert(id.to_string());
                     }
@@ -1401,14 +1516,19 @@ mod tests {
 
     #[test]
     fn maps_public_models_and_reasoning_effort() {
-        assert_eq!(
-            resolve_runtime_model("antigravity/gemini-3.7-flash", "medium"),
-            "gemini-3.7-flash-medium"
-        );
-        assert_eq!(
-            resolve_runtime_model("antigravity/gemini-3.7-flash", "high"),
-            "gemini-3.7-flash-high"
-        );
+        // Newer flash generations only expose a -tiered router model
+        // (verified live via fetchAvailableModels); the backend picks the
+        // effort tier, including generations with no static entry (3.8).
+        for effort in ["off", "low", "medium", "high", "xhigh"] {
+            assert_eq!(
+                resolve_runtime_model("antigravity/gemini-3.7-flash", effort),
+                "gemini-3.7-flash-tiered"
+            );
+            assert_eq!(
+                resolve_runtime_model("antigravity/gemini-3.8-flash", effort),
+                "gemini-3.8-flash-tiered"
+            );
+        }
         assert_eq!(
             resolve_runtime_model("antigravity/gemini-3.6-flash", "medium"),
             "gemini-3.6-flash-medium"
@@ -1425,6 +1545,76 @@ mod tests {
             resolve_runtime_model("claude-opus-4-6", "high"),
             "claude-opus-4-6-thinking"
         );
+    }
+
+    #[test]
+    fn available_models_parse_display_names_with_id_fallback() {
+        let value = serde_json::json!({
+            "defaultAgentModelId": "gemini-3.6-flash-high",
+            "models": {
+                "gemini-3.6-flash-high": {"displayName": "Gemini 3.6 Flash (High)"},
+                "gemini-3.7-flash-tiered": {},
+                "unrelated": "not-an-object-entry"
+            }
+        });
+        let entries = parse_available_models(&value);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].id, "gemini-3.6-flash-high");
+        assert_eq!(entries[0].display_name, "Gemini 3.6 Flash (High)");
+        assert_eq!(entries[1].id, "gemini-3.7-flash-tiered");
+        assert_eq!(entries[1].display_name, "gemini-3.7-flash-tiered");
+        assert!(parse_available_models(&serde_json::json!({})).is_empty());
+    }
+
+    struct ThreadUnparker {
+        thread: std::thread::Thread,
+    }
+
+    impl std::task::Wake for ThreadUnparker {
+        fn wake(self: Arc<Self>) {
+            self.thread.unpark();
+        }
+    }
+
+    /// Regression: GPUI background tasks have no Tokio reactor, where hyper
+    /// panics on first I/O poll. Drives the fetch on a bare thread with a
+    /// park/unpark waker — mirroring that context — so a missing hop fails
+    /// here instead of aborting the app at startup. The live fetch runs only
+    /// under `THREADLANE_LIVE_ANTIGRAVITY=1`; without credentials the
+    /// credential-less empty result is asserted.
+    #[test]
+    fn fetch_available_models_survives_without_a_reactor() {
+        use std::future::Future;
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        if load_antigravity_credentials().is_some()
+            && std::env::var("THREADLANE_LIVE_ANTIGRAVITY").is_err()
+        {
+            return;
+        }
+        let waker = std::task::Waker::from(Arc::new(ThreadUnparker {
+            thread: std::thread::current(),
+        }));
+        let mut context = std::task::Context::from_waker(&waker);
+        let mut future = Box::pin(fetch_available_models());
+        let models = loop {
+            match future.as_mut().poll(&mut context) {
+                std::task::Poll::Ready(models) => break models,
+                std::task::Poll::Pending => std::thread::park(),
+            }
+        };
+        if std::env::var("THREADLANE_LIVE_ANTIGRAVITY").is_err()
+            && load_antigravity_credentials().is_none()
+        {
+            assert!(models.is_empty());
+        }
+    }
+
+    #[test]
+    fn tiered_and_legacy_models_require_thought_signatures() {
+        assert!(requires_thought_signature("gemini-3.6-flash-medium"));
+        assert!(requires_thought_signature("gemini-3.7-flash-tiered"));
+        assert!(!requires_thought_signature("gemini-2.5-flash"));
+        assert!(!requires_thought_signature("claude-sonnet-4-6"));
     }
 
     #[test]

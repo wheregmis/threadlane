@@ -447,6 +447,24 @@ impl WorkspaceView {
                     .await;
             })
             .detach();
+            // Same for the OpenAI list and the Antigravity inventory: live
+            // results merge additively (seeds are the offline guarantee) and
+            // unknown Antigravity entries drop out once confirmed retired.
+            // TTL-guarded, so project switches just revalidate.
+            let openai_model = view.model.clone();
+            cx.spawn(async move |_view, cx| {
+                crate::model_catalog::refresh_openai_models_and_update(openai_model, cx).await;
+            })
+            .detach();
+            let antigravity_model = view.model.clone();
+            cx.spawn(async move |_view, cx| {
+                crate::model_catalog::refresh_antigravity_models_and_update(
+                    antigravity_model,
+                    cx,
+                )
+                .await;
+            })
+            .detach();
             // Connect each external agent once in the background and cache
             // the models it offers, so every session's picker can offer them
             // before its own engine spawns. Revalidation stays here: a

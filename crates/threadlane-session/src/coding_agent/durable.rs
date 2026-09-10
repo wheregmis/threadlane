@@ -30,26 +30,24 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-fn should_complete_prewalk(tool_name: &str, is_error: bool) -> bool {
-    !is_error && tool_name == super::capabilities::PREWALK_HANDOFF_TOOL_NAME
-}
-
 #[cfg(test)]
 mod prewalk_tests {
-    use super::should_complete_prewalk;
+    use crate::orchestrator::{
+        is_prewalk_implementation_action, is_prewalk_todo_gate_opener, prewalk_would_be_noop,
+    };
 
     #[test]
-    fn only_a_successful_explicit_signal_completes_prewalk() {
-        assert!(!should_complete_prewalk("write_file", false));
-        assert!(!should_complete_prewalk("edit_file_hashline", false));
-        assert!(should_complete_prewalk(
-            super::super::capabilities::PREWALK_HANDOFF_TOOL_NAME,
-            false
-        ));
-        assert!(!should_complete_prewalk(
-            super::super::capabilities::PREWALK_HANDOFF_TOOL_NAME,
-            true
-        ));
+    fn handoff_is_automatic_todo_gated_not_tool_triggered() {
+        // Implementation actions alone do not complete prewalk; the todo
+        // gate must open first and the handoff is automatic.
+        assert!(is_prewalk_implementation_action("write_file", false));
+        assert!(is_prewalk_implementation_action("edit_file_hashline", false));
+        assert!(!is_prewalk_implementation_action("read_file", false));
+        assert!(!is_prewalk_implementation_action("run_command", false));
+        assert!(!is_prewalk_implementation_action("update_plan", false));
+        assert!(is_prewalk_todo_gate_opener("update_plan", false));
+        assert!(!is_prewalk_todo_gate_opener("update_plan", true));
+        assert!(!prewalk_would_be_noop("a", None, "b", None));
     }
 }
 
@@ -245,17 +243,78 @@ impl CodingAgent {
             let event_tx = event_tx.clone();
             let turn_arc = turn_arc.clone();
             Box::pin(async move {
-                if should_complete_prewalk(&result.name, result.is_error) {
-                    let state = prewalk.lock().unwrap().take();
-                    if let Some(state) = state {
-                        let handoff_ms = state.started_at.elapsed().as_millis();
-                        let target_model = state.target_model;
-                        let target_effort = state.target_reasoning;
+                // oh-my-pi parity: todo-gated automatic handoff. A successful
+                // `update_plan` (even view) opens the gate; the first
+                // workspace-mutating edit/write behind an open gate switches
+                // one-shot to the fast model. No explicit handoff tool.
+                let handoff = {
+                    let mut guard = prewalk.lock().unwrap();
+                    match guard.as_mut() {
+                        None => None,
+                        Some(state)
+                            if crate::orchestrator::is_prewalk_todo_gate_opener(
+                                &result.name,
+                                result.is_error,
+                            ) =>
+                        {
+                            state.todo_seen = true;
+                            // Any successful todo call (including view) counts,
+                            // but never triggers the handoff by itself.
+                            None
+                        }
+                        Some(state)
+                            if state.todo_gate_open()
+                                && crate::orchestrator::is_prewalk_implementation_action(
+                                    &result.name,
+                                    result.is_error,
+                                ) =>
+                        {
+                            let state = guard.take().expect("prewalk checked above");
+                            // Noop guard at handoff time: the active model may
+                            // have changed since arming (e.g. /model switch).
+                            let (active_model, active_effort) = {
+                                // Best-effort synchronous read; if locked, skip
+                                // noop check and proceed with the handoff.
+                                match turn_arc.try_lock() {
+                                    Ok(turn) => (turn.model.clone(), Some(turn.reasoning_effort)),
+                                    Err(_) => (String::new(), None),
+                                }
+                            };
+                            if !active_model.is_empty()
+                                && crate::orchestrator::prewalk_would_be_noop(
+                                    &active_model,
+                                    active_effort,
+                                    &state.target_model,
+                                    state.target_reasoning,
+                                ) {
+                                let _ = event_tx.send(threadlane_runtime::AgentEvent::PrewalkCompleted {
+                                    model: state.target_model.clone(),
+                                    message: format!(
+                                        "Prewalk: target `{}` already matches the active model and reasoning; nothing to switch.",
+                                        state.target_model
+                                    ),
+                                });
+                                None
+                            } else {
+                                Some(state)
+                            }
+                        }
+                        Some(_) => None,
+                    }
+                };
+                if let Some(state) = handoff {
+                    let handoff_ms = state.started_at.elapsed().as_millis();
+                    let target_model = state.target_model;
+                    let target_effort = state.target_reasoning;
+                    let action_name = result.name.clone();
+                    {
                         let mut turn = turn_arc.lock().await;
                         turn.model = target_model.clone();
                         if let Some(effort) = target_effort {
                             turn.reasoning_effort = effort;
                         }
+                        // Scrub the hidden plan nudge, then inject the
+                        // post-handoff verification checklist.
                         if let Some(pos) = turn
                             .system_prompt
                             .find(crate::orchestrator::ARCHITECT_PROTOCOL_HEADER)
@@ -263,20 +322,26 @@ impl CodingAgent {
                             turn.system_prompt.truncate(pos);
                             turn.system_prompt = turn.system_prompt.trim_end().to_string();
                         }
-                        drop(turn);
-                        let effort_info = target_effort
-                            .map(|e| format!(" with reasoning effort `{}`", e.label()))
-                            .unwrap_or_default();
-                        let _ = event_tx.send(threadlane_runtime::AgentEvent::PrewalkCompleted {
-                            model: target_model.clone(),
-                            message: format!(
-                                "Prewalk complete: foundational change verified. Switched model to `{target_model}`{effort_info}."
-                            ),
-                        });
-                        log::info!(
-                            "orchestrator handoff_ms={handoff_ms} handoff_model={target_model} success=true"
-                        );
+                        if !turn
+                            .system_prompt
+                            .contains(crate::orchestrator::PREWALK_CHECKLIST_HEADER)
+                        {
+                            turn.system_prompt
+                                .push_str(&crate::orchestrator::build_checklist_directive());
+                        }
                     }
+                    let effort_info = target_effort
+                        .map(|e| format!(" with reasoning effort `{}`", e.label()))
+                        .unwrap_or_default();
+                    let _ = event_tx.send(threadlane_runtime::AgentEvent::PrewalkCompleted {
+                        model: target_model.clone(),
+                        message: format!(
+                            "Prewalk complete: first `{action_name}` landed behind an opened todo gate. Switched model to `{target_model}`{effort_info}."
+                        ),
+                    });
+                    log::info!(
+                        "orchestrator handoff_ms={handoff_ms} handoff_model={target_model} action={action_name} success=true"
+                    );
                 }
                 harness.lock().await.record_tool_result(&run_id, &result)
             })
@@ -1319,12 +1384,14 @@ impl CodingAgent {
                     #[cfg(test)]
                     child_run_override: None,
                     semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
+                    hub: self.hub.clone(),
                 },
                 NEXT_SUBAGENT_UI_RUN_ID.fetch_add(1, Ordering::Relaxed),
                 0,
                 identity,
                 Some(accepted),
                 resume_messages.clone(),
+                None,
             )
             .await;
             let (status, outcome, error, resumed_messages) = match result {

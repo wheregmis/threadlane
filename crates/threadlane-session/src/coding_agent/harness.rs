@@ -1498,6 +1498,85 @@ impl CodingSessionHarness {
         Ok(accepted)
     }
 
+    /// Start a follow-up operation on an already-settled subagent lane
+    /// (`hub revive` parity with oh-my-pi's parked-agent revive).
+    ///
+    /// The lane keeps its history: the child syncs the lane context, so the
+    /// revived run continues where the previous turn left off. Fails when
+    /// the lane is missing or still has an open operation (use `hub send`).
+    pub(crate) fn resume_subagent_lane(
+        &mut self,
+        lane: &str,
+        prompt: &str,
+    ) -> Result<(SubagentLaneIdentity, AcceptedRun), String> {
+        if prompt.trim().is_empty() {
+            return Err("revive prompt must be non-empty".into());
+        }
+        self.ensure_fresh()?;
+        let state = Reducer::reduce(self.store.store()).map_err(|error| error.to_string())?;
+        let lane_state = state
+            .lane(lane)
+            .ok_or_else(|| format!("unknown subagent lane: {lane}"))?;
+        if lane_state.open_operation.is_some() {
+            return Err(format!("lane {lane} is still live; use `hub send` to steer it"));
+        }
+        let run_id = self.unique_run_id("subagent-run")?;
+        let source_leaf_id = lane_state.leaf_id.clone();
+        if let Err(error) = self.store.start_operation_on_lane(
+            lane,
+            &run_id,
+            source_leaf_id.clone(),
+            OperationIntent::Run,
+        ) {
+            return Err(error.to_string());
+        }
+        self.store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())?;
+        let prompt_message = AgentMessage::user(prompt.to_owned(), Vec::new());
+        let assistant_entry_id = self
+            .store
+            .accept_prompt_on_lane(lane, &run_id, prompt_message)
+            .map_err(|error| error.to_string())?;
+        self.store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())?;
+        let started_seq = self
+            .store
+            .records()
+            .iter()
+            .find_map(|record| match record {
+                HarnessRecord::OperationStarted { id, seq, .. } if id == &run_id => Some(*seq),
+                _ => None,
+            })
+            .unwrap_or(0);
+        let identity = SubagentLaneIdentity {
+            lane_name: lane.to_owned(),
+            run_id: run_id.clone(),
+            source_leaf_id,
+            started_seq,
+        };
+        let accepted = AcceptedRun {
+            session_id: self.store.session_id().to_owned(),
+            run_id,
+            lane: lane.to_owned(),
+            prompt_entry_id: format!("entry-{}-user", identity.run_id),
+            assistant_entry_id,
+            accepted_through_seq: self
+                .store
+                .entries()
+                .iter()
+                .map(|entry| entry.seq)
+                .chain(self.store.records().iter().map(HarnessRecord::seq))
+                .max()
+                .unwrap_or(0),
+        };
+        self.store
+            .validate_accepted_run(&accepted)
+            .map_err(|error| error.to_string())?;
+        Ok((identity, accepted))
+    }
+
     pub(crate) fn append_subagent_context(
         &mut self,
         lane: &str,

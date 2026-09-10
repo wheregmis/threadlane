@@ -202,6 +202,17 @@ fn tool_update_events(call: AcpToolCall) -> Vec<AgentEvent> {
             } else {
                 content
             };
+            // Some agents (notably opencode under ACP) implement `question`
+            // with an interactive prompt that has no client binding: it never
+            // emits `session/request_permission`, so nothing is ever shown and
+            // the tool fails with "dismissed" unseen. Rewriting the result
+            // surfaces the unasked questions and steers the model to plain
+            // text, in this UI and in the journaled transcript alike.
+            let output = if is_unseen_question_dismissal(&name, &output) {
+                unseen_question_guidance(&call, &output)
+            } else {
+                output
+            };
             vec![AgentEvent::ToolExecutionEnd {
                 tool_call_id: call.tool_call_id.clone(),
                 name: name.clone(),
@@ -222,6 +233,102 @@ fn text_of(block: &AcpContentBlock) -> Option<String> {
         .as_text()
         .filter(|text| !text.is_empty())
         .map(str::to_string)
+}
+
+/// Whether this failure is an interactive `question` prompt that was
+/// dismissed without ever reaching the user.
+///
+/// The match is deliberately narrow — tool name `question` plus the agent's
+/// own dismissed wording — so genuine user dismissals answered through the
+/// permission prompt (which resolve as allow/deny option ids, not this text)
+/// and unrelated tool failures pass through untouched.
+fn is_unseen_question_dismissal(name: &str, output: &str) -> bool {
+    name.eq_ignore_ascii_case("question") && output.contains("dismissed this question")
+}
+
+/// Rewrites an unseen question dismissal into something actionable.
+///
+/// The original text claims the user dismissed the question, but the user
+/// never saw it: the agent's interactive prompt has no binding in this
+/// client. The rewrite says so, quotes the questions the agent tried to ask
+/// (parsed leniently from `rawInput`, tolerating both `{label}` objects and
+/// plain strings), and directs the model to plain text so the conversation
+/// can proceed.
+fn unseen_question_guidance(call: &AcpToolCall, output: &str) -> String {
+    let _ = output;
+    let mut guidance = String::from(
+        "The `question` tool cannot display questions to the user in this client, \
+         so nothing was asked and no answer was collected. Ask any clarifying \
+         questions in plain text instead.",
+    );
+    let questions = question_items_in(&call.raw_input);
+    if !questions.is_empty() {
+        guidance.push_str("\nQuestions that were not asked:");
+        for (header, question, options) in questions {
+            guidance.push_str("\n- ");
+            if !header.is_empty() {
+                guidance.push_str(&header);
+                guidance.push_str(": ");
+            }
+            guidance.push_str(&question);
+            if !options.is_empty() {
+                guidance.push_str(" (");
+                guidance.push_str(&options.join(" / "));
+                guidance.push(')');
+            }
+        }
+    }
+    guidance
+}
+
+/// Extracts `(header, question, options)` triples from an ACP `question`
+/// tool's `rawInput`, tolerating opencode's `{label, description}` option
+/// objects as well as plain-string options. Malformed entries are skipped.
+fn question_items_in(raw_input: &Option<serde_json::Value>) -> Vec<(String, String, Vec<String>)> {
+    let Some(questions) = raw_input
+        .as_ref()
+        .and_then(|input| input.get("questions"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
+    questions
+        .iter()
+        .filter_map(|item| {
+            let question = item
+                .get("question")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())?
+                .to_string();
+            let header = item
+                .get("header")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .unwrap_or_default()
+                .to_string();
+            let options = item
+                .get("options")
+                .and_then(serde_json::Value::as_array)
+                .map(|options| {
+                    options
+                        .iter()
+                        .filter_map(|option| {
+                            option
+                                .get("label")
+                                .and_then(serde_json::Value::as_str)
+                                .or_else(|| option.as_str())
+                                .map(str::trim)
+                                .filter(|text| !text.is_empty())
+                                .map(str::to_string)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some((header, question, options))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -363,6 +470,74 @@ mod tests {
         };
         assert!(result.is_error);
         assert_eq!(result.content, "Tool call failed.");
+    }
+
+    #[test]
+    fn an_unseen_question_dismissal_surfaces_the_unasked_questions() {
+        let events = agent_events_for(AcpSessionUpdate::ToolCallUpdate(tool_call(json!({
+            "toolCallId": "call_q",
+            "title": "question",
+            "kind": "other",
+            "status": "failed",
+            "rawInput": {
+                "questions": [{
+                    "question": "What would you like to work on today?",
+                    "header": "Today's focus",
+                    "options": [
+                        {"label": "Explore a codebase", "description": "Look around."},
+                        {"label": "Build something new", "description": "Start fresh."},
+                    ],
+                }],
+            },
+            "content": [{ "type": "content", "content": { "type": "text", "text": "The user dismissed this question" } }],
+        }))));
+        let [AgentEvent::ToolExecutionEnd { result, .. }] = events.as_slice() else {
+            panic!("expected a tool end, got {events:?}");
+        };
+        assert!(result.is_error);
+        assert!(
+            result.content.contains("cannot display questions"),
+            "unexpected guidance: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("What would you like to work on today?"),
+            "questions must stay visible: {}",
+            result.content
+        );
+        assert!(result.content.contains("Explore a codebase / Build something new"));
+        assert!(
+            result.content.contains("plain text"),
+            "model must be steered to text: {}",
+            result.content
+        );
+    }
+
+    #[test]
+    fn unrelated_failures_and_tools_pass_through_untouched() {
+        // Same dismissed wording on another tool is not ours to rewrite.
+        let events = agent_events_for(AcpSessionUpdate::ToolCallUpdate(tool_call(json!({
+            "toolCallId": "call_1",
+            "title": "read",
+            "status": "failed",
+            "content": [{ "type": "content", "content": { "type": "text", "text": "The user dismissed this question" } }],
+        }))));
+        let [AgentEvent::ToolExecutionEnd { result, .. }] = events.as_slice() else {
+            panic!("expected a tool end, got {events:?}");
+        };
+        assert_eq!(result.content, "The user dismissed this question");
+
+        // A question failure without the dismissed wording is a real error.
+        let events = agent_events_for(AcpSessionUpdate::ToolCallUpdate(tool_call(json!({
+            "toolCallId": "call_2",
+            "title": "question",
+            "status": "failed",
+            "content": [{ "type": "content", "content": { "type": "text", "text": "Permission denied: question" } }],
+        }))));
+        let [AgentEvent::ToolExecutionEnd { result, .. }] = events.as_slice() else {
+            panic!("expected a tool end, got {events:?}");
+        };
+        assert_eq!(result.content, "Permission denied: question");
     }
 
     #[test]

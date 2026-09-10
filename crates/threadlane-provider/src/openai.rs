@@ -701,6 +701,73 @@ pub async fn fetch_available_models(api_key: &str, account_id: Option<&str>) -> 
     }
 }
 
+/// Model ids usable on a ChatGPT subscription, read live from
+/// `chatgpt.com/backend-api/models` (verified: 200 with the OAuth token;
+/// `api.openai.com/v1/models` 401s for these accounts, so the API-key fetch
+/// above can never see them). Pure shape parsing lives in
+/// [`parse_subscription_models`] so tests need no network.
+pub async fn fetch_subscription_models() -> Vec<String> {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        fetch_subscription_models_inner().await
+    } else {
+        // GPUI background tasks have no Tokio reactor; hyper panics there.
+        match threadlane_runtime::get_runtime().spawn(fetch_subscription_models_inner()).await
+        {
+            Ok(models) => models,
+            Err(_) => Vec::new(),
+        }
+    }
+}
+
+fn parse_subscription_models(value: &Value) -> Vec<String> {
+    let mut ids = HashSet::new();
+    if let Some(categories) = value.get("categories").and_then(Value::as_array) {
+        for category in categories {
+            if let Some(default) = category.get("default_model").and_then(Value::as_str) {
+                ids.insert(default.to_string());
+            }
+            if let Some(supported) = category.get("supported_models").and_then(Value::as_array) {
+                for model in supported.iter().filter_map(Value::as_str) {
+                    ids.insert(model.to_string());
+                }
+            }
+        }
+    }
+    let mut ids: Vec<String> = ids.into_iter().collect();
+    ids.sort();
+    ids
+}
+
+async fn fetch_subscription_models_inner() -> Vec<String> {
+    let credentials = threadlane_auth::openai_auth::load_credentials()
+        .filter(|credentials| threadlane_auth::openai_auth::is_own_source(&credentials.source));
+    let Some(credentials) = credentials else {
+        return Vec::new();
+    };
+    let response = http_client()
+        .get("https://chatgpt.com/backend-api/models")
+        .header(AUTHORIZATION, format!("Bearer {}", credentials.access_token))
+        .header(CONTENT_TYPE, "application/json")
+        .header("OpenAI-Beta", "responses=experimental")
+        .header("originator", "threadlane")
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await;
+    let Ok(response) = response else {
+        return Vec::new();
+    };
+    if !response.status().is_success() {
+        return Vec::new();
+    }
+    let Ok(value) = response.json::<Value>().await else {
+        return Vec::new();
+    };
+    parse_subscription_models(&value)
+        .into_iter()
+        .filter(|id| is_chat_capable_model(id))
+        .collect()
+}
+
 #[derive(Clone)]
 pub struct OpenAIClient {
     api_key: String,
@@ -1377,10 +1444,10 @@ fn extract_deferred_text(value: &Value) -> Option<String> {
 mod tests {
     use super::{
         api_error_details, clamp_prompt_cache_key, continuation_payload, fresh_models,
-        parse_chat_usage, parse_responses_text_delta, parse_responses_usage, title_payload,
-        title_response_text, title_stream_text, CodexWsState, Continuation, ModelCacheEntry,
-        OpenAIClient, ProviderUsage, ResponseAccumulator, StreamEvent, MODEL_CACHE_TTL,
-        OPENAI_PROMPT_CACHE_KEY_MAX_CHARS,
+        parse_chat_usage, parse_responses_text_delta, parse_responses_usage,
+        parse_subscription_models, title_payload, title_response_text, title_stream_text,
+        CodexWsState, Continuation, ModelCacheEntry, OpenAIClient, ProviderUsage,
+        ResponseAccumulator, StreamEvent, MODEL_CACHE_TTL, OPENAI_PROMPT_CACHE_KEY_MAX_CHARS,
     };
     use serde_json::json;
     use std::time::{Duration, Instant};
@@ -1401,6 +1468,25 @@ mod tests {
                 "content":[{"type":"output_text","text":"answer"}]
             })],
         }
+    }
+
+    #[test]
+    fn subscription_models_collect_defaults_and_supported_ids() {
+        let value = json!({
+            "categories": [
+                {
+                    "default_model": "gpt-5-6",
+                    "supported_models": ["gpt-5-6", "gpt-5-6-instant"]
+                },
+                {"default_model": "gpt-6-pro", "supported_models": []},
+                {"supported_models": ["gpt-5-5-thinking"]}
+            ]
+        });
+        assert_eq!(
+            parse_subscription_models(&value),
+            vec!["gpt-5-5-thinking", "gpt-5-6", "gpt-5-6-instant", "gpt-6-pro"]
+        );
+        assert!(parse_subscription_models(&json!({})).is_empty());
     }
 
     #[test]

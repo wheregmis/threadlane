@@ -144,7 +144,7 @@ impl Default for AgentConfig {
             context_maximum_retained_tail_tokens: 64_000,
             context_retained_tail_percent: 25,
             stream_rule_max_window_bytes: 4096,
-            default_system_prompt: "You are threadlane AI coding agent.".into(),
+            default_system_prompt: "You are threadlane AI coding agent. Lead with answers and actions. Omit conversational filler, preambles, and recaps. Keep edits minimal, focused on root causes, and strictly avoid unrequested refactoring or speculative abstractions.".into(),
             model_roles: ModelRoles::default(),
             subagent_model: None,
             subagent_reasoning_effort: None,

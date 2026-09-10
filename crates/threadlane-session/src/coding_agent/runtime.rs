@@ -7,7 +7,7 @@ use super::subagents::*;
 use super::broker::ManagedProcessRegistry;
 use super::capabilities::{
     build_broker_dispatcher, render_agent_catalog, restored_tool_policy, BrowserCapability,
-    ContextCapability, GitHubCapability, McpCapability, PlanCapability, PrewalkCapability,
+    ContextCapability, GitHubCapability, McpCapability, PlanCapability,
     QuestionCapability, SkillCapability, SubagentCapability, WasiCapability, WorktreeCapability,
 };
 use super::harness::{CodingSessionHarness, HarnessWatch, InterruptedSubagentRecoveryState};
@@ -58,6 +58,9 @@ pub struct CodingAgent {
     pub(crate) harness_journal_error: Option<String>,
     pub(crate) harness_run_id: Arc<std::sync::Mutex<Option<String>>>,
     pub(crate) prewalk: Arc<std::sync::Mutex<Option<crate::orchestrator::PrewalkState>>>,
+    /// Live agent-to-agent mailbox shared by sibling `message_peer` and the
+    /// parent `hub` tool (oh-my-pi hub/IRC parity).
+    pub(crate) hub: super::mailbox::SubagentHub,
     cancellation: CodingAgentCancellation,
     pub(crate) interrupted_subagent_recovery: InterruptedSubagentRecoveryState,
     /// Connection to an external ACP agent, opened on first use.
@@ -475,8 +478,25 @@ impl CodingAgent {
         ));
         let dispatch_parent_leaf = Arc::new(std::sync::Mutex::new(None));
         let completed_subagent_lanes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let hub = super::mailbox::SubagentHub::new();
+        // Cloned separately for the `hub revive` spawner below; the
+        // `agent_runner` closure moves its own copies.
+        let revive_api_key = runner_api_key.clone();
+        let revive_account_id = runner_account_id.clone();
+        let revive_state = runner_state.clone();
+        let revive_config = runner_config.clone();
+        let revive_work_dir = runner_work_dir.clone();
+        let revive_extensions = runner_extensions.clone();
+        let revive_event_tx = runner_event_tx.clone();
+        let revive_session_file = runner_session_file.clone();
+        let revive_semaphore = runner_semaphore.clone();
+        let revive_hub = hub.clone();
+        let revive_parent_leaf = dispatch_parent_leaf.clone();
+        let revive_completed_lanes = completed_subagent_lanes.clone();
+        let revive_parent_session_id = session_id.clone();
         let runner_parent_leaf = dispatch_parent_leaf.clone();
         let runner_completed_lanes = completed_subagent_lanes.clone();
+        let runner_hub = hub.clone();
         let parent_session_id = session_id.clone();
         let agent_runner: AgentRunner = Arc::new(move |tasks, parallel, tool_call_id| {
             #[cfg(test)]
@@ -490,6 +510,7 @@ impl CodingAgent {
             let event_tx = runner_event_tx.clone();
             let session_file = runner_session_file.clone();
             let semaphore = runner_semaphore.clone();
+            let hub = runner_hub.clone();
             let parent_leaf_id = runner_parent_leaf.lock().ok().and_then(|leaf| leaf.clone());
             let completed_lanes = runner_completed_lanes.clone();
             let parent_session_id = parent_session_id.clone();
@@ -524,6 +545,7 @@ impl CodingAgent {
                         parent_leaf_id,
                         session_file,
                         completed_lanes,
+                        hub,
                         #[cfg(test)]
                         scheduler_observer: observer,
                         #[cfg(test)]
@@ -543,9 +565,71 @@ impl CodingAgent {
                 }))
             })
         });
+        // `hub revive` spawner: reuses the subagent ingredients above to open
+        // a follow-up operation on the settled lane (same history).
+        let revive_hook: super::mailbox::ReviveHook = Arc::new(move |req: super::mailbox::ReviveRequest| {
+            let api_key = revive_api_key.clone();
+            let account_id = revive_account_id.clone();
+            let state = revive_state.clone();
+            let runner_config = revive_config.clone();
+            let work_dir = revive_work_dir.clone();
+            let extensions = revive_extensions.clone();
+            let event_tx = revive_event_tx.clone();
+            let session_file = revive_session_file.clone();
+            let semaphore = revive_semaphore.clone();
+            let hub = revive_hub.clone();
+            let parent_leaf = revive_parent_leaf.clone();
+            let completed_lanes = revive_completed_lanes.clone();
+            let parent_session_id = revive_parent_session_id.clone();
+            Box::pin(async move {
+                let parent_reasoning_effort = {
+                    let state = state.lock().await;
+                    state.reasoning_effort()
+                };
+                let child_reasoning_effort = runner_config
+                    .subagent_reasoning_effort
+                    .unwrap_or(parent_reasoning_effort);
+                let parent_leaf_id = parent_leaf.lock().ok().and_then(|leaf| leaf.clone());
+                // The revived run keeps the lane's original model so history
+                // and behavior stay continuous.
+                let child_model = req.model.clone();
+                revive_subagent_lane(
+                    ReviveLaneRequest {
+                        lane_name: req.lane_name,
+                        agent: req.agent,
+                        task: req.task,
+                        model: req.model,
+                        message: req.message,
+                    },
+                    SubagentRunContext {
+                        api_key,
+                        account_id,
+                        child_model,
+                        child_reasoning_effort,
+                        parent_session_id: parent_session_id.clone(),
+                        work_dir,
+                        extensions,
+                        parent_event_tx: event_tx,
+                        parent_leaf_id,
+                        session_file,
+                        completed_lanes,
+                        hub,
+                        #[cfg(test)]
+                        scheduler_observer: None,
+                        #[cfg(test)]
+                        child_work_observer: None,
+                        #[cfg(test)]
+                        child_tool_observer: None,
+                        #[cfg(test)]
+                        child_run_override: None,
+                        semaphore,
+                    },
+                )
+                .await
+            })
+        });
         let (broker_dispatcher, managed_processes, permission_handle, permissions) =
-            build_broker_dispatcher(
-                tool_policy.clone(),
+            build_broker_dispatcher(                tool_policy.clone(),
                 wasi_extensions.clone(),
                 true,
                 options.work_dir.clone(),
@@ -564,6 +648,9 @@ impl CodingAgent {
         }));
         registry.register(Box::new(SubagentCapability {
             agent_runner: agent_runner.clone(),
+            hub: hub.clone(),
+            session_file: session_file.clone(),
+            revive_hook: Some(revive_hook),
         }));
         registry.register(Box::new(PlanCapability {
             plan_store: plan_store.clone(),
@@ -591,7 +678,8 @@ impl CodingAgent {
                 work_dir: options.work_dir.clone(),
             }));
         }
-        registry.register(Box::new(PrewalkCapability));
+        // No PrewalkCapability: oh-my-pi parity handoff is automatic at the
+        // first qualifying edit/write, not an explicit model-invoked tool.
 
         registry.register(Box::new(WasiCapability {
             extensions: wasi_extensions.clone(),
@@ -677,6 +765,7 @@ impl CodingAgent {
             harness_journal_error,
             harness_run_id,
             prewalk: Arc::new(std::sync::Mutex::new(None)),
+            hub,
             cancellation,
             interrupted_subagent_recovery,
             acp,
@@ -1359,29 +1448,50 @@ impl CodingAgent {
                 if let CommandAction::Prewalk(objective) = &cmd_action {
                     let task_prompt = objective.trim();
                     if task_prompt.is_empty() {
-                        return Some(Ok("Usage: /prewalk <task objective> - explore with frontier model, land first edit, then transition to fast model.".into()));
+                        return Some(Ok("Usage: /prewalk <task objective> - plan with frontier model, land first edit behind an update_plan todo gate, then auto-handoff to fast model.".into()));
                     }
-                    let active_model = self.agent.turn.lock().await.model.clone();
+                    let (active_model, active_effort) = {
+                        let turn = self.agent.turn.lock().await;
+                        (turn.model.clone(), Some(turn.reasoning_effort))
+                    };
                     let fast_model = self
                         .agent
                         .model_roles()
                         .resolve_fast(&active_model)
                         .to_string();
                     let fast_reasoning = self.agent.config().fast_reasoning_effort;
-                    *self.prewalk.lock().unwrap() = Some(crate::orchestrator::PrewalkState {
-                        target_model: fast_model.clone(),
-                        target_reasoning: fast_reasoning,
-                        started_at: std::time::Instant::now(),
-                    });
+                    if crate::orchestrator::prewalk_would_be_noop(
+                        &active_model,
+                        active_effort,
+                        &fast_model,
+                        fast_reasoning,
+                    ) {
+                        let _ = self.agent.event_tx.send(AgentEvent::PrewalkCompleted {
+                            model: active_model.clone(),
+                            message: format!("Prewalk: target `{fast_model}` already matches the active model and reasoning; nothing to switch."),
+                        });
+                        effective_input = task_prompt.to_string();
+                    } else {
+                        let requires_todo = self
+                            .agent
+                            .configured_tool_definitions()
+                            .iter()
+                            .any(|tool| tool.name == crate::orchestrator::PREWALK_TODO_TOOL);
+                        *self.prewalk.lock().unwrap() = Some(crate::orchestrator::PrewalkState::new(
+                            fast_model.clone(),
+                            fast_reasoning,
+                            requires_todo,
+                        ));
 
-                    let _ = self.agent.event_tx.send(AgentEvent::PrewalkCompleted {
-                        model: active_model.clone(),
-                        message: format!("Prewalk started with `{active_model}`. Target fast model: `{fast_model}`."),
-                    });
+                        let _ = self.agent.event_tx.send(AgentEvent::PrewalkCompleted {
+                            model: active_model.clone(),
+                            message: format!("Prewalk armed with `{active_model}`. Will auto-switch to `{fast_model}` after the first edit/write behind an opened update_plan gate."),
+                        });
 
-                    effective_input = task_prompt.to_string();
-                    architect_directive =
-                        Some(crate::orchestrator::build_architect_directive(&fast_model));
+                        effective_input = task_prompt.to_string();
+                        architect_directive =
+                            Some(crate::orchestrator::build_architect_directive(&fast_model, requires_todo));
+                    }
                 } else {
                     let output = execute_slash_command(cmd_action, &mut self.agent).await;
                     return Some(Ok(output));
@@ -1389,9 +1499,14 @@ impl CodingAgent {
             }
         }
 
-        // --- OMP-style Entrypoint Orchestrator: Intent Classification & Automatic Prewalk ---
+        // --- One-shot Prewalk orchestrator (oh-my-pi parity): no classifier.
+        // Only `Always` mode arms automatically; explicit `/prewalk` above
+        // bypasses this. `Auto` is deprecated and inert.
         if architect_directive.is_none() && self.prewalk.lock().unwrap().is_none() {
-            let active_model = self.agent.turn.lock().await.model.clone();
+            let (active_model, active_effort) = {
+                let turn = self.agent.turn.lock().await;
+                (turn.model.clone(), Some(turn.reasoning_effort))
+            };
             let fast_model = self
                 .agent
                 .model_roles()
@@ -1399,7 +1514,14 @@ impl CodingAgent {
                 .to_string();
             let fast_reasoning = self.agent.config().fast_reasoning_effort;
             let orchestrator_mode = self.agent.config().orchestrator_mode;
-            let provider_client = Some(self.agent.provider_client_arc());
+            // Mirror the gate the armed state will use: without the todo tool
+            // in the schema the gate is open from the start, so the directive
+            // must not demand an unfulfillable `update_plan` call.
+            let requires_todo = self
+                .agent
+                .configured_tool_definitions()
+                .iter()
+                .any(|tool| tool.name == crate::orchestrator::PREWALK_TODO_TOOL);
 
             let decision = crate::orchestrator::Orchestrator::evaluate(
                 &effective_input,
@@ -1407,9 +1529,8 @@ impl CodingAgent {
                 &active_model,
                 &fast_model,
                 fast_reasoning,
-                provider_client,
-            )
-            .await;
+                requires_todo,
+            );
 
             if let crate::orchestrator::OrchestratorDecision::EngagePrewalk {
                 fast_model: target_fast,
@@ -1417,20 +1538,32 @@ impl CodingAgent {
                 architect_system_directive,
             } = decision
             {
-                *self.prewalk.lock().unwrap() = Some(crate::orchestrator::PrewalkState {
-                    target_model: target_fast.clone(),
-                    target_reasoning: target_effort,
-                    started_at: std::time::Instant::now(),
-                });
+                if crate::orchestrator::prewalk_would_be_noop(
+                    &active_model,
+                    active_effort,
+                    &target_fast,
+                    target_effort,
+                ) {
+                    let _ = self.agent.event_tx.send(AgentEvent::PrewalkCompleted {
+                        model: active_model.clone(),
+                        message: format!("Prewalk: target `{target_fast}` already matches the active model and reasoning; nothing to switch."),
+                    });
+                } else {
+                    *self.prewalk.lock().unwrap() = Some(crate::orchestrator::PrewalkState::new(
+                        target_fast.clone(),
+                        target_effort,
+                        requires_todo,
+                    ));
 
-                let _ = self.agent.event_tx.send(AgentEvent::PrewalkCompleted {
-                    model: active_model.clone(),
-                    message: format!(
-                        "Auto-Prewalk engaged: Frontier architect (`{active_model}`) exploring and landing first edit before handoff to `{target_fast}`."
-                    ),
-                });
+                    let _ = self.agent.event_tx.send(AgentEvent::PrewalkCompleted {
+                        model: active_model.clone(),
+                        message: format!(
+                            "Auto-Prewalk armed: frontier architect (`{active_model}`) planning behind an update_plan gate before auto-handoff to `{target_fast}`."
+                        ),
+                    });
 
-                architect_directive = Some(architect_system_directive);
+                    architect_directive = Some(architect_system_directive);
+                }
             }
         }
 
@@ -1531,6 +1664,49 @@ impl CodingAgent {
             return Some(Err(error));
         }
         *self.dispatch_parent_leaf.lock().unwrap() = None;
+        // Bounded continuation safety net (oh-my-pi `prewalk-continue.md`
+        // parity): if prewalk is still armed after the turn and the last
+        // assistant message made no tool calls, the plan nudge's prose reply
+        // would otherwise end the run before any code exists. Emit a one-time
+        // reminder and keep the prewalk armed for the next turn instead of
+        // looping. Fires at most once per armed prewalk via `continue_pending`.
+        {
+            let mut fire_reminder = false;
+            if let Ok(mut guard) = self.prewalk.lock() {
+                if let Some(state) = guard.as_mut() {
+                    if state.continue_pending {
+                        state.continue_pending = false;
+                        fire_reminder = true;
+                    }
+                }
+            }
+            if fire_reminder {
+                let text_only = {
+                    let turn = self.agent.turn.lock().await;
+                    turn.messages.iter().rev().find_map(|message| match message {
+                        AgentMessage::Assistant { content, tool_calls, .. } => Some(
+                            tool_calls.as_ref().is_none_or(|calls| calls.is_empty())
+                                && content.as_ref().is_some_and(|text| !text.trim().is_empty()),
+                        ),
+                        AgentMessage::Tool { .. } => Some(false),
+                        _ => None,
+                    })
+                    .unwrap_or(false)
+                };
+                // Only remind when the turn truly ended text-only with no
+                // handoff. If tools ran (todo opened, edits attempted), the
+                // normal gate/handoff path already applies.
+                if text_only && self.prewalk.lock().unwrap().is_some() {
+                    let _ = self.agent.event_tx.send(AgentEvent::PrewalkCompleted {
+                        model: self.agent.model(),
+                        message: format!(
+                            "Prewalk: plan received but no todo/edits yet. {}",
+                            crate::orchestrator::PREWALK_CONTINUE_PROMPT
+                        ),
+                    });
+                }
+            }
+        }
         let mut tool_termination = HashMap::new();
         let (usage, failure) = loop {
             match harness_events.try_recv() {

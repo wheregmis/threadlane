@@ -14,7 +14,7 @@ fn builtin_commands() -> Vec<SlashCommandInfo> {
         ("model", "Switch model, or show the current one"),
         (
             "prewalk",
-            "Explore and land first working edit, then hand off to fast model (/prewalk <objective>)",
+            "Plan with frontier model, land first edit, auto-handoff to fast model (/prewalk <objective>)",
         ),
         ("compact", "Compact the conversation context"),
         ("session", "Show session info"),
@@ -121,7 +121,7 @@ pub(crate) async fn execute_slash_command(
         }
         CommandAction::Prewalk(objective) => {
             if objective.trim().is_empty() {
-                "Usage: /prewalk <task objective> to explore, land the first edit, and transition to fast model.".to_string()
+                "Usage: /prewalk <task objective> to plan, land the first edit behind an update_plan todo gate, and auto-handoff to the fast model.".to_string()
             } else {
                 format!("Prewalk initiated for: {}", objective.trim())
             }

@@ -5120,6 +5120,12 @@ impl ChatListView {
         let effort_model = self.model.clone();
         let effort_options =
             crate::model_catalog::efforts_for_model(&selected_model, project_root.as_deref());
+        // Models without thinking (ACP agents, off-only registry entries)
+        // offer no effort control instead of dead options.
+        let show_effort_picker = crate::model_catalog::supports_reasoning(
+            &selected_model,
+            project_root.as_deref(),
+        );
         let effort_picker = Button::new("composer-reasoning-effort-picker")
             .icon(Icon::default().path("icons/effort.svg"))
             .label(reasoning_effort.label())
@@ -5679,7 +5685,7 @@ impl ChatListView {
                             .items_center()
                             .gap_1()
                             .child(model_picker)
-                            .child(effort_picker)
+                            .children(show_effort_picker.then_some(effort_picker))
                             .child(div().flex_1())
                             .child(stash_button)
                             .children(subagent_popover)

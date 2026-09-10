@@ -62,7 +62,7 @@ mod tests {
             reasoning_effort: Some(ReasoningEffort::High),
             fast_model: Some("antigravity/gemini-3-flash".into()),
             fast_reasoning_effort: Some(ReasoningEffort::Low),
-            orchestrator_mode: OrchestratorMode::Auto,
+            orchestrator_mode: OrchestratorMode::Always,
         };
         save(dir.path(), &settings).unwrap();
         assert_eq!(load(dir.path()), settings);

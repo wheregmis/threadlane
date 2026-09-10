@@ -275,8 +275,69 @@ async fn a_denied_permission_reaches_the_agent() {
 }
 
 #[tokio::test]
-async fn without_a_ui_a_permission_request_is_refused() {
-    let (_temp, mut engine) = setup("permission");
+async fn a_dismissed_acp_question_is_surfaced_and_remembered() {
+    let (_temp, mut engine) = setup("dismissed_question");
+    let (tx, mut rx) = broadcast::channel(64);
+    let permissions = responding_handle(None, &tx);
+
+    engine
+        .run_turn(
+            "stub",
+            "ask me something",
+            &[],
+            ReasoningEffort::Medium,
+            &tx,
+            &permissions,
+        )
+        .await
+        .unwrap();
+
+    // The agent's dismissal never reached a user, so the bridge rewrites it
+    // before it hits the transcript: the unasked questions stay visible and
+    // the model is steered to plain text.
+    let tool_end = collect(&mut rx)
+        .into_iter()
+        .find_map(|event| match event {
+            AgentEvent::ToolExecutionEnd { result, .. } => Some(result),
+            _ => None,
+        })
+        .expect("a tool result");
+    assert!(tool_end.is_error);
+    assert!(
+        tool_end.content.contains("cannot display questions"),
+        "dismissal must be rewritten, got: {}",
+        tool_end.content
+    );
+    assert!(
+        tool_end.content.contains("What should we build?"),
+        "unasked questions must stay visible, got: {}",
+        tool_end.content
+    );
+
+    // The same conversation remembers: the next prompt carries a reminder so
+    // the model asks in text instead of failing the tool again. The stub
+    // echoes the prompt it received, which is how the reminder is observed
+    // without inspecting process state.
+    let reply = engine
+        .run_turn(
+            "stub",
+            "go on",
+            &[],
+            ReasoningEffort::Medium,
+            &tx,
+            &permissions,
+        )
+        .await
+        .unwrap();
+    assert!(
+        reply.contains("plain text"),
+        "second turn must carry the reminder, got: {reply}"
+    );
+    engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn without_a_ui_a_permission_request_is_refused() {    let (_temp, mut engine) = setup("permission");
     let (tx, mut rx) = broadcast::channel(64);
     // Non-interactive: nobody can consent, so nothing may be granted.
     let permissions = responding_handle(None, &tx);
@@ -890,6 +951,7 @@ fn queued_controller(work: &Path) -> std::sync::Arc<threadlane_session::SessionC
             system_prompt: Default::default(),
             agent_config: None,
             coding_config: None,
+            browser: BrowserBridge::unavailable(),
         },
         ExecutionMode::Interactive,
     )

@@ -448,6 +448,17 @@ impl AcpConfigOption {
         self.options.iter().any(|choice| choice.value == value)
     }
 
+    /// Clone with `current_value` overridden for optimistic display.
+    ///
+    /// Only applies when the agent actually offers `value`; an unknown value
+    /// is ignored so a stale pending selection cannot invent a model.
+    pub fn with_current_value_override(mut self, value: &str) -> Self {
+        if self.has_choice(value) {
+            self.current_value = Value::String(value.to_string());
+        }
+        self
+    }
+
     fn is_category(&self, category: &str) -> bool {
         self.category.as_deref() == Some(category)
     }
@@ -468,6 +479,29 @@ pub fn config_option_for<'a>(
     category: &str,
 ) -> Option<&'a AcpConfigOption> {
     options.iter().find(|option| option.is_category(category))
+}
+
+/// Applies pending `config_id -> value` selections to cached options for
+/// optimistic display before a session exists to hold them.
+///
+/// Unknown config ids or values the agent does not offer are ignored.
+pub fn apply_pending_config_values(
+    options: Vec<AcpConfigOption>,
+    pending: &std::collections::HashMap<String, String>,
+) -> Vec<AcpConfigOption> {
+    if pending.is_empty() {
+        return options;
+    }
+    options
+        .into_iter()
+        .map(|option| {
+            if let Some(value) = pending.get(&option.id) {
+                option.with_current_value_override(value)
+            } else {
+                option
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -1939,6 +1973,35 @@ mod tests {
         assert!(file.agents[0].enabled);
         assert_eq!(file.agents[0].scope, AcpScope::Global);
         assert!(file.agents[0].args.is_empty());
+    }
+
+    #[test]
+    fn pending_values_override_cached_current_only_for_offered_choices() {
+        let option: AcpConfigOption = serde_json::from_value(json!({
+            "id": "model",
+            "name": "Model",
+            "category": "model",
+            "currentValue": "deepseek",
+            "options": [
+                {"value": "deepseek", "name": "openrouter/DeepSeek V4.1 Flash"},
+                {"value": "muse", "name": "opencode/Muse Spark 1.3 Free"},
+            ],
+        }))
+        .unwrap();
+        let mut pending = HashMap::new();
+        pending.insert("model".to_string(), "muse".to_string());
+        let applied = apply_pending_config_values(vec![option.clone()], &pending);
+        assert_eq!(applied[0].current_value(), Some("muse"));
+        assert_eq!(
+            applied[0].current_label().as_deref(),
+            Some("opencode/Muse Spark 1.3 Free")
+        );
+
+        // Unknown values never invent a model.
+        let mut bad = HashMap::new();
+        bad.insert("model".to_string(), "unknown".to_string());
+        let kept = apply_pending_config_values(vec![option], &bad);
+        assert_eq!(kept[0].current_value(), Some("deepseek"));
     }
 
     #[test]

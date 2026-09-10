@@ -204,6 +204,24 @@ impl SettingsView {
                                 state.reconcile_selected_model();
                                 cx.notify();
                             });
+                            // OAuth/API credentials changed (e.g. Antigravity
+                            // login): re-pull the live inventories whose
+                            // contents depend on them. TTL-guarded, so unrelated
+                            // connects are cheap.
+                            let dynamic_model = auth_model.clone();
+                            cx.spawn(async move |_this, cx| {
+                                crate::model_catalog::refresh_antigravity_models_and_update(
+                                    dynamic_model.clone(),
+                                    cx,
+                                )
+                                .await;
+                                crate::model_catalog::refresh_openai_models_and_update(
+                                    dynamic_model,
+                                    cx,
+                                )
+                                .await;
+                            })
+                            .detach();
                         }
                     }
                     if this.page == SettingsPage::Providers {
@@ -231,6 +249,16 @@ impl SettingsView {
                         controller::dispatch(state, AppAction::SaveOpenAiKey(key));
                         cx.notify();
                     });
+                    // The key just changed, so re-pull the live OpenAI list.
+                    let openai_refresh = openai_model.clone();
+                    cx.spawn(async move |_this, cx| {
+                        crate::model_catalog::refresh_openai_models_and_update(
+                            openai_refresh,
+                            cx,
+                        )
+                        .await;
+                    })
+                    .detach();
                 }
             },
         );
@@ -624,6 +652,13 @@ impl SettingsView {
         let model_entity = self.model.clone();
         let project_for_models = project.clone();
         let reasoning_for_model = selected_model.clone().unwrap_or_default();
+        // Reasoning controls hide for models without thinking (ACP agents,
+        // off-only registry entries) instead of offering dead options. An
+        // unset model inherits the parent, so the control stays visible.
+        let show_reasoning = crate::model_catalog::supports_reasoning(
+            &reasoning_for_model,
+            Some(&project),
+        );
         let model_picker = Button::new("subagent-model-picker")
             .label(model_label)
             .dropdown_caret(true)
@@ -806,6 +841,10 @@ impl SettingsView {
         let fast_reasoning_entity = self.model.clone();
         let project_for_fast_reasoning = project.clone();
         let fast_for_model = preferences.fast_model.clone().unwrap_or_default();
+        let show_fast_reasoning = crate::model_catalog::supports_reasoning(
+            &fast_for_model,
+            Some(&project),
+        );
         let fast_reasoning_picker = Button::new("fast-reasoning-picker")
             .label(fast_reasoning_label)
             .dropdown_caret(true)
@@ -853,7 +892,6 @@ impl SettingsView {
                 let entity = orchestrator_entity.clone();
                 let project = project_for_orchestrator.clone();
                 [
-                    threadlane_runtime::OrchestratorMode::Auto,
                     threadlane_runtime::OrchestratorMode::Always,
                     threadlane_runtime::OrchestratorMode::Off,
                 ]
@@ -908,24 +946,28 @@ impl SettingsView {
                 "Default model for every delegated child.",
                 model_picker.into_any_element(),
             ))
-            .child(row(
-                "Subagent reasoning effort",
-                "Default reasoning effort for every delegated child.",
-                reasoning_picker.into_any_element(),
-            ))
+            .children(show_reasoning.then(|| {
+                row(
+                    "Subagent reasoning effort",
+                    "Default reasoning effort for every delegated child.",
+                    reasoning_picker.into_any_element(),
+                )
+            }))
             .child(row(
                 "Fast model (/prewalk)",
                 "Model used for high-speed execution after /prewalk lands the first working edit.",
                 fast_model_picker.into_any_element(),
             ))
-            .child(row(
-                "Fast model reasoning effort",
-                "Reasoning effort for fast model execution after /prewalk.",
-                fast_reasoning_picker.into_any_element(),
-            ))
+            .children(show_fast_reasoning.then(|| {
+                row(
+                    "Fast model reasoning effort",
+                    "Reasoning effort for fast model execution after /prewalk.",
+                    fast_reasoning_picker.into_any_element(),
+                )
+            }))
             .child(row(
                 "Auto-Prewalk Orchestrator",
-                "Automatically engages /prewalk on actionable coding tasks when a fast model is configured.",
+                "Off by default. Always arms /prewalk planning + todo-gated auto-handoff; otherwise use explicit /prewalk.",
                 orchestrator_picker.into_any_element(),
             ))
             .into_any_element()

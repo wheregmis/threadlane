@@ -42,6 +42,7 @@ pub(crate) fn execute_prompt(
     images: Vec<ImageAttachment>,
     reasoning_effort: ReasoningEffort,
     stream_tx: Sender<ChatStreamEvent>,
+    pending_acp: Vec<(String, String)>,
 ) -> Result<(), String> {
     runtime.begin_generation()?;
     let executor = match executor() {
@@ -61,6 +62,37 @@ pub(crate) fn execute_prompt(
             task_runtime.finish_generation(Some("Generation registration failed".into()));
             return;
         };
+
+        // Apply New-task ACP selections before the first turn. The picker
+        // stores them while no session exists; the reservation above blocks
+        // a second turn, and calling the controller directly bypasses the
+        // picker-time "stop the turn" guard (no turn holds the agent yet).
+        // Each result is reported so the per-session map reflects what the
+        // agent actually holds before the turn starts.
+        for (config_id, value) in pending_acp {
+            let source = Arc::downgrade(&task_runtime);
+            match task_runtime
+                .set_acp_config_option(&config_id, &value)
+                .await
+            {
+                Ok(options) => {
+                    let _ = task_stream_tx.send(ChatStreamEvent::AcpConfigOptions {
+                        session_id: task_session_id.clone(),
+                        source,
+                        options,
+                        error: None,
+                    });
+                }
+                Err(error) => {
+                    let _ = task_stream_tx.send(ChatStreamEvent::AcpConfigOptions {
+                        session_id: task_session_id.clone(),
+                        source,
+                        options: Vec::new(),
+                        error: Some(error),
+                    });
+                }
+            }
+        }
 
         let turn_span = tracing::info_span!("chat.turn", session_id = %task_session_id);
         tracing::info!(parent: &turn_span, "starting chat turn");
