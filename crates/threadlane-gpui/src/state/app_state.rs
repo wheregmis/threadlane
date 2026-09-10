@@ -1037,14 +1037,15 @@ impl AppState {
             return None;
         }
 
-        let store = self
+        let current_store = self
             .pr_review_tracking
             .entry(work_dir.clone())
-            .or_insert_with(|| crate::services::pr_review::load_pr_review_tracking(&work_dir));
-        let previous_store = store.clone();
+            .or_insert_with(|| crate::services::pr_review::load_pr_review_tracking(&work_dir))
+            .clone();
+        let mut candidate_store = current_store;
 
         let new_items = match crate::services::pr_review::check_and_record_fresh_feedback(
-            store,
+            &mut candidate_store,
             &branch,
             &feedback_items,
         ) {
@@ -1066,14 +1067,12 @@ impl AppState {
                 .try_queue_follow_up_with_images(prompt.clone(), Vec::new())
                 .is_err()
             {
-                self.pr_review_tracking.insert(work_dir, previous_store);
                 return None;
             }
         } else {
             let model = runtime.model().to_owned();
             let (api_key, _) = provider_credentials(&model);
             if api_key.is_empty() && !threadlane_session::is_acp_model(&model) {
-                self.pr_review_tracking.insert(work_dir, previous_store);
                 return None;
             }
             if crate::services::chat::execute_prompt(
@@ -1086,7 +1085,6 @@ impl AppState {
             )
             .is_err()
             {
-                self.pr_review_tracking.insert(work_dir, previous_store);
                 return None;
             }
             if self.active_session_id.as_deref() == Some(&session_id) {
@@ -1094,6 +1092,7 @@ impl AppState {
                 self.session_status = Some("Working…".into());
             }
         }
+        self.pr_review_tracking.insert(work_dir.clone(), candidate_store);
         if let Some(store) = self.pr_review_tracking.get(&work_dir) {
             let _ = crate::services::pr_review::save_pr_review_tracking(&work_dir, store);
         }
