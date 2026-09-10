@@ -224,3 +224,29 @@ pub fn cancel_open_subagent_operations(session_file: &Path) -> Result<(), String
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn persistence_failure_still_aborts_and_clears_active_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let invalid_session_file = temp.path().join("session-directory");
+        std::fs::create_dir(&invalid_session_file).unwrap();
+        let (event_tx, _) = broadcast::channel(8);
+        let cancellation = CodingAgentCancellation::new(Some(invalid_session_file), event_tx);
+
+        let task = tokio::spawn(std::future::pending::<()>());
+        cancellation.track_active_run(task.abort_handle()).unwrap();
+
+        assert!(cancellation.cancel().is_err());
+        assert!(task.await.unwrap_err().is_cancelled());
+
+        let replacement = tokio::spawn(std::future::pending::<()>());
+        assert!(cancellation
+            .track_active_run(replacement.abort_handle())
+            .is_ok());
+        replacement.abort();
+    }
+}
