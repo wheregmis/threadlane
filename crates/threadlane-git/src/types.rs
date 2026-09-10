@@ -202,12 +202,12 @@ pub struct GitCommitInfo {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GitWorktreeInfo {
-    pub(crate) path: PathBuf,
-    pub(crate) branch: Option<String>,
-    pub(crate) head: String,
-    pub(crate) is_bare: bool,
-    pub(crate) is_detached: bool,
-    pub(crate) is_locked: bool,
+    pub path: PathBuf,
+    pub branch: Option<String>,
+    pub head: String,
+    pub is_bare: bool,
+    pub is_detached: bool,
+    pub is_locked: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

@@ -7,10 +7,9 @@ use std::time::{Duration, Instant};
 use crate::error::GitError;
 use crate::github::{fresh_cache_value, inspect_pr, invalidate_pr_cache, repository_key};
 use crate::types::{
-    GitBranchInfo, GitCommitInfo, GitFile, GitStashInfo, GitStatus, GIT_FIELD_SEPARATOR,
+    GitBranchInfo, GitCommitInfo, GitFile, GitStashInfo, GitStatus, GitWorktreeInfo,
+    GIT_FIELD_SEPARATOR,
 };
-#[cfg(test)]
-use crate::types::GitWorktreeInfo;
 
 #[cfg(test)]
 thread_local! {
@@ -1202,8 +1201,7 @@ pub fn remove_worktree(
 }
 
 /// Lists all worktrees in the repository.
-#[cfg(test)]
-pub(crate) fn list_worktrees(repo_path: &Path) -> Result<Vec<GitWorktreeInfo>, GitError> {
+pub fn list_worktrees(repo_path: &Path) -> Result<Vec<GitWorktreeInfo>, GitError> {
     let output = command(repo_path, &["worktree", "list", "--porcelain"])?;
     let mut worktrees = Vec::new();
     let mut current = GitWorktreeInfo::default();
@@ -1246,6 +1244,12 @@ pub(crate) fn list_worktrees(repo_path: &Path) -> Result<Vec<GitWorktreeInfo>, G
     }
 
     Ok(worktrees)
+}
+
+/// Removes stale administrative worktree records.
+pub fn prune_worktrees(repo_path: &Path) -> Result<(), GitError> {
+    command(repo_path, &["worktree", "prune"])?;
+    Ok(())
 }
 
 fn discover_default_branch(work_dir: &Path) -> Option<String> {

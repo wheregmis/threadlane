@@ -526,6 +526,7 @@ pub(crate) async fn run_subagents_with_context(
                     };
                     let result = match workspace {
                         Ok(workspace) => {
+                            let parent_work_dir = context.work_dir.clone();
                             let mut child_context = context;
                             if let Some((work_dir, _)) = &workspace {
                                 child_context.work_dir = work_dir.clone();
@@ -545,13 +546,27 @@ pub(crate) async fn run_subagents_with_context(
                             )
                             .await
                             .unwrap_or_else(|_| Err("Subagent timed out".to_string()));
-                            if let (Ok(result), Some((work_dir, branch))) = (&mut result, workspace)
-                            {
-                                result.output = format!(
-                                    "Isolated worktree: {}\nBranch: {branch}\n{}",
-                                    work_dir.display(),
-                                    result.output
-                                );
+                            if let Some((work_dir, branch)) = workspace {
+                                let note = match threadlane_git::remove_worktree(
+                                    &parent_work_dir,
+                                    &work_dir,
+                                    false,
+                                ) {
+                                    Ok(()) => {
+                                        let _ = threadlane_git::prune_worktrees(&parent_work_dir);
+                                        format!("Branch: {branch}")
+                                    }
+                                    Err(_) => format!(
+                                        "Isolated worktree retained: {}\nBranch: {branch}",
+                                        work_dir.display()
+                                    ),
+                                };
+                                match &mut result {
+                                    Ok(result) => {
+                                        result.output = format!("{note}\n{}", result.output)
+                                    }
+                                    Err(error) => *error = format!("{error}\n{note}"),
+                                }
                             }
                             result
                         }

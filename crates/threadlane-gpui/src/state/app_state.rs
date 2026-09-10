@@ -762,8 +762,31 @@ impl AppState {
         let file_name = session_file
             .file_name()
             .ok_or_else(|| "Session file has no file name".to_string())?;
-        std::fs::rename(&session_file, archive_dir.join(file_name))
-            .map_err(|error| error.to_string())?;
+        let archive_file = archive_dir.join(file_name);
+        if let Some(worktree_dir) = self.session_worktree_path(&work_dir, &session_id) {
+            if worktree_dir.exists() {
+                if threadlane_git::inspect(&worktree_dir)
+                    .map_err(|error| error.to_string())?
+                    .has_changes
+                {
+                    return Err("Commit or discard worktree changes before archiving".into());
+                }
+                std::fs::copy(&session_file, &archive_file).map_err(|error| error.to_string())?;
+                if let Err(error) = threadlane_git::remove_worktree(&work_dir, &worktree_dir, false)
+                {
+                    let _ = std::fs::remove_file(&archive_file);
+                    return Err(error.to_string());
+                }
+            } else {
+                std::fs::rename(&session_file, &archive_file)
+                    .map_err(|error| error.to_string())?;
+            }
+            let stub = Self::canonical_session_file(&work_dir, &session_id);
+            Self::remove_file_if_present(&stub)?;
+            let _ = threadlane_git::prune_worktrees(&work_dir);
+        } else {
+            std::fs::rename(&session_file, archive_file).map_err(|error| error.to_string())?;
+        }
         self.finish_session_removal(&work_dir, &session_id);
         Ok(())
     }
@@ -781,7 +804,19 @@ impl AppState {
         {
             return Err("Stop the running generation before deleting this session".into());
         }
-        std::fs::remove_file(session_file).map_err(|error| error.to_string())?;
+        if let Some(worktree_dir) = self.session_worktree_path(&work_dir, &session_id) {
+            if worktree_dir.exists() {
+                threadlane_git::remove_worktree(&work_dir, &worktree_dir, true)
+                    .map_err(|error| error.to_string())?;
+            }
+            Self::remove_file_if_present(&Self::canonical_session_file(
+                &work_dir,
+                &session_id,
+            ))?;
+            let _ = threadlane_git::prune_worktrees(&work_dir);
+        } else {
+            std::fs::remove_file(session_file).map_err(|error| error.to_string())?;
+        }
         self.finish_session_removal(&work_dir, &session_id);
         Ok(())
     }
@@ -918,6 +953,33 @@ impl AppState {
             })
             .map(|session| session.runtime_work_dir.clone())
             .unwrap_or_else(|| work_dir.to_path_buf())
+    }
+
+    fn canonical_session_file(work_dir: &Path, session_id: &str) -> PathBuf {
+        work_dir
+            .join(".threadlane/sessions")
+            .join(format!("{session_id}.jsonl"))
+    }
+
+    fn session_worktree_path(&self, work_dir: &Path, session_id: &str) -> Option<PathBuf> {
+        self.projects
+            .iter()
+            .find(|project| project.work_dir == work_dir)
+            .and_then(|project| {
+                project
+                    .sessions
+                    .iter()
+                    .find(|session| session.id == session_id && session.is_worktree)
+            })
+            .map(|session| session.runtime_work_dir.clone())
+    }
+
+    fn remove_file_if_present(path: &Path) -> Result<(), String> {
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.to_string()),
+        }
     }
 
     fn projection_key(session_id: &str, session_file: &Path) -> SessionProjectionKey {

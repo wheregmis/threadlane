@@ -638,6 +638,55 @@
     }
 
     #[test]
+    fn removing_worktree_session_removes_checkout_and_metadata_stub() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().canonicalize().unwrap();
+        run_git(&project, &["init", "-b", "main"]);
+        run_git(&project, &["config", "user.email", "test@example.com"]);
+        run_git(&project, &["config", "user.name", "Test"]);
+        std::fs::write(project.join("base.txt"), "base\n").unwrap();
+        run_git(&project, &["add", "."]);
+        run_git(&project, &["commit", "-qm", "initial"]);
+
+        let session_id = "worktree-session";
+        let worktree = project.join(".threadlane/worktrees").join(session_id);
+        threadlane_git::create_worktree(&project, &worktree, "worktree/session").unwrap();
+        let stub = project
+            .join(".threadlane/sessions")
+            .join(format!("{session_id}.jsonl"));
+        let transcript = worktree
+            .join(".threadlane/sessions")
+            .join(format!("{session_id}.jsonl"));
+        std::fs::create_dir_all(stub.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(&stub, "{}\n").unwrap();
+        std::fs::write(&transcript, "{}\n").unwrap();
+
+        let mut session = test_session(session_id, &transcript);
+        session.work_dir = project.clone();
+        session.runtime_work_dir = worktree.clone();
+        session.is_worktree = true;
+        let mut state = AppState::load_from_registry(Vec::new());
+        state.projects.push(ProjectInfo {
+            name: "project".into(),
+            work_dir: project.clone(),
+            sessions: vec![session],
+            is_expanded: true,
+        });
+
+        state
+            .remove_session(project.clone(), session_id.into())
+            .unwrap();
+
+        assert!(!worktree.exists());
+        assert!(!stub.exists());
+        assert!(threadlane_git::list_worktrees(&project)
+            .unwrap()
+            .iter()
+            .all(|entry| entry.branch.as_deref() != Some("worktree/session")));
+    }
+
+    #[test]
     fn session_discovery_restores_its_last_git_branch() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
