@@ -590,7 +590,7 @@ fn completed_pr_and_missing_worktree_are_not_attention_without_other_work() {
 }
 
 #[test]
-fn project_git_status_only_marks_active_session_ready() {
+fn project_git_status_marks_sessions_in_the_checkout_ready() {
     let mut state = AppState::load_from_registry(Vec::new());
     let session_file = Path::new("/project/.threadlane/sessions/current.jsonl");
     let active = test_session("current", session_file);
@@ -610,7 +610,28 @@ fn project_git_status_only_marks_active_session_ready() {
     );
 
     assert_eq!(state.session_attention(&active), SessionAttention::Ready);
-    assert_eq!(state.session_attention(&historical), SessionAttention::Idle);
+    assert_eq!(state.session_attention(&historical), SessionAttention::Ready);
+}
+
+#[test]
+fn worktree_session_does_not_inherit_main_checkout_git_status() {
+    let mut state = AppState::load_from_registry(Vec::new());
+    let mut session = test_session(
+        "worktree",
+        Path::new("/project/.threadlane/sessions/worktree.jsonl"),
+    );
+    session.is_worktree = true;
+    session.runtime_work_dir = PathBuf::from("/project/.threadlane/worktrees/worktree");
+
+    state.git_statuses.insert(
+        session.work_dir.clone(),
+        threadlane_git::GitStatus {
+            has_changes: true,
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(state.session_attention(&session), SessionAttention::Idle);
 }
 #[test]
 fn inactive_start_and_error_wake_attention_observers() {

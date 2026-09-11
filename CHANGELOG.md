@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.15](https://github.com/wheregmis/threadlane/compare/v0.1.14...v0.1.15) (2026-09-11)
+
+
+### Features
+
+* **session:** add macOS capture resolution modes ([8c836c2](https://github.com/wheregmis/threadlane/commit/8c836c2ec5d74d9f07ce0bb64d5e7345f860e907))
+
 ## [0.1.14](https://github.com/wheregmis/threadlane/compare/v0.1.13...v0.1.14) (2026-09-10)
 
 

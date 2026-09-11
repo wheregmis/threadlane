@@ -1246,10 +1246,11 @@ impl AppState {
         let runtime_status = runtime.map(|runtime| runtime.status());
         let is_active = self.active_work_dir.as_ref() == Some(&session.work_dir)
             && self.active_session_id.as_deref() == Some(session.id.as_str());
-        let git_status = self
-            .git_statuses
-            .get(&session.runtime_work_dir)
-            .or_else(|| self.git_statuses.get(&session.work_dir));
+        let git_status = self.git_statuses.get(&session.runtime_work_dir).or_else(|| {
+            (!session.is_worktree)
+                .then(|| self.git_statuses.get(&session.work_dir))
+                .flatten()
+        });
         let linked_pr = session
             .git_branch
             .as_ref()
@@ -1270,14 +1271,16 @@ impl AppState {
                     || pr.state.eq_ignore_ascii_case("open")
                     || pr.state.eq_ignore_ascii_case("draft"))
         });
-        // Git status belongs to a checkout, not to a session. Only let it
-        // affect the selected session; otherwise every historical local
-        // session sharing the project checkout appears Ready.
-        let actionable_git_work = is_active
-            && git_status
-                .is_some_and(|status| status.has_changes || status.ahead > 0 || status.pr_ready);
+        // A checkout's git status is shared by local sessions, so expose
+        // actionable work to every session that points at that checkout. A
+        // known completed PR still owns its session and must not be revived
+        // by stale changes left in the shared checkout.
+        let actionable_git_work = git_status
+            .is_some_and(|status| status.has_changes || status.ahead > 0 || status.pr_ready);
         let branch_is_actionable = session.git_branch.is_some()
             && (linked_pr_is_active || (linked_pr.is_none() && actionable_git_work));
+        let ready_work = branch_is_actionable
+            || (linked_pr.is_none() && actionable_git_work);
         derive_session_attention(
             self.pending_permissions.contains_key(&session.id)
                 || self.pending_questions.contains_key(&session.id),
@@ -1285,7 +1288,7 @@ impl AppState {
             runtime_status.as_ref(),
             runtime.is_some_and(|runtime| runtime.is_generating())
                 || (is_active && self.is_generating),
-            branch_is_actionable || linked_pr_is_active || actionable_git_work,
+            ready_work,
         )
     }
 

@@ -1043,6 +1043,9 @@ impl GitHubView {
     fn refresh(&mut self, cx: &mut Context<Self>) {
         self.debounce_task.take();
         self.query_revision = self.query_revision.saturating_add(1);
+        for (_, work_dir) in self.scope_targets(cx) {
+            threadlane_git::invalidate_github_cache(&work_dir);
+        }
         self.fetch_list(cx);
     }
 
