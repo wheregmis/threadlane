@@ -8421,12 +8421,10 @@ dependencies = [
 name = "threadlane-skills"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "serde",
  "serde_json",
  "serde_yaml",
  "tempfile",
- "threadlane-runtime",
 ]
 
 [[package]]

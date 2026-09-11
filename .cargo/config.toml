@@ -1,2 +1,5 @@
-[build]
-rustflags = ["-Z", "threads=8"]
+[env]
+# rustc parses very large GPUI test/codegen units on a small default stack and
+# SIGBUSes while linking the test binary. 32 MiB survives the repeatable crash
+# window; toolchain stays pinned at 1.95 in rust-toolchain.toml.
+RUST_MIN_STACK = "33554432"

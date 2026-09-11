@@ -1,6 +1,5 @@
 pub mod frontmatter;
 
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -8,7 +7,6 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
-use threadlane_runtime::{AgentToolDefinition, ToolExecutor};
 
 pub const LOAD_SKILL_TOOL_NAME: &str = "load_skill";
 const DEFAULT_MAX_SKILL_BYTES: usize = 512 * 1024;
@@ -432,7 +430,23 @@ where
     discovery.finish()
 }
 
+/// Provider-neutral tool definition for `load_skill`, owned by the skills
+/// crate so hosts without `threadlane-runtime` can still render the schema.
+/// Session adapters convert this into their runtime `AgentToolDefinition`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkillToolDefinition {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub parameters: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strict: Option<bool>,
+}
+
 /// Host-owned executor for the reserved `load_skill` tool.
+///
+/// Runtime-agnostic: exposes a sync `execute` plus the tool schema.
+/// `threadlane-session` adapts this into its `ToolExecutor`.
 #[derive(Clone)]
 pub struct LoadSkillToolExecutor {
     registry: Arc<SkillRegistry>,
@@ -442,47 +456,20 @@ impl LoadSkillToolExecutor {
     pub fn new(registry: Arc<SkillRegistry>) -> Self {
         Self { registry }
     }
-}
 
-fn load_skill_tool_definition() -> AgentToolDefinition {
-    AgentToolDefinition {
-        name: LOAD_SKILL_TOOL_NAME.to_string(),
-        description: Some(
-            "Load the full instructions for one skill from the available-skills catalog by exact ID."
-                .to_string(),
-        ),
-        parameters: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "Exact skill ID from the available-skills catalog"
-                }
-            },
-            "required": ["name"],
-            "additionalProperties": false
-        }),
-        strict: Some(true),
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LoadSkillArguments {
-    name: String,
-}
-
-#[async_trait]
-impl ToolExecutor for LoadSkillToolExecutor {
-    fn executor_id(&self) -> &str {
+    pub fn executor_id(&self) -> &str {
         "threadlane.host.load_skill"
     }
 
-    fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
+    pub fn tool_definition(&self) -> SkillToolDefinition {
+        load_skill_tool_definition()
+    }
+
+    pub fn tool_definitions(&self) -> Arc<[SkillToolDefinition]> {
         vec![load_skill_tool_definition()].into()
     }
 
-    async fn execute_tool(&self, name: &str, args: &str) -> Option<Result<String, String>> {
+    pub fn execute(&self, name: &str, args: &str) -> Option<Result<String, String>> {
         if name != LOAD_SKILL_TOOL_NAME {
             return None;
         }
@@ -511,6 +498,34 @@ impl ToolExecutor for LoadSkillToolExecutor {
             )
         }))
     }
+}
+
+pub fn load_skill_tool_definition() -> SkillToolDefinition {
+    SkillToolDefinition {
+        name: LOAD_SKILL_TOOL_NAME.to_string(),
+        description: Some(
+            "Load the full instructions for one skill from the available-skills catalog by exact ID."
+                .to_string(),
+        ),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Exact skill ID from the available-skills catalog"
+                }
+            },
+            "required": ["name"],
+            "additionalProperties": false
+        }),
+        strict: Some(true),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LoadSkillArguments {
+    name: String,
 }
 
 struct Discovery {
@@ -1541,7 +1556,7 @@ fn valid_package_component(component: &str) -> bool {
 }
 
 fn dirs_home() -> Option<PathBuf> {
-    threadlane_runtime::utils::dirs_home()
+    std::env::var_os("HOME").map(PathBuf::from)
 }
 
 #[cfg(test)]
