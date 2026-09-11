@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Sender};
 use std::time::{SystemTime, UNIX_EPOCH};
-use threadlane_session::harness::JsonlStore;
+use threadlane_session::harness::{JsonlStore, SessionStore};
 use threadlane_session::{
     AcpConfigOption, AgentEvent, AgentMessage, ImageAttachment, ReasoningEffort, SessionPlan,
     SubagentProgressUpdate, TokenUsage,
@@ -774,6 +774,7 @@ impl AppState {
         &mut self,
         work_dir: PathBuf,
         session_id: String,
+        delete_worktree: bool,
     ) -> Result<(), String> {
         let session_file = self.session_file(&work_dir, &session_id);
         if self
@@ -790,7 +791,7 @@ impl AppState {
             .ok_or_else(|| "Session file has no file name".to_string())?;
         let archive_file = archive_dir.join(file_name);
         if let Some(worktree_dir) = self.session_worktree_path(&work_dir, &session_id) {
-            if worktree_dir.exists() {
+            if delete_worktree && worktree_dir.exists() {
                 if threadlane_git::inspect(&worktree_dir)
                     .map_err(|error| error.to_string())?
                     .has_changes
@@ -803,12 +804,23 @@ impl AppState {
                     let _ = std::fs::remove_file(&archive_file);
                     return Err(error.to_string());
                 }
+                let stub = Self::canonical_session_file(&work_dir, &session_id);
+                Self::remove_file_if_present(&stub)?;
+                let _ = threadlane_git::prune_worktrees(&work_dir);
             } else {
-                std::fs::rename(&session_file, &archive_file).map_err(|error| error.to_string())?;
+                if session_file.exists() {
+                    if std::fs::rename(&session_file, &archive_file).is_err() {
+                        std::fs::copy(&session_file, &archive_file)
+                            .map_err(|error| error.to_string())?;
+                        let _ = std::fs::remove_file(&session_file);
+                    }
+                }
+                let stub = Self::canonical_session_file(&work_dir, &session_id);
+                Self::remove_file_if_present(&stub)?;
+                if delete_worktree {
+                    let _ = threadlane_git::prune_worktrees(&work_dir);
+                }
             }
-            let stub = Self::canonical_session_file(&work_dir, &session_id);
-            Self::remove_file_if_present(&stub)?;
-            let _ = threadlane_git::prune_worktrees(&work_dir);
         } else {
             std::fs::rename(&session_file, archive_file).map_err(|error| error.to_string())?;
         }
@@ -820,6 +832,7 @@ impl AppState {
         &mut self,
         work_dir: PathBuf,
         session_id: String,
+        delete_worktree: bool,
     ) -> Result<(), String> {
         let session_file = self.session_file(&work_dir, &session_id);
         if self
@@ -830,12 +843,16 @@ impl AppState {
             return Err("Stop the running generation before deleting this session".into());
         }
         if let Some(worktree_dir) = self.session_worktree_path(&work_dir, &session_id) {
-            if worktree_dir.exists() {
+            if delete_worktree && worktree_dir.exists() {
                 threadlane_git::remove_worktree(&work_dir, &worktree_dir, true)
                     .map_err(|error| error.to_string())?;
+                let _ = threadlane_git::prune_worktrees(&work_dir);
             }
             Self::remove_file_if_present(&Self::canonical_session_file(&work_dir, &session_id))?;
-            let _ = threadlane_git::prune_worktrees(&work_dir);
+            Self::remove_file_if_present(&session_file)?;
+            if delete_worktree {
+                let _ = threadlane_git::prune_worktrees(&work_dir);
+            }
         } else {
             std::fs::remove_file(session_file).map_err(|error| error.to_string())?;
         }
@@ -984,7 +1001,8 @@ impl AppState {
     }
 
     fn session_worktree_path(&self, work_dir: &Path, session_id: &str) -> Option<PathBuf> {
-        self.projects
+        if let Some(path) = self
+            .projects
             .iter()
             .find(|project| project.work_dir == work_dir)
             .and_then(|project| {
@@ -994,6 +1012,23 @@ impl AppState {
                     .find(|session| session.id == session_id && session.is_worktree)
             })
             .map(|session| session.runtime_work_dir.clone())
+        {
+            return Some(path);
+        }
+        let stub = Self::canonical_session_file(work_dir, session_id);
+        let store = JsonlStore::open_read_only(&stub).ok()?;
+        let facts = store.facts();
+        if facts.get("is_worktree").is_some_and(|value| value == "true") {
+            let canonical_work_dir =
+                std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
+            Some(crate::state::effective_session_work_dir(
+                &canonical_work_dir,
+                session_id,
+                &facts,
+            ))
+        } else {
+            None
+        }
     }
 
     fn remove_file_if_present(path: &Path) -> Result<(), String> {

@@ -19,16 +19,18 @@ pub(crate) fn dispatch(state: &mut AppState, action: AppAction) -> Option<Sessio
         AppAction::SettleSession {
             work_dir,
             session_id,
+            delete_worktree,
         } => {
-            if let Err(error) = state.settle_session(work_dir, session_id) {
+            if let Err(error) = state.settle_session(work_dir, session_id, delete_worktree) {
                 state.session_status = Some(error);
             }
         }
         AppAction::RemoveSession {
             work_dir,
             session_id,
+            delete_worktree,
         } => {
-            if let Err(error) = state.remove_session(work_dir, session_id) {
+            if let Err(error) = state.remove_session(work_dir, session_id, delete_worktree) {
                 state.session_status = Some(error);
             }
         }

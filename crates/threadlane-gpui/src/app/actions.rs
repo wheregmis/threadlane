@@ -13,10 +13,12 @@ pub enum AppAction {
     SettleSession {
         work_dir: PathBuf,
         session_id: String,
+        delete_worktree: bool,
     },
     RemoveSession {
         work_dir: PathBuf,
         session_id: String,
+        delete_worktree: bool,
     },
     ToggleProject(PathBuf),
     SetSidebarProjectFilter(Option<PathBuf>),

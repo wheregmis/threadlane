@@ -4,7 +4,7 @@ mod projection;
 mod types;
 
 pub(crate) use app_state::AppState;
-pub(crate) use discovery::discover_sessions_in_project;
+pub(crate) use discovery::{discover_sessions_in_project, effective_session_work_dir};
 pub(crate) use projection::{
     coding_agent_options, compute_full_session_projection, compute_session_messages,
     provider_credentials, runtime_status_text,
