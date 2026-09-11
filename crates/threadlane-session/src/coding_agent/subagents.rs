@@ -1086,6 +1086,7 @@ pub(crate) async fn run_subagent_task(
             .map_err(|error| format!("Failed to load subagent lane context: {error}"))?;
     }
     agent.work_dir = Some(context.work_dir.clone());
+    agent.turn.lock().await.project_root = Some(context.work_dir.clone());
 
     let session_file_for_checkpoint = context.session_file.clone();
 

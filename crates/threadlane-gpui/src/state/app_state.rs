@@ -344,6 +344,14 @@ impl AppState {
     pub(crate) fn refresh_available_models(&mut self) {
         self.available_models =
             crate::model_catalog::available_models_for_project(self.active_work_dir.as_deref());
+        if self.selected_model.is_empty() {
+            self.selected_model = self
+                .available_models
+                .first()
+                .map(|model| model.id.clone())
+                .unwrap_or_default();
+        }
+        self.set_reasoning_effort(self.reasoning_effort);
     }
 
     pub(crate) fn set_needle_enabled(&mut self, enabled: bool) -> Result<(), String> {
@@ -452,6 +460,7 @@ impl AppState {
                 .map(|model| model.id.clone())
                 .unwrap_or_default();
         }
+        self.set_reasoning_effort(self.reasoning_effort);
         self.invalidate_idle_runtimes();
     }
 
@@ -485,6 +494,7 @@ impl AppState {
             return;
         }
         self.selected_model = model.clone();
+        self.set_reasoning_effort(self.reasoning_effort);
         self.auth_status_msg = Some(format!("Model switched to {model}"));
         if self.session_status.as_deref().is_some_and(|status| {
             status == "Stop the current turn before changing models"
@@ -502,7 +512,35 @@ impl AppState {
     }
 
     pub(crate) fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {
+        let effort = threadlane_runtime::model_registry::effective_effort(
+            &self.selected_model,
+            effort,
+            self.active_work_dir.as_deref(),
+        );
+        if let Some((runtime, _)) = self.active_session_runtime() {
+            if runtime.is_generating() {
+                self.session_status =
+                    Some("Stop the current turn before changing reasoning effort".into());
+                return;
+            }
+            let result = if let Some(error) = runtime.harness_error() {
+                Err(error.to_string())
+            } else if let Ok(mut agent) = runtime.agent.try_lock() {
+                agent.set_fact("reasoning_effort", effort.label())
+            } else {
+                Err("Agent settings are still loading. Try changing reasoning effort again shortly."
+                    .into())
+            };
+            if let Err(error) = result {
+                self.session_status = Some(format!("Could not switch reasoning effort: {error}"));
+                return;
+            }
+            self.session_runtimes.remove(&runtime.session_file);
+        } else if self.reasoning_effort == effort {
+            return;
+        }
         self.reasoning_effort = effort;
+        self.active_session_runtime();
     }
 
     pub(crate) fn open_settings(&mut self) {
@@ -1188,6 +1226,7 @@ impl AppState {
             }
         } else {
             let model = runtime.model().to_owned();
+            let reasoning_effort = runtime.reasoning_effort();
             let (api_key, _) = provider_credentials(&model);
             if api_key.is_empty() && !threadlane_session::is_acp_model(&model) {
                 return None;
@@ -1201,7 +1240,7 @@ impl AppState {
                 session_id.clone(),
                 prompt.clone(),
                 Vec::new(),
-                self.reasoning_effort,
+                reasoning_effort,
                 self.stream_tx.clone(),
                 pending_acp,
             )
@@ -1436,6 +1475,15 @@ impl AppState {
                 }
             }
         }
+
+        threadlane_session::coding_agent::harness::CodingSessionHarness::append_fact_to_path(
+            &session_file,
+            "main",
+            "reasoning_effort",
+            self.reasoning_effort.label(),
+            None,
+        )
+        .map_err(|error| format!("failed to persist reasoning effort: {error}"))?;
 
         if let Some(project) = self
             .projects

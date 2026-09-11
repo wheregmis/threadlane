@@ -35,18 +35,6 @@ pub struct ModelOption {
     pub(crate) provider: ModelProvider,
 }
 
-const OPENAI_MODELS: &[(&str, &str)] = &[
-    ("gpt-5.6-luna", "GPT-5.6 Luna"),
-    ("gpt-5.4", "GPT-5.4"),
-    ("gpt-5.4-mini", "GPT-5.4 Mini"),
-    ("gpt-5.5", "GPT-5.5"),
-    ("gpt-5.6-sol", "GPT-5.6 Sol"),
-    ("gpt-5.6-terra", "GPT-5.6 Terra"),
-    ("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark"),
-    ("gpt-4o", "GPT-4o"),
-    ("gpt-4o-mini", "GPT-4o Mini"),
-];
-
 const ANTIGRAVITY_MODELS: &[(&str, &str)] = &[
     ("antigravity/gemini-3.7-flash", "Gemini 3.7 Flash"),
     ("antigravity/gemini-3.1-pro", "Gemini 3.1 Pro"),
@@ -85,16 +73,22 @@ pub(crate) fn available_models_for_project(
     project_root: Option<&std::path::Path>,
 ) -> Vec<ModelOption> {
     let mut models = models_for_credentials(
-        has_openai_credentials(),
         threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some(),
         threadlane_auth::opencode_auth::load_opencode_api_key().is_some(),
     );
-    merge_registry_models(&mut models, project_root);
     merge_discovered_opencode_models(&mut models);
     merge_discovered_openai_models(&mut models);
+    merge_registry_models(&mut models, project_root);
     append_acp_models(&mut models, project_root);
     retain_available_antigravity_models(&mut models, project_root);
+    group_antigravity_models(&mut models);
     models
+}
+
+/// Live Antigravity entries can be appended after other providers. Keep the
+/// provider contiguous so the picker renders one section heading.
+fn group_antigravity_models(models: &mut [ModelOption]) {
+    models.sort_by_key(|model| model.provider != ModelProvider::Antigravity);
 }
 
 /// Live-discovered Zen models, refreshed in the background by
@@ -193,10 +187,14 @@ fn merge_discovered_opencode_models(models: &mut Vec<ModelOption>) {
 
 /// Live `GET /v1/models` results, refreshed in the background by
 /// [`refresh_openai_models`]. Merged additively like the Zen list: unknown
-/// ids appear with generated labels, curated seeds are never relabeled, and
-/// nothing is ever removed (the seeds are the offline guarantee).
+/// ids appear with generated labels. The last successful live result remains
+/// available if a later refresh fails.
 static DISCOVERED_OPENAI: std::sync::OnceLock<
-    std::sync::Mutex<(std::time::Instant, Vec<ModelOption>)>,
+    std::sync::Mutex<(
+        std::time::Instant,
+        Vec<ModelOption>,
+        Vec<threadlane_runtime::model_registry::ModelInfo>,
+    )>,
 > = std::sync::OnceLock::new();
 
 /// Pulls the live OpenAI model list and caches it for the picker. Skips the
@@ -215,15 +213,25 @@ pub async fn refresh_openai_models() {
     }
     // Same precedence as session credential resolution: stored API key,
     // ChatGPT login, environment. A Codex-subscription token 401s on
-    // `/v1/models` and yields the static fallback, which merges as a no-op —
-    // subscription models arrive via the ChatGPT backend below instead.
+    // `/v1/models`; subscription models arrive via the ChatGPT backend below.
     let (api_key, account_id) = crate::state::provider_credentials("gpt-4o");
     if api_key.trim().is_empty() {
         return;
     }
-    let mut discovered: Vec<ModelOption> =
-        threadlane_provider::openai::fetch_available_models(&api_key, account_id.as_deref())
-            .await
+    let general =
+        threadlane_provider::openai::try_fetch_available_models(&api_key, account_id.as_deref())
+            .await;
+    let subscription = threadlane_provider::openai::try_fetch_subscription_models().await;
+    if general.is_none() && subscription.is_none() {
+        return;
+    }
+    let cache = DISCOVERED_OPENAI
+        .get_or_init(|| std::sync::Mutex::new((std::time::Instant::now(), Vec::new(), Vec::new())));
+    let Ok(mut guard) = cache.lock() else {
+        return;
+    };
+    if let Some(general) = general {
+        guard.1 = general
             .into_iter()
             .map(|bare_id| ModelOption {
                 id: bare_id.clone(),
@@ -231,28 +239,15 @@ pub async fn refresh_openai_models() {
                 provider: ModelProvider::OpenAi,
             })
             .collect();
-    // ChatGPT subscriptions never see `/v1/models`; their inventory lives on
-    // the ChatGPT backend and includes models (e.g. newer GPT generations)
-    // the static seeds predate.
-    for bare_id in threadlane_provider::openai::fetch_subscription_models().await {
-        if !discovered.iter().any(|model| model.id == bare_id) {
-            discovered.push(ModelOption {
-                id: bare_id.clone(),
-                label: pretty_bare_label(&bare_id),
-                provider: ModelProvider::OpenAi,
-            });
-        }
     }
-    discovered.sort_by(|a, b| a.id.cmp(&b.id));
-    if let Some(cache) = DISCOVERED_OPENAI
-        .get_or_init(|| std::sync::Mutex::new((std::time::Instant::now(), Vec::new())))
-        .lock()
-        .ok()
-    {
-        let mut guard = cache;
-        guard.0 = std::time::Instant::now();
-        guard.1 = discovered;
+    if let Some(subscription) = subscription {
+        threadlane_runtime::model_registry::update_discovered_models(
+            "openai",
+            subscription.clone(),
+        );
+        guard.2 = subscription;
     }
+    guard.0 = std::time::Instant::now();
 }
 
 /// Refreshes the live OpenAI list, then rebuilds the picker's model list.
@@ -273,11 +268,22 @@ fn merge_discovered_openai_models(models: &mut Vec<ModelOption>) {
     if !credentials_allow(ModelProvider::OpenAi) {
         return;
     }
-    let discovered = DISCOVERED_OPENAI
+    let Some((mut discovered, subscription)) = DISCOVERED_OPENAI
         .get()
         .and_then(|cache| cache.lock().ok())
-        .map(|guard| guard.1.clone())
-        .unwrap_or_default();
+        .map(|guard| (guard.1.clone(), guard.2.clone()))
+    else {
+        return;
+    };
+    for info in subscription {
+        discovered.retain(|model| model.id != info.id);
+        discovered.push(ModelOption {
+            id: info.id,
+            label: info.label,
+            provider: ModelProvider::OpenAi,
+        });
+    }
+    discovered.sort_by(|a, b| a.id.cmp(&b.id));
     for option in discovered {
         if !models.iter().any(|model| model.id == option.id) {
             models.push(option);
@@ -312,7 +318,23 @@ pub async fn refresh_antigravity_models() {
     if live.is_empty() {
         return;
     }
-    let ids = live.into_iter().map(|model| model.id).collect();
+    let ids = live.iter().map(|model| model.id.clone()).collect();
+    let mut models = models_for_credentials(true, false);
+    models.extend(
+        threadlane_runtime::model_registry::registry_for_project(None)
+            .into_iter()
+            .filter(|model| model.id.starts_with("antigravity/"))
+            .map(|model| ModelOption {
+                id: model.id,
+                label: model.label,
+                provider: ModelProvider::Antigravity,
+            }),
+    );
+    synthesize_live_antigravity_models(&mut models, &ids);
+    threadlane_runtime::model_registry::update_discovered_models(
+        "antigravity",
+        antigravity_capabilities(&models, &live),
+    );
     if let Some(cache) = DISCOVERED_ANTIGRAVITY
         .get_or_init(|| std::sync::Mutex::new((std::time::Instant::now(), None)))
         .lock()
@@ -353,12 +375,10 @@ fn antigravity_entry_available(
     available: &HashSet<String>,
 ) -> bool {
     efforts.iter().any(|effort| {
-        available.contains(
-            &threadlane_provider::antigravity::runtime_model_for(
-                model_id,
-                &effort.label().to_ascii_lowercase(),
-            ),
-        )
+        available.contains(&threadlane_provider::antigravity::runtime_model_for(
+            model_id,
+            &effort.label().to_ascii_lowercase(),
+        ))
     })
 }
 
@@ -392,31 +412,86 @@ fn live_antigravity_runtime_ids() -> HashSet<String> {
         .unwrap_or_default()
 }
 
-/// Adds picker entries for live generations with no static catalog row.
-/// Newer flash generations expose only a `-tiered` router model (verified
-/// live: no suffixed variants for 3.7/3.8); the logical id drops the suffix
-/// and the runtime map routes every effort back to it. Static and registry
-/// rows always win — this only fills gaps, never relabels.
+/// Add live agent models that existing logical entries do not already route to.
+/// Add tiered entries first so their per-effort variants don't become duplicate rows.
 fn synthesize_live_antigravity_models(models: &mut Vec<ModelOption>, available: &HashSet<String>) {
-    let mut synthesized: Vec<ModelOption> = available
+    let mut runtime_ids: Vec<_> = available.iter().collect();
+    runtime_ids.sort_by(|a, b| {
+        b.ends_with("-tiered")
+            .cmp(&a.ends_with("-tiered"))
+            .then_with(|| a.cmp(b))
+    });
+    for runtime_id in runtime_ids {
+        if models.iter().any(|model| {
+            threadlane_runtime::model_registry::supported_efforts_for(&model.id, None)
+                .iter()
+                .any(|effort| {
+                    threadlane_provider::antigravity::runtime_model_for(
+                        &model.id,
+                        &effort.label().to_ascii_lowercase(),
+                    ) == *runtime_id
+                })
+        }) {
+            continue;
+        }
+        let base = ["-tiered", "-low", "-medium", "-high"]
+            .into_iter()
+            .find_map(|suffix| runtime_id.strip_suffix(suffix))
+            .unwrap_or(runtime_id);
+        let logical_id = format!("antigravity/{base}");
+        if models.iter().any(|model| model.id == logical_id) {
+            continue;
+        }
+        let label = threadlane_runtime::model_registry::find_model(&logical_id, None)
+            .map(|model| model.label)
+            .unwrap_or_else(|| pretty_bare_label(base));
+        models.push(ModelOption {
+            id: logical_id,
+            label,
+            provider: ModelProvider::Antigravity,
+        });
+    }
+}
+
+fn antigravity_capabilities(
+    models: &[ModelOption],
+    live: &[threadlane_provider::antigravity::AntigravityModelInfo],
+) -> Vec<threadlane_runtime::model_registry::ModelInfo> {
+    models
         .iter()
-        .filter_map(|runtime_id| {
-            let base = runtime_id
-                .strip_suffix("-tiered")
-                .filter(|base| base.starts_with("gemini-"))?;
-            let logical_id = format!("antigravity/{base}");
-            if models.iter().any(|model| model.id == logical_id) {
+        .filter_map(|model| {
+            let mut supported_efforts = Vec::new();
+            let mut display_name = None;
+            for effort in threadlane_runtime::ReasoningEffort::known_levels() {
+                let label = effort.label().to_ascii_lowercase();
+                let runtime =
+                    threadlane_provider::antigravity::runtime_model_for(&model.id, &label);
+                if let Some(info) = live.iter().find(|info| info.id == runtime) {
+                    if info.supported_efforts.contains(&label) {
+                        supported_efforts.push(label);
+                    }
+                    if model.id.strip_prefix("antigravity/") == Some(info.id.as_str()) {
+                        display_name = Some(info.display_name.clone());
+                    }
+                }
+            }
+            if supported_efforts.is_empty() {
                 return None;
             }
-            Some(ModelOption {
-                id: logical_id,
-                label: pretty_bare_label(base),
-                provider: ModelProvider::Antigravity,
+            Some(threadlane_runtime::model_registry::ModelInfo {
+                id: model.id.clone(),
+                label: display_name.unwrap_or_else(|| model.label.clone()),
+                provider: Some("antigravity".into()),
+                context_window: None,
+                default_effort: supported_efforts
+                    .iter()
+                    .find(|effort| effort.as_str() == "medium")
+                    .or_else(|| supported_efforts.first())
+                    .cloned(),
+                supported_efforts,
             })
         })
-        .collect();
-    synthesized.sort_by(|a, b| a.id.cmp(&b.id));
-    models.extend(synthesized);
+        .collect()
 }
 
 /// Launch-time snapshot of one external agent's settings, read without
@@ -564,8 +639,7 @@ fn credentials_allow(provider: ModelProvider) -> bool {
     }
 }
 
-/// Merges `models.json` registry entries (bundled, env, global, project) over
-/// the compiled seeds so new models appear without a code change.
+/// Merges `models.json` metadata over the discovered catalog.
 fn merge_registry_models(models: &mut Vec<ModelOption>, project_root: Option<&std::path::Path>) {
     for info in threadlane_runtime::model_registry::registry_for_project(project_root) {
         if let Some(existing) = models.iter_mut().find(|model| model.id == info.id) {
@@ -579,6 +653,11 @@ fn merge_registry_models(models: &mut Vec<ModelOption>, project_root: Option<&st
             continue;
         }
         let provider = provider_for_id(&info.id, info.provider.as_deref());
+        // OpenAI inventory is account-specific and comes only from its live
+        // model endpoints; registry data may annotate a discovered entry.
+        if provider == ModelProvider::OpenAi {
+            continue;
+        }
         if provider != ModelProvider::Acp && !credentials_allow(provider) {
             continue;
         }
@@ -606,10 +685,7 @@ pub(crate) fn efforts_for_model(
 /// entries declaring only `off` have no thinking to tune — both hide the
 /// control instead of offering dead options. Unknown models stay permissive
 /// so new providers work before their registry entry lands.
-pub(crate) fn supports_reasoning(
-    model_id: &str,
-    project_root: Option<&std::path::Path>,
-) -> bool {
+pub(crate) fn supports_reasoning(model_id: &str, project_root: Option<&std::path::Path>) -> bool {
     // An unset model inherits its effort, so the control stays visible.
     if model_id.trim().is_empty() {
         return true;
@@ -621,15 +697,8 @@ pub(crate) fn supports_reasoning(
         != vec![threadlane_runtime::ReasoningEffort::Off]
 }
 
-fn models_for_credentials(
-    has_openai: bool,
-    has_antigravity: bool,
-    has_opencode: bool,
-) -> Vec<ModelOption> {
+fn models_for_credentials(has_antigravity: bool, has_opencode: bool) -> Vec<ModelOption> {
     let mut models = Vec::new();
-    if has_openai {
-        models.extend(provider_models(OPENAI_MODELS, ModelProvider::OpenAi));
-    }
     if has_antigravity {
         models.extend(provider_models(
             ANTIGRAVITY_MODELS,
@@ -671,12 +740,8 @@ pub(crate) fn default_model_for_project(project_root: Option<&std::path::Path>) 
 }
 
 fn option_for(model_id: &str) -> Option<ModelOption> {
-    provider_models(OPENAI_MODELS, ModelProvider::OpenAi)
+    provider_models(ANTIGRAVITY_MODELS, ModelProvider::Antigravity)
         .into_iter()
-        .chain(provider_models(
-            ANTIGRAVITY_MODELS,
-            ModelProvider::Antigravity,
-        ))
         .chain(provider_models(OPENCODE_MODELS, ModelProvider::OpenCode))
         .find(|model| model.id == model_id)
 }
@@ -691,7 +756,7 @@ pub(crate) fn selection_label(model_id: &str, available: &[ModelOption]) -> Stri
         .find(|model| model.id == model_id)
         .map(|model| model.label.clone())
         .or_else(|| label_for(model_id))
-        .unwrap_or_else(|| model_id.to_string())
+        .unwrap_or_else(|| pretty_bare_label(model_id))
 }
 
 pub fn available_option(model_id: &str) -> Option<ModelOption> {
@@ -747,7 +812,7 @@ mod tests {
 
     #[test]
     fn no_credentials_produce_no_provider_models() {
-        assert!(models_for_credentials(false, false, false).is_empty());
+        assert!(models_for_credentials(false, false).is_empty());
     }
 
     #[test]
@@ -765,10 +830,50 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_capabilities_follow_live_variants_and_disable_non_thinking() {
+        use threadlane_provider::antigravity::AntigravityModelInfo;
+        let models = vec![
+            ModelOption {
+                id: "antigravity/gemini-3.6-flash".into(),
+                label: "Flash".into(),
+                provider: ModelProvider::Antigravity,
+            },
+            ModelOption {
+                id: "antigravity/test-no-thinking".into(),
+                label: "Fast".into(),
+                provider: ModelProvider::Antigravity,
+            },
+        ];
+        let live = vec![
+            AntigravityModelInfo {
+                id: "gemini-3.6-flash-medium".into(),
+                display_name: "Flash (Medium)".into(),
+                supported_efforts: vec!["medium".into()],
+                thinking_budget: Some(4000),
+            },
+            AntigravityModelInfo {
+                id: "test-no-thinking".into(),
+                display_name: "Fast".into(),
+                supported_efforts: vec!["off".into()],
+                thinking_budget: None,
+            },
+        ];
+        let metadata = antigravity_capabilities(&models, &live);
+        assert_eq!(metadata[0].supported_efforts, ["medium"]);
+        assert_eq!(metadata[1].supported_efforts, ["off"]);
+        threadlane_runtime::model_registry::update_discovered_models(
+            "antigravity",
+            vec![metadata[1].clone()],
+        );
+        assert!(!supports_reasoning("antigravity/test-no-thinking", None));
+    }
+
+    #[test]
     fn antigravity_availability_follows_live_runtime_ids() {
         use threadlane_runtime::ReasoningEffort;
-        let available: HashSet<String> =
-            ["gemini-3.7-flash-tiered".to_string()].into_iter().collect();
+        let available: HashSet<String> = ["gemini-3.7-flash-tiered".to_string()]
+            .into_iter()
+            .collect();
         // 3.7-flash resolves to -tiered at every effort.
         assert!(antigravity_entry_available(
             "antigravity/gemini-3.7-flash",
@@ -784,7 +889,9 @@ mod tests {
         assert!(antigravity_entry_available(
             "antigravity/gemini-3.6-flash",
             &[ReasoningEffort::Medium],
-            &["gemini-3.6-flash-medium".to_string()].into_iter().collect(),
+            &["gemini-3.6-flash-medium".to_string()]
+                .into_iter()
+                .collect(),
         ));
     }
 
@@ -796,7 +903,10 @@ mod tests {
             .lock()
             .ok()
             .map(|guard| (guard.0, guard.1.clone()));
-        if let Some(cache) = DISCOVERED_ANTIGRAVITY.get().and_then(|cache| cache.lock().ok()) {
+        if let Some(cache) = DISCOVERED_ANTIGRAVITY
+            .get()
+            .and_then(|cache| cache.lock().ok())
+        {
             let mut guard = cache;
             guard.0 = std::time::Instant::now();
             guard.1 = stub;
@@ -804,7 +914,9 @@ mod tests {
         run();
         if let (Some(saved), Some(cache)) = (
             saved,
-            DISCOVERED_ANTIGRAVITY.get().and_then(|cache| cache.lock().ok()),
+            DISCOVERED_ANTIGRAVITY
+                .get()
+                .and_then(|cache| cache.lock().ok()),
         ) {
             let mut guard = cache;
             guard.0 = saved.0;
@@ -815,7 +927,11 @@ mod tests {
     #[test]
     fn retired_antigravity_models_drop_out_once_confirmed() {
         with_antigravity_cache(
-            Some(["gemini-3.7-flash-tiered".to_string()].into_iter().collect()),
+            Some(
+                ["gemini-3.7-flash-tiered".to_string()]
+                    .into_iter()
+                    .collect(),
+            ),
             || {
                 let mut models = vec![
                     ModelOption {
@@ -900,6 +1016,63 @@ mod tests {
     }
 
     #[test]
+    fn tiered_model_and_runtime_variants_share_one_new_picker_entry() {
+        let mut models = Vec::new();
+        synthesize_live_antigravity_models(
+            &mut models,
+            &[
+                "gemini-3.6-flash-tiered".into(),
+                "gemini-3.6-flash-low".into(),
+                "gemini-3.6-flash-medium".into(),
+                "gemini-3.6-flash-high".into(),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "antigravity/gemini-3.6-flash");
+    }
+
+    #[test]
+    fn antigravity_models_share_one_picker_section() {
+        let mut models = vec![
+            ModelOption {
+                id: "openai/model".into(),
+                label: "OpenAI".into(),
+                provider: ModelProvider::OpenAi,
+            },
+            ModelOption {
+                id: "antigravity/first".into(),
+                label: "First".into(),
+                provider: ModelProvider::Antigravity,
+            },
+            ModelOption {
+                id: "opencode/model".into(),
+                label: "OpenCode".into(),
+                provider: ModelProvider::OpenCode,
+            },
+            ModelOption {
+                id: "antigravity/second".into(),
+                label: "Second".into(),
+                provider: ModelProvider::Antigravity,
+            },
+        ];
+        group_antigravity_models(&mut models);
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.provider)
+                .collect::<Vec<_>>(),
+            [
+                ModelProvider::Antigravity,
+                ModelProvider::Antigravity,
+                ModelProvider::OpenAi,
+                ModelProvider::OpenCode,
+            ]
+        );
+    }
+
+    #[test]
     fn selection_labels_preserve_configured_agents_and_unavailable_models() {
         let models = vec![ModelOption {
             id: "acp/claude".into(),
@@ -907,7 +1080,7 @@ mod tests {
             provider: ModelProvider::Acp,
         }];
         assert_eq!(selection_label("acp/claude", &models), "Claude Code");
-        assert_eq!(selection_label("gpt-5.5", &models), "GPT-5.5");
+        assert_eq!(selection_label("gpt-5.5", &models), "Gpt 5.5");
         assert_eq!(
             selection_label("acp/removed-agent", &models),
             "acp/removed-agent"
@@ -916,20 +1089,20 @@ mod tests {
 
     #[test]
     fn providers_only_expose_their_own_models() {
-        assert!(models_for_credentials(true, false, false)
-            .iter()
-            .all(|model| model.provider == ModelProvider::OpenAi));
-        assert!(models_for_credentials(false, true, false)
-            .iter()
-            .all(|model| model.provider == ModelProvider::Antigravity));
-        assert!(models_for_credentials(false, false, true)
-            .iter()
-            .all(|model| model.provider == ModelProvider::OpenCode));
+        assert!(
+            models_for_credentials(true, false)
+                .iter()
+                .all(|model| model.provider == ModelProvider::Antigravity)
+        );
+        assert!(
+            models_for_credentials(false, true)
+                .iter()
+                .all(|model| model.provider == ModelProvider::OpenCode)
+        );
     }
 
     #[test]
     fn catalog_matches_native_provider_inventory() {
-        assert_eq!(OPENAI_MODELS.len(), 9);
         assert_eq!(ANTIGRAVITY_MODELS.len(), 5);
         assert_eq!(OPENCODE_MODELS.len(), 8);
     }
@@ -982,24 +1155,30 @@ mod tests {
         }
         merge_discovered_opencode_models(&mut models);
         assert_eq!(models.len(), before + 1);
-        assert!(models
-            .iter()
-            .any(|model| model.id == "opencode-go/kimi-k2.6"));
+        assert!(
+            models
+                .iter()
+                .any(|model| model.id == "opencode-go/kimi-k2.6")
+        );
     }
 
     #[test]
     fn combined_catalog_preserves_provider_order() {
-        let models = models_for_credentials(true, true, true);
-        assert!(models[..OPENAI_MODELS.len()]
-            .iter()
-            .all(|model| model.provider == ModelProvider::OpenAi));
+        let models = models_for_credentials(true, true);
         assert!(
-            models[OPENAI_MODELS.len()..OPENAI_MODELS.len() + ANTIGRAVITY_MODELS.len()]
+            models[..ANTIGRAVITY_MODELS.len()]
                 .iter()
                 .all(|model| model.provider == ModelProvider::Antigravity)
         );
-        assert!(models[OPENAI_MODELS.len() + ANTIGRAVITY_MODELS.len()..]
-            .iter()
-            .all(|model| model.provider == ModelProvider::OpenCode));
+        assert!(
+            models[ANTIGRAVITY_MODELS.len()..]
+                .iter()
+                .all(|model| model.provider == ModelProvider::OpenCode)
+        );
+    }
+
+    #[test]
+    fn openai_models_are_only_live_discovered() {
+        assert!(models_for_credentials(false, false).is_empty());
     }
 }

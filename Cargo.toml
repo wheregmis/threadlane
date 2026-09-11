@@ -6,7 +6,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.15"
+version = "0.1.16"
 edition = "2021"
 
 [profile.dev]
@@ -23,6 +23,20 @@ rpath = false
 
 [profile.dev.package."*"]
 opt-level = 2
+
+# wasmi 2.0 defaults to `auto-dispatch`: its build script selects the
+# tail-call interpreter backend whenever the crate is compiled at opt-level 2
+# or higher, on the assumption that LLVM turns every handler-to-handler
+# `return handler(...)` into a sibling call. The dev profile's
+# `debug-assertions = true` breaks that assumption: `core::ub_checks` inside
+# the handlers take the address of a stack slot, so LLVM keeps a real call and
+# every executed Wasm instruction nests one native frame. Loading any real
+# extension then overflows GPUI's 512 KiB GCD worker stacks in ~6k
+# instructions (SIGBUS at startup). Compiling wasmi without debug assertions
+# restores the sibling calls its backend depends on; release builds already
+# run this way. `threadlane-wasi` has a regression test for the stack bound.
+[profile.dev.package.wasmi]
+debug-assertions = false
 
 [profile.dev.package.threadlane-gpui]
 opt-level = 2

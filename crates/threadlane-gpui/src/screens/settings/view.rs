@@ -639,7 +639,17 @@ impl SettingsView {
         let preferences = crate::services::subagent_settings::load(&project);
         let available = crate::model_catalog::available_models_for_project(Some(&project));
         let selected_model = preferences.model.clone();
-        let selected_reasoning = preferences.reasoning_effort;
+        let reasoning_model = selected_model
+            .as_deref()
+            .or(preferences.fast_model.as_deref())
+            .unwrap_or(&state.selected_model);
+        let selected_reasoning = preferences.reasoning_effort.map(|effort| {
+            threadlane_runtime::model_registry::effective_effort(
+                reasoning_model,
+                effort,
+                Some(&project),
+            )
+        });
         let model_label = selected_model
             .as_deref()
             .map(|id| crate::model_catalog::selection_label(id, &available))
@@ -651,7 +661,7 @@ impl SettingsView {
         let available_for_fast = available.clone();
         let model_entity = self.model.clone();
         let project_for_models = project.clone();
-        let reasoning_for_model = selected_model.clone().unwrap_or_default();
+        let reasoning_for_model = reasoning_model.to_string();
         // Reasoning controls hide for models without thinking (ACP agents,
         // off-only registry entries) instead of offering dead options. An
         // unset model inherits the parent, so the control stays visible.
@@ -834,7 +844,13 @@ impl SettingsView {
                     },
                 )
             });
-        let selected_fast_reasoning = preferences.fast_reasoning_effort;
+        let selected_fast_reasoning = preferences.fast_reasoning_effort.map(|effort| {
+            threadlane_runtime::model_registry::effective_effort(
+                preferences.fast_model.as_deref().unwrap_or_default(),
+                effort,
+                Some(&project),
+            )
+        });
         let fast_reasoning_label = selected_fast_reasoning
             .map(|effort| effort.label())
             .unwrap_or("Same as parent");

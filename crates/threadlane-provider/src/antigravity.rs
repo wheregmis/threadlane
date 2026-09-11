@@ -3,12 +3,12 @@ use crate::openai::{ProviderUsage, StreamEvent, ToolCall, ToolCallFunction};
 use futures_util::StreamExt;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::{mpsc, Mutex, OnceCell};
+use tokio::sync::{Mutex, OnceCell, mpsc};
 
 const PROD_BASE_URL: &str = "https://cloudcode-pa.googleapis.com";
 /// Daily host the official client uses for control- and data-plane traffic.
@@ -632,7 +632,12 @@ fn runtime_model_override(model: &str, effort: &str) -> Option<String> {
 pub struct AntigravityModelInfo {
     pub id: String,
     pub display_name: String,
+    pub supported_efforts: Vec<String>,
+    pub thinking_budget: Option<i64>,
 }
+
+static LIVE_MODELS: std::sync::OnceLock<std::sync::RwLock<Vec<AntigravityModelInfo>>> =
+    std::sync::OnceLock::new();
 
 /// Backend runtime id for a logical `antigravity/*` model id and lowercase
 /// effort label. Thin wrapper so catalog code can validate entries against
@@ -650,6 +655,31 @@ fn parse_available_models(value: &Value) -> Vec<AntigravityModelInfo> {
     let mut entries: Vec<AntigravityModelInfo> = models
         .iter()
         .filter(|(_, info)| info.is_object())
+        .filter(|(id, info)| {
+            if info.get("isInternal").and_then(Value::as_bool) == Some(true) {
+                return false;
+            }
+            if let Some(sorts) = value.get("agentModelSorts").and_then(Value::as_array) {
+                id.ends_with("-tiered")
+                    || sorts
+                        .iter()
+                        .filter_map(|sort| sort.get("groups").and_then(Value::as_array))
+                        .flatten()
+                        .filter_map(|group| group.get("modelIds").and_then(Value::as_array))
+                        .flatten()
+                        .any(|model| model.as_str() == Some(id.as_str()))
+                    || value
+                        .get("tieredModelIds")
+                        .and_then(Value::as_object)
+                        .into_iter()
+                        .flat_map(|tiers| tiers.values())
+                        .filter_map(Value::as_array)
+                        .flatten()
+                        .any(|model| model.as_str() == Some(id.as_str()))
+            } else {
+                info.get("isInternal").and_then(Value::as_bool) != Some(true)
+            }
+        })
         .map(|(id, info)| AntigravityModelInfo {
             id: id.clone(),
             display_name: info
@@ -658,6 +688,29 @@ fn parse_available_models(value: &Value) -> Vec<AntigravityModelInfo> {
                 .filter(|name| !name.trim().is_empty())
                 .unwrap_or(id)
                 .to_string(),
+            supported_efforts: match info.get("supportsThinking").and_then(Value::as_bool) {
+                // Protobuf JSON omits false booleans; absence is non-thinking too.
+                Some(false) | None => vec!["off".into()],
+                Some(true) => {
+                    let name = info
+                        .get("displayName")
+                        .and_then(Value::as_str)
+                        .unwrap_or(id);
+                    if let Some(effort) = ["low", "medium", "high"]
+                        .into_iter()
+                        .find(|effort| name.to_ascii_lowercase().ends_with(&format!("({effort})")))
+                    {
+                        vec![effort.into()]
+                    } else if id.ends_with("-tiered") {
+                        // The tiered wire protocol accepts these three budget modes.
+                        vec!["low".into(), "medium".into(), "high".into()]
+                    } else {
+                        // A fixed thinking budget exposes one mode, not fake effort levels.
+                        vec!["medium".into()]
+                    }
+                }
+            },
+            thinking_budget: info.get("thinkingBudget").and_then(Value::as_i64),
         })
         .collect();
     entries.sort_by(|a, b| a.id.cmp(&b.id));
@@ -692,6 +745,7 @@ async fn fetch_available_models_inner() -> Vec<AntigravityModelInfo> {
             .post(format!("{endpoint}/v1internal:fetchAvailableModels"))
             .headers(antigravity_headers(&token))
             .json(&json!({ "project": project }))
+            .timeout(std::time::Duration::from_secs(10))
             .send()
             .await;
         let Ok(response) = response else { continue };
@@ -703,6 +757,9 @@ async fn fetch_available_models_inner() -> Vec<AntigravityModelInfo> {
         };
         let entries = parse_available_models(&value);
         if !entries.is_empty() {
+            if let Ok(mut cache) = LIVE_MODELS.get_or_init(Default::default).write() {
+                *cache = entries.clone();
+            }
             return entries;
         }
     }
@@ -718,6 +775,14 @@ fn resolve_runtime_model(model_id: &str, effort: &str) -> String {
     let model = model_id.strip_prefix("antigravity/").unwrap_or(model_id);
     if let Some(mapped) = runtime_model_override(model, effort) {
         return mapped;
+    }
+    let variant = format!("{model}-{effort}");
+    if LIVE_MODELS
+        .get()
+        .and_then(|models| models.read().ok())
+        .is_some_and(|models| models.iter().any(|entry| entry.id == variant))
+    {
+        return variant;
     }
     match model {
         "gemini-3.6-flash" => match effort {
@@ -885,10 +950,22 @@ fn convert_openai_payload(payload: &Value) -> Result<(String, Value), String> {
         .and_then(Value::as_u64)
         .unwrap_or(8192);
     generation.insert("maxOutputTokens".to_string(), json!(max_output_tokens));
-    generation.insert(
-        "thinkingConfig".to_string(),
-        thinking_config(&runtime_model, effort),
-    );
+    let supports_thinking = LIVE_MODELS
+        .get()
+        .and_then(|cache| cache.read().ok())
+        .and_then(|models| {
+            models
+                .iter()
+                .find(|model| model.id == runtime_model)
+                .map(|model| model.supported_efforts != ["off"])
+        })
+        .unwrap_or(true);
+    if supports_thinking {
+        generation.insert(
+            "thinkingConfig".to_string(),
+            thinking_config(&runtime_model, effort),
+        );
+    }
     request.insert("generationConfig".to_string(), Value::Object(generation));
 
     if let Some(tools) = payload.get("tools").and_then(Value::as_array) {
@@ -1131,8 +1208,19 @@ fn tool_choice_mode(choice: Option<&Value>) -> Option<&'static str> {
 
 fn thinking_config(model: &str, effort: &str) -> Value {
     let enabled = effort != "off";
+    let advertised_budget = LIVE_MODELS
+        .get()
+        .and_then(|cache| cache.read().ok())
+        .and_then(|models| {
+            models
+                .iter()
+                .find(|entry| entry.id == model)
+                .and_then(|entry| entry.thinking_budget)
+        });
     let budget = if !enabled {
         0
+    } else if let Some(budget) = advertised_budget.filter(|_| !model.ends_with("-tiered")) {
+        budget
     } else if model.starts_with("claude-") {
         1024
     } else if model.starts_with("gpt-oss-") {
@@ -1564,6 +1652,27 @@ mod tests {
         assert_eq!(entries[1].id, "gemini-3.7-flash-tiered");
         assert_eq!(entries[1].display_name, "gemini-3.7-flash-tiered");
         assert!(parse_available_models(&serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn inventory_keeps_agent_capabilities_and_excludes_auxiliary_models() {
+        let entries = parse_available_models(&json!({
+            "agentModelSorts": [{"groups": [{"modelIds": ["fast", "fixed", "variant", "internal"]}]}],
+            "models": {
+                "fast": {"supportsThinking": false},
+                "fixed": {"supportsThinking": true, "thinkingBudget": 1024},
+                "variant": {"displayName": "Future (High)", "supportsThinking": true, "thinkingBudget": -1},
+                "gemini-future-tiered": {"supportsThinking": true},
+                "image-model": {"displayName": "Image"},
+                "internal": {"isInternal": true}
+            }
+        }));
+        assert_eq!(entries.len(), 4);
+        assert_eq!(entries[0].supported_efforts, ["off"]);
+        assert_eq!(entries[1].supported_efforts, ["medium"]);
+        assert_eq!(entries[1].thinking_budget, Some(1024));
+        assert_eq!(entries[2].supported_efforts, ["low", "medium", "high"]);
+        assert_eq!(entries[3].supported_efforts, ["high"]);
     }
 
     struct ThreadUnparker {

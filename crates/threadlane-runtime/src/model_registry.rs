@@ -4,6 +4,23 @@ use std::path::Path;
 
 use crate::types::ReasoningEffort;
 
+static DISCOVERED_MODELS: std::sync::OnceLock<std::sync::RwLock<HashMap<String, ModelInfo>>> =
+    std::sync::OnceLock::new();
+
+/// Publish successful provider discovery for both selectors and request adapters.
+/// Failed/empty refreshes leave the last known capabilities intact.
+pub fn update_discovered_models(provider: &str, models: Vec<ModelInfo>) {
+    if models.is_empty() {
+        return;
+    }
+    if let Ok(mut cache) = DISCOVERED_MODELS.get_or_init(Default::default).write() {
+        cache.retain(|_, model| model.provider.as_deref() != Some(provider));
+        for model in models {
+            cache.insert(model.id.clone(), model);
+        }
+    }
+}
+
 /// A model entry that can be supplied without a code change.
 ///
 /// Sources merge in increasing precedence:
@@ -196,9 +213,62 @@ pub fn registry_for_project(project_root: Option<&Path>) -> Vec<ModelInfo> {
 
 /// Registry lookup by id across all file sources.
 pub fn find_model(model_id: &str, project_root: Option<&Path>) -> Option<ModelInfo> {
-    registry_for_project(project_root)
+    let mut model = registry_for_project(project_root)
         .into_iter()
-        .find(|model| model.id == model_id)
+        .find(|model| model.id == model_id);
+    if let Some(live) = DISCOVERED_MODELS
+        .get()
+        .and_then(|cache| cache.read().ok())
+        .and_then(|cache| cache.get(model_id).cloned())
+    {
+        if let Some(model) = &mut model {
+            if !live.supported_efforts.is_empty() {
+                model.supported_efforts = live.supported_efforts;
+                model.default_effort = live.default_effort;
+            }
+        } else {
+            model = Some(live);
+        }
+    }
+    model
+}
+
+/// Preserve a valid selection; otherwise use the advertised default/first mode.
+pub fn effective_effort(
+    model_id: &str,
+    effort: ReasoningEffort,
+    project_root: Option<&Path>,
+) -> ReasoningEffort {
+    let Some(model) = find_model(model_id, project_root) else {
+        return effort;
+    };
+    let supported = model.efforts();
+    if supported.contains(&effort) {
+        return effort;
+    }
+    model
+        .default_effort
+        .as_deref()
+        .and_then(ReasoningEffort::from_label)
+        .filter(|default| supported.contains(default))
+        .unwrap_or(supported[0])
+}
+
+/// `none` is an explicit provider mode; `off` means omit the parameter entirely.
+pub fn effective_api_effort(
+    model_id: &str,
+    effort: ReasoningEffort,
+    project_root: Option<&Path>,
+) -> Option<&'static str> {
+    let effective = effective_effort(model_id, effort, project_root);
+    if effective == ReasoningEffort::Off
+        && find_model(model_id, project_root)
+            .is_some_and(|model| model.supported_efforts.iter().any(|level| level == "none"))
+    {
+        Some("none")
+    } else {
+        effective.as_api_str()
+    }
 }
 
 /// Supported efforts for a model id. Unknown models get all known levels so
@@ -259,6 +329,25 @@ mod tests {
             default_effort: None,
         };
         assert_eq!(info.efforts(), vec![ReasoningEffort::Off]);
+    }
+
+    #[test]
+    fn discovered_refresh_replaces_only_its_provider() {
+        let model = |id: &str, provider: &str| ModelInfo {
+            id: id.into(),
+            label: id.into(),
+            provider: Some(provider.into()),
+            context_window: None,
+            supported_efforts: vec!["low".into()],
+            default_effort: None,
+        };
+        update_discovered_models("replace-test", vec![model("retired", "replace-test")]);
+        update_discovered_models("other-test", vec![model("kept", "other-test")]);
+        update_discovered_models("replace-test", vec![model("current", "replace-test")]);
+
+        assert!(find_model("retired", None).is_none());
+        assert!(find_model("current", None).is_some());
+        assert!(find_model("kept", None).is_some());
     }
 
     #[test]

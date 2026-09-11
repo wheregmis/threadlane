@@ -396,6 +396,7 @@ impl CodingAgent {
         }
 
         let mut effective_model = options.model.clone();
+        let mut effective_reasoning_effort = ReasoningEffort::default();
         let (mut harness, harness_journal_error) = match session_file.as_deref() {
             Some(path) => match super::harness::CodingSessionHarness::open(path) {
                 Ok(h) => (Some(h), None),
@@ -410,6 +411,14 @@ impl CodingAgent {
         if let Some(h) = harness.as_ref() {
             if let Some(model) = h.store.facts().get("model") {
                 effective_model = model.clone();
+            }
+            if let Some(effort) = h
+                .store
+                .facts()
+                .get("reasoning_effort")
+                .and_then(|effort| ReasoningEffort::from_label(effort))
+            {
+                effective_reasoning_effort = effort;
             }
             if let Some(plan_json) = h.store.facts().get("session_plan") {
                 if let Ok(plan) = serde_json::from_str::<threadlane_runtime::SessionPlan>(plan_json)
@@ -458,6 +467,11 @@ impl CodingAgent {
                 panic!("Failed to create agent runtime: {error}");
             })
         };
+        agent
+            .turn
+            .try_lock()
+            .expect("new agent turn must be unlocked")
+            .reasoning_effort = effective_reasoning_effort;
         agent.session_id = session_id.clone();
         let harness_run_id: Arc<std::sync::Mutex<Option<String>>> =
             Arc::new(std::sync::Mutex::new(None));
@@ -757,6 +771,8 @@ impl CodingAgent {
             manager_clone.discover_and_connect().await;
         });
         agent.work_dir = Some(options.work_dir.clone());
+        agent.turn.try_lock().expect("new runtime turn is unlocked").project_root =
+            Some(options.work_dir.clone());
 
         let mut system_prompt_config = options.system_prompt.clone();
         if initial_tool_policy == ToolPolicy::ReadOnly {
