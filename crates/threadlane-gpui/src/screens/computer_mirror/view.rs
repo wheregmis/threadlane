@@ -13,7 +13,7 @@
 //! holds a subscription, and each one is painted straight from a
 //! `RenderImage` — no JPEG round trip and no file polling on the hot path.
 //! Input overlays (click ripples, scroll direction, the pointer) ride the
-//! same feed so the popup reads like a screen recording, not a slideshow.
+//! same feed so the panel reads like a screen recording, not a slideshow.
 //!
 //! `<previews>/latest.json` stays the cold fallback: it names the last
 //! capture on disk for when no live frame exists (fresh launch, Linux) and
@@ -46,7 +46,7 @@ const FPS_WINDOW_MS: u128 = 2_000;
 /// command buffer still sampling it never sees the tile reused.
 const RETIRE_PAINTS: u8 = 3;
 /// Retired frames beyond this are released immediately, paints or not, so a
-/// hidden window never hoards textures.
+/// panel that is not being painted never hoards textures.
 const RETIRE_CAP: usize = 8;
 /// A poller capture older than this while running means the feed stalled.
 const STALE_MS: u128 = 3_000;
@@ -61,8 +61,10 @@ const PANEL_MIN_HEIGHT: Pixels = px(140.0);
 
 /// Drag payload for the top-left resize grip.
 struct ResizeDrag;
-/// Drag payload for moving the panel by its header.
-struct MoveDrag;
+/// Drag payload for moving the panel by its header. The serial is minted per
+/// render and frozen into the active drag by gpui, so a move handler can
+/// tell a new drag from a continuing one without any drop event.
+struct MoveDrag(u64);
 
 /// The frame currently on screen and the pixels it was built from.
 struct LivePicture {
@@ -106,7 +108,16 @@ pub struct MirrorView {
     /// Cursor position within the panel when a move drag began; captured on
     /// the first drag move so the panel follows without jumping.
     move_grab: Option<Point<Pixels>>,
+    /// Serial of the move drag `move_grab` belongs to.
+    move_grab_for: Option<u64>,
+    /// Serial handed to the next header drag.
+    drag_serial: u64,
+    /// Host bounds as last seen by the layer probe; geometry is re-clamped
+    /// whenever they change so a shrinking window cannot strand the panel.
+    host: Option<Bounds<Pixels>>,
     _tasks: Vec<Task<()>>,
+    /// Releases every uploaded frame when the host drops this entity.
+    _release: Subscription,
 }
 
 impl MirrorView {
@@ -204,6 +215,24 @@ impl MirrorView {
             }
         });
 
+        // Atlas tiles are only ever freed explicitly. The popup window used
+        // to take its atlas with it; now the frames live in the chat window,
+        // so hand every uploaded frame back when the host drops this view.
+        let release = cx.on_release(|this, cx| {
+            if let Some(live) = this.live.take() {
+                cx.drop_image(live.image, None);
+            }
+            let retired: Vec<Retired> = this
+                .retired
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .drain(..)
+                .collect();
+            for entry in retired {
+                cx.drop_image(entry.image, None);
+            }
+        });
+
         Self {
             focus_handle: cx.focus_handle(),
             model,
@@ -226,8 +255,22 @@ impl MirrorView {
             size: size(PANEL_INITIAL_WIDTH, PANEL_INITIAL_HEIGHT),
             expanded: false,
             move_grab: None,
+            move_grab_for: None,
+            drag_serial: 0,
+            host: None,
             _tasks: vec![frames, overlays, status, sidecar],
+            _release: release,
         }
+    }
+
+    /// The layer probe saw new host bounds: remember them and pull the panel
+    /// back inside, so a window made smaller never leaves the header (and
+    /// with it every control) off-screen.
+    fn host_resized(&mut self, host: Bounds<Pixels>) {
+        self.host = Some(host);
+        let (offset, size) = fitted_panel(host, self.offset, self.size);
+        self.offset = offset;
+        self.size = size;
     }
 
     /// Grow or shrink from the top-left grip. The bottom-right corner stays
@@ -241,10 +284,15 @@ impl MirrorView {
         self.size = resized_panel(host, self.offset, mouse);
     }
 
-    /// Follow a header drag, keeping the whole panel inside the host.
-    fn move_to(&mut self, host: Bounds<Pixels>, mouse: Point<Pixels>) {
+    /// Follow a header drag, keeping the whole panel inside the host. A new
+    /// drag (fresh serial) re-captures where the header was grabbed.
+    fn move_to(&mut self, serial: u64, host: Bounds<Pixels>, mouse: Point<Pixels>) {
         if self.expanded {
             return;
+        }
+        if self.move_grab_for != Some(serial) {
+            self.move_grab = None;
+            self.move_grab_for = Some(serial);
         }
         let panel_left = host.right() - self.offset.x - self.size.width;
         let panel_top = host.bottom() - self.offset.y - self.size.height;
@@ -538,6 +586,28 @@ fn moved_panel(
     point(
         right.clamp(px(0.0), max_right),
         bottom.clamp(px(0.0), max_bottom),
+    )
+}
+
+/// Stored panel geometry pulled back inside a (possibly smaller) host: the
+/// size shrinks to what fits with a margin, then the offset is clamped so the
+/// whole panel stays visible.
+fn fitted_panel(
+    host: Bounds<Pixels>,
+    offset: Point<Pixels>,
+    panel: Size<Pixels>,
+) -> (Point<Pixels>, Size<Pixels>) {
+    let room_width = (host.size.width - PANEL_MARGIN * 2.0).max(px(1.0));
+    let room_height = (host.size.height - PANEL_MARGIN * 2.0).max(px(1.0));
+    let fitted = size(panel.width.min(room_width), panel.height.min(room_height));
+    let max_right = (host.size.width - fitted.width).max(px(0.0));
+    let max_bottom = (host.size.height - fitted.height).max(px(0.0));
+    (
+        point(
+            offset.x.clamp(px(0.0), max_right),
+            offset.y.clamp(px(0.0), max_bottom),
+        ),
+        fitted,
     )
 }
 
@@ -882,6 +952,8 @@ impl Render for MirrorView {
         };
 
         let expanded = self.expanded;
+        self.drag_serial += 1;
+        let drag_serial = self.drag_serial;
         let header = div()
             .id("computer-mirror-drag")
             .flex_none()
@@ -893,11 +965,9 @@ impl Render for MirrorView {
             .border_b_1()
             .border_color(theme.border)
             .cursor_grab()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _event, _window, _cx| this.move_grab = None),
-            )
-            .on_drag(MoveDrag, |_, _offset, _window, cx| cx.new(|_| Empty))
+            .on_drag(MoveDrag(drag_serial), |_, _offset, _window, cx| {
+                cx.new(|_| Empty)
+            })
             .child(div().size(px(8.0)).rounded_full().bg(dot))
             .child(
                 div()
@@ -1013,10 +1083,32 @@ impl Render for MirrorView {
             .child(body)
             .child(grip);
 
+        // The probe records the host's bounds every layout so stored
+        // geometry can be re-clamped when the window shrinks; it paints
+        // nothing and only touches the entity when the bounds changed.
+        let probe_target = cx.weak_entity();
+        let known_host = self.host;
+        let probe = canvas(
+            move |bounds, _window, cx| {
+                if known_host != Some(bounds) {
+                    let _ = probe_target.update(cx, |this, cx| {
+                        this.host_resized(bounds);
+                        cx.notify();
+                    });
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .inset_0();
+
         // A transparent layer over the whole host: it carries no hitbox that
         // blocks the chat underneath, but it receives drag moves wherever the
         // cursor goes and reports its bounds, which is all the geometry the
-        // panel needs to move and resize.
+        // panel needs to move and resize. Drags end on their own; a new one
+        // is told apart by its serial, so no drop listener is needed (and
+        // none on this layer could fire anyway, the occluding panel is what
+        // is hovered at release).
         div()
             .absolute()
             .inset_0()
@@ -1028,13 +1120,12 @@ impl Render for MirrorView {
             )
             .on_drag_move(
                 cx.listener(|this, event: &DragMoveEvent<MoveDrag>, _window, cx| {
-                    this.move_to(event.bounds, event.event.position);
+                    let serial = event.drag(cx).0;
+                    this.move_to(serial, event.bounds, event.event.position);
                     cx.notify();
                 }),
             )
-            .on_drop(cx.listener(|this, _drag: &MoveDrag, _window, _cx| {
-                this.move_grab = None;
-            }))
+            .child(probe)
             .child(panel)
     }
 }
@@ -1215,6 +1306,39 @@ mod tests {
         assert_eq!(
             moved_panel(host(), panel, grab, point(px(5_000.0), px(5_000.0))),
             point(px(0.0), px(0.0))
+        );
+    }
+
+    #[test]
+    fn fitted_panel_pulls_geometry_back_inside_a_smaller_host() {
+        // Fits already: untouched.
+        assert_eq!(
+            fitted_panel(
+                host(),
+                point(px(12.0), px(12.0)),
+                size(px(320.0), px(230.0))
+            ),
+            (point(px(12.0), px(12.0)), size(px(320.0), px(230.0)))
+        );
+        // Offset stranded past the top-left after a shrink: clamped so the
+        // panel is flush with the far corner instead of off-screen.
+        assert_eq!(
+            fitted_panel(
+                host(),
+                point(px(700.0), px(500.0)),
+                size(px(320.0), px(230.0))
+            ),
+            (point(px(480.0), px(370.0)), size(px(320.0), px(230.0)))
+        );
+        // Panel larger than the host: shrunk to the host minus margins and
+        // pinned to the corner.
+        let tiny = Bounds {
+            origin: point(px(0.0), px(0.0)),
+            size: size(px(200.0), px(100.0)),
+        };
+        assert_eq!(
+            fitted_panel(tiny, point(px(40.0), px(40.0)), size(px(320.0), px(230.0))),
+            (point(px(24.0), px(24.0)), size(px(176.0), px(76.0)))
         );
     }
 
