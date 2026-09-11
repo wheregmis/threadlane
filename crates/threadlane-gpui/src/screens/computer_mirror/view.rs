@@ -3,7 +3,7 @@
 //! It displays; it never drives anything itself.
 //!
 //! Frames arrive in-process from `threadlane_session::computer_live`: the
-//! macOS poller publishes bounded BGRA frames at up to 30fps while this view
+//! macOS poller publishes bounded BGRA frames at up to 20fps while this view
 //! holds a subscription, and each one is painted straight from a
 //! `RenderImage` — no JPEG round trip and no file polling on the hot path.
 //! Input overlays (click ripples, scroll direction, the pointer) ride the
@@ -76,6 +76,8 @@ pub struct MirrorView {
     last_overlay_ms: u128,
     error: Option<String>,
     last_ts: u64,
+    /// Header as last repainted by the timer, see `header_key`.
+    last_header_key: String,
     _tasks: Vec<Task<()>>,
 }
 
@@ -201,6 +203,7 @@ impl MirrorView {
             last_overlay_ms: 0,
             error: None,
             last_ts: 0,
+            last_header_key: String::new(),
             _tasks: vec![frames, overlays, status, sidecar],
         }
     }
@@ -271,12 +274,38 @@ impl MirrorView {
             .retain(|overlay| now.saturating_sub(overlay.ts_ms) < CAPTION_MS.max(OVERLAY_MS));
     }
 
-    /// Frames per second over the recent window, once at least two landed.
-    fn fps(&self) -> Option<f32> {
-        let (first, last) = (self.frame_times.front()?, self.frame_times.back()?);
+    /// Frames per second over the recent window, once at least two landed
+    /// in it. Measured against `now`, not the last arrival: unchanged
+    /// pixels are never republished, so the readout must decay to nothing
+    /// on its own when the picture settles.
+    fn fps(&self, now: u128) -> Option<f32> {
+        let recent: Vec<u128> = self
+            .frame_times
+            .iter()
+            .copied()
+            .filter(|ts| now.saturating_sub(*ts) <= FPS_WINDOW_MS)
+            .collect();
+        let (first, last) = (recent.first()?, recent.last()?);
         let span_ms = last.saturating_sub(*first);
-        (self.frame_times.len() >= 2 && span_ms > 0)
-            .then(|| (self.frame_times.len() - 1) as f32 * 1_000.0 / span_ms as f32)
+        (recent.len() >= 2 && span_ms > 0)
+            .then(|| (recent.len() - 1) as f32 * 1_000.0 / span_ms as f32)
+    }
+
+    /// What the header would say right now; the sidecar timer compares
+    /// this between ticks so time-driven states (a stalled feed, a decayed
+    /// fps readout, an expired caption) get their repaint without waiting
+    /// for the very events whose absence defines them.
+    fn header_key(&self) -> String {
+        let now = now_ms();
+        let caption_live = self
+            .overlays
+            .last()
+            .is_some_and(|overlay| now.saturating_sub(overlay.ts_ms) < CAPTION_MS);
+        format!(
+            "{:?}|{:?}|{caption_live}",
+            self.feed_state(),
+            self.fps(now).map(|fps| fps.round() as u32)
+        )
     }
 
     /// Re-read poller status and the sidecar; true when the view changed.
@@ -285,6 +314,11 @@ impl MirrorView {
     /// instead of a blank window.
     fn poll(&mut self) -> bool {
         let mut changed = false;
+        let header = self.header_key();
+        if header != self.last_header_key {
+            self.last_header_key = header;
+            changed = true;
+        }
         if let Ok(bytes) = std::fs::read(self.previews_dir.join("latest.json")) {
             if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
                 let ts = value
@@ -377,7 +411,7 @@ impl MirrorView {
             if stalled {
                 FeedState::Stalled
             } else {
-                FeedState::Live { fps: self.fps() }
+                FeedState::Live { fps: self.fps(now) }
             }
         } else if self.live.is_some() {
             FeedState::Paused
@@ -405,6 +439,11 @@ enum FeedState {
 /// Upload-ready image for a live frame: gpui wants tightly packed BGRA rows,
 /// which is exactly what the poller publishes, so this is one copy.
 fn render_image(frame: &LiveFrame) -> Option<Arc<RenderImage>> {
+    // `from_raw` accepts any buffer at least this long, and the atlas
+    // uploads with a tight pitch, so a padded buffer would shear silently.
+    if frame.bgra.len() != frame.width as usize * frame.height as usize * 4 {
+        return None;
+    }
     let buffer = RgbaImage::from_raw(frame.width, frame.height, frame.bgra.clone())?;
     Some(Arc::new(RenderImage::new(vec![Frame::new(buffer)])))
 }
@@ -573,7 +612,7 @@ fn now_ms() -> u128 {
         .unwrap_or(0)
 }
 
-/// Newest `computer-*.jpg` / `latest-frame.jpg` in a previews dir, if any.
+/// Newest `computer-*.jpg` screenshot in a previews dir, if any.
 fn newest_capture(dir: &std::path::Path) -> Option<PathBuf> {
     std::fs::read_dir(dir)
         .ok()?
@@ -583,7 +622,7 @@ fn newest_capture(dir: &std::path::Path) -> Option<PathBuf> {
                 && path
                     .file_name()
                     .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with("computer-") || name == "latest-frame.jpg")
+                    .is_some_and(|name| name.starts_with("computer-"))
         })
         .max_by_key(|path| file_mtime_ms(path).unwrap_or(0))
 }
@@ -661,7 +700,7 @@ impl Render for MirrorView {
                     .map(|overlay| now.saturating_sub(overlay.ts_ms))
                     .filter(|age| *age < 450)
                     .map(|age| 1.0 - age as f32 / 450.0);
-                let animating = !markers.is_empty() || flash.is_some();
+                let animating = !markers.is_empty() || flash.is_some() || caption.is_some();
                 canvas(
                     move |_, _, _| (),
                     move |bounds, _, window, _cx| {
@@ -846,11 +885,13 @@ mod tests {
     fn newest_capture_picks_latest_jpg() {
         let dir = tempfile::tempdir().unwrap();
         let old = dir.path().join("computer-1.jpg");
-        let new = dir.path().join("latest-frame.jpg");
+        let new = dir.path().join("computer-2.jpg");
         std::fs::write(&old, b"old").unwrap();
         std::thread::sleep(std::time::Duration::from_millis(15));
         std::fs::write(&new, b"new").unwrap();
         std::fs::write(dir.path().join("notes.txt"), b"nope").unwrap();
+        // A leftover preview from pre-video builds is not a screenshot.
+        std::fs::write(dir.path().join("latest-frame.jpg"), b"legacy").unwrap();
         assert_eq!(newest_capture(dir.path()), Some(new));
         assert!(file_mtime_ms(&old).is_some());
     }
@@ -943,6 +984,10 @@ mod tests {
         let mut short = frame(4, 2);
         short.bgra.pop();
         assert!(render_image(&short).is_none());
+        // Row padding would upload sheared; refuse it too.
+        let mut padded = frame(4, 2);
+        padded.bgra.extend_from_slice(&[0; 8]);
+        assert!(render_image(&padded).is_none());
     }
 
     #[test]

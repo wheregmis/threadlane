@@ -6,10 +6,10 @@
 //! build and packaged app). Each poll serves two tiers:
 //!
 //! - **Live tier** ([`crate::computer_live`]): a nominal-resolution composite
-//!   scaled to bounded premultiplied BGRA for the GPUI mirror, published
-//!   in-process at up to 30fps while a mirror is subscribed and skipped when
-//!   the pixels did not change. This is what makes the mirror feel like
-//!   video instead of a slideshow.
+//!   scaled to bounded opaque BGRA for the GPUI mirror, published in-process
+//!   at up to 20fps while a mirror is subscribed and skipped when the pixels
+//!   did not change. This is what makes the mirror feel like video instead
+//!   of a slideshow.
 //! - **Model tier**: a best-resolution composite kept in memory as a raw
 //!   1560px BGRA frame at most every 500ms, so `computer_screenshot` serves
 //!   the current picture instantly; the JPEG is encoded only when the model
@@ -21,16 +21,19 @@
 //!
 //! Lifecycle is lazy: the first computer call starts polling for its target,
 //! later calls reuse fresh frames, and the thread exits after two minutes
-//! without computer calls (ten while a mirror is still watching).
+//! without computer calls (ten while a mirror is still watching). One mutex
+//! owns both the target state and the "a thread is serving it" flag, so an
+//! idle exit and a restart can never interleave into state with no thread.
 
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use super::computer::{composite_target, pointer_location, CaptureResolution, SCREENSHOT_WIDTH};
 pub(crate) use crate::computer_live::StreamTarget;
 use crate::computer_live::{self, LiveFrame, LiveStatus, LIVE_FRAME_MAX_WIDTH};
 
-/// Model tier cadence: JPEG plus preview file at most this often.
+/// Model tier cadence: refresh the in-memory best-resolution frame at most
+/// this often.
 const MODEL_FRAME_INTERVAL_MS: u64 = 500;
 /// Live tier cadence while a mirror is watching and something is happening:
 /// a WindowServer composite costs ~22ms and a nominal frame ~30ms all in
@@ -73,9 +76,25 @@ struct PollerState {
     last_change_ms: u128,
 }
 
-fn poller() -> &'static Mutex<Option<PollerState>> {
-    static POLLER: OnceLock<Mutex<Option<PollerState>>> = OnceLock::new();
-    POLLER.get_or_init(|| Mutex::new(None))
+/// What the poller is doing: its target bookkeeping and whether a thread is
+/// currently serving it. Guarded together, always.
+#[derive(Default)]
+struct PollerSlot {
+    state: Option<PollerState>,
+    thread_running: bool,
+}
+
+fn poller() -> &'static Mutex<PollerSlot> {
+    static POLLER: OnceLock<Mutex<PollerSlot>> = OnceLock::new();
+    POLLER.get_or_init(|| Mutex::new(PollerSlot::default()))
+}
+
+/// The slot, recovering from poisoning: a panic under CoreGraphics must not
+/// take the stream down for the rest of the process.
+fn lock_slot() -> MutexGuard<'static, PollerSlot> {
+    poller()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn latest() -> &'static Mutex<Option<StreamFrame>> {
@@ -171,25 +190,25 @@ pub(super) fn fresh_frame(target: StreamTarget) -> Option<StreamFrame> {
 /// blocks the caller on frames: the first screenshot after a switch still
 /// uses one-shot capture while polling warms up in the background.
 pub(super) fn ensure_stream(target: StreamTarget) {
-    {
-        let mut guard = match poller().lock() {
-            Ok(guard) => guard,
-            Err(_) => return,
-        };
-        if let Some(running) = guard.as_mut() {
-            running.last_use_ms = now_ms();
-            if running.target == target {
-                return;
+    let mut slot = lock_slot();
+    let now = now_ms();
+    match slot.state.as_mut() {
+        Some(running) => {
+            running.last_use_ms = now;
+            if running.target != target {
+                running.target = target;
+                running.last_change_ms = now;
             }
         }
-        let now = now_ms();
-        *guard = Some(PollerState {
-            target,
-            last_use_ms: now,
-            last_change_ms: now,
-        });
+        None => {
+            slot.state = Some(PollerState {
+                target,
+                last_use_ms: now,
+                last_change_ms: now,
+            });
+        }
     }
-    spawn_poller();
+    spawn_poller(&mut slot);
 }
 
 /// An input action happened: keep the stream alive and at full rate without
@@ -198,18 +217,19 @@ pub(super) fn ensure_stream(target: StreamTarget) {
 /// running, so the mirror shows video during act sequences even when the
 /// model has not screenshotted recently.
 pub(super) fn touch_or_start(target: StreamTarget) {
-    let running = poller()
-        .lock()
-        .ok()
-        .and_then(|mut guard| {
-            guard.as_mut().map(|running| {
-                running.last_use_ms = now_ms();
-            })
-        })
-        .is_some();
-    if !running {
-        ensure_stream(target);
+    let mut slot = lock_slot();
+    let now = now_ms();
+    match slot.state.as_mut() {
+        Some(running) => running.last_use_ms = now,
+        None => {
+            slot.state = Some(PollerState {
+                target,
+                last_use_ms: now,
+                last_change_ms: now,
+            });
+        }
     }
+    spawn_poller(&mut slot);
 }
 
 /// Next capture delay from who is watching and how lively the target is.
@@ -237,84 +257,108 @@ pub(crate) fn should_exit(watchers: usize, since_activity_ms: u128) -> bool {
     since_activity_ms > WATCHED_IDLE_MS || (watchers == 0 && since_activity_ms > STREAM_IDLE_MS)
 }
 
-fn spawn_poller() {
-    static POLLING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if POLLING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+/// Start the polling thread for the slot's state unless one is already
+/// serving it. Called with the slot locked so the running flag and the
+/// state change together.
+fn spawn_poller(slot: &mut PollerSlot) {
+    if slot.thread_running || slot.state.is_none() {
         return;
     }
-    std::thread::spawn(|| {
-        let mut last_model_ms: u128 = 0;
-        let mut sleep_ms = LIVE_ACTIVE_INTERVAL_MS;
-        loop {
-            std::thread::sleep(Duration::from_millis(sleep_ms));
-            let snapshot = match poller().lock() {
-                Ok(guard) => guard.clone(),
-                Err(_) => break,
-            };
-            let Some(current) = snapshot else {
-                break;
-            };
-            let started = now_ms();
-            let watchers = computer_live::watcher_count();
-            let since_activity = started.saturating_sub(current.last_use_ms);
-            if should_exit(watchers, since_activity) {
-                if let Ok(mut guard) = poller().lock() {
-                    *guard = None;
+    slot.thread_running = true;
+    let spawned = std::thread::Builder::new()
+        .name("threadlane-computer-live".into())
+        .spawn(|| {
+            // Whatever ends the loop — including a panic somewhere under
+            // CoreGraphics — the slot must stop claiming a thread that is
+            // gone, or no computer call could ever restart the feed.
+            struct Released;
+            impl Drop for Released {
+                fn drop(&mut self) {
+                    let mut slot = lock_slot();
+                    slot.thread_running = false;
+                    if std::thread::panicking() {
+                        slot.state = None;
+                        computer_live::set_status(LiveStatus {
+                            running: false,
+                            last_error: Some(
+                                "The live capture thread panicked; the next computer action restarts it."
+                                    .to_string(),
+                            ),
+                            ..LiveStatus::default()
+                        });
+                    }
                 }
-                computer_live::set_status(LiveStatus {
-                    running: false,
-                    target: Some(current.target),
-                    last_capture_ms: started,
-                    interval_ms: 0,
-                    last_error: None,
-                    pointer: None,
-                });
-                break;
             }
-            let interval = tick_interval_ms(
-                watchers,
-                since_activity,
-                started.saturating_sub(current.last_change_ms),
-            );
-            let model_due =
-                started.saturating_sub(last_model_ms) >= u128::from(MODEL_FRAME_INTERVAL_MS);
-            // Nobody watching and nothing due: nothing to composite this tick.
-            if watchers == 0 && !model_due {
-                sleep_ms = interval;
+            let _released = Released;
+            poll_loop();
+        });
+    if spawned.is_err() {
+        slot.thread_running = false;
+    }
+}
+
+fn poll_loop() {
+    let mut last_model_ms: u128 = 0;
+    let mut sleep_ms = LIVE_ACTIVE_INTERVAL_MS;
+    loop {
+        std::thread::sleep(Duration::from_millis(sleep_ms));
+        let Some(current) = lock_slot().state.clone() else {
+            let mut slot = lock_slot();
+            slot.state = None;
+            slot.thread_running = false;
+            break;
+        };
+        let started = now_ms();
+        let watchers = computer_live::watcher_count();
+        if should_exit(watchers, started.saturating_sub(current.last_use_ms)) {
+            // Re-check under the lock: a computer call may have landed since
+            // the snapshot, and it must find either a live thread or a free
+            // slot — never a running flag with nobody behind it.
+            let mut slot = lock_slot();
+            let still_idle = slot.state.as_ref().is_none_or(|state| {
+                should_exit(watchers, now_ms().saturating_sub(state.last_use_ms))
+            });
+            if !still_idle {
+                sleep_ms = 1;
                 continue;
             }
-            let live_composite = if watchers > 0 {
-                Some(composite_target(current.target, CaptureResolution::Nominal))
-            } else {
-                None
-            };
-            let model_composite = if model_due {
-                Some(composite_target(current.target, CaptureResolution::Best))
-            } else {
-                None
-            };
-            let pointer = pointer_location();
-            let failure = [live_composite.as_ref(), model_composite.as_ref()]
-                .into_iter()
-                .flatten()
-                .find_map(|result| result.as_ref().err().cloned());
-            if let Some(error) = failure {
-                // Failures stay quiet here; the one-shot screenshot path
-                // surfaces capture errors to the model. The mirror header
-                // still learns why the picture stopped.
-                computer_live::set_status(LiveStatus {
-                    running: true,
-                    target: Some(current.target),
-                    last_capture_ms: started,
-                    interval_ms: interval,
-                    last_error: Some(error),
-                    pointer,
-                });
-                sleep_ms = interval;
-                continue;
-            }
-            if let Some(Ok(composite)) = live_composite.as_ref() {
-                if let Ok((bgra, width, height)) = composite.bgra(LIVE_FRAME_MAX_WIDTH) {
+            slot.state = None;
+            slot.thread_running = false;
+            drop(slot);
+            computer_live::set_status(LiveStatus {
+                running: false,
+                target: Some(current.target),
+                last_capture_ms: started,
+                interval_ms: 0,
+                last_error: None,
+                pointer: None,
+            });
+            break;
+        }
+        let since_activity = started.saturating_sub(current.last_use_ms);
+        let interval = tick_interval_ms(
+            watchers,
+            since_activity,
+            started.saturating_sub(current.last_change_ms),
+        );
+        let model_due =
+            started.saturating_sub(last_model_ms) >= u128::from(MODEL_FRAME_INTERVAL_MS);
+        // Nobody watching and nothing due: nothing to composite this tick.
+        if watchers == 0 && !model_due {
+            sleep_ms = interval;
+            continue;
+        }
+        let pointer = pointer_location();
+        let mut error = None;
+        if watchers > 0 {
+            match composite_target(current.target, CaptureResolution::Nominal).and_then(
+                |composite| {
+                    composite
+                        .bgra(LIVE_FRAME_MAX_WIDTH)
+                        .map(|frame| (composite, frame))
+                },
+            ) {
+                Ok((composite, (bgra, width, height))) => {
                     let unchanged = computer_live::latest_frame().is_some_and(|previous| {
                         previous.target == current.target
                             && previous.width == width
@@ -332,54 +376,51 @@ fn spawn_poller() {
                             origin_points: composite.origin_points,
                             points_width: composite.points_size.0,
                         });
-                        if let Ok(mut guard) = poller().lock() {
-                            if let Some(running) = guard.as_mut() {
-                                running.last_change_ms = started;
-                            }
+                        if let Some(running) = lock_slot().state.as_mut() {
+                            running.last_change_ms = started;
                         }
                     }
                 }
+                Err(message) => error = Some(message),
             }
-            if let Some(Ok(composite)) = model_composite.as_ref() {
-                if let Ok((bgra, width, height)) = composite.bgra(SCREENSHOT_WIDTH) {
+        }
+        if model_due {
+            match composite_target(current.target, CaptureResolution::Best).and_then(|composite| {
+                composite
+                    .bgra(SCREENSHOT_WIDTH)
+                    .map(|frame| (composite.points_size.0, frame))
+            }) {
+                Ok((src_points_width, (bgra, width, height))) => {
                     last_model_ms = started;
                     if let Ok(mut latest) = latest().lock() {
                         *latest = Some(StreamFrame {
                             bgra,
                             width,
                             height,
-                            src_points_width: composite.points_size.0,
+                            src_points_width,
                             target: current.target,
                             ts_ms: started,
                         });
                     }
                 }
+                Err(message) => error = Some(message),
             }
-            computer_live::set_status(LiveStatus {
-                running: true,
-                target: Some(current.target),
-                last_capture_ms: started,
-                interval_ms: interval,
-                last_error: None,
-                pointer,
-            });
-            // Pace on wall clock so capture time does not stretch the period.
-            let elapsed = now_ms().saturating_sub(started);
-            sleep_ms = u64::from(interval).saturating_sub(elapsed as u64).max(1);
         }
-        POLLING.store(false, std::sync::atomic::Ordering::SeqCst);
-    });
-}
-
-/// True when every pixel is identical, e.g. a composite of nothing. Every
-/// pixel equals the first exactly when every pixel equals its neighbour, so
-/// one shifted slice compare (a memcmp, fast even unoptimised) answers it.
-pub(crate) fn is_blank(pixels: &[u8], bytes_per_pixel: usize) -> bool {
-    let bytes_per_pixel = bytes_per_pixel.max(1);
-    if pixels.len() < bytes_per_pixel * 2 {
-        return true;
+        // Failures stay quiet here; the one-shot screenshot path surfaces
+        // capture errors to the model. The mirror header still learns why
+        // the picture stopped.
+        computer_live::set_status(LiveStatus {
+            running: true,
+            target: Some(current.target),
+            last_capture_ms: started,
+            interval_ms: interval,
+            last_error: error,
+            pointer,
+        });
+        // Pace on wall clock so capture time does not stretch the period.
+        let elapsed = now_ms().saturating_sub(started);
+        sleep_ms = u64::from(interval).saturating_sub(elapsed as u64).max(1);
     }
-    pixels[bytes_per_pixel..] == pixels[..pixels.len() - bytes_per_pixel]
 }
 
 /// JPEG for the model from an opaque BGRA frame: drop alpha, swap to RGB,
@@ -493,14 +534,22 @@ mod tests {
     }
 
     #[test]
-    fn blank_detection_handles_pixel_widths() {
-        assert!(is_blank(&[0, 0, 0, 255, 0, 0, 0, 255], 4));
-        assert!(!is_blank(&[0, 0, 0, 255, 1, 0, 0, 255], 4));
-        assert!(!is_blank(&[0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 1, 255], 4));
-        assert!(is_blank(&[7, 7, 7, 7, 7, 7], 3));
-        assert!(!is_blank(&[7, 7, 7, 7, 7, 8], 3));
-        assert!(is_blank(&[], 4));
-        assert!(is_blank(&[1, 2, 3, 4], 4));
+    fn slot_never_claims_a_thread_it_failed_to_start() {
+        // A slot with no state has nothing to poll: spawning is a no-op and
+        // the running flag stays clear, so a later call can start cleanly.
+        let mut slot = PollerSlot::default();
+        spawn_poller(&mut slot);
+        assert!(!slot.thread_running);
+        // Once a thread claims the slot, a second spawn is refused without
+        // touching the flag.
+        slot.thread_running = true;
+        slot.state = Some(PollerState {
+            target: StreamTarget::Display,
+            last_use_ms: 0,
+            last_change_ms: 0,
+        });
+        spawn_poller(&mut slot);
+        assert!(slot.thread_running);
     }
 
     #[test]
