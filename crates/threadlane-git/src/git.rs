@@ -690,6 +690,22 @@ pub fn discard_file_changes(work_dir: &Path, relative_path: &str) -> Result<(), 
     Ok(())
 }
 
+pub fn discard_files<S: AsRef<str>>(work_dir: &Path, relative_paths: &[S]) -> Result<(), GitError> {
+    for path in relative_paths {
+        validate_diff_path(work_dir, path.as_ref())?;
+    }
+    for path in relative_paths {
+        discard_file_changes(work_dir, path.as_ref())?;
+    }
+    Ok(())
+}
+
+pub fn discard_all_changes(work_dir: &Path) -> Result<(), GitError> {
+    let status = inspect(work_dir)?;
+    let paths: Vec<String> = status.files.into_iter().map(|f| f.path).collect();
+    discard_files(work_dir, &paths)
+}
+
 pub fn ignore_file(work_dir: &Path, relative_path: &str) -> Result<(), GitError> {
     validate_diff_path(work_dir, relative_path)?;
     let gitignore_path = work_dir.join(".gitignore");

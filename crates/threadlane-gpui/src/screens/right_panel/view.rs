@@ -26,9 +26,10 @@ use crate::state::AppState;
 use super::browser::BrowserView;
 use super::draft_pr::{draft_pr_prefill, DraftPrContextKey, DraftPrDialogView};
 pub(crate) use super::types::{
-    can_create_pull_request, can_publish_branch, detect_language,
-    message_generated_matches_active_project, normalize_generated_commit_message, FileNode,
-    GitAction, PanelEvent, ReviewTab, Surface,
+    can_create_pull_request, can_publish_branch, detect_language, discard_options,
+    message_generated_matches_active_project, normalize_generated_commit_message,
+    selection_bar_discard_options, DiscardOption, FileNode, GitAction, PanelEvent, ReviewTab,
+    Surface,
 };
 
 pub struct RightPanelView {
@@ -901,6 +902,14 @@ impl RightPanelView {
             GitAction::PopStash(_) => "Restoring stashed changes…".to_string(),
             GitAction::DropStash(_) => "Discarding stash…".to_string(),
             GitAction::DiscardFile(p) => format!("Discarding changes in {p}…"),
+            GitAction::DiscardFiles(paths) => {
+                if paths.len() == 1 {
+                    format!("Discarding changes in {}…", paths[0])
+                } else {
+                    format!("Discarding changes in {} files…", paths.len())
+                }
+            }
+            GitAction::DiscardAll => "Discarding all changes…".to_string(),
             GitAction::IgnoreFile(p) => format!("Adding {p} to .gitignore…"),
             GitAction::IgnoreExtension(ext) => format!("Ignoring *.{ext} files…"),
         };
@@ -978,6 +987,23 @@ impl RightPanelView {
                     GitAction::DiscardFile(path) => {
                         threadlane_git::discard_file_changes(&work_dir, path)
                             .map_err(|e| e.to_string())?;
+                        action_message = Some(format!("Discarded changes in {path}"));
+                    }
+                    GitAction::DiscardFiles(paths) => {
+                        if !paths.is_empty() {
+                            threadlane_git::discard_files(&work_dir, paths)
+                                .map_err(|e| e.to_string())?;
+                            action_message = Some(if paths.len() == 1 {
+                                format!("Discarded changes in {}", paths[0])
+                            } else {
+                                format!("Discarded changes in {} files", paths.len())
+                            });
+                        }
+                    }
+                    GitAction::DiscardAll => {
+                        threadlane_git::discard_all_changes(&work_dir)
+                            .map_err(|e| e.to_string())?;
+                        action_message = Some("Discarded all changes".to_string());
                     }
                     GitAction::IgnoreFile(path) => {
                         threadlane_git::ignore_file(&work_dir, path).map_err(|e| e.to_string())?;
@@ -1673,29 +1699,43 @@ impl RightPanelView {
                     let rel_path_2 = path.clone();
                     let project_ref = project.clone();
                     let model_ref = model.clone();
-                    let panel_discard = panel.clone();
                     let panel_ignore = panel.clone();
                     let panel_ignore_ext = panel.clone();
 
-                    let mut menu = menu
-                        .item(PopupMenuItem::new("Discard Changes...").on_click(
+                    let mut menu = menu;
+                    let (selected_paths, total_files) = {
+                        let panel_ref = panel.read(_cx);
+                        let selected_paths: Vec<String> =
+                            panel_ref.selected_files.iter().cloned().collect();
+                        (selected_paths, panel_ref.review_files.len())
+                    };
+                    for opt in discard_options(&discard_path, &selected_paths, total_files) {
+                        let panel_action = panel.clone();
+                        let label = opt.label();
+                        let action = match opt {
+                            DiscardOption::Single(p) => GitAction::DiscardFile(p),
+                            DiscardOption::Selected(paths) => GitAction::DiscardFiles(paths),
+                            DiscardOption::All(_) => GitAction::DiscardAll,
+                        };
+                        menu = menu.item(PopupMenuItem::new(label).on_click(
                             move |_event, window, cx| {
-                                let p = discard_path.clone();
-                                panel_discard.update(cx, |this, cx| {
-                                    this.run_git_action(GitAction::DiscardFile(p), window, cx);
+                                let act = action.clone();
+                                panel_action.update(cx, |this, cx| {
+                                    this.run_git_action(act, window, cx);
                                 });
                             },
-                        ))
-                        .item(
-                            PopupMenuItem::new("Ignore File (Add to .gitignore)").on_click(
-                                move |_event, window, cx| {
-                                    let p = ignore_path.clone();
-                                    panel_ignore.update(cx, |this, cx| {
-                                        this.run_git_action(GitAction::IgnoreFile(p), window, cx);
-                                    });
-                                },
-                            ),
-                        );
+                        ));
+                    }
+                    menu = menu.item(
+                        PopupMenuItem::new("Ignore File (Add to .gitignore)").on_click(
+                            move |_event, window, cx| {
+                                let p = ignore_path.clone();
+                                panel_ignore.update(cx, |this, cx| {
+                                    this.run_git_action(GitAction::IgnoreFile(p), window, cx);
+                                });
+                            },
+                        ),
+                    );
 
                     if let Some(ext_str) = ext.clone() {
                         let ext_action = ext_str.clone();
@@ -1806,6 +1846,7 @@ impl RightPanelView {
             self.review_files_list_state
                 .reset_with_uniform_height(self.review_files.len(), px(32.0));
         }
+        let panel_entity = cx.entity().clone();
         let theme = cx.theme().colors;
         if let Some(error) = &self.review_error {
             return self.render_empty("Review unavailable", error, cx);
@@ -2221,6 +2262,7 @@ impl RightPanelView {
         let has_staged = staged_count > 0;
 
         let selection_bar = (total_files > 0).then(|| {
+            let panel_sb = panel_entity.clone();
             div()
                 .flex()
                 .items_center()
@@ -2230,6 +2272,69 @@ impl RightPanelView {
                 .border_b_1()
                 .border_color(theme.border)
                 .bg(theme.muted.opacity(0.15))
+                .context_menu({
+                    let panel = panel_sb;
+                    move |menu, _window, cx| {
+                        let (selected_paths, total_files, unstaged_count, has_staged) = {
+                            let panel_ref = panel.read(cx);
+                            let selected_paths: Vec<String> =
+                                panel_ref.selected_files.iter().cloned().collect();
+                            let total = panel_ref.review_files.len();
+                            let unstaged =
+                                panel_ref.review_files.iter().filter(|f| f.unstaged).count();
+                            let staged =
+                                panel_ref.review_files.iter().any(|f| f.staged);
+                            (selected_paths, total, unstaged, staged)
+                        };
+                        let mut menu = menu;
+                        for opt in selection_bar_discard_options(&selected_paths, total_files) {
+                            let panel_action = panel.clone();
+                            let label = opt.label();
+                            let action = match opt {
+                                DiscardOption::Single(p) => GitAction::DiscardFile(p),
+                                DiscardOption::Selected(paths) => GitAction::DiscardFiles(paths),
+                                DiscardOption::All(_) => GitAction::DiscardAll,
+                            };
+                            menu = menu.item(PopupMenuItem::new(label).on_click(
+                                move |_event, window, cx| {
+                                    let act = action.clone();
+                                    panel_action.update(cx, |this, cx| {
+                                        this.run_git_action(act, window, cx);
+                                    });
+                                },
+                            ));
+                        }
+                        if total_files > 0 {
+                            let panel_stage = panel.clone();
+                            menu = menu.separator().item(
+                                PopupMenuItem::new("Stage All")
+                                    .disabled(unstaged_count == 0)
+                                    .on_click(move |_event, window, cx| {
+                                        panel_stage.update(cx, |this, cx| {
+                                            this.run_git_action(GitAction::StageAll, window, cx);
+                                        });
+                                    }),
+                            );
+                            if has_staged {
+                                let panel_unstage = panel.clone();
+                                menu = menu.item(
+                                    PopupMenuItem::new("Unstage All").on_click(
+                                        move |_event, window, cx| {
+                                            panel_unstage.update(cx, |this, cx| {
+                                                this.run_git_action(
+                                                    GitAction::UnstageAll,
+                                                    window,
+                                                    cx,
+                                                );
+                                            });
+                                        },
+                                    ),
+                                );
+                            }
+                        }
+                        menu
+                    }
+                })
                 .child(
                     div()
                         .flex()
@@ -2333,10 +2438,41 @@ impl RightPanelView {
                 )
                 .into_any_element()
         } else {
+            let panel_fl = panel_entity.clone();
             div()
                 .relative()
                 .flex_1()
                 .min_h_0()
+                .context_menu({
+                    let panel = panel_fl;
+                    move |menu, _window, cx| {
+                        let (selected_paths, total_files) = {
+                            let panel_ref = panel.read(cx);
+                            let selected_paths: Vec<String> =
+                                panel_ref.selected_files.iter().cloned().collect();
+                            (selected_paths, panel_ref.review_files.len())
+                        };
+                        let mut menu = menu;
+                        for opt in selection_bar_discard_options(&selected_paths, total_files) {
+                            let panel_action = panel.clone();
+                            let label = opt.label();
+                            let action = match opt {
+                                DiscardOption::Single(p) => GitAction::DiscardFile(p),
+                                DiscardOption::Selected(paths) => GitAction::DiscardFiles(paths),
+                                DiscardOption::All(_) => GitAction::DiscardAll,
+                            };
+                            menu = menu.item(PopupMenuItem::new(label).on_click(
+                                move |_event, window, cx| {
+                                    let act = action.clone();
+                                    panel_action.update(cx, |this, cx| {
+                                        this.run_git_action(act, window, cx);
+                                    });
+                                },
+                            ));
+                        }
+                        menu
+                    }
+                })
                 .child(
                     list(
                         self.review_files_list_state.clone(),
