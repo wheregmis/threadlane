@@ -68,6 +68,18 @@ fn generated_commit_messages_only_apply_to_the_originating_checkout() {
 }
 
 #[test]
+fn generated_commit_messages_follow_conventional_commits() {
+    assert_eq!(
+        super::types::normalize_generated_commit_message("```\nCommit: Fix branch picker\n```"),
+        "fix: branch picker"
+    );
+    assert_eq!(
+        super::types::normalize_generated_commit_message("feat: add generated commit messages\nDetails"),
+        "feat: add generated commit messages"
+    );
+}
+
+#[test]
 fn only_publishable_branches_without_upstreams_use_the_publish_action() {
     let unpublished = GitStatus {
         branch: Some("feature/demo".into()),

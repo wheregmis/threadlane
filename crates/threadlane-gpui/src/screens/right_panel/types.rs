@@ -42,23 +42,7 @@ pub(crate) fn message_generated_matches_active_project(
 }
 
 pub(crate) fn normalize_generated_commit_message(raw: &str) -> String {
-    let trimmed = raw.trim();
-    let unquoted = trimmed
-        .strip_prefix('"')
-        .and_then(|s| s.strip_suffix('"'))
-        .unwrap_or(trimmed)
-        .trim();
-    if unquoted.starts_with("```") {
-        unquoted
-            .lines()
-            .filter(|line| !line.trim().starts_with("```"))
-            .collect::<Vec<_>>()
-            .join("\n")
-            .trim()
-            .to_string()
-    } else {
-        unquoted.to_string()
-    }
+    threadlane_provider::normalize_commit_message(raw)
 }
 
 pub(crate) fn detect_language(path_str: &str) -> &'static str {
