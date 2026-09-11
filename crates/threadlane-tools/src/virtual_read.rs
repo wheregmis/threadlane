@@ -3,6 +3,65 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Credentials for remote forge reads (`pr://`, `mr://`, `issue://`, and
+/// GitHub/GitLab URLs).
+///
+/// Historically this module resolved tokens itself from a hardcoded
+/// application credential store. That store now belongs to the host: callers
+/// pass stored tokens here, and this module only falls back to ambient
+/// environment behavior (`gh`/`glab` CLIs, then `GITHUB_TOKEN`/`GH_TOKEN` /
+/// `GITLAB_TOKEN`/`GL_TOKEN`). `Default` is empty (ambient fallbacks only).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RemoteCredentials {
+    pub github_token: Option<String>,
+    pub gitlab_token: Option<String>,
+}
+
+impl RemoteCredentials {
+    /// Ambient environment only: `GITHUB_TOKEN`/`GH_TOKEN` and
+    /// `GITLAB_TOKEN`/`GL_TOKEN` when set and non-blank.
+    pub fn from_env() -> Self {
+        fn env_token(keys: &[&str]) -> Option<String> {
+            keys.iter()
+                .filter_map(|key| std::env::var(key).ok())
+                .map(|value| value.trim().to_string())
+                .find(|value| !value.is_empty())
+        }
+        Self {
+            github_token: env_token(&["GITHUB_TOKEN", "GH_TOKEN"]),
+            gitlab_token: env_token(&["GITLAB_TOKEN", "GL_TOKEN"]),
+        }
+    }
+}
+
+/// Resolves the GitHub token: injected stored token first, then the `gh` CLI,
+/// then the environment. The stored-file lookup lives with the host's
+/// credential store, not here.
+fn resolve_github_token(injected: Option<&str>) -> Option<String> {
+    if let Some(token) = injected.map(str::trim).filter(|t| !t.is_empty()) {
+        return Some(token.to_string());
+    }
+    if let Ok(output) = Command::new("gh").args(["auth", "token"]).output() {
+        if output.status.success() {
+            let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !token.is_empty() {
+                return Some(token);
+            }
+        }
+    }
+    RemoteCredentials::from_env().github_token
+}
+
+/// Resolves the GitLab token: injected stored token first, then the
+/// environment. (There is no `glab` token probe; `glab` authenticates its own
+/// CLI calls in Strategy 1.)
+fn resolve_gitlab_token(injected: Option<&str>) -> Option<String> {
+    if let Some(token) = injected.map(str::trim).filter(|t| !t.is_empty()) {
+        return Some(token.to_string());
+    }
+    RemoteCredentials::from_env().gitlab_token
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepoProvider {
     GitHub,
@@ -289,6 +348,16 @@ pub fn remote_ref_path(root: &Path, reference: &str) -> String {
 }
 
 pub fn try_remote_ref_path(root: &Path, reference: &str) -> Result<String, String> {
+    try_remote_ref_path_with(root, reference, &RemoteCredentials::default())
+}
+
+/// Reads a remote `pr://`/`mr://`/`issue://` reference or forge URL using the
+/// injected credentials plus ambient (`gh`/`glab`/env) fallbacks.
+pub fn try_remote_ref_path_with(
+    root: &Path,
+    reference: &str,
+    credentials: &RemoteCredentials,
+) -> Result<String, String> {
     let parsed = parse_remote_ref(reference).ok_or_else(|| {
         format!(
             "Invalid repository reference '{reference}': expected pr://<num>, issue://<num>, mr://<num>, or GitHub/GitLab URL"
@@ -330,18 +399,37 @@ pub fn try_remote_ref_path(root: &Path, reference: &str) -> Result<String, Strin
     };
 
     match provider {
-        RepoProvider::GitHub => {
-            fetch_github(root, &host, &owner_repo, &parsed.kind, &parsed.number)
-        }
-        RepoProvider::GitLab => {
-            fetch_gitlab(root, &host, &owner_repo, &parsed.kind, &parsed.number)
-        }
+        RepoProvider::GitHub => fetch_github(
+            root,
+            &host,
+            &owner_repo,
+            &parsed.kind,
+            &parsed.number,
+            credentials.github_token.as_deref(),
+        ),
+        RepoProvider::GitLab => fetch_gitlab(
+            root,
+            &host,
+            &owner_repo,
+            &parsed.kind,
+            &parsed.number,
+            credentials.gitlab_token.as_deref(),
+        ),
     }
 }
 
 #[allow(dead_code)]
 pub fn github_path(root: &Path, reference: &str) -> String {
-    remote_ref_path(root, reference)
+    github_path_with(root, reference, &RemoteCredentials::default())
+}
+
+#[allow(dead_code)]
+pub fn github_path_with(
+    root: &Path,
+    reference: &str,
+    credentials: &RemoteCredentials,
+) -> String {
+    try_remote_ref_path_with(root, reference, credentials).unwrap_or_else(|error| error)
 }
 
 fn fetch_github(
@@ -350,6 +438,7 @@ fn fetch_github(
     owner_repo: &str,
     kind: &str,
     number: &str,
+    github_token: Option<&str>,
 ) -> Result<String, String> {
     let endpoint = match kind {
         "pr" | "mr" => format!("repos/{owner_repo}/pulls/{number}"),
@@ -388,7 +477,7 @@ fn fetch_github(
         "Accept: application/vnd.github+json",
     ]);
 
-    if let Some(token) = threadlane_auth::github_auth::get_github_token() {
+    if let Some(token) = resolve_github_token(github_token) {
         cmd.args(["-H", &format!("Authorization: Bearer {token}")]);
     }
     cmd.arg(&url);
@@ -426,6 +515,7 @@ fn fetch_gitlab(
     project_path: &str,
     kind: &str,
     number: &str,
+    gitlab_token: Option<&str>,
 ) -> Result<String, String> {
     let encoded_project = project_path.replace('/', "%2F");
     let endpoint = match kind {
@@ -456,7 +546,7 @@ fn fetch_gitlab(
     let mut cmd = Command::new("curl");
     cmd.args(["-s", "-L", "-H", "User-Agent: Threadlane"]);
 
-    if let Some(tok) = threadlane_auth::github_auth::get_gitlab_token() {
+    if let Some(tok) = resolve_gitlab_token(gitlab_token) {
         cmd.args(["-H", &format!("PRIVATE-TOKEN: {tok}")]);
     }
     cmd.arg(&url);
@@ -844,5 +934,28 @@ mod tests {
         fs::write(skill_dir.join("SKILL.md"), "my skill content").unwrap();
 
         assert_eq!(try_skill(root, "my-skill").unwrap(), "my skill content");
+    }
+
+    #[test]
+    fn injected_tokens_take_precedence_and_are_trimmed() {
+        assert_eq!(
+            resolve_github_token(Some("  stored-token  ")).as_deref(),
+            Some("stored-token")
+        );
+        assert_eq!(
+            resolve_gitlab_token(Some("stored-token")).as_deref(),
+            Some("stored-token")
+        );
+    }
+
+    #[test]
+    fn invalid_remote_references_fail_before_any_credential_lookup() {
+        let credentials = RemoteCredentials {
+            github_token: Some("stored-token".to_string()),
+            gitlab_token: None,
+        };
+        let error = try_remote_ref_path_with(Path::new("."), "not-a-ref", &credentials)
+            .expect_err("invalid reference must fail");
+        assert!(error.contains("Invalid repository reference"), "{error}");
     }
 }
