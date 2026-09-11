@@ -1,4 +1,18 @@
-use async_trait::async_trait;
+//! Model Context Protocol (MCP) stdio client: process lifecycle, connection
+//! reuse, discovery, and tool calls.
+//!
+//! This crate is runtime-agnostic: it exposes MCP-native tool metadata
+//! ([`McpToolDescription`]) and structured results ([`McpToolResult`]) and
+//! performs no host tool-schema conversion. Hosts adapt it to their own tool
+//! runtime (in Threadlane, `threadlane-session` owns the `ToolExecutor`
+//! adapter that converts descriptions to `AgentToolDefinition` and flattens
+//! results to text).
+//!
+//! Scope note: this is a stdio MCP tools client, not a complete
+//! all-transports MCP SDK. `McpTransport::Sse` configurations are recognized
+//! but not connected. The default settings locations keep the Threadlane
+//! `.threadlane/mcp.json` convention; other hosts may load configs directly.
+
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -9,7 +23,6 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use threadlane_runtime::{AgentToolDefinition, ToolExecutor};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex as TokioMutex;
@@ -133,17 +146,88 @@ impl McpSettings {
     }
 }
 
+/// MCP-native description of one tool offered by a server.
+///
+/// This is the raw listing metadata (namespaced `full_name`, human
+/// description, JSON `input_schema`); converting it into a host tool schema
+/// is the host adapter's job.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpToolDescription {
+    pub tool_name: String,
+    pub full_name: String,
+    pub description: String,
+    pub input_schema: Value,
+}
+
+/// One content item in an MCP `tools/call` result.
+///
+/// `text` items carry model-readable output; every other item type is
+/// retained verbatim as `other` so hosts can decide what to do with
+/// structured or binary payloads instead of silently dropping them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum McpContentItem {
+    Text { text: String },
+    #[serde(untagged)]
+    Other { raw: Value },
+}
+
+/// Structured result of an MCP `tools/call`.
+///
+/// Unlike the flattened text hosts typically feed the model, this preserves
+/// the raw response and the server's `isError` flag. Use
+/// [`McpToolResult::to_text`] for the legacy text projection.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpToolResult {
+    pub content: Vec<McpContentItem>,
+    #[serde(default)]
+    pub is_error: bool,
+    pub raw: Value,
+}
+
+impl McpToolResult {
+    /// Projects the result onto plain text: the `text` items joined by
+    /// newlines, or the pretty-printed raw response when there is no text.
+    pub fn to_text(&self) -> String {
+        let mut output = String::new();
+        for item in &self.content {
+            if let McpContentItem::Text { text } = item {
+                if !output.is_empty() {
+                    output.push('\n');
+                }
+                output.push_str(text);
+            }
+        }
+        if output.is_empty() {
+            output = serde_json::to_string_pretty(&self.raw).unwrap_or_default();
+        }
+        output
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct McpToolInfo {
-    tool_name: String,
-    full_name: String,
-    definition: AgentToolDefinition,
+    pub tool_name: String,
+    pub full_name: String,
+    pub description: String,
+    pub input_schema: Value,
+}
+
+impl McpToolInfo {
+    pub fn description(&self) -> McpToolDescription {
+        McpToolDescription {
+            tool_name: self.tool_name.clone(),
+            full_name: self.full_name.clone(),
+            description: self.description.clone(),
+            input_schema: self.input_schema.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct McpServerRecord {
-    config: McpServerConfig,
-    tools: Vec<McpToolInfo>,
+    pub config: McpServerConfig,
+    pub tools: Vec<McpToolInfo>,
 }
 
 /// A live stdio session with one MCP server.
@@ -160,7 +244,11 @@ struct McpSession {
 
 impl McpSession {
     /// Spawns the server and completes the MCP handshake.
-    async fn connect(config: &McpServerConfig) -> Result<Self, String> {
+    async fn connect(
+        config: &McpServerConfig,
+        client_name: &str,
+        client_version: &str,
+    ) -> Result<Self, String> {
         let McpTransport::Stdio { command, args, env } = &config.transport else {
             return Err("Only stdio MCP servers can be connected".to_string());
         };
@@ -201,7 +289,7 @@ impl McpSession {
                 json!({
                     "protocolVersion": "2024-11-05",
                     "capabilities": {},
-                    "clientInfo": { "name": "threadlane", "version": env!("CARGO_PKG_VERSION") }
+                    "clientInfo": { "name": client_name, "version": client_version }
                 }),
             )
             .await
@@ -284,8 +372,10 @@ impl McpSession {
 pub struct McpManager {
     global_dir: Option<PathBuf>,
     project_root: Option<PathBuf>,
+    client_name: String,
+    client_version: String,
     servers: TokioMutex<Vec<McpServerRecord>>,
-    cached_tool_defs: RwLock<Arc<[AgentToolDefinition]>>,
+    cached_tool_descriptions: RwLock<Arc<[McpToolDescription]>>,
     /// Live sessions keyed by server id, reused across tool calls.
     ///
     /// Each session carries its own lock so a call to one server never blocks a
@@ -299,10 +389,22 @@ impl McpManager {
         Self {
             global_dir,
             project_root,
+            client_name: "threadlane".to_string(),
+            client_version: env!("CARGO_PKG_VERSION").to_string(),
             servers: TokioMutex::new(Vec::new()),
-            cached_tool_defs: RwLock::new(Arc::from([])),
+            cached_tool_descriptions: RwLock::new(Arc::from([])),
             sessions: TokioMutex::new(HashMap::new()),
         }
+    }
+
+    /// Identifies the client in the MCP `initialize` handshake.
+    ///
+    /// Defaults to the Threadlane name and this crate's version; hosts
+    /// embedding this client under their own identity should set both.
+    pub fn with_client_info(mut self, name: &str, version: &str) -> Self {
+        self.client_name = name.to_string();
+        self.client_version = version.to_string();
+        self
     }
 
     /// Terminates every live server session.
@@ -386,12 +488,12 @@ impl McpManager {
 
         let tool_defs: Vec<_> = records
             .iter()
-            .flat_map(|record| record.tools.iter().map(|tool| tool.definition.clone()))
+            .flat_map(|record| record.tools.iter().map(|tool| tool.description()))
             .collect();
 
         let mut guard = self.servers.lock().await;
         *guard = records.clone();
-        if let Ok(mut cached) = self.cached_tool_defs.write() {
+        if let Ok(mut cached) = self.cached_tool_descriptions.write() {
             *cached = tool_defs.into();
         }
         records
@@ -408,7 +510,7 @@ impl McpManager {
         if let Some(previous) = previous {
             previous.lock().await.kill().await;
         }
-        let mut session = match McpSession::connect(config).await {
+        let mut session = match McpSession::connect(config, &self.client_name, &self.client_version).await {
             Ok(session) => session,
             Err(_error) => return Vec::new(),
         };
@@ -439,12 +541,9 @@ impl McpManager {
                 let full_name = format!("mcp__{}__{}", config.id, name);
                 mcp_tools.push(McpToolInfo {
                     tool_name: name.to_string(),
-                    full_name: full_name.clone(),
-                    definition: AgentToolDefinition::new(
-                        full_name,
-                        format!("[MCP: {}] {}", config.name, description),
-                        input_schema,
-                    ),
+                    full_name,
+                    description: format!("[MCP: {}] {}", config.name, description),
+                    input_schema,
                 });
             }
         }
@@ -457,14 +556,26 @@ impl McpManager {
         mcp_tools
     }
 
-    fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
-        self.cached_tool_defs
+    /// Cached [`McpToolDescription`] snapshot, rebuilt by
+    /// [`Self::discover_and_connect`].
+    pub fn tool_descriptions(&self) -> Arc<[McpToolDescription]> {
+        self.cached_tool_descriptions
             .read()
             .map(|defs| defs.clone())
             .unwrap_or_default()
     }
 
-    async fn execute_tool(&self, full_name: &str, args: &str) -> Option<Result<String, String>> {
+    /// Calls a tool by namespaced (`mcp__<server>__<tool>`) or bare name with
+    /// an already-parsed JSON argument value.
+    ///
+    /// Returns `None` when no enabled server offers the tool. The structured
+    /// [`McpToolResult`] preserves content items, the `isError` flag, and the
+    /// raw response; hosts that need plain text use [`McpToolResult::to_text`].
+    pub async fn call_tool(
+        &self,
+        full_name: &str,
+        args: &Value,
+    ) -> Option<Result<McpToolResult, String>> {
         let target = {
             let servers = self.servers.lock().await;
             servers.iter().find_map(|server| {
@@ -480,11 +591,6 @@ impl McpManager {
         };
         let (config, tool_name) = target?;
 
-        let parsed_args: Value = match serde_json::from_str(args) {
-            Ok(value) => value,
-            Err(error) => return Some(Err(format!("Invalid JSON tool arguments: {error}"))),
-        };
-
         // Resolve the handle under the map lock, then release it before doing
         // any I/O so concurrent calls to other servers are not serialized.
         let handle = {
@@ -494,12 +600,15 @@ impl McpManager {
                 None => {
                     // A server that died between calls is restarted once rather
                     // than failing the tool call outright.
-                    let session = match McpSession::connect(&config).await {
-                        Ok(session) => session,
-                        Err(error) => {
-                            return Some(Err(format!("Failed to start MCP server: {error}")))
-                        }
-                    };
+                    let session =
+                        match McpSession::connect(&config, &self.client_name, &self.client_version)
+                            .await
+                        {
+                            Ok(session) => session,
+                            Err(error) => {
+                                return Some(Err(format!("Failed to start MCP server: {error}")))
+                            }
+                        };
                     let handle = Arc::new(TokioMutex::new(session));
                     self.sessions
                         .lock()
@@ -515,7 +624,7 @@ impl McpManager {
             session
                 .request(
                     "tools/call",
-                    json!({ "name": tool_name, "arguments": parsed_args }),
+                    json!({ "name": tool_name, "arguments": args }),
                 )
                 .await
         };
@@ -533,63 +642,27 @@ impl McpManager {
             }
         };
 
-        let mut output = String::new();
-        if let Some(content) = response.get("content").and_then(Value::as_array) {
-            for item in content {
+        let mut content = Vec::new();
+        if let Some(items) = response.get("content").and_then(Value::as_array) {
+            for item in items {
                 if let Some(text) = item.get("text").and_then(Value::as_str) {
-                    if !output.is_empty() {
-                        output.push('\n');
-                    }
-                    output.push_str(text);
+                    content.push(McpContentItem::Text {
+                        text: text.to_string(),
+                    });
+                } else {
+                    content.push(McpContentItem::Other { raw: item.clone() });
                 }
             }
         }
-        if output.is_empty() {
-            output = serde_json::to_string_pretty(&response).unwrap_or_default();
-        }
-        Some(Ok(output))
-    }
-}
-
-#[async_trait]
-impl ToolExecutor for McpManager {
-    fn executor_id(&self) -> &str {
-        "threadlane.mcp_tools"
-    }
-
-    fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
-        McpManager::tool_definitions(self)
-    }
-
-    async fn execute_tool(&self, name: &str, args: &str) -> Option<Result<String, String>> {
-        McpManager::execute_tool(self, name, args).await
-    }
-}
-
-/// Compatibility adapter for callers that have not yet registered an
-/// `McpManager` directly with `ToolDispatcher`.
-pub struct McpToolExecutor {
-    manager: Arc<McpManager>,
-}
-
-impl McpToolExecutor {
-    pub fn new(manager: Arc<McpManager>) -> Self {
-        Self { manager }
-    }
-}
-
-#[async_trait]
-impl ToolExecutor for McpToolExecutor {
-    fn executor_id(&self) -> &str {
-        "threadlane.mcp_tools.adapter"
-    }
-
-    fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
-        self.manager.tool_definitions()
-    }
-
-    async fn execute_tool(&self, name: &str, args: &str) -> Option<Result<String, String>> {
-        self.manager.execute_tool(name, args).await
+        let is_error = response
+            .get("isError")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        Some(Ok(McpToolResult {
+            content,
+            is_error,
+            raw: response,
+        }))
     }
 }
 
@@ -598,19 +671,48 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tool_definition_slice_is_reused() {
+    fn tool_description_slice_is_reused() {
         let manager = McpManager::new(None, None);
-        *manager.cached_tool_defs.write().unwrap() = vec![AgentToolDefinition::new(
-            "mcp__stub__echo",
-            "echo",
-            serde_json::json!({"type": "object"}),
-        )]
+        *manager.cached_tool_descriptions.write().unwrap() = vec![McpToolDescription {
+            tool_name: "echo".to_string(),
+            full_name: "mcp__stub__echo".to_string(),
+            description: "echo".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }]
         .into();
 
-        let first = manager.tool_definitions();
-        let second = manager.tool_definitions();
+        let first = manager.tool_descriptions();
+        let second = manager.tool_descriptions();
 
         assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn tool_result_to_text_prefers_text_and_falls_back_to_raw() {
+        let text_result = McpToolResult {
+            content: vec![
+                McpContentItem::Text {
+                    text: "a".to_string(),
+                },
+                McpContentItem::Text {
+                    text: "b".to_string(),
+                },
+            ],
+            is_error: false,
+            raw: serde_json::json!({}),
+        };
+        assert_eq!(text_result.to_text(), "a\nb");
+
+        let raw = serde_json::json!({"structured": [1, 2]});
+        let structured = McpToolResult {
+            content: vec![McpContentItem::Other { raw: raw.clone() }],
+            is_error: false,
+            raw: raw.clone(),
+        };
+        assert_eq!(
+            structured.to_text(),
+            serde_json::to_string_pretty(&raw).unwrap()
+        );
     }
 
     #[test]

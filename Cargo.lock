@@ -8267,6 +8267,7 @@ name = "threadlane-benchmarks"
 version = "0.0.0"
 dependencies = [
  "hotpath",
+ "serde_json",
  "tempfile",
  "threadlane-mcp",
  "threadlane-runtime",
@@ -8337,12 +8338,10 @@ dependencies = [
 name = "threadlane-mcp"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "futures",
  "serde",
  "serde_json",
  "tempfile",
- "threadlane-runtime",
  "tokio",
 ]
 

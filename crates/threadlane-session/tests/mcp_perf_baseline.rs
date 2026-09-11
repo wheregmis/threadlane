@@ -2,7 +2,7 @@
 //!
 //! Ignored by default: it spawns real subprocesses and reports timings rather
 //! than asserting behavior. Run with
-//! `cargo test -p threadlane-mcp --test perf_baseline -- --ignored --nocapture`.
+//! `cargo test -p threadlane-session --test mcp_perf_baseline -- --ignored --nocapture`.
 //!
 //! The stub server is a `/bin/sh` script, so this harness is Unix-only.
 #![cfg(unix)]
@@ -11,10 +11,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
-use threadlane_mcp::{
+use threadlane_session::mcp::{
     McpManager, McpScope, McpServerConfig, McpSettings, McpToolExecutor, McpTransport,
 };
-use threadlane_runtime::ToolExecutor;
+use threadlane_session::ToolExecutor;
 
 fn stub_server_script(dir: &std::path::Path) -> PathBuf {
     let path = dir.join("stub_mcp.sh");

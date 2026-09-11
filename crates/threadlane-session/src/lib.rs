@@ -14,6 +14,7 @@ pub mod controller;
 pub mod credentials;
 pub mod error;
 pub mod extension_broker;
+pub mod mcp;
 pub mod orchestrator;
 pub mod permission;
 mod plan;
@@ -62,7 +63,7 @@ pub use system_prompt::SystemPromptConfig;
 
 // Re-export the runtime crate's public API so downstream crates (GPUI)
 // can use a single dependency.
-pub use threadlane_mcp::*;
+pub use mcp::*;
 pub use threadlane_runtime::*;
 pub use threadlane_skills::*;
 pub use threadlane_wasi::broker::*;

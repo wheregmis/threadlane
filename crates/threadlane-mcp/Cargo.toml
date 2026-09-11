@@ -6,11 +6,9 @@ description = "Model Context Protocol (MCP) client engine for threadlane agent"
 
 
 [dependencies]
-threadlane-runtime.workspace = true
 tokio = { workspace = true, features = ["full"] }
 serde.workspace = true
 serde_json.workspace = true
-async-trait.workspace = true
 futures.workspace = true
 
 [dev-dependencies]
