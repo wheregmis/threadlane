@@ -1270,12 +1270,10 @@ impl AppState {
                     || pr.state.eq_ignore_ascii_case("open")
                     || pr.state.eq_ignore_ascii_case("draft"))
         });
-        // Git status belongs to a checkout, not to a session. Only let it
-        // affect the selected session; otherwise every historical local
-        // session sharing the project checkout appears Ready.
-        let actionable_git_work = is_active
-            && git_status
-                .is_some_and(|status| status.has_changes || status.ahead > 0 || status.pr_ready);
+        // A checkout's git status is shared by local sessions, so expose
+        // actionable work to every session that points at that checkout.
+        let actionable_git_work = git_status
+            .is_some_and(|status| status.has_changes || status.ahead > 0 || status.pr_ready);
         let branch_is_actionable = session.git_branch.is_some()
             && (linked_pr_is_active || (linked_pr.is_none() && actionable_git_work));
         derive_session_attention(

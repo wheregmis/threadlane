@@ -590,7 +590,7 @@ fn completed_pr_and_missing_worktree_are_not_attention_without_other_work() {
 }
 
 #[test]
-fn project_git_status_only_marks_active_session_ready() {
+fn project_git_status_marks_sessions_in_the_checkout_ready() {
     let mut state = AppState::load_from_registry(Vec::new());
     let session_file = Path::new("/project/.threadlane/sessions/current.jsonl");
     let active = test_session("current", session_file);
@@ -610,7 +610,7 @@ fn project_git_status_only_marks_active_session_ready() {
     );
 
     assert_eq!(state.session_attention(&active), SessionAttention::Ready);
-    assert_eq!(state.session_attention(&historical), SessionAttention::Idle);
+    assert_eq!(state.session_attention(&historical), SessionAttention::Ready);
 }
 #[test]
 fn inactive_start_and_error_wake_attention_observers() {
