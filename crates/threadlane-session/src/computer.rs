@@ -629,6 +629,18 @@ mod mac {
 
     pub(crate) const SCREEN_RECORDING_HINT: &str = "Screen Recording permission is missing: grant it to this app in System Settings → Privacy & Security, then retry.";
 
+    /// Pixel density of a composite. The WindowServer round trip costs the
+    /// same either way (~22ms measured); everything downstream is 4× cheaper
+    /// at nominal, which is why the live mirror uses it while the model keeps
+    /// full resolution for legible text in small windows.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum CaptureResolution {
+        /// Display points, 1:1 — no scale bookkeeping, no Retina backing.
+        Nominal,
+        /// The display's best (Retina 2×) backing.
+        Best,
+    }
+
     /// Composite `target` through the WindowServer: every on-screen window
     /// except ours for the display, or one window cropped to its bounds so
     /// the model sees just what it drives and coordinates stay window-local.
