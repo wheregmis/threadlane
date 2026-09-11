@@ -1984,6 +1984,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn default_path_validator_allows_new_files_and_rejects_escape() {
+        let dir = std::env::temp_dir().join(format!(
+            "threadlane-acp-validator-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let root = dir.canonicalize().expect("canonical root");
+
+        // A not-yet-existing nested target resolves inside the root.
+        let resolved = default_path_validator("sub/new-file.txt", &root).expect("inside");
+        assert!(resolved.starts_with(&root));
+
+        // Absolute escape and `..` traversal are rejected.
+        assert!(default_path_validator("/etc/passwd", &root).is_err());
+        assert!(default_path_validator("../outside.txt", &root).is_err());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn model_labels_keep_explicit_names_and_resolve_generic_names_from_descriptions() {
         for (category, name, description, expected) in [
             (
