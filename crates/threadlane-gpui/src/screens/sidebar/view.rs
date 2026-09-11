@@ -1,8 +1,13 @@
+use std::cell::Cell;
+use std::path::PathBuf;
+use std::rc::Rc;
+
 use gpui::prelude::FluentBuilder;
 use gpui::InteractiveElement;
 use gpui::*;
 
 use gpui_component::button::{Button, ButtonVariant, ButtonVariants};
+use gpui_component::checkbox::Checkbox;
 use gpui_component::dialog::DialogButtonProps;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
@@ -13,6 +18,167 @@ use gpui_component::{Icon, IconName, Selectable, Sizable, WindowExt};
 
 use crate::app::{actions::AppAction, controller};
 use crate::state::{AppState, SessionAttention, SessionInfo, TrajectoryEntry};
+
+fn open_archive_session_dialog(
+    window: &mut Window,
+    cx: &mut App,
+    model: Entity<AppState>,
+    work_dir: PathBuf,
+    session_id: String,
+    is_worktree: bool,
+    git_branch: Option<String>,
+) {
+    let delete_worktree = Rc::new(Cell::new(true));
+    window.open_alert_dialog(cx, {
+        let model = model.clone();
+        let work_dir = work_dir.clone();
+        let session_id = session_id.clone();
+        let delete_worktree = delete_worktree.clone();
+        move |alert, _window, cx| {
+            let model = model.clone();
+            let work_dir = work_dir.clone();
+            let session_id = session_id.clone();
+            let delete_worktree = delete_worktree.clone();
+            let mut alert = alert
+                .title("Archive session?")
+                .description(format!(
+                    "This removes session {session_id} from the active list."
+                ))
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("Archive")
+                        .show_cancel(true),
+                );
+
+            if is_worktree {
+                let delete_worktree_click = delete_worktree.clone();
+                let model_click = model.clone();
+                let label = if let Some(branch) = &git_branch {
+                    format!("Delete associated worktree ({branch})")
+                } else {
+                    "Delete associated worktree".to_string()
+                };
+                alert = alert.child(
+                    div().pt_2().child(
+                        Checkbox::new(SharedString::from(format!(
+                            "archive-delete-worktree-{}",
+                            session_id
+                        )))
+                        .checked(delete_worktree.get())
+                        .label(label)
+                        .on_click(move |checked, _window, cx| {
+                            delete_worktree_click.set(*checked);
+                            model_click.update(cx, |_state, cx| {
+                                cx.notify();
+                            });
+                        }),
+                    ),
+                );
+            }
+
+            alert.on_ok(move |_event, _window, cx| {
+                let delete_worktree_val = if is_worktree {
+                    delete_worktree.get()
+                } else {
+                    false
+                };
+                model.update(cx, |state, cx| {
+                    controller::dispatch(
+                        state,
+                        AppAction::SettleSession {
+                            work_dir: work_dir.clone(),
+                            session_id: session_id.clone(),
+                            delete_worktree: delete_worktree_val,
+                        },
+                    );
+                    cx.notify();
+                });
+                true
+            })
+        }
+    });
+}
+
+fn open_remove_session_dialog(
+    window: &mut Window,
+    cx: &mut App,
+    model: Entity<AppState>,
+    work_dir: PathBuf,
+    session_id: String,
+    is_worktree: bool,
+    git_branch: Option<String>,
+) {
+    let delete_worktree = Rc::new(Cell::new(true));
+    window.open_alert_dialog(cx, {
+        let model = model.clone();
+        let work_dir = work_dir.clone();
+        let session_id = session_id.clone();
+        let delete_worktree = delete_worktree.clone();
+        move |alert, _window, cx| {
+            let model = model.clone();
+            let work_dir = work_dir.clone();
+            let session_id = session_id.clone();
+            let delete_worktree = delete_worktree.clone();
+            let mut alert = alert
+                .title("Remove session?")
+                .description(format!(
+                    "This permanently removes session {session_id}."
+                ))
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("Remove")
+                        .ok_variant(ButtonVariant::Danger)
+                        .show_cancel(true),
+                );
+
+            if is_worktree {
+                let delete_worktree_click = delete_worktree.clone();
+                let model_click = model.clone();
+                let label = if let Some(branch) = &git_branch {
+                    format!("Delete associated worktree ({branch})")
+                } else {
+                    "Delete associated worktree".to_string()
+                };
+                alert = alert.child(
+                    div().pt_2().child(
+                        Checkbox::new(SharedString::from(format!(
+                            "remove-delete-worktree-{}",
+                            session_id
+                        )))
+                        .checked(delete_worktree.get())
+                        .label(label)
+                        .on_click(move |checked, _window, cx| {
+                            delete_worktree_click.set(*checked);
+                            model_click.update(cx, |_state, cx| {
+                                cx.notify();
+                            });
+                        }),
+                    ),
+                );
+            }
+
+            alert.on_ok(move |_event, _window, cx| {
+                let delete_worktree_val = if is_worktree {
+                    delete_worktree.get()
+                } else {
+                    false
+                };
+                model.update(cx, |state, cx| {
+                    controller::dispatch(
+                        state,
+                        AppAction::RemoveSession {
+                            work_dir: work_dir.clone(),
+                            session_id: session_id.clone(),
+                            delete_worktree: delete_worktree_val,
+                        },
+                    );
+                    cx.notify();
+                });
+                true
+            })
+        }
+    });
+}
 
 fn safe_file_stem(title: &str) -> String {
     let stem = title
@@ -786,6 +952,8 @@ impl SidebarView {
         let quick_settle_model = self.model.clone();
         let quick_settle_work_dir = session.work_dir.clone();
         let quick_settle_session_id = session.id.clone();
+        let quick_settle_is_worktree = session.is_worktree;
+        let quick_settle_git_branch = session.git_branch.clone();
         let time_ago = format_time_ago(session.updated_at, now_unix_secs());
         let project = self
             .model
@@ -1147,18 +1315,31 @@ impl SidebarView {
                                             cx.stop_propagation();
                                         })
                                         .on_click(
-                                            move |_event, _window, cx| {
-                                                quick_settle_model.update(cx, |state, cx| {
-                                                    controller::dispatch(
-                                                        state,
-                                                        AppAction::SettleSession {
-                                                            work_dir: quick_settle_work_dir.clone(),
-                                                            session_id: quick_settle_session_id
-                                                                .clone(),
-                                                        },
+                                            move |_event, window, cx| {
+                                                if quick_settle_is_worktree {
+                                                    open_archive_session_dialog(
+                                                        window,
+                                                        cx,
+                                                        quick_settle_model.clone(),
+                                                        quick_settle_work_dir.clone(),
+                                                        quick_settle_session_id.clone(),
+                                                        true,
+                                                        quick_settle_git_branch.clone(),
                                                     );
-                                                    cx.notify();
-                                                });
+                                                } else {
+                                                    quick_settle_model.update(cx, |state, cx| {
+                                                        controller::dispatch(
+                                                            state,
+                                                            AppAction::SettleSession {
+                                                                work_dir: quick_settle_work_dir.clone(),
+                                                                session_id: quick_settle_session_id
+                                                                    .clone(),
+                                                                delete_worktree: false,
+                                                            },
+                                                        );
+                                                        cx.notify();
+                                                    });
+                                                }
                                             },
                                         ),
                                     ),
@@ -1195,9 +1376,13 @@ impl SidebarView {
                 let settle_model = context_model.clone();
                 let settle_work_dir = context_work_dir.clone();
                 let settle_session_id = context_session_id.clone();
+                let settle_is_worktree = session.is_worktree;
+                let settle_git_branch = session.git_branch.clone();
                 let remove_model = context_model.clone();
                 let remove_work_dir = context_work_dir.clone();
                 let remove_session_id = context_session_id.clone();
+                let remove_is_worktree = session.is_worktree;
+                let remove_git_branch = session.git_branch.clone();
 
                 menu.item(PopupMenuItem::new("Open Session").on_click(
                     move |_event, _window, cx| {
@@ -1338,80 +1523,29 @@ impl SidebarView {
                 .separator()
                 .item(
                     PopupMenuItem::new("Archive Session").on_click(move |_event, window, cx| {
-                        let model = settle_model.clone();
-                        let work_dir = settle_work_dir.clone();
-                        let session_id = settle_session_id.clone();
-                        window.open_alert_dialog(cx, {
-                            let model = model.clone();
-                            let work_dir = work_dir.clone();
-                            let session_id = session_id.clone();
-                            move |alert, _window, _cx| {
-                                let model = model.clone();
-                                let work_dir = work_dir.clone();
-                                let session_id = session_id.clone();
-                                alert
-                                    .title("Archive session?")
-                                    .description(format!(
-                                        "This removes session {session_id} from the active list."
-                                    ))
-                                    .show_cancel(true)
-                                    .on_ok(move |_event, _window, cx| {
-                                        model.update(cx, |state, cx| {
-                                            controller::dispatch(
-                                                state,
-                                                AppAction::SettleSession {
-                                                    work_dir: work_dir.clone(),
-                                                    session_id: session_id.clone(),
-                                                },
-                                            );
-                                            cx.notify();
-                                        });
-                                        true
-                                    })
-                            }
-                        });
+                        open_archive_session_dialog(
+                            window,
+                            cx,
+                            settle_model.clone(),
+                            settle_work_dir.clone(),
+                            settle_session_id.clone(),
+                            settle_is_worktree,
+                            settle_git_branch.clone(),
+                        );
                     }),
                 )
                 .separator()
                 .item(
                     PopupMenuItem::new("Remove Session").on_click(move |_event, window, cx| {
-                        let model = remove_model.clone();
-                        let work_dir = remove_work_dir.clone();
-                        let session_id = remove_session_id.clone();
-                        window.open_alert_dialog(cx, {
-                            let model = model.clone();
-                            let work_dir = work_dir.clone();
-                            let session_id = session_id.clone();
-                            move |alert, _window, _cx| {
-                                let model = model.clone();
-                                let work_dir = work_dir.clone();
-                                let session_id = session_id.clone();
-                                alert
-                                    .title("Remove session?")
-                                    .description(format!(
-                                        "This permanently removes session {session_id}."
-                                    ))
-                                    .button_props(
-                                        DialogButtonProps::default()
-                                            .ok_text("Remove")
-                                            .ok_variant(ButtonVariant::Danger)
-                                            .show_cancel(true),
-                                    )
-                                    .on_ok(move |_event, _window, cx| {
-                                        model.update(cx, |state, cx| {
-                                            controller::dispatch(
-                                                state,
-                                                AppAction::RemoveSession {
-                                                    work_dir: work_dir.clone(),
-                                                    session_id: session_id.clone(),
-                                                },
-                                            );
-                                            cx.notify();
-                                        });
-                                        true
-                                    })
-                            }
-                        });
+                        open_remove_session_dialog(
+                            window,
+                            cx,
+                            remove_model.clone(),
+                            remove_work_dir.clone(),
+                            remove_session_id.clone(),
+                            remove_is_worktree,
+                            remove_git_branch.clone(),
+                        );
                     }),
                 )
             })
