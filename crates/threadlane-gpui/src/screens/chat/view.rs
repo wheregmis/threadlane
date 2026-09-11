@@ -7,7 +7,6 @@ use std::time::Duration;
 use base64::Engine as _;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::Root;
 use gpui_component::button::{Button, ButtonVariants, Toggle, ToggleVariants};
 use gpui_component::hover_card::HoverCard;
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
@@ -87,68 +86,6 @@ fn visible_session_status<'a>(
     })
 }
 
-/// Open the computer-use mirror popup: a small non-activating window in the
-/// bottom-right corner showing the target as live video plus the current
-/// action. Guarded by `AppState::mirror_open` so repeated triggers reuse the
-/// window. (gpui only honours `is_resizable` on titled windows, so this
-/// title-less popup stays fixed-size.)
-fn open_computer_mirror(model: &Entity<AppState>, cx: &mut AsyncApp) {
-    let previews_dir = model.update(cx, |state, _cx| {
-        if state.mirror_open {
-            return None;
-        }
-        // The live mirror is global (one popup, many project sessions); the
-        // session tools write latest.json here and frames arrive in-process.
-        threadlane_session::computer::global_previews_dir().or_else(|| {
-            state
-                .active_work_dir
-                .clone()
-                .map(|work_dir| work_dir.join(".threadlane").join("previews"))
-        })
-    });
-    let Some(previews_dir) = previews_dir else {
-        return;
-    };
-    let bounds = cx.update(|cx| {
-        cx.primary_display().map(|display| {
-            let area = display.visible_bounds();
-            Bounds {
-                origin: point(
-                    area.origin.x + area.size.width - px(496.0),
-                    area.origin.y + area.size.height - px(376.0),
-                ),
-                size: size(px(480.0), px(360.0)),
-            }
-        })
-    });
-    let Some(bounds) = bounds else {
-        return;
-    };
-    let opened = cx.open_window(
-        WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: None,
-            focus: false,
-            show: true,
-            kind: WindowKind::PopUp,
-            is_movable: true,
-            is_resizable: false,
-            is_minimizable: false,
-            ..Default::default()
-        },
-        {
-            let model = model.clone();
-            move |window, cx| {
-                let view = MirrorView::build(model.clone(), previews_dir.clone(), window, cx);
-                cx.new(|cx| Root::new(view, window, cx))
-            }
-        },
-    );
-    if opened.is_ok() {
-        let _ = model.update(cx, |state, _cx| state.mirror_open = true);
-    }
-}
-
 fn render_chat_error(id: &str, error: &str, model: &Entity<AppState>, cx: &App) -> Div {
     let theme = cx.theme().colors;
     let (summary, needs_provider_settings) = chat_error_summary(error);
@@ -213,7 +150,7 @@ fn render_chat_error(id: &str, error: &str, model: &Entity<AppState>, cx: &App) 
             ),
     )
 }
-use threadlane_session::commands::{SlashCommandInfo, available_slash_commands};
+use threadlane_session::commands::{available_slash_commands, SlashCommandInfo};
 use threadlane_session::{ImageAttachment, PlanItemStatus, SessionPlan};
 
 actions!(
@@ -294,6 +231,10 @@ pub struct ChatListView {
     trajectory_inspector_tab: TrajectoryInspectorTab,
     trajectory_cache: Option<TrajectoryRenderCache>,
     trajectory_raw_json: Option<(u64, usize, String)>,
+    /// The computer-use mirror floating over the chat while
+    /// `AppState::mirror_open`, plus the observation that redraws this view
+    /// when the mirror closes itself.
+    mirror: Option<(Entity<MirrorView>, Subscription)>,
     slash_command_cache: Option<(
         Option<std::path::PathBuf>,
         std::time::Instant,
@@ -497,7 +438,7 @@ impl ChatListView {
             // reaches a model through this path.
             if std::env::var_os("THREADLANE_MIRROR_DEBUG").is_some() {
                 threadlane_session::computer::watch_display_for_debug();
-                open_computer_mirror(&stream_model, cx);
+                let _ = this.update(cx, |view, cx| view.open_mirror(cx));
             }
             while let Some(events) = next_chat_stream_batch(&mut stream_rx).await {
                 let changed = stream_model.update(cx, |state, cx| {
@@ -510,7 +451,7 @@ impl ChatListView {
                 let mirror_trigger =
                     stream_model.update(cx, |state, _cx| state.take_computer_mirror_trigger());
                 if mirror_trigger {
-                    open_computer_mirror(&stream_model, cx);
+                    let _ = this.update(cx, |view, cx| view.open_mirror(cx));
                 }
                 cx.background_executor()
                     .timer(Duration::from_millis(30))
@@ -563,6 +504,7 @@ impl ChatListView {
             trajectory_inspector_tab: TrajectoryInspectorTab::Overview,
             trajectory_cache: None,
             trajectory_raw_json: None,
+            mirror: None,
             slash_command_cache: None,
             slash_scroll_handle: ScrollHandle::new(),
             selected_slash_index: 0,
@@ -798,7 +740,10 @@ impl ChatListView {
                         Button::new("chat-open-task-context")
                             .label(format!("#{}", issue.number))
                             .icon(IconName::Github)
-                            .tooltip(format!("{} / {} · Open task context", issue.owner, issue.repo))
+                            .tooltip(format!(
+                                "{} / {} · Open task context",
+                                issue.owner, issue.repo
+                            ))
                             .ghost()
                             .xsmall()
                             .on_click(move |_, _, cx| {
@@ -815,7 +760,7 @@ impl ChatListView {
                                     });
                                 }
                             })
-                    }))
+                    })),
             )
             .child(
                 div()
@@ -5247,10 +5192,8 @@ impl ChatListView {
             crate::model_catalog::efforts_for_model(&selected_model, project_root.as_deref());
         // Models without thinking (ACP agents, off-only registry entries)
         // offer no effort control instead of dead options.
-        let show_effort_picker = crate::model_catalog::supports_reasoning(
-            &selected_model,
-            project_root.as_deref(),
-        );
+        let show_effort_picker =
+            crate::model_catalog::supports_reasoning(&selected_model, project_root.as_deref());
         let effort_picker = Button::new("composer-reasoning-effort-picker")
             .icon(Icon::default().path("icons/effort.svg"))
             .label(reasoning_effort.label())
@@ -6057,17 +6000,14 @@ impl ChatListView {
                     .child(subagent_label.unwrap_or(category)),
             )
             .child(
-                div()
-                    .flex_none()
-                    .text_color(theme.muted_foreground)
-                    .child(
-                        Icon::new(if self.progress_summary_expanded {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        })
-                        .xsmall(),
-                    ),
+                div().flex_none().text_color(theme.muted_foreground).child(
+                    Icon::new(if self.progress_summary_expanded {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    })
+                    .xsmall(),
+                ),
             );
 
         container = container.child(header_row);
@@ -6165,8 +6105,38 @@ impl ChatListView {
     }
 }
 
-impl Render for ChatListView {
+impl ChatListView {
+    /// Show the computer-use mirror as a floating panel over the chat. The
+    /// entity is created on first open; repeated triggers only raise the
+    /// flag. The mirror is global (one panel, many project sessions) and the
+    /// session tools write `latest.json` into the global previews dir.
+    pub(crate) fn open_mirror(&mut self, cx: &mut Context<Self>) {
+        let previews_dir = self.model.update(cx, |state, cx| {
+            if !state.mirror_open {
+                state.mirror_open = true;
+                cx.notify();
+            }
+            threadlane_session::computer::global_previews_dir().or_else(|| {
+                state
+                    .active_work_dir
+                    .clone()
+                    .map(|work_dir| work_dir.join(".threadlane").join("previews"))
+            })
+        });
+        if self.mirror.is_none() {
+            let Some(previews_dir) = previews_dir else {
+                return;
+            };
+            let model = self.model.clone();
+            let mirror = cx.new(|cx| MirrorView::new(model, previews_dir, cx));
+            let subscription = cx.observe(&mirror, |_this, _mirror, cx| cx.notify());
+            self.mirror = Some((mirror, subscription));
+        }
+        cx.notify();
+    }
+}
 
+impl Render for ChatListView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (messages, is_new_task, active_plan, session_key, is_generating, has_active_permission) = {
             let state = self.model.read(cx);
@@ -6174,6 +6144,11 @@ impl Render for ChatListView {
                 .active_session_id
                 .as_ref()
                 .is_some_and(|session_id| state.pending_permissions.contains_key(session_id));
+            if !state.mirror_open {
+                // Dropping the entity ends its frame subscription, which is
+                // what lets the poller leave its video tier.
+                self.mirror = None;
+            }
             (
                 state.messages.clone(),
                 state.is_new_task,
@@ -6237,6 +6212,7 @@ impl Render for ChatListView {
         let theme = cx.theme().colors;
 
         div()
+            .relative()
             .flex()
             .flex_col()
             .flex_1()
@@ -6365,6 +6341,8 @@ impl Render for ChatListView {
                     .then(|| self.render_permission_details_dialog(cx))
                     .flatten(),
             )
+            // The computer-use mirror floats over everything above.
+            .children(self.mirror.as_ref().map(|(mirror, _)| mirror.clone()))
     }
 }
 
