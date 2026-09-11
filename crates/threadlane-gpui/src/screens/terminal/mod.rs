@@ -442,7 +442,7 @@ impl TerminalView {
 
     fn start(&mut self) {
         let result = start_parser_worker(self.rows, self.cols, self.event_tx.clone())
-            .map_err(anyhow::Error::from)
+            .map_err(|e| e.to_string())
             .and_then(|(output_tx, command_tx)| {
                 spawn_shell(
                     &self.project,
@@ -451,6 +451,7 @@ impl TerminalView {
                     output_tx,
                     self.event_tx.clone(),
                 )
+                .map_err(|e| e.to_string())
                 .map(|session| (session, command_tx))
             });
         match result {
@@ -1143,7 +1144,7 @@ fn spawn_shell(
     cols: u16,
     output_tx: mpsc::SyncSender<Vec<u8>>,
     event_tx: tokio::sync::mpsc::UnboundedSender<PtyEvent>,
-) -> anyhow::Result<PtySession> {
+) -> Result<PtySession, Box<dyn std::error::Error + Send + Sync>> {
     let pair = native_pty_system().openpty(PtySize {
         rows,
         cols,

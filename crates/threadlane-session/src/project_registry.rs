@@ -210,7 +210,9 @@ fn default_global_dir() -> PathBuf {
 }
 
 fn project_id(path: &Path) -> String {
-    format!("{:x}", md5::compute(path.to_string_lossy().as_bytes()))
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(path.to_string_lossy().as_bytes());
+    format!("{:x}", digest)[..32].to_string()
 }
 
 fn now_millis() -> u64 {

@@ -5,11 +5,11 @@ edition = "2021"
 description = "Skill directory scanning, YAML frontmatter parsing, and load_skill tool for threadlane agent"
 
 [dependencies]
-threadlane-runtime = { version = "0.1.0", path = "../threadlane-runtime" }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-serde_yaml = "0.9"
-async-trait = "0.1"
+threadlane-runtime.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+async-trait.workspace = true
 
 [dev-dependencies]
-tempfile = "3.10"
+tempfile.workspace = true

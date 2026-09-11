@@ -28,17 +28,17 @@ Do not edit generated content under `target/` or deployed runtime content under 
 
 ## Common Commands
 
-Run commands from the repository root.
+Run commands from the repository root. Use Cargo Nextest instead of `cargo test` for unit and integration tests; install it once with `cargo install cargo-nextest`. Nextest does not run doctests, so use `cargo test --workspace --doc` separately when doctest coverage is needed.
 
 ```bash
 # Fast validation for desktop-app changes
 cargo check -p threadlane-gpui
 
 # Focused updater tests
-cargo test -p threadlane-updater
+cargo nextest run -p threadlane-updater
 
-# Full workspace tests
-cargo test --workspace
+# Workspace unit and integration tests
+cargo nextest run --workspace
 
 # Build and deploy WASI extensions
 ./scripts/build_extensions.sh
@@ -65,7 +65,7 @@ A normal `cargo run` may be unsuitable for testing installation: update installa
 2. For Rust or GPUI edits, run at least:
    - `cargo check -p threadlane-gpui`
    - `git diff --check`
-3. Run focused tests for touched logic, then broader workspace tests when warranted.
+3. Run focused tests for touched logic with `cargo nextest run -p <package> <test-name-filter>`, then `cargo nextest run --workspace` when broader coverage is warranted.
 4. Do not claim a UI behavior was visually verified unless the application was actually run and observed.
 5. Existing unused-code warnings are not part of unrelated tasks; do not remove meaningful code merely to silence them.
 6. The locked GPUI/Zed revision uses `std::hint::cold_path`, which requires Rust 1.95 or newer. Keep the root `rust-toolchain.toml` and release workflow aligned with that minimum.
@@ -138,7 +138,7 @@ A normal `cargo run` may be unsuitable for testing installation: update installa
 - For remaining `ScrollHandle` views, `offset().y` becomes negative as content scrolls down while `max_offset().y` is positive. Compute distance from the bottom as `abs(offset.y + max_offset.y)`, and notify the owning view after setting a deferred scroll target so prepaint applies it against the latest layout.
 - In the GPUI chat path, `CodingAgent` is the sole owner of durable prompt persistence. Show an accepted prompt optimistically in `AppState.messages`, but do not also append it directly to `SessionTree` before `handle_input_with_images`, which would persist the same user message twice. Forward `AgentEvent`s to the GPUI thread and reconcile from the session file only when the run finishes.
 - GPUI `Task` is `#[must_use]` and **dropping it cancels the future immediately**. `let _ = cx.spawn(...)` therefore never runs. Either `.detach()` the task or hold/`await` it; the async spawn runs the work to completion on the background executor.
-- GPUI sessions reuse one `SessionRuntime`/`CodingAgent` per durable session on a shared Tokio executor. Register each spawned turn with `CodingAgentCancellation::track_active_run` before exposing cancellation, and call `finish_active_run` after normal completion; `cancel()` records durable abort intent before aborting the registered task.
+- GPUI sessions reuse one `SessionRuntime`/`CodingAgent` per durable session on a shared Tokio executor. Register each spawned turn with `CodingAgentCancellation::track_active_run` before exposing cancellation, and call `finish_active_run` after normal completion; `cancel()` attempts durable abort intent before aborting the registered task, but must still abort and clear the active run if persistence fails, then return the persistence error. Cancellation regression tests must bound pending-task waits so failures cannot hang the suite.
 - GPUI message queue and steer actions must use the active runtime's `CodingAgentWorkHandle` (`try_queue_follow_up_with_images` and `queue_steer_with_images`). Stage composer text per session, persist queue intent before optimistic presentation, and let `CodingAgent::run_scheduled_agent_work` consume it rather than creating a GUI-only queue.
 - Scheduled inputs consume only their exact durable queue entry and execute through `run_consumed_queue_message` without enqueueing a second copy. Never consume the next entry after a batch: a steer or follow-up may have arrived during provider execution and must retain its own scheduler wake.
 - `CodingAgent::new` opens `CodingSessionHarness` against the supplied session JSONL itself. Harness V2 records and legacy session records intentionally coexist in that canonical file; do not invent a GPUI-only `.harness.jsonl` sidecar. Existing `.harness.jsonl` filtering remains for legacy sidecars.
@@ -197,13 +197,13 @@ A normal `cargo run` may be unsuitable for testing installation: update installa
 - A settings change is applied against the agent and the *agent's* reply is stored, never an optimistic local value: changing one option can change another (picking a model changes which effort levels exist), and a value the agent does not offer is refused before it is sent.
 - The reasoning picker sets `AgentRuntime` config, which the ACP path never reads; anything that must reach an external agent has to go through `set_config_option`. The same trap applies to any future setting that looks provider-shaped.
 - ACP model labels preserve an explicit advertised name such as "GPT-6-Astra". Generic names such as "Default (recommended)" use the leading option-description segment, where agents may identify "Opus 4.8 with 1M context"; a capability description must not replace an explicit model name. The composer and status bar share `AcpConfigOption::current_detail_label` through `AppState::active_acp_model_label`.
-- `tests/acp_engine_tests.rs` drives the real spawn path against `src/bin/acp_stub_agent.rs`, behind the `test-support` feature: `cargo test -p threadlane-session --features test-support`. Cover new turn behaviour there rather than only in unit tests — the handshake, ordering, permission, and cancel paths only exist once a process is on the other end. Keep the engine alive outside a task the test aborts, mirroring the app: the connection is `kill_on_drop`, so dropping it with the turn kills the agent before it can act on the cancel.
+- `tests/acp_engine_tests.rs` drives the real spawn path against `src/bin/acp_stub_agent.rs`, behind the `test-support` feature: `cargo nextest run -p threadlane-session --features test-support`. Cover new turn behaviour there rather than only in unit tests — the handshake, ordering, permission, and cancel paths only exist once a process is on the other end. Keep the engine alive outside a task the test aborts, mirroring the app: the connection is `kill_on_drop`, so dropping it with the turn kills the agent before it can act on the cancel.
 - An ACP agent's interactive `question` prompt may have no client binding: opencode under ACP never emits `session/request_permission` for it, so nothing is shown and the tool fails unseen with "dismissed". Threadlane rewrites that failure in `acp_bridge` (surfacing the unasked questions from `rawInput` and steering the model to plain text) and `AcpEngine` reminds the model on every later turn of the conversation once seen. Never treat the dismissed text as a real user decision.
 
 ## Performance
 
 - PR Hotpath harnesses live in the non-published `crates/threadlane-benchmarks` crate, with one binary per independently reported suite. Keep measurement executables and their shared fixtures there rather than adding benchmark examples to production crates; production entry points should expose only the narrow APIs needed by real callers and benchmarks.
-- Measure before changing. `crates/threadlane-mcp/tests/perf_baseline.rs` is an `#[ignore]`d measurement harness, not an assertion; run it with `-- --ignored --nocapture` to get a baseline and again to prove a change helped. Do not optimize a path whose cost has not been measured.
+- Measure before changing. `crates/threadlane-mcp/tests/perf_baseline.rs` is an `#[ignore]`d measurement harness, not an assertion; run it with `cargo nextest run -p threadlane-mcp --test perf_baseline --run-ignored only --no-capture` to get a baseline and again to prove a change helped. Do not optimize a path whose cost has not been measured.
 - For UI debugging and profiling, build `target/debug/threadlane-gpui` and drive that exact binary with Computer Use; never assume `/Applications/Threadlane.app` contains the current changes. When Computer Use needs an app identity, copy the binary into a temporary `.app` with a distinct bundle ID such as `dev.threadlane.sourceprofile`, ad-hoc re-sign it after every binary replacement, verify the source and bundled binary hashes match, and run `codesign --verify --deep --strict` before launch.
 - `THREADLANE_MIRROR_DEBUG=1 cargo run -p threadlane-gpui` opens the computer-use mirror on the main display at launch with no model turn or approval prompt (frames stay in-process), which is how to observe or profile the live video path; like any watched stream it idles out after ten minutes without computer calls, so relaunch to resume.
 - Target the temporary bundle ID in Computer Use, confirm the installed `dev.threadlane.app` is not running, and resolve the exact-source PID before attaching Instruments. Prefer accessibility elements; when GPUI controls lack labels, inspect a fresh screenshot and use top-level `x`/`y` coordinates. Use `THREADLANE_GPUI_PROFILE=1` for the frame overlay and Time Profiler for stack attribution, and do not claim visual verification until the exact-source window was observed.

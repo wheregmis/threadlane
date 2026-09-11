@@ -5,17 +5,17 @@ edition = "2021"
 description = "OpenAI REST & Codex backend streaming client and device auth for threadlane agent"
 
 [dependencies]
-threadlane-protocol = { version = "0.1.0", path = "../threadlane-protocol" }
-threadlane-runtime = { version = "0.1.0", path = "../threadlane-runtime" }
-threadlane-auth = { version = "0.1.0", path = "../threadlane-auth" }
-async-trait = "0.1"
-tokio = { version = "1.38", features = ["full"] }
-reqwest = { version = "0.12", features = ["json", "stream"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+threadlane-protocol.workspace = true
+threadlane-runtime.workspace = true
+threadlane-auth.workspace = true
+async-trait.workspace = true
+tokio = { workspace = true, features = ["full"] }
+reqwest = { workspace = true, features = ["default-tls", "json", "stream"] }
+serde.workspace = true
+serde_json.workspace = true
 futures-util = "0.3"
 bytes = "1.6"
-tokio-tungstenite = { version = "0.30", features = ["native-tls"] }
-sha2 = "0.10"
-url = "2.5"
-tracing = "0.1"
+tokio-tungstenite.workspace = true
+sha2.workspace = true
+url.workspace = true
+tracing.workspace = true

@@ -18,32 +18,31 @@ required-features = ["test-support"]
 test-support = []
 
 [dependencies]
-threadlane-runtime = { version = "0.1.0", path = "../threadlane-runtime" }
-threadlane-protocol = { version = "0.1.0", path = "../threadlane-protocol" }
-threadlane-auth = { version = "0.1.0", path = "../threadlane-auth" }
-threadlane-tools = { version = "0.1.0", path = "../threadlane-tools" }
-threadlane-provider = { version = "0.1.0", path = "../threadlane-provider" }
-threadlane-mcp = { version = "0.1.0", path = "../threadlane-mcp" }
-threadlane-skills = { version = "0.1.0", path = "../threadlane-skills" }
-threadlane-wasi = { version = "0.1.0", path = "../threadlane-wasi" }
-threadlane-git = { version = "0.1.0", path = "../threadlane-git" }
-tokio = { version = "1.38", features = ["full"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-base64 = "0.22"
-async-trait = "0.1"
-futures = "0.3"
-md5 = "0.8"
-sha2 = "0.10"
-thiserror = "2.0"
-directories = "6.0"
+threadlane-runtime.workspace = true
+threadlane-protocol.workspace = true
+threadlane-auth.workspace = true
+threadlane-tools.workspace = true
+threadlane-provider.workspace = true
+threadlane-mcp.workspace = true
+threadlane-skills.workspace = true
+threadlane-wasi.workspace = true
+threadlane-git.workspace = true
+tokio = { workspace = true, features = ["full"] }
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+directories.workspace = true
 log = "0.4"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+reqwest = { workspace = true, features = ["rustls-tls", "stream"] }
 
 [dev-dependencies]
-tempfile = "3.10"
+tempfile.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = { version = "0.25", features = ["elcapitan", "highsierra"] }
 core-foundation = "0.10"
-image = "0.25"
+image.workspace = true

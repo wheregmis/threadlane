@@ -171,10 +171,9 @@ impl CodingAgentCancellation {
 
     pub(crate) fn cancel(&self) -> Result<(), String> {
         let durable_run_id = if let Some(path) = self.harness_session_file.as_deref() {
-            let mut journal = CodingSessionHarness::open(path)?;
-            journal.request_abort()?
+            CodingSessionHarness::open(path).and_then(|mut journal| journal.request_abort())
         } else {
-            None
+            Ok(None)
         };
         let handle = {
             let mut state = self.state.lock().map_err(|error| error.to_string())?;
@@ -184,6 +183,8 @@ impl CodingAgentCancellation {
         if let Some(handle) = handle {
             handle.abort();
         }
+        // Attempt durable intent first, but persistence failure must not leave generation running.
+        let durable_run_id = durable_run_id?;
         if let (Some(path), Some(run_id)) = (
             self.harness_session_file.as_deref(),
             durable_run_id.as_deref(),
@@ -241,7 +242,10 @@ mod tests {
         cancellation.track_active_run(task.abort_handle()).unwrap();
 
         assert!(cancellation.cancel().is_err());
-        assert!(task.await.unwrap_err().is_cancelled());
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("cancellation must abort the task even when persistence fails");
+        assert!(outcome.unwrap_err().is_cancelled());
 
         let replacement = tokio::spawn(std::future::pending::<()>());
         assert!(cancellation

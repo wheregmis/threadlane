@@ -5,11 +5,11 @@ edition = "2021"
 description = "WASI WebAssembly extension sandbox host and capability broker for threadlane agent"
 
 [dependencies]
-threadlane-runtime = { version = "0.1.0", path = "../threadlane-runtime" }
-wasmi = "2.0"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-async-trait = "0.1"
+threadlane-runtime.workspace = true
+wasmi.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
 
 [dev-dependencies]
-tempfile = "3.10"
+tempfile.workspace = true

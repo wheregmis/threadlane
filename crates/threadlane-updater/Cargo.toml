@@ -5,4 +5,4 @@ edition.workspace = true
 description = "Signed application update checks and background downloads for threadlane agent"
 
 [dependencies]
-cargo-packager-updater = "=0.2.3"
+cargo-packager-updater.workspace = true

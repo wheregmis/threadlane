@@ -8,5 +8,5 @@ description = "Permission-gated web fetch and search tools for Threadlane"
 crate-type = ["cdylib"]
 
 [dependencies]
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde.workspace = true
+serde_json.workspace = true

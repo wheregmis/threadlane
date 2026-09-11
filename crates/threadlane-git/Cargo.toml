@@ -5,9 +5,9 @@ edition = "2021"
 description = "Project-local Git operations and status parsing for threadlane agent"
 
 [dependencies]
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-threadlane-auth = { path = "../threadlane-auth" }
+serde.workspace = true
+serde_json.workspace = true
+threadlane-auth.workspace = true
 
 [dev-dependencies]
-tempfile = "3.8"
+tempfile.workspace = true

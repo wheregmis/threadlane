@@ -6,10 +6,10 @@ description = "Built-in coding tools and execution primitives for threadlane age
 
 
 [dependencies]
-threadlane-hashline = { version = "0.1.0", path = "../threadlane-hashline" }
-threadlane-auth = { version = "0.1.0", path = "../threadlane-auth" }
-serde_json = "1.0"
-sha2 = "0.10"
+threadlane-hashline.workspace = true
+threadlane-auth.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
-tempfile = "3.8"
+tempfile.workspace = true
