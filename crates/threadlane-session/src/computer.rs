@@ -629,6 +629,13 @@ mod mac {
 
     pub(crate) const SCREEN_RECORDING_HINT: &str = "Screen Recording permission is missing: grant it to this app in System Settings → Privacy & Security, then retry.";
 
+    pub(crate) enum CaptureResolution {
+        /// Display-point resolution for the live mirror.
+        Nominal,
+        /// Full-resolution capture for model screenshots.
+        Best,
+    }
+
     /// Composite `target` through the WindowServer: every on-screen window
     /// except ours for the display, or one window cropped to its bounds so
     /// the model sees just what it drives and coordinates stay window-local.
