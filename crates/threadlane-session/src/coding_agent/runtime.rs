@@ -757,6 +757,8 @@ impl CodingAgent {
             manager_clone.discover_and_connect().await;
         });
         agent.work_dir = Some(options.work_dir.clone());
+        agent.turn.try_lock().expect("new runtime turn is unlocked").project_root =
+            Some(options.work_dir.clone());
 
         let mut system_prompt_config = options.system_prompt.clone();
         if initial_tool_policy == ToolPolicy::ReadOnly {

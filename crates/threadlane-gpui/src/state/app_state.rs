@@ -344,6 +344,13 @@ impl AppState {
     pub(crate) fn refresh_available_models(&mut self) {
         self.available_models =
             crate::model_catalog::available_models_for_project(self.active_work_dir.as_deref());
+        if self.selected_model.is_empty() {
+            self.selected_model = self
+                .available_models
+                .first()
+                .map(|model| model.id.clone())
+                .unwrap_or_default();
+        }
         self.set_reasoning_effort(self.reasoning_effort);
     }
 

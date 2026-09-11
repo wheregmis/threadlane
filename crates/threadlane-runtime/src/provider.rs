@@ -97,7 +97,11 @@ impl ProviderAdapter for ChatCompletionsAdapter {
             chat_payload["prompt_cache_key"] = key.into();
         }
         if let Some(effort) =
-            crate::model_registry::effective_api_effort(&state.model, state.reasoning_effort)
+            crate::model_registry::effective_api_effort(
+                &state.model,
+                state.reasoning_effort,
+                state.project_root.as_deref(),
+            )
         {
             chat_payload["reasoning_effort"] = effort.into();
         }
@@ -149,7 +153,11 @@ impl ProviderAdapter for CodexResponsesAdapter {
             codex_payload["prompt_cache_key"] = key.into();
         }
         if let Some(effort) =
-            crate::model_registry::effective_api_effort(&state.model, state.reasoning_effort)
+            crate::model_registry::effective_api_effort(
+                &state.model,
+                state.reasoning_effort,
+                state.project_root.as_deref(),
+            )
         {
             codex_payload["reasoning"] = serde_json::json!({
                 "effort": effort,
@@ -705,6 +713,7 @@ mod tests {
             messages: Vec::new(),
             model: "test-reasoning-model".into(),
             reasoning_effort: ReasoningEffort::High,
+            project_root: None,
         };
         let payload = adapter.build_payload(&state, &[], None);
         assert_eq!(payload["model"], "test-reasoning-model");
@@ -720,6 +729,7 @@ mod tests {
             messages: Vec::new(),
             model: "gpt-5.6-luna".into(),
             reasoning_effort: ReasoningEffort::Low,
+            project_root: None,
         };
         let payload = adapter.build_payload(&state, &[], None);
         assert_eq!(payload["model"], "gpt-5.6-luna");
@@ -744,14 +754,15 @@ mod tests {
             messages: vec![],
             model: id.into(),
             reasoning_effort: ReasoningEffort::High,
+            project_root: None,
         };
-        update_discovered_models(vec![info.clone()]);
+        update_discovered_models("test", vec![info.clone()]);
         assert_eq!(
             ChatCompletionsAdapter.build_payload(&state, &[], None)["reasoning_effort"],
             "low"
         );
         info.supported_efforts = vec!["off".into()];
-        update_discovered_models(vec![info.clone()]);
+        update_discovered_models("test", vec![info.clone()]);
         assert!(
             ChatCompletionsAdapter
                 .build_payload(&state, &[], None)
@@ -765,10 +776,35 @@ mod tests {
                 .is_none()
         );
         info.supported_efforts = vec!["none".into()];
-        update_discovered_models(vec![info]);
+        update_discovered_models("test", vec![info]);
         assert_eq!(
             CodexResponsesAdapter.build_payload(&state, &[], None)["reasoning"]["effort"],
             "none"
+        );
+    }
+
+    #[test]
+    fn adapter_uses_project_reasoning_capabilities() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".threadlane")).unwrap();
+        std::fs::write(
+            dir.path().join(".threadlane/models.json"),
+            r#"[{"id":"project-model","label":"Project","supported_efforts":["off"]}]"#,
+        )
+        .unwrap();
+        let state = TurnState {
+            system_prompt: String::new(),
+            messages: vec![],
+            model: "project-model".into(),
+            reasoning_effort: ReasoningEffort::High,
+            project_root: Some(dir.path().into()),
+        };
+
+        assert!(
+            ChatCompletionsAdapter
+                .build_payload(&state, &[], None)
+                .get("reasoning_effort")
+                .is_none()
         );
     }
 
@@ -780,6 +816,7 @@ mod tests {
             messages: Vec::new(),
             model: "test-model".into(),
             reasoning_effort: ReasoningEffort::default(),
+            project_root: None,
         };
 
         let chat = router.build_payload(PayloadFormat::ChatCompletions, &state, &[], None);
@@ -813,6 +850,7 @@ mod tests {
             ],
             model: "test-model".into(),
             reasoning_effort: ReasoningEffort::default(),
+            project_root: None,
         };
 
         let codex = router.build_payload(PayloadFormat::Codex, &state, &[], None);
@@ -834,6 +872,7 @@ mod tests {
             }],
             model: "test-model".into(),
             reasoning_effort: ReasoningEffort::default(),
+            project_root: None,
         };
 
         let codex = router.build_payload(PayloadFormat::Codex, &state, &[], None);

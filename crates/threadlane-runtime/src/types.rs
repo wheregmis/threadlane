@@ -536,6 +536,7 @@ pub struct TurnState {
     pub messages: Vec<AgentMessage>,
     pub model: String,
     pub reasoning_effort: ReasoningEffort,
+    pub project_root: Option<std::path::PathBuf>,
 }
 
 impl TurnState {

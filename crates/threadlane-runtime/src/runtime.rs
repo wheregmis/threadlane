@@ -121,6 +121,7 @@ impl AgentRuntime {
             messages: Vec::new(),
             model,
             reasoning_effort: Default::default(),
+            project_root: None,
         }));
 
         Self {
