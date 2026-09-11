@@ -539,13 +539,28 @@ impl ProviderClient {
         let model = model.to_owned();
         let instructions = concat!(
             "You are an expert software engineer generating a Git commit message.\n",
-            "Follow Conventional Commits format (`<type>: <description>` or `<type>(<scope>): <description>`).\n",
+            "You MUST strictly follow the Conventional Commits specification.\n\n",
+            "Format:\n",
+            "<type>: <description> OR <type>(<scope>): <description>\n\n",
+            "Allowed types (MUST be lowercase):\n",
+            "- feat: A new feature or capability\n",
+            "- fix: A bug fix or defect resolution\n",
+            "- chore: Maintenance, dependency updates, tooling, or minor chores\n",
+            "- refactor: Code restructuring without changing behavior or fixing bugs\n",
+            "- docs: Documentation changes only\n",
+            "- style: Code formatting or styling with no logic change\n",
+            "- perf: Performance improvements\n",
+            "- test: Adding or updating tests\n",
+            "- build: Build system or packaging changes\n",
+            "- ci: CI/CD configuration and automation scripts\n",
+            "- revert: Reverting a previous commit\n\n",
             "Rules:\n",
-            "1. Use imperative, present tense: 'add', 'fix', 'refactor', 'update', 'remove' (not 'added', 'fixed').\n",
-            "2. Common types: feat, fix, refactor, style, perf, docs, test, chore.\n",
-            "3. Keep the entire commit subject under 72 characters.\n",
-            "4. Do not end the subject line with a period.\n",
-            "5. Output ONLY the raw commit subject line. Do NOT include quotes, backticks, bullet points, or markdown formatting."
+            "1. The commit message MUST start with one of the allowed types (e.g. 'feat:', 'fix:', 'chore:'). Never omit the type prefix.\n",
+            "2. An optional scope may describe the affected component: e.g. 'feat(auth):', 'fix(git):'.\n",
+            "3. Use imperative, present tense for the description: 'add' (not 'added'), 'fix' (not 'fixed'), 'update' (not 'updated').\n",
+            "4. Keep the entire commit subject under 72 characters.\n",
+            "5. Do not end the subject line with a period.\n",
+            "6. Output ONLY the raw commit subject line. Do NOT include quotes, backticks, bullet points, preamble, or markdown formatting."
         );
         let prompt = Arc::new(format!(
             "{instructions}\n\nHere is the diff of the changes:\n\n{diff}"
@@ -575,7 +590,7 @@ impl ProviderClient {
                             {"role": "system", "content": instructions_str},
                             {"role": "user", "content": prompt.as_str()}
                         ],
-                        "max_tokens": 96,
+                        "max_tokens": 256,
                         "stream": true
                     }),
                 }
@@ -605,19 +620,448 @@ impl ProviderClient {
         if let Some(error) = error {
             return Err(error);
         }
-        let text = text
-            .trim()
-            .trim_matches('`')
-            .trim_matches('"')
-            .trim_matches('\'')
-            .trim()
-            .to_owned();
-        if text.is_empty() {
+        let message = normalize_commit_message(&text);
+        if message.is_empty() {
             Err("The model returned an empty commit message".to_owned())
         } else {
-            Ok(text)
+            Ok(message)
         }
     }
+}
+
+/// Truncates a string to at most `max_chars` Unicode characters,
+/// attempting to break cleanly at a word boundary when possible.
+fn truncate_to_word_boundary(text: &str, max_chars: usize) -> String {
+    let char_count = text.chars().count();
+    if char_count <= max_chars {
+        return text.to_string();
+    }
+    let truncated: String = text.chars().take(max_chars).collect();
+    if let Some(last_space) = truncated.rfind(' ') {
+        if last_space > 20 {
+            let candidate = truncated[..last_space].trim_end();
+            return candidate
+                .trim_end_matches([',', ';', '-', ':', '.'])
+                .to_string();
+        }
+    }
+    truncated
+        .trim_end_matches([',', ';', '-', ':', '.'])
+        .to_string()
+}
+
+fn clean_wrapper_prefixes(line: &str) -> &str {
+    let mut s = line.trim();
+
+    if let Some(idx) = s.find("git commit") {
+        if let Some(m_idx) = s[idx..].find("-m") {
+            let rest = s[idx + m_idx + 2..].trim();
+            let unquoted = rest
+                .strip_prefix('"')
+                .and_then(|r| r.strip_suffix('"'))
+                .or_else(|| rest.strip_prefix('\'').and_then(|r| r.strip_suffix('\'')))
+                .unwrap_or(rest)
+                .trim();
+            if !unquoted.is_empty() {
+                return unquoted;
+            }
+        }
+    }
+
+    s = s
+        .trim_matches('`')
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim();
+
+    for prefix in &[
+        "commit message:",
+        "commit:",
+        "git commit:",
+        "subject:",
+        "proposed commit message:",
+        "generated commit message:",
+    ] {
+        if s.to_ascii_lowercase().starts_with(prefix) {
+            s = s[prefix.len()..].trim();
+            break;
+        }
+    }
+
+    let lower = s.to_ascii_lowercase();
+    if (lower.starts_with("here is") || lower.starts_with("here's"))
+        && (lower.contains("commit message") || lower.ends_with(':'))
+    {
+        return "";
+    }
+
+    s.trim_matches('`')
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim()
+}
+
+fn extract_candidate_line(raw: &str) -> Option<&str> {
+    let mut in_fence = false;
+    let mut fence_lines = Vec::new();
+    let mut normal_lines = Vec::new();
+
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if trimmed.is_empty() {
+            continue;
+        }
+        if in_fence {
+            fence_lines.push(trimmed);
+        } else {
+            normal_lines.push(trimmed);
+        }
+    }
+
+    let candidates = if !fence_lines.is_empty() {
+        fence_lines
+    } else {
+        normal_lines
+    };
+
+    for candidate in candidates {
+        let cleaned = clean_wrapper_prefixes(candidate);
+        if !cleaned.is_empty() {
+            return Some(cleaned);
+        }
+    }
+    None
+}
+
+struct ConventionalMatch<'a> {
+    type_name: &'static str,
+    scope: Option<&'a str>,
+    is_breaking: bool,
+    description: &'a str,
+}
+
+fn map_alias_type(name: &str) -> Option<&'static str> {
+    match name.to_ascii_lowercase().as_str() {
+        "feat" | "feature" => Some("feat"),
+        "fix" | "bugfix" | "bug" => Some("fix"),
+        "chore" | "maintenance" => Some("chore"),
+        "refactor" | "refactoring" => Some("refactor"),
+        "docs" | "doc" | "documentation" => Some("docs"),
+        "style" | "styles" => Some("style"),
+        "perf" | "performance" => Some("perf"),
+        "test" | "tests" => Some("test"),
+        "build" => Some("build"),
+        "ci" => Some("ci"),
+        "revert" => Some("revert"),
+        _ => None,
+    }
+}
+
+fn parse_conventional_prefix(line: &str) -> Option<ConventionalMatch<'_>> {
+    let colon_idx = line.find(':')?;
+    let prefix = line[..colon_idx].trim();
+    let rest = line[colon_idx + 1..].trim();
+    if rest.is_empty() {
+        return None;
+    }
+
+    let (prefix_no_bang, is_breaking) = if let Some(stripped) = prefix.strip_suffix('!') {
+        (stripped.trim_end(), true)
+    } else {
+        (prefix, false)
+    };
+
+    let (raw_type, scope) = if let Some(scope_start) = prefix_no_bang.find('(') {
+        if prefix_no_bang.ends_with(')') && scope_start > 0 {
+            let t = prefix_no_bang[..scope_start].trim();
+            let s = prefix_no_bang[scope_start + 1..prefix_no_bang.len() - 1].trim();
+            (t, if s.is_empty() { None } else { Some(s) })
+        } else {
+            return None;
+        }
+    } else {
+        (prefix_no_bang.trim(), None)
+    };
+
+    if let Some(s) = scope {
+        if s.contains('\n') || s.contains(':') || s.contains('(') || s.contains(')') {
+            return None;
+        }
+    }
+
+    let mapped_type = map_alias_type(raw_type)?;
+    Some(ConventionalMatch {
+        type_name: mapped_type,
+        scope,
+        is_breaking,
+        description: rest,
+    })
+}
+
+fn normalize_word(word: &str) -> String {
+    let is_all_caps = word.len() > 1 && word.chars().all(|c| c.is_ascii_uppercase());
+    let has_inner_caps = word.chars().skip(1).any(|c| c.is_ascii_uppercase());
+    if is_all_caps || has_inner_caps {
+        word.to_string()
+    } else {
+        let mut chars = word.chars();
+        match chars.next() {
+            Some(c) => c.to_lowercase().collect::<String>() + chars.as_str(),
+            None => String::new(),
+        }
+    }
+}
+
+fn normalize_description(desc: &str) -> String {
+    let mut s = desc
+        .trim()
+        .trim_matches('`')
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim();
+    s = s.trim_end_matches('.');
+    if s.is_empty() {
+        return String::new();
+    }
+
+    let words: Vec<&str> = s.split_whitespace().collect();
+    if words.is_empty() {
+        return String::new();
+    }
+
+    let first_word = words[0];
+    let lower_first = first_word.to_ascii_lowercase();
+    let converted_first = match lower_first.as_str() {
+        "added" | "adds" => "add",
+        "created" | "creates" => "create",
+        "implemented" | "implements" => "implement",
+        "introduced" | "introduces" => "introduce",
+        "supported" | "supports" => "support",
+        "allowed" | "allows" => "allow",
+        "enabled" | "enables" => "enable",
+        "provided" | "provides" => "provide",
+        "updated" | "updates" => "update",
+        "bumped" | "bumps" => "bump",
+        "upgraded" | "upgrades" => "upgrade",
+        "simplified" | "simplifies" => "simplify",
+        "restructured" | "restructures" => "restructure",
+        "reorganized" | "reorganizes" => "reorganize",
+        "cleaned" | "cleans" => "clean",
+        "optimized" | "optimizes" => "optimize",
+        "formatted" | "formats" => "format",
+        "documented" | "documents" => "document",
+        "tested" | "tests" => "test",
+        "prevented" | "prevents" => "prevent",
+        "resolved" | "resolves" => "resolve",
+        "handled" | "handles" => "handle",
+        "corrected" | "corrects" => "correct",
+        "patched" | "patches" => "patch",
+        "avoided" | "avoids" => "avoid",
+        _ => "",
+    };
+
+    let first_normalized = if !converted_first.is_empty() {
+        converted_first.to_string()
+    } else {
+        normalize_word(first_word)
+    };
+
+    let mut result = vec![first_normalized];
+    for &word in &words[1..] {
+        result.push(normalize_word(word));
+    }
+    result.join(" ")
+}
+
+fn infer_conventional_commit(line: &str) -> (&'static str, String) {
+    let trimmed = line.trim().trim_start_matches(['-', '*', '>', '•']).trim();
+    let first_word = trimmed
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .trim_matches(|c: char| !c.is_alphanumeric());
+    let lower_first = first_word.to_ascii_lowercase();
+
+    let lower_line = trimmed.to_ascii_lowercase();
+    if lower_line.contains("readme")
+        || matches!(
+            lower_first.as_str(),
+            "doc" | "docs" | "document" | "documents" | "documented" | "documentation"
+        )
+    {
+        let desc = normalize_description(trimmed);
+        return ("docs", desc);
+    }
+
+    let has_test_word = trimmed
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|w| matches!(w.to_ascii_lowercase().as_str(), "test" | "tests" | "testing"));
+    if has_test_word {
+        let desc = normalize_description(trimmed);
+        return ("test", desc);
+    }
+
+    if matches!(
+        lower_first.as_str(),
+        "fix" | "fixes" | "fixed" | "fixing" | "resolve" | "resolves" | "resolved"
+            | "resolving" | "prevent" | "prevents" | "prevented" | "preventing" | "handle"
+            | "handles" | "handled" | "handling" | "correct" | "corrects" | "corrected"
+            | "correcting" | "patch" | "patches" | "patched" | "avoid" | "avoids" | "avoided"
+    ) {
+        let desc = if matches!(lower_first.as_str(), "fix" | "fixes" | "fixed" | "fixing") {
+            let rest = trimmed[first_word.len()..].trim();
+            let next_word = rest
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if matches!(next_word.as_str(), "and" | "or" | "for" | "to" | "in" | "on" | "with")
+                || rest.is_empty()
+            {
+                normalize_description(trimmed)
+            } else {
+                normalize_description(rest)
+            }
+        } else {
+            normalize_description(trimmed)
+        };
+        return ("fix", desc);
+    }
+
+    if matches!(
+        lower_first.as_str(),
+        "add" | "adds" | "added" | "adding" | "create" | "creates" | "created" | "creating"
+            | "implement" | "implements" | "implemented" | "implementing" | "introduce"
+            | "introduces" | "introduced" | "introducing" | "support" | "supports"
+            | "supported" | "supporting" | "allow" | "allows" | "allowed" | "allowing"
+            | "enable" | "enables" | "enabled" | "enabling" | "provide" | "provides"
+            | "provided" | "providing" | "feat" | "feature" | "features"
+    ) {
+        let desc = normalize_description(trimmed);
+        return ("feat", desc);
+    }
+
+    if matches!(
+        lower_first.as_str(),
+        "refactor" | "refactors" | "refactored" | "refactoring" | "restructure"
+            | "restructures" | "restructured" | "restructuring" | "reorganize"
+            | "reorganizes" | "reorganized" | "reorganizing" | "simplify" | "simplifies"
+            | "simplified" | "simplifying" | "rewrite" | "rewrites" | "rewrote" | "rewriting"
+            | "cleanup" | "clean" | "cleans" | "cleaned" | "cleaning"
+    ) {
+        let desc = if matches!(
+            lower_first.as_str(),
+            "refactor" | "refactors" | "refactored" | "refactoring"
+        ) {
+            let rest = trimmed[first_word.len()..].trim();
+            if rest.is_empty() {
+                normalize_description(trimmed)
+            } else {
+                normalize_description(rest)
+            }
+        } else {
+            normalize_description(trimmed)
+        };
+        return ("refactor", desc);
+    }
+
+    let has_perf_word = trimmed
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|w| {
+            matches!(
+                w.to_ascii_lowercase().as_str(),
+                "perf"
+                    | "performance"
+                    | "speedup"
+                    | "optimize"
+                    | "optimizes"
+                    | "optimized"
+                    | "optimizing"
+                    | "optimization"
+            )
+        });
+    if has_perf_word {
+        let desc = normalize_description(trimmed);
+        return ("perf", desc);
+    }
+
+    if matches!(
+        lower_first.as_str(),
+        "style" | "styles" | "format" | "formats" | "formatted" | "formatting" | "lint"
+            | "lints" | "linted" | "linting" | "rustfmt" | "prettier"
+    ) {
+        let desc = normalize_description(trimmed);
+        return ("style", desc);
+    }
+
+    if matches!(
+        lower_first.as_str(),
+        "build" | "cmake" | "cargo" | "package" | "packaging"
+    ) {
+        let desc = normalize_description(trimmed);
+        return ("build", desc);
+    }
+
+    if matches!(
+        lower_first.as_str(),
+        "ci" | "cd" | "workflow" | "workflows" | "action" | "actions" | "pipeline" | "pipelines"
+    ) {
+        let desc = normalize_description(trimmed);
+        return ("ci", desc);
+    }
+
+    if matches!(
+        lower_first.as_str(),
+        "revert" | "reverts" | "reverted" | "reverting"
+    ) {
+        let desc = normalize_description(trimmed);
+        return ("revert", desc);
+    }
+
+    if matches!(
+        lower_first.as_str(),
+        "update" | "updates" | "updated" | "updating" | "bump" | "bumps" | "bumped"
+            | "bumping" | "upgrade" | "upgrades" | "upgraded" | "upgrading" | "deps"
+            | "dependencies" | "dependency" | "release" | "releases" | "released" | "chore"
+            | "chores"
+    ) {
+        let desc = normalize_description(trimmed);
+        return ("chore", desc);
+    }
+
+    ("chore", normalize_description(trimmed))
+}
+
+/// Normalizes a commit message candidate to follow the Conventional Commits specification
+/// (`<type>: <description>` or `<type>(<scope>): <description>`).
+pub fn normalize_commit_message(raw: &str) -> String {
+    let candidate = match extract_candidate_line(raw) {
+        Some(line) => line,
+        None => return String::new(),
+    };
+
+    let formatted = if let Some(matched) = parse_conventional_prefix(candidate) {
+        let desc = normalize_description(matched.description);
+        let scope_str = match matched.scope {
+            Some(scope) => format!("({scope})"),
+            None => String::new(),
+        };
+        let bang = if matched.is_breaking { "!" } else { "" };
+        format!("{}{}{}: {}", matched.type_name, scope_str, bang, desc)
+    } else {
+        let (type_name, desc) = infer_conventional_commit(candidate);
+        if desc.is_empty() {
+            format!("{type_name}: update")
+        } else {
+            format!("{type_name}: {desc}")
+        }
+    };
+
+    truncate_to_word_boundary(&formatted, 72)
 }
 
 #[cfg(test)]
@@ -961,5 +1405,128 @@ mod tests {
             rx.recv().await,
             Some(StreamEvent::Error(err)) if err == "HTTP 429 quota2"
         ));
+    }
+
+    #[test]
+    fn normalizes_valid_conventional_commits() {
+        assert_eq!(
+            normalize_commit_message("feat: add user authentication"),
+            "feat: add user authentication"
+        );
+        assert_eq!(
+            normalize_commit_message("fix(git): resolve merge conflicts"),
+            "fix(git): resolve merge conflicts"
+        );
+        assert_eq!(
+            normalize_commit_message("chore(deps)!: upgrade tokio to 1.38"),
+            "chore(deps)!: upgrade tokio to 1.38"
+        );
+        assert_eq!(
+            normalize_commit_message("Feat: Add Dark Mode Support."),
+            "feat: add dark mode support"
+        );
+        assert_eq!(
+            normalize_commit_message("fix:handle missing branch"),
+            "fix: handle missing branch"
+        );
+    }
+
+    #[test]
+    fn normalizes_wrapper_formatting_and_fences() {
+        assert_eq!(
+            normalize_commit_message("```git\nfeat: add git commit generation\n```"),
+            "feat: add git commit generation"
+        );
+        assert_eq!(
+            normalize_commit_message("\"feat: add git review dialog\""),
+            "feat: add git review dialog"
+        );
+        assert_eq!(
+            normalize_commit_message("git commit -m \"fix: resolve crash on startup\""),
+            "fix: resolve crash on startup"
+        );
+        assert_eq!(
+            normalize_commit_message("Commit message: feat: add new button"),
+            "feat: add new button"
+        );
+        assert_eq!(
+            normalize_commit_message("Commit: Fix branch picker"),
+            "fix: branch picker"
+        );
+        assert_eq!(
+            normalize_commit_message(
+                "Here is the commit message:\n\nfeat: add dark mode\n\nDetailed explanation..."
+            ),
+            "feat: add dark mode"
+        );
+    }
+
+    #[test]
+    fn infers_standard_types_when_prefix_omitted() {
+        assert_eq!(
+            normalize_commit_message("Add dark mode toggle button"),
+            "feat: add dark mode toggle button"
+        );
+        assert_eq!(
+            normalize_commit_message("Added support for OAuth login"),
+            "feat: add support for OAuth login"
+        );
+        assert_eq!(
+            normalize_commit_message("Fix crash when clicking button"),
+            "fix: crash when clicking button"
+        );
+        assert_eq!(
+            normalize_commit_message("Avoid main status for worktree sessions"),
+            "fix: avoid main status for worktree sessions"
+        );
+        assert_eq!(
+            normalize_commit_message("Prevent memory leak in terminal"),
+            "fix: prevent memory leak in terminal"
+        );
+        assert_eq!(
+            normalize_commit_message("Update dependencies to latest versions"),
+            "chore: update dependencies to latest versions"
+        );
+        assert_eq!(
+            normalize_commit_message("Bump version to 0.1.16"),
+            "chore: bump version to 0.1.16"
+        );
+        assert_eq!(
+            normalize_commit_message("Refactor right panel view components"),
+            "refactor: right panel view components"
+        );
+        assert_eq!(
+            normalize_commit_message("Update README with installation instructions"),
+            "docs: update README with installation instructions"
+        );
+        assert_eq!(
+            normalize_commit_message("Add unit tests for commit normalization"),
+            "test: add unit tests for commit normalization"
+        );
+        assert_eq!(
+            normalize_commit_message("Improve performance of diff rendering"),
+            "perf: improve performance of diff rendering"
+        );
+        assert_eq!(
+            normalize_commit_message("Initial commit of the project"),
+            "chore: initial commit of the project"
+        );
+    }
+
+    #[test]
+    fn preserves_acronyms_and_truncates_at_72_chars() {
+        assert_eq!(
+            normalize_commit_message("feat: support PTY terminal and URL parsing"),
+            "feat: support PTY terminal and URL parsing"
+        );
+        assert_eq!(
+            normalize_commit_message("fix: macOS window resize handling"),
+            "fix: macOS window resize handling"
+        );
+        let long = "feat: implement comprehensive support for nested workspace directory scanning in right panel review tab";
+        let normalized = normalize_commit_message(long);
+        assert!(normalized.chars().count() <= 72);
+        assert!(normalized.starts_with("feat: implement comprehensive support for nested workspace directory"));
+        assert!(!normalized.ends_with('.'));
     }
 }
