@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -33,6 +34,13 @@ static ISSUE_DETAIL_CACHE: OnceLock<
     Mutex<HashMap<GithubIssueCacheKey, (Instant, GitHubIssueDetail)>>,
 > = OnceLock::new();
 
+pub(crate) fn prune_expired<K, T>(cache: &mut HashMap<K, (Instant, T)>, now: Instant, ttl: Duration)
+where
+    K: Eq + Hash,
+{
+    cache.retain(|_, (created, _)| now.duration_since(*created) <= ttl);
+}
+
 pub(crate) fn fresh_cache_value<T: Clone>(
     entry: &(Instant, T),
     now: Instant,
@@ -55,6 +63,30 @@ pub(crate) fn invalidate_pr_cache(work_dir: &Path, branch: &str) {
     if let Some(cache) = PR_CACHE.get() {
         if let Ok(mut cache) = cache.lock() {
             cache.remove(&pr_cache_key(work_dir, branch));
+        }
+    }
+}
+
+pub fn invalidate_github_cache(work_dir: &Path) {
+    let repository = repository_key(work_dir);
+    if let Some(cache) = PR_CACHE.get() {
+        if let Ok(mut cache) = cache.lock() {
+            cache.retain(|(path, _), _| path != &repository);
+        }
+    }
+    if let Some(cache) = ISSUE_LIST_CACHE.get() {
+        if let Ok(mut cache) = cache.lock() {
+            cache.retain(|(path, _), _| path != &repository);
+        }
+    }
+    if let Some(cache) = PR_LIST_CACHE.get() {
+        if let Ok(mut cache) = cache.lock() {
+            cache.retain(|(path, _), _| path != &repository);
+        }
+    }
+    if let Some(cache) = ISSUE_DETAIL_CACHE.get() {
+        if let Ok(mut cache) = cache.lock() {
+            cache.retain(|(path, _), _| path != &repository);
         }
     }
 }
@@ -519,6 +551,9 @@ pub fn inspect_pr_for_branch(
     let key = pr_cache_key(work_dir, branch);
     let now = Instant::now();
     let cache = PR_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut cache) = cache.lock() {
+        prune_expired(&mut cache, now, PR_INSPECTION_TTL);
+    }
     if let Some(info) = cache.lock().ok().and_then(|cache| {
         cache
             .get(&key)
@@ -774,6 +809,9 @@ pub fn list_github_issues(
     let key = (repository_key(work_dir), args.join("\0"));
     let now = Instant::now();
     let cache = ISSUE_LIST_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut cache) = cache.lock() {
+        prune_expired(&mut cache, now, GITHUB_RESPONSE_TTL);
+    }
     if let Some(rows) = cache.lock().ok().and_then(|cache| {
         cache
             .get(&key)
@@ -804,6 +842,9 @@ pub fn inspect_github_issue(work_dir: &Path, number: u64) -> Result<GitHubIssueD
     let key = (repository_key(work_dir), number);
     let now = Instant::now();
     let cache = ISSUE_DETAIL_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut cache) = cache.lock() {
+        prune_expired(&mut cache, now, GITHUB_RESPONSE_TTL);
+    }
     if let Some(detail) = cache.lock().ok().and_then(|cache| {
         cache
             .get(&key)
@@ -833,6 +874,9 @@ pub fn list_github_pull_requests(
     let key = (repository_key(work_dir), args.join("\0"));
     let now = Instant::now();
     let cache = PR_LIST_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut cache) = cache.lock() {
+        prune_expired(&mut cache, now, GITHUB_RESPONSE_TTL);
+    }
     if let Some(rows) = cache.lock().ok().and_then(|cache| {
         cache
             .get(&key)
@@ -968,6 +1012,7 @@ pub fn comment_on_github_issue(
     validate_github_number(number, "issue").map_err(|message| GitError::new(work_dir, message))?;
     let body =
         validated_text(body, "comment body").map_err(|message| GitError::new(work_dir, message))?;
+    invalidate_github_cache(work_dir);
     execute_gh(
         work_dir,
         &[
@@ -987,6 +1032,7 @@ pub fn comment_on_pull_request(
 ) -> Result<String, GitError> {
     let args =
         github_pr_comment_args(number, body).map_err(|message| GitError::new(work_dir, message))?;
+    invalidate_github_cache(work_dir);
     execute_gh(work_dir, &args)
 }
 
@@ -1035,6 +1081,7 @@ pub fn reply_to_pull_request_review_comment(
         repository.owner, repository.repo
     );
     let body = format!("body={body}");
+    invalidate_github_cache(work_dir);
     execute_gh(
         work_dir,
         &github_api_args(
@@ -1063,6 +1110,7 @@ pub fn submit_pull_request_review(
     };
     let (repository, _review_endpoint) = validated_review_endpoint(pull_request)
         .map_err(|message| GitError::new(work_dir, message))?;
+    invalidate_github_cache(work_dir);
     let review = execute_gh(work_dir, &args)?;
     let endpoint = format!(
         "repos/{}/{}/pulls/{}/comments",

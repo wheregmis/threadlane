@@ -1,5 +1,5 @@
-
 use super::*;
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -132,6 +132,20 @@ fn cache_entry_expires_after_ttl() {
         ),
         None
     );
+}
+
+#[test]
+fn expired_cache_entries_are_pruned() {
+    let started = std::time::Instant::now();
+    let mut cache = HashMap::from([
+        ("fresh", (started, 1)),
+        ("stale", (started - std::time::Duration::from_secs(31), 2)),
+    ]);
+
+    prune_expired(&mut cache, started, std::time::Duration::from_secs(30));
+
+    assert_eq!(cache.len(), 1);
+    assert_eq!(cache.get("fresh"), Some(&(started, 1)));
 }
 
 #[test]
