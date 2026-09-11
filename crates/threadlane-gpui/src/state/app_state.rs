@@ -505,11 +505,35 @@ impl AppState {
     }
 
     pub(crate) fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {
-        self.reasoning_effort = threadlane_runtime::model_registry::effective_effort(
+        let effort = threadlane_runtime::model_registry::effective_effort(
             &self.selected_model,
             effort,
             self.active_work_dir.as_deref(),
         );
+        if let Some((runtime, _)) = self.active_session_runtime() {
+            if runtime.is_generating() {
+                self.session_status =
+                    Some("Stop the current turn before changing reasoning effort".into());
+                return;
+            }
+            let result = if let Some(error) = runtime.harness_error() {
+                Err(error.to_string())
+            } else if let Ok(mut agent) = runtime.agent.try_lock() {
+                agent.set_fact("reasoning_effort", effort.label())
+            } else {
+                Err("Agent settings are still loading. Try changing reasoning effort again shortly."
+                    .into())
+            };
+            if let Err(error) = result {
+                self.session_status = Some(format!("Could not switch reasoning effort: {error}"));
+                return;
+            }
+            self.session_runtimes.remove(&runtime.session_file);
+        } else if self.reasoning_effort == effort {
+            return;
+        }
+        self.reasoning_effort = effort;
+        self.active_session_runtime();
     }
 
     pub(crate) fn open_settings(&mut self) {

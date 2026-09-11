@@ -12,7 +12,7 @@ use crate::coding_agent::{
 };
 use crate::permission::{PermissionDecision, PermissionHandle};
 use crate::question::QuestionHandle;
-use crate::ModelRoles;
+use crate::{ModelRoles, ReasoningEffort};
 
 /// Execution mode configured for a session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,6 +46,7 @@ pub struct SessionController {
     pub session_file: PathBuf,
     mode: ExecutionMode,
     pub selected_model: String,
+    pub reasoning_effort: ReasoningEffort,
     pub system_prompt: String,
     pub harness_error: Option<String>,
     is_generating: AtomicBool,
@@ -80,6 +81,7 @@ impl SessionController {
         };
 
         let selected_model = agent.model().to_string();
+        let reasoning_effort = agent.agent.reasoning_effort();
 
         Arc::new(Self {
             agent: Arc::new(tokio::sync::Mutex::new(agent)),
@@ -91,6 +93,7 @@ impl SessionController {
             session_file,
             mode,
             selected_model,
+            reasoning_effort,
             system_prompt,
             harness_error,
             is_generating: AtomicBool::new(false),
@@ -109,6 +112,10 @@ impl SessionController {
 
     pub fn model(&self) -> &str {
         &self.selected_model
+    }
+
+    pub fn reasoning_effort(&self) -> ReasoningEffort {
+        self.reasoning_effort
     }
 
     pub fn system_prompt(&self) -> &str {
