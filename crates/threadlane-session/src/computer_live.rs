@@ -1,8 +1,8 @@
 //! In-process live feed for native computer use.
 //!
 //! The GPUI mirror wants video, not a slideshow. The macOS poller in
-//! `computer_stream` publishes bounded premultiplied-BGRA frames here at up
-//! to 30fps while a mirror is subscribed, along with input overlays (where a
+//! `computer_stream` publishes bounded opaque BGRA frames here at up to
+//! 20fps while a mirror is subscribed, along with input overlays (where a
 //! click landed, what was typed) and poller status for the mirror header.
 //! Everything is process-global because the poller is: one machine, one
 //! live feed, many project sessions.
@@ -18,7 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, watch};
 
 /// Bound on live frame width: enough for a mirror popup, small enough to
-/// scale, publish, and upload thirty times a second.
+/// scale, publish, and upload twenty times a second.
 pub const LIVE_FRAME_MAX_WIDTH: u32 = 1_280;
 
 /// What the poller is pointed at. Screenshots reuse frames only when the
@@ -38,9 +38,8 @@ impl StreamTarget {
     }
 }
 
-/// One mirror frame: premultiplied BGRA pixels plus the geometry needed to
-/// map screen-space points (window bounds, input events, the pointer) onto
-/// it.
+/// One mirror frame: opaque BGRA pixels plus the geometry needed to map
+/// screen-space points (window bounds, input events, the pointer) onto it.
 #[derive(Debug)]
 pub struct LiveFrame {
     pub seq: u64,
@@ -48,8 +47,9 @@ pub struct LiveFrame {
     pub target: StreamTarget,
     pub width: u32,
     pub height: u32,
-    /// `width × height × 4` bytes in B-G-R-A order with premultiplied alpha:
-    /// the layout gpui uploads without conversion.
+    /// `width × height × 4` bytes in B-G-R-A order, effectively opaque (the
+    /// capture is drawn over an opaque backdrop; CoreGraphics rounding can
+    /// leave a stray 254): the layout gpui uploads without conversion.
     pub bgra: Vec<u8>,
     /// Top-left of the captured region in display points (screen space).
     pub origin_points: (f64, f64),
@@ -142,7 +142,7 @@ fn status_slot() -> &'static watch::Sender<LiveStatus> {
 }
 
 /// Latest-frame subscription for a mirror. Holding the receiver is what
-/// turns the poller's video tier on: it only pays for 30fps while
+/// turns the poller's video tier on: it only pays for 20fps while
 /// [`watcher_count`] is non-zero, so drop it when the mirror closes.
 pub fn subscribe_frames() -> watch::Receiver<Option<Arc<LiveFrame>>> {
     frames().subscribe()

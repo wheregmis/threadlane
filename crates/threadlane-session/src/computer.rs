@@ -581,6 +581,7 @@ mod mac {
     /// composite, so a poll costs one WindowServer round trip.
     pub(crate) struct Composite {
         image: core_graphics::image::CGImage,
+        resolution: CaptureResolution,
         /// Top-left of the captured region in display points.
         pub(crate) origin_points: (f64, f64),
         /// Captured region size in display points.
@@ -588,20 +589,25 @@ mod mac {
     }
 
     impl Composite {
-        /// Downscale to at most `max_width` pixels wide as premultiplied
-        /// little-endian BGRA (B, G, R, A in memory), the layout gpui uploads
-        /// untouched. CoreGraphics resamples in one pass; no Rust per-pixel
-        /// loop. Fails closed on a blank composite, which is what a denied
-        /// Screen Recording permission produces.
+        /// Downscale to at most `max_width` pixels wide as opaque
+        /// little-endian BGRA (B, G, R, A in memory with A at 255, give or
+        /// take CoreGraphics' resampling rounding), the layout gpui uploads
+        /// untouched. CoreGraphics resamples in one pass; no Rust
+        /// per-pixel loop. Model-tier (best-resolution) composites use
+        /// proper filtering so hairlines and small text survive the ~2×
+        /// reduction; the live tier takes the cheaper low-quality resample.
+        /// A refused bitmap context is an error, never a panic: the poller
+        /// must survive it and the one-shot path must fall back.
         pub(crate) fn bgra(&self, max_width: u32) -> Result<(Vec<u8>, u32, u32), String> {
-            let (bgra, width, height) = scale_bgra(&self.image, max_width)?;
-            if crate::computer_stream::is_blank(&bgra, 4) {
-                return Err(
-                    "Window composite is blank (Screen Recording permission likely missing)."
-                        .to_string(),
-                );
-            }
-            Ok((bgra, width, height))
+            use core_graphics::context::CGInterpolationQuality;
+            let interpolation = match self.resolution {
+                CaptureResolution::Best => CGInterpolationQuality::CGInterpolationQualityDefault,
+                CaptureResolution::Nominal => CGInterpolationQuality::CGInterpolationQualityLow,
+            };
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                scale_bgra(&self.image, max_width, interpolation)
+            }))
+            .unwrap_or_else(|_| Err("CoreGraphics refused the bitmap context.".to_string()))
         }
 
         /// Bounded JPEG for the model from the same composite.
@@ -629,10 +635,15 @@ mod mac {
 
     pub(crate) const SCREEN_RECORDING_HINT: &str = "Screen Recording permission is missing: grant it to this app in System Settings → Privacy & Security, then retry.";
 
+    /// Pixel density of a composite. The WindowServer round trip costs the
+    /// same either way (~22ms measured); everything downstream is 4× cheaper
+    /// at nominal, which is why the live mirror uses it while the model keeps
+    /// full resolution for legible text in small windows.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(crate) enum CaptureResolution {
-        /// Display-point resolution for the live mirror.
+        /// Display points, 1:1 — no scale bookkeeping, no Retina backing.
         Nominal,
-        /// Full-resolution capture for model screenshots.
+        /// The display's best (Retina 2×) backing.
         Best,
     }
 
@@ -667,11 +678,15 @@ mod mac {
             }
             crate::computer_stream::StreamTarget::Window(id) => {
                 let id = id as i32;
+                // Our own windows stay unaddressable here too, or a stale
+                // id could point the mirror at itself.
+                let own_pid = std::process::id() as i32;
                 let bounds = window_infos()
                     .ok()
                     .and_then(|infos| {
                         infos.into_iter().find_map(|window| {
-                            (window.id == id && window.onscreen).then_some(window.bounds)
+                            (window.id == id && window.onscreen && window.pid != own_pid)
+                                .then_some(window.bounds)
                         })
                     })
                     .ok_or_else(|| {
@@ -710,6 +725,7 @@ mod mac {
         }
         Ok(Composite {
             image,
+            resolution,
             origin_points: (rect.origin.x, rect.origin.y),
             points_size: (rect.size.width, rect.size.height),
         })
@@ -719,10 +735,13 @@ mod mac {
     /// opaque BGRA, rows top-down, `width × 4` bytes per row. The context is
     /// first filled with a dark backdrop: windows-only composites leave
     /// uncovered desktop transparent, and gpui blends with straight alpha,
-    /// so opaque output is the only layout both tiers agree on.
+    /// so opaque output is the only layout both tiers agree on. Panics if
+    /// CoreGraphics refuses the context (`create_bitmap_context` asserts);
+    /// callers catch that.
     fn scale_bgra(
         image: &core_graphics::image::CGImage,
         max_width: u32,
+        interpolation: core_graphics::context::CGInterpolationQuality,
     ) -> Result<(Vec<u8>, u32, u32), String> {
         use core_graphics::base::{kCGBitmapByteOrder32Little, kCGImageAlphaPremultipliedFirst};
         use core_graphics::context::{CGContext, CGInterpolationQuality};
@@ -757,7 +776,7 @@ mod mac {
         context.set_rgb_fill_color(0.08, 0.08, 0.09, 1.0);
         context.fill_rect(rect);
         context.set_interpolation_quality(if width < source_width {
-            CGInterpolationQuality::CGInterpolationQualityLow
+            interpolation
         } else {
             CGInterpolationQuality::CGInterpolationQualityNone
         });
@@ -1015,11 +1034,15 @@ impl ComputerToolExecutor {
         // the TCC prompt) when the composite is unavailable or blank.
         // Each arm yields (bytes, dims text, source points width) so clicks
         // convert image pixels back to display points exactly.
-        let (bytes, dims, src_points_width) = match capture_composited_for_target(
-            target,
-            SCREENSHOT_WIDTH,
-            SCREENSHOT_JPEG_QUALITY,
-        ) {
+        // The composite, downscale, and encode are all CPU work; keep them
+        // off the async executor like every other capture path.
+        let composited = tokio::task::spawn_blocking(move || {
+            capture_composited_for_target(target, SCREENSHOT_WIDTH, SCREENSHOT_JPEG_QUALITY)
+        })
+        .await
+        .map_err(|error| format!("Screenshot task failed: {error}"))
+        .and_then(|result| result);
+        let (bytes, dims, src_points_width) = match composited {
             Ok((bytes, width, height, src_points_width)) => {
                 std::fs::write(&path, &bytes)
                     .map_err(|error| format!("Could not save screenshot: {error}"))?;
@@ -1250,7 +1273,9 @@ pub(crate) use mac::{composite_target, pointer_location, CaptureResolution};
 /// Start the live feed on the main display for the user's own mirror, with
 /// no model in the loop: a developer hook (`THREADLANE_MIRROR_DEBUG`) for
 /// observing and profiling the video path. Frames stay in-process and are
-/// never attached to a tool result, so no permission gate applies.
+/// never attached to a tool result, so no permission gate applies. Like any
+/// watched stream it idles out after ten minutes without computer calls;
+/// relaunch to resume.
 #[cfg(target_os = "macos")]
 pub fn watch_display_for_debug() {
     crate::computer_stream::ensure_stream(crate::computer_stream::StreamTarget::Display);
@@ -1821,18 +1846,11 @@ mod tests {
         let (bgra, width, height) = composite.bgra(LIVE_FRAME_MAX_WIDTH).expect("bgra frame");
         assert!(width <= LIVE_FRAME_MAX_WIDTH && width > 0 && height > 0);
         assert_eq!(bgra.len(), (width * height * 4) as usize);
-        // Windows-only composites leave uncovered desktop transparent, so
-        // alpha is premultiplied and mixed: some opaque, none half-baked
-        // beyond what premultiplication allows (colour never exceeds alpha).
-        assert!(
-            bgra.chunks_exact(4).any(|pixel| pixel[3] == 255),
-            "some opaque"
-        );
-        assert!(
-            bgra.chunks_exact(4)
-                .all(|pixel| pixel[0] <= pixel[3] && pixel[1] <= pixel[3] && pixel[2] <= pixel[3]),
-            "premultiplied"
-        );
+        // The backdrop fill makes every pixel opaque, uncovered desktop
+        // included, which is what gpui's straight-alpha blend needs. A few
+        // pixels land on 254 after CoreGraphics resamples in the display's
+        // colour space; that is rounding, not transparency.
+        assert!(bgra.chunks_exact(4).all(|pixel| pixel[3] >= 250), "opaque");
         assert!(composite.points_size.0 > 0.0);
         let started = std::time::Instant::now();
         for _ in 0..10 {

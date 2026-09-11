@@ -89,8 +89,9 @@ fn visible_session_status<'a>(
 
 /// Open the computer-use mirror popup: a small non-activating window in the
 /// bottom-right corner showing the target as live video plus the current
-/// action. Resizable so the user can enlarge the picture; guarded by
-/// `AppState::mirror_open` so repeated triggers reuse the window.
+/// action. Guarded by `AppState::mirror_open` so repeated triggers reuse the
+/// window. (gpui only honours `is_resizable` on titled windows, so this
+/// title-less popup stays fixed-size.)
 fn open_computer_mirror(model: &Entity<AppState>, cx: &mut AsyncApp) {
     let previews_dir = model.update(cx, |state, _cx| {
         if state.mirror_open {
@@ -131,7 +132,7 @@ fn open_computer_mirror(model: &Entity<AppState>, cx: &mut AsyncApp) {
             show: true,
             kind: WindowKind::PopUp,
             is_movable: true,
-            is_resizable: true,
+            is_resizable: false,
             is_minimizable: false,
             ..Default::default()
         },
