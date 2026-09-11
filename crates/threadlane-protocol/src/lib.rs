@@ -1,5 +1,12 @@
 use serde::{Deserialize, Serialize};
 
+pub mod messages;
+
+pub use messages::{
+    AgentMessage, AgentToolCall, AgentToolDefinition, DeferredHandle, ImageAttachment,
+    ReasoningEffort,
+};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeToolCallFunction {
     pub name: String,

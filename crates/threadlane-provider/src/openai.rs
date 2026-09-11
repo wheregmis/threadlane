@@ -29,6 +29,8 @@ const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const WS_RESPONSE_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const WS_MAX_AGE: Duration = Duration::from_secs(55 * 60);
 const MODEL_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+use crate::credentials::SharedCodexResolver;
+use crate::model_registry::ModelInfo;
 use crate::title_generator::{
     title_payload, title_response_text, title_stream_text, TITLE_REQUEST_TIMEOUT,
 };
@@ -684,7 +686,7 @@ pub async fn try_fetch_available_models(
     } else {
         let api_key = api_key.to_string();
         let account_id = account_id.map(str::to_string);
-        let handle = threadlane_runtime::get_runtime().spawn(async move {
+        let handle = crate::exec::get_runtime().spawn(async move {
             fetch_available_models_network(&api_key, account_id.as_deref(), cache_key, now).await
         });
         handle.await.ok().flatten()
@@ -692,18 +694,29 @@ pub async fn try_fetch_available_models(
 }
 
 /// Codex model inventory and capabilities, not the general ChatGPT web picker.
-pub async fn fetch_subscription_models() -> Vec<threadlane_runtime::model_registry::ModelInfo> {
-    try_fetch_subscription_models().await.unwrap_or_default()
+pub async fn fetch_subscription_models(access_token: &str, account_id: Option<&str>) -> Vec<ModelInfo> {
+    try_fetch_subscription_models(access_token, account_id)
+        .await
+        .unwrap_or_default()
 }
 
 pub async fn try_fetch_subscription_models(
-) -> Option<Vec<threadlane_runtime::model_registry::ModelInfo>> {
+    access_token: &str,
+    account_id: Option<&str>,
+) -> Option<Vec<ModelInfo>> {
+    if access_token.trim().is_empty() {
+        return None;
+    }
+    let access_token = access_token.to_string();
+    let account_id = account_id.map(str::to_string);
     if tokio::runtime::Handle::try_current().is_ok() {
-        fetch_subscription_models_inner().await
+        fetch_subscription_models_inner(&access_token, account_id.as_deref()).await
     } else {
         // GPUI background tasks have no Tokio reactor; hyper panics there.
-        match threadlane_runtime::get_runtime()
-            .spawn(fetch_subscription_models_inner())
+        match crate::exec::get_runtime()
+            .spawn(async move {
+                fetch_subscription_models_inner(&access_token, account_id.as_deref()).await
+            })
             .await
         {
             Ok(models) => models,
@@ -712,7 +725,7 @@ pub async fn try_fetch_subscription_models(
     }
 }
 
-fn parse_subscription_models(value: &Value) -> Vec<threadlane_runtime::model_registry::ModelInfo> {
+fn parse_subscription_models(value: &Value) -> Vec<ModelInfo> {
     value
         .get("models")
         .and_then(Value::as_array)
@@ -738,7 +751,7 @@ fn parse_subscription_models(value: &Value) -> Vec<threadlane_runtime::model_reg
             if levels.is_some() && supported_efforts.is_empty() {
                 supported_efforts.push("off".into());
             }
-            Some(threadlane_runtime::model_registry::ModelInfo {
+            Some(ModelInfo {
                 id: id.into(),
                 label: model
                     .get("display_name")
@@ -761,10 +774,10 @@ fn parse_subscription_models(value: &Value) -> Vec<threadlane_runtime::model_reg
 }
 
 async fn fetch_subscription_models_inner(
-) -> Option<Vec<threadlane_runtime::model_registry::ModelInfo>> {
-    let credentials = threadlane_auth::openai_auth::load_credentials()
-        .filter(|credentials| threadlane_auth::openai_auth::is_own_source(&credentials.source));
-    let Some(credentials) = credentials else {
+    access_token: &str,
+    account_id: Option<&str>,
+) -> Option<Vec<ModelInfo>> {
+    if access_token.trim().is_empty() {
         return None;
     };
     // Catalog visibility is gated by Codex client compatibility, not Threadlane's version.
@@ -772,15 +785,12 @@ async fn fetch_subscription_models_inner(
     let mut request = http_client()
         .get("https://chatgpt.com/backend-api/codex/models")
         .query(&[("client_version", client_version.as_str())])
-        .header(
-            AUTHORIZATION,
-            format!("Bearer {}", credentials.access_token),
-        )
+        .header(AUTHORIZATION, format!("Bearer {access_token}"))
         .header(CONTENT_TYPE, "application/json")
         .header("OpenAI-Beta", "responses=experimental")
         .header("originator", "threadlane")
         .timeout(Duration::from_secs(10));
-    if let Some(account_id) = credentials.account_id.as_deref() {
+    if let Some(account_id) = account_id {
         request = request.header("ChatGPT-Account-Id", account_id);
     }
     let response = request.send().await;
@@ -813,6 +823,7 @@ pub struct OpenAIClient {
     credentials: Arc<StdMutex<OpenAICredentials>>,
     client: reqwest::Client,
     codex_ws: Arc<Mutex<CodexWsState>>,
+    codex_accounts: SharedCodexResolver,
 }
 
 enum WsResult {
@@ -826,9 +837,23 @@ enum WsResult {
 }
 
 impl OpenAIClient {
+    /// Test constructor without stored credentials: tokens are used as-is.
+    #[cfg(test)]
     pub(crate) fn new(api_key: String, account_id: Option<String>) -> Self {
+        Self::new_with_resolver(
+            api_key,
+            account_id,
+            Arc::new(crate::credentials::NoopCodexResolver),
+        )
+    }
+
+    pub(crate) fn new_with_resolver(
+        api_key: String,
+        account_id: Option<String>,
+        codex_accounts: SharedCodexResolver,
+    ) -> Self {
         let codex_account_id = (account_id.is_some() || api_key.starts_with("ey"))
-            .then(|| threadlane_auth::openai_auth::codex_account_id_for_token(&api_key))
+            .then(|| codex_accounts.account_id_for_token(&api_key))
             .flatten();
         Self {
             credentials: Arc::new(StdMutex::new(OpenAICredentials {
@@ -838,6 +863,7 @@ impl OpenAIClient {
             })),
             client: http_client().clone(),
             codex_ws: Arc::new(Mutex::new(CodexWsState::new())),
+            codex_accounts,
         }
     }
 
@@ -849,6 +875,12 @@ impl OpenAIClient {
             .unwrap_or_default()
     }
 
+    /// Current signing pair, for rebuilding this client around a new resolver.
+    pub(crate) fn credentials_pair(&self) -> (String, Option<String>) {
+        let credentials = self.credentials();
+        (credentials.api_key, credentials.account_id)
+    }
+
     /// Rotate the credential used for subsequent OpenAI-branch requests.
     /// Called when the session model changes providers mid-task (slash
     /// `/model`, picker rebuilds skip this by constructing fresh clients,
@@ -856,7 +888,7 @@ impl OpenAIClient {
     /// Codex websocket, whose handshake embeds the previous Bearer token.
     pub(crate) fn refresh_credentials(&self, api_key: String, account_id: Option<String>) {
         let codex_account_id = (account_id.is_some() || api_key.starts_with("ey"))
-            .then(|| threadlane_auth::openai_auth::codex_account_id_for_token(&api_key))
+            .then(|| self.codex_accounts.account_id_for_token(&api_key))
             .flatten();
         let rotated_account = {
             let mut guard = match self.credentials.lock() {
@@ -891,7 +923,11 @@ impl OpenAIClient {
     async fn access_token(&self) -> Result<String, String> {
         let credentials = self.credentials();
         match credentials.codex_account_id.as_deref() {
-            Some(id) => threadlane_auth::openai_auth::get_valid_codex_account_token(id).await,
+            Some(id) => {
+                self.codex_accounts
+                    .valid_token_for_account(id)
+                    .await
+            }
             None => Ok(credentials.api_key.clone()),
         }
     }

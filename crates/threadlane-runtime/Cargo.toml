@@ -6,6 +6,7 @@ description = "Threadlane agent runtime: harness, provider routing, tool dispatc
 
 [dependencies]
 threadlane-protocol.workspace = true
+threadlane-provider.workspace = true
 threadlane-tools.workspace = true
 tokio = { workspace = true, features = ["full"] }
 serde.workspace = true
@@ -29,4 +30,3 @@ optional = true
 
 [dev-dependencies]
 tempfile.workspace = true
-threadlane-provider.workspace = true

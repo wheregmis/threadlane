@@ -73,7 +73,7 @@ pub(crate) fn available_models_for_project(
     project_root: Option<&std::path::Path>,
 ) -> Vec<ModelOption> {
     let mut models = models_for_credentials(
-        threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some(),
+        threadlane_auth::antigravity_auth::load_antigravity_credentials().is_some(),
         threadlane_auth::opencode_auth::load_opencode_api_key().is_some(),
     );
     merge_discovered_opencode_models(&mut models);
@@ -133,7 +133,9 @@ pub async fn refresh_discovered_models() {
     if fresh {
         return;
     }
-    let mut discovered: Vec<ModelOption> = threadlane_provider::opencode::fetch_available_models()
+    let mut discovered: Vec<ModelOption> = threadlane_provider::opencode::fetch_available_models(
+        &threadlane_auth::opencode_auth::load_opencode_api_key().unwrap_or_default(),
+    )
         .await
         .into_iter()
         .map(|bare_id| ModelOption {
@@ -221,7 +223,20 @@ pub async fn refresh_openai_models() {
     let general =
         threadlane_provider::openai::try_fetch_available_models(&api_key, account_id.as_deref())
             .await;
-    let subscription = threadlane_provider::openai::try_fetch_subscription_models().await;
+    // Subscription inventory signs with the stored ChatGPT login (own
+    // source), never the API key: a key 401s on the subscription endpoint.
+    let login = threadlane_auth::openai_auth::load_credentials()
+        .filter(|credentials| threadlane_auth::openai_auth::is_own_source(&credentials.source));
+    let subscription = match login.as_ref() {
+        Some(credentials) => {
+            threadlane_provider::openai::try_fetch_subscription_models(
+                &credentials.access_token,
+                credentials.account_id.as_deref(),
+            )
+            .await
+        }
+        None => None,
+    };
     if general.is_none() && subscription.is_none() {
         return;
     }
@@ -304,7 +319,10 @@ static DISCOVERED_ANTIGRAVITY: std::sync::OnceLock<
 /// cache is fresh; an empty result keeps the previous success, and the next
 /// trigger retries once the TTL lapses.
 pub async fn refresh_antigravity_models() {
-    if threadlane_provider::antigravity_auth::load_antigravity_credentials().is_none() {
+    let token = threadlane_auth::antigravity_auth::load_antigravity_credentials()
+        .map(|credentials| credentials.access_token)
+        .unwrap_or_default();
+    if token.trim().is_empty() {
         return;
     }
     let fresh = DISCOVERED_ANTIGRAVITY
@@ -314,7 +332,7 @@ pub async fn refresh_antigravity_models() {
     if fresh {
         return;
     }
-    let live = threadlane_provider::antigravity::fetch_available_models().await;
+    let live = threadlane_provider::antigravity::fetch_available_models(&token).await;
     if live.is_empty() {
         return;
     }
@@ -630,7 +648,7 @@ fn credentials_allow(provider: ModelProvider) -> bool {
     match provider {
         ModelProvider::OpenAi => has_openai_credentials(),
         ModelProvider::Antigravity => {
-            threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some()
+            threadlane_auth::antigravity_auth::load_antigravity_credentials().is_some()
         }
         ModelProvider::OpenCode => {
             threadlane_auth::opencode_auth::load_opencode_api_key().is_some()

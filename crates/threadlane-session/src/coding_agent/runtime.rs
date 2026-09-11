@@ -25,7 +25,6 @@ use std::sync::Arc;
 use threadlane_mcp::McpManager;
 use threadlane_protocol::ProviderPort;
 use threadlane_provider::openai::fetch_available_models;
-use threadlane_provider::router::ProviderClient;
 use threadlane_runtime::harness::{OperationOutcome, Reducer, SessionStore, Snapshot};
 use threadlane_runtime::{
     AgentEvent, AgentMessage, AgentRuntime, ImageAttachment, ReasoningEffort, TokenUsage,
@@ -363,7 +362,7 @@ impl CodingAgent {
     }
 
     pub fn new(options: CodingAgentOptions) -> Self {
-        let provider = Arc::new(ProviderClient::new(
+        let provider = Arc::new(crate::credentials::provider_client_for(
             &options.api_key,
             options.account_id.clone(),
         ));

@@ -813,7 +813,7 @@ impl RightPanelView {
                 } else {
                     diff
                 };
-                let raw = threadlane_provider::ProviderClient::new(api_key, account_id)
+                let raw = threadlane_session::provider_client_for(api_key, account_id)
                     .generate_commit_message(&model, &diff)
                     .await?;
                 let message = normalize_generated_commit_message(&raw);

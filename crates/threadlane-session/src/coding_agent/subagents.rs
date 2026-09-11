@@ -1009,7 +1009,7 @@ pub(crate) async fn run_subagent_task(
         threadlane_runtime::AgentConfig::builder()
             .core_tool_schema_mode(config.tools.is_none())
             .build(),
-        Arc::new(threadlane_provider::router::ProviderClient::new(
+        Arc::new(crate::credentials::provider_client_for(
             context.api_key.clone(),
             context.account_id.clone(),
         )),

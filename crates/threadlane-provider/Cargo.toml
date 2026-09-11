@@ -6,9 +6,8 @@ description = "OpenAI REST & Codex backend streaming client and device auth for 
 
 [dependencies]
 threadlane-protocol.workspace = true
-threadlane-runtime.workspace = true
-threadlane-auth.workspace = true
 async-trait.workspace = true
+directories.workspace = true
 tokio = { workspace = true, features = ["full"] }
 reqwest = { workspace = true, features = ["default-tls", "json", "stream"] }
 serde.workspace = true
@@ -19,3 +18,6 @@ tokio-tungstenite.workspace = true
 sha2.workspace = true
 url.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

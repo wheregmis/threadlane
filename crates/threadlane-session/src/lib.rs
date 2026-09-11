@@ -51,7 +51,9 @@ pub use acp_runtime::AcpEngine;
 pub use browser::{ActTarget, BrowserBridge, BrowserCommand, BrowserRequest};
 pub use commands::{available_slash_commands, SlashCommandInfo};
 pub use config::CodingAgentConfig;
-pub use credentials::provider_credentials;
+pub use credentials::{
+    opencode_api_key, provider_client_for, provider_credentials, AuthCredentialBridge,
+};
 pub use permission::{PermissionDecision, PermissionHandle};
 pub use policy::ToolPolicy;
 pub use project_registry::{

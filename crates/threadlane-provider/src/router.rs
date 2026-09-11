@@ -1,4 +1,5 @@
 use crate::antigravity::AntigravityClient;
+use crate::convert::{convert_to_codex_llm, convert_to_llm};
 use crate::openai::OpenAIClient;
 use crate::opencode::OpenCodeGoClient;
 use crate::title_generator::{title_payload, TITLE_REQUEST_TIMEOUT};
@@ -7,8 +8,8 @@ use futures_util::future::BoxFuture;
 use serde_json::Value;
 use std::sync::Arc;
 use threadlane_protocol::{
-    DeferredResponse as RuntimeDeferredResponse, ProviderPort, RuntimeRequest,
-    RuntimeStreamEvent as StreamEvent,
+    AgentMessage, AgentToolDefinition, DeferredResponse as RuntimeDeferredResponse, ProviderPort,
+    RuntimeRequest, RuntimeStreamEvent as StreamEvent,
 };
 use tokio::sync::mpsc;
 
@@ -121,9 +122,9 @@ fn runtime_request_payload_source(request: &RuntimeRequest) -> PayloadSource {
         Box::pin(async move {
             match format {
                 PayloadFormat::ChatCompletions => {
-                    let agent_messages: Vec<threadlane_runtime::AgentMessage> =
+                    let agent_messages: Vec<AgentMessage> =
                         serde_json::from_value(messages).unwrap_or_default();
-                    let chat_messages = threadlane_runtime::convert_to_llm(&agent_messages);
+                    let chat_messages = convert_to_llm(&agent_messages);
                     let mut payload = serde_json::json!({
                         "model": model,
                         "messages": chat_messages,
@@ -137,14 +138,14 @@ fn runtime_request_payload_source(request: &RuntimeRequest) -> PayloadSource {
                     payload
                 }
                 PayloadFormat::Codex => {
-                    let agent_messages: Vec<threadlane_runtime::AgentMessage> =
+                    let agent_messages: Vec<AgentMessage> =
                         serde_json::from_value(messages).unwrap_or_default();
                     let codex_tools = tools
                         .as_array()
                         .into_iter()
                         .flatten()
                         .filter_map(|tool| {
-                            threadlane_runtime::types::AgentToolDefinition::from_provider_schema(
+                            AgentToolDefinition::from_provider_schema(
                                 tool,
                             )
                             .ok()
@@ -152,7 +153,7 @@ fn runtime_request_payload_source(request: &RuntimeRequest) -> PayloadSource {
                         .map(|tool| tool.to_codex_responses_tool())
                         .collect::<Vec<_>>();
                     let (instructions, input) =
-                        threadlane_runtime::convert_to_codex_llm(&agent_messages);
+                        convert_to_codex_llm(&agent_messages);
                     let mut payload = serde_json::json!({
                         "model": model,
                         "instructions": instructions,
@@ -180,6 +181,8 @@ pub struct ProviderClient {
     openai_fallbacks: Vec<OpenAIClient>,
     antigravity: AntigravityClient,
     opencode: OpenCodeGoClient,
+    opencode_api_key: Option<String>,
+    antigravity_credentials: crate::credentials::SharedAntigravityCredentials,
 }
 
 #[async_trait::async_trait]
@@ -223,20 +226,84 @@ impl ProviderPort for ProviderClient {
 
 impl ProviderClient {
     pub fn new(api_key: impl Into<String>, account_id: Option<String>) -> Self {
+        Self::new_with_resolver(
+            api_key,
+            account_id,
+            Arc::new(crate::credentials::NoopCodexResolver),
+            None,
+            Arc::new(crate::credentials::NoopAntigravityCredentials),
+        )
+    }
+
+    /// Full constructor with host-injected credential resolution. Session
+    /// clients should prefer this so stored logins keep working; [`Self::new`]
+    /// resolves from explicit arguments and ambient environment only.
+    pub fn new_with_resolver(
+        api_key: impl Into<String>,
+        account_id: Option<String>,
+        codex_accounts: crate::credentials::SharedCodexResolver,
+        opencode_api_key: Option<String>,
+        antigravity_credentials: crate::credentials::SharedAntigravityCredentials,
+    ) -> Self {
         let api_key = api_key.into();
-        let backups = threadlane_auth::openai_auth::get_backup_codex_accounts();
-        let openai_fallbacks: Vec<OpenAIClient> = backups
+        let openai_fallbacks: Vec<OpenAIClient> = codex_accounts
+            .backup_accounts()
             .into_iter()
             .filter(|backup| backup.access_token != api_key)
-            .map(|backup| OpenAIClient::new(backup.access_token, backup.account_id))
+            .map(|backup| {
+                OpenAIClient::new_with_resolver(
+                    backup.access_token,
+                    backup.account_id,
+                    codex_accounts.clone(),
+                )
+            })
             .collect();
 
-        Self {
-            openai: OpenAIClient::new(api_key, account_id),
-            openai_fallbacks,
-            antigravity: AntigravityClient::new(),
-            opencode: OpenCodeGoClient::new(),
+        let mut opencode = OpenCodeGoClient::new();
+        if let Some(key) = opencode_api_key.clone() {
+            opencode = opencode.with_api_key(key);
         }
+        Self {
+            openai: OpenAIClient::new_with_resolver(api_key, account_id, codex_accounts.clone()),
+            openai_fallbacks,
+            antigravity: AntigravityClient::new_with_credentials(
+                antigravity_credentials.clone(),
+            ),
+            opencode,
+            opencode_api_key,
+            antigravity_credentials,
+        }
+    }
+
+    /// Attaches the host's Codex account resolver, rebuilding the OpenAI
+    /// clients (primary plus fallbacks) so stored logins resolve again.
+    pub fn with_codex_resolver(self, codex_accounts: crate::credentials::SharedCodexResolver) -> Self {
+        let (api_key, account_id) = self.openai.credentials_pair();
+        Self::new_with_resolver(
+            api_key,
+            account_id,
+            codex_accounts,
+            self.opencode_api_key.clone(),
+            self.antigravity_credentials.clone(),
+        )
+    }
+
+    /// Attaches the stored OpenCode API key for Zen requests.
+    pub fn with_opencode_api_key(mut self, api_key: impl Into<String>) -> Self {
+        let key = api_key.into();
+        self.opencode_api_key = (!key.trim().is_empty()).then_some(key.clone());
+        self.opencode = self.opencode.clone().with_api_key(key);
+        self
+    }
+
+    /// Attaches the host's Antigravity credential source.
+    pub fn with_antigravity_credentials(
+        mut self,
+        credentials: crate::credentials::SharedAntigravityCredentials,
+    ) -> Self {
+        self.antigravity_credentials = credentials.clone();
+        self.antigravity = AntigravityClient::new_with_credentials(credentials);
+        self
     }
 
     #[cfg(test)]
@@ -254,6 +321,8 @@ impl ProviderClient {
             )],
             antigravity: AntigravityClient::new(),
             opencode: OpenCodeGoClient::new(),
+            opencode_api_key: None,
+            antigravity_credentials: Arc::new(crate::credentials::NoopAntigravityCredentials),
         }
     }
 
@@ -271,6 +340,8 @@ impl ProviderClient {
                 .collect(),
             antigravity: AntigravityClient::new(),
             opencode: OpenCodeGoClient::new(),
+            opencode_api_key: None,
+            antigravity_credentials: Arc::new(crate::credentials::NoopAntigravityCredentials),
         }
     }
 
