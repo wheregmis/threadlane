@@ -1,13 +1,19 @@
-//! Live video mirror for native computer use: a small non-activating popup
-//! that shows the target as it changes plus where the agent's input lands.
-//! It displays; it never drives anything itself.
+//! Live video mirror for native computer use: a small floating panel inside
+//! the chat view that shows the target as it changes plus where the agent's
+//! input lands. It displays; it never drives anything itself.
+//!
+//! The panel floats over the chat, anchored to the bottom-right corner:
+//! compact by default, dragged by its header to move, grown from its
+//! top-left grip (anchored bottom-right, so dragging up and left enlarges
+//! it), and toggled to fill the chat panel with the expand button. The host
+//! view owns the entity and drops it when `AppState::mirror_open` clears.
 //!
 //! Frames arrive in-process from `threadlane_session::computer_live`: the
-//! macOS poller publishes bounded BGRA frames at up to 30fps while this view
+//! macOS poller publishes bounded BGRA frames at up to 20fps while this view
 //! holds a subscription, and each one is painted straight from a
 //! `RenderImage` — no JPEG round trip and no file polling on the hot path.
 //! Input overlays (click ripples, scroll direction, the pointer) ride the
-//! same feed so the popup reads like a screen recording, not a slideshow.
+//! same feed so the panel reads like a screen recording, not a slideshow.
 //!
 //! `<previews>/latest.json` stays the cold fallback: it names the last
 //! capture on disk for when no live frame exists (fresh launch, Linux) and
@@ -40,10 +46,25 @@ const FPS_WINDOW_MS: u128 = 2_000;
 /// command buffer still sampling it never sees the tile reused.
 const RETIRE_PAINTS: u8 = 3;
 /// Retired frames beyond this are released immediately, paints or not, so a
-/// hidden window never hoards textures.
+/// panel that is not being painted never hoards textures.
 const RETIRE_CAP: usize = 8;
 /// A poller capture older than this while running means the feed stalled.
 const STALE_MS: u128 = 3_000;
+/// Gap between the panel and the chat view's edges.
+const PANEL_MARGIN: Pixels = px(12.0);
+/// Compact size on first open: a 16:10 picture under a 30px header.
+const PANEL_INITIAL_WIDTH: Pixels = px(320.0);
+const PANEL_INITIAL_HEIGHT: Pixels = px(230.0);
+/// Smallest useful panel: header plus a legible picture.
+const PANEL_MIN_WIDTH: Pixels = px(200.0);
+const PANEL_MIN_HEIGHT: Pixels = px(140.0);
+
+/// Drag payload for the top-left resize grip.
+struct ResizeDrag;
+/// Drag payload for moving the panel by its header. The serial is minted per
+/// render and frozen into the active drag by gpui, so a move handler can
+/// tell a new drag from a continuing one without any drop event.
+struct MoveDrag(u64);
 
 /// The frame currently on screen and the pixels it was built from.
 struct LivePicture {
@@ -76,23 +97,33 @@ pub struct MirrorView {
     last_overlay_ms: u128,
     error: Option<String>,
     last_ts: u64,
+    /// Header as last repainted by the timer, see `header_key`.
+    last_header_key: String,
+    /// Distance from the host's bottom-right corner (right, bottom).
+    offset: Point<Pixels>,
+    /// Panel size while not expanded.
+    size: Size<Pixels>,
+    /// Filling the host (minus margins) instead of `size` at `offset`.
+    expanded: bool,
+    /// Cursor position within the panel when a move drag began; captured on
+    /// the first drag move so the panel follows without jumping.
+    move_grab: Option<Point<Pixels>>,
+    /// Serial of the move drag `move_grab` belongs to.
+    move_grab_for: Option<u64>,
+    /// Serial handed to the next header drag.
+    drag_serial: u64,
+    /// Host bounds as last seen by the layer probe; geometry is re-clamped
+    /// whenever they change so a shrinking window cannot strand the panel.
+    host: Option<Bounds<Pixels>>,
     _tasks: Vec<Task<()>>,
+    /// Releases every uploaded frame when the host drops this entity.
+    _release: Subscription,
 }
 
 impl MirrorView {
-    pub(crate) fn build(
+    pub(crate) fn new(
         model: Entity<AppState>,
         previews_dir: PathBuf,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Entity<Self> {
-        cx.new(|cx| Self::new(model, previews_dir, window, cx))
-    }
-
-    fn new(
-        model: Entity<AppState>,
-        previews_dir: PathBuf,
-        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         // Live frames: holding this receiver is what switches the poller to
@@ -184,6 +215,24 @@ impl MirrorView {
             }
         });
 
+        // Atlas tiles are only ever freed explicitly. The popup window used
+        // to take its atlas with it; now the frames live in the chat window,
+        // so hand every uploaded frame back when the host drops this view.
+        let release = cx.on_release(|this, cx| {
+            if let Some(live) = this.live.take() {
+                cx.drop_image(live.image, None);
+            }
+            let retired: Vec<Retired> = this
+                .retired
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .drain(..)
+                .collect();
+            for entry in retired {
+                cx.drop_image(entry.image, None);
+            }
+        });
+
         Self {
             focus_handle: cx.focus_handle(),
             model,
@@ -201,8 +250,61 @@ impl MirrorView {
             last_overlay_ms: 0,
             error: None,
             last_ts: 0,
+            last_header_key: String::new(),
+            offset: point(PANEL_MARGIN, PANEL_MARGIN),
+            size: size(PANEL_INITIAL_WIDTH, PANEL_INITIAL_HEIGHT),
+            expanded: false,
+            move_grab: None,
+            move_grab_for: None,
+            drag_serial: 0,
+            host: None,
             _tasks: vec![frames, overlays, status, sidecar],
+            _release: release,
         }
+    }
+
+    /// The layer probe saw new host bounds: remember them and pull the panel
+    /// back inside, so a window made smaller never leaves the header (and
+    /// with it every control) off-screen.
+    fn host_resized(&mut self, host: Bounds<Pixels>) {
+        self.host = Some(host);
+        let (offset, size) = fitted_panel(host, self.offset, self.size);
+        self.offset = offset;
+        self.size = size;
+    }
+
+    /// Grow or shrink from the top-left grip. The bottom-right corner stays
+    /// put, so the new size is the distance from the cursor to that corner.
+    fn resize_to(&mut self, host: Bounds<Pixels>, mouse: Point<Pixels>) {
+        if self.expanded {
+            // Leaving expanded mode by dragging: the corner is at the margins.
+            self.offset = point(PANEL_MARGIN, PANEL_MARGIN);
+            self.expanded = false;
+        }
+        self.size = resized_panel(host, self.offset, mouse);
+    }
+
+    /// Follow a header drag, keeping the whole panel inside the host. A new
+    /// drag (fresh serial) re-captures where the header was grabbed.
+    fn move_to(&mut self, serial: u64, host: Bounds<Pixels>, mouse: Point<Pixels>) {
+        if self.expanded {
+            return;
+        }
+        if self.move_grab_for != Some(serial) {
+            self.move_grab = None;
+            self.move_grab_for = Some(serial);
+        }
+        let panel_left = host.right() - self.offset.x - self.size.width;
+        let panel_top = host.bottom() - self.offset.y - self.size.height;
+        let grab = *self
+            .move_grab
+            .get_or_insert(point(mouse.x - panel_left, mouse.y - panel_top));
+        self.offset = moved_panel(host, self.size, grab, mouse);
+    }
+
+    fn toggle_expanded(&mut self, cx: &mut Context<Self>) {
+        self.expanded = !self.expanded;
+        cx.notify();
     }
 
     /// Take a poller status; true when something visible changed. Every tick
@@ -271,12 +373,38 @@ impl MirrorView {
             .retain(|overlay| now.saturating_sub(overlay.ts_ms) < CAPTION_MS.max(OVERLAY_MS));
     }
 
-    /// Frames per second over the recent window, once at least two landed.
-    fn fps(&self) -> Option<f32> {
-        let (first, last) = (self.frame_times.front()?, self.frame_times.back()?);
+    /// Frames per second over the recent window, once at least two landed
+    /// in it. Measured against `now`, not the last arrival: unchanged
+    /// pixels are never republished, so the readout must decay to nothing
+    /// on its own when the picture settles.
+    fn fps(&self, now: u128) -> Option<f32> {
+        let recent: Vec<u128> = self
+            .frame_times
+            .iter()
+            .copied()
+            .filter(|ts| now.saturating_sub(*ts) <= FPS_WINDOW_MS)
+            .collect();
+        let (first, last) = (recent.first()?, recent.last()?);
         let span_ms = last.saturating_sub(*first);
-        (self.frame_times.len() >= 2 && span_ms > 0)
-            .then(|| (self.frame_times.len() - 1) as f32 * 1_000.0 / span_ms as f32)
+        (recent.len() >= 2 && span_ms > 0)
+            .then(|| (recent.len() - 1) as f32 * 1_000.0 / span_ms as f32)
+    }
+
+    /// What the header would say right now; the sidecar timer compares
+    /// this between ticks so time-driven states (a stalled feed, a decayed
+    /// fps readout, an expired caption) get their repaint without waiting
+    /// for the very events whose absence defines them.
+    fn header_key(&self) -> String {
+        let now = now_ms();
+        let caption_live = self
+            .overlays
+            .last()
+            .is_some_and(|overlay| now.saturating_sub(overlay.ts_ms) < CAPTION_MS);
+        format!(
+            "{:?}|{:?}|{caption_live}",
+            self.feed_state(),
+            self.fps(now).map(|fps| fps.round() as u32)
+        )
     }
 
     /// Re-read poller status and the sidecar; true when the view changed.
@@ -285,6 +413,11 @@ impl MirrorView {
     /// instead of a blank window.
     fn poll(&mut self) -> bool {
         let mut changed = false;
+        let header = self.header_key();
+        if header != self.last_header_key {
+            self.last_header_key = header;
+            changed = true;
+        }
         if let Ok(bytes) = std::fs::read(self.previews_dir.join("latest.json")) {
             if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
                 let ts = value
@@ -357,9 +490,12 @@ impl MirrorView {
         changed
     }
 
-    fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Hide the panel. The host observes this view and drops the entity once
+    /// the flag clears, which also ends the frame subscription that keeps the
+    /// poller in its video tier.
+    fn close(&mut self, cx: &mut Context<Self>) {
         self.model.update(cx, |state, _| state.mirror_open = false);
-        window.remove_window();
+        cx.notify();
     }
 
     /// Header state: what the feed is doing right now, in one glance.
@@ -377,7 +513,7 @@ impl MirrorView {
             if stalled {
                 FeedState::Stalled
             } else {
-                FeedState::Live { fps: self.fps() }
+                FeedState::Live { fps: self.fps(now) }
             }
         } else if self.live.is_some() {
             FeedState::Paused
@@ -405,8 +541,74 @@ enum FeedState {
 /// Upload-ready image for a live frame: gpui wants tightly packed BGRA rows,
 /// which is exactly what the poller publishes, so this is one copy.
 fn render_image(frame: &LiveFrame) -> Option<Arc<RenderImage>> {
+    // `from_raw` accepts any buffer at least this long, and the atlas
+    // uploads with a tight pitch, so a padded buffer would shear silently.
+    if frame.bgra.len() != frame.width as usize * frame.height as usize * 4 {
+        return None;
+    }
     let buffer = RgbaImage::from_raw(frame.width, frame.height, frame.bgra.clone())?;
     Some(Arc::new(RenderImage::new(vec![Frame::new(buffer)])))
+}
+
+/// Panel size after dragging the top-left grip to `mouse`, with the panel's
+/// bottom-right corner fixed at `offset` from the host's corner. Clamped to
+/// the minimum size and to what fits inside the host with a margin.
+fn resized_panel(
+    host: Bounds<Pixels>,
+    offset: Point<Pixels>,
+    mouse: Point<Pixels>,
+) -> Size<Pixels> {
+    let right_edge = host.right() - offset.x;
+    let bottom_edge = host.bottom() - offset.y;
+    let max_width = (host.size.width - offset.x - PANEL_MARGIN).max(PANEL_MIN_WIDTH);
+    let max_height = (host.size.height - offset.y - PANEL_MARGIN).max(PANEL_MIN_HEIGHT);
+    size(
+        (right_edge - mouse.x).clamp(PANEL_MIN_WIDTH, max_width),
+        (bottom_edge - mouse.y).clamp(PANEL_MIN_HEIGHT, max_height),
+    )
+}
+
+/// Panel offset (right, bottom) after dragging its header so the point
+/// grabbed at `grab` (relative to the panel's top-left) sits under `mouse`,
+/// clamped so the panel stays inside the host.
+fn moved_panel(
+    host: Bounds<Pixels>,
+    panel: Size<Pixels>,
+    grab: Point<Pixels>,
+    mouse: Point<Pixels>,
+) -> Point<Pixels> {
+    let left = mouse.x - grab.x;
+    let top = mouse.y - grab.y;
+    let right = host.right() - (left + panel.width);
+    let bottom = host.bottom() - (top + panel.height);
+    let max_right = (host.size.width - panel.width).max(px(0.0));
+    let max_bottom = (host.size.height - panel.height).max(px(0.0));
+    point(
+        right.clamp(px(0.0), max_right),
+        bottom.clamp(px(0.0), max_bottom),
+    )
+}
+
+/// Stored panel geometry pulled back inside a (possibly smaller) host: the
+/// size shrinks to what fits with a margin, then the offset is clamped so the
+/// whole panel stays visible.
+fn fitted_panel(
+    host: Bounds<Pixels>,
+    offset: Point<Pixels>,
+    panel: Size<Pixels>,
+) -> (Point<Pixels>, Size<Pixels>) {
+    let room_width = (host.size.width - PANEL_MARGIN * 2.0).max(px(1.0));
+    let room_height = (host.size.height - PANEL_MARGIN * 2.0).max(px(1.0));
+    let fitted = size(panel.width.min(room_width), panel.height.min(room_height));
+    let max_right = (host.size.width - fitted.width).max(px(0.0));
+    let max_bottom = (host.size.height - fitted.height).max(px(0.0));
+    (
+        point(
+            offset.x.clamp(px(0.0), max_right),
+            offset.y.clamp(px(0.0), max_bottom),
+        ),
+        fitted,
+    )
 }
 
 /// Where a `frame_width × frame_height` picture lands inside `bounds` with
@@ -573,7 +775,7 @@ fn now_ms() -> u128 {
         .unwrap_or(0)
 }
 
-/// Newest `computer-*.jpg` / `latest-frame.jpg` in a previews dir, if any.
+/// Newest `computer-*.jpg` screenshot in a previews dir, if any.
 fn newest_capture(dir: &std::path::Path) -> Option<PathBuf> {
     std::fs::read_dir(dir)
         .ok()?
@@ -583,7 +785,7 @@ fn newest_capture(dir: &std::path::Path) -> Option<PathBuf> {
                 && path
                     .file_name()
                     .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with("computer-") || name == "latest-frame.jpg")
+                    .is_some_and(|name| name.starts_with("computer-"))
         })
         .max_by_key(|path| file_mtime_ms(path).unwrap_or(0))
 }
@@ -661,7 +863,7 @@ impl Render for MirrorView {
                     .map(|overlay| now.saturating_sub(overlay.ts_ms))
                     .filter(|age| *age < 450)
                     .map(|age| 1.0 - age as f32 / 450.0);
-                let animating = !markers.is_empty() || flash.is_some();
+                let animating = !markers.is_empty() || flash.is_some() || caption.is_some();
                 canvas(
                     move |_, _, _| (),
                     move |bounds, _, window, _cx| {
@@ -749,8 +951,126 @@ impl Render for MirrorView {
                 .into_any_element(),
         };
 
-        div()
-            .size_full()
+        let expanded = self.expanded;
+        self.drag_serial += 1;
+        let drag_serial = self.drag_serial;
+        let header = div()
+            .id("computer-mirror-drag")
+            .flex_none()
+            .h(px(30.0))
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_2()
+            .border_b_1()
+            .border_color(theme.border)
+            .cursor_grab()
+            .on_drag(MoveDrag(drag_serial), |_, _offset, _window, cx| {
+                cx.new(|_| Empty)
+            })
+            .child(div().size(px(8.0)).rounded_full().bg(dot))
+            .child(
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(badge_color)
+                    .child(badge),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_xs()
+                    .truncate()
+                    .text_color(theme.muted_foreground)
+                    .child(subtitle),
+            )
+            .child(
+                Button::new("mirror-expand")
+                    .icon(if expanded {
+                        IconName::Minimize
+                    } else {
+                        IconName::Maximize
+                    })
+                    .ghost()
+                    .xsmall()
+                    .tooltip(if expanded {
+                        "Shrink the mirror"
+                    } else {
+                        "Expand the mirror to fill the chat"
+                    })
+                    .on_click(cx.listener(|this, _event, _window, cx| this.toggle_expanded(cx))),
+            )
+            .child(
+                Button::new("mirror-close")
+                    .icon(IconName::Close)
+                    .ghost()
+                    .xsmall()
+                    .tooltip("Close computer mirror")
+                    .on_click(cx.listener(|this, _event, _window, cx| this.close(cx))),
+            );
+        let body = div()
+            .flex_1()
+            .min_h_0()
+            .relative()
+            .child(picture)
+            .when_some(caption, |this, caption| {
+                this.child(
+                    div()
+                        .absolute()
+                        .bottom_2()
+                        .left_2()
+                        .max_w_full()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(hsla(0.0, 0.0, 0.0, 0.62))
+                        .text_xs()
+                        .text_color(hsla(0.0, 0.0, 1.0, 0.95))
+                        .truncate()
+                        .child(caption),
+                )
+            });
+        // The grip sits over the header's top-left corner: the panel is
+        // anchored bottom-right, so this is the corner that moves.
+        let grip = div()
+            .id("computer-mirror-resize")
+            .absolute()
+            .top_0()
+            .left_0()
+            .size(px(16.0))
+            .rounded_tl_lg()
+            .cursor_nwse_resize()
+            .hover(|style| style.bg(theme.primary.opacity(0.3)))
+            .on_drag(ResizeDrag, |_, _offset, _window, cx| cx.new(|_| Empty))
+            .child(
+                div()
+                    .absolute()
+                    .top(px(4.0))
+                    .left(px(4.0))
+                    .size(px(7.0))
+                    .rounded_tl_sm()
+                    .border_t_1()
+                    .border_l_1()
+                    .border_color(theme.muted_foreground.opacity(0.8)),
+            );
+        let panel = div()
+            .id("computer-mirror-panel")
+            .absolute()
+            .when(expanded, |this| {
+                this.top(PANEL_MARGIN)
+                    .left(PANEL_MARGIN)
+                    .right(PANEL_MARGIN)
+                    .bottom(PANEL_MARGIN)
+            })
+            .when(!expanded, |this| {
+                this.right(self.offset.x)
+                    .bottom(self.offset.y)
+                    .w(self.size.width)
+                    .h(self.size.height)
+            })
+            .occlude()
             .flex()
             .flex_col()
             .bg(theme.background)
@@ -758,69 +1078,55 @@ impl Render for MirrorView {
             .border_color(theme.border)
             .rounded_lg()
             .overflow_hidden()
-            .child(
-                div()
-                    .flex_none()
-                    .h(px(30.0))
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .child(div().size(px(8.0)).rounded_full().bg(dot))
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_xs()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(badge_color)
-                            .child(badge),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_xs()
-                            .truncate()
-                            .text_color(theme.muted_foreground)
-                            .child(subtitle),
-                    )
-                    .child(
-                        Button::new("mirror-close")
-                            .icon(IconName::Close)
-                            .ghost()
-                            .xsmall()
-                            .tooltip("Close computer mirror")
-                            .on_click(cx.listener(|this, _event, window, cx| {
-                                this.close(window, cx);
-                            })),
-                    ),
+            .shadow_lg()
+            .child(header)
+            .child(body)
+            .child(grip);
+
+        // The probe records the host's bounds every layout so stored
+        // geometry can be re-clamped when the window shrinks; it paints
+        // nothing and only touches the entity when the bounds changed.
+        let probe_target = cx.weak_entity();
+        let known_host = self.host;
+        let probe = canvas(
+            move |bounds, _window, cx| {
+                if known_host != Some(bounds) {
+                    let _ = probe_target.update(cx, |this, cx| {
+                        this.host_resized(bounds);
+                        cx.notify();
+                    });
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .inset_0();
+
+        // A transparent layer over the whole host: it carries no hitbox that
+        // blocks the chat underneath, but it receives drag moves wherever the
+        // cursor goes and reports its bounds, which is all the geometry the
+        // panel needs to move and resize. Drags end on their own; a new one
+        // is told apart by its serial, so no drop listener is needed (and
+        // none on this layer could fire anyway, the occluding panel is what
+        // is hovered at release).
+        div()
+            .absolute()
+            .inset_0()
+            .on_drag_move(
+                cx.listener(|this, event: &DragMoveEvent<ResizeDrag>, _window, cx| {
+                    this.resize_to(event.bounds, event.event.position);
+                    cx.notify();
+                }),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .relative()
-                    .child(picture)
-                    .when_some(caption, |this, caption| {
-                        this.child(
-                            div()
-                                .absolute()
-                                .bottom_2()
-                                .left_2()
-                                .max_w_full()
-                                .px_2()
-                                .py_1()
-                                .rounded_md()
-                                .bg(hsla(0.0, 0.0, 0.0, 0.62))
-                                .text_xs()
-                                .text_color(hsla(0.0, 0.0, 1.0, 0.95))
-                                .truncate()
-                                .child(caption),
-                        )
-                    }),
+            .on_drag_move(
+                cx.listener(|this, event: &DragMoveEvent<MoveDrag>, _window, cx| {
+                    let serial = event.drag(cx).0;
+                    this.move_to(serial, event.bounds, event.event.position);
+                    cx.notify();
+                }),
             )
+            .child(probe)
+            .child(panel)
     }
 }
 
@@ -846,11 +1152,13 @@ mod tests {
     fn newest_capture_picks_latest_jpg() {
         let dir = tempfile::tempdir().unwrap();
         let old = dir.path().join("computer-1.jpg");
-        let new = dir.path().join("latest-frame.jpg");
+        let new = dir.path().join("computer-2.jpg");
         std::fs::write(&old, b"old").unwrap();
         std::thread::sleep(std::time::Duration::from_millis(15));
         std::fs::write(&new, b"new").unwrap();
         std::fs::write(dir.path().join("notes.txt"), b"nope").unwrap();
+        // A leftover preview from pre-video builds is not a screenshot.
+        std::fs::write(dir.path().join("latest-frame.jpg"), b"legacy").unwrap();
         assert_eq!(newest_capture(dir.path()), Some(new));
         assert!(file_mtime_ms(&old).is_some());
     }
@@ -943,6 +1251,95 @@ mod tests {
         let mut short = frame(4, 2);
         short.bgra.pop();
         assert!(render_image(&short).is_none());
+        // Row padding would upload sheared; refuse it too.
+        let mut padded = frame(4, 2);
+        padded.bgra.extend_from_slice(&[0; 8]);
+        assert!(render_image(&padded).is_none());
+    }
+
+    fn host() -> Bounds<Pixels> {
+        Bounds {
+            origin: point(px(100.0), px(50.0)),
+            size: size(px(800.0), px(600.0)),
+        }
+    }
+
+    #[test]
+    fn resize_grows_from_the_anchored_corner_and_clamps() {
+        let offset = point(PANEL_MARGIN, PANEL_MARGIN);
+        // Corner at (888, 638): a cursor 400x300 away gives that size.
+        assert_eq!(
+            resized_panel(host(), offset, point(px(488.0), px(338.0))),
+            size(px(400.0), px(300.0))
+        );
+        // Dragging past the corner clamps to the minimum...
+        assert_eq!(
+            resized_panel(host(), offset, point(px(2_000.0), px(2_000.0))),
+            size(PANEL_MIN_WIDTH, PANEL_MIN_HEIGHT)
+        );
+        // ...and dragging off the host clamps to what fits with a margin.
+        assert_eq!(
+            resized_panel(host(), offset, point(px(-500.0), px(-500.0))),
+            size(
+                px(800.0) - PANEL_MARGIN * 2.0,
+                px(600.0) - PANEL_MARGIN * 2.0
+            )
+        );
+    }
+
+    #[test]
+    fn move_follows_the_grab_point_inside_the_host() {
+        let panel = size(px(320.0), px(230.0));
+        let grab = point(px(20.0), px(10.0));
+        // Cursor at (500, 300) puts the panel's top-left at (480, 290):
+        // right offset = 900 - 800 = 100, bottom offset = 650 - 520 = 130.
+        assert_eq!(
+            moved_panel(host(), panel, grab, point(px(500.0), px(300.0))),
+            point(px(100.0), px(130.0))
+        );
+        // Dragged beyond the host's top-left: pinned to the far corner.
+        assert_eq!(
+            moved_panel(host(), panel, grab, point(px(-900.0), px(-900.0))),
+            point(px(480.0), px(370.0))
+        );
+        // Dragged beyond the bottom-right: pinned flush to that corner.
+        assert_eq!(
+            moved_panel(host(), panel, grab, point(px(5_000.0), px(5_000.0))),
+            point(px(0.0), px(0.0))
+        );
+    }
+
+    #[test]
+    fn fitted_panel_pulls_geometry_back_inside_a_smaller_host() {
+        // Fits already: untouched.
+        assert_eq!(
+            fitted_panel(
+                host(),
+                point(px(12.0), px(12.0)),
+                size(px(320.0), px(230.0))
+            ),
+            (point(px(12.0), px(12.0)), size(px(320.0), px(230.0)))
+        );
+        // Offset stranded past the top-left after a shrink: clamped so the
+        // panel is flush with the far corner instead of off-screen.
+        assert_eq!(
+            fitted_panel(
+                host(),
+                point(px(700.0), px(500.0)),
+                size(px(320.0), px(230.0))
+            ),
+            (point(px(480.0), px(370.0)), size(px(320.0), px(230.0)))
+        );
+        // Panel larger than the host: shrunk to the host minus margins and
+        // pinned to the corner.
+        let tiny = Bounds {
+            origin: point(px(0.0), px(0.0)),
+            size: size(px(200.0), px(100.0)),
+        };
+        assert_eq!(
+            fitted_panel(tiny, point(px(40.0), px(40.0)), size(px(320.0), px(230.0))),
+            (point(px(24.0), px(24.0)), size(px(176.0), px(76.0)))
+        );
     }
 
     #[test]

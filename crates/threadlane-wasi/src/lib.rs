@@ -1290,3 +1290,85 @@ mod reload_tests {
             .all(|request| request.invoking_extension != extension_name));
     }
 }
+
+#[cfg(test)]
+mod native_stack_tests {
+    //! wasmi's native stack use must stay bounded no matter how many Wasm
+    //! instructions an extension executes.
+    //!
+    //! wasmi 2.0 selects a tail-call dispatch backend in optimized builds and
+    //! relies on LLVM emitting sibling calls between instruction handlers. When
+    //! a build blocks that optimization (the dev profile did through
+    //! `debug-assertions`; see the `[profile.dev.package.wasmi]` note in the
+    //! workspace `Cargo.toml`), every executed instruction nests one native
+    //! frame and `extension_info` overflows the 512 KiB stack of GPUI's GCD
+    //! worker threads after roughly six thousand instructions. The probe below
+    //! runs an `extension_info` that executes far more than that on a thread
+    //! with exactly that stack size. An overflow aborts the whole process, so
+    //! the probe runs in a child process and the parent asserts on its status.
+    use super::*;
+
+    const PROBE_ENV: &str = "THREADLANE_WASI_NATIVE_STACK_PROBE";
+    /// GCD worker threads, GPUI's background executor on macOS, get 512 KiB.
+    const GCD_WORKER_STACK_SIZE: usize = 512 * 1024;
+    const MANIFEST: &str =
+        r#"{"name":"stack_probe","version":"0.1.0","description":"native stack probe"}"#;
+
+    /// `extension_info` spins for 300k iterations (over a million executed
+    /// instructions) before returning the manifest. The module is written in
+    /// text form; wasmi parses it directly because its `wat` feature is on.
+    fn probe_module() -> Vec<u8> {
+        format!(
+            r#"(module
+  (memory (export "memory") 1)
+  (data (i32.const 8) "{manifest}")
+  (func (export "extension_info") (result i64)
+    (local $n i32)
+    (local.set $n (i32.const 300000))
+    (block $done
+      (loop $spin
+        (local.set $n (i32.sub (local.get $n) (i32.const 1)))
+        (br_if $done (i32.eqz (local.get $n)))
+        (br $spin)))
+    (i64.or (i64.shl (i64.const 8) (i64.const 32)) (i64.const {len}))))"#,
+            manifest = MANIFEST.replace('"', "\\\""),
+            len = MANIFEST.len(),
+        )
+        .into_bytes()
+    }
+
+    fn run_probe() {
+        let loaded = std::thread::Builder::new()
+            .name("wasi-native-stack-probe".into())
+            .stack_size(GCD_WORKER_STACK_SIZE)
+            .spawn(|| WasiExtension::load_from_bytes(probe_module()))
+            .expect("spawn probe thread")
+            .join()
+            .expect("probe thread must not panic")
+            .expect("probe extension must load");
+        assert_eq!(loaded.manifest.name, "stack_probe");
+    }
+
+    #[test]
+    fn extension_info_runs_on_a_gcd_sized_native_stack() {
+        if std::env::var_os(PROBE_ENV).is_some() {
+            run_probe();
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary path"))
+            .args([
+                "--exact",
+                "native_stack_tests::extension_info_runs_on_a_gcd_sized_native_stack",
+            ])
+            .env(PROBE_ENV, "1")
+            .output()
+            .expect("run probe child");
+        assert!(
+            output.status.success(),
+            "extension_info overflowed a {GCD_WORKER_STACK_SIZE}-byte native stack \
+             (wasmi is nesting a native frame per Wasm instruction): {}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+}
