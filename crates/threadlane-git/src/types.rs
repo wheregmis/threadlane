@@ -237,6 +237,8 @@ pub struct GitStatus {
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GitFile {
     pub path: String,
+    #[serde(default)]
+    pub orig_path: Option<String>,
     pub(crate) status: String,
     pub(crate) index_status: char,
     pub(crate) worktree_status: char,

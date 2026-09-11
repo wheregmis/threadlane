@@ -117,14 +117,17 @@ pub(crate) fn parse_status(_work_dir: &Path, porcelain: &str) -> GitStatus {
         } else {
             line.get(3..).unwrap_or_default().trim()
         };
-        // With -z, rename/copy records are followed by the old path as a
-        // separate record; the first path is already the new path we display.
-        // The line-based fallback keeps the legacy test format readable.
-        if (index == 'R' || index == 'C' || worktree == 'R' || worktree == 'C')
-            && porcelain.contains('\0')
-        {
-            let _old_path = records.next();
-        }
+        let orig_path = if index == 'R' || index == 'C' || worktree == 'R' || worktree == 'C' {
+            if porcelain.contains('\0') {
+                records.next()
+            } else {
+                raw_path
+                    .split_once(" -> ")
+                    .map(|(old_p, _)| old_p.trim().to_string())
+            }
+        } else {
+            None
+        };
         let path = raw_path
             .rsplit_once(" -> ")
             .map(|(_, new_path)| new_path)
@@ -139,6 +142,7 @@ pub(crate) fn parse_status(_work_dir: &Path, porcelain: &str) -> GitStatus {
             };
             status.files.push(GitFile {
                 path,
+                orig_path,
                 status: status_code,
                 index_status: index,
                 worktree_status: worktree,
@@ -475,6 +479,7 @@ pub fn inspect_stash_files(work_dir: &Path, stash_index: usize) -> Vec<GitFile> 
             let char_status = *status_map.get(&path).unwrap_or(&'M');
             files.push(GitFile {
                 path: path.clone(),
+                orig_path: None,
                 status: char_status.to_string(),
                 index_status: char_status,
                 worktree_status: ' ',
@@ -608,6 +613,7 @@ pub fn inspect_commit_files(work_dir: &Path, sha: &str) -> Vec<GitFile> {
 
     let mut status_map = std::collections::HashMap::new();
     let mut rename_destinations = std::collections::HashMap::new();
+    let mut rename_sources = std::collections::HashMap::new();
     for line in name_status_output.lines() {
         let parts: Vec<&str> = line.split('\t').collect();
         if let (Some(code), Some(path)) = (parts.first(), parts.get(1)) {
@@ -618,6 +624,7 @@ pub fn inspect_commit_files(work_dir: &Path, sha: &str) -> Vec<GitFile> {
                     let destination = destination.trim().to_string();
                     rename_destinations
                         .insert(format!("{source} => {destination}"), destination.clone());
+                    rename_sources.insert(destination.clone(), source);
                     status_map.insert(destination, status);
                 }
             } else {
@@ -640,6 +647,7 @@ pub fn inspect_commit_files(work_dir: &Path, sha: &str) -> Vec<GitFile> {
             let char_status = *status_map.get(&path).unwrap_or(&'M');
             files.push(GitFile {
                 path: path.clone(),
+                orig_path: rename_sources.get(&path).cloned(),
                 status: char_status.to_string(),
                 index_status: char_status,
                 worktree_status: ' ',
@@ -665,8 +673,35 @@ pub fn diff_commit_file(work_dir: &Path, sha: &str, file_path: &str) -> Result<S
     command(work_dir, &["show", sha, "--", file_path])
 }
 
+fn find_rename_source(work_dir: &Path, destination_path: &str) -> Option<String> {
+    let porcelain = command(work_dir, &["status", "--porcelain=v1", "-z"]).ok()?;
+    let mut records = porcelain.split('\0').filter(|r| !r.is_empty());
+    while let Some(line) = records.next() {
+        let bytes = line.as_bytes();
+        if bytes.len() < 3 {
+            continue;
+        }
+        let index = bytes[0] as char;
+        let worktree = bytes[1] as char;
+        let is_rename = index == 'R' || index == 'C' || worktree == 'R' || worktree == 'C';
+        let path = line.get(3..).unwrap_or_default();
+        if is_rename {
+            let old_path = records.next();
+            if path == destination_path {
+                return old_path.map(|s| s.to_string());
+            }
+        }
+    }
+    None
+}
+
 pub fn discard_file_changes(work_dir: &Path, relative_path: &str) -> Result<(), GitError> {
     validate_diff_path(work_dir, relative_path)?;
+    let rename_source = find_rename_source(work_dir, relative_path);
+    if let Some(ref old_path) = rename_source {
+        validate_diff_path(work_dir, old_path)?;
+    }
+
     let full_path = work_dir.join(relative_path);
     let in_index = command(work_dir, &["ls-files", "--error-unmatch", relative_path]).is_ok();
     if in_index {
@@ -687,6 +722,19 @@ pub fn discard_file_changes(work_dir: &Path, relative_path: &str) -> Result<(), 
         }
         let _ = command(work_dir, &["clean", "-f", "-d", "--", relative_path]);
     }
+
+    if let Some(old_path) = rename_source {
+        if command(
+            work_dir,
+            &["restore", "--staged", "--worktree", "--", &old_path],
+        )
+        .is_err()
+        {
+            let _ = command(work_dir, &["reset", "HEAD", "--", &old_path]);
+            let _ = command(work_dir, &["checkout", "HEAD", "--", &old_path]);
+        }
+    }
+
     Ok(())
 }
 
@@ -701,9 +749,12 @@ pub fn discard_files<S: AsRef<str>>(work_dir: &Path, relative_paths: &[S]) -> Re
 }
 
 pub fn discard_all_changes(work_dir: &Path) -> Result<(), GitError> {
-    let status = inspect(work_dir)?;
-    let paths: Vec<String> = status.files.into_iter().map(|f| f.path).collect();
-    discard_files(work_dir, &paths)
+    if command(work_dir, &["restore", "--staged", "--worktree", "."]).is_err() {
+        let _ = command(work_dir, &["reset", "HEAD", "."]);
+        let _ = command(work_dir, &["checkout", "HEAD", "."]);
+    }
+    let _ = command(work_dir, &["clean", "-f", "-d"]);
+    Ok(())
 }
 
 pub fn ignore_file(work_dir: &Path, relative_path: &str) -> Result<(), GitError> {

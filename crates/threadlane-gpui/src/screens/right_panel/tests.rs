@@ -440,3 +440,31 @@ fn selection_bar_discard_options_scenarios() {
     assert_eq!(opts5_none, vec![DiscardOption::All(5)]);
     assert_eq!(opts5_none[0].label(), "Discard All Changes (5)...");
 }
+
+#[test]
+fn discard_option_confirmation_and_action() {
+    let single = DiscardOption::Single("src/foo.rs".to_string());
+    assert!(!single.requires_confirmation());
+    assert_eq!(single.confirmation_prompt(), None);
+    assert_eq!(
+        single.git_action(),
+        GitAction::DiscardFile("src/foo.rs".to_string())
+    );
+
+    let selected = DiscardOption::Selected(vec!["src/a.rs".into(), "src/b.rs".into()]);
+    assert!(selected.requires_confirmation());
+    let prompt = selected.confirmation_prompt().unwrap();
+    assert_eq!(prompt.0, "Discard selected changes?");
+    assert!(prompt.1.contains("2 selected files"));
+    assert_eq!(
+        selected.git_action(),
+        GitAction::DiscardFiles(vec!["src/a.rs".into(), "src/b.rs".into()])
+    );
+
+    let all = DiscardOption::All(4);
+    assert!(all.requires_confirmation());
+    let prompt_all = all.confirmation_prompt().unwrap();
+    assert_eq!(prompt_all.0, "Discard all changes?");
+    assert!(prompt_all.1.contains("4 files"));
+    assert_eq!(all.git_action(), GitAction::DiscardAll);
+}

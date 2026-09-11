@@ -177,6 +177,43 @@ impl DiscardOption {
             Self::All(count) => format!("Discard All Changes ({count})..."),
         }
     }
+
+    pub fn git_action(&self) -> GitAction {
+        match self {
+            Self::Single(path) => GitAction::DiscardFile(path.clone()),
+            Self::Selected(paths) => GitAction::DiscardFiles(paths.clone()),
+            Self::All(_) => GitAction::DiscardAll,
+        }
+    }
+
+    pub fn requires_confirmation(&self) -> bool {
+        matches!(self, Self::Selected(_) | Self::All(_))
+    }
+
+    pub fn confirmation_prompt(&self) -> Option<(String, String)> {
+        match self {
+            Self::Single(_) => None,
+            Self::Selected(paths) => {
+                let count = paths.len();
+                let file_str = if count == 1 { "file" } else { "files" };
+                Some((
+                    "Discard selected changes?".to_string(),
+                    format!(
+                        "Are you sure you want to discard changes in {count} selected {file_str}? This cannot be undone."
+                    ),
+                ))
+            }
+            Self::All(count) => {
+                let file_str = if *count == 1 { "file" } else { "files" };
+                Some((
+                    "Discard all changes?".to_string(),
+                    format!(
+                        "Are you sure you want to discard all changes across {count} {file_str}? This cannot be undone."
+                    ),
+                ))
+            }
+        }
+    }
 }
 
 pub fn discard_options(

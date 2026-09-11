@@ -1052,6 +1052,26 @@ fn discard_multiple_files_and_all_changes() {
     assert_eq!(inspect(dir.path()).unwrap().files.len(), 0);
     assert!(dir.path().join("tracked3.txt").exists());
     assert!(!dir.path().join("new_staged.txt").exists());
+
+    // 4. Test staged rename discard preserves both paths
+    run_git(dir.path(), &["mv", "tracked1.txt", "renamed1.txt"]);
+    let status = inspect(dir.path()).unwrap();
+    assert_eq!(status.files.len(), 1);
+    assert_eq!(status.files[0].path, "renamed1.txt");
+    assert_eq!(status.files[0].orig_path.as_deref(), Some("tracked1.txt"));
+
+    discard_file_changes(dir.path(), "renamed1.txt").unwrap();
+    assert_eq!(inspect(dir.path()).unwrap().files.len(), 0);
+    assert!(dir.path().join("tracked1.txt").exists());
+    assert!(!dir.path().join("renamed1.txt").exists());
+
+    // 5. Test staged rename discard via discard_all_changes
+    run_git(dir.path(), &["mv", "tracked2.txt", "renamed2.txt"]);
+    assert_eq!(inspect(dir.path()).unwrap().files.len(), 1);
+    discard_all_changes(dir.path()).unwrap();
+    assert_eq!(inspect(dir.path()).unwrap().files.len(), 0);
+    assert!(dir.path().join("tracked2.txt").exists());
+    assert!(!dir.path().join("renamed2.txt").exists());
 }
 
 #[test]

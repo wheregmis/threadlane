@@ -705,15 +705,7 @@ impl RightPanelView {
                         self.last_fetched_time = Some(std::time::Instant::now());
                         let action_failed = action_error.is_some();
                         let message = action_error
-                            .or_else(|| {
-                                action_message.map(|message| {
-                                    if message.is_empty() {
-                                        "Pull request created successfully.".into()
-                                    } else {
-                                        format!("Pull request created: {message}")
-                                    }
-                                })
-                            })
+                            .or(action_message)
                             .unwrap_or_else(|| "Git action completed successfully.".into());
                         self.git_feedback = Some(message.clone());
                         self.pending_git_notifications.push(if action_failed {
@@ -846,12 +838,31 @@ impl RightPanelView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.execute_git_action(action, Some(window), cx);
+    }
+
+    pub(crate) fn run_git_action_without_window(
+        &mut self,
+        action: GitAction,
+        cx: &mut Context<Self>,
+    ) {
+        self.execute_git_action(action, None, cx);
+    }
+
+    fn execute_git_action(
+        &mut self,
+        action: GitAction,
+        mut window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(work_dir) = self.project.clone() else {
             self.git_feedback = Some("Attach a project to use Git actions.".into());
-            window.push_notification(
-                Notification::warning("Attach a project to use Git actions"),
-                cx,
-            );
+            let notif = Notification::warning("Attach a project to use Git actions");
+            if let Some(ref mut window) = window {
+                window.push_notification(notif, cx);
+            } else {
+                self.pending_git_notifications.push(notif);
+            }
             cx.notify();
             return;
         };
@@ -869,16 +880,23 @@ impl RightPanelView {
         if matches!(action, GitAction::Commit | GitAction::CommitAndPush) {
             if selected_paths.is_empty() {
                 self.git_feedback = Some("Select at least one file to commit.".into());
-                window.push_notification(
-                    Notification::warning("Select at least one file to commit"),
-                    cx,
-                );
+                let notif = Notification::warning("Select at least one file to commit");
+                if let Some(ref mut window) = window {
+                    window.push_notification(notif, cx);
+                } else {
+                    self.pending_git_notifications.push(notif);
+                }
                 cx.notify();
                 return;
             }
             if message.is_empty() {
                 self.git_feedback = Some("Enter a commit message first.".into());
-                window.push_notification(Notification::warning("Enter a commit message first"), cx);
+                let notif = Notification::warning("Enter a commit message first");
+                if let Some(ref mut window) = window {
+                    window.push_notification(notif, cx);
+                } else {
+                    self.pending_git_notifications.push(notif);
+                }
                 cx.notify();
                 return;
             }
@@ -914,7 +932,12 @@ impl RightPanelView {
             GitAction::IgnoreExtension(ext) => format!("Ignoring *.{ext} files…"),
         };
         self.git_feedback = Some(feedback.clone());
-        window.push_notification(Notification::info(feedback), cx);
+        let notif = Notification::info(feedback);
+        if let Some(ref mut window) = window {
+            window.push_notification(notif, cx);
+        } else {
+            self.pending_git_notifications.push(notif);
+        }
         let tx = self.event_tx.clone();
         std::thread::spawn(move || {
             let action_result = (|| {
@@ -955,10 +978,13 @@ impl RightPanelView {
                         threadlane_git::unstage_all(&work_dir).map_err(|e| e.to_string())?;
                     }
                     GitAction::CreatePullRequest => {
-                        action_message = Some(
-                            threadlane_git::create_pull_request(&work_dir)
-                                .map_err(|e| e.to_string())?,
-                        );
+                        let pr = threadlane_git::create_pull_request(&work_dir)
+                            .map_err(|e| e.to_string())?;
+                        action_message = Some(if pr.is_empty() {
+                            "Pull request created successfully.".into()
+                        } else {
+                            format!("Pull request created: {pr}")
+                        });
                     }
                     GitAction::Checkout(branch) => {
                         threadlane_git::checkout(&work_dir, branch).map_err(|e| e.to_string())?;
@@ -1541,6 +1567,40 @@ impl RightPanelView {
             .into_any_element()
     }
 
+    pub(crate) fn handle_discard_option(
+        panel: Entity<RightPanelView>,
+        opt: DiscardOption,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        if opt.requires_confirmation() {
+            let (title, description) = opt.confirmation_prompt().unwrap_or((
+                "Discard changes?".into(),
+                "Are you sure you want to discard these changes? This cannot be undone.".into(),
+            ));
+            let action = opt.git_action();
+            cx.spawn(async move |cx| {
+                let confirmed = rfd::AsyncMessageDialog::new()
+                    .set_title(&title)
+                    .set_description(&description)
+                    .set_buttons(rfd::MessageButtons::YesNo)
+                    .show()
+                    .await;
+                if matches!(confirmed, rfd::MessageDialogResult::Yes) {
+                    let _ = panel.update(cx, |this, cx| {
+                        this.run_git_action_without_window(action, cx);
+                    });
+                }
+            })
+            .detach();
+        } else {
+            let action = opt.git_action();
+            panel.update(cx, |this, cx| {
+                this.run_git_action(action, window, cx);
+            });
+        }
+    }
+
     fn render_review_file_row(
         &mut self,
         index: usize,
@@ -1712,17 +1772,15 @@ impl RightPanelView {
                     for opt in discard_options(&discard_path, &selected_paths, total_files) {
                         let panel_action = panel.clone();
                         let label = opt.label();
-                        let action = match opt {
-                            DiscardOption::Single(p) => GitAction::DiscardFile(p),
-                            DiscardOption::Selected(paths) => GitAction::DiscardFiles(paths),
-                            DiscardOption::All(_) => GitAction::DiscardAll,
-                        };
+                        let opt_action = opt.clone();
                         menu = menu.item(PopupMenuItem::new(label).on_click(
                             move |_event, window, cx| {
-                                let act = action.clone();
-                                panel_action.update(cx, |this, cx| {
-                                    this.run_git_action(act, window, cx);
-                                });
+                                Self::handle_discard_option(
+                                    panel_action.clone(),
+                                    opt_action.clone(),
+                                    window,
+                                    cx,
+                                );
                             },
                         ));
                     }
@@ -2290,17 +2348,15 @@ impl RightPanelView {
                         for opt in selection_bar_discard_options(&selected_paths, total_files) {
                             let panel_action = panel.clone();
                             let label = opt.label();
-                            let action = match opt {
-                                DiscardOption::Single(p) => GitAction::DiscardFile(p),
-                                DiscardOption::Selected(paths) => GitAction::DiscardFiles(paths),
-                                DiscardOption::All(_) => GitAction::DiscardAll,
-                            };
+                            let opt_action = opt.clone();
                             menu = menu.item(PopupMenuItem::new(label).on_click(
                                 move |_event, window, cx| {
-                                    let act = action.clone();
-                                    panel_action.update(cx, |this, cx| {
-                                        this.run_git_action(act, window, cx);
-                                    });
+                                    Self::handle_discard_option(
+                                        panel_action.clone(),
+                                        opt_action.clone(),
+                                        window,
+                                        cx,
+                                    );
                                 },
                             ));
                         }
@@ -2456,17 +2512,15 @@ impl RightPanelView {
                         for opt in selection_bar_discard_options(&selected_paths, total_files) {
                             let panel_action = panel.clone();
                             let label = opt.label();
-                            let action = match opt {
-                                DiscardOption::Single(p) => GitAction::DiscardFile(p),
-                                DiscardOption::Selected(paths) => GitAction::DiscardFiles(paths),
-                                DiscardOption::All(_) => GitAction::DiscardAll,
-                            };
+                            let opt_action = opt.clone();
                             menu = menu.item(PopupMenuItem::new(label).on_click(
                                 move |_event, window, cx| {
-                                    let act = action.clone();
-                                    panel_action.update(cx, |this, cx| {
-                                        this.run_git_action(act, window, cx);
-                                    });
+                                    Self::handle_discard_option(
+                                        panel_action.clone(),
+                                        opt_action.clone(),
+                                        window,
+                                        cx,
+                                    );
                                 },
                             ));
                         }
