@@ -88,15 +88,16 @@ fn visible_session_status<'a>(
 }
 
 /// Open the computer-use mirror popup: a small non-activating window in the
-/// bottom-right corner showing the latest screenshot plus current action.
-/// Guarded by `AppState::mirror_open` so repeated triggers reuse the window.
+/// bottom-right corner showing the target as live video plus the current
+/// action. Resizable so the user can enlarge the picture; guarded by
+/// `AppState::mirror_open` so repeated triggers reuse the window.
 fn open_computer_mirror(model: &Entity<AppState>, cx: &mut AsyncApp) {
     let previews_dir = model.update(cx, |state, _cx| {
         if state.mirror_open {
             return None;
         }
         // The live mirror is global (one popup, many project sessions); the
-        // session tools write latest.json/latest-frame.jpg here.
+        // session tools write latest.json here and frames arrive in-process.
         threadlane_session::computer::global_previews_dir().or_else(|| {
             state
                 .active_work_dir
@@ -130,7 +131,7 @@ fn open_computer_mirror(model: &Entity<AppState>, cx: &mut AsyncApp) {
             show: true,
             kind: WindowKind::PopUp,
             is_movable: true,
-            is_resizable: false,
+            is_resizable: true,
             is_minimizable: false,
             ..Default::default()
         },
@@ -489,6 +490,14 @@ impl ChatListView {
 
         let stream_model = model.clone();
         cx.spawn(async move |this, cx| {
+            // Dev hook: `THREADLANE_MIRROR_DEBUG=1` opens the mirror on the
+            // main display at launch, so the live feed can be observed and
+            // profiled without a model turn or an approval prompt. Nothing
+            // reaches a model through this path.
+            if std::env::var_os("THREADLANE_MIRROR_DEBUG").is_some() {
+                threadlane_session::computer::watch_display_for_debug();
+                open_computer_mirror(&stream_model, cx);
+            }
             while let Some(events) = next_chat_stream_batch(&mut stream_rx).await {
                 let changed = stream_model.update(cx, |state, cx| {
                     let changed = state.drain_chat_stream(events);

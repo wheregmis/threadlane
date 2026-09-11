@@ -8359,6 +8359,7 @@ dependencies = [
  "gpui-pre-platform",
  "gpui-wry",
  "hotpath",
+ "image",
  "lb-wry",
  "notify 8.2.0",
  "objc2 0.6.4",

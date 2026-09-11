@@ -37,6 +37,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 portable-pty = "0.9"
 vt100 = "0.16"
 notify = "8.2"
+# Live computer-use frames are uploaded as gpui `RenderImage`s, built from
+# `image::Frame`; pin to the same major as gpui-pre.
+image = "0.25"
 hotpath = "0.25"
 
 [target.'cfg(target_os = "macos")'.dependencies]
