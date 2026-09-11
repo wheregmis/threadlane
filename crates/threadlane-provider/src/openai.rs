@@ -622,7 +622,7 @@ async fn fetch_available_models_network(
     account_id: Option<&str>,
     cache_key: u64,
     now: Instant,
-) -> Vec<String> {
+) -> Option<Vec<String>> {
     let cache = MODEL_CACHE.get_or_init(|| StdMutex::new(HashMap::new()));
     let mut req = http_client()
         .get("https://api.openai.com/v1/models")
@@ -641,27 +641,34 @@ async fn fetch_available_models_network(
                         .filter(|id| is_chat_capable_model(id))
                         .map(str::to_string)
                         .collect();
-                    if !models.is_empty() {
-                        models.sort();
-                        if let Ok(mut cache) = cache.lock() {
-                            cache.insert(
-                                cache_key,
-                                ModelCacheEntry {
-                                    stored_at: now,
-                                    models: models.clone().into(),
-                                },
-                            );
-                        }
-                        return models;
+                    models.sort();
+                    if let Ok(mut cache) = cache.lock() {
+                        cache.insert(
+                            cache_key,
+                            ModelCacheEntry {
+                                stored_at: now,
+                                models: models.clone().into(),
+                            },
+                        );
                     }
+                    return Some(models);
                 }
             }
         }
     }
-    Vec::new()
+    None
 }
 
 pub async fn fetch_available_models(api_key: &str, account_id: Option<&str>) -> Vec<String> {
+    try_fetch_available_models(api_key, account_id)
+        .await
+        .unwrap_or_default()
+}
+
+pub async fn try_fetch_available_models(
+    api_key: &str,
+    account_id: Option<&str>,
+) -> Option<Vec<String>> {
     let cache_key = model_cache_key(api_key, account_id);
     let now = Instant::now();
     let cache = MODEL_CACHE.get_or_init(|| StdMutex::new(HashMap::new()));
@@ -670,7 +677,7 @@ pub async fn fetch_available_models(api_key: &str, account_id: Option<&str>) -> 
             .get(&cache_key)
             .and_then(|entry| fresh_models(entry, now))
     }) {
-        return models.iter().cloned().collect();
+        return Some(models.iter().cloned().collect());
     }
     if tokio::runtime::Handle::try_current().is_ok() {
         fetch_available_models_network(api_key, account_id, cache_key, now).await
@@ -680,15 +687,17 @@ pub async fn fetch_available_models(api_key: &str, account_id: Option<&str>) -> 
         let handle = threadlane_runtime::get_runtime().spawn(async move {
             fetch_available_models_network(&api_key, account_id.as_deref(), cache_key, now).await
         });
-        match handle.await {
-            Ok(models) => models,
-            Err(_) => Vec::new(),
-        }
+        handle.await.ok().flatten()
     }
 }
 
 /// Codex model inventory and capabilities, not the general ChatGPT web picker.
 pub async fn fetch_subscription_models() -> Vec<threadlane_runtime::model_registry::ModelInfo> {
+    try_fetch_subscription_models().await.unwrap_or_default()
+}
+
+pub async fn try_fetch_subscription_models(
+) -> Option<Vec<threadlane_runtime::model_registry::ModelInfo>> {
     if tokio::runtime::Handle::try_current().is_ok() {
         fetch_subscription_models_inner().await
     } else {
@@ -698,7 +707,7 @@ pub async fn fetch_subscription_models() -> Vec<threadlane_runtime::model_regist
             .await
         {
             Ok(models) => models,
-            Err(_) => Vec::new(),
+            Err(_) => None,
         }
     }
 }
@@ -751,11 +760,12 @@ fn parse_subscription_models(value: &Value) -> Vec<threadlane_runtime::model_reg
         .collect()
 }
 
-async fn fetch_subscription_models_inner() -> Vec<threadlane_runtime::model_registry::ModelInfo> {
+async fn fetch_subscription_models_inner(
+) -> Option<Vec<threadlane_runtime::model_registry::ModelInfo>> {
     let credentials = threadlane_auth::openai_auth::load_credentials()
         .filter(|credentials| threadlane_auth::openai_auth::is_own_source(&credentials.source));
     let Some(credentials) = credentials else {
-        return Vec::new();
+        return None;
     };
     // Catalog visibility is gated by Codex client compatibility, not Threadlane's version.
     let client_version = std::env::var("CODEX_CLIENT_VERSION").unwrap_or_else(|_| "0.154.0".into());
@@ -775,15 +785,15 @@ async fn fetch_subscription_models_inner() -> Vec<threadlane_runtime::model_regi
     }
     let response = request.send().await;
     let Ok(response) = response else {
-        return Vec::new();
+        return None;
     };
     if !response.status().is_success() {
-        return Vec::new();
+        return None;
     }
     let Ok(value) = response.json::<Value>().await else {
-        return Vec::new();
+        return None;
     };
-    parse_subscription_models(&value)
+    Some(parse_subscription_models(&value))
 }
 
 #[derive(Clone, Debug, Default)]

@@ -9,8 +9,12 @@ static DISCOVERED_MODELS: std::sync::OnceLock<std::sync::RwLock<HashMap<String, 
 
 /// Publish successful provider discovery for both selectors and request adapters.
 /// Failed/empty refreshes leave the last known capabilities intact.
-pub fn update_discovered_models(models: Vec<ModelInfo>) {
+pub fn update_discovered_models(provider: &str, models: Vec<ModelInfo>) {
+    if models.is_empty() {
+        return;
+    }
     if let Ok(mut cache) = DISCOVERED_MODELS.get_or_init(Default::default).write() {
+        cache.retain(|_, model| model.provider.as_deref() != Some(provider));
         for model in models {
             cache.insert(model.id.clone(), model);
         }
@@ -251,10 +255,14 @@ pub fn effective_effort(
 }
 
 /// `none` is an explicit provider mode; `off` means omit the parameter entirely.
-pub fn effective_api_effort(model_id: &str, effort: ReasoningEffort) -> Option<&'static str> {
-    let effective = effective_effort(model_id, effort, None);
+pub fn effective_api_effort(
+    model_id: &str,
+    effort: ReasoningEffort,
+    project_root: Option<&Path>,
+) -> Option<&'static str> {
+    let effective = effective_effort(model_id, effort, project_root);
     if effective == ReasoningEffort::Off
-        && find_model(model_id, None)
+        && find_model(model_id, project_root)
             .is_some_and(|model| model.supported_efforts.iter().any(|level| level == "none"))
     {
         Some("none")
@@ -321,6 +329,25 @@ mod tests {
             default_effort: None,
         };
         assert_eq!(info.efforts(), vec![ReasoningEffort::Off]);
+    }
+
+    #[test]
+    fn discovered_refresh_replaces_only_its_provider() {
+        let model = |id: &str, provider: &str| ModelInfo {
+            id: id.into(),
+            label: id.into(),
+            provider: Some(provider.into()),
+            context_window: None,
+            supported_efforts: vec!["low".into()],
+            default_effort: None,
+        };
+        update_discovered_models("replace-test", vec![model("retired", "replace-test")]);
+        update_discovered_models("other-test", vec![model("kept", "other-test")]);
+        update_discovered_models("replace-test", vec![model("current", "replace-test")]);
+
+        assert!(find_model("retired", None).is_none());
+        assert!(find_model("current", None).is_some());
+        assert!(find_model("kept", None).is_some());
     }
 
     #[test]

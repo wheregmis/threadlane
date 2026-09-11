@@ -190,7 +190,11 @@ fn merge_discovered_opencode_models(models: &mut Vec<ModelOption>) {
 /// ids appear with generated labels. The last successful live result remains
 /// available if a later refresh fails.
 static DISCOVERED_OPENAI: std::sync::OnceLock<
-    std::sync::Mutex<(std::time::Instant, Vec<ModelOption>)>,
+    std::sync::Mutex<(
+        std::time::Instant,
+        Vec<ModelOption>,
+        Vec<threadlane_runtime::model_registry::ModelInfo>,
+    )>,
 > = std::sync::OnceLock::new();
 
 /// Pulls the live OpenAI model list and caches it for the picker. Skips the
@@ -214,9 +218,20 @@ pub async fn refresh_openai_models() {
     if api_key.trim().is_empty() {
         return;
     }
-    let mut discovered: Vec<ModelOption> =
-        threadlane_provider::openai::fetch_available_models(&api_key, account_id.as_deref())
-            .await
+    let general =
+        threadlane_provider::openai::try_fetch_available_models(&api_key, account_id.as_deref())
+            .await;
+    let subscription = threadlane_provider::openai::try_fetch_subscription_models().await;
+    if general.is_none() && subscription.is_none() {
+        return;
+    }
+    let cache = DISCOVERED_OPENAI
+        .get_or_init(|| std::sync::Mutex::new((std::time::Instant::now(), Vec::new(), Vec::new())));
+    let Ok(mut guard) = cache.lock() else {
+        return;
+    };
+    if let Some(general) = general {
+        guard.1 = general
             .into_iter()
             .map(|bare_id| ModelOption {
                 id: bare_id.clone(),
@@ -224,29 +239,15 @@ pub async fn refresh_openai_models() {
                 provider: ModelProvider::OpenAi,
             })
             .collect();
-    let subscription = threadlane_provider::openai::fetch_subscription_models().await;
-    for info in &subscription {
-        discovered.retain(|model| model.id != info.id);
-        discovered.push(ModelOption {
-            id: info.id.clone(),
-            label: info.label.clone(),
-            provider: ModelProvider::OpenAi,
-        });
     }
-    threadlane_runtime::model_registry::update_discovered_models(subscription);
-    discovered.sort_by(|a, b| a.id.cmp(&b.id));
-    if discovered.is_empty() {
-        return;
+    if let Some(subscription) = subscription {
+        threadlane_runtime::model_registry::update_discovered_models(
+            "openai",
+            subscription.clone(),
+        );
+        guard.2 = subscription;
     }
-    if let Some(cache) = DISCOVERED_OPENAI
-        .get_or_init(|| std::sync::Mutex::new((std::time::Instant::now(), Vec::new())))
-        .lock()
-        .ok()
-    {
-        let mut guard = cache;
-        guard.0 = std::time::Instant::now();
-        guard.1 = discovered;
-    }
+    guard.0 = std::time::Instant::now();
 }
 
 /// Refreshes the live OpenAI list, then rebuilds the picker's model list.
@@ -267,11 +268,22 @@ fn merge_discovered_openai_models(models: &mut Vec<ModelOption>) {
     if !credentials_allow(ModelProvider::OpenAi) {
         return;
     }
-    let discovered = DISCOVERED_OPENAI
+    let Some((mut discovered, subscription)) = DISCOVERED_OPENAI
         .get()
         .and_then(|cache| cache.lock().ok())
-        .map(|guard| guard.1.clone())
-        .unwrap_or_default();
+        .map(|guard| (guard.1.clone(), guard.2.clone()))
+    else {
+        return;
+    };
+    for info in subscription {
+        discovered.retain(|model| model.id != info.id);
+        discovered.push(ModelOption {
+            id: info.id,
+            label: info.label,
+            provider: ModelProvider::OpenAi,
+        });
+    }
+    discovered.sort_by(|a, b| a.id.cmp(&b.id));
     for option in discovered {
         if !models.iter().any(|model| model.id == option.id) {
             models.push(option);
@@ -319,9 +331,10 @@ pub async fn refresh_antigravity_models() {
             }),
     );
     synthesize_live_antigravity_models(&mut models, &ids);
-    threadlane_runtime::model_registry::update_discovered_models(antigravity_capabilities(
-        &models, &live,
-    ));
+    threadlane_runtime::model_registry::update_discovered_models(
+        "antigravity",
+        antigravity_capabilities(&models, &live),
+    );
     if let Some(cache) = DISCOVERED_ANTIGRAVITY
         .get_or_init(|| std::sync::Mutex::new((std::time::Instant::now(), None)))
         .lock()
@@ -410,7 +423,7 @@ fn synthesize_live_antigravity_models(models: &mut Vec<ModelOption>, available: 
     });
     for runtime_id in runtime_ids {
         if models.iter().any(|model| {
-            threadlane_runtime::ReasoningEffort::known_levels()
+            threadlane_runtime::model_registry::supported_efforts_for(&model.id, None)
                 .iter()
                 .any(|effort| {
                     threadlane_provider::antigravity::runtime_model_for(
@@ -421,7 +434,10 @@ fn synthesize_live_antigravity_models(models: &mut Vec<ModelOption>, available: 
         }) {
             continue;
         }
-        let base = runtime_id.strip_suffix("-tiered").unwrap_or(runtime_id);
+        let base = ["-tiered", "-low", "-medium", "-high"]
+            .into_iter()
+            .find_map(|suffix| runtime_id.strip_suffix(suffix))
+            .unwrap_or(runtime_id);
         let logical_id = format!("antigravity/{base}");
         if models.iter().any(|model| model.id == logical_id) {
             continue;
@@ -845,7 +861,10 @@ mod tests {
         let metadata = antigravity_capabilities(&models, &live);
         assert_eq!(metadata[0].supported_efforts, ["medium"]);
         assert_eq!(metadata[1].supported_efforts, ["off"]);
-        threadlane_runtime::model_registry::update_discovered_models(vec![metadata[1].clone()]);
+        threadlane_runtime::model_registry::update_discovered_models(
+            "antigravity",
+            vec![metadata[1].clone()],
+        );
         assert!(!supports_reasoning("antigravity/test-no-thinking", None));
     }
 

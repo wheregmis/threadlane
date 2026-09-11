@@ -656,6 +656,9 @@ fn parse_available_models(value: &Value) -> Vec<AntigravityModelInfo> {
         .iter()
         .filter(|(_, info)| info.is_object())
         .filter(|(id, info)| {
+            if info.get("isInternal").and_then(Value::as_bool) == Some(true) {
+                return false;
+            }
             if let Some(sorts) = value.get("agentModelSorts").and_then(Value::as_array) {
                 id.ends_with("-tiered")
                     || sorts
@@ -772,6 +775,14 @@ fn resolve_runtime_model(model_id: &str, effort: &str) -> String {
     let model = model_id.strip_prefix("antigravity/").unwrap_or(model_id);
     if let Some(mapped) = runtime_model_override(model, effort) {
         return mapped;
+    }
+    let variant = format!("{model}-{effort}");
+    if LIVE_MODELS
+        .get()
+        .and_then(|models| models.read().ok())
+        .is_some_and(|models| models.iter().any(|entry| entry.id == variant))
+    {
+        return variant;
     }
     match model {
         "gemini-3.6-flash" => match effort {
@@ -1646,7 +1657,7 @@ mod tests {
     #[test]
     fn inventory_keeps_agent_capabilities_and_excludes_auxiliary_models() {
         let entries = parse_available_models(&json!({
-            "agentModelSorts": [{"groups": [{"modelIds": ["fast", "fixed", "variant"]}]}],
+            "agentModelSorts": [{"groups": [{"modelIds": ["fast", "fixed", "variant", "internal"]}]}],
             "models": {
                 "fast": {"supportsThinking": false},
                 "fixed": {"supportsThinking": true, "thinkingBudget": 1024},
