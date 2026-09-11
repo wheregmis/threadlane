@@ -4,6 +4,19 @@ use std::path::Path;
 
 use crate::types::ReasoningEffort;
 
+static DISCOVERED_MODELS: std::sync::OnceLock<std::sync::RwLock<HashMap<String, ModelInfo>>> =
+    std::sync::OnceLock::new();
+
+/// Publish successful provider discovery for both selectors and request adapters.
+/// Failed/empty refreshes leave the last known capabilities intact.
+pub fn update_discovered_models(models: Vec<ModelInfo>) {
+    if let Ok(mut cache) = DISCOVERED_MODELS.get_or_init(Default::default).write() {
+        for model in models {
+            cache.insert(model.id.clone(), model);
+        }
+    }
+}
+
 /// A model entry that can be supplied without a code change.
 ///
 /// Sources merge in increasing precedence:
@@ -196,9 +209,58 @@ pub fn registry_for_project(project_root: Option<&Path>) -> Vec<ModelInfo> {
 
 /// Registry lookup by id across all file sources.
 pub fn find_model(model_id: &str, project_root: Option<&Path>) -> Option<ModelInfo> {
-    registry_for_project(project_root)
+    let mut model = registry_for_project(project_root)
         .into_iter()
-        .find(|model| model.id == model_id)
+        .find(|model| model.id == model_id);
+    if let Some(live) = DISCOVERED_MODELS
+        .get()
+        .and_then(|cache| cache.read().ok())
+        .and_then(|cache| cache.get(model_id).cloned())
+    {
+        if let Some(model) = &mut model {
+            if !live.supported_efforts.is_empty() {
+                model.supported_efforts = live.supported_efforts;
+                model.default_effort = live.default_effort;
+            }
+        } else {
+            model = Some(live);
+        }
+    }
+    model
+}
+
+/// Preserve a valid selection; otherwise use the advertised default/first mode.
+pub fn effective_effort(
+    model_id: &str,
+    effort: ReasoningEffort,
+    project_root: Option<&Path>,
+) -> ReasoningEffort {
+    let Some(model) = find_model(model_id, project_root) else {
+        return effort;
+    };
+    let supported = model.efforts();
+    if supported.contains(&effort) {
+        return effort;
+    }
+    model
+        .default_effort
+        .as_deref()
+        .and_then(ReasoningEffort::from_label)
+        .filter(|default| supported.contains(default))
+        .unwrap_or(supported[0])
+}
+
+/// `none` is an explicit provider mode; `off` means omit the parameter entirely.
+pub fn effective_api_effort(model_id: &str, effort: ReasoningEffort) -> Option<&'static str> {
+    let effective = effective_effort(model_id, effort, None);
+    if effective == ReasoningEffort::Off
+        && find_model(model_id, None)
+            .is_some_and(|model| model.supported_efforts.iter().any(|level| level == "none"))
+    {
+        Some("none")
+    } else {
+        effective.as_api_str()
+    }
 }
 
 /// Supported efforts for a model id. Unknown models get all known levels so

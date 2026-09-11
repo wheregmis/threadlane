@@ -344,6 +344,7 @@ impl AppState {
     pub(crate) fn refresh_available_models(&mut self) {
         self.available_models =
             crate::model_catalog::available_models_for_project(self.active_work_dir.as_deref());
+        self.set_reasoning_effort(self.reasoning_effort);
     }
 
     pub(crate) fn set_needle_enabled(&mut self, enabled: bool) -> Result<(), String> {
@@ -452,6 +453,7 @@ impl AppState {
                 .map(|model| model.id.clone())
                 .unwrap_or_default();
         }
+        self.set_reasoning_effort(self.reasoning_effort);
         self.invalidate_idle_runtimes();
     }
 
@@ -485,6 +487,7 @@ impl AppState {
             return;
         }
         self.selected_model = model.clone();
+        self.set_reasoning_effort(self.reasoning_effort);
         self.auth_status_msg = Some(format!("Model switched to {model}"));
         if self.session_status.as_deref().is_some_and(|status| {
             status == "Stop the current turn before changing models"
@@ -502,7 +505,11 @@ impl AppState {
     }
 
     pub(crate) fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {
-        self.reasoning_effort = effort;
+        self.reasoning_effort = threadlane_runtime::model_registry::effective_effort(
+            &self.selected_model,
+            effort,
+            self.active_work_dir.as_deref(),
+        );
     }
 
     pub(crate) fn open_settings(&mut self) {

@@ -639,7 +639,13 @@ impl SettingsView {
         let preferences = crate::services::subagent_settings::load(&project);
         let available = crate::model_catalog::available_models_for_project(Some(&project));
         let selected_model = preferences.model.clone();
-        let selected_reasoning = preferences.reasoning_effort;
+        let selected_reasoning = preferences.reasoning_effort.map(|effort| {
+            threadlane_runtime::model_registry::effective_effort(
+                selected_model.as_deref().unwrap_or_default(),
+                effort,
+                Some(&project),
+            )
+        });
         let model_label = selected_model
             .as_deref()
             .map(|id| crate::model_catalog::selection_label(id, &available))
@@ -834,7 +840,13 @@ impl SettingsView {
                     },
                 )
             });
-        let selected_fast_reasoning = preferences.fast_reasoning_effort;
+        let selected_fast_reasoning = preferences.fast_reasoning_effort.map(|effort| {
+            threadlane_runtime::model_registry::effective_effort(
+                preferences.fast_model.as_deref().unwrap_or_default(),
+                effort,
+                Some(&project),
+            )
+        });
         let fast_reasoning_label = selected_fast_reasoning
             .map(|effort| effort.label())
             .unwrap_or("Same as parent");

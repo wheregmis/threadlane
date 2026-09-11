@@ -96,7 +96,9 @@ impl ProviderAdapter for ChatCompletionsAdapter {
         if let Some(key) = prompt_cache_key {
             chat_payload["prompt_cache_key"] = key.into();
         }
-        if let Some(effort) = state.reasoning_effort.as_api_str() {
+        if let Some(effort) =
+            crate::model_registry::effective_api_effort(&state.model, state.reasoning_effort)
+        {
             chat_payload["reasoning_effort"] = effort.into();
         }
         chat_payload
@@ -146,7 +148,9 @@ impl ProviderAdapter for CodexResponsesAdapter {
         if let Some(key) = prompt_cache_key {
             codex_payload["prompt_cache_key"] = key.into();
         }
-        if let Some(effort) = state.reasoning_effort.as_api_str() {
+        if let Some(effort) =
+            crate::model_registry::effective_api_effort(&state.model, state.reasoning_effort)
+        {
             codex_payload["reasoning"] = serde_json::json!({
                 "effort": effort,
                 "summary": "auto"
@@ -699,11 +703,11 @@ mod tests {
         let state = TurnState {
             system_prompt: "system".into(),
             messages: Vec::new(),
-            model: "gpt-4o".into(),
+            model: "test-reasoning-model".into(),
             reasoning_effort: ReasoningEffort::High,
         };
         let payload = adapter.build_payload(&state, &[], None);
-        assert_eq!(payload["model"], "gpt-4o");
+        assert_eq!(payload["model"], "test-reasoning-model");
         assert_eq!(payload["reasoning_effort"], "high");
         assert!(payload["stream"].as_bool().unwrap());
     }
@@ -721,6 +725,51 @@ mod tests {
         assert_eq!(payload["model"], "gpt-5.6-luna");
         assert_eq!(payload["reasoning"]["effort"], "low");
         assert_eq!(payload["reasoning"]["summary"], "auto");
+    }
+
+    #[test]
+    fn adapters_enforce_discovered_reasoning_capabilities() {
+        use crate::model_registry::{ModelInfo, update_discovered_models};
+        let id = "test-dynamic-capabilities";
+        let mut info = ModelInfo {
+            id: id.into(),
+            label: id.into(),
+            provider: None,
+            context_window: None,
+            supported_efforts: vec!["low".into(), "ultra".into()],
+            default_effort: Some("low".into()),
+        };
+        let state = TurnState {
+            system_prompt: String::new(),
+            messages: vec![],
+            model: id.into(),
+            reasoning_effort: ReasoningEffort::High,
+        };
+        update_discovered_models(vec![info.clone()]);
+        assert_eq!(
+            ChatCompletionsAdapter.build_payload(&state, &[], None)["reasoning_effort"],
+            "low"
+        );
+        info.supported_efforts = vec!["off".into()];
+        update_discovered_models(vec![info.clone()]);
+        assert!(
+            ChatCompletionsAdapter
+                .build_payload(&state, &[], None)
+                .get("reasoning_effort")
+                .is_none()
+        );
+        assert!(
+            CodexResponsesAdapter
+                .build_payload(&state, &[], None)
+                .get("reasoning")
+                .is_none()
+        );
+        info.supported_efforts = vec!["none".into()];
+        update_discovered_models(vec![info]);
+        assert_eq!(
+            CodexResponsesAdapter.build_payload(&state, &[], None)["reasoning"]["effort"],
+            "none"
+        );
     }
 
     #[test]
