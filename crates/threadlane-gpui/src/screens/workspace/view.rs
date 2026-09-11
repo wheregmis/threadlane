@@ -259,6 +259,7 @@ impl WorkspaceView {
                         if let Some(status) = runtime_status_text(runtime.status()) {
                             state.session_status = Some(status);
                         }
+                        state.set_reasoning_effort(state.reasoning_effort);
                     }
                     Some(Err(error)) => {
                         state.session_status =

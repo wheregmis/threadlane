@@ -17,6 +17,23 @@ fn filesystem_root_is_not_an_attachable_project() {
 }
 
 #[test]
+fn model_selection_resets_unsupported_reasoning_and_rejects_hidden_efforts() {
+    use threadlane_runtime::ReasoningEffort;
+    let mut state = AppState::load_from_registry(Vec::new());
+    state.available_models = vec![crate::model_catalog::ModelOption {
+        id: "gpt-4o".into(),
+        label: "GPT-4o".into(),
+        provider: crate::model_catalog::ModelProvider::OpenAi,
+    }];
+    state.selected_model = "previous-model".into();
+    state.reasoning_effort = ReasoningEffort::High;
+    state.set_selected_model("gpt-4o".into());
+    assert_eq!(state.reasoning_effort, ReasoningEffort::Off);
+    state.set_reasoning_effort(ReasoningEffort::High);
+    assert_eq!(state.reasoning_effort, ReasoningEffort::Off);
+}
+
+#[test]
 fn active_git_work_dir_uses_the_active_session_checkout_when_available() {
     let local_project = PathBuf::from("/projects/local");
     let worktree = PathBuf::from("/projects/local/.threadlane/worktrees/session");

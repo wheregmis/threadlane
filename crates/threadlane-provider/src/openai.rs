@@ -617,20 +617,6 @@ pub(crate) fn is_chat_capable_model(id: &str) -> bool {
     true
 }
 
-fn fallback_models() -> Vec<String> {
-    vec![
-        "gpt-5.6-luna".to_string(),
-        "gpt-5.4".to_string(),
-        "gpt-5.4-mini".to_string(),
-        "gpt-5.5".to_string(),
-        "gpt-5.6-sol".to_string(),
-        "gpt-5.6-terra".to_string(),
-        "gpt-5.3-codex-spark".to_string(),
-        "gpt-4o".to_string(),
-        "gpt-4o-mini".to_string(),
-    ]
-}
-
 async fn fetch_available_models_network(
     api_key: &str,
     account_id: Option<&str>,
@@ -672,7 +658,7 @@ async fn fetch_available_models_network(
             }
         }
     }
-    fallback_models()
+    Vec::new()
 }
 
 pub async fn fetch_available_models(api_key: &str, account_id: Option<&str>) -> Vec<String> {
@@ -696,22 +682,20 @@ pub async fn fetch_available_models(api_key: &str, account_id: Option<&str>) -> 
         });
         match handle.await {
             Ok(models) => models,
-            Err(_) => fallback_models(),
+            Err(_) => Vec::new(),
         }
     }
 }
 
-/// Model ids usable on a ChatGPT subscription, read live from
-/// `chatgpt.com/backend-api/models` (verified: 200 with the OAuth token;
-/// `api.openai.com/v1/models` 401s for these accounts, so the API-key fetch
-/// above can never see them). Pure shape parsing lives in
-/// [`parse_subscription_models`] so tests need no network.
-pub async fn fetch_subscription_models() -> Vec<String> {
+/// Codex model inventory and capabilities, not the general ChatGPT web picker.
+pub async fn fetch_subscription_models() -> Vec<threadlane_runtime::model_registry::ModelInfo> {
     if tokio::runtime::Handle::try_current().is_ok() {
         fetch_subscription_models_inner().await
     } else {
         // GPUI background tasks have no Tokio reactor; hyper panics there.
-        match threadlane_runtime::get_runtime().spawn(fetch_subscription_models_inner()).await
+        match threadlane_runtime::get_runtime()
+            .spawn(fetch_subscription_models_inner())
+            .await
         {
             Ok(models) => models,
             Err(_) => Vec::new(),
@@ -719,40 +703,77 @@ pub async fn fetch_subscription_models() -> Vec<String> {
     }
 }
 
-fn parse_subscription_models(value: &Value) -> Vec<String> {
-    let mut ids = HashSet::new();
-    if let Some(categories) = value.get("categories").and_then(Value::as_array) {
-        for category in categories {
-            if let Some(default) = category.get("default_model").and_then(Value::as_str) {
-                ids.insert(default.to_string());
+fn parse_subscription_models(value: &Value) -> Vec<threadlane_runtime::model_registry::ModelInfo> {
+    value
+        .get("models")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|model| model.get("visibility").and_then(Value::as_str) == Some("list"))
+        .filter_map(|model| {
+            let id = model.get("slug")?.as_str()?.trim();
+            if id.is_empty() || !is_chat_capable_model(id) {
+                return None;
             }
-            if let Some(supported) = category.get("supported_models").and_then(Value::as_array) {
-                for model in supported.iter().filter_map(Value::as_str) {
-                    ids.insert(model.to_string());
-                }
+            let levels = model
+                .get("supported_reasoning_levels")
+                .and_then(Value::as_array);
+            let mut supported_efforts: Vec<String> = levels
+                .into_iter()
+                .flatten()
+                .filter_map(|level| level.get("effort").and_then(Value::as_str))
+                .filter(|effort| !effort.trim().is_empty())
+                .map(str::to_owned)
+                .collect();
+            // An explicit empty list means no reasoning; absent metadata is unknown.
+            if levels.is_some() && supported_efforts.is_empty() {
+                supported_efforts.push("off".into());
             }
-        }
-    }
-    let mut ids: Vec<String> = ids.into_iter().collect();
-    ids.sort();
-    ids
+            Some(threadlane_runtime::model_registry::ModelInfo {
+                id: id.into(),
+                label: model
+                    .get("display_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or(id)
+                    .into(),
+                provider: Some("openai".into()),
+                context_window: model
+                    .get("context_window")
+                    .and_then(Value::as_u64)
+                    .map(|v| v as usize),
+                supported_efforts,
+                default_effort: model
+                    .get("default_reasoning_level")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+            })
+        })
+        .collect()
 }
 
-async fn fetch_subscription_models_inner() -> Vec<String> {
+async fn fetch_subscription_models_inner() -> Vec<threadlane_runtime::model_registry::ModelInfo> {
     let credentials = threadlane_auth::openai_auth::load_credentials()
         .filter(|credentials| threadlane_auth::openai_auth::is_own_source(&credentials.source));
     let Some(credentials) = credentials else {
         return Vec::new();
     };
-    let response = http_client()
-        .get("https://chatgpt.com/backend-api/models")
-        .header(AUTHORIZATION, format!("Bearer {}", credentials.access_token))
+    // Catalog visibility is gated by Codex client compatibility, not Threadlane's version.
+    let client_version = std::env::var("CODEX_CLIENT_VERSION").unwrap_or_else(|_| "0.154.0".into());
+    let mut request = http_client()
+        .get("https://chatgpt.com/backend-api/codex/models")
+        .query(&[("client_version", client_version.as_str())])
+        .header(
+            AUTHORIZATION,
+            format!("Bearer {}", credentials.access_token),
+        )
         .header(CONTENT_TYPE, "application/json")
         .header("OpenAI-Beta", "responses=experimental")
         .header("originator", "threadlane")
-        .timeout(Duration::from_secs(10))
-        .send()
-        .await;
+        .timeout(Duration::from_secs(10));
+    if let Some(account_id) = credentials.account_id.as_deref() {
+        request = request.header("ChatGPT-Account-Id", account_id);
+    }
+    let response = request.send().await;
     let Ok(response) = response else {
         return Vec::new();
     };
@@ -763,9 +784,6 @@ async fn fetch_subscription_models_inner() -> Vec<String> {
         return Vec::new();
     };
     parse_subscription_models(&value)
-        .into_iter()
-        .filter(|id| is_chat_capable_model(id))
-        .collect()
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1527,21 +1545,24 @@ mod tests {
     }
 
     #[test]
-    fn subscription_models_collect_defaults_and_supported_ids() {
+    fn subscription_models_keep_codex_capabilities_and_hide_internal_models() {
         let value = json!({
-            "categories": [
-                {
-                    "default_model": "gpt-5-6",
-                    "supported_models": ["gpt-5-6", "gpt-5-6-instant"]
-                },
-                {"default_model": "gpt-6-pro", "supported_models": []},
-                {"supported_models": ["gpt-5-5-thinking"]}
+            "models": [
+                {"slug": "future-codex", "display_name": "Future Codex", "visibility": "list",
+                 "supported_reasoning_levels": [{"effort": "low"}, {"effort": "ultra"}],
+                 "default_reasoning_level": "low"},
+                {"slug": "no-thinking", "visibility": "list", "supported_reasoning_levels": []},
+                {"slug": "hidden", "visibility": "hide"},
+                {"slug": "unknown", "visibility": "list"}
             ]
         });
-        assert_eq!(
-            parse_subscription_models(&value),
-            vec!["gpt-5-5-thinking", "gpt-5-6", "gpt-5-6-instant", "gpt-6-pro"]
-        );
+        let models = parse_subscription_models(&value);
+        assert_eq!(models.len(), 3);
+        assert_eq!(models[0].label, "Future Codex");
+        assert_eq!(models[0].supported_efforts, ["low", "ultra"]);
+        assert_eq!(models[0].default_effort.as_deref(), Some("low"));
+        assert_eq!(models[1].supported_efforts, ["off"]);
+        assert!(models[2].supported_efforts.is_empty());
         assert!(parse_subscription_models(&json!({})).is_empty());
     }
 
