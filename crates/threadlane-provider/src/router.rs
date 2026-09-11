@@ -629,33 +629,73 @@ impl ProviderClient {
     }
 }
 
-/// Truncates a string to at most `max_chars` Unicode characters,
-/// attempting to break cleanly at a word boundary when possible.
-fn truncate_to_word_boundary(text: &str, max_chars: usize) -> String {
-    let char_count = text.chars().count();
-    if char_count <= max_chars {
-        return text.to_string();
-    }
-    let truncated: String = text.chars().take(max_chars).collect();
-    if let Some(last_space) = truncated.rfind(' ') {
-        if last_space > 20 {
-            let candidate = truncated[..last_space].trim_end();
-            return candidate
-                .trim_end_matches([',', ';', '-', ':', '.'])
-                .to_string();
+/// Formats and truncates a Conventional Commit message to at most `max_chars` Unicode characters,
+/// budgeting scope to ensure a complete `type(scope): description` structure is preserved.
+fn format_and_truncate_conventional_commit(
+    type_name: &str,
+    scope: Option<&str>,
+    is_breaking: bool,
+    desc: &str,
+    max_chars: usize,
+) -> String {
+    let bang = if is_breaking { "!" } else { "" };
+    let desc = if desc.is_empty() { "update" } else { desc };
+
+    // Budget scope so that a complete `type(scope): description` structure is preserved
+    let min_desc_budget = 10;
+    let scope_str = match scope {
+        Some(s) => {
+            let fixed_overhead = type_name.chars().count() + bang.chars().count() + 4; // '(): '
+            let available_scope = max_chars.saturating_sub(fixed_overhead + min_desc_budget);
+            if s.chars().count() > available_scope && available_scope > 0 {
+                let truncated: String = s.chars().take(available_scope).collect();
+                let clean = truncated.trim_end_matches(['-', '_', '.', '/']);
+                format!("({clean})")
+            } else {
+                format!("({s})")
+            }
         }
+        None => String::new(),
+    };
+
+    let prefix = format!("{}{}{}: ", type_name, scope_str, bang);
+    let prefix_len = prefix.chars().count();
+    let avail_desc = max_chars.saturating_sub(prefix_len);
+
+    if desc.chars().count() <= avail_desc {
+        return format!("{}{}", prefix, desc);
     }
-    truncated
-        .trim_end_matches([',', ';', '-', ':', '.'])
-        .to_string()
+
+    if avail_desc == 0 {
+        return prefix.trim_end().to_string();
+    }
+
+    let desc_trunc: String = desc.chars().take(avail_desc).collect();
+    let truncated_desc = if let Some(last_space) = desc_trunc.rfind(' ') {
+        let candidate = desc_trunc[..last_space].trim_end();
+        let cleaned = candidate.trim_end_matches([',', ';', '-', ':', '.']);
+        if !cleaned.is_empty() {
+            cleaned
+        } else {
+            desc_trunc.trim_end_matches([',', ';', '-', ':', '.'])
+        }
+    } else {
+        desc_trunc.trim_end_matches([',', ';', '-', ':', '.'])
+    };
+
+    format!("{}{}", prefix, truncated_desc)
 }
 
 fn clean_wrapper_prefixes(line: &str) -> &str {
     let mut s = line.trim();
 
-    if let Some(idx) = s.find("git commit") {
-        if let Some(m_idx) = s[idx..].find("-m") {
-            let rest = s[idx + m_idx + 2..].trim();
+    let trimmed_prompt = s.trim_start_matches(['$', '>', '#', ' ']);
+    if trimmed_prompt
+        .to_ascii_lowercase()
+        .starts_with("git commit")
+    {
+        if let Some(m_idx) = trimmed_prompt.find("-m") {
+            let rest = trimmed_prompt[m_idx + 2..].trim();
             let unquoted = rest
                 .strip_prefix('"')
                 .and_then(|r| r.strip_suffix('"'))
@@ -674,6 +714,16 @@ fn clean_wrapper_prefixes(line: &str) -> &str {
         .trim_matches('\'')
         .trim();
 
+    let lower = s.to_ascii_lowercase();
+    if (lower.starts_with("here is") || lower.starts_with("here's"))
+        && (lower.contains("commit message") || lower.ends_with(':'))
+    {
+        s = match s.find(':') {
+            Some(idx) => s[idx + 1..].trim(),
+            None => "",
+        };
+    }
+
     for prefix in &[
         "commit message:",
         "commit:",
@@ -686,13 +736,6 @@ fn clean_wrapper_prefixes(line: &str) -> &str {
             s = s[prefix.len()..].trim();
             break;
         }
-    }
-
-    let lower = s.to_ascii_lowercase();
-    if (lower.starts_with("here is") || lower.starts_with("here's"))
-        && (lower.contains("commit message") || lower.ends_with(':'))
-    {
-        return "";
     }
 
     s.trim_matches('`')
@@ -765,9 +808,6 @@ fn parse_conventional_prefix(line: &str) -> Option<ConventionalMatch<'_>> {
     let colon_idx = line.find(':')?;
     let prefix = line[..colon_idx].trim();
     let rest = line[colon_idx + 1..].trim();
-    if rest.is_empty() {
-        return None;
-    }
 
     let (prefix_no_bang, is_breaking) = if let Some(stripped) = prefix.strip_suffix('!') {
         (stripped.trim_end(), true)
@@ -879,11 +919,8 @@ fn normalize_description(desc: &str) -> String {
 
 fn infer_conventional_commit(line: &str) -> (&'static str, String) {
     let trimmed = line.trim().trim_start_matches(['-', '*', '>', '•']).trim();
-    let first_word = trimmed
-        .split_whitespace()
-        .next()
-        .unwrap_or_default()
-        .trim_matches(|c: char| !c.is_alphanumeric());
+    let leading_token = trimmed.split_whitespace().next().unwrap_or_default();
+    let first_word = leading_token.trim_matches(|c: char| !c.is_alphanumeric());
     let lower_first = first_word.to_ascii_lowercase();
 
     let lower_line = trimmed.to_ascii_lowercase();
@@ -913,7 +950,7 @@ fn infer_conventional_commit(line: &str) -> (&'static str, String) {
             | "correcting" | "patch" | "patches" | "patched" | "avoid" | "avoids" | "avoided"
     ) {
         let desc = if matches!(lower_first.as_str(), "fix" | "fixes" | "fixed" | "fixing") {
-            let rest = trimmed[first_word.len()..].trim();
+            let rest = trimmed[leading_token.len()..].trim();
             let next_word = rest
                 .split_whitespace()
                 .next()
@@ -957,7 +994,7 @@ fn infer_conventional_commit(line: &str) -> (&'static str, String) {
             lower_first.as_str(),
             "refactor" | "refactors" | "refactored" | "refactoring"
         ) {
-            let rest = trimmed[first_word.len()..].trim();
+            let rest = trimmed[leading_token.len()..].trim();
             if rest.is_empty() {
                 normalize_description(trimmed)
             } else {
@@ -1044,24 +1081,26 @@ pub fn normalize_commit_message(raw: &str) -> String {
         None => return String::new(),
     };
 
-    let formatted = if let Some(matched) = parse_conventional_prefix(candidate) {
-        let desc = normalize_description(matched.description);
-        let scope_str = match matched.scope {
-            Some(scope) => format!("({scope})"),
-            None => String::new(),
-        };
-        let bang = if matched.is_breaking { "!" } else { "" };
-        format!("{}{}{}: {}", matched.type_name, scope_str, bang, desc)
-    } else {
-        let (type_name, desc) = infer_conventional_commit(candidate);
-        if desc.is_empty() {
-            format!("{type_name}: update")
+    let (type_name, scope, is_breaking, desc) =
+        if let Some(matched) = parse_conventional_prefix(candidate) {
+            let desc = normalize_description(matched.description);
+            let desc = if desc.is_empty() {
+                "update".to_string()
+            } else {
+                desc
+            };
+            (matched.type_name, matched.scope, matched.is_breaking, desc)
         } else {
-            format!("{type_name}: {desc}")
-        }
-    };
+            let (type_name, desc) = infer_conventional_commit(candidate);
+            let desc = if desc.is_empty() {
+                "update".to_string()
+            } else {
+                desc
+            };
+            (type_name, None, false, desc)
+        };
 
-    truncate_to_word_boundary(&formatted, 72)
+    format_and_truncate_conventional_commit(type_name, scope, is_breaking, &desc, 72)
 }
 
 #[cfg(test)]
@@ -1429,6 +1468,14 @@ mod tests {
             normalize_commit_message("fix:handle missing branch"),
             "fix: handle missing branch"
         );
+        assert_eq!(
+            normalize_commit_message("feat: ."),
+            "feat: update"
+        );
+        assert_eq!(
+            normalize_commit_message("feat(auth): \"\""),
+            "feat(auth): update"
+        );
     }
 
     #[test]
@@ -1458,6 +1505,14 @@ mod tests {
                 "Here is the commit message:\n\nfeat: add dark mode\n\nDetailed explanation..."
             ),
             "feat: add dark mode"
+        );
+        assert_eq!(
+            normalize_commit_message("Here is the commit message: feat: add dark mode"),
+            "feat: add dark mode"
+        );
+        assert_eq!(
+            normalize_commit_message("fix: handle git commit -m arguments"),
+            "fix: handle git commit -m arguments"
         );
     }
 
@@ -1511,6 +1566,18 @@ mod tests {
             normalize_commit_message("Initial commit of the project"),
             "chore: initial commit of the project"
         );
+        assert_eq!(
+            normalize_commit_message("🔧Fix crash in parser"),
+            "fix: crash in parser"
+        );
+        assert_eq!(
+            normalize_commit_message("[fix] crash in parser"),
+            "fix: crash in parser"
+        );
+        assert_eq!(
+            normalize_commit_message("[refactor] simplify view component"),
+            "refactor: simplify view component"
+        );
     }
 
     #[test]
@@ -1528,5 +1595,17 @@ mod tests {
         assert!(normalized.chars().count() <= 72);
         assert!(normalized.starts_with("feat: implement comprehensive support for nested workspace directory"));
         assert!(!normalized.ends_with('.'));
+
+        let scoped_long = "feat(this-is-a-long-scope-name-that-is-about-sixty-chars-long): add x";
+        let norm_scoped = normalize_commit_message(scoped_long);
+        assert!(norm_scoped.chars().count() <= 72);
+        assert!(norm_scoped.contains(": "));
+        assert!(norm_scoped.ends_with("add x"));
+
+        let very_long_scope = "feat(super-long-scope-name-that-is-way-too-long-and-keeps-going-and-going-beyond-the-limit): add authentication system";
+        let norm_very_long = normalize_commit_message(very_long_scope);
+        assert!(norm_very_long.chars().count() <= 72);
+        assert!(norm_very_long.contains(": "));
+        assert!(!norm_very_long.split(": ").nth(1).unwrap().is_empty());
     }
 }
