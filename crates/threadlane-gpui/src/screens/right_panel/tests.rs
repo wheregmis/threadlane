@@ -8,7 +8,8 @@ use super::draft_pr::{
     DraftPrRemoteResult,
 };
 use super::types::{
-    can_create_pull_request, can_publish_branch, message_generated_matches_active_project,
+    can_create_pull_request, can_publish_branch, discard_options, message_generated_matches_active_project,
+    selection_bar_discard_options, DiscardOption,
 };
 use super::view::{retain_review_selection, scan_project_tree};
 
@@ -340,4 +341,130 @@ fn project_scan_is_bounded_and_skips_generated_roots() {
         .any(|item| item.relative_path == "src/nested"));
 
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn discard_options_for_single_file() {
+    let selected = vec!["src/a.rs".to_string()];
+    let options = discard_options("src/a.rs", &selected, 1);
+    assert_eq!(options, vec![DiscardOption::Single("src/a.rs".to_string())]);
+    assert_eq!(options[0].label(), "Discard Changes...");
+}
+
+#[test]
+fn discard_options_when_all_files_selected() {
+    let selected = vec![
+        "src/a.rs".to_string(),
+        "src/b.rs".to_string(),
+        "src/c.rs".to_string(),
+    ];
+    let options = discard_options("src/a.rs", &selected, 3);
+    assert_eq!(
+        options,
+        vec![
+            DiscardOption::Single("src/a.rs".to_string()),
+            DiscardOption::All(3),
+        ]
+    );
+    assert_eq!(options[0].label(), "Discard Changes...");
+    assert_eq!(options[1].label(), "Discard All Changes (3)...");
+}
+
+#[test]
+fn discard_options_when_subset_of_files_selected() {
+    let selected = vec!["src/a.rs".to_string(), "src/b.rs".to_string()];
+    let options = discard_options("src/c.rs", &selected, 5);
+    assert_eq!(
+        options,
+        vec![
+            DiscardOption::Single("src/c.rs".to_string()),
+            DiscardOption::Selected(vec!["src/a.rs".to_string(), "src/b.rs".to_string()]),
+            DiscardOption::All(5),
+        ]
+    );
+    assert_eq!(options[0].label(), "Discard Changes...");
+    assert_eq!(options[1].label(), "Discard Selected Changes (2)...");
+    assert_eq!(options[2].label(), "Discard All Changes (5)...");
+}
+
+#[test]
+fn discard_options_when_no_files_selected() {
+    let selected: Vec<String> = Vec::new();
+    let options = discard_options("src/a.rs", &selected, 4);
+    assert_eq!(
+        options,
+        vec![
+            DiscardOption::Single("src/a.rs".to_string()),
+            DiscardOption::All(4),
+        ]
+    );
+    assert_eq!(options[0].label(), "Discard Changes...");
+    assert_eq!(options[1].label(), "Discard All Changes (4)...");
+}
+
+#[test]
+fn selection_bar_discard_options_scenarios() {
+    // 0 files: empty
+    assert!(selection_bar_discard_options(&[], 0).is_empty());
+
+    // 1 file, 1 selected
+    let opts1 = selection_bar_discard_options(&["src/a.rs".to_string()], 1);
+    assert_eq!(opts1, vec![DiscardOption::All(1)]);
+    assert_eq!(opts1[0].label(), "Discard All Changes (1)...");
+
+    // 3 files, all selected
+    let all3 = vec![
+        "src/a.rs".to_string(),
+        "src/b.rs".to_string(),
+        "src/c.rs".to_string(),
+    ];
+    let opts3 = selection_bar_discard_options(&all3, 3);
+    assert_eq!(opts3, vec![DiscardOption::All(3)]);
+    assert_eq!(opts3[0].label(), "Discard All Changes (3)...");
+
+    // 5 files, 2 selected
+    let sub2 = vec!["src/a.rs".to_string(), "src/b.rs".to_string()];
+    let opts5 = selection_bar_discard_options(&sub2, 5);
+    assert_eq!(
+        opts5,
+        vec![
+            DiscardOption::Selected(vec!["src/a.rs".to_string(), "src/b.rs".to_string()]),
+            DiscardOption::All(5),
+        ]
+    );
+    assert_eq!(opts5[0].label(), "Discard Selected Changes (2)...");
+    assert_eq!(opts5[1].label(), "Discard All Changes (5)...");
+
+    // 5 files, 0 selected
+    let opts5_none = selection_bar_discard_options(&[], 5);
+    assert_eq!(opts5_none, vec![DiscardOption::All(5)]);
+    assert_eq!(opts5_none[0].label(), "Discard All Changes (5)...");
+}
+
+#[test]
+fn discard_option_confirmation_and_action() {
+    let single = DiscardOption::Single("src/foo.rs".to_string());
+    assert!(!single.requires_confirmation());
+    assert_eq!(single.confirmation_prompt(), None);
+    assert_eq!(
+        single.git_action(),
+        GitAction::DiscardFile("src/foo.rs".to_string())
+    );
+
+    let selected = DiscardOption::Selected(vec!["src/a.rs".into(), "src/b.rs".into()]);
+    assert!(selected.requires_confirmation());
+    let prompt = selected.confirmation_prompt().unwrap();
+    assert_eq!(prompt.0, "Discard selected changes?");
+    assert!(prompt.1.contains("2 selected files"));
+    assert_eq!(
+        selected.git_action(),
+        GitAction::DiscardFiles(vec!["src/a.rs".into(), "src/b.rs".into()])
+    );
+
+    let all = DiscardOption::All(4);
+    assert!(all.requires_confirmation());
+    let prompt_all = all.confirmation_prompt().unwrap();
+    assert_eq!(prompt_all.0, "Discard all changes?");
+    assert!(prompt_all.1.contains("4 files"));
+    assert_eq!(all.git_action(), GitAction::DiscardAll);
 }

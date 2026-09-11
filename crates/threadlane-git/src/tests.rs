@@ -998,6 +998,83 @@ fn file_discard_and_ignore_lifecycle() {
 }
 
 #[test]
+fn discard_multiple_files_and_all_changes() {
+    let dir = tempdir().unwrap();
+    run_git(dir.path(), &["init", "-b", "main"]);
+    run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+    run_git(dir.path(), &["config", "user.name", "Test"]);
+    fs::write(dir.path().join("tracked1.txt"), "t1 original\n").unwrap();
+    fs::write(dir.path().join("tracked2.txt"), "t2 original\n").unwrap();
+    fs::write(dir.path().join("tracked3.txt"), "t3 original\n").unwrap();
+    run_git(dir.path(), &["add", "."]);
+    run_git(dir.path(), &["commit", "-qm", "initial commit"]);
+
+    // Test rejection of path outside workspace in discard_files
+    assert!(discard_files(dir.path(), &["tracked1.txt", "../outside.txt"]).is_err());
+
+    // 1. Modify multiple tracked files and create untracked, discard specific subset
+    fs::write(dir.path().join("tracked1.txt"), "t1 modified\n").unwrap();
+    fs::write(dir.path().join("tracked2.txt"), "t2 modified\n").unwrap();
+    fs::write(dir.path().join("untracked1.txt"), "u1 content\n").unwrap();
+    fs::write(dir.path().join("untracked2.txt"), "u2 content\n").unwrap();
+    assert_eq!(inspect(dir.path()).unwrap().files.len(), 4);
+
+    // Discard tracked1 and untracked1
+    discard_files(dir.path(), &["tracked1.txt", "untracked1.txt"]).unwrap();
+    let status = inspect(dir.path()).unwrap();
+    assert_eq!(status.files.len(), 2);
+    assert_eq!(
+        fs::read_to_string(dir.path().join("tracked1.txt")).unwrap(),
+        "t1 original\n"
+    );
+    assert!(!dir.path().join("untracked1.txt").exists());
+    assert_eq!(
+        fs::read_to_string(dir.path().join("tracked2.txt")).unwrap(),
+        "t2 modified\n"
+    );
+    assert!(dir.path().join("untracked2.txt").exists());
+
+    // 2. Discard all remaining changes
+    discard_all_changes(dir.path()).unwrap();
+    assert_eq!(inspect(dir.path()).unwrap().files.len(), 0);
+    assert_eq!(
+        fs::read_to_string(dir.path().join("tracked2.txt")).unwrap(),
+        "t2 original\n"
+    );
+    assert!(!dir.path().join("untracked2.txt").exists());
+
+    // 3. Test with deletions and staged additions
+    fs::remove_file(dir.path().join("tracked3.txt")).unwrap();
+    fs::write(dir.path().join("new_staged.txt"), "staged\n").unwrap();
+    run_git(dir.path(), &["add", "new_staged.txt"]);
+    assert_eq!(inspect(dir.path()).unwrap().files.len(), 2);
+    discard_all_changes(dir.path()).unwrap();
+    assert_eq!(inspect(dir.path()).unwrap().files.len(), 0);
+    assert!(dir.path().join("tracked3.txt").exists());
+    assert!(!dir.path().join("new_staged.txt").exists());
+
+    // 4. Test staged rename discard preserves both paths
+    run_git(dir.path(), &["mv", "tracked1.txt", "renamed1.txt"]);
+    let status = inspect(dir.path()).unwrap();
+    assert_eq!(status.files.len(), 1);
+    assert_eq!(status.files[0].path, "renamed1.txt");
+    assert_eq!(status.files[0].orig_path.as_deref(), Some("tracked1.txt"));
+
+    discard_file_changes(dir.path(), "renamed1.txt").unwrap();
+    assert_eq!(inspect(dir.path()).unwrap().files.len(), 0);
+    assert!(dir.path().join("tracked1.txt").exists());
+    assert!(!dir.path().join("renamed1.txt").exists());
+
+    // 5. Test staged rename discard via discard_all_changes
+    run_git(dir.path(), &["mv", "tracked2.txt", "renamed2.txt"]);
+    assert_eq!(inspect(dir.path()).unwrap().files.len(), 1);
+    discard_all_changes(dir.path()).unwrap();
+    assert_eq!(inspect(dir.path()).unwrap().files.len(), 0);
+    assert!(dir.path().join("tracked2.txt").exists());
+    assert!(!dir.path().join("renamed2.txt").exists());
+}
+
+#[test]
 fn commit_history_inspection() {
     let dir = tempdir().unwrap();
     run_git(dir.path(), &["init", "-b", "main"]);

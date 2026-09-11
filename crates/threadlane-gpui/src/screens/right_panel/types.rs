@@ -156,8 +156,95 @@ pub enum GitAction {
     PopStash(Option<usize>),
     DropStash(Option<usize>),
     DiscardFile(String),
+    DiscardFiles(Vec<String>),
+    DiscardAll,
     IgnoreFile(String),
     IgnoreExtension(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DiscardOption {
+    Single(String),
+    Selected(Vec<String>),
+    All(usize),
+}
+
+impl DiscardOption {
+    pub fn label(&self) -> String {
+        match self {
+            Self::Single(_) => "Discard Changes...".to_string(),
+            Self::Selected(paths) => format!("Discard Selected Changes ({})...", paths.len()),
+            Self::All(count) => format!("Discard All Changes ({count})..."),
+        }
+    }
+
+    pub fn git_action(&self) -> GitAction {
+        match self {
+            Self::Single(path) => GitAction::DiscardFile(path.clone()),
+            Self::Selected(paths) => GitAction::DiscardFiles(paths.clone()),
+            Self::All(_) => GitAction::DiscardAll,
+        }
+    }
+
+    pub fn requires_confirmation(&self) -> bool {
+        matches!(self, Self::Selected(_) | Self::All(_))
+    }
+
+    pub fn confirmation_prompt(&self) -> Option<(String, String)> {
+        match self {
+            Self::Single(_) => None,
+            Self::Selected(paths) => {
+                let count = paths.len();
+                let file_str = if count == 1 { "file" } else { "files" };
+                Some((
+                    "Discard selected changes?".to_string(),
+                    format!(
+                        "Are you sure you want to discard changes in {count} selected {file_str}? This cannot be undone."
+                    ),
+                ))
+            }
+            Self::All(count) => {
+                let file_str = if *count == 1 { "file" } else { "files" };
+                Some((
+                    "Discard all changes?".to_string(),
+                    format!(
+                        "Are you sure you want to discard all changes across {count} {file_str}? This cannot be undone."
+                    ),
+                ))
+            }
+        }
+    }
+}
+
+pub fn discard_options(
+    clicked_path: &str,
+    selected_paths: &[String],
+    total_files: usize,
+) -> Vec<DiscardOption> {
+    let mut options = vec![DiscardOption::Single(clicked_path.to_string())];
+    let selected_count = selected_paths.len();
+    if selected_count > 1 && selected_count < total_files {
+        options.push(DiscardOption::Selected(selected_paths.to_vec()));
+    }
+    if total_files > 1 {
+        options.push(DiscardOption::All(total_files));
+    }
+    options
+}
+
+pub fn selection_bar_discard_options(
+    selected_paths: &[String],
+    total_files: usize,
+) -> Vec<DiscardOption> {
+    let mut options = Vec::new();
+    let selected_count = selected_paths.len();
+    if selected_count > 0 && selected_count < total_files {
+        options.push(DiscardOption::Selected(selected_paths.to_vec()));
+    }
+    if total_files > 0 {
+        options.push(DiscardOption::All(total_files));
+    }
+    options
 }
 
 #[derive(Clone, Debug)]

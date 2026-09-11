@@ -26,9 +26,10 @@ use crate::state::AppState;
 use super::browser::BrowserView;
 use super::draft_pr::{draft_pr_prefill, DraftPrContextKey, DraftPrDialogView};
 pub(crate) use super::types::{
-    can_create_pull_request, can_publish_branch, detect_language,
-    message_generated_matches_active_project, normalize_generated_commit_message, FileNode,
-    GitAction, PanelEvent, ReviewTab, Surface,
+    can_create_pull_request, can_publish_branch, detect_language, discard_options,
+    message_generated_matches_active_project, normalize_generated_commit_message,
+    selection_bar_discard_options, DiscardOption, FileNode, GitAction, PanelEvent, ReviewTab,
+    Surface,
 };
 
 pub struct RightPanelView {
@@ -704,15 +705,7 @@ impl RightPanelView {
                         self.last_fetched_time = Some(std::time::Instant::now());
                         let action_failed = action_error.is_some();
                         let message = action_error
-                            .or_else(|| {
-                                action_message.map(|message| {
-                                    if message.is_empty() {
-                                        "Pull request created successfully.".into()
-                                    } else {
-                                        format!("Pull request created: {message}")
-                                    }
-                                })
-                            })
+                            .or(action_message)
                             .unwrap_or_else(|| "Git action completed successfully.".into());
                         self.git_feedback = Some(message.clone());
                         self.pending_git_notifications.push(if action_failed {
@@ -845,12 +838,31 @@ impl RightPanelView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.execute_git_action(action, Some(window), cx);
+    }
+
+    pub(crate) fn run_git_action_without_window(
+        &mut self,
+        action: GitAction,
+        cx: &mut Context<Self>,
+    ) {
+        self.execute_git_action(action, None, cx);
+    }
+
+    fn execute_git_action(
+        &mut self,
+        action: GitAction,
+        mut window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(work_dir) = self.project.clone() else {
             self.git_feedback = Some("Attach a project to use Git actions.".into());
-            window.push_notification(
-                Notification::warning("Attach a project to use Git actions"),
-                cx,
-            );
+            let notif = Notification::warning("Attach a project to use Git actions");
+            if let Some(ref mut window) = window {
+                window.push_notification(notif, cx);
+            } else {
+                self.pending_git_notifications.push(notif);
+            }
             cx.notify();
             return;
         };
@@ -868,16 +880,23 @@ impl RightPanelView {
         if matches!(action, GitAction::Commit | GitAction::CommitAndPush) {
             if selected_paths.is_empty() {
                 self.git_feedback = Some("Select at least one file to commit.".into());
-                window.push_notification(
-                    Notification::warning("Select at least one file to commit"),
-                    cx,
-                );
+                let notif = Notification::warning("Select at least one file to commit");
+                if let Some(ref mut window) = window {
+                    window.push_notification(notif, cx);
+                } else {
+                    self.pending_git_notifications.push(notif);
+                }
                 cx.notify();
                 return;
             }
             if message.is_empty() {
                 self.git_feedback = Some("Enter a commit message first.".into());
-                window.push_notification(Notification::warning("Enter a commit message first"), cx);
+                let notif = Notification::warning("Enter a commit message first");
+                if let Some(ref mut window) = window {
+                    window.push_notification(notif, cx);
+                } else {
+                    self.pending_git_notifications.push(notif);
+                }
                 cx.notify();
                 return;
             }
@@ -901,11 +920,24 @@ impl RightPanelView {
             GitAction::PopStash(_) => "Restoring stashed changes…".to_string(),
             GitAction::DropStash(_) => "Discarding stash…".to_string(),
             GitAction::DiscardFile(p) => format!("Discarding changes in {p}…"),
+            GitAction::DiscardFiles(paths) => {
+                if paths.len() == 1 {
+                    format!("Discarding changes in {}…", paths[0])
+                } else {
+                    format!("Discarding changes in {} files…", paths.len())
+                }
+            }
+            GitAction::DiscardAll => "Discarding all changes…".to_string(),
             GitAction::IgnoreFile(p) => format!("Adding {p} to .gitignore…"),
             GitAction::IgnoreExtension(ext) => format!("Ignoring *.{ext} files…"),
         };
         self.git_feedback = Some(feedback.clone());
-        window.push_notification(Notification::info(feedback), cx);
+        let notif = Notification::info(feedback);
+        if let Some(ref mut window) = window {
+            window.push_notification(notif, cx);
+        } else {
+            self.pending_git_notifications.push(notif);
+        }
         let tx = self.event_tx.clone();
         std::thread::spawn(move || {
             let action_result = (|| {
@@ -946,10 +978,13 @@ impl RightPanelView {
                         threadlane_git::unstage_all(&work_dir).map_err(|e| e.to_string())?;
                     }
                     GitAction::CreatePullRequest => {
-                        action_message = Some(
-                            threadlane_git::create_pull_request(&work_dir)
-                                .map_err(|e| e.to_string())?,
-                        );
+                        let pr = threadlane_git::create_pull_request(&work_dir)
+                            .map_err(|e| e.to_string())?;
+                        action_message = Some(if pr.is_empty() {
+                            "Pull request created successfully.".into()
+                        } else {
+                            format!("Pull request created: {pr}")
+                        });
                     }
                     GitAction::Checkout(branch) => {
                         threadlane_git::checkout(&work_dir, branch).map_err(|e| e.to_string())?;
@@ -978,6 +1013,23 @@ impl RightPanelView {
                     GitAction::DiscardFile(path) => {
                         threadlane_git::discard_file_changes(&work_dir, path)
                             .map_err(|e| e.to_string())?;
+                        action_message = Some(format!("Discarded changes in {path}"));
+                    }
+                    GitAction::DiscardFiles(paths) => {
+                        if !paths.is_empty() {
+                            threadlane_git::discard_files(&work_dir, paths)
+                                .map_err(|e| e.to_string())?;
+                            action_message = Some(if paths.len() == 1 {
+                                format!("Discarded changes in {}", paths[0])
+                            } else {
+                                format!("Discarded changes in {} files", paths.len())
+                            });
+                        }
+                    }
+                    GitAction::DiscardAll => {
+                        threadlane_git::discard_all_changes(&work_dir)
+                            .map_err(|e| e.to_string())?;
+                        action_message = Some("Discarded all changes".to_string());
                     }
                     GitAction::IgnoreFile(path) => {
                         threadlane_git::ignore_file(&work_dir, path).map_err(|e| e.to_string())?;
@@ -1515,6 +1567,40 @@ impl RightPanelView {
             .into_any_element()
     }
 
+    pub(crate) fn handle_discard_option(
+        panel: Entity<RightPanelView>,
+        opt: DiscardOption,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        if opt.requires_confirmation() {
+            let (title, description) = opt.confirmation_prompt().unwrap_or((
+                "Discard changes?".into(),
+                "Are you sure you want to discard these changes? This cannot be undone.".into(),
+            ));
+            let action = opt.git_action();
+            cx.spawn(async move |cx| {
+                let confirmed = rfd::AsyncMessageDialog::new()
+                    .set_title(&title)
+                    .set_description(&description)
+                    .set_buttons(rfd::MessageButtons::YesNo)
+                    .show()
+                    .await;
+                if matches!(confirmed, rfd::MessageDialogResult::Yes) {
+                    let _ = panel.update(cx, |this, cx| {
+                        this.run_git_action_without_window(action, cx);
+                    });
+                }
+            })
+            .detach();
+        } else {
+            let action = opt.git_action();
+            panel.update(cx, |this, cx| {
+                this.run_git_action(action, window, cx);
+            });
+        }
+    }
+
     fn render_review_file_row(
         &mut self,
         index: usize,
@@ -1673,29 +1759,41 @@ impl RightPanelView {
                     let rel_path_2 = path.clone();
                     let project_ref = project.clone();
                     let model_ref = model.clone();
-                    let panel_discard = panel.clone();
                     let panel_ignore = panel.clone();
                     let panel_ignore_ext = panel.clone();
 
-                    let mut menu = menu
-                        .item(PopupMenuItem::new("Discard Changes...").on_click(
+                    let mut menu = menu;
+                    let (selected_paths, total_files) = {
+                        let panel_ref = panel.read(_cx);
+                        let selected_paths: Vec<String> =
+                            panel_ref.selected_files.iter().cloned().collect();
+                        (selected_paths, panel_ref.review_files.len())
+                    };
+                    for opt in discard_options(&discard_path, &selected_paths, total_files) {
+                        let panel_action = panel.clone();
+                        let label = opt.label();
+                        let opt_action = opt.clone();
+                        menu = menu.item(PopupMenuItem::new(label).on_click(
                             move |_event, window, cx| {
-                                let p = discard_path.clone();
-                                panel_discard.update(cx, |this, cx| {
-                                    this.run_git_action(GitAction::DiscardFile(p), window, cx);
+                                Self::handle_discard_option(
+                                    panel_action.clone(),
+                                    opt_action.clone(),
+                                    window,
+                                    cx,
+                                );
+                            },
+                        ));
+                    }
+                    menu = menu.item(
+                        PopupMenuItem::new("Ignore File (Add to .gitignore)").on_click(
+                            move |_event, window, cx| {
+                                let p = ignore_path.clone();
+                                panel_ignore.update(cx, |this, cx| {
+                                    this.run_git_action(GitAction::IgnoreFile(p), window, cx);
                                 });
                             },
-                        ))
-                        .item(
-                            PopupMenuItem::new("Ignore File (Add to .gitignore)").on_click(
-                                move |_event, window, cx| {
-                                    let p = ignore_path.clone();
-                                    panel_ignore.update(cx, |this, cx| {
-                                        this.run_git_action(GitAction::IgnoreFile(p), window, cx);
-                                    });
-                                },
-                            ),
-                        );
+                        ),
+                    );
 
                     if let Some(ext_str) = ext.clone() {
                         let ext_action = ext_str.clone();
@@ -1806,6 +1904,7 @@ impl RightPanelView {
             self.review_files_list_state
                 .reset_with_uniform_height(self.review_files.len(), px(32.0));
         }
+        let panel_entity = cx.entity().clone();
         let theme = cx.theme().colors;
         if let Some(error) = &self.review_error {
             return self.render_empty("Review unavailable", error, cx);
@@ -2221,6 +2320,7 @@ impl RightPanelView {
         let has_staged = staged_count > 0;
 
         let selection_bar = (total_files > 0).then(|| {
+            let panel_sb = panel_entity.clone();
             div()
                 .flex()
                 .items_center()
@@ -2230,6 +2330,67 @@ impl RightPanelView {
                 .border_b_1()
                 .border_color(theme.border)
                 .bg(theme.muted.opacity(0.15))
+                .context_menu({
+                    let panel = panel_sb;
+                    move |menu, _window, cx| {
+                        let (selected_paths, total_files, unstaged_count, has_staged) = {
+                            let panel_ref = panel.read(cx);
+                            let selected_paths: Vec<String> =
+                                panel_ref.selected_files.iter().cloned().collect();
+                            let total = panel_ref.review_files.len();
+                            let unstaged =
+                                panel_ref.review_files.iter().filter(|f| f.unstaged).count();
+                            let staged =
+                                panel_ref.review_files.iter().any(|f| f.staged);
+                            (selected_paths, total, unstaged, staged)
+                        };
+                        let mut menu = menu;
+                        for opt in selection_bar_discard_options(&selected_paths, total_files) {
+                            let panel_action = panel.clone();
+                            let label = opt.label();
+                            let opt_action = opt.clone();
+                            menu = menu.item(PopupMenuItem::new(label).on_click(
+                                move |_event, window, cx| {
+                                    Self::handle_discard_option(
+                                        panel_action.clone(),
+                                        opt_action.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                },
+                            ));
+                        }
+                        if total_files > 0 {
+                            let panel_stage = panel.clone();
+                            menu = menu.separator().item(
+                                PopupMenuItem::new("Stage All")
+                                    .disabled(unstaged_count == 0)
+                                    .on_click(move |_event, window, cx| {
+                                        panel_stage.update(cx, |this, cx| {
+                                            this.run_git_action(GitAction::StageAll, window, cx);
+                                        });
+                                    }),
+                            );
+                            if has_staged {
+                                let panel_unstage = panel.clone();
+                                menu = menu.item(
+                                    PopupMenuItem::new("Unstage All").on_click(
+                                        move |_event, window, cx| {
+                                            panel_unstage.update(cx, |this, cx| {
+                                                this.run_git_action(
+                                                    GitAction::UnstageAll,
+                                                    window,
+                                                    cx,
+                                                );
+                                            });
+                                        },
+                                    ),
+                                );
+                            }
+                        }
+                        menu
+                    }
+                })
                 .child(
                     div()
                         .flex()
@@ -2333,10 +2494,39 @@ impl RightPanelView {
                 )
                 .into_any_element()
         } else {
+            let panel_fl = panel_entity.clone();
             div()
                 .relative()
                 .flex_1()
                 .min_h_0()
+                .context_menu({
+                    let panel = panel_fl;
+                    move |menu, _window, cx| {
+                        let (selected_paths, total_files) = {
+                            let panel_ref = panel.read(cx);
+                            let selected_paths: Vec<String> =
+                                panel_ref.selected_files.iter().cloned().collect();
+                            (selected_paths, panel_ref.review_files.len())
+                        };
+                        let mut menu = menu;
+                        for opt in selection_bar_discard_options(&selected_paths, total_files) {
+                            let panel_action = panel.clone();
+                            let label = opt.label();
+                            let opt_action = opt.clone();
+                            menu = menu.item(PopupMenuItem::new(label).on_click(
+                                move |_event, window, cx| {
+                                    Self::handle_discard_option(
+                                        panel_action.clone(),
+                                        opt_action.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                },
+                            ));
+                        }
+                        menu
+                    }
+                })
                 .child(
                     list(
                         self.review_files_list_state.clone(),
