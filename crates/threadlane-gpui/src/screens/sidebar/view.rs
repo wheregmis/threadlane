@@ -19,7 +19,68 @@ use gpui_component::{Icon, IconName, Selectable, Sizable, WindowExt};
 use crate::app::{actions::AppAction, controller};
 use crate::state::{AppState, SessionAttention, SessionInfo, TrajectoryEntry};
 
-fn open_archive_session_dialog(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionRemovalKind {
+    Archive,
+    Remove,
+}
+
+impl SessionRemovalKind {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Archive => "Archive session?",
+            Self::Remove => "Remove session?",
+        }
+    }
+
+    fn description(self, session_id: &str) -> String {
+        match self {
+            Self::Archive => format!("This removes session {session_id} from the active list."),
+            Self::Remove => format!("This permanently removes session {session_id}."),
+        }
+    }
+
+    fn action_prefix(self) -> &'static str {
+        match self {
+            Self::Archive => "archive",
+            Self::Remove => "remove",
+        }
+    }
+
+    fn button_props(self) -> DialogButtonProps {
+        match self {
+            Self::Archive => DialogButtonProps::default()
+                .ok_text("Archive")
+                .show_cancel(true),
+            Self::Remove => DialogButtonProps::default()
+                .ok_text("Remove")
+                .ok_variant(ButtonVariant::Danger)
+                .show_cancel(true),
+        }
+    }
+
+    fn dispatch_action(
+        self,
+        work_dir: PathBuf,
+        session_id: String,
+        delete_worktree: bool,
+    ) -> AppAction {
+        match self {
+            Self::Archive => AppAction::SettleSession {
+                work_dir,
+                session_id,
+                delete_worktree,
+            },
+            Self::Remove => AppAction::RemoveSession {
+                work_dir,
+                session_id,
+                delete_worktree,
+            },
+        }
+    }
+}
+
+fn open_session_removal_dialog(
     window: &mut Window,
     cx: &mut App,
     model: Entity<AppState>,
@@ -27,6 +88,7 @@ fn open_archive_session_dialog(
     session_id: String,
     is_worktree: bool,
     git_branch: Option<String>,
+    kind: SessionRemovalKind,
 ) {
     let delete_worktree = Rc::new(Cell::new(true));
     window.open_alert_dialog(cx, {
@@ -40,15 +102,9 @@ fn open_archive_session_dialog(
             let session_id = session_id.clone();
             let delete_worktree = delete_worktree.clone();
             let mut alert = alert
-                .title("Archive session?")
-                .description(format!(
-                    "This removes session {session_id} from the active list."
-                ))
-                .button_props(
-                    DialogButtonProps::default()
-                        .ok_text("Archive")
-                        .show_cancel(true),
-                );
+                .title(kind.title())
+                .description(kind.description(&session_id))
+                .button_props(kind.button_props());
 
             if is_worktree {
                 let delete_worktree_click = delete_worktree.clone();
@@ -61,7 +117,8 @@ fn open_archive_session_dialog(
                 alert = alert.child(
                     div().pt_2().child(
                         Checkbox::new(SharedString::from(format!(
-                            "archive-delete-worktree-{}",
+                            "{}-delete-worktree-{}",
+                            kind.action_prefix(),
                             session_id
                         )))
                         .checked(delete_worktree.get())
@@ -85,11 +142,11 @@ fn open_archive_session_dialog(
                 model.update(cx, |state, cx| {
                     controller::dispatch(
                         state,
-                        AppAction::SettleSession {
-                            work_dir: work_dir.clone(),
-                            session_id: session_id.clone(),
-                            delete_worktree: delete_worktree_val,
-                        },
+                        kind.dispatch_action(
+                            work_dir.clone(),
+                            session_id.clone(),
+                            delete_worktree_val,
+                        ),
                     );
                     cx.notify();
                 });
@@ -97,6 +154,27 @@ fn open_archive_session_dialog(
             })
         }
     });
+}
+
+fn open_archive_session_dialog(
+    window: &mut Window,
+    cx: &mut App,
+    model: Entity<AppState>,
+    work_dir: PathBuf,
+    session_id: String,
+    is_worktree: bool,
+    git_branch: Option<String>,
+) {
+    open_session_removal_dialog(
+        window,
+        cx,
+        model,
+        work_dir,
+        session_id,
+        is_worktree,
+        git_branch,
+        SessionRemovalKind::Archive,
+    );
 }
 
 fn open_remove_session_dialog(
@@ -108,76 +186,16 @@ fn open_remove_session_dialog(
     is_worktree: bool,
     git_branch: Option<String>,
 ) {
-    let delete_worktree = Rc::new(Cell::new(true));
-    window.open_alert_dialog(cx, {
-        let model = model.clone();
-        let work_dir = work_dir.clone();
-        let session_id = session_id.clone();
-        let delete_worktree = delete_worktree.clone();
-        move |alert, _window, _cx| {
-            let model = model.clone();
-            let work_dir = work_dir.clone();
-            let session_id = session_id.clone();
-            let delete_worktree = delete_worktree.clone();
-            let mut alert = alert
-                .title("Remove session?")
-                .description(format!(
-                    "This permanently removes session {session_id}."
-                ))
-                .button_props(
-                    DialogButtonProps::default()
-                        .ok_text("Remove")
-                        .ok_variant(ButtonVariant::Danger)
-                        .show_cancel(true),
-                );
-
-            if is_worktree {
-                let delete_worktree_click = delete_worktree.clone();
-                let model_click = model.clone();
-                let label = if let Some(branch) = &git_branch {
-                    format!("Delete associated worktree ({branch})")
-                } else {
-                    "Delete associated worktree".to_string()
-                };
-                alert = alert.child(
-                    div().pt_2().child(
-                        Checkbox::new(SharedString::from(format!(
-                            "remove-delete-worktree-{}",
-                            session_id
-                        )))
-                        .checked(delete_worktree.get())
-                        .label(label)
-                        .on_click(move |checked, _window, cx| {
-                            delete_worktree_click.set(*checked);
-                            model_click.update(cx, |_state, cx| {
-                                cx.notify();
-                            });
-                        }),
-                    ),
-                );
-            }
-
-            alert.on_ok(move |_event, _window, cx| {
-                let delete_worktree_val = if is_worktree {
-                    delete_worktree.get()
-                } else {
-                    false
-                };
-                model.update(cx, |state, cx| {
-                    controller::dispatch(
-                        state,
-                        AppAction::RemoveSession {
-                            work_dir: work_dir.clone(),
-                            session_id: session_id.clone(),
-                            delete_worktree: delete_worktree_val,
-                        },
-                    );
-                    cx.notify();
-                });
-                true
-            })
-        }
-    });
+    open_session_removal_dialog(
+        window,
+        cx,
+        model,
+        work_dir,
+        session_id,
+        is_worktree,
+        git_branch,
+        SessionRemovalKind::Remove,
+    );
 }
 
 fn safe_file_stem(title: &str) -> String {
