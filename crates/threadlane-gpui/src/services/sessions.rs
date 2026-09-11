@@ -1,8 +1,31 @@
 //! Harness-aware session runtime adapter for the GPUI frontend.
 
+use std::sync::Arc;
+
+use threadlane_session::CodingAgentOptions;
+
 pub use threadlane_session::ExecutionMode;
 pub use threadlane_session::SessionController as SessionRuntime;
 pub use threadlane_session::SessionStatus as SessionRuntimeStatus;
+
+/// Starts building a session runtime on the shared Tokio blocking pool and
+/// returns the join handle so callers can overlap other work before awaiting.
+///
+/// `SessionRuntime::new` opens the durable harness and loads every WASI
+/// extension for the project, running each module's `extension_info` through
+/// the wasmi interpreter. GPUI's background executor runs its futures on GCD
+/// worker threads with 512 KiB stacks, which is not enough headroom for that
+/// constructor (it overflowed at startup while loading the bundled
+/// extensions). Tokio's blocking threads get its 2 MiB default stack and carry
+/// a reactor for anything the constructor spawns. Dropping the handle detaches
+/// the task instead of cancelling it, so a hydration that is superseded still
+/// finishes constructing, and then drops, its runtime.
+pub(crate) fn spawn_session_runtime_construction(
+    options: CodingAgentOptions,
+    mode: ExecutionMode,
+) -> tokio::task::JoinHandle<Arc<SessionRuntime>> {
+    threadlane_runtime::get_runtime().spawn_blocking(move || SessionRuntime::new(options, mode))
+}
 
 #[cfg(test)]
 mod tests {

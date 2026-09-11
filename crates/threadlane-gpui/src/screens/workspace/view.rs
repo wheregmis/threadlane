@@ -37,7 +37,7 @@ use crate::screens::right_panel::RightPanelView;
 use crate::screens::settings::SettingsView;
 use crate::screens::sidebar::SidebarView;
 use crate::screens::terminal::TerminalView;
-use crate::services::sessions::{ExecutionMode, SessionRuntime};
+use crate::services::sessions::{ExecutionMode, spawn_session_runtime_construction};
 use crate::services::updater::{self, UpdaterEvent};
 use crate::state::{
     AppState, SessionHydrationRequest, SessionInfo, WorkspacePage, coding_agent_options,
@@ -185,18 +185,19 @@ impl WorkspaceView {
         cx: &mut AsyncApp,
     ) {
         cx.spawn(async move |cx| {
+            // Runtime construction loads WASI extensions through wasmi and must
+            // not run on GPUI's 512 KiB GCD worker stacks. The blocking-pool
+            // task starts now and overlaps the transcript projection below.
             let runtime_task =
                 request
                     .runtime_options
                     .clone()
                     .map(|(work_dir, model, roles, browser)| {
                         let session_file = request.session_file.clone();
-                        cx.background_executor().spawn(async move {
-                            SessionRuntime::new(
-                                coding_agent_options(work_dir, session_file, model, roles, browser),
-                                ExecutionMode::Interactive,
-                            )
-                        })
+                        spawn_session_runtime_construction(
+                            coding_agent_options(work_dir, session_file, model, roles, browser),
+                            ExecutionMode::Interactive,
+                        )
                     });
             if request.reload_messages {
                 let history_file = request.session_file.clone();
@@ -227,7 +228,7 @@ impl WorkspaceView {
                 .spawn(async move { compute_full_session_projection(&session_file) })
                 .await;
             let runtime = match runtime_task {
-                Some(task) => Some(task.await),
+                Some(task) => Some(task.await.map_err(|error| error.to_string())),
                 None => None,
             };
             let _ = model.update(cx, |state, cx| {
@@ -247,16 +248,23 @@ impl WorkspaceView {
                         state.session_status = Some(format!("Could not load session: {error}"))
                     }
                 }
-                if let Some(runtime) = runtime {
-                    let runtime = state
-                        .session_runtimes
-                        .entry(request.session_file.clone())
-                        .or_insert(runtime);
-                    state.is_generating = runtime.is_generating();
-                    state.selected_model = runtime.selected_model.clone();
-                    if let Some(status) = runtime_status_text(runtime.status()) {
-                        state.session_status = Some(status);
+                match runtime {
+                    Some(Ok(runtime)) => {
+                        let runtime = state
+                            .session_runtimes
+                            .entry(request.session_file.clone())
+                            .or_insert(runtime);
+                        state.is_generating = runtime.is_generating();
+                        state.selected_model = runtime.selected_model.clone();
+                        if let Some(status) = runtime_status_text(runtime.status()) {
+                            state.session_status = Some(status);
+                        }
                     }
+                    Some(Err(error)) => {
+                        state.session_status =
+                            Some(format!("Could not start session runtime: {error}"));
+                    }
+                    None => {}
                 }
                 cx.notify();
             });
