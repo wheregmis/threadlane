@@ -83,16 +83,16 @@ fn smart_tab_title(path_str: &str, is_diff: bool) -> String {
 }
 
 pub struct EditorTab {
-    pub project_dir: PathBuf,
-    pub relative_path: String,
-    pub file_name: String,
-    pub language: &'static str,
-    pub saved_content: String,
-    pub is_dirty: bool,
-    pub is_diff: bool,
-    pub editor_state: Option<Entity<EditorState>>,
-    pub text_view_state: Option<Entity<TextViewState>>,
-    pub _subscription: Option<Subscription>,
+    project_dir: PathBuf,
+    relative_path: String,
+    file_name: String,
+    _language: &'static str,
+    saved_content: String,
+    is_dirty: bool,
+    is_diff: bool,
+    editor_state: Option<Entity<EditorState>>,
+    text_view_state: Option<Entity<TextViewState>>,
+    _subscription: Option<Subscription>,
 }
 
 #[derive(Clone, Debug)]
@@ -111,7 +111,11 @@ pub struct EditorView {
 }
 
 impl EditorView {
-    pub fn new(model: Entity<AppState>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        model: Entity<AppState>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let model_clone = model.clone();
         let sub = cx.observe(&model_clone, |_this, _model, cx| {
             cx.notify();
@@ -127,22 +131,22 @@ impl EditorView {
         }
     }
 
-    pub fn has_tabs(&self) -> bool {
+    fn has_tabs(&self) -> bool {
         !self.tabs.is_empty()
     }
 
-    pub fn tab_count(&self) -> usize {
+    pub(crate) fn tab_count(&self) -> usize {
         self.tabs.len()
     }
 
-    pub fn is_active_dirty(&self) -> bool {
+    fn is_active_dirty(&self) -> bool {
         self.active_tab_index
             .and_then(|idx| self.tabs.get(idx))
             .map(|tab| tab.is_dirty && !tab.is_diff)
             .unwrap_or(false)
     }
 
-    pub fn is_active_diff(&self) -> bool {
+    fn is_active_diff(&self) -> bool {
         self.active_tab_index
             .and_then(|idx| self.tabs.get(idx))
             .map(|tab| tab.is_diff)
@@ -163,7 +167,12 @@ impl EditorView {
         }
     }
 
-    pub fn open_file(&mut self, project: PathBuf, relative_path: &str, cx: &mut Context<Self>) {
+    pub(crate) fn open_file(
+        &mut self,
+        project: PathBuf,
+        relative_path: &str,
+        cx: &mut Context<Self>,
+    ) {
         self.pending_open = Some(PendingOpen::File {
             project,
             path: relative_path.to_string(),
@@ -171,7 +180,7 @@ impl EditorView {
         cx.notify();
     }
 
-    pub fn open_diff(&mut self, relative_path: &str, content: &str, cx: &mut Context<Self>) {
+    pub(crate) fn open_diff(&mut self, relative_path: &str, content: &str, cx: &mut Context<Self>) {
         self.pending_open = Some(PendingOpen::Diff {
             path: relative_path.to_string(),
             content: content.to_string(),
@@ -215,7 +224,7 @@ impl EditorView {
                 .unwrap_or_else(|| PathBuf::from(".")),
             relative_path: tab_key,
             file_name: tab_title,
-            language: "diff",
+            _language: "diff",
             saved_content: content.to_string(),
             is_dirty: false,
             is_diff: true,
@@ -298,7 +307,7 @@ impl EditorView {
             project_dir: project_dir.to_path_buf(),
             relative_path: relative_path.to_string(),
             file_name: tab_title,
-            language: lang,
+            _language: lang,
             saved_content: content_for_sub,
             is_dirty: false,
             is_diff: false,
@@ -325,7 +334,7 @@ impl EditorView {
         }
     }
 
-    pub fn select_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+    fn select_tab(&mut self, index: usize, cx: &mut Context<Self>) {
         if index < self.tabs.len() {
             self.active_tab_index = Some(index);
             self.status_msg = None;
@@ -350,7 +359,7 @@ impl EditorView {
         }
     }
 
-    pub fn close_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+    fn close_tab(&mut self, index: usize, cx: &mut Context<Self>) {
         if index >= self.tabs.len() {
             return;
         }
@@ -386,7 +395,7 @@ impl EditorView {
         }
     }
 
-    pub fn close_other_tabs(&mut self, keep_index: usize, cx: &mut Context<Self>) {
+    fn close_other_tabs(&mut self, keep_index: usize, cx: &mut Context<Self>) {
         if keep_index >= self.tabs.len() {
             return;
         }
@@ -446,7 +455,7 @@ impl EditorView {
         }
     }
 
-    pub fn close_all_tabs(&mut self, cx: &mut Context<Self>) {
+    fn close_all_tabs(&mut self, cx: &mut Context<Self>) {
         let dirty_names: Vec<String> = self
             .tabs
             .iter()
@@ -493,7 +502,7 @@ impl EditorView {
         }
     }
 
-    pub fn save_active_file(&mut self, cx: &mut Context<Self>) {
+    fn save_active_file(&mut self, cx: &mut Context<Self>) {
         let Some(idx) = self.active_tab_index else {
             return;
         };
@@ -504,7 +513,7 @@ impl EditorView {
         self.save_active_file(cx);
     }
 
-    pub fn save_tab_at(&mut self, index: usize, cx: &mut Context<Self>) {
+    fn save_tab_at(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.get_mut(index) else {
             return;
         };
@@ -644,7 +653,7 @@ impl EditorView {
                             })
                             .child(
                                 div()
-                                    .text_size(px(11.0))
+                                    .text_xs()
                                     .text_color(if tab.is_diff {
                                         theme.warning
                                     } else {
@@ -654,7 +663,7 @@ impl EditorView {
                             )
                             .child(
                                 div()
-                                    .text_size(px(12.0))
+                                    .text_xs()
                                     .font_weight(if is_selected {
                                         FontWeight::MEDIUM
                                     } else {
@@ -677,6 +686,7 @@ impl EditorView {
                                     .ghost()
                                     .xsmall()
                                     .icon(IconName::Close)
+                                    .tooltip("Close tab")
                                     .on_click(move |_event, _window, cx| {
                                         close_view.update(cx, |this, cx| this.close_tab(idx, cx));
                                     }),
@@ -692,7 +702,7 @@ impl EditorView {
                     .px_1()
                     .child(if let Some((msg, is_error)) = self.visible_status() {
                         div()
-                            .text_size(px(11.0))
+                            .text_xs()
                             .text_color(if is_error {
                                 theme.danger
                             } else {
@@ -745,13 +755,13 @@ impl EditorView {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_size(px(24.0))
+                    .text_2xl()
                     .text_color(theme.muted_foreground)
                     .child(IconName::File),
             )
             .child(
                 div()
-                    .text_size(px(14.0))
+                    .text_sm()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.foreground)
                     .child("No files open in Editor"),
@@ -760,7 +770,7 @@ impl EditorView {
                 div()
                     .max_w(px(380.0))
                     .text_center()
-                    .text_size(px(12.0))
+                    .text_xs()
                     .text_color(theme.muted_foreground)
                     .child("Click a file in the Files panel or a changed file in Review to open and view here."),
             )

@@ -457,18 +457,14 @@ impl McpManager {
         mcp_tools
     }
 
-    pub fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
+    fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
         self.cached_tool_defs
             .read()
             .map(|defs| defs.clone())
             .unwrap_or_default()
     }
 
-    pub async fn execute_tool(
-        &self,
-        full_name: &str,
-        args: &str,
-    ) -> Option<Result<String, String>> {
+    async fn execute_tool(&self, full_name: &str, args: &str) -> Option<Result<String, String>> {
         let target = {
             let servers = self.servers.lock().await;
             servers.iter().find_map(|server| {

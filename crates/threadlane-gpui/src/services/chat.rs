@@ -36,11 +36,13 @@ impl Drop for RunCleanup {
 
 pub(crate) fn execute_prompt(
     runtime: Arc<SessionRuntime>,
+    work_dir: PathBuf,
     session_id: String,
     text: String,
     images: Vec<ImageAttachment>,
     reasoning_effort: ReasoningEffort,
     stream_tx: Sender<ChatStreamEvent>,
+    pending_acp: Vec<(String, String)>,
 ) -> Result<(), String> {
     runtime.begin_generation()?;
     let executor = match executor() {
@@ -61,8 +63,6 @@ pub(crate) fn execute_prompt(
             return;
         };
 
-        let turn_span = tracing::info_span!("chat.turn", session_id = %task_session_id);
-        tracing::info!(parent: &turn_span, "starting chat turn");
         let mut cleanup = RunCleanup {
             runtime: task_runtime.clone(),
             registration_id,
@@ -70,22 +70,47 @@ pub(crate) fn execute_prompt(
             stream_tx: task_stream_tx.clone(),
             error: None,
         };
-        let work_dir = task_runtime
-            .session_file
-            .parent()
-            .and_then(std::path::Path::parent)
-            .and_then(std::path::Path::parent)
-            .map(std::path::Path::to_path_buf);
-        let git_branch = match work_dir {
-            Some(work_dir) => {
-                tokio::task::spawn_blocking(move || threadlane_git::current_branch(&work_dir))
-                    .await
-                    .ok()
-                    .and_then(Result::ok)
-                    .flatten()
+
+        // Apply New-task ACP selections before the first turn. A failure must
+        // abort this turn: otherwise the prompt would run under the agent's
+        // default configuration rather than the picker selection.
+        for (config_id, value) in pending_acp {
+            let source = Arc::downgrade(&task_runtime);
+            match task_runtime
+                .set_acp_config_option(&config_id, &value)
+                .await
+            {
+                Ok(options) => {
+                    let _ = task_stream_tx.send(ChatStreamEvent::AcpConfigOptions {
+                        session_id: task_session_id.clone(),
+                        source,
+                        options,
+                        error: None,
+                        failed_config: None,
+                    });
+                }
+                Err(error) => {
+                    cleanup.error = Some(error.clone());
+                    let _ = task_stream_tx.send(ChatStreamEvent::AcpConfigOptions {
+                        session_id: task_session_id.clone(),
+                        source,
+                        options: Vec::new(),
+                        error: Some(error),
+                        failed_config: Some((config_id, value)),
+                    });
+                    return;
+                }
             }
-            None => None,
-        };
+        }
+
+        let turn_span = tracing::info_span!("chat.turn", session_id = %task_session_id);
+        tracing::info!(parent: &turn_span, "starting chat turn");
+        let git_branch =
+            tokio::task::spawn_blocking(move || threadlane_git::current_branch(&work_dir))
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .flatten();
         let mut agent = task_runtime.agent.lock().await;
         if let Some(branch) = git_branch {
             if let Err(error) = agent.set_fact("git_branch", &branch) {
@@ -166,8 +191,10 @@ pub(crate) fn execute_prompt(
         if !acp_options.is_empty() {
             let _ = task_stream_tx.send(ChatStreamEvent::AcpConfigOptions {
                 session_id: task_session_id.clone(),
+                source: Arc::downgrade(&task_runtime),
                 options: acp_options,
                 error: None,
+                failed_config: None,
             });
         }
         drop(agent);
@@ -239,14 +266,17 @@ where
         return Err("Stop the current turn before changing the agent's settings".into());
     }
     executor()?.spawn(async move {
+        let source = Arc::downgrade(&runtime);
         let (options, error) = match operation(runtime).await {
             Ok(options) => (options, None),
             Err(error) => (Vec::new(), Some(error)),
         };
         let _ = stream_tx.send(ChatStreamEvent::AcpConfigOptions {
             session_id,
+            source,
             options,
             error,
+            failed_config: None,
         });
     });
     Ok(())

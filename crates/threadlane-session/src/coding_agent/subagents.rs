@@ -3,8 +3,8 @@ use super::capabilities::{
     build_broker_dispatcher, create_after_tool_hook_handler, extension_before_tool_hook_handler,
 };
 use super::context_snapshots::{
-    resolve_context_snapshot, snapshot_location, MAX_SUBAGENT_CONTEXT_CHARS,
-    MAX_SUBAGENT_CONTEXT_REFS,
+    MAX_SUBAGENT_CONTEXT_CHARS, MAX_SUBAGENT_CONTEXT_REFS, resolve_context_snapshot,
+    snapshot_location,
 };
 use super::harness::{AcceptedRun, CodingSessionHarness, SubagentLaneIdentity, SubagentStartError};
 use super::scheduler::AgentWorkScheduler;
@@ -12,7 +12,9 @@ use super::scheduler::AgentWorkScheduler;
 use super::scheduler::{
     AgentWork, AgentWorkObserver, DeterministicSubagentToolExecutor, SubagentBoundaryObserver,
 };
-use crate::agents::{discover_agents, AgentDefinition, AgentScope};
+use crate::agents::{AgentDefinition, AgentScope, discover_agents};
+#[cfg(test)]
+use crate::browser::BrowserBridge;
 use crate::policy::ToolPolicy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -20,22 +22,22 @@ use std::collections::HashSet;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use threadlane_runtime::harness::HookKind;
 use threadlane_runtime::{
     AgentEvent, AgentMessage, AgentRuntime, SubagentProgressUpdate, TurnState,
 };
 use threadlane_wasi::WasiExtensionManager;
 use tokio::sync::broadcast;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 pub(crate) const MAX_SUBAGENT_TASKS: usize = 8;
 pub(crate) const MAX_SUBAGENT_TASK_CHARS: usize = 32_000;
-pub(crate) const SUBAGENT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-pub(crate) const SUBAGENT_RECOVERY_PROMPT: &str =
+const SUBAGENT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const SUBAGENT_RECOVERY_PROMPT: &str =
     "Continue from the recovered checkpoint and finish the assigned task.";
 pub(crate) static NEXT_SUBAGENT_UI_RUN_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -130,75 +132,47 @@ pub(crate) struct SubagentRunContext {
     pub(crate) parent_event_tx: broadcast::Sender<AgentEvent>,
     pub(crate) parent_leaf_id: Option<String>,
     pub(crate) session_file: Option<PathBuf>,
+    pub(crate) completed_lanes: Arc<std::sync::Mutex<Vec<CompletedSubagentLane>>>,
+    /// Live agent-to-agent mailbox shared by sibling lanes and the parent
+    /// `hub` tool. Inbox keys are agent role names (stable, known upfront)
+    /// plus resolved lane names.
+    pub(crate) hub: super::mailbox::SubagentHub,
     #[cfg(test)]
     pub(crate) scheduler_observer: Option<AgentWorkObserver>,
     #[cfg(test)]
     pub(crate) child_work_observer: Option<SubagentBoundaryObserver>,
     #[cfg(test)]
     pub(crate) child_tool_observer: Option<Arc<AtomicBool>>,
+    #[cfg(test)]
+    pub(crate) child_run_override: Option<(Duration, SubagentRunOverride)>,
     pub(crate) semaphore: Arc<tokio::sync::Semaphore>,
 }
 
-#[derive(Clone, Debug)]
-pub struct SubagentInnerTool {
-    pub id: String,
-    pub name: String,
-    pub arguments: String,
-    pub output: String,
-    pub is_error: bool,
-}
+#[cfg(test)]
+pub(crate) type SubagentRunOverride = Arc<
+    dyn Fn(String) -> Pin<Box<dyn Future<Output = Result<SubagentResult, String>> + Send>>
+        + Send
+        + Sync,
+>;
 
 #[derive(Clone, Debug)]
 pub struct SubagentResult {
-    pub output: String,
-    pub thinking: Vec<AgentMessage>,
-    pub inner_tools: Vec<SubagentInnerTool>,
-    pub error: Option<String>,
-    pub messages: Vec<AgentMessage>,
-}
-
-pub(crate) fn tool_target_preview(name: &str, arguments: &str) -> String {
-    let parsed: Option<serde_json::Value> = serde_json::from_str(arguments).ok();
-    let get_str = |key: &str| {
-        parsed
-            .as_ref()
-            .and_then(|v| v.get(key))
-            .and_then(serde_json::Value::as_str)
-    };
-    let target = match name {
-        "read_file" | "write_file" | "edit_file" | "edit_file_hashline" => get_str("path")
-            .or_else(|| get_str("file_path"))
-            .unwrap_or(arguments),
-        "list_dir" => get_str("path").unwrap_or(arguments),
-        "run_command" => get_str("command").unwrap_or(arguments),
-        _ => arguments,
-    };
-    if target.chars().count() > 60 {
-        target.chars().take(60).collect::<String>()
-    } else {
-        target.to_string()
-    }
+    output: String,
+    thinking: Vec<AgentMessage>,
+    pub(crate) error: Option<String>,
+    pub(crate) messages: Vec<AgentMessage>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SubagentSessionData {
-    pub run_id: String,
-    pub task: String,
-    pub agent: String,
-    pub status: String,
-    pub thinking: String,
-    pub inner_tools: Vec<SubagentInnerToolData>,
-    pub output: String,
+    run_id: String,
+    task: String,
+    agent: String,
+    status: String,
+    output: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SubagentInnerToolData {
-    pub name: String,
-    pub target_preview: String,
-    pub is_error: bool,
-}
-
-pub(crate) fn format_subagent_results(
+fn format_subagent_results(
     tasks: Vec<AgentRunTask>,
     results: Vec<Result<SubagentResult, String>>,
     lanes: &[CompletedSubagentLane],
@@ -209,24 +183,6 @@ pub(crate) fn format_subagent_results(
         .zip(lanes)
         .map(|((task, result), lane)| match result {
             Ok(res) => {
-                let mut thinking = String::new();
-                for think_msg in &res.thinking {
-                    if let AgentMessage::Custom { payload, .. } = think_msg {
-                        if let Some(thought) = payload.get("thought").and_then(|v| v.as_str()) {
-                            thinking.push_str(thought);
-                            thinking.push('\n');
-                        }
-                    }
-                }
-                let inner_tools = res
-                    .inner_tools
-                    .into_iter()
-                    .map(|tool| SubagentInnerToolData {
-                        name: tool.name.clone(),
-                        target_preview: tool_target_preview(&tool.name, &tool.arguments),
-                        is_error: tool.is_error,
-                    })
-                    .collect();
                 let status = match lane.status {
                     SubagentLaneStatus::Completed => "completed",
                     SubagentLaneStatus::Failed => "failed",
@@ -236,8 +192,6 @@ pub(crate) fn format_subagent_results(
                     task: task.task,
                     agent: task.agent,
                     status: status.to_string(),
-                    thinking,
-                    inner_tools,
                     output: res.output,
                 }
             }
@@ -246,8 +200,6 @@ pub(crate) fn format_subagent_results(
                 task: task.task,
                 agent: task.agent,
                 status: "failed".to_string(),
-                thinking: String::new(),
-                inner_tools: Vec::new(),
                 output: format!("Subagent failed to run: {err}"),
             },
         })
@@ -256,7 +208,7 @@ pub(crate) fn format_subagent_results(
     serde_json::to_string(&sessions).unwrap_or_else(|_| "[]".to_string())
 }
 
-pub(crate) fn aggregate_subagent_results(
+fn aggregate_subagent_results(
     tasks: Vec<AgentRunTask>,
     results: Vec<Result<SubagentResult, String>>,
     lanes: Vec<CompletedSubagentLane>,
@@ -276,7 +228,7 @@ pub(crate) fn aggregate_subagent_results(
         Err(format!("All subagents failed: {output}"))
     }
 }
-pub(crate) fn subagent_ui_event(
+fn subagent_ui_event(
     event: AgentEvent,
     run_id: u64,
     task_index: usize,
@@ -331,7 +283,7 @@ pub(crate) fn subagent_ui_event(
     })
 }
 
-pub(crate) async fn checkpoint_new_subagent_messages(
+async fn checkpoint_new_subagent_messages(
     session_file: Option<&Path>,
     lane_name: &str,
     run_id: &str,
@@ -347,7 +299,7 @@ pub(crate) async fn checkpoint_new_subagent_messages(
     Ok(())
 }
 
-pub(crate) async fn consume_subagent_turn_checkpoints(
+async fn consume_subagent_turn_checkpoints(
     mut events: broadcast::Receiver<AgentEvent>,
     session_file: Option<PathBuf>,
     lane_name: String,
@@ -374,7 +326,7 @@ pub(crate) async fn consume_subagent_turn_checkpoints(
     Ok(checkpoint_cursor)
 }
 
-pub(crate) async fn checkpoint_subagent_final_snapshot(
+async fn checkpoint_subagent_final_snapshot(
     session_file: Option<&Path>,
     lane_name: &str,
     run_id: &str,
@@ -425,6 +377,20 @@ pub(crate) async fn run_subagents_with_context(
     let lane_key = tool_call_id
         .map(|id| format!("tool-{id}"))
         .unwrap_or_else(|| "explicit".into());
+    // Sibling agent roles for `message_peer` validation + child prompts.
+    // Deduplicated, stable order; includes every batch member so late
+    // starters validate even before peers register with the hub.
+    let sibling_names: Vec<String> = {
+        let mut seen = std::collections::HashSet::new();
+        let mut names = Vec::new();
+        for task in &tasks {
+            if seen.insert(task.agent.clone()) {
+                names.push(task.agent.clone());
+            }
+        }
+        names
+    };
+    let enable_peer_messaging = parallel && tasks.len() > 1;
     let run_one = |task_index: usize, task: AgentRunTask| {
         let candidate = candidates
             .iter()
@@ -436,7 +402,7 @@ pub(crate) async fn run_subagents_with_context(
             None => {
                 let sys_prompt = task.instructions.clone().unwrap_or_else(|| {
                     format!(
-                        "You are a specialized subagent acting as {}. Complete only the assigned task and report results clearly to the parent agent.",
+                        "You are a specialized subagent acting as {}. Complete strictly the assigned task without unrequested changes, tangents, or conversational filler. Report exact findings, changed files, and validation results directly.",
                         task.agent
                     )
                 });
@@ -457,12 +423,16 @@ pub(crate) async fn run_subagents_with_context(
         if let Some(t) = &task.tools {
             config.tools = Some(t.clone());
         }
+        let isolate_workspace = parallel && subagent_can_write(&config);
 
         let context = context.clone();
+        let completed_lanes = context.completed_lanes.clone();
         let event_tx = context.parent_event_tx.clone();
         let lane_task = task.task.clone();
         let lane_agent = task.agent.clone();
         let lane_key = lane_key.clone();
+        let sibling_names = sibling_names.clone();
+        let hub_for_outcome = context.hub.clone();
         async move {
             let parent_leaf_id = context.parent_leaf_id.clone();
             let lane_hint = format!(
@@ -539,8 +509,39 @@ pub(crate) async fn run_subagents_with_context(
                 }
             };
             let resolved_model = context.child_model.clone();
+            let has_lane = match &start {
+                Ok(_) => true,
+                Err(error) => error.identity.is_some(),
+            };
             let result = match start {
                 Ok((identity, accepted)) => {
+                    #[cfg(test)]
+                    if let Some(observer) = context.child_work_observer.as_ref() {
+                        observer();
+                    }
+                    let child_timeout = SUBAGENT_TIMEOUT;
+                    #[cfg(test)]
+                    let child_timeout = context
+                        .child_run_override
+                        .as_ref()
+                        .map_or(child_timeout, |(duration, _)| *duration);
+                    let workspace = if isolate_workspace {
+                        isolated_subagent_workspace(&context.work_dir, &identity.run_id)
+                            .await
+                            .map(Some)
+                    } else {
+                        Ok(None)
+                    };
+                    let isolation = workspace
+                        .as_ref()
+                        .ok()
+                        .and_then(|workspace| workspace.as_ref())
+                        .map(
+                            |(workspace, branch)| threadlane_runtime::SubagentIsolation {
+                                workspace: workspace.clone(),
+                                branch: branch.clone(),
+                            },
+                        );
                     let _ = event_tx.send(AgentEvent::SubagentStarted {
                         run_id,
                         task_index,
@@ -549,27 +550,75 @@ pub(crate) async fn run_subagents_with_context(
                         agent: lane_agent.clone(),
                         task: lane_task.clone(),
                         model: resolved_model.clone(),
+                        isolation,
                     });
-                    #[cfg(test)]
-                    if let Some(observer) = context.child_work_observer.as_ref() {
-                        observer();
-                    }
-                    timeout(
-                        SUBAGENT_TIMEOUT,
-                        run_subagent_task(
-                            config,
-                            task.task,
-                            context,
-                            run_id,
-                            task_index,
-                            identity.clone(),
-                            accepted,
-                            Vec::new(),
-                        ),
-                    )
-                    .await
-                    .map_err(|_| "Subagent timed out".to_string())
-                    .map(|result| (result, identity))?
+                    // Register the live lane so `hub list` and peer
+                    // addressing resolve by lane name or agent role.
+                    context.hub.register(
+                        identity.lane_name.clone(),
+                        identity.run_id.clone(),
+                        lane_agent.clone(),
+                        lane_task.clone(),
+                        resolved_model.clone(),
+                    );
+                    let peer_info = if enable_peer_messaging {
+                        Some((sibling_names.clone(), lane_agent.clone()))
+                    } else {
+                        None
+                    };
+                    let hub_for_settle = context.hub.clone();
+                    let settle_lane = identity.lane_name.clone();
+                    let result = match workspace {
+                        Ok(workspace) => {
+                            let parent_work_dir = context.work_dir.clone();
+                            let mut child_context = context;
+                            if let Some((work_dir, _)) = &workspace {
+                                child_context.work_dir = work_dir.clone();
+                            }
+                            let mut result = timeout(
+                                child_timeout,
+                                run_subagent_task(
+                                    config,
+                                    task.task,
+                                    child_context,
+                                    run_id,
+                                    task_index,
+                                    identity.clone(),
+                                    accepted,
+                                    Vec::new(),
+                                    peer_info,
+                                ),
+                            )
+                            .await
+                            .unwrap_or_else(|_| Err("Subagent timed out".to_string()));
+                            hub_for_settle.mark_settled(&settle_lane, false);
+                            if let Some((work_dir, branch)) = workspace {
+                                let note = match threadlane_git::remove_worktree(
+                                    &parent_work_dir,
+                                    &work_dir,
+                                    false,
+                                ) {
+                                    Ok(()) => {
+                                        let _ = threadlane_git::prune_worktrees(&parent_work_dir);
+                                        format!("Branch: {branch}")
+                                    }
+                                    Err(_) => format!(
+                                        "Isolated worktree retained: {}\nBranch: {branch}",
+                                        work_dir.display()
+                                    ),
+                                };
+                                match &mut result {
+                                    Ok(result) => {
+                                        result.output = format!("{note}\n{}", result.output)
+                                    }
+                                    Err(error) => *error = format!("{error}\n{note}"),
+                                }
+                            }
+                            result
+                        }
+                        Err(error) => Err(error),
+                    };
+                    (result, identity)
                 }
                 Err(SubagentStartError { identity, error }) => (
                     Err(error),
@@ -599,6 +648,17 @@ pub(crate) async fn run_subagents_with_context(
                 succeeded,
                 error,
             });
+            // Record the terminal outcome for `hub list`/`hub wait`. A lane
+            // killed via `hub kill` keeps its `killed` outcome instead of
+            // being relabeled by the natural completion path.
+            if hub_for_outcome.is_killed(&identity.lane_name, &lane_agent) {
+                hub_for_outcome.set_outcome(&identity.lane_name, "killed");
+            } else {
+                hub_for_outcome.set_outcome(
+                    &identity.lane_name,
+                    if succeeded { "completed" } else { "failed" },
+                );
+            }
             let lane = CompletedSubagentLane {
                 lane_name: identity.lane_name,
                 run_id: identity.run_id,
@@ -620,6 +680,11 @@ pub(crate) async fn run_subagents_with_context(
                     .and_then(|result| result.error.clone())
                     .or_else(|| result.as_ref().err().cloned()),
             };
+            // Completion belongs to the child lifecycle, not batch success.
+            // A sibling failure must not strand this lane or discard its work.
+            if has_lane {
+                accept_completed_subagent_lanes(&completed_lanes, vec![lane.clone()])?;
+            }
             Ok((result, lane))
         }
     };
@@ -657,8 +722,263 @@ pub(crate) async fn run_subagents_with_context(
     aggregate_subagent_results(tasks, tool_results, lanes)
 }
 
+/// Follow-up request for reviving a settled lane on its existing history.
+pub(crate) struct ReviveLaneRequest {
+    pub(crate) lane_name: String,
+    pub(crate) agent: String,
+    pub(crate) task: String,
+    pub(crate) model: String,
+    pub(crate) message: String,
+}
+
+/// Revive a settled lane (`hub revive` parity with oh-my-pi's parked-agent
+/// revive): open a follow-up operation on the SAME lane so history stays
+/// continuous, then run it as a background worker.
+///
+/// Queued inbox notes (e.g. from `hub send` to the settled lane) are drained
+/// up front and folded into the follow-up prompt. The revived run executes
+/// in the parent workdir without worktree isolation; completion commits
+/// through the shared completed-lane sink on a later parent turn.
+pub(crate) async fn revive_subagent_lane(
+    req: ReviveLaneRequest,
+    context: SubagentRunContext,
+) -> Result<String, String> {
+    let session_file = context
+        .session_file
+        .clone()
+        .ok_or_else(|| "revive requires session persistence".to_string())?;
+    // Fold queued inbox notes into the follow-up prompt so a `hub send`
+    // issued while the lane was settled is not lost.
+    let queued = super::mailbox::drain_lane_inbox(&context.hub, &req.lane_name, &req.agent);
+    let mut prompt = req.message.clone();
+    if !queued.is_empty() {
+        let notes = queued
+            .iter()
+            .map(|message| format!("[queued from {}] {}", message.from, message.body))
+            .collect::<Vec<_>>()
+            .join("\n");
+        prompt.push_str(&format!("\n\nQueued notes from the parent/siblings:\n{notes}"));
+    }
+    let (identity, accepted) = {
+        let mut journal = CodingSessionHarness::open(&session_file)?;
+        journal.resume_subagent_lane(&req.lane_name, &prompt)?
+    };
+    context.hub.register(
+        identity.lane_name.clone(),
+        identity.run_id.clone(),
+        req.agent.clone(),
+        req.task.clone(),
+        req.model.clone(),
+    );
+    let ui_run_id = NEXT_SUBAGENT_UI_RUN_ID.fetch_add(1, Ordering::Relaxed);
+    let _ = context.parent_event_tx.send(AgentEvent::SubagentStarted {
+        run_id: ui_run_id,
+        task_index: 0,
+        journal_run_id: identity.run_id.clone(),
+        lane: identity.lane_name.clone(),
+        agent: req.agent.clone(),
+        task: req.task.clone(),
+        model: req.model.clone(),
+        isolation: None,
+    });
+    let candidates = discover_agents(&context.work_dir, AgentScope::Both).agents;
+    let config = candidates
+        .into_iter()
+        .find(|candidate| candidate.name == req.agent)
+        .unwrap_or_else(|| AgentDefinition {
+            name: req.agent.clone(),
+            description: format!("Revived subagent for {}", req.agent),
+            tools: None,
+            model: None,
+            system_prompt: format!(
+                "You are a specialized subagent acting as {}. Continue the assigned task from the lane history and report results clearly to the parent agent.",
+                req.agent
+            ),
+            source: crate::agents::AgentSource::Project,
+            file_path: context.work_dir.clone(),
+        });
+    let permit = context
+        .semaphore
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| "Subagent concurrency limiter closed".to_string())?;
+    let ReviveLaneRequest {
+        lane_name,
+        agent: lane_agent,
+        task: lane_task,
+        model: resolved_model,
+        ..
+    } = req;
+    let hub = context.hub.clone();
+    let event_tx = context.parent_event_tx.clone();
+    let completed_lanes = context.completed_lanes.clone();
+    let settle_run_id = identity.run_id.clone();
+    let settle_lane = identity.lane_name.clone();
+    tokio::spawn(async move {
+        let _permit = permit;
+        let child_context = context;
+        let result = timeout(
+            SUBAGENT_TIMEOUT,
+            run_subagent_task(
+                config,
+                prompt,
+                child_context,
+                ui_run_id,
+                0,
+                identity,
+                Some(accepted),
+                Vec::new(),
+                None,
+            ),
+        )
+        .await
+        .unwrap_or_else(|_| Err("Subagent timed out".to_string()));
+        let (succeeded, error) = match &result {
+            Ok(result) if result.error.is_none() => (true, None),
+            Ok(result) => (false, result.error.clone()),
+            Err(error) => (false, Some(error.clone())),
+        };
+        log::info!(
+            "revived subagent finished lane={} journal_run_id={} succeeded={succeeded}",
+            settle_lane,
+            settle_run_id
+        );
+        let _ = event_tx.send(AgentEvent::SubagentFinished {
+            run_id: ui_run_id,
+            task_index: 0,
+            journal_run_id: settle_run_id.clone(),
+            succeeded,
+            error: error.clone(),
+        });
+        if hub.is_killed(&settle_lane, &lane_agent) {
+            hub.set_outcome(&settle_lane, "killed");
+        } else {
+            hub.set_outcome(
+                &settle_lane,
+                if succeeded { "completed" } else { "failed" },
+            );
+        }
+        hub.mark_settled(&settle_lane, false);
+        let lane = CompletedSubagentLane {
+            lane_name: settle_lane,
+            run_id: settle_run_id,
+            task: lane_task,
+            agent: lane_agent,
+            model: resolved_model,
+            status: if succeeded {
+                SubagentLaneStatus::Completed
+            } else {
+                SubagentLaneStatus::Failed
+            },
+            messages: result
+                .as_ref()
+                .map(|result| result.messages.clone())
+                .unwrap_or_default(),
+            error: result
+                .as_ref()
+                .ok()
+                .and_then(|result| result.error.clone())
+                .or_else(|| result.as_ref().err().cloned()),
+        };
+        let _ = accept_completed_subagent_lanes(&completed_lanes, vec![lane]);
+    });
+    Ok(format!(
+        "Revived lane {lane_name} with a follow-up turn. Use `hub wait` to block until it settles and `hub read {lane_name}` for output."
+    ))
+}
+
+fn configure_subagent_tools(config: &mut AgentDefinition) -> ToolPolicy {
+    let Some(tools) = config.tools.as_mut() else {
+        return ToolPolicy::FullAccess;
+    };
+    if tools.iter().any(|tool| {
+        matches!(
+            tool.as_str(),
+            "write_file"
+                | "edit_file"
+                | "edit_file_hashline"
+                | "edit_files_hashline"
+                | "apply_workspace_edit_plan"
+                | "write"
+                | "edit"
+        )
+    }) {
+        return ToolPolicy::FullAccess;
+    }
+    // Shell access is blocked by read-only policy. Replace it with the existing
+    // workspace-scoped discovery tools instead of advertising an unusable tool.
+    if tools.iter().any(|tool| tool == "run_command") {
+        tools.retain(|tool| tool != "run_command");
+        for name in ["list_dir", "grep_search"] {
+            if !tools.iter().any(|tool| tool == name) {
+                tools.push(name.into());
+            }
+        }
+    }
+    ToolPolicy::ReadOnly
+}
+
+fn subagent_can_write(config: &AgentDefinition) -> bool {
+    config.tools.as_ref().is_none_or(|tools| {
+        tools.iter().any(|tool| {
+            matches!(
+                tool.as_str(),
+                "write_file"
+                    | "edit_file"
+                    | "edit_file_hashline"
+                    | "edit_files_hashline"
+                    | "apply_workspace_edit_plan"
+                    | "write"
+                    | "edit"
+            )
+        })
+    })
+}
+
+async fn isolated_subagent_workspace(
+    parent_work_dir: &Path,
+    journal_run_id: &str,
+) -> Result<(PathBuf, String), String> {
+    let parent_work_dir = parent_work_dir.to_path_buf();
+    let journal_run_id = journal_run_id.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let root = threadlane_git::primary_worktree_root(&parent_work_dir)
+            .map_err(|error| error.to_string())?;
+        let (worktree, branch) = subagent_workspace(&root, &journal_run_id);
+        let status = threadlane_git::inspect(&parent_work_dir)
+            .map_err(|error| format!("Failed to inspect parent worktree: {error}"))?;
+        if status.has_changes {
+            return Err("Parallel isolated subagents require a clean parent worktree (commit or stash staged, unstaged, and untracked changes first)".into());
+        }
+        threadlane_git::create_worktree(&parent_work_dir, &worktree, &branch)
+            .map_err(|error| error.to_string())?;
+        Ok((worktree, branch))
+    })
+    .await
+    .map_err(|error| format!("Failed to provision subagent worktree: {error}"))?
+}
+
+pub fn subagent_workspace(repo_root: &Path, journal_run_id: &str) -> (PathBuf, String) {
+    let lane = journal_run_id
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let branch = format!("threadlane/subagent-{lane}");
+    (
+        repo_root.join(".threadlane/worktrees/subagents").join(lane),
+        branch,
+    )
+}
+
 pub(crate) async fn run_subagent_task(
-    config: AgentDefinition,
+    mut config: AgentDefinition,
     task: String,
     context: SubagentRunContext,
     run_id: u64,
@@ -666,7 +986,14 @@ pub(crate) async fn run_subagent_task(
     identity: SubagentLaneIdentity,
     accepted: Option<AcceptedRun>,
     resume_messages: Vec<AgentMessage>,
+    // (sibling agent roles, own agent role) when peer messaging applies.
+    peer_info: Option<(Vec<String>, String)>,
 ) -> Result<SubagentResult, String> {
+    #[cfg(test)]
+    if let Some((_, run)) = &context.child_run_override {
+        return run(task).await;
+    }
+    let policy = configure_subagent_tools(&mut config);
     let model = context.child_model.clone();
     let lane_name = identity.lane_name.clone();
     let journal_run_id = identity.run_id.clone();
@@ -679,7 +1006,9 @@ pub(crate) async fn run_subagent_task(
         context.account_id.clone(),
         &model,
         Some(&subagent_session),
-        threadlane_runtime::AgentConfig::default(),
+        threadlane_runtime::AgentConfig::builder()
+            .core_tool_schema_mode(config.tools.is_none())
+            .build(),
         Arc::new(threadlane_provider::router::ProviderClient::new(
             context.api_key.clone(),
             context.account_id.clone(),
@@ -693,13 +1022,54 @@ pub(crate) async fn run_subagent_task(
     if let Some(tools) = config.tools.clone() {
         agent.set_allowed_tool_names(Some(tools.into_iter().collect()));
     }
-    let system_prompt = format!(
-        "{}
-
-You are an isolated subagent working in {}. Complete only the assigned task and return a concise final report to your parent agent.",
-        config.system_prompt,
-        context.work_dir.display(),
-    );
+    // Live peer channel (oh-my-pi IRC parity). Always registered when the
+    // batch supplies peer info; a whitelist (if any) is extended so the
+    // tool is not filtered out of the child schema. Full-access children
+    // keep `allowed=None` so later-registered tools stay visible.
+    if let Some((ref siblings, ref own_agent)) = peer_info {
+        let peer_executor = Arc::new(super::mailbox::MessagePeerToolExecutor::new(
+            context.hub.clone(),
+            lane_name.clone(),
+            own_agent.clone(),
+            siblings.clone(),
+        ));
+        if config.tools.is_some() {
+            let mut allowed: std::collections::HashSet<String> = agent
+                .configured_tool_definitions()
+                .into_iter()
+                .map(|tool| tool.name)
+                .collect();
+            allowed.insert(super::mailbox::MESSAGE_PEER_TOOL_NAME.to_string());
+            agent.set_allowed_tool_names(Some(allowed));
+        }
+        let _ = agent.register_tool_executor(peer_executor);
+    }
+    let system_prompt = if let Some((ref siblings, _)) = peer_info {
+        let peers: Vec<String> = siblings
+            .iter()
+            .filter(|sibling| *sibling != &config.name)
+            .cloned()
+            .collect();
+        let peer_line = if peers.is_empty() {
+            "No sibling subagents in this batch.".to_string()
+        } else {
+            format!(
+                "Sibling subagents in this parallel batch: {}. Use `message_peer` (to = role, lane, or `all`) to coordinate shared files, interfaces, or findings; one call both sends and drains your inbox. Check your inbox before finalizing shared work.",
+                peers.join(", ")
+            )
+        };
+        format!(
+            "{}\n\nYou are an isolated subagent working in {}. Complete strictly the assigned task without unrequested changes, tangents, or conversational filler. Return a concise, direct report to your parent agent detailing exact actions and verification evidence. {peer_line} The parent may also steer you via `hub send`; treat drained inbox messages as instructions for your next steps. If you change files, commit them before finishing so the parent can integrate your branch.",
+            config.system_prompt,
+            context.work_dir.display(),
+        )
+    } else {
+        format!(
+            "{}\n\nYou are an isolated subagent working in {}. Complete strictly the assigned task without unrequested changes, tangents, or conversational filler. Return a concise, direct report to your parent agent detailing exact actions and verification evidence. If you change files, commit them before finishing so the parent can integrate your branch.",
+            config.system_prompt,
+            context.work_dir.display(),
+        )
+    };
     agent.set_system_prompt(system_prompt).await;
     let is_recovery = !resume_messages.is_empty();
     if is_recovery {
@@ -719,19 +1089,9 @@ You are an isolated subagent working in {}. Complete only the assigned task and 
 
     let session_file_for_checkpoint = context.session_file.clone();
 
-    let policy = Arc::new(tokio::sync::Mutex::new(
-        if config.tools.as_ref().is_some_and(|tools| {
-            !tools
-                .iter()
-                .any(|tool| matches!(tool.as_str(), "write_file" | "edit_file" | "write" | "edit"))
-        }) {
-            ToolPolicy::ReadOnly
-        } else {
-            ToolPolicy::FullAccess
-        },
-    ));
+    let policy = Arc::new(tokio::sync::Mutex::new(policy));
     let agent_work = AgentWorkScheduler::default();
-    let (broker_dispatcher, _, _) = build_broker_dispatcher(
+    let (broker_dispatcher, _, _, _) = build_broker_dispatcher(
         policy.clone(),
         context.extensions.clone(),
         false,
@@ -772,7 +1132,6 @@ You are an isolated subagent working in {}. Complete only the assigned task and 
             return Ok(SubagentResult {
                 output: "test subagent result".into(),
                 thinking: Vec::new(),
-                inner_tools: Vec::new(),
                 error: None,
                 messages: resume_messages,
             });
@@ -829,7 +1188,6 @@ You are an isolated subagent working in {}. Complete only the assigned task and 
         return Ok(SubagentResult {
             output: format!("test subagent result ({observed_model})"),
             thinking: Vec::new(),
-            inner_tools: Vec::new(),
             error: None,
             messages,
         });
@@ -888,18 +1246,73 @@ You are an isolated subagent working in {}. Complete only the assigned task and 
         subagent_harness
             .validate_accepted_run(accepted_run)
             .map_err(|error| format!("Invalid subagent accepted run token: {error}"))?;
-        agent
-            .run_accepted(
+        // `hub kill` parity with oh-my-pi's Agent Hub kill: race the turn
+        // loop against the hub kill flag so shutdown lands at the next await
+        // point instead of waiting out the whole run. Dropping the
+        // `run_accepted` future cancels the in-flight provider stream; the
+        // partial transcript below is still committed through the normal
+        // completed-lane path with a killed error.
+        let killed = tokio::select! {
+            _ = agent.run_accepted(
                 &accepted_run.run_id,
                 &accepted_run.lane,
                 accepted_run.accepted_through_seq,
-            )
-            .await;
+            ) => false,
+            _ = context.hub.wait_killed(&lane_name, &config.name) => true,
+        };
+        if killed {
+            checkpoint_task.abort();
+            let state = agent.get_state().await;
+            let thinking: Vec<AgentMessage> = state
+                .messages
+                .iter()
+                .filter(|message| matches!(message, AgentMessage::Custom { custom_type, .. } if custom_type == "thinking"))
+                .cloned()
+                .collect();
+            let error = format!("Subagent '{}' killed via hub.", config.name);
+            return Ok(SubagentResult {
+                output: error.clone(),
+                thinking,
+                error: Some(error),
+                messages: state
+                    .messages
+                    .into_iter()
+                    .filter(|message| !matches!(message, AgentMessage::System { .. }))
+                    .collect(),
+            });
+        }
     } else {
         agent.steer(AgentMessage::user(prompt_text.to_string(), Vec::new()));
         agent.run_steer().await;
     }
     while agent_work.run_executor(&mut agent, None).await {}
+
+    // Inbox follow-up loop (parent `hub send` / late sibling messages).
+    // Bounded to 3 extra turns so a chatty peer cannot loop the child.
+    // A `hub kill` landing mid-loop stops further follow-ups.
+    if peer_info.is_some() {
+        let own_agent = peer_info.as_ref().map(|(_, agent)| agent.clone()).unwrap_or_default();
+        for _ in 0..3 {
+            if context.hub.is_killed(&lane_name, &own_agent) {
+                break;
+            }
+            let pending = super::mailbox::drain_lane_inbox(&context.hub, &lane_name, &own_agent);
+            if pending.is_empty() {
+                break;
+            }
+            let body = pending
+                .iter()
+                .map(|message| format!("[inbox from {}] {}", message.from, message.body))
+                .collect::<Vec<_>>()
+                .join("\n");
+            agent.steer(AgentMessage::user(
+                format!("Live messages for you (from parent hub / sibling peers). Incorporate them into your next steps, then continue your assigned task:\n{body}"),
+                Vec::new(),
+            ));
+            agent.run_steer().await;
+            while agent_work.run_executor(&mut agent, None).await {}
+        }
+    }
 
     let mut checkpoint_cursor = checkpoint_task
         .await
@@ -938,37 +1351,6 @@ You are an isolated subagent working in {}. Complete only the assigned task and 
         .filter(|message| matches!(message, AgentMessage::Custom { custom_type, .. } if custom_type == "thinking"))
         .cloned()
         .collect();
-    let mut inner_tools = Vec::new();
-    for message in &state.messages {
-        match message {
-            AgentMessage::Assistant {
-                tool_calls: Some(calls),
-                ..
-            } => {
-                for call in calls {
-                    inner_tools.push(SubagentInnerTool {
-                        id: call.id.clone(),
-                        name: call.function.name.clone(),
-                        arguments: call.function.arguments.clone(),
-                        output: String::new(),
-                        is_error: false,
-                    });
-                }
-            }
-            AgentMessage::Tool {
-                tool_call_id,
-                content,
-                is_error,
-                ..
-            } => {
-                if let Some(tool) = inner_tools.iter_mut().find(|t| &t.id == tool_call_id) {
-                    tool.output = content.clone();
-                    tool.is_error = *is_error;
-                }
-            }
-            _ => {}
-        }
-    }
     let completion_error = error
         .map(|error| format!("Subagent '{}' failed: {error}", config.name))
         .or_else(|| {
@@ -982,7 +1364,6 @@ You are an isolated subagent working in {}. Complete only the assigned task and 
     Ok(SubagentResult {
         output: completion_error.clone().unwrap_or(output),
         thinking,
-        inner_tools,
         error: completion_error,
         messages: state
             .messages
@@ -1050,6 +1431,7 @@ mod result_tests {
                     .unwrap(),
                     is_error: false,
                     terminate: false,
+                    images: Vec::new(),
                 })
                 .unwrap();
             context_ids.push(
@@ -1079,9 +1461,12 @@ mod result_tests {
             parent_event_tx,
             parent_leaf_id: None,
             session_file: Some(session_file),
+            completed_lanes: Arc::default(),
+            hub: crate::coding_agent::mailbox::SubagentHub::new(),
             scheduler_observer: Some(Arc::new(std::sync::Mutex::new(Vec::new()))),
             child_work_observer: observer,
             child_tool_observer: None,
+            child_run_override: None,
             semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
         }
     }
@@ -1091,7 +1476,7 @@ mod result_tests {
             agent: agent.into(),
             task: format!("{agent} task"),
             instructions: None,
-            tools: None,
+            tools: Some(vec!["read_file".into()]),
             model: None,
             context_refs: Vec::new(),
         }
@@ -1184,33 +1569,37 @@ mod result_tests {
         });
         let mut child = task("worker");
         child.context_refs = vec!["ctx-missing".into()];
-        assert!(run_subagents_with_context(
-            vec![child],
-            false,
-            None,
-            test_context(
-                dir.path().into(),
-                session_file.clone(),
-                Some(observer.clone())
-            ),
-        )
-        .await
-        .unwrap_err()
-        .contains("missing"));
+        assert!(
+            run_subagents_with_context(
+                vec![child],
+                false,
+                None,
+                test_context(
+                    dir.path().into(),
+                    session_file.clone(),
+                    Some(observer.clone())
+                ),
+            )
+            .await
+            .unwrap_err()
+            .contains("missing")
+        );
         assert!(!observed.load(Ordering::SeqCst));
 
         std::fs::write(dir.path().join("first.rs"), "stale").unwrap();
         let mut child = task("worker");
         child.context_refs = vec![context_ids[0].clone()];
-        assert!(run_subagents_with_context(
-            vec![child],
-            false,
-            None,
-            test_context(dir.path().into(), session_file, Some(observer)),
-        )
-        .await
-        .unwrap_err()
-        .contains("stale"));
+        assert!(
+            run_subagents_with_context(
+                vec![child],
+                false,
+                None,
+                test_context(dir.path().into(), session_file, Some(observer)),
+            )
+            .await
+            .unwrap_err()
+            .contains("stale")
+        );
         assert!(!observed.load(Ordering::SeqCst));
     }
 
@@ -1262,10 +1651,271 @@ mod result_tests {
         SubagentResult {
             output: output.into(),
             thinking: Vec::new(),
-            inner_tools: Vec::new(),
             error: None,
             messages: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn failed_batches_finalize_every_started_lane_and_keep_successes() {
+        use crate::coding_agent::{CodingAgent, CodingAgentOptions};
+        use crate::system_prompt::SystemPromptConfig;
+        use threadlane_runtime::harness::{OperationOutcome, Record, Reducer};
+
+        for parallel in [false, true] {
+            for all_failed in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("session.jsonl");
+                let mut agent = CodingAgent::new(CodingAgentOptions {
+                    api_key: "test-key".into(),
+                    account_id: None,
+                    model: "test-model".into(),
+                    work_dir: dir.path().into(),
+                    session_file: Some(path.clone()),
+                    system_prompt: SystemPromptConfig::default(),
+                    agent_config: None,
+                    coding_config: None,
+                    browser: BrowserBridge::unavailable(),
+                });
+                agent
+                    .begin_harness_run(AgentMessage::user("parent task", vec![]))
+                    .await
+                    .unwrap();
+                let mut context = test_context(dir.path().into(), path.clone(), None);
+                context.semaphore = Arc::new(tokio::sync::Semaphore::new(2));
+                context.completed_lanes = agent.completed_subagent_lanes.clone();
+                context.child_run_override = Some((
+                    Duration::from_millis(10),
+                    Arc::new(|task| {
+                        Box::pin(async move {
+                            if task == "timeout task" {
+                                return std::future::pending().await;
+                            }
+                            if task == "failed task" {
+                                return Err("child failed".into());
+                            }
+                            let mut result = success("successful sibling report");
+                            result.messages.push(AgentMessage::Assistant {
+                                content: Some(result.output.clone()),
+                                tool_calls: None,
+                                stop_reason: Some("end_turn".into()),
+                                deferred_handle: None,
+                            });
+                            Ok(result)
+                        })
+                    }),
+                ));
+                let mut events = context.parent_event_tx.subscribe();
+                let result = run_subagents_with_context(
+                    vec![
+                        task("timeout"),
+                        task(if all_failed { "failed" } else { "worker" }),
+                    ],
+                    parallel,
+                    None,
+                    context,
+                )
+                .await;
+                if all_failed {
+                    let error = result.unwrap_err();
+                    assert!(error.contains("child failed"));
+                    assert!(error.contains("Subagent timed out"));
+                } else {
+                    let (output, _, _) = result.unwrap();
+                    assert!(output.contains("successful sibling report"));
+                    assert!(output.contains("Subagent timed out"));
+                }
+                let mut finished = 0;
+                while let Ok(event) = events.try_recv() {
+                    if matches!(event, AgentEvent::SubagentFinished { .. }) {
+                        finished += 1;
+                    }
+                }
+                assert_eq!(finished, 2);
+                assert_eq!(agent.completed_subagent_lanes.lock().unwrap().len(), 2);
+                agent.commit_completed_subagent_lanes().unwrap();
+                drop(agent);
+                let store = JsonlStore::open(&path).unwrap();
+                let state = Reducer::reduce(&store).unwrap();
+                let children: Vec<_> = state
+                    .lanes
+                    .iter()
+                    .filter(|lane| lane.name != "main")
+                    .collect();
+                assert_eq!(children.len(), 2);
+                assert!(children.iter().all(|lane| lane.open_operation.is_none()));
+                let outcomes: Vec<_> = store
+                    .records()
+                    .iter()
+                    .filter_map(|record| match record {
+                        Record::OperationFinished { lane, outcome, .. } if lane != "main" => {
+                            Some(outcome)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(outcomes.len(), 2);
+                assert_eq!(
+                    outcomes
+                        .iter()
+                        .filter(|outcome| matches!(outcome, OperationOutcome::Completed))
+                        .count(),
+                    usize::from(!all_failed)
+                );
+                assert!(store.entries().iter().any(|entry| matches!(&entry.message,
+                    AgentMessage::Assistant { content: Some(content), .. } if content == "successful sibling report"
+                )) == !all_failed);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn read_only_scout_can_discover_files_without_shell_access() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("example.rs"), "fn archive_session() {}\n").unwrap();
+        let mut config = AgentDefinition {
+            name: "scout".into(),
+            description: String::new(),
+            tools: Some(vec!["read_file".into(), "run_command".into()]),
+            model: None,
+            system_prompt: String::new(),
+            source: crate::agents::AgentSource::Project,
+            file_path: dir.path().into(),
+        };
+        let policy = configure_subagent_tools(&mut config);
+        assert_eq!(policy, ToolPolicy::ReadOnly);
+        let mut agent = AgentRuntime::new_with_provider(
+            "",
+            None,
+            "test-model",
+            Some(&dir.path().join("session.jsonl")),
+            threadlane_runtime::AgentConfig::builder()
+                .core_tool_schema_mode(config.tools.is_none())
+                .build(),
+            Arc::new(threadlane_provider::router::ProviderClient::new("", None)),
+        )
+        .unwrap();
+        agent.work_dir = Some(dir.path().into());
+        agent.set_allowed_tool_names(Some(config.tools.clone().unwrap().into_iter().collect()));
+        let names: HashSet<_> = agent
+            .configured_tool_definitions()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert_eq!(
+            names,
+            HashSet::from(["read_file".into(), "list_dir".into(), "grep_search".into()])
+        );
+        let policy = Arc::new(tokio::sync::Mutex::new(policy));
+        let extensions = Arc::new(WasiExtensionManager::new());
+        let (broker, _, _, _) = build_broker_dispatcher(
+            policy.clone(),
+            extensions.clone(),
+            false,
+            dir.path().into(),
+            agent.event_tx.clone(),
+            AgentWorkScheduler::default(),
+            None,
+            None,
+        );
+        agent
+            .hook_registry
+            .register(
+                HookKind::BeforeTool,
+                "policy",
+                extension_before_tool_hook_handler(policy, extensions, broker),
+            )
+            .unwrap();
+        for (name, args, is_error, expected) in [
+            ("list_dir", r#"{"path":"."}"#, false, "example.rs"),
+            (
+                "grep_search",
+                r#"{"pattern":"archive_session","glob":"*.rs"}"#,
+                false,
+                "archive_session",
+            ),
+            (
+                "read_file",
+                r#"{"path":"example.rs"}"#,
+                false,
+                "archive_session",
+            ),
+            ("run_command", r#"{"command":"touch forbidden"}"#, true, ""),
+            (
+                "write_file",
+                r#"{"path":"forbidden","content":"bad"}"#,
+                true,
+                "",
+            ),
+        ] {
+            let call = threadlane_provider::openai::ToolCall {
+                id: name.into(),
+                r#type: "function".into(),
+                function: threadlane_provider::openai::ToolCallFunction {
+                    name: name.into(),
+                    arguments: args.into(),
+                },
+                thought_signature: None,
+            };
+            let results = agent.execute_tools(&[call]).await;
+            assert_eq!(results[0].is_error, is_error, "{}", results[0].content);
+            assert!(results[0].content.contains(expected));
+        }
+        assert!(!dir.path().join("forbidden").exists());
+        // An explicitly permitted hashline editor must not be mistaken for a scout.
+        config.tools = Some(vec!["edit_files_hashline".into(), "run_command".into()]);
+        assert_eq!(
+            configure_subagent_tools(&mut config),
+            ToolPolicy::FullAccess
+        );
+        assert!(config.tools.unwrap().contains(&"run_command".into()));
+    }
+
+    #[test]
+    fn only_write_capable_subagents_need_isolated_workspaces() {
+        let config = |tools| AgentDefinition {
+            name: "worker".into(),
+            description: String::new(),
+            tools,
+            model: None,
+            system_prompt: String::new(),
+            source: crate::agents::AgentSource::Project,
+            file_path: PathBuf::new(),
+        };
+
+        assert!(subagent_can_write(&config(None)));
+        assert!(subagent_can_write(&config(Some(vec![
+            "edit_file_hashline".into()
+        ]))));
+        assert!(!subagent_can_write(&config(Some(vec!["read_file".into()]))));
+    }
+
+    #[test]
+    fn subagent_report_excludes_activity_but_preserves_lane_history() {
+        let mut result = success("Fix example.rs:1; validation blocked by missing compiler");
+        let history = vec![AgentMessage::Tool {
+            tool_call_id: "read-1".into(),
+            name: "read_file".into(),
+            content: "large child tool output".repeat(1000),
+            is_error: false,
+            terminate: false,
+            images: Vec::new(),
+        }];
+        result.messages = history.clone();
+        let mut completed = lane("scout", SubagentLaneStatus::Completed);
+        completed.messages = history.clone();
+        let (output, _, lanes) =
+            aggregate_subagent_results(vec![task("scout")], vec![Ok(result)], vec![completed])
+                .unwrap();
+        let report: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(
+            report[0]["output"],
+            "Fix example.rs:1; validation blocked by missing compiler"
+        );
+        assert!(report[0].get("inner_tools").is_none());
+        assert!(report[0].get("thinking").is_none());
+        assert!(!output.contains("large child tool output"));
+        assert_eq!(lanes[0].messages, history);
     }
 
     #[test]

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptTemplate {
-    pub name: String,
+    pub(crate) name: String,
     description: String,
     argument_hint: Option<String>,
     content: String,
@@ -12,7 +12,7 @@ pub struct PromptTemplate {
 }
 
 /// Parse command arguments respecting bash-style quotes (single and double quotes).
-pub fn parse_command_args(args_string: &str) -> Vec<String> {
+fn parse_command_args(args_string: &str) -> Vec<String> {
     let mut args = Vec::new();
     let mut current = String::new();
     let mut in_quote: Option<char> = None;
@@ -51,7 +51,7 @@ pub fn parse_command_args(args_string: &str) -> Vec<String> {
 /// - ${@:-default} and ${ARGUMENTS:-default} for all args with default when empty
 /// - ${@:N} for args from Nth onwards (1-indexed)
 /// - ${@:N:L} for L args starting from Nth
-pub fn substitute_args(content: &str, args: &[String]) -> String {
+fn substitute_args(content: &str, args: &[String]) -> String {
     let all_args = args.join(" ");
     let mut result = String::new();
     let mut i = 0;
@@ -163,7 +163,7 @@ fn eval_braced_expr(expr: &str, args: &[String], all_args: &str) -> String {
 }
 
 /// Parse frontmatter metadata from markdown file content.
-pub fn parse_frontmatter(content: &str) -> (Option<String>, Option<String>, String) {
+fn parse_frontmatter(content: &str) -> (Option<String>, Option<String>, String) {
     let parsed = threadlane_skills::frontmatter::parse_frontmatter(content);
     let description = parsed.get_str("description").map(ToString::to_string);
     let argument_hint = parsed.get_str("argument-hint").map(ToString::to_string);
@@ -221,7 +221,7 @@ fn load_prompt_templates_from_dir(dir: &Path, scope: &str) -> Vec<PromptTemplate
 }
 
 /// Load all prompt templates from global, project, and package locations.
-pub fn load_prompt_templates(project_dir: &Path, global_dir: &Path) -> Vec<PromptTemplate> {
+pub(crate) fn load_prompt_templates(project_dir: &Path, global_dir: &Path) -> Vec<PromptTemplate> {
     let mut templates = Vec::new();
 
     // 1. Global prompts: ~/.threadlane/prompts/
@@ -260,7 +260,7 @@ pub fn load_prompt_templates(project_dir: &Path, global_dir: &Path) -> Vec<Promp
 
 /// Expand a prompt template if the input starts with `/name`.
 /// Returns the expanded prompt string, or the original text if no template matched.
-pub fn expand_prompt_template(text: &str, templates: &[PromptTemplate]) -> String {
+pub(crate) fn expand_prompt_template(text: &str, templates: &[PromptTemplate]) -> String {
     let trimmed = text.trim();
     if !trimmed.starts_with('/') {
         return text.to_string();

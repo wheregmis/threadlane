@@ -185,6 +185,20 @@ pub(crate) const ACP_PRESETS: &[AcpPreset] = &[
         command: "npx -y @agentclientprotocol/codex-acp",
         previous_commands: &["npx -y @zed-industries/codex-acp"],
     },
+    AcpPreset {
+        id: "opencode2",
+        name: "OpenCode (ACP)",
+        description: "Use OpenCode as an external ACP agent.",
+        command: "opencode acp",
+        previous_commands: &["opencode2 acp"],
+    },
+    AcpPreset {
+        id: "antigravity",
+        name: "Google Antigravity",
+        description: "Use Google's Antigravity agent through ACP.",
+        command: "agy_acp_server.par",
+        previous_commands: &["./agy_acp_server.par"],
+    },
 ];
 
 pub(crate) fn upgrade_acp_presets(project_root: Option<&Path>) -> Result<(), String> {

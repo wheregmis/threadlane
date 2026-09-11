@@ -40,6 +40,7 @@ fn dump_config(args: &[String]) -> Result<(), String> {
         system_prompt: Default::default(),
         agent_config: None,
         coding_config: None,
+        browser: threadlane_session::BrowserBridge::unavailable(),
     };
     let mut manager = SkillManager::new();
     manager.discover_skills(Some(&project));
@@ -65,6 +66,7 @@ fn dump_config(args: &[String]) -> Result<(), String> {
 #[hotpath::main]
 fn main() {
     let args = std::env::args().collect::<Vec<_>>();
+    threadlane_gpui::process_environment::initialize_child_process_path();
     if args.iter().any(|arg| arg == "--dump-config") {
         if let Err(error) = dump_config(&args) {
             eprintln!("--dump-config: {error}");
@@ -73,7 +75,9 @@ fn main() {
         return;
     }
     let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        tracing_subscriber::EnvFilter::new("info,gpui_component::text::format::markdown=error")
+        tracing_subscriber::EnvFilter::new(
+            "info,gpui_component::text::format::markdown=error,gpui_base::text::format::markdown=error",
+        )
     });
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_target(true)

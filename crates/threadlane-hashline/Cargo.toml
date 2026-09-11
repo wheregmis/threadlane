@@ -6,4 +6,3 @@ description = "Line:hash anchor calculation and precise text edit engine for thr
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"

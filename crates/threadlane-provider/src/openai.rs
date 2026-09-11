@@ -576,20 +576,72 @@ impl ResponseAccumulator {
     }
 }
 
-pub async fn fetch_available_models(api_key: &str, account_id: Option<&str>) -> Vec<String> {
-    let cache_key = model_cache_key(api_key, account_id);
-    let now = Instant::now();
-    let cache = MODEL_CACHE.get_or_init(|| StdMutex::new(HashMap::new()));
-    if let Some(models) = cache.lock().ok().and_then(|cache| {
-        cache
-            .get(&cache_key)
-            .and_then(|entry| fresh_models(entry, now))
-    }) {
-        return models.iter().cloned().collect();
+/// Exclusion-based filter so new chat models appear without a code change.
+/// `OPENAI_MODELS_ALLOW_EXTRA` (comma-separated substrings) can re-include a
+/// family excluded below without editing this function.
+pub(crate) fn is_chat_capable_model(id: &str) -> bool {
+    let id_lower = id.to_ascii_lowercase();
+    const EXCLUDED_PREFIXES: &[&str] = &[
+        "text-embedding-",
+        "tts-",
+        "whisper-",
+        "dall-e",
+        "omni-moderation-",
+        "computer-use-",
+    ];
+    const EXCLUDED_CONTAINS: &[&str] = &[
+        "embedding",
+        "moderation",
+        "transcribe",
+        "realtime",
+        "audio-",
+        "image-",
+    ];
+    if EXCLUDED_PREFIXES
+        .iter()
+        .any(|prefix| id_lower.starts_with(prefix))
+        || EXCLUDED_CONTAINS.iter().any(|part| id_lower.contains(part))
+    {
+        let extra = std::env::var("OPENAI_MODELS_ALLOW_EXTRA").unwrap_or_default();
+        for token in extra
+            .split(',')
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+        {
+            if id_lower.contains(&token.to_ascii_lowercase()) {
+                return true;
+            }
+        }
+        return false;
     }
+    true
+}
+
+fn fallback_models() -> Vec<String> {
+    vec![
+        "gpt-5.6-luna".to_string(),
+        "gpt-5.4".to_string(),
+        "gpt-5.4-mini".to_string(),
+        "gpt-5.5".to_string(),
+        "gpt-5.6-sol".to_string(),
+        "gpt-5.6-terra".to_string(),
+        "gpt-5.3-codex-spark".to_string(),
+        "gpt-4o".to_string(),
+        "gpt-4o-mini".to_string(),
+    ]
+}
+
+async fn fetch_available_models_network(
+    api_key: &str,
+    account_id: Option<&str>,
+    cache_key: u64,
+    now: Instant,
+) -> Vec<String> {
+    let cache = MODEL_CACHE.get_or_init(|| StdMutex::new(HashMap::new()));
     let mut req = http_client()
         .get("https://api.openai.com/v1/models")
-        .header(AUTHORIZATION, format!("Bearer {api_key}"));
+        .header(AUTHORIZATION, format!("Bearer {api_key}"))
+        .timeout(Duration::from_secs(10));
     if let Some(account_id) = account_id {
         req = req.header("chatgpt-account-id", account_id);
     }
@@ -600,12 +652,7 @@ pub async fn fetch_available_models(api_key: &str, account_id: Option<&str>) -> 
                     let mut models: Vec<_> = data
                         .iter()
                         .filter_map(|item| item.get("id").and_then(Value::as_str))
-                        .filter(|id| {
-                            id.starts_with("gpt-")
-                                || id.starts_with("o1")
-                                || id.starts_with("o3")
-                                || id.contains("codex")
-                        })
+                        .filter(|id| is_chat_capable_model(id))
                         .map(str::to_string)
                         .collect();
                     if !models.is_empty() {
@@ -625,23 +672,117 @@ pub async fn fetch_available_models(api_key: &str, account_id: Option<&str>) -> 
             }
         }
     }
-    vec![
-        "gpt-5.6-luna".to_string(),
-        "gpt-5.4".to_string(),
-        "gpt-5.4-mini".to_string(),
-        "gpt-5.5".to_string(),
-        "gpt-5.6-sol".to_string(),
-        "gpt-5.6-terra".to_string(),
-        "gpt-5.3-codex-spark".to_string(),
-        "gpt-4o".to_string(),
-        "gpt-4o-mini".to_string(),
-    ]
+    fallback_models()
+}
+
+pub async fn fetch_available_models(api_key: &str, account_id: Option<&str>) -> Vec<String> {
+    let cache_key = model_cache_key(api_key, account_id);
+    let now = Instant::now();
+    let cache = MODEL_CACHE.get_or_init(|| StdMutex::new(HashMap::new()));
+    if let Some(models) = cache.lock().ok().and_then(|cache| {
+        cache
+            .get(&cache_key)
+            .and_then(|entry| fresh_models(entry, now))
+    }) {
+        return models.iter().cloned().collect();
+    }
+    if tokio::runtime::Handle::try_current().is_ok() {
+        fetch_available_models_network(api_key, account_id, cache_key, now).await
+    } else {
+        let api_key = api_key.to_string();
+        let account_id = account_id.map(str::to_string);
+        let handle = threadlane_runtime::get_runtime().spawn(async move {
+            fetch_available_models_network(&api_key, account_id.as_deref(), cache_key, now).await
+        });
+        match handle.await {
+            Ok(models) => models,
+            Err(_) => fallback_models(),
+        }
+    }
+}
+
+/// Model ids usable on a ChatGPT subscription, read live from
+/// `chatgpt.com/backend-api/models` (verified: 200 with the OAuth token;
+/// `api.openai.com/v1/models` 401s for these accounts, so the API-key fetch
+/// above can never see them). Pure shape parsing lives in
+/// [`parse_subscription_models`] so tests need no network.
+pub async fn fetch_subscription_models() -> Vec<String> {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        fetch_subscription_models_inner().await
+    } else {
+        // GPUI background tasks have no Tokio reactor; hyper panics there.
+        match threadlane_runtime::get_runtime().spawn(fetch_subscription_models_inner()).await
+        {
+            Ok(models) => models,
+            Err(_) => Vec::new(),
+        }
+    }
+}
+
+fn parse_subscription_models(value: &Value) -> Vec<String> {
+    let mut ids = HashSet::new();
+    if let Some(categories) = value.get("categories").and_then(Value::as_array) {
+        for category in categories {
+            if let Some(default) = category.get("default_model").and_then(Value::as_str) {
+                ids.insert(default.to_string());
+            }
+            if let Some(supported) = category.get("supported_models").and_then(Value::as_array) {
+                for model in supported.iter().filter_map(Value::as_str) {
+                    ids.insert(model.to_string());
+                }
+            }
+        }
+    }
+    let mut ids: Vec<String> = ids.into_iter().collect();
+    ids.sort();
+    ids
+}
+
+async fn fetch_subscription_models_inner() -> Vec<String> {
+    let credentials = threadlane_auth::openai_auth::load_credentials()
+        .filter(|credentials| threadlane_auth::openai_auth::is_own_source(&credentials.source));
+    let Some(credentials) = credentials else {
+        return Vec::new();
+    };
+    let response = http_client()
+        .get("https://chatgpt.com/backend-api/models")
+        .header(AUTHORIZATION, format!("Bearer {}", credentials.access_token))
+        .header(CONTENT_TYPE, "application/json")
+        .header("OpenAI-Beta", "responses=experimental")
+        .header("originator", "threadlane")
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await;
+    let Ok(response) = response else {
+        return Vec::new();
+    };
+    if !response.status().is_success() {
+        return Vec::new();
+    }
+    let Ok(value) = response.json::<Value>().await else {
+        return Vec::new();
+    };
+    parse_subscription_models(&value)
+        .into_iter()
+        .filter(|id| is_chat_capable_model(id))
+        .collect()
+}
+
+#[derive(Clone, Debug, Default)]
+struct OpenAICredentials {
+    api_key: String,
+    account_id: Option<String>,
+    codex_account_id: Option<String>,
 }
 
 #[derive(Clone)]
 pub struct OpenAIClient {
-    api_key: String,
-    account_id: Option<String>,
+    /// Shared across clones so a mid-session model switch rotates the key
+    /// for in-flight turn loops, background workers, and title requests at
+    /// once. Without this, switching from e.g. an Antigravity model to an
+    /// OpenAI one keeps sending the Google OAuth token to `api.openai.com`
+    /// (401 `invalid_api_key`).
+    credentials: Arc<StdMutex<OpenAICredentials>>,
     client: reqwest::Client,
     codex_ws: Arc<Mutex<CodexWsState>>,
 }
@@ -658,16 +799,73 @@ enum WsResult {
 
 impl OpenAIClient {
     pub(crate) fn new(api_key: String, account_id: Option<String>) -> Self {
+        let codex_account_id = (account_id.is_some() || api_key.starts_with("ey"))
+            .then(|| threadlane_auth::openai_auth::codex_account_id_for_token(&api_key))
+            .flatten();
         Self {
-            api_key,
-            account_id,
+            credentials: Arc::new(StdMutex::new(OpenAICredentials {
+                api_key,
+                account_id,
+                codex_account_id,
+            })),
             client: http_client().clone(),
             codex_ws: Arc::new(Mutex::new(CodexWsState::new())),
         }
     }
 
+    fn credentials(&self) -> OpenAICredentials {
+        self.credentials
+            .lock()
+            .ok()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
+    }
+
+    /// Rotate the credential used for subsequent OpenAI-branch requests.
+    /// Called when the session model changes providers mid-task (slash
+    /// `/model`, picker rebuilds skip this by constructing fresh clients,
+    /// prewalk handoffs). A changed account identity also drops the cached
+    /// Codex websocket, whose handshake embeds the previous Bearer token.
+    pub(crate) fn refresh_credentials(&self, api_key: String, account_id: Option<String>) {
+        let codex_account_id = (account_id.is_some() || api_key.starts_with("ey"))
+            .then(|| threadlane_auth::openai_auth::codex_account_id_for_token(&api_key))
+            .flatten();
+        let rotated_account = {
+            let mut guard = match self.credentials.lock() {
+                Ok(guard) => guard,
+                Err(_) => return,
+            };
+            let rotated = guard.account_id != account_id
+                || guard.codex_account_id != codex_account_id;
+            *guard = OpenAICredentials {
+                api_key,
+                account_id,
+                codex_account_id,
+            };
+            rotated
+        };
+        if rotated_account {
+            // Best-effort: the next request reconnects. Deliberately not
+            // awaited — rotation must stay callable from sync contexts.
+            if let Ok(mut state) = self.codex_ws.try_lock() {
+                state.socket = None;
+                state.session_key = None;
+                state.opened_at = None;
+            }
+        }
+    }
+
     pub(crate) fn is_codex(&self) -> bool {
-        self.account_id.is_some() || self.api_key.starts_with("ey")
+        let credentials = self.credentials();
+        credentials.account_id.is_some() || credentials.api_key.starts_with("ey")
+    }
+
+    async fn access_token(&self) -> Result<String, String> {
+        let credentials = self.credentials();
+        match credentials.codex_account_id.as_deref() {
+            Some(id) => threadlane_auth::openai_auth::get_valid_codex_account_token(id).await,
+            None => Ok(credentials.api_key.clone()),
+        }
     }
 
     pub(crate) async fn generate_title(&self, model: &str, prompt: &str) -> Result<String, String> {
@@ -685,9 +883,12 @@ impl OpenAIClient {
             .client
             .post(url)
             .timeout(TITLE_REQUEST_TIMEOUT)
-            .header(AUTHORIZATION, format!("Bearer {}", self.api_key))
+            .header(
+                AUTHORIZATION,
+                format!("Bearer {}", self.access_token().await?),
+            )
             .header(CONTENT_TYPE, "application/json");
-        if let Some(account_id) = &self.account_id {
+        if let Some(account_id) = &self.credentials().account_id {
             request = request.header("chatgpt-account-id", account_id);
         }
         if is_codex {
@@ -780,10 +981,11 @@ impl OpenAIClient {
             .into_client_request()
             .map_err(|error| error.to_string())?;
         let headers = request.headers_mut();
-        let authorization = HeaderValue::from_str(&format!("Bearer {}", self.api_key))
-            .map_err(|error| error.to_string())?;
+        let authorization =
+            HeaderValue::from_str(&format!("Bearer {}", self.access_token().await?))
+                .map_err(|error| error.to_string())?;
         headers.insert("authorization", authorization);
-        if let Some(account_id) = &self.account_id {
+        if let Some(account_id) = &self.credentials().account_id {
             headers.insert(
                 "chatgpt-account-id",
                 HeaderValue::from_str(account_id).map_err(|error| error.to_string())?,
@@ -1052,12 +1254,19 @@ impl OpenAIClient {
         is_codex: bool,
         event_tx: &mpsc::Sender<StreamEvent>,
     ) {
+        let access_token = match self.access_token().await {
+            Ok(token) => token,
+            Err(error) => {
+                let _ = event_tx.send(StreamEvent::Error(error)).await;
+                return;
+            }
+        };
         let mut request = self
             .client
             .post(url)
-            .header(AUTHORIZATION, format!("Bearer {}", self.api_key))
+            .header(AUTHORIZATION, format!("Bearer {access_token}"))
             .header(CONTENT_TYPE, "application/json");
-        if let Some(account_id) = &self.account_id {
+        if let Some(account_id) = &self.credentials().account_id {
             request = request.header("chatgpt-account-id", account_id);
         }
         if is_codex {
@@ -1198,7 +1407,10 @@ impl crate::traits::ModelProvider for OpenAIClient {
             .client
             .get(format!("{base}/{handle_id}"))
             .timeout(Duration::from_secs(30))
-            .header(AUTHORIZATION, format!("Bearer {}", self.api_key))
+            .header(
+                AUTHORIZATION,
+                format!("Bearer {}", self.access_token().await?),
+            )
             .header(CONTENT_TYPE, "application/json")
             .send()
             .await
@@ -1250,7 +1462,10 @@ impl crate::traits::ModelProvider for OpenAIClient {
             .client
             .post(format!("{base}/{handle_id}/cancel"))
             .timeout(Duration::from_secs(30))
-            .header(AUTHORIZATION, format!("Bearer {}", self.api_key))
+            .header(
+                AUTHORIZATION,
+                format!("Bearer {}", self.access_token().await?),
+            )
             .header(CONTENT_TYPE, "application/json")
             .send()
             .await
@@ -1285,10 +1500,10 @@ fn extract_deferred_text(value: &Value) -> Option<String> {
 mod tests {
     use super::{
         api_error_details, clamp_prompt_cache_key, continuation_payload, fresh_models,
-        parse_chat_usage, parse_responses_text_delta, parse_responses_usage, title_payload,
-        title_response_text, title_stream_text, CodexWsState, Continuation, ModelCacheEntry,
-        OpenAIClient, ProviderUsage, ResponseAccumulator, StreamEvent, MODEL_CACHE_TTL,
-        OPENAI_PROMPT_CACHE_KEY_MAX_CHARS,
+        parse_chat_usage, parse_responses_text_delta, parse_responses_usage,
+        parse_subscription_models, title_payload, title_response_text, title_stream_text,
+        CodexWsState, Continuation, ModelCacheEntry, OpenAIClient, ProviderUsage,
+        ResponseAccumulator, StreamEvent, MODEL_CACHE_TTL, OPENAI_PROMPT_CACHE_KEY_MAX_CHARS,
     };
     use serde_json::json;
     use std::time::{Duration, Instant};
@@ -1309,6 +1524,40 @@ mod tests {
                 "content":[{"type":"output_text","text":"answer"}]
             })],
         }
+    }
+
+    #[test]
+    fn subscription_models_collect_defaults_and_supported_ids() {
+        let value = json!({
+            "categories": [
+                {
+                    "default_model": "gpt-5-6",
+                    "supported_models": ["gpt-5-6", "gpt-5-6-instant"]
+                },
+                {"default_model": "gpt-6-pro", "supported_models": []},
+                {"supported_models": ["gpt-5-5-thinking"]}
+            ]
+        });
+        assert_eq!(
+            parse_subscription_models(&value),
+            vec!["gpt-5-5-thinking", "gpt-5-6", "gpt-5-6-instant", "gpt-6-pro"]
+        );
+        assert!(parse_subscription_models(&json!({})).is_empty());
+    }
+
+    #[tokio::test]
+    async fn refresh_credentials_rotates_signing_key_for_all_clones() {
+        let client = OpenAIClient::new("sk-test".into(), None);
+        assert!(!client.is_codex());
+        let clone = client.clone();
+        clone.refresh_credentials("eyJhbGciOiJIUzI1NiJ9.test".into(), Some("acc-1".into()));
+        // The shared cell makes the rotation visible through every clone,
+        // including in-flight turn loops holding an older Arc.
+        assert!(client.is_codex());
+        assert_eq!(
+            client.access_token().await.unwrap(),
+            "eyJhbGciOiJIUzI1NiJ9.test"
+        );
     }
 
     #[test]
@@ -1626,5 +1875,16 @@ mod tests {
         }));
         assert_eq!(code, "model_not_found");
         assert_eq!(message, "missing");
+    }
+
+    #[test]
+    fn chat_model_filter_accepts_new_models_without_code_changes() {
+        use super::is_chat_capable_model;
+        assert!(is_chat_capable_model("gpt-5.6-luna"));
+        assert!(is_chat_capable_model("gpt-99-new"));
+        assert!(is_chat_capable_model("o4-mini"));
+        assert!(!is_chat_capable_model("text-embedding-3-small"));
+        assert!(!is_chat_capable_model("tts-1"));
+        assert!(!is_chat_capable_model("whisper-1"));
     }
 }

@@ -145,10 +145,7 @@ pub(crate) fn load_project_registry_from(global_dir: &Path) -> Vec<ProjectRecord
     normalize_projects(projects)
 }
 
-pub(crate) fn save_project_registry_to(
-    global_dir: &Path,
-    projects: &[ProjectRecord],
-) -> Result<(), String> {
+fn save_project_registry_to(global_dir: &Path, projects: &[ProjectRecord]) -> Result<(), String> {
     fs::create_dir_all(global_dir).map_err(|error| error.to_string())?;
     let path = global_dir.join("projects.json");
     let temporary_path = global_dir.join("projects.json.tmp");

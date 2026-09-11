@@ -38,7 +38,13 @@ pub struct AssistantAttemptProcedure;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RetryPolicy {
     pub max_attempts: u32,
+    /// Backoff steps in logical sequence units, *not* wall-clock time: the
+    /// harness stamps records with the sequence clock (`timestamp == seq`),
+    /// so `retry_at = seq + delay_for(attempt)` is ordered against the same
+    /// clock the reducer guard (`retry_at < timestamp`) checks. Deterministic
+    /// and test-friendly by design; do not interpret these as milliseconds.
     pub base_delay: u64,
+    /// Cap for the exponential backoff above, in the same sequence units.
     pub max_delay: u64,
 }
 
@@ -70,7 +76,7 @@ impl RetryProcedure {
         if lane.retry.is_some() {
             return Err(ProcedureError::Invalid("retry is already scheduled".into()));
         }
-        let attempt = next_attempt(store, run_id);
+        let attempt = next_attempt(store, effects, run_id);
         if attempt == 0 || attempt > policy.max_attempts {
             return Err(ProcedureError::Invalid(
                 "retry attempt cap exhausted".into(),
@@ -159,8 +165,8 @@ impl AssistantAttemptProcedure {
         let lane = open_lane(store, run_id)?;
         if !matches!(cause, UsageCause::Provider) {
             let seq = next_seq_with_effects(store, effects);
-            let attempt =
-                matches!(cause, UsageCause::Discarded).then(|| current_attempt(store, run_id));
+            let attempt = matches!(cause, UsageCause::Discarded)
+                .then(|| current_attempt(store, effects, run_id));
             effects.park(EffectAction::AppendRecord {
                 id: format!("usage-action-{run_id}-{seq}"),
                 record: Record::Usage {
@@ -176,9 +182,9 @@ impl AssistantAttemptProcedure {
                     usage,
                 },
             })?;
-            return Ok(current_attempt(store, run_id));
+            return Ok(current_attempt(store, effects, run_id));
         }
-        let attempt = current_attempt(store, run_id);
+        let attempt = current_attempt(store, effects, run_id);
         let seq = next_seq_with_effects(store, effects);
         effects.park(EffectAction::AppendRecord {
             id: format!("provider-usage-action-{run_id}-{seq}"),
@@ -230,16 +236,19 @@ impl AssistantAttemptProcedure {
                 }
                 _ => None,
             })
-            .unwrap_or_else(|| current_attempt(store, run_id));
+            .unwrap_or_else(|| current_attempt(store, effects, run_id));
         let seq = next_seq_with_effects(store, effects);
         let step_id = format!("attempt-{run_id}-{attempt}");
         // Guard on the record id, not (run_id, result_entry_id): two
         // different result entries that happen to share the same attempt
-        // number would otherwise produce colliding ids.
+        // number would otherwise produce colliding ids. The pending queue
+        // counts too so a double-parked finish is a no-op, not a later
+        // `DuplicateId` at commit.
         if !store
             .records()
             .iter()
             .any(|record| matches!(record, Record::StepAttempt { id, .. } if id == &step_id))
+            && !effects.has_pending_record_with_id(&step_id)
         {
             effects.park(EffectAction::AppendRecord {
                 id: format!("assistant-attempt-action-{run_id}-{attempt}"),
@@ -255,9 +264,10 @@ impl AssistantAttemptProcedure {
                 },
             })?;
         }
+        let usage_id = format!("usage-{run_id}-{attempt}");
         if !store.records().iter().any(|record| {
             matches!(record, Record::Usage { run_id: Some(record_run_id), cause: UsageCause::Provider, attempt: Some(record_attempt), .. } if record_run_id == run_id && *record_attempt == attempt)
-        }) {
+        }) && !effects.has_pending_record_with_id(&usage_id) {
             effects.park(EffectAction::AppendRecord {
                 id: format!("assistant-usage-action-{run_id}-{attempt}"),
                 record: Record::Usage {
@@ -385,7 +395,7 @@ impl OperationProcedure {
 }
 
 impl PromptProcedure {
-    pub fn accept<S: SessionStore>(
+    pub(crate) fn accept<S: SessionStore>(
         store: &S,
         run_id: &str,
         prompt: AgentMessage,
@@ -394,7 +404,7 @@ impl PromptProcedure {
         Self::accept_on_lane(store, "main", run_id, prompt, effects)
     }
 
-    pub fn accept_on_lane<S: SessionStore>(
+    pub(crate) fn accept_on_lane<S: SessionStore>(
         store: &S,
         lane_name: &str,
         run_id: &str,
@@ -983,7 +993,7 @@ impl NavigationProcedure {
 pub struct CompactionProcedure;
 
 impl CompactionProcedure {
-    pub fn accept<S: SessionStore>(
+    pub(crate) fn accept<S: SessionStore>(
         store: &S,
         run_id: &str,
         summary: &str,
@@ -1000,7 +1010,7 @@ impl CompactionProcedure {
         )
     }
 
-    pub fn checkpoint_open_run<S: SessionStore>(
+    pub(crate) fn checkpoint_open_run<S: SessionStore>(
         store: &S,
         lane_name: &str,
         run_id: &str,
@@ -1350,7 +1360,7 @@ impl QueueProcedure {
         Ok(())
     }
 
-    pub fn cancel_unbound<S: SessionStore>(
+    pub(crate) fn cancel_unbound<S: SessionStore>(
         store: &S,
         entry_id: &str,
         effects: &mut GatedEffects,
@@ -1496,7 +1506,7 @@ impl QueueProcedure {
 pub struct AbortProcedure;
 
 impl AbortProcedure {
-    pub fn request<S: SessionStore>(
+    pub(crate) fn request<S: SessionStore>(
         store: &S,
         run_id: &str,
         effects: &mut GatedEffects,
@@ -1531,7 +1541,7 @@ impl AbortProcedure {
         Ok(())
     }
 
-    pub fn reconcile<S: SessionStore>(
+    pub(crate) fn reconcile<S: SessionStore>(
         store: &S,
         run_id: &str,
         assistant_entry_id: &str,
@@ -1558,7 +1568,6 @@ impl AbortProcedure {
                 "assistant result identity is empty".into(),
             ));
         }
-        let mut seq = next_seq_with_effects(store, effects);
         let mut parent_id = lane
             .leaf_id
             .clone()
@@ -1569,17 +1578,11 @@ impl AbortProcedure {
             })
             .or_else(|| assistant_exists.then(|| assistant_entry_id.into()));
         DeferredProcedure::apply_pending(store, run_id, effects)?;
-        seq += lane
-            .deferred_writes
-            .iter()
-            .map(|target| {
-                if store.entries().iter().any(|entry| entry.id == target.id) {
-                    1
-                } else {
-                    2
-                }
-            })
-            .sum::<u64>();
+        // Recompute instead of guessing how many seqs `apply_pending`
+        // consumed: its actual consumption depends on already-written and
+        // pending state, and a miscount yields `NonMonotonicSequence` or
+        // `DuplicateId` on the abort records below.
+        let mut seq = next_seq_with_effects(store, effects);
         for tool in lane.tools.iter().filter(|tool| !tool.completed) {
             if !store
                 .entries()
@@ -1599,6 +1602,7 @@ impl AbortProcedure {
                             content: "Tool execution was interrupted by abort.".into(),
                             is_error: true,
                             terminate: false,
+                            images: Vec::new(),
                         },
                         surface_op: super::types::SurfaceOperation::Append,
                         terminate: false,
@@ -1759,7 +1763,7 @@ impl DeferredProcedure {
         Ok(())
     }
 
-    pub fn apply_pending<S: SessionStore>(
+    pub(crate) fn apply_pending<S: SessionStore>(
         store: &S,
         run_id: &str,
         effects: &mut GatedEffects,
@@ -1813,7 +1817,7 @@ impl DeferredProcedure {
         Ok(())
     }
 
-    pub fn redeem<S: SessionStore>(
+    pub(crate) fn redeem<S: SessionStore>(
         store: &S,
         run_id: &str,
         resolution: DeferredResolution,
@@ -1872,7 +1876,11 @@ impl DeferredProcedure {
                 stop_reason: Some("deferred_error".into()),
                 deferred_handle: None,
             },
-            DeferredResolution::Pending(_) => unreachable!(),
+            DeferredResolution::Pending(_) => {
+                return Err(ProcedureError::Invalid(
+                    "deferred redemption already handled pending separately".into(),
+                ));
+            }
         };
         if !matches!(
             message,
@@ -1894,13 +1902,16 @@ impl DeferredProcedure {
         let usage_entry_id = entry_id.clone();
         let attempt = lane.attempts.saturating_add(1);
         let base = next_seq_with_effects(store, effects);
+        // Contiguous sequences with `timestamp == seq`, matching every other
+        // procedure: the old base/+3/+6 gaps wasted sequence numbers and
+        // broke the timestamp convention the retry guard relies on.
         effects.park(EffectAction::AppendEntry {
             entry: Entry {
                 id: entry_id.clone(),
                 parent_id: Some(deferred.0),
                 lane: lane.name.clone(),
                 seq: base,
-                timestamp: base + 1,
+                timestamp: base,
                 message,
                 surface_op: super::types::SurfaceOperation::Append,
                 terminate: false,
@@ -1910,16 +1921,16 @@ impl DeferredProcedure {
             id: format!("deferred-attempt-{run_id}"),
             record: Record::StepAttempt {
                 id: format!("deferred-attempt-record-{run_id}"),
-                seq: base + 3,
+                seq: base + 1,
                 lane: lane.name.clone(),
-                timestamp: base + 4,
+                timestamp: base + 1,
                 run_id: run_id.into(),
                 attempt,
                 result_entry_id: entry_id,
                 compaction_reason: None,
             },
         })?;
-        let usage_seq = base + 6;
+        let usage_seq = base + 2;
         effects.park(EffectAction::AppendRecord {
             id: format!("deferred-usage-action-{run_id}-{usage_seq}"),
             record: Record::Usage {
@@ -1948,7 +1959,7 @@ pub enum ToolRecovery {
 }
 
 impl ToolBatchProcedure {
-    pub fn start<S: SessionStore>(
+    pub(crate) fn start<S: SessionStore>(
         store: &S,
         run_id: &str,
         assistant_entry_id: &str,
@@ -2018,7 +2029,7 @@ impl ToolBatchProcedure {
         Ok(())
     }
 
-    pub fn finish<S: SessionStore>(
+    pub(crate) fn finish<S: SessionStore>(
         store: &S,
         run_id: &str,
         result: ToolResult,
@@ -2181,19 +2192,22 @@ impl ToolBatchProcedure {
         }
         let entry_seq = next_seq_with_effects(store, effects);
         let call_id = result.call_id.clone();
-        let parent_id = if tool.tool_index == 0 {
-            tool.assistant_entry_id.clone()
-        } else {
-            lane.tools
-                .iter()
-                .find(|candidate| {
-                    candidate.run_id == run_id
-                        && candidate.assistant_entry_id == tool.assistant_entry_id
-                        && candidate.tool_index + 1 == tool.tool_index
-                })
-                .map(|candidate| candidate.result_entry_id.clone())
-                .ok_or_else(|| ProcedureError::Invalid("previous tool result is missing".into()))?
-        };
+        // Chain onto the nearest lower-index tool for the same assistant
+        // turn, tolerating removed indexes (e.g. replay-claimed slots) by
+        // falling back through whatever predecessors remain, then to the
+        // assistant entry itself. The previous strict contiguous-index
+        // lookup failed batches with a legitimately absent predecessor.
+        let parent_id = lane
+            .tools
+            .iter()
+            .filter(|candidate| {
+                candidate.run_id == run_id
+                    && candidate.assistant_entry_id == tool.assistant_entry_id
+                    && candidate.tool_index < tool.tool_index
+            })
+            .max_by_key(|candidate| candidate.tool_index)
+            .map(|candidate| candidate.result_entry_id.clone())
+            .unwrap_or_else(|| tool.assistant_entry_id.clone());
         effects.park(EffectAction::AppendEntry {
             entry: Entry {
                 id: tool.result_entry_id.clone(),
@@ -2207,6 +2221,7 @@ impl ToolBatchProcedure {
                     content: result.content,
                     is_error: result.is_error,
                     terminate: result.terminate,
+                    images: result.images.clone(),
                 },
                 surface_op: super::types::SurfaceOperation::Append,
                 terminate: result.terminate,
@@ -2264,13 +2279,27 @@ impl ToolBatchProcedure {
         }
         let mut seq = next_seq_with_effects(store, effects);
         let mut recoveries = Vec::new();
-        for spec in current_specs {
+        // Chain synthesized results in tool-index order like `finish_inner`
+        // instead of all parenting the assistant entry: the cursor advances
+        // through completed predecessors (whose result entries exist) and
+        // each synthesized entry, preserving model-visible order.
+        let mut ordered: Vec<&ToolSpec> = current_specs.iter().collect();
+        ordered.sort_by_key(|spec| spec.index);
+        let mut parent_id = assistant_entry_id.to_owned();
+        for spec in ordered {
             let tool = lane
                 .tools
                 .iter()
                 .find(|tool| tool.run_id == run_id && tool.tool_call_id == spec.call_id)
                 .ok_or_else(|| ProcedureError::Invalid("tool intent does not exist".into()))?;
             if tool.completed {
+                if store
+                    .entries()
+                    .iter()
+                    .any(|entry| entry.id == tool.result_entry_id)
+                {
+                    parent_id = tool.result_entry_id.clone();
+                }
                 continue;
             }
             if tool.tool_name != spec.name
@@ -2329,11 +2358,12 @@ impl ToolBatchProcedure {
                 content,
                 is_error: true,
                 terminate: false,
+                images: Vec::new(),
             };
             effects.park(EffectAction::AppendEntry {
                 entry: Entry {
                     id: tool.result_entry_id.clone(),
-                    parent_id: Some(assistant_entry_id.into()),
+                    parent_id: Some(parent_id.clone()),
                     lane: lane.name.clone(),
                     seq,
                     timestamp: seq,
@@ -2343,11 +2373,13 @@ impl ToolBatchProcedure {
                         content: result.content.clone(),
                         is_error: result.is_error,
                         terminate: result.terminate,
+                        images: result.images.clone(),
                     },
                     surface_op: super::types::SurfaceOperation::Append,
                     terminate: result.terminate,
                 },
             })?;
+            parent_id = tool.result_entry_id.clone();
             effects.park(EffectAction::AppendRecord {
                 id: format!("tool-recovery-finish-action-{run_id}-{}", spec.call_id),
                 record: Record::ToolFinished {
@@ -2385,11 +2417,11 @@ fn open_lane<S: SessionStore>(
     Ok(lane.clone())
 }
 
-fn current_attempt<S: SessionStore>(store: &S, run_id: &str) -> u32 {
-    highest_attempt(store, run_id).max(1)
+fn current_attempt<S: SessionStore>(store: &S, effects: &GatedEffects, run_id: &str) -> u32 {
+    highest_attempt(store, effects, run_id).max(1)
 }
 
-fn highest_attempt<S: SessionStore>(store: &S, run_id: &str) -> u32 {
+fn highest_attempt<S: SessionStore>(store: &S, effects: &GatedEffects, run_id: &str) -> u32 {
     store
         .records()
         .iter()
@@ -2414,12 +2446,16 @@ fn highest_attempt<S: SessionStore>(store: &S, run_id: &str) -> u32 {
             } if record_run_id == run_id => Some(*attempt),
             _ => None,
         }))
+        // Parked-but-uncommitted attempts count too: two procedures parking
+        // against the same store snapshot must not compute the same next
+        // attempt and collide at commit.
+        .chain(effects.pending_attempts_for_run(run_id))
         .max()
         .unwrap_or(0)
 }
 
-fn next_attempt<S: SessionStore>(store: &S, run_id: &str) -> u32 {
-    highest_attempt(store, run_id).saturating_add(1)
+fn next_attempt<S: SessionStore>(store: &S, effects: &GatedEffects, run_id: &str) -> u32 {
+    highest_attempt(store, effects, run_id).saturating_add(1)
 }
 
 fn next_seq_with_effects<S: SessionStore>(store: &S, effects: &GatedEffects) -> u64 {

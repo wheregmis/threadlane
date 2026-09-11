@@ -23,6 +23,14 @@ extern "system" {
 }
 
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+
+fn account_store_guard() -> std::sync::MutexGuard<'static, ()> {
+    // ponytail: in-process transactions around atomic file replacement; use
+    // an advisory file lock if multiple Threadlane processes share credentials.
+    static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    GATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 fn deserialize_string_or_number<'de, D>(deserializer: D) -> Result<u64, D::Error>
 where
@@ -72,10 +80,10 @@ fn default_verification_uri() -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceCodeResponse {
-    pub device_auth_id: String,
-    pub user_code: String,
+    device_auth_id: String,
+    user_code: String,
     #[serde(default = "default_verification_uri")]
-    pub verification_uri: String,
+    verification_uri: String,
     #[serde(default)]
     expires_at: Option<String>,
     #[serde(default)]
@@ -84,7 +92,7 @@ pub struct DeviceCodeResponse {
         deserialize_with = "deserialize_string_or_number",
         default = "default_interval"
     )]
-    pub interval: u64,
+    interval: u64,
 }
 
 fn default_interval() -> u64 {
@@ -94,15 +102,15 @@ fn default_interval() -> u64 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OAuthTokens {
     #[serde(default)]
-    pub access_token: String,
+    access_token: String,
     #[serde(default)]
-    pub refresh_token: Option<String>,
+    refresh_token: Option<String>,
     #[serde(default)]
-    pub expires_in: Option<u64>,
+    expires_in: Option<u64>,
     #[serde(default)]
-    pub id_token: Option<String>,
+    id_token: Option<String>,
     #[serde(default)]
-    pub account_id: Option<String>,
+    account_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -117,19 +125,19 @@ pub struct CodexAccount {
     pub label: String,
     pub account_id: Option<String>,
     pub access_token: String,
-    pub refresh_token: Option<String>,
-    pub expires_at: Option<u64>,
+    refresh_token: Option<String>,
+    expires_at: Option<u64>,
     pub source: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct CodexAccountsStore {
-    pub active_account_id: Option<String>,
-    pub accounts: Vec<CodexAccount>,
+    active_account_id: Option<String>,
+    accounts: Vec<CodexAccount>,
 }
 
 impl CodexAccountsStore {
-    pub fn active_account(&self) -> Option<&CodexAccount> {
+    fn active_account(&self) -> Option<&CodexAccount> {
         if let Some(active_id) = &self.active_account_id {
             if let Some(acc) = self.accounts.iter().find(|a| &a.id == active_id) {
                 return Some(acc);
@@ -142,7 +150,7 @@ impl CodexAccountsStore {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredCredentials {
     pub access_token: String,
-    pub refresh_token: Option<String>,
+    refresh_token: Option<String>,
     pub account_id: Option<String>,
     pub source: String,
 }
@@ -161,17 +169,18 @@ fn get_credentials_path() -> PathBuf {
     path
 }
 
-fn extract_jwt_claim(jwt: &str, claim_key: &str) -> Option<String> {
+fn jwt_claims(jwt: &str) -> Option<Value> {
     use base64::Engine;
-    let parts: Vec<&str> = jwt.split('.').collect();
-    if parts.len() >= 2 {
-        let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-        let standard_engine = base64::engine::general_purpose::STANDARD_NO_PAD;
-        let payload_bytes = engine
-            .decode(parts[1])
-            .or_else(|_| standard_engine.decode(parts[1]))
-            .ok()?;
-        let json: Value = serde_json::from_slice(&payload_bytes).ok()?;
+    let payload = jwt.split('.').nth(1)?;
+    let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(payload))
+        .ok()?;
+    serde_json::from_slice(&payload_bytes).ok()
+}
+
+fn extract_jwt_claim(jwt: &str, claim_key: &str) -> Option<String> {
+    if let Some(json) = jwt_claims(jwt) {
         if let Some(val) = json.get(claim_key).and_then(Value::as_str) {
             return Some(val.to_string());
         }
@@ -188,15 +197,16 @@ fn extract_jwt_claim(jwt: &str, claim_key: &str) -> Option<String> {
     None
 }
 
-pub fn save_credentials_store(store: &CodexAccountsStore) -> Result<(), String> {
+fn save_credentials_store(store: &CodexAccountsStore) -> Result<(), String> {
     let path = get_credentials_path();
     let json = serde_json::to_string_pretty(store)
         .map_err(|_| "Failed to serialize credentials".to_string())?;
     write_secure_text_file(&path, &json)
 }
 
-pub fn add_or_update_account(tokens: &OAuthTokens) -> Result<CodexAccount, String> {
-    let mut store = load_credentials_store();
+fn add_or_update_account(tokens: &OAuthTokens) -> Result<CodexAccount, String> {
+    let _guard = account_store_guard();
+    let mut store = load_credentials_store_unlocked();
     let email = tokens
         .id_token
         .as_deref()
@@ -275,6 +285,11 @@ pub fn is_own_source(source: &str) -> bool {
 }
 
 pub fn remove_credentials() -> Result<(), String> {
+    let _guard = account_store_guard();
+    remove_credentials_file()
+}
+
+fn remove_credentials_file() -> Result<(), String> {
     let path = get_credentials_path();
     if path.exists() {
         fs::remove_file(path).map_err(|e| e.to_string())?;
@@ -397,7 +412,12 @@ pub fn load_openai_api_key() -> Option<String> {
     }
 }
 
-pub fn load_credentials_store() -> CodexAccountsStore {
+fn load_credentials_store() -> CodexAccountsStore {
+    let _guard = account_store_guard();
+    load_credentials_store_unlocked()
+}
+
+fn load_credentials_store_unlocked() -> CodexAccountsStore {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     let threadlane_path = get_credentials_path();
 
@@ -511,6 +531,32 @@ pub fn get_active_codex_account() -> Option<CodexAccount> {
     load_credentials_store().active_account().cloned()
 }
 
+/// Find the Threadlane account behind a token, including a token another
+/// running provider has already refreshed. Never borrow another app's login.
+pub fn codex_account_id_for_token(token: &str) -> Option<String> {
+    let identity = codex_token_identity(token);
+    load_all_codex_accounts()
+        .into_iter()
+        .filter(|account| is_own_source(&account.source))
+        .find(|account| {
+            account.access_token == token
+                || (identity.is_some() && identity == codex_token_identity(&account.access_token))
+        })
+        .map(|account| account.id)
+}
+
+fn codex_token_identity(token: &str) -> Option<(String, String)> {
+    let claims = jwt_claims(token)?;
+    Some((
+        claims.get("sub")?.as_str()?.to_string(),
+        claims
+            .get("https://api.openai.com/auth")?
+            .get("chatgpt_account_id")?
+            .as_str()?
+            .to_string(),
+    ))
+}
+
 pub fn get_backup_codex_accounts() -> Vec<CodexAccount> {
     let store = load_credentials_store();
     let active_id = store.active_account().map(|a| a.id.clone());
@@ -522,7 +568,8 @@ pub fn get_backup_codex_accounts() -> Vec<CodexAccount> {
 }
 
 pub fn set_active_codex_account(id: &str) -> Result<(), String> {
-    let mut store = load_credentials_store();
+    let _guard = account_store_guard();
+    let mut store = load_credentials_store_unlocked();
     if !store.accounts.iter().any(|a| a.id == id) {
         return Err(format!("Account '{id}' not found"));
     }
@@ -531,7 +578,8 @@ pub fn set_active_codex_account(id: &str) -> Result<(), String> {
 }
 
 pub fn remove_codex_account(id: &str) -> Result<(), String> {
-    let mut store = load_credentials_store();
+    let _guard = account_store_guard();
+    let mut store = load_credentials_store_unlocked();
     let initial_len = store.accounts.len();
     store.accounts.retain(|a| a.id != id);
     if store.accounts.len() == initial_len {
@@ -541,17 +589,74 @@ pub fn remove_codex_account(id: &str) -> Result<(), String> {
         store.active_account_id = store.accounts.first().map(|a| a.id.clone());
     }
     if store.accounts.is_empty() {
-        remove_credentials()
+        remove_credentials_file()
     } else {
         save_credentials_store(&store)
     }
 }
 
+fn codex_token_needs_refresh(account: &CodexAccount, now: u64) -> bool {
+    let jwt_expiry = jwt_claims(&account.access_token)
+        .and_then(|claims| claims.get("exp").and_then(Value::as_u64));
+    account
+        .expires_at
+        .into_iter()
+        .chain(jwt_expiry)
+        .min()
+        .is_some_and(|expiry| expiry <= now.saturating_add(60))
+}
+
+/// Resolve the account captured when a provider was created, even if the user
+/// switches the active account while that provider is running.
+pub async fn get_valid_codex_account_token(id: &str) -> Result<String, String> {
+    get_valid_codex_account_token_at(id, TOKEN_URL).await
+}
+
+async fn get_valid_codex_account_token_at(id: &str, token_url: &str) -> Result<String, String> {
+    let id = id.to_string();
+    let token_url = token_url.to_string();
+    // Dropping a Tokio JoinHandle detaches it: cancelling a turn must not
+    // abandon a rotated refresh token between the response and secure save.
+    tokio::spawn(async move { resolve_codex_account_token(&id, &token_url).await })
+        .await
+        .map_err(|_| "Couldn't refresh ChatGPT sign-in. Try again.".to_string())?
+}
+
+async fn resolve_codex_account_token(id: &str, token_url: &str) -> Result<String, String> {
+    // ponytail: one refresh gate for all accounts; use per-account gates if
+    // concurrent refreshes become common. Reload inside it for rotating tokens.
+    static REFRESH_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _guard = REFRESH_GATE.lock().await;
+    let account = load_all_codex_accounts()
+        .into_iter()
+        .find(|account| account.id == id && is_own_source(&account.source))
+        .ok_or_else(|| {
+            "ChatGPT account is no longer connected. Sign in again in Settings → Providers."
+                .to_string()
+        })?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if !codex_token_needs_refresh(&account, now) {
+        return Ok(account.access_token);
+    }
+    refresh_codex_account_token_at(&account, token_url)
+        .await
+        .map(|account| account.access_token)
+}
+
 pub async fn refresh_codex_account_token(account: &CodexAccount) -> Result<CodexAccount, String> {
-    let refresh_token = account
-        .refresh_token
-        .as_ref()
-        .ok_or_else(|| "No refresh token available for account".to_string())?;
+    refresh_codex_account_token_at(account, TOKEN_URL).await
+}
+
+async fn refresh_codex_account_token_at(
+    account: &CodexAccount,
+    token_url: &str,
+) -> Result<CodexAccount, String> {
+    let refresh_token = account.refresh_token.as_ref().ok_or_else(|| {
+        "ChatGPT sign-in expired. Sign in again in Settings → Providers.".to_string()
+    })?;
 
     let body = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("grant_type", "refresh_token")
@@ -561,7 +666,8 @@ pub async fn refresh_codex_account_token(account: &CodexAccount) -> Result<Codex
 
     let client = reqwest::Client::new();
     let res = client
-        .post("https://auth.openai.com/oauth/token")
+        .post(token_url)
+        .timeout(std::time::Duration::from_secs(30))
         .header(
             reqwest::header::CONTENT_TYPE,
             "application/x-www-form-urlencoded",
@@ -569,30 +675,39 @@ pub async fn refresh_codex_account_token(account: &CodexAccount) -> Result<Codex
         .body(body)
         .send()
         .await
-        .map_err(|e| format!("Failed to refresh Codex OAuth token: {e}"))?;
+        .map_err(|_| {
+            "Couldn't refresh ChatGPT sign-in. Check your connection and try again.".to_string()
+        })?;
 
     let status = res.status();
-    let body = res.text().await.unwrap_or_default();
-    let val: Value = crate::parse_oauth_response(&body)?;
-
     if !status.is_success() {
-        let reason = val
-            .get("error_description")
-            .or_else(|| val.get("error"))
-            .and_then(Value::as_str)
-            .unwrap_or("unknown error");
-        return Err(format!("Token refresh failed ({status}): {reason}"));
+        return Err(
+            if status.is_server_error() || matches!(status.as_u16(), 408 | 429) {
+                "ChatGPT sign-in is temporarily unavailable. Try again shortly."
+            } else {
+                "ChatGPT sign-in expired. Sign in again in Settings → Providers."
+            }
+            .to_string(),
+        );
     }
+    let body = res
+        .text()
+        .await
+        .map_err(|_| "Couldn't read the ChatGPT sign-in response. Try again.".to_string())?;
+    let val: Value = crate::parse_oauth_response(&body)
+        .map_err(|_| "ChatGPT returned an invalid sign-in response. Try again.".to_string())?;
 
     let access_token = val
         .get("access_token")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| "Missing access_token in refresh response".to_string())?
+        .filter(|token| !token.trim().is_empty())
+        .ok_or_else(|| "ChatGPT returned an invalid sign-in response. Try again.".to_string())?
         .to_string();
 
     let new_refresh = val
         .get("refresh_token")
         .and_then(|v| v.as_str())
+        .filter(|token| !token.trim().is_empty())
         .map(str::to_string)
         .or_else(|| account.refresh_token.clone());
 
@@ -604,20 +719,38 @@ pub async fn refresh_codex_account_token(account: &CodexAccount) -> Result<Codex
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let expires_at = Some(now + expires_in);
+    let expires_at = Some(now.saturating_add(expires_in));
 
-    let mut store = load_credentials_store();
     let mut updated_account = account.clone();
     updated_account.access_token = access_token;
     updated_account.refresh_token = new_refresh;
     updated_account.expires_at = expires_at;
 
-    if let Some(existing) = store.accounts.iter_mut().find(|a| a.id == account.id) {
-        *existing = updated_account.clone();
-        save_credentials_store(&store)?;
-    }
+    commit_codex_account_refresh(account, updated_account)
+}
 
-    Ok(updated_account)
+fn commit_codex_account_refresh(
+    original: &CodexAccount,
+    refreshed: CodexAccount,
+) -> Result<CodexAccount, String> {
+    let _guard = account_store_guard();
+    let mut store = load_credentials_store_unlocked();
+    let existing = store.accounts.iter_mut()
+        .find(|account| account.id == original.id && is_own_source(&account.source))
+        .ok_or_else(|| "ChatGPT account was disconnected during refresh. Sign in again in Settings → Providers.".to_string())?;
+    if existing.access_token != original.access_token
+        || existing.refresh_token != original.refresh_token
+    {
+        // A newer sign-in or refresh wins over this request's stale snapshot.
+        return Ok(existing.clone());
+    }
+    existing.access_token = refreshed.access_token;
+    existing.refresh_token = refreshed.refresh_token;
+    existing.expires_at = refreshed.expires_at;
+    let updated = existing.clone();
+    save_credentials_store(&store)
+        .map_err(|_| "Couldn't save the refreshed ChatGPT sign-in. Check that your Threadlane settings folder is writable, then sign in again.".to_string())?;
+    Ok(updated)
 }
 
 const BROWSER_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
@@ -1000,12 +1133,12 @@ impl AuthProvider for OpenAiAuthProvider {
     }
 
     async fn get_token(&self) -> Result<String, String> {
-        load_credentials()
-            .filter(|creds| is_own_source(&creds.source))
-            .map(|creds| creds.access_token)
+        let account = get_active_codex_account()
+            .filter(|account| is_own_source(&account.source))
             .ok_or_else(|| {
                 "No stored OpenAI credentials found. Please run /login openai".to_string()
-            })
+            })?;
+        get_valid_codex_account_token(&account.id).await
     }
 
     fn clear_credentials(&self) -> Result<(), String> {
@@ -1341,6 +1474,182 @@ mod tests {
         assert_eq!(get_active_codex_account().unwrap().id, "acc_work");
 
         let _ = env;
+    }
+
+    fn test_jwt(subject: &str, account: &str, expiry: u64) -> String {
+        use base64::Engine;
+        let claims = serde_json::json!({
+            "sub": subject,
+            "exp": expiry,
+            "https://api.openai.com/auth": { "chatgpt_account_id": account },
+        });
+        format!(
+            "eyJhbGciOiJub25lIn0.{}.test",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims.to_string())
+        )
+    }
+
+    #[test]
+    fn codex_refresh_uses_legacy_jwt_expiry_and_refreshes_before_expiration() {
+        let mut account = CodexAccount {
+            id: "work".into(),
+            label: "Work".into(),
+            account_id: None,
+            access_token: test_jwt("user", "work", 1_000),
+            refresh_token: Some("test-refresh".into()),
+            expires_at: None,
+            source: "~/.threadlane/credentials.json".into(),
+        };
+        assert!(!codex_token_needs_refresh(&account, 939));
+        assert!(codex_token_needs_refresh(&account, 940));
+        assert!(codex_token_needs_refresh(&account, 1_100));
+        account.expires_at = Some(2_000);
+        assert!(codex_token_needs_refresh(&account, 1_100));
+        account.access_token = "opaque-token".into();
+        assert!(!codex_token_needs_refresh(&account, 1_100));
+        assert!(codex_token_needs_refresh(&account, 1_940));
+    }
+
+    #[tokio::test]
+    async fn codex_token_resolution_preserves_account_after_rotation_and_active_switch() {
+        let _env = TestHomeGuard::new("token-resolution");
+        let original = test_jwt("user", "work", 1);
+        let fresh = test_jwt("user", "work", u64::MAX);
+        let work = CodexAccount {
+            id: "work-login".into(),
+            label: "Work".into(),
+            account_id: None,
+            access_token: fresh.clone(),
+            refresh_token: None,
+            expires_at: None,
+            source: "~/.threadlane/credentials.json".into(),
+        };
+        let mut store = CodexAccountsStore {
+            active_account_id: Some("personal-login".into()),
+            accounts: vec![
+                work.clone(),
+                CodexAccount {
+                    id: "personal-login".into(),
+                    access_token: test_jwt("user", "personal", u64::MAX),
+                    ..work
+                },
+            ],
+        };
+        save_credentials_store(&store).unwrap();
+        let id = codex_account_id_for_token(&original).unwrap();
+        assert_eq!(id, "work-login");
+        assert_eq!(get_valid_codex_account_token(&id).await.unwrap(), fresh);
+        assert_eq!(get_active_codex_account().unwrap().id, "personal-login");
+        assert!(codex_account_id_for_token(&test_jwt("another-user", "work", 1)).is_none());
+
+        store.accounts[0].access_token = original.clone();
+        save_credentials_store(&store).unwrap();
+        let error = get_valid_codex_account_token(&id).await.unwrap_err();
+        assert!(error.contains("Sign in again in Settings"));
+        assert!(!error.contains(&original));
+        assert_eq!(load_all_codex_accounts()[0].access_token, original);
+
+        store.accounts[0].source = "~/.codex/auth.json".into();
+        save_credentials_store(&store).unwrap();
+        assert!(codex_account_id_for_token(&original).is_none());
+        assert!(get_valid_codex_account_token(&id).await.is_err());
+    }
+
+    #[test]
+    fn refresh_commit_preserves_new_sign_in_and_does_not_restore_removed_accounts() {
+        let _env = TestHomeGuard::new("refresh-commit");
+        let original = add_or_update_account(&OAuthTokens {
+            access_token: "original-access".into(),
+            refresh_token: Some("original-refresh".into()),
+            expires_in: Some(1),
+            id_token: None,
+            account_id: Some("work".into()),
+        })
+        .unwrap();
+        let refreshed = CodexAccount {
+            access_token: "refreshed-access".into(),
+            refresh_token: Some("rotated-refresh".into()),
+            expires_at: Some(u64::MAX),
+            ..original.clone()
+        };
+        let refreshed = commit_codex_account_refresh(&original, refreshed).unwrap();
+        assert_eq!(get_active_codex_account().unwrap(), refreshed);
+
+        let new_sign_in = add_or_update_account(&OAuthTokens {
+            access_token: "new-sign-in-access".into(),
+            refresh_token: Some("new-sign-in-refresh".into()),
+            expires_in: Some(3_600),
+            id_token: None,
+            account_id: Some("work".into()),
+        })
+        .unwrap();
+        assert_eq!(
+            commit_codex_account_refresh(&original, refreshed.clone()).unwrap(),
+            new_sign_in
+        );
+        assert_eq!(get_active_codex_account().unwrap(), new_sign_in);
+
+        remove_codex_account("work").unwrap();
+        assert!(commit_codex_account_refresh(&original, refreshed).is_err());
+        assert!(!get_credentials_path().exists());
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_token_caller_does_not_abandon_rotated_credentials() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _env = TestHomeGuard::new("cancel-refresh");
+        let account = add_or_update_account(&OAuthTokens {
+            access_token: "old-access".into(),
+            refresh_token: Some("old-refresh".into()),
+            expires_in: Some(0),
+            id_token: None,
+            account_id: Some("work".into()),
+        })
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/token", listener.local_addr().unwrap());
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (respond_tx, respond_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            assert!(socket.read(&mut request).await.unwrap() > 0);
+            started_tx.send(()).unwrap();
+            respond_rx.await.unwrap();
+            let body = r#"{"access_token":"fresh-access","refresh_token":"rotated-refresh","expires_in":3600}"#;
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        let caller_id = account.id.clone();
+        let caller_endpoint = endpoint.clone();
+        let caller = tokio::spawn(async move {
+            get_valid_codex_account_token_at(&caller_id, &caller_endpoint).await
+        });
+        started_rx.await.unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        respond_tx.send(()).unwrap();
+        server.await.unwrap();
+
+        // The next caller waits for the existing refresh, then reads its saved
+        // token. The mock listener is gone, so a duplicate request would fail.
+        assert_eq!(
+            get_valid_codex_account_token_at(&account.id, &endpoint)
+                .await
+                .unwrap(),
+            "fresh-access"
+        );
+        let saved = get_active_codex_account().unwrap();
+        assert_eq!(saved.access_token, "fresh-access");
+        assert_eq!(saved.refresh_token.as_deref(), Some("rotated-refresh"));
     }
 
     #[test]

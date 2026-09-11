@@ -1,4 +1,4 @@
-use super::types::{Entry, Record, ReduceError, ReducedState};
+use super::types::{Entry, Record, ReduceError, ReducedState, UsageCause};
 use crate::types::{AgentMessage, TokenUsage};
 use std::collections::BTreeSet;
 
@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 /// type rather than walking the session log or a rendered transcript.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelContextProjection {
-    pub lane: String,
+    lane: String,
     pub leaf_id: Option<String>,
     /// Selected active branch entries, including a compaction checkpoint and
     /// only the tail after that checkpoint.
@@ -22,9 +22,9 @@ pub struct ModelContextProjection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompactionCheckpoint {
     pub entry_id: String,
-    pub seq: u64,
-    pub compacted_messages: Option<usize>,
-    pub source_leaf_id: Option<String>,
+    seq: u64,
+    compacted_messages: Option<usize>,
+    source_leaf_id: Option<String>,
 }
 
 impl ModelContextProjection {
@@ -43,7 +43,7 @@ impl ModelContextProjection {
 /// reconciliation and audits, not for provider payloads.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TranscriptProjection {
-    pub lane: String,
+    lane: String,
     pub entries: Vec<Entry>,
 }
 
@@ -80,17 +80,23 @@ impl SessionIdGenerator {
                 }
             })
             .collect::<String>();
-        let kind = kind
+        let mut kind = kind
             .trim()
             .replace(|character: char| !character.is_ascii_alphanumeric(), "-");
+        if kind.is_empty() {
+            kind.push_str("id");
+        }
         let base = format!("{session}-{kind}");
+        // One hash build so probing is O(1) per candidate instead of O(n).
+        let used: std::collections::HashSet<&str> = used_ids.iter().map(String::as_str).collect();
         let mut counter = 1u64;
         loop {
             let candidate = format!("{base}-{counter}");
-            if !used_ids.iter().any(|used| used == &candidate) {
+            if !used.contains(candidate.as_str()) {
                 return candidate;
             }
             counter = counter.saturating_add(1);
+            debug_assert!(counter > 1, "runaway id probe");
         }
     }
 }
@@ -302,16 +308,35 @@ pub trait SessionStore {
         if limit == 0 {
             return Vec::new();
         }
+        let entries = self.entries();
+        let mut index_by_id: std::collections::HashMap<&str, usize> =
+            std::collections::HashMap::with_capacity(entries.len());
+        for (index, entry) in entries.iter().enumerate() {
+            // Keep first occurrence so duplicate ids resolve deterministically.
+            index_by_id.entry(entry.id.as_str()).or_insert(index);
+        }
+        // Never fall back to another lane's entry: only use the last entry
+        // when no leaf was requested, and prefer the last entry of the
+        // branch's own lane when the leaf id is unknown.
+        let mut current: Option<&Entry> = leaf_id
+            .and_then(|id| index_by_id.get(id).map(|index| &entries[*index]))
+            .or_else(|| {
+                if leaf_id.is_none() {
+                    entries.last()
+                } else {
+                    None
+                }
+            });
         let mut branch = Vec::new();
-        let mut current = leaf_id
-            .and_then(|id| self.entry(id))
-            .or_else(|| self.entries().last());
         while let Some(entry) = current {
             branch.push(entry.clone());
             if branch.len() == limit {
                 break;
             }
-            current = entry.parent_id.as_deref().and_then(|id| self.entry(id));
+            current = entry
+                .parent_id
+                .as_deref()
+                .and_then(|id| index_by_id.get(id).map(|index| &entries[*index]));
         }
         branch.reverse();
         branch
@@ -327,7 +352,12 @@ pub trait SessionStore {
     fn usage_sum(&self, lane: &str) -> TokenUsage {
         let mut total = TokenUsage::default();
         for record in self.records().iter().filter(|record| record.lane() == lane) {
-            if let Record::Usage { usage, .. } = record {
+            if let Record::Usage {
+                usage,
+                cause: UsageCause::Provider,
+                ..
+            } = record
+            {
                 total.accumulate(usage);
             }
         }
@@ -440,6 +470,7 @@ mod tests {
                 content: "skill instructions".into(),
                 is_error: false,
                 terminate: false,
+                images: Vec::new(),
             },
         );
 

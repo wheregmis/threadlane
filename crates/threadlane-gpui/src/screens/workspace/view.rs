@@ -2,13 +2,14 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use gpui::*;
+use gpui::prelude::FluentBuilder;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::command::{Command, CommandGroup, CommandItem, CommandState};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
-use gpui_component::resizable::{h_resizable, resizable_panel, v_resizable, ResizableState};
+use gpui_component::resizable::{ResizableState, h_resizable, resizable_panel, v_resizable};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::status_bar::StatusBar;
-use gpui_component::{v_flex, ActiveTheme, Icon, IconName, Root, Selectable, Sizable};
+use gpui_component::{ActiveTheme, Icon, IconName, Root, Selectable, Sizable, v_flex};
 
 actions!(
     threadlane_workspace,
@@ -39,14 +40,27 @@ use crate::screens::terminal::TerminalView;
 use crate::services::sessions::{ExecutionMode, SessionRuntime};
 use crate::services::updater::{self, UpdaterEvent};
 use crate::state::{
-    coding_agent_options, compute_full_session_projection, compute_session_messages,
-    runtime_status_text, AppState, SessionHydrationRequest, SessionInfo, WorkspacePage,
+    AppState, SessionHydrationRequest, SessionInfo, WorkspacePage, coding_agent_options,
+    compute_full_session_projection, compute_session_messages, runtime_status_text,
 };
 use threadlane_updater::UpdateStatus;
 
 fn open_github_from_palette(state: &mut AppState, notify: impl FnOnce()) {
     controller::dispatch(state, AppAction::OpenGitHub);
     notify();
+}
+
+fn update_notice_key(status: &UpdateStatus) -> String {
+    match status {
+        UpdateStatus::Idle => "idle".to_string(),
+        UpdateStatus::Checking => "checking".to_string(),
+        UpdateStatus::Available(info) => format!("available:{}", info.version),
+        UpdateStatus::UpToDate => "up-to-date".to_string(),
+        UpdateStatus::Downloading { version, .. } => format!("downloading:{version}"),
+        UpdateStatus::ReadyToInstall { info, .. } => format!("ready:{}", info.version),
+        UpdateStatus::Installing => "installing".to_string(),
+        UpdateStatus::Error(error) => format!("error:{error}"),
+    }
 }
 
 pub fn init(cx: &mut App) {
@@ -116,22 +130,6 @@ struct TerminalGroup {
     active_tab: usize,
 }
 
-fn normalize_generated_commit_message(raw: &str) -> String {
-    let line = raw
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty() && !line.starts_with("```"))
-        .unwrap_or_default()
-        .trim_matches('`')
-        .trim();
-    let line = line
-        .strip_prefix("Commit message:")
-        .or_else(|| line.strip_prefix("Commit:"))
-        .unwrap_or(line)
-        .trim();
-    line.chars().take(72).collect()
-}
-
 fn git_result_matches_active(requested: &Path, active: &Path) -> bool {
     requested == active
 }
@@ -150,7 +148,12 @@ fn session_pr_target_is_active(
     targets.contains(target)
 }
 
+fn session_pr_refresh_delay(succeeded: bool) -> std::time::Duration {
+    std::time::Duration::from_secs(if succeeded { 31 } else { 5 * 60 })
+}
+
 pub struct WorkspaceView {
+    focus_handle: FocusHandle,
     model: Entity<AppState>,
     sidebar: Entity<SidebarView>,
     chat_list: Entity<ChatListView>,
@@ -164,6 +167,7 @@ pub struct WorkspaceView {
     bottom_panel_visible: bool,
     command_palette_open: bool,
     command_state: Entity<CommandState>,
+    recent_palette_actions: Vec<&'static str>,
     last_git_work_dir: Option<PathBuf>,
     last_git_pr_targets: HashSet<(PathBuf, String)>,
     sidebar_resizable_state: Entity<ResizableState>,
@@ -175,24 +179,25 @@ pub struct WorkspaceView {
 }
 
 impl WorkspaceView {
-    pub(crate) fn spawn_session_hydration(
+    fn spawn_session_hydration(
         model: Entity<AppState>,
         request: SessionHydrationRequest,
         cx: &mut AsyncApp,
     ) {
         cx.spawn(async move |cx| {
-            let runtime_task = request
-                .runtime_options
-                .clone()
-                .map(|(work_dir, model, roles)| {
-                    let session_file = request.session_file.clone();
-                    cx.background_executor().spawn(async move {
-                        SessionRuntime::new(
-                            coding_agent_options(work_dir, session_file, model, roles),
-                            ExecutionMode::Interactive,
-                        )
-                    })
-                });
+            let runtime_task =
+                request
+                    .runtime_options
+                    .clone()
+                    .map(|(work_dir, model, roles, browser)| {
+                        let session_file = request.session_file.clone();
+                        cx.background_executor().spawn(async move {
+                            SessionRuntime::new(
+                                coding_agent_options(work_dir, session_file, model, roles, browser),
+                                ExecutionMode::Interactive,
+                            )
+                        })
+                    });
             if request.reload_messages {
                 let history_file = request.session_file.clone();
                 let history = cx
@@ -285,6 +290,8 @@ impl WorkspaceView {
 
         let model_clone = model.clone();
         let view = cx.new(|cx| {
+            let focus_handle = cx.focus_handle();
+            focus_handle.focus(window, cx);
             let sub = cx.observe(&model_clone, move |this: &mut Self, model, cx| {
                 this.sync_git_status_with_active_project(cx);
                 if let Some(cmd) =
@@ -300,6 +307,16 @@ impl WorkspaceView {
                         let trimmed = cmd.trim_end();
                         term.send_input(&format!("{trimmed}\n"));
                     });
+                }
+                if let Some(work_dir) =
+                    model.update(cx, |state, _cx| state.requested_terminal_work_dir.take())
+                {
+                    this.bottom_panel_visible = true;
+                    if let Some(project) = model.read(cx).active_work_dir.clone() {
+                        this.add_terminal_tab_for_project(project, work_dir, cx);
+                    } else {
+                        this.get_or_create_active_terminal(&work_dir, cx);
+                    }
                 }
                 let _ = model_wake_tx.send(());
                 cx.notify();
@@ -361,8 +378,12 @@ impl WorkspaceView {
                         }
                         for UpdaterEvent::Status(status) in updater_events {
                             this.model.update(cx, |state, cx| {
+                                let new_key = update_notice_key(&status);
+                                let old_key = update_notice_key(&state.update_status);
                                 state.update_status = status;
-                                state.update_notice_dismissed = false;
+                                if new_key != old_key {
+                                    state.update_notice_dismissed = false;
+                                }
                                 cx.notify();
                             });
                         }
@@ -379,6 +400,7 @@ impl WorkspaceView {
             });
 
             Self {
+                focus_handle,
                 model,
                 sidebar,
                 chat_list,
@@ -392,6 +414,7 @@ impl WorkspaceView {
                 bottom_panel_visible: false,
                 command_palette_open: false,
                 command_state,
+                recent_palette_actions: Vec::new(),
                 last_git_work_dir: None,
                 last_git_pr_targets: HashSet::new(),
                 sidebar_resizable_state,
@@ -419,6 +442,43 @@ impl WorkspaceView {
             view.sync_git_status_with_active_project(cx);
             view.github
                 .update(cx, |github, cx| github.sync_active_project(cx));
+            // Pull the live Zen model list in the background so new
+            // `opencode-go/*` models appear in the picker without a restart.
+            let discovery_model = view.model.clone();
+            cx.spawn(async move |_view, cx| {
+                crate::model_catalog::refresh_discovered_models_and_update(discovery_model, cx)
+                    .await;
+            })
+            .detach();
+            // Same for the OpenAI list and the Antigravity inventory: live
+            // results merge additively (seeds are the offline guarantee) and
+            // unknown Antigravity entries drop out once confirmed retired.
+            // TTL-guarded, so project switches just revalidate.
+            let openai_model = view.model.clone();
+            cx.spawn(async move |_view, cx| {
+                crate::model_catalog::refresh_openai_models_and_update(openai_model, cx).await;
+            })
+            .detach();
+            let antigravity_model = view.model.clone();
+            cx.spawn(async move |_view, cx| {
+                crate::model_catalog::refresh_antigravity_models_and_update(
+                    antigravity_model,
+                    cx,
+                )
+                .await;
+            })
+            .detach();
+            // Connect each external agent once in the background and cache
+            // the models it offers, so every session's picker can offer them
+            // before its own engine spawns. Revalidation stays here: a
+            // failing agent keeps its cached models while settings shows why.
+            let acp_model = view.model.clone();
+            let acp_project = view.model.read(cx).active_work_dir.clone();
+            cx.spawn(async move |_view, cx| {
+                crate::model_catalog::refresh_acp_models_and_update(acp_model, cx, acp_project)
+                    .await;
+            })
+            .detach();
         });
 
         let view_handle = view.downgrade();
@@ -443,18 +503,10 @@ impl WorkspaceView {
         view
     }
 
-    fn open_git_files(&mut self, cx: &mut Context<Self>) {
-        self.right_panel_visible = true;
-        self.right_panel.update(cx, |panel, cx| {
-            panel.open_files(cx);
-        });
-        self.refresh_git_status(cx);
-        cx.notify();
-    }
-
     fn open_git_review(&mut self, cx: &mut Context<Self>) {
-        self.model.update(cx, |state, _cx| {
+        self.model.update(cx, |state, cx| {
             state.workspace_page = WorkspacePage::Chat;
+            cx.notify();
         });
         self.right_panel_visible = true;
         self.right_panel.update(cx, |panel, cx| {
@@ -465,8 +517,9 @@ impl WorkspaceView {
     }
 
     fn open_git_branches(&mut self, cx: &mut Context<Self>) {
-        self.model.update(cx, |state, _cx| {
+        self.model.update(cx, |state, cx| {
             state.workspace_page = WorkspacePage::Chat;
+            cx.notify();
         });
         self.right_panel_visible = true;
         self.right_panel.update(cx, |panel, cx| {
@@ -477,8 +530,9 @@ impl WorkspaceView {
     }
 
     fn open_git_new_branch(&mut self, cx: &mut Context<Self>) {
-        self.model.update(cx, |state, _cx| {
+        self.model.update(cx, |state, cx| {
             state.workspace_page = WorkspacePage::Chat;
+            cx.notify();
         });
         self.right_panel_visible = true;
         self.right_panel.update(cx, |panel, cx| {
@@ -489,8 +543,9 @@ impl WorkspaceView {
     }
 
     fn open_git_merge(&mut self, cx: &mut Context<Self>) {
-        self.model.update(cx, |state, _cx| {
+        self.model.update(cx, |state, cx| {
             state.workspace_page = WorkspacePage::Chat;
+            cx.notify();
         });
         self.right_panel_visible = true;
         self.right_panel.update(cx, |panel, cx| {
@@ -531,8 +586,9 @@ impl WorkspaceView {
         group
     }
 
-    fn add_terminal_tab(&mut self, project: PathBuf, cx: &mut Context<Self>) {
+    fn add_terminal_tab(&mut self, project: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let terminal = cx.new(|cx| TerminalView::new(project.clone(), cx));
+        terminal.read(cx).focus_handle(cx).focus(window, cx);
         let group = self
             .terminal_groups
             .entry(project)
@@ -540,6 +596,19 @@ impl WorkspaceView {
                 tabs: Vec::new(),
                 active_tab: 0,
             });
+        group.tabs.push(terminal);
+        group.active_tab = group.tabs.len() - 1;
+        cx.notify();
+    }
+
+    fn add_terminal_tab_for_project(
+        &mut self,
+        project: PathBuf,
+        work_dir: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        let terminal = cx.new(|cx| TerminalView::new(work_dir, cx));
+        let group = self.get_or_create_terminal_group(&project, cx);
         group.tabs.push(terminal);
         group.active_tab = group.tabs.len() - 1;
         cx.notify();
@@ -555,9 +624,18 @@ impl WorkspaceView {
             .clone()
     }
 
-    fn select_terminal_tab(&mut self, project: &PathBuf, tab: usize, cx: &mut Context<Self>) {
+    fn select_terminal_tab(
+        &mut self,
+        project: &PathBuf,
+        tab: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(group) = self.terminal_groups.get_mut(project) {
             group.active_tab = tab.min(group.tabs.len().saturating_sub(1));
+            if let Some(terminal) = group.tabs.get(group.active_tab) {
+                terminal.read(cx).focus_handle(cx).focus(window, cx);
+            }
             cx.notify();
         }
     }
@@ -624,11 +702,14 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         let model = self.model.clone();
+        if action_key != "go_task" {
+            self.recent_palette_actions.retain(|key| *key != action_key);
+            self.recent_palette_actions.insert(0, action_key);
+            self.recent_palette_actions.truncate(5);
+        }
         match action_key {
             "new" => {
-                model.update(cx, |state, _cx| {
-                    controller::dispatch(state, AppAction::BeginNewTask);
-                });
+                self.begin_new_task_action(&BeginNewTask, window, cx);
             }
             "attach" => {
                 cx.spawn(async move |_this, cx| {
@@ -665,15 +746,51 @@ impl WorkspaceView {
                 });
             }
             "settings" => {
-                model.update(cx, |state, _cx| {
-                    controller::dispatch(state, AppAction::OpenSettings);
-                });
+                self.open_settings_action(&OpenSettings, window, cx);
             }
             "sidebar" => {
-                self.sidebar_collapsed = !self.sidebar_collapsed;
+                self.toggle_sidebar_action(&ToggleSidebar, window, cx);
             }
             "panel" => {
                 self.right_panel_visible = !self.right_panel_visible;
+            }
+            "go_task" => {
+                // Focus the session search in the palette itself — just clear the
+                // query so the sessions group is prominent.
+                self.command_palette_open = true;
+                self.command_state.update(cx, |state, cx| {
+                    state.set_query("", window, cx);
+                    state.focus(window, cx);
+                });
+                return; // keep palette open
+            }
+            "open_file" => {
+                self.right_panel_visible = true;
+                self.right_panel.update(cx, |panel, cx| {
+                    panel.open_surface(crate::screens::right_panel::Surface::Files, cx);
+                });
+            }
+            "run_terminal" => {
+                self.toggle_terminal_action(&ToggleTerminal, window, cx);
+            }
+            "open_issue" => {
+                model.update(cx, |state, cx| {
+                    open_github_from_palette(state, || cx.notify());
+                });
+            }
+            "switch_worktree" => {
+                use crate::state::WorkMode;
+                model.update(cx, |state, cx| {
+                    let new_mode = match state.draft_work_mode {
+                        WorkMode::Local => WorkMode::Worktree,
+                        WorkMode::Worktree => WorkMode::Local,
+                    };
+                    state.set_work_mode(new_mode);
+                    cx.notify();
+                });
+            }
+            "ask_agent" => {
+                self.focus_composer_action(&FocusComposer, window, cx);
             }
             "goal" | "model" | "compact" => {
                 let value = if action_key == "compact" {
@@ -744,11 +861,13 @@ impl WorkspaceView {
         });
     }
 
-    fn schedule_session_pr_refresh(target: (PathBuf, String), cx: &mut Context<Self>) {
+    fn schedule_session_pr_refresh(
+        target: (PathBuf, String),
+        delay: std::time::Duration,
+        cx: &mut Context<Self>,
+    ) {
         cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_secs(31))
-                .await;
+            cx.background_executor().timer(delay).await;
             let _ = this.update(cx, |this, _cx| {
                 if session_pr_target_is_active(&this.last_git_pr_targets, &target) {
                     this.spawn_session_pr_refresh(target.0, target.1);
@@ -787,13 +906,19 @@ impl WorkspaceView {
                 result,
             } => {
                 let target = (work_dir.clone(), branch.clone());
+                let refresh_delay = session_pr_refresh_delay(result.is_ok());
                 if let Ok(pr) = result {
                     self.model.update(cx, |state, cx| {
-                        state.git_prs.insert((work_dir, branch), pr);
+                        state
+                            .git_prs
+                            .insert((work_dir.clone(), branch.clone()), pr.clone());
+                        if let Some(info) = pr.as_ref() {
+                            state.auto_address_pr_reviews(work_dir.clone(), branch.clone(), info);
+                        }
                         cx.notify();
                     });
                 }
-                Self::schedule_session_pr_refresh(target, cx);
+                Self::schedule_session_pr_refresh(target, refresh_delay, cx);
                 return;
             }
             GitEvent::Loaded { work_dir, result } => (work_dir, result),
@@ -857,6 +982,10 @@ impl WorkspaceView {
             }
             _ => return None,
         };
+        let error_details: Option<String> = match &status {
+            UpdateStatus::Error(error) => Some(error.clone()),
+            _ => None,
+        };
 
         let action = match &status {
             UpdateStatus::Available(info) => {
@@ -866,6 +995,7 @@ impl WorkspaceView {
                     Button::new("update-download")
                         .label("Download")
                         .primary()
+                        .tooltip(format!("Download Threadlane {}", info.version))
                         .on_click(move |_event, _window, _cx| {
                             updater::download(info.clone(), tx.clone());
                         }),
@@ -875,10 +1005,12 @@ impl WorkspaceView {
                 let tx = self.updater_tx.clone();
                 let info = info.clone();
                 let bytes = bytes.clone();
+                let version = info.version.clone();
                 Some(
                     Button::new("update-install")
                         .label("Install and relaunch")
                         .primary()
+                        .tooltip(format!("Install Threadlane {version} and relaunch"))
                         .on_click(move |_event, _window, _cx| {
                             updater::install(info.clone(), bytes.clone(), tx.clone());
                         }),
@@ -890,6 +1022,7 @@ impl WorkspaceView {
                     Button::new("update-retry")
                         .label("Retry")
                         .outline()
+                        .tooltip("Check for updates again")
                         .on_click(move |_event, _window, _cx| updater::check(tx.clone())),
                 )
             }
@@ -904,7 +1037,7 @@ impl WorkspaceView {
                 .right(px(16.0))
                 .bottom(px(16.0))
                 .w(px(420.0))
-                .rounded_xl()
+                .rounded_lg()
                 .border_1()
                 .border_color(theme.border)
                 .bg(theme.title_bar)
@@ -932,6 +1065,16 @@ impl WorkspaceView {
                         ),
                 )
                 .children(action)
+                .children(error_details.map(|details| {
+                    Button::new("update-copy-error")
+                        .label("Copy details")
+                        .ghost()
+                        .xsmall()
+                        .tooltip("Copy the complete update error")
+                        .on_click(move |_event, _window, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(details.clone()));
+                        })
+                }))
                 .children(
                     matches!(status, UpdateStatus::Available(_) | UpdateStatus::Error(_)).then(
                         || {
@@ -958,13 +1101,62 @@ impl WorkspaceView {
         let model = self.model.clone();
         let state = model.read(cx);
 
-        let commands: [(&str, &str, &str, IconName, &[&str]); 15] = [
+        let commands: [(&str, &str, &str, IconName, &[&str], &str); 21] = [
             (
                 "New Task",
                 "Start a fresh session",
                 "new",
                 IconName::Plus,
                 &["task", "fresh", "session", "new"],
+                "⌘N",
+            ),
+            (
+                "Go to Task…",
+                "Jump to a recent task or session",
+                "go_task",
+                IconName::Search,
+                &["go", "task", "jump", "find", "session", "recent"],
+                "",
+            ),
+            (
+                "Open File…",
+                "Browse project files in the right panel",
+                "open_file",
+                IconName::File,
+                &["open", "file", "browse", "tree", "explorer"],
+                "",
+            ),
+            (
+                "Run Terminal Command…",
+                "Open or focus the integrated terminal",
+                "run_terminal",
+                IconName::SquareTerminal,
+                &["run", "terminal", "command", "shell", "exec"],
+                "⌘J",
+            ),
+            (
+                "Open Issue/PR…",
+                "Browse GitHub issues and pull requests",
+                "open_issue",
+                IconName::Github,
+                &["issue", "pr", "pull", "request", "github", "browse"],
+                "",
+            ),
+            (
+                "Switch Worktree…",
+                "Toggle between local and worktree mode",
+                "switch_worktree",
+                IconName::FolderOpen,
+                &["switch", "worktree", "mode", "local", "branch"],
+                "",
+            ),
+            (
+                "Ask Agent to…",
+                "Focus the composer to prompt the agent",
+                "ask_agent",
+                IconName::Bot,
+                &["ask", "agent", "prompt", "chat", "ai", "help"],
+                "⌘L",
             ),
             (
                 "Add Project",
@@ -972,6 +1164,7 @@ impl WorkspaceView {
                 "attach",
                 IconName::FolderOpen,
                 &["folder", "workspace", "attach", "open", "project"],
+                "",
             ),
             (
                 "Goal Planning (/goal)",
@@ -979,6 +1172,7 @@ impl WorkspaceView {
                 "goal",
                 IconName::Bot,
                 &["goal", "planning", "loop", "agent", "autonomous"],
+                "",
             ),
             (
                 "Model Selection (/model)",
@@ -986,6 +1180,7 @@ impl WorkspaceView {
                 "model",
                 IconName::Cpu,
                 &["model", "llm", "switch", "provider", "select"],
+                "",
             ),
             (
                 "Compact History (/compact)",
@@ -993,6 +1188,7 @@ impl WorkspaceView {
                 "compact",
                 IconName::Minimize,
                 &["compact", "history", "context", "clean"],
+                "",
             ),
             (
                 "Git Review & Commit",
@@ -1000,6 +1196,7 @@ impl WorkspaceView {
                 "git",
                 IconName::Github,
                 &["git", "diff", "review", "commit", "stage"],
+                "",
             ),
             (
                 "GitHub",
@@ -1007,6 +1204,7 @@ impl WorkspaceView {
                 "github",
                 IconName::Github,
                 &["github", "issues", "pull requests", "repository"],
+                "",
             ),
             (
                 "Git: Switch Branch",
@@ -1014,6 +1212,7 @@ impl WorkspaceView {
                 "git_branch",
                 IconName::Github,
                 &["git", "branch", "switch", "checkout"],
+                "",
             ),
             (
                 "Git: New Branch",
@@ -1021,6 +1220,7 @@ impl WorkspaceView {
                 "git_new_branch",
                 IconName::Plus,
                 &["git", "branch", "new", "create"],
+                "",
             ),
             (
                 "Git: Merge Branch",
@@ -1028,6 +1228,7 @@ impl WorkspaceView {
                 "git_merge",
                 IconName::Redo,
                 &["git", "merge", "branch", "integrate"],
+                "",
             ),
             (
                 "Git: Restore Stashed Changes",
@@ -1035,6 +1236,7 @@ impl WorkspaceView {
                 "git_stash_pop",
                 IconName::Undo2,
                 &["git", "stash", "pop", "restore", "unstash"],
+                "",
             ),
             (
                 "Git: Pull Origin",
@@ -1042,6 +1244,7 @@ impl WorkspaceView {
                 "git_pull",
                 IconName::Redo,
                 &["git", "pull", "origin", "fetch", "sync"],
+                "",
             ),
             (
                 "Toggle Sidebar",
@@ -1049,6 +1252,7 @@ impl WorkspaceView {
                 "sidebar",
                 IconName::PanelLeft,
                 &["sidebar", "toggle", "hide", "show", "projects"],
+                "⌘B",
             ),
             (
                 "Toggle Right Panel",
@@ -1056,6 +1260,7 @@ impl WorkspaceView {
                 "panel",
                 IconName::PanelRight,
                 &["panel", "right", "terminal", "review", "toggle"],
+                "⌘R",
             ),
             (
                 "Settings",
@@ -1063,35 +1268,73 @@ impl WorkspaceView {
                 "settings",
                 IconName::Settings,
                 &["settings", "keys", "provider", "preferences", "config"],
+                "⌘,",
             ),
         ];
 
         let mut commands_group = CommandGroup::new().label("Commands & Actions");
-        for (name, desc, _action_key, icon, keywords) in &commands {
+        for (name, desc, _action_key, icon, keywords, shortcut) in &commands {
             let name_str = name.to_string();
             let desc_str = desc.to_string();
+            let shortcut_str = shortcut.to_string();
             let item = CommandItem::new()
                 .label(*name)
                 .icon(icon.clone())
                 .keywords(keywords.iter().copied())
                 .child(move |_window, cx| {
                     let colors = cx.theme().colors;
-                    v_flex()
-                        .gap_0p5()
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
                         .child(
-                            div()
-                                .text_sm()
-                                .font_weight(FontWeight::MEDIUM)
-                                .child(name_str.clone()),
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .gap_0p5()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child(name_str.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(colors.muted_foreground)
+                                        .child(desc_str.clone()),
+                                ),
                         )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(colors.muted_foreground)
-                                .child(desc_str.clone()),
-                        )
+                        .when(!shortcut_str.is_empty(), |el| {
+                            el.child(
+                                div()
+                                    .flex_none()
+                                    .ml_2()
+                                    .px_1p5()
+                                    .py_0p5()
+                                    .rounded_sm()
+                                    .bg(colors.muted.opacity(0.5))
+                                    .text_xs()
+                                    .text_color(colors.muted_foreground)
+                                    .child(shortcut_str.clone()),
+                            )
+                        })
                 });
             commands_group = commands_group.item(item);
+        }
+
+        let mut recent_group = CommandGroup::new().label("Recently Used");
+        for action_key in &self.recent_palette_actions {
+            if let Some((name, _, _, icon, keywords, _)) =
+                commands.iter().find(|(_, _, key, _, _, _)| key == action_key)
+            {
+                recent_group = recent_group.item(
+                    CommandItem::new()
+                        .label(*name)
+                        .icon(icon.clone())
+                        .keywords(keywords.iter().copied()),
+                );
+            }
         }
 
         let mut session_entries = Vec::new();
@@ -1149,7 +1392,7 @@ impl WorkspaceView {
                 div()
                     .id("command-palette-modal")
                     .w(px(560.0))
-                    .rounded_xl()
+                    .rounded_lg()
                     .border_1()
                     .border_color(theme.border)
                     .bg(theme.title_bar)
@@ -1161,6 +1404,7 @@ impl WorkspaceView {
                             .bordered(false)
                             .placeholder("Type a command or search sessions…")
                             .max_h(px(420.0))
+                            .group(recent_group)
                             .group(commands_group)
                             .group(sessions_group)
                             .on_cancel(move |_window, cx| {
@@ -1173,25 +1417,20 @@ impl WorkspaceView {
                                 let _ = view.update(cx, |this, cx| {
                                     this.command_palette_open = false;
                                     if index.section == 0 {
-                                        if let Some((_, _, action_key, _, _)) =
-                                            commands.get(index.row)
-                                        {
+                                        if let Some(action_key) = this.recent_palette_actions.get(index.row) {
                                             this.execute_palette_action(action_key, window, cx);
                                         }
                                     } else if index.section == 1 {
-                                        if let Some((work_dir, session_id)) =
-                                            session_entries.get(index.row)
-                                        {
+                                        if let Some((_, _, action_key, _, _, _)) = commands.get(index.row) {
+                                            this.execute_palette_action(action_key, window, cx);
+                                        }
+                                    } else if index.section == 2 {
+                                        if let Some((work_dir, session_id)) = session_entries.get(index.row) {
                                             let work_dir = work_dir.clone();
                                             let session_id = session_id.clone();
-                                            this.model.update(cx, |state, _cx| {
-                                                controller::dispatch(
-                                                    state,
-                                                    AppAction::SelectSession {
-                                                        work_dir,
-                                                        session_id,
-                                                    },
-                                                );
+                                            this.model.update(cx, |state, cx| {
+                                                controller::dispatch(state, AppAction::SelectSession { work_dir, session_id });
+                                                cx.notify();
                                             });
                                         }
                                     }
@@ -1393,6 +1632,9 @@ impl WorkspaceView {
             chat.header_left_padding = inset;
             cx.notify();
         });
+        self.github.update(cx, |github, cx| {
+            github.set_window_controls_inset(self.sidebar_collapsed.then_some(inset), cx);
+        });
         cx.notify();
     }
 
@@ -1430,11 +1672,15 @@ impl WorkspaceView {
     fn begin_new_task_action(
         &mut self,
         _: &BeginNewTask,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.model.update(cx, |state, _cx| {
+        self.model.update(cx, |state, cx| {
             controller::dispatch(state, AppAction::BeginNewTask);
+            cx.notify();
+        });
+        self.chat_list.update(cx, |chat, cx| {
+            chat.focus_composer(window, cx);
         });
         cx.notify();
     }
@@ -1445,8 +1691,9 @@ impl WorkspaceView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.model.update(cx, |state, _cx| {
+        self.model.update(cx, |state, cx| {
             controller::dispatch(state, AppAction::OpenSettings);
+            cx.notify();
         });
         cx.notify();
     }
@@ -1513,6 +1760,9 @@ impl WorkspaceView {
 
 impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some((work_dir, number)) = self.model.update(cx, |state, _cx| state.requested_github_issue.take()) {
+            self.github.update(cx, |github, cx| github.open_linked_task(work_dir, number, cx));
+        }
         let workspace_page = self.model.read(cx).workspace_page;
         let terminal_project = self.model.read(cx).active_work_dir.clone();
         let (terminal_tabs, active_terminal_tab, active_terminal) =
@@ -1563,6 +1813,17 @@ impl Render for WorkspaceView {
                     let new_view = cx.entity().clone();
                     let is_selected = tab == active_terminal_tab;
                     let total_tabs = terminal_tabs.len();
+                    let tab_tooltip = match &terminal_project {
+                        Some(project) => format!(
+                            "Shell {} · {}",
+                            tab + 1,
+                            project
+                                .file_name()
+                                .map(|name| name.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| project.to_string_lossy().into_owned())
+                        ),
+                        None => format!("Shell {}", tab + 1),
+                    };
 
                     div()
                         .flex()
@@ -1575,10 +1836,11 @@ impl Render for WorkspaceView {
                                 .ghost()
                                 .selected(is_selected)
                                 .xsmall()
-                                .on_click(move |_event, _window, cx| {
+                                .tooltip(tab_tooltip)
+                                .on_click(move |_event, window, cx| {
                                     if let Some(project) = &select_project {
                                         select_view.update(cx, |this, cx| {
-                                            this.select_terminal_tab(project, tab, cx)
+                                            this.select_terminal_tab(project, tab, window, cx)
                                         });
                                     }
                                 })
@@ -1624,10 +1886,14 @@ impl Render for WorkspaceView {
                                     let n_proj = new_tab_project.clone();
                                     let n_view = new_view.clone();
                                     menu.item(PopupMenuItem::new("New Terminal Tab").on_click(
-                                        move |_event, _window, cx| {
+                                        move |_event, window, cx| {
                                             if let Some(project) = &n_proj {
                                                 n_view.update(cx, |this, cx| {
-                                                    this.add_terminal_tab(project.clone(), cx);
+                                                    this.add_terminal_tab(
+                                                        project.clone(),
+                                                        window,
+                                                        cx,
+                                                    );
                                                 });
                                             }
                                         },
@@ -1695,10 +1961,10 @@ impl Render for WorkspaceView {
                             .icon(IconName::Plus)
                             .tooltip("New terminal tab")
                             .ghost()
-                            .xsmall()
-                            .on_click(move |_event, _window, cx| {
+                            .small()
+                            .on_click(move |_event, window, cx| {
                                 new_view.update(cx, |this, cx| {
-                                    this.add_terminal_tab(project.clone(), cx)
+                                    this.add_terminal_tab(project.clone(), window, cx)
                                 });
                             })
                     }))
@@ -1707,7 +1973,7 @@ impl Render for WorkspaceView {
                             .icon(IconName::Undo2)
                             .tooltip("Clear terminal")
                             .ghost()
-                            .xsmall()
+                            .small()
                             .on_click(move |_event, _window, cx| {
                                 active_terminal_clear.update(cx, |t, cx| t.clear(cx));
                             }),
@@ -1717,7 +1983,7 @@ impl Render for WorkspaceView {
                             .icon(IconName::Redo)
                             .tooltip("Restart shell")
                             .ghost()
-                            .xsmall()
+                            .small()
                             .on_click(move |_event, _window, cx| {
                                 active_terminal_restart.update(cx, |t, cx| t.restart(cx));
                             }),
@@ -1727,7 +1993,7 @@ impl Render for WorkspaceView {
                             .icon(IconName::Close)
                             .tooltip("Hide terminal (Cmd+J)")
                             .ghost()
-                            .xsmall()
+                            .small()
                             .on_click(move |_event, _window, cx| {
                                 close_panel_view.update(cx, |this, cx| {
                                     this.bottom_panel_visible = false;
@@ -1818,10 +2084,13 @@ impl Render for WorkspaceView {
             .update(cx, |panel, cx| panel.render_git_dialog_layer(cx));
 
         div()
+            .id("workspace-root")
             .relative()
             .flex()
             .w_full()
             .h_full()
+            .track_focus(&self.focus_handle)
+            .role(Role::Application)
             .on_action(cx.listener(Self::toggle_command_palette))
             .on_action(cx.listener(Self::toggle_sidebar_action))
             .on_action(cx.listener(Self::toggle_right_panel_action))
@@ -1883,18 +2152,8 @@ impl Render for WorkspaceView {
                     .absolute()
                     .top(px(9.0))
                     .left(px(76.0))
-                    .on_click(cx.listener(|this, _event, _window, cx| {
-                        this.sidebar_collapsed = !this.sidebar_collapsed;
-                        let inset = if this.sidebar_collapsed {
-                            px(110.0)
-                        } else {
-                            px(14.0)
-                        };
-                        this.chat_list.update(cx, |chat, cx| {
-                            chat.header_left_padding = inset;
-                            cx.notify();
-                        });
-                        cx.notify();
+                    .on_click(cx.listener(|this, _event, window, cx| {
+                        this.toggle_sidebar_action(&ToggleSidebar, window, cx);
                     }))
             }))
             .children(
@@ -1912,8 +2171,9 @@ impl Render for WorkspaceView {
 #[cfg(test)]
 mod tests {
     use super::{
-        active_project_git_status, git_result_matches_active, next_workspace_event,
-        open_github_from_palette, session_pr_target_is_active, GitEvent, WorkspacePumpEvent,
+        GitEvent, WorkspacePumpEvent, active_project_git_status, git_result_matches_active,
+        next_workspace_event, open_github_from_palette, session_pr_refresh_delay,
+        session_pr_target_is_active,
     };
     use crate::services::updater::UpdaterEvent;
     use crate::state::{AppState, SessionInfo, WorkspacePage};
@@ -1960,6 +2220,8 @@ mod tests {
 
         assert!(session_pr_target_is_active(&targets, &target));
         assert!(!session_pr_target_is_active(&HashSet::new(), &target));
+        assert_eq!(session_pr_refresh_delay(true).as_secs(), 31);
+        assert_eq!(session_pr_refresh_delay(false).as_secs(), 300);
     }
 
     #[test]
@@ -1983,17 +2245,19 @@ mod tests {
             tokio::sync::mpsc::unbounded_channel::<(PathBuf, Vec<SessionInfo>)>();
         let (model_tx, mut model_rx) = tokio::sync::mpsc::unbounded_channel();
 
-        assert!(tokio::time::timeout(
-            std::time::Duration::from_millis(10),
-            next_workspace_event(
-                &mut git_rx,
-                &mut updater_rx,
-                &mut sessions_rx,
-                &mut model_rx,
-            ),
-        )
-        .await
-        .is_err());
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(10),
+                next_workspace_event(
+                    &mut git_rx,
+                    &mut updater_rx,
+                    &mut sessions_rx,
+                    &mut model_rx,
+                ),
+            )
+            .await
+            .is_err()
+        );
         model_tx.send(()).unwrap();
         assert!(matches!(
             next_workspace_event(

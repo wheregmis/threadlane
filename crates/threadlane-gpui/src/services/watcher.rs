@@ -6,8 +6,8 @@ use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WorkspaceChangeEvent {
-    pub git_dirty: bool,
-    pub files_dirty: bool,
+    pub(crate) git_dirty: bool,
+    pub(crate) files_dirty: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,7 +19,7 @@ pub enum ChangeClassification {
 }
 
 /// Classifies a path change within a workspace directory.
-pub fn classify_path_change(root: &Path, path: &Path, kind: &EventKind) -> ChangeClassification {
+fn classify_path_change(root: &Path, path: &Path, kind: &EventKind) -> ChangeClassification {
     let Ok(relative) = path.strip_prefix(root) else {
         return ChangeClassification::Ignored;
     };
@@ -86,7 +86,7 @@ pub struct WorkspaceWatcher {
 }
 
 impl WorkspaceWatcher {
-    pub fn start<F>(
+    pub(crate) fn start<F>(
         root: PathBuf,
         debounce_duration: Duration,
         on_change: F,

@@ -6,9 +6,9 @@ use threadlane_runtime::AgentToolDefinition;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SystemPromptConfig {
     /// Replaces threadlane's default identity, tool list, and default guidelines.
-    pub(crate) custom_prompt: Option<String>,
+    custom_prompt: Option<String>,
     /// Text appended after the base prompt and before project resources.
-    pub(crate) append_prompt: Option<String>,
+    append_prompt: Option<String>,
     /// Additional guideline bullets for the default prompt.
     pub(crate) guidelines: Vec<String>,
 }
@@ -169,6 +169,21 @@ pub(crate) fn build_system_prompt(options: SystemPromptBuildOptions<'_>) -> Stri
             add_tool_guideline(
                 "When invoking `subagent`, specify clear custom `instructions` and the minimum required `tools` for each subagent.",
             );
+            if available_tool_names.contains("hub") {
+                add_tool_guideline(
+                    "Parallel siblings coordinate live via their `message_peer` tool (address by agent role, lane name, or `all`); pass `wait=false` to spawn persistent background workers and supervise them with `hub list`, `hub send`, `hub read`, `hub revive`, `hub kill`, and `hub wait`.",
+                );
+            }
+        }
+        if available_tool_names.contains("browser_navigate") {
+            add_tool_guideline(
+                "To drive the embedded browser panel: open pages with `browser_navigate`, read the page with `browser_snapshot`, then operate elements with `browser_act` using snapshot refs. Refs expire on re-render, so take a fresh snapshot when an act reports a stale ref. Prefer snapshot/act over `browser_evaluate_script`. The panel is visible to the user, so narrate what you open.",
+            );
+        }
+        if available_tool_names.contains("computer_windows") {
+            add_tool_guideline(
+                "To operate the computer outside the embedded browser: list targets with `computer_windows`, capture context with `computer_screenshot` (you receive the image — read positions off it), then act with `computer_act`. Prefer these native tools over shell workarounds (`open`, `osascript`, pasted JS): they keep coordinates, approvals, and verification in one loop. Pass target with a window id to act in the background: coordinates become window-relative and your cursor and focus stay untouched. Omit target only for foreground control with display coordinates. A window-targeted screenshot shows just that window — prefer it over full-display shots before acting, and re-screenshot after any act that changes the UI to verify the effect before continuing. A stale window id or snapshot ref means re-list, never guessing. Chromium/Electron apps may ignore background clicks; say so and ask the user rather than hammering. For anything inside a web page, prefer the embedded browser tools (DOM refs beat pixels). The first screenshot/input asks the user for approval and they can allow always for the project; denied actions must not be retried verbatim. Threadlane's own windows are hidden from you; never try to drive them.",
+            );
         }
         if available_tool_names.contains("update_plan") {
             add_tool_guideline(
@@ -217,12 +232,18 @@ pub(crate) fn build_system_prompt(options: SystemPromptBuildOptions<'_>) -> Stri
         format!(
             "You are an expert coding assistant operating inside threadlane. Use the tools exposed by the runtime when relevant.\n\n\
             ## Execution Guidelines\n\
+            - Lead with the answer or action. If the output is a command, file path, diff, or code snippet, place it first before explanations.\n\
+            - No conversational filler: omit preambles (\"Sure!\", \"Great question\", \"Let me...\"), post-task recaps (\"I have now done X, Y, and Z...\"), and pleasantries (\"Hope this helps\", \"Let me know...\"). Start with the work or answer and end when finished.\n\
             - Match effort to the request and complete the requested scope. Make reasonable assumptions unless proceeding would be unsafe or useless.\n\
-            - Inspect before editing, fix root causes, preserve surrounding idioms, and keep changes minimal. Do not add speculative abstractions or unrelated cleanup.\n\
+            - Inspect before editing, fix root causes, preserve surrounding idioms, and keep changes minimal. Do not add speculative abstractions or unrequested cleanup.\n\
+            - Suppress tangents: stay strictly on the user's task. Never refactor unrelated code. If a secondary issue exists, finish the requested task first, then state the secondary issue separately at the end.\n\
+            - Number multi-step tasks into concise, bounded actions. Keep visible lists focused (rank by relevance, at most ~5 items per group).\n\
+            - Matter-of-fact tone: for errors and failures, state the exact cause and fix directly without fluff (\"Uh oh\", \"There seems to be a problem\").\n\
+            - Conclude with one concrete next action if work remains open or requires user confirmation.\n\
             - Do not claim completion or successful validation without evidence. If blocked, finish unblocked work and state what remains.{validation_rule}\n\
             - Use concise plans only for substantial multi-step work. Avoid redundant reads and tool calls.\n\
             - If a tool fails, adapt to its error rather than retrying verbatim. Run independent calls in parallel when useful.\n\
-            - Be concise and direct. Cite code as `file_path:line_number` when relevant.\n\n\
+            - Cite code as `file_path:line_number` when relevant.\n\n\
             ## Tool-Specific Guidance\
             {formatted_tool_guidelines}{extension_note}"
         )
@@ -286,6 +307,26 @@ mod tests {
     }
 
     #[test]
+    fn default_prompt_contains_action_oriented_anti_filler_guidelines() {
+        let prompt = build_system_prompt(SystemPromptBuildOptions {
+            config: &SystemPromptConfig::default(),
+            work_dir: Path::new("/workspace"),
+            tools: &[],
+            project_context: &ProjectContext::default(),
+            skill_catalog: None,
+            agent_catalog: None,
+            loaded_extension_count: 0,
+        });
+
+        assert!(prompt.contains("Lead with the answer or action"));
+        assert!(prompt.contains("No conversational filler"));
+        assert!(prompt.contains("Suppress tangents"));
+        assert!(prompt.contains("Matter-of-fact tone"));
+        assert!(prompt.contains("Conclude with one concrete next action"));
+        assert!(prompt.len() < 4_000);
+    }
+
+    #[test]
     fn project_instructions_are_referenced_not_embedded() {
         let context = ProjectContext {
             context_files: vec![PathBuf::from("/workspace/AGENTS.md")],
@@ -327,6 +368,52 @@ mod tests {
         assert!(!build(&[]).contains("AGENTS"));
         assert!(build(&[tool("read_file", "read")]).contains("SKILLS"));
         assert!(build(&[tool("subagent", "delegate")]).contains("AGENTS"));
+    }
+
+    #[test]
+    fn browser_guideline_tracks_browser_tools() {
+        let config = SystemPromptConfig::default();
+        let context = ProjectContext::default();
+        let build = |tools: &[AgentToolDefinition]| {
+            build_system_prompt(SystemPromptBuildOptions {
+                config: &config,
+                work_dir: Path::new("/workspace"),
+                tools,
+                project_context: &context,
+                skill_catalog: None,
+                agent_catalog: None,
+                loaded_extension_count: 0,
+            })
+        };
+
+        assert!(!build(&[]).contains("browser_snapshot"));
+        let with_browser = build(&[tool("browser_navigate", "navigate")]);
+        assert!(with_browser.contains("browser_snapshot"));
+        assert!(with_browser.contains("browser_act"));
+    }
+
+    #[test]
+    fn computer_guideline_tracks_computer_tools() {
+        let config = SystemPromptConfig::default();
+        let context = ProjectContext::default();
+        let build = |tools: &[AgentToolDefinition]| {
+            build_system_prompt(SystemPromptBuildOptions {
+                config: &config,
+                work_dir: Path::new("/workspace"),
+                tools,
+                project_context: &context,
+                skill_catalog: None,
+                agent_catalog: None,
+                loaded_extension_count: 0,
+            })
+        };
+
+        assert!(!build(&[]).contains("computer_act"));
+        let with_computer = build(&[tool("computer_windows", "windows")]);
+        assert!(with_computer.contains("computer_act"));
+        assert!(with_computer.contains("computer_screenshot"));
+        assert!(with_computer.contains("re-screenshot after any act"));
+        assert!(with_computer.contains("embedded browser tools"));
     }
 
     #[test]

@@ -6,7 +6,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.9"
+version = "0.1.14"
 edition = "2021"
 
 [profile.dev]
@@ -26,6 +26,24 @@ opt-level = 2
 
 [profile.dev.package.threadlane-gpui]
 opt-level = 2
+
+[profile.dev.package.gpui-pre]
+opt-level = 3
+
+[profile.dev.package.gpui-pre-platform]
+opt-level = 3
+
+[profile.dev.package.gpui-pre-macros]
+opt-level = 3
+
+[profile.dev.package.gpui-component]
+opt-level = 3
+
+[profile.dev.package.gpui-kit]
+opt-level = 3
+
+[profile.dev.package.gpui-kit-assets]
+opt-level = 3
 
 [profile.release]
 opt-level = 3

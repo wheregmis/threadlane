@@ -12,7 +12,7 @@ impl CapabilityCatalog {
         Self::discover_with_roots(global_threadlane_dir.as_deref(), project_root)
     }
 
-    pub fn discover_with_roots(
+    fn discover_with_roots(
         global_threadlane_dir: Option<&Path>,
         project_root: Option<&Path>,
     ) -> Self {
@@ -25,7 +25,7 @@ impl CapabilityCatalog {
         Self { extensions }
     }
 
-    pub fn extensions(&self) -> &[ExtensionRecord] {
+    pub(crate) fn extensions(&self) -> &[ExtensionRecord] {
         &self.extensions
     }
 }

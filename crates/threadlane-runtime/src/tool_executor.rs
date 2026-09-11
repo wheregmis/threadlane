@@ -13,7 +13,7 @@ use threadlane_tools::{
 pub struct BuiltinToolExecutor;
 
 impl BuiltinToolExecutor {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self
     }
 }
@@ -52,7 +52,7 @@ impl ToolExecutor for BuiltinToolExecutor {
     }
 }
 
-pub fn builtin_tool_executor() -> Arc<dyn ToolExecutor> {
+pub(crate) fn builtin_tool_executor() -> Arc<dyn ToolExecutor> {
     Arc::new(BuiltinToolExecutor::new())
 }
 
@@ -96,6 +96,20 @@ pub trait ToolExecutor: Send + Sync {
         args: &str,
     ) -> Option<Result<String, String>> {
         self.execute_tool(&call.name, args).await
+    }
+
+    /// Rich variant carrying model-visible images alongside text. The default
+    /// wraps the string result so existing executors stay untouched; only
+    /// image-producing tools (screenshots) override this.
+    async fn execute_tool_with_output_in_workspace(
+        &self,
+        name: &str,
+        args: &str,
+        work_dir: Option<&std::path::Path>,
+    ) -> Option<Result<crate::types::ToolOutput, String>> {
+        self.execute_tool_in_workspace(name, args, work_dir)
+            .await
+            .map(|result| result.map(crate::types::ToolOutput::from))
     }
 }
 

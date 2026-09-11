@@ -330,7 +330,9 @@ pub fn try_remote_ref_path(root: &Path, reference: &str) -> Result<String, Strin
     };
 
     match provider {
-        RepoProvider::GitHub => fetch_github(root, &owner_repo, &parsed.kind, &parsed.number),
+        RepoProvider::GitHub => {
+            fetch_github(root, &host, &owner_repo, &parsed.kind, &parsed.number)
+        }
         RepoProvider::GitLab => {
             fetch_gitlab(root, &host, &owner_repo, &parsed.kind, &parsed.number)
         }
@@ -342,19 +344,25 @@ pub fn github_path(root: &Path, reference: &str) -> String {
     remote_ref_path(root, reference)
 }
 
-fn fetch_github(root: &Path, owner_repo: &str, kind: &str, number: &str) -> Result<String, String> {
+fn fetch_github(
+    root: &Path,
+    host: &str,
+    owner_repo: &str,
+    kind: &str,
+    number: &str,
+) -> Result<String, String> {
     let endpoint = match kind {
         "pr" | "mr" => format!("repos/{owner_repo}/pulls/{number}"),
         _ => format!("repos/{owner_repo}/issues/{number}"),
     };
     let web_url = match kind {
-        "pr" | "mr" => format!("https://github.com/{owner_repo}/pull/{number}"),
-        _ => format!("https://github.com/{owner_repo}/issues/{number}"),
+        "pr" | "mr" => format!("https://{host}/{owner_repo}/pull/{number}"),
+        _ => format!("https://{host}/{owner_repo}/issues/{number}"),
     };
 
     // Strategy 1: gh CLI
     if let Ok(output) = Command::new("gh")
-        .args(["api", &endpoint])
+        .args(["api", "--hostname", host, &endpoint])
         .current_dir(root)
         .output()
     {
@@ -365,7 +373,11 @@ fn fetch_github(root: &Path, owner_repo: &str, kind: &str, number: &str) -> Resu
     }
 
     // Strategy 2: Direct curl HTTP API fallback
-    let url = format!("https://api.github.com/{endpoint}");
+    let url = if host.eq_ignore_ascii_case("github.com") {
+        format!("https://api.github.com/{endpoint}")
+    } else {
+        format!("https://{host}/api/v3/{endpoint}")
+    };
     let mut cmd = Command::new("curl");
     cmd.args([
         "-s",

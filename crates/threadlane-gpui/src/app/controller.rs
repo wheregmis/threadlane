@@ -80,6 +80,7 @@ pub(crate) fn dispatch(state: &mut AppState, action: AppAction) -> Option<Sessio
             state.set_acp_config_option(config_id, value)
         }
         AppAction::OpenGitHub => state.open_github(),
+        AppAction::OpenGitHubIssue { work_dir, number } => state.open_github_issue(work_dir, number),
         AppAction::CloseGitHub => state.close_github(),
         AppAction::OpenSettings => state.open_settings(),
         AppAction::CloseSettings => state.close_settings(),
@@ -108,6 +109,7 @@ pub(crate) fn dispatch(state: &mut AppState, action: AppAction) -> Option<Sessio
         }
         AppAction::OpenFileInEditor(path) => state.request_open_file(path),
         AppAction::RunTerminalCommand(cmd) => state.request_run_terminal_command(cmd),
+        AppAction::OpenTerminalAt(work_dir) => state.request_open_terminal(work_dir),
     }
     None
 }

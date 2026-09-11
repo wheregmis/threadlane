@@ -45,7 +45,7 @@ impl AgentToolDefinition {
     }
 
     /// Renders the nested function schema expected by Chat Completions.
-    pub fn to_chat_completions_tool(&self) -> Value {
+    pub(crate) fn to_chat_completions_tool(&self) -> Value {
         let mut function = Map::new();
         function.insert("name".into(), self.name.clone().into());
         if let Some(description) = &self.description {
@@ -116,8 +116,7 @@ impl AgentToolDefinition {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReasoningEffort {
     Off,
     Minimal,
@@ -127,10 +126,38 @@ pub enum ReasoningEffort {
     High,
     XHigh,
     Max,
+    /// Provider/model-defined effort level loaded at runtime (e.g. from
+    /// `models.json` or an ACP `thought_level` option). Stored as a leaked
+    /// lowercase API value so the enum stays `Copy` and wire-compatible.
+    Other(&'static str),
 }
 
 impl ReasoningEffort {
-    pub(crate) fn as_api_str(self) -> Option<&'static str> {
+    /// All built-in levels in picker order. Custom levels from the model
+    /// registry are appended by callers.
+    pub fn known_levels() -> [Self; 7] {
+        [
+            Self::Off,
+            Self::Minimal,
+            Self::Low,
+            Self::Medium,
+            Self::High,
+            Self::XHigh,
+            Self::Max,
+        ]
+    }
+
+    pub fn is_custom(self) -> bool {
+        matches!(self, Self::Other(_))
+    }
+
+    /// Builds a custom level from a runtime string. Empty strings return
+    /// `None`; known names resolve to their built-in variant.
+    pub fn custom(value: &str) -> Option<Self> {
+        Self::from_label(value)
+    }
+
+    pub fn as_api_str(self) -> Option<&'static str> {
         match self {
             Self::Off => None,
             Self::Minimal => Some("minimal"),
@@ -139,6 +166,14 @@ impl ReasoningEffort {
             Self::High => Some("high"),
             Self::XHigh => Some("xhigh"),
             Self::Max => Some("max"),
+            Self::Other(value) => {
+                let normalized = value.trim().to_ascii_lowercase();
+                if normalized.is_empty() || normalized == "off" || normalized == "none" {
+                    None
+                } else {
+                    Some(value)
+                }
+            }
         }
     }
 
@@ -151,12 +186,14 @@ impl ReasoningEffort {
             Self::High => "High",
             Self::XHigh => "XHigh",
             Self::Max => "Max",
+            Self::Other(value) => value,
         }
     }
 
     pub fn from_label(label: &str) -> Option<Self> {
         let label = label.strip_prefix("Thinking: ").unwrap_or(label).trim();
         match label.to_ascii_lowercase().as_str() {
+            "" => None,
             "off" | "none" => Some(Self::Off),
             "minimal" => Some(Self::Minimal),
             "low" => Some(Self::Low),
@@ -164,8 +201,34 @@ impl ReasoningEffort {
             "high" => Some(Self::High),
             "xhigh" => Some(Self::XHigh),
             "max" => Some(Self::Max),
-            _ => None,
+            _ => {
+                let normalized = label.to_ascii_lowercase();
+                let leaked: &'static str = Box::leak(normalized.into_boxed_str());
+                Some(Self::Other(leaked))
+            }
         }
+    }
+}
+
+impl serde::Serialize for ReasoningEffort {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Off => serializer.serialize_str("off"),
+            Self::Minimal => serializer.serialize_str("minimal"),
+            Self::Low => serializer.serialize_str("low"),
+            Self::Medium => serializer.serialize_str("medium"),
+            Self::High => serializer.serialize_str("high"),
+            Self::XHigh => serializer.serialize_str("xhigh"),
+            Self::Max => serializer.serialize_str("max"),
+            Self::Other(value) => serializer.serialize_str(value),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ReasoningEffort {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        Self::from_label(&value).ok_or_else(|| serde::de::Error::custom("empty reasoning effort"))
     }
 }
 
@@ -193,9 +256,9 @@ pub struct ImageAttachment {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeferredHandle {
-    pub handle_id: String,
-    pub provider: String,
-    pub model: String,
+    handle_id: String,
+    provider: String,
+    model: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -236,6 +299,11 @@ pub enum AgentMessage {
         is_error: bool,
         #[serde(default)]
         terminate: bool,
+        /// Model-visible images attached by the tool (e.g. screenshots).
+        /// Empty for text-only results; serialized inline so durable reload
+        /// reproduces the exact provider-visible context.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<ImageAttachment>,
     },
     Custom {
         custom_type: String,
@@ -259,7 +327,7 @@ impl AgentMessage {
         }
     }
 
-    pub fn is_user(&self) -> bool {
+    pub(crate) fn is_user(&self) -> bool {
         matches!(self, Self::User { .. } | Self::UserWithImages { .. })
     }
 
@@ -328,6 +396,27 @@ pub struct AgentToolResult {
     pub content: String,
     pub is_error: bool,
     pub(crate) terminate: bool,
+    /// Model-visible images attached by the tool. Serialized inline so the
+    /// durable transcript reproduces the exact provider-visible context.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageAttachment>,
+}
+
+/// Rich tool output: text plus optional model-visible images. Executors keep
+/// returning plain strings; only image-producing tools build this directly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolOutput {
+    pub content: String,
+    pub images: Vec<ImageAttachment>,
+}
+
+impl From<String> for ToolOutput {
+    fn from(content: String) -> Self {
+        Self {
+            content,
+            images: Vec::new(),
+        }
+    }
 }
 
 impl AgentToolResult {
@@ -352,6 +441,7 @@ impl AgentToolResult {
             content: content.into(),
             is_error,
             terminate: false,
+            images: Vec::new(),
         }
     }
 }
@@ -362,10 +452,10 @@ pub struct ModelRoles {
     pub fast: Option<String>,
     /// Ordered alternate models attempted after a pre-output quota/rate-limit failure.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub fallback_chain: Vec<String>,
+    pub(crate) fallback_chain: Vec<String>,
     /// Persisted cooldown markers for temporarily exhausted provider/model routes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub cooldown_models: Vec<String>,
+    pub(crate) cooldown_models: Vec<String>,
 }
 
 impl ModelRoles {
@@ -373,7 +463,7 @@ impl ModelRoles {
         self.fast.as_deref().unwrap_or(fallback)
     }
 
-    pub fn fallback_after<'a>(&'a self, current: &str) -> Option<&'a str> {
+    pub(crate) fn fallback_after<'a>(&'a self, current: &str) -> Option<&'a str> {
         self.fallback_chain
             .iter()
             .map(String::as_str)
@@ -387,26 +477,41 @@ impl ModelRoles {
     }
 }
 
-/// Orchestration mode governing automatic /prewalk engagement.
+/// Orchestration mode governing explicit /prewalk engagement.
+///
+/// Prewalk is off by default (oh-my-pi parity): it is a one-shot handoff from
+/// the active model to a faster/cheaper model after planning reaches
+/// implementation. It is armed explicitly via `/prewalk` or `Always` mode;
+/// there is no LLM intent classifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum OrchestratorMode {
-    /// Automatically engage /prewalk on actionable coding tasks if a fast model is available.
-    #[default]
+    /// Deprecated: previously ran an LLM intent classifier. Now behaves as
+    /// `Off` (direct execution) to preserve deserialization of old configs
+    /// without paying classifier latency/cost.
+    #[serde(alias = "auto")]
     Auto,
-    /// Always engage /prewalk on all incoming prompts.
+    /// Arm prewalk on all incoming prompts.
     Always,
     /// Direct execution only (explicit /prewalk command required).
+    #[default]
     Off,
 }
 
 impl OrchestratorMode {
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Auto => "Auto (Complex Tasks)",
+            // Auto is retained only for backward compat; it no longer engages.
+            Self::Auto => "Off (Manual /prewalk)",
             Self::Always => "Always",
             Self::Off => "Off (Manual /prewalk)",
         }
+    }
+
+    /// Whether this mode arms prewalk automatically. `Auto` is intentionally
+    /// inert (see variant docs).
+    pub fn arms_automatically(&self) -> bool {
+        matches!(self, Self::Always)
     }
 }
 

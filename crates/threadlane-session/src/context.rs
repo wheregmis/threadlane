@@ -2,12 +2,12 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Default)]
 pub struct ProjectContext {
-    pub context_files: Vec<PathBuf>,
+    pub(crate) context_files: Vec<PathBuf>,
     pub(crate) memory_content: Option<String>,
 }
 
 impl ProjectContext {
-    pub fn discover(start_dir: &Path) -> Self {
+    pub(crate) fn discover(start_dir: &Path) -> Self {
         let mut current = start_dir.to_path_buf();
         let mut context_files = Vec::new();
 

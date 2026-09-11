@@ -19,11 +19,22 @@ const LOCK_EX: i32 = 2;
 #[cfg(unix)]
 const LOCK_NB: i32 = 4;
 
-// ponytail: one process-wide SQLite append gate; replace with per-database
-// locks if concurrent database throughput becomes a measured bottleneck.
-fn append_gate() -> &'static Mutex<()> {
-    static GATE: OnceLock<Mutex<()>> = OnceLock::new();
-    GATE.get_or_init(|| Mutex::new(()))
+/// Per-database append gate: unrelated sessions must not serialize behind
+/// each other, but appends to the same database still need mutual exclusion
+/// across the reload/validate/insert/reload sequence. Cross-process writers
+/// are arbitrated by SQLite itself (`BEGIN IMMEDIATE` + `busy_timeout`);
+/// the `flock` lease below is a fast fail-closed guard, not the arbiter.
+fn append_gate_for(canonical_db: &Path) -> Arc<Mutex<()>> {
+    static GATES: OnceLock<Mutex<std::collections::HashMap<std::path::PathBuf, Arc<Mutex<()>>>>> =
+        OnceLock::new();
+    let mut gates = GATES
+        .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .expect("sqlite append gate registry poisoned");
+    gates
+        .entry(canonical_db.to_path_buf())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
 }
 
 struct WriterClaim {
@@ -34,11 +45,14 @@ fn writer_claim(path: &Path) -> Result<Arc<WriterClaim>, ReduceError> {
     static CLAIMS: OnceLock<
         Mutex<std::collections::HashMap<std::path::PathBuf, Weak<WriterClaim>>>,
     > = OnceLock::new();
+    // Canonicalize so relative/symlinked spellings of the same lock file
+    // share one lease instead of silently splitting mutual exclusion.
+    let canonical = super::jsonl::canonical_writer_key(path);
     let claims = CLAIMS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
     let mut claims = claims
         .lock()
         .map_err(|error| ReduceError::Storage(error.to_string()))?;
-    if let Some(claim) = claims.get(path).and_then(Weak::upgrade) {
+    if let Some(claim) = claims.get(&canonical).and_then(Weak::upgrade) {
         return Ok(claim);
     }
     let file = fs::OpenOptions::new()
@@ -52,14 +66,18 @@ fn writer_claim(path: &Path) -> Result<Arc<WriterClaim>, ReduceError> {
     if unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } != 0 {
         return Err(storage(std::io::Error::last_os_error()));
     }
+    // Non-Unix has no `flock` lease: in-process exclusion still holds via
+    // the per-database gate, and cross-process writers are arbitrated by
+    // SQLite's own locking (`BEGIN IMMEDIATE` + `busy_timeout`).
     let claim = Arc::new(WriterClaim { _file: file });
-    claims.insert(path.to_path_buf(), Arc::downgrade(&claim));
+    claims.insert(canonical, Arc::downgrade(&claim));
     Ok(claim)
 }
 
 pub struct SqliteStore {
     db: *mut sqlite::sqlite3,
     _writer_lock: Arc<WriterClaim>,
+    append_gate: Arc<Mutex<()>>,
     session_id: String,
     parent_session_id: Option<String>,
     entries: Vec<Entry>,
@@ -69,10 +87,7 @@ pub struct SqliteStore {
 unsafe impl Send for SqliteStore {}
 
 impl SqliteStore {
-    pub fn open(
-        path: impl AsRef<Path>,
-        session_id: impl Into<String>,
-    ) -> Result<Self, ReduceError> {
+    fn open(path: impl AsRef<Path>, session_id: impl Into<String>) -> Result<Self, ReduceError> {
         let lock_path = path.as_ref().with_extension("sqlite.lock");
         if let Some(parent) = path
             .as_ref()
@@ -82,6 +97,7 @@ impl SqliteStore {
             fs::create_dir_all(parent).map_err(storage)?;
         }
         let writer_lock = writer_claim(&lock_path)?;
+        let append_gate = append_gate_for(&super::jsonl::canonical_writer_key(path.as_ref()));
         let path = CString::new(path.as_ref().to_string_lossy().as_bytes())
             .map_err(|error| ReduceError::Storage(error.to_string()))?;
         let mut db = ptr::null_mut();
@@ -109,6 +125,11 @@ impl SqliteStore {
         let result = (|| {
             exec(db, "PRAGMA foreign_keys = ON")?;
             exec(db, "PRAGMA journal_mode = WAL")?;
+            // WAL alone only moves the durability point to the WAL file;
+            // FULL synchronous forces WAL frames to stable storage before
+            // each commit returns, matching the JSONL store's per-append
+            // fsync durability.
+            exec(db, "PRAGMA synchronous = FULL")?;
             exec(db, "CREATE TABLE IF NOT EXISTS harness_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")?;
             exec(db, "CREATE TABLE IF NOT EXISTS harness_entries (id TEXT PRIMARY KEY, seq INTEGER NOT NULL UNIQUE, parent_id TEXT, timestamp INTEGER NOT NULL, terminate INTEGER NOT NULL, payload TEXT NOT NULL)")?;
             exec(db, "CREATE TABLE IF NOT EXISTS harness_records (id TEXT PRIMARY KEY, seq INTEGER NOT NULL UNIQUE, lane TEXT NOT NULL, payload TEXT NOT NULL)")?;
@@ -147,6 +168,7 @@ impl SqliteStore {
                 let store = Self {
                     db,
                     _writer_lock: writer_lock,
+                    append_gate,
                     session_id,
                     parent_session_id,
                     entries,
@@ -305,7 +327,12 @@ impl SqliteStore {
                 sqlite::sqlite3_finalize(statement);
             }
             step_result?;
-            exec(self.db, "COMMIT")
+            exec(self.db, "COMMIT")?;
+            // Best-effort passive checkpoint keeps the WAL bounded for
+            // readers; durability is already guaranteed by synchronous=FULL.
+            // A checkpoint failure must not fail the committed append.
+            let _ = exec(self.db, "PRAGMA wal_checkpoint(PASSIVE)");
+            Ok(())
         })();
         if result.is_err() {
             let _ = exec(self.db, "ROLLBACK");
@@ -331,7 +358,8 @@ impl SessionStore for SqliteStore {
     }
 
     fn append_entry(&mut self, mut entry: Entry) -> Result<(), ReduceError> {
-        let _gate = append_gate()
+        let gate = self.append_gate.clone();
+        let _gate = gate
             .lock()
             .map_err(|error| ReduceError::Storage(error.to_string()))?;
         for _ in 0..3 {
@@ -362,7 +390,8 @@ impl SessionStore for SqliteStore {
     }
 
     fn append_record(&mut self, mut record: Record) -> Result<(), ReduceError> {
-        let _gate = append_gate()
+        let gate = self.append_gate.clone();
+        let _gate = gate
             .lock()
             .map_err(|error| ReduceError::Storage(error.to_string()))?;
         for _ in 0..3 {
@@ -404,7 +433,12 @@ impl SqliteStore {
 fn is_sequence_conflict(error: &ReduceError) -> bool {
     match error {
         ReduceError::Storage(message) => {
-            message.contains("harness_entries.seq") || message.contains("harness_records.seq")
+            // `db_error` embeds the primary result code ("sqlite error 19"
+            // for SQLITE_CONSTRAINT). Sequence columns are the only UNIQUE
+            // columns retried here: id conflicts reloaded identically and
+            // must surface instead of spinning.
+            (message.contains("sqlite error 19") || message.contains("SQLITE_CONSTRAINT"))
+                && message.contains(".seq")
         }
         _ => false,
     }

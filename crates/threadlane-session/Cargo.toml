@@ -20,15 +20,17 @@ test-support = []
 [dependencies]
 threadlane-runtime = { version = "0.1.0", path = "../threadlane-runtime" }
 threadlane-protocol = { version = "0.1.0", path = "../threadlane-protocol" }
+threadlane-auth = { version = "0.1.0", path = "../threadlane-auth" }
 threadlane-tools = { version = "0.1.0", path = "../threadlane-tools" }
 threadlane-provider = { version = "0.1.0", path = "../threadlane-provider" }
 threadlane-mcp = { version = "0.1.0", path = "../threadlane-mcp" }
 threadlane-skills = { version = "0.1.0", path = "../threadlane-skills" }
 threadlane-wasi = { version = "0.1.0", path = "../threadlane-wasi" }
+threadlane-git = { version = "0.1.0", path = "../threadlane-git" }
 tokio = { version = "1.38", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-serde_yaml = "0.9"
+base64 = "0.22"
 async-trait = "0.1"
 futures = "0.3"
 md5 = "0.8"
@@ -40,3 +42,8 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 
 [dev-dependencies]
 tempfile = "3.10"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = { version = "0.25", features = ["elcapitan", "highsierra"] }
+core-foundation = "0.10"
+image = "0.25"

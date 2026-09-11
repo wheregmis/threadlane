@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use log::warn;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::acp::{
     config_option_for, AcpClientHandler, AcpConfigOption, AcpContentBlock, AcpManager,
@@ -36,11 +36,13 @@ use crate::acp::{
 use crate::acp_bridge::agent_events_for;
 use crate::permission::{PermissionDecision, PermissionHandle};
 use threadlane_runtime::{
-    AgentEvent, AgentToolResult, ImageAttachment, ReasoningEffort, TokenUsage,
+    AgentEvent, AgentToolResult, ImageAttachment, ReasoningEffort, SessionPlan, TokenUsage,
 };
 
 /// Durable tool activity collected while an ACP turn streams.
 pub(crate) struct AcpTurnToolActivity {
+    /// Assistant text streamed since the preceding tool call.
+    pub(crate) preamble: String,
     pub(crate) tool_call_id: String,
     pub(crate) name: String,
     pub(crate) arguments: String,
@@ -48,8 +50,11 @@ pub(crate) struct AcpTurnToolActivity {
 }
 
 pub(crate) struct AcpTurnOutcome {
+    /// Assistant text streamed after the last tool call.
     pub(crate) reply: String,
     pub(crate) tools: Vec<AcpTurnToolActivity>,
+    /// No update preserves the previous plan; an empty update clears it.
+    pub(crate) plan: Option<SessionPlan>,
 }
 
 /// A live connection to one external ACP agent, reused across turns.
@@ -57,6 +62,38 @@ pub struct AcpEngine {
     global_dir: Option<PathBuf>,
     work_dir: PathBuf,
     active: Option<ActiveSession>,
+    /// Whether this agent's `question` tool has dismissed unseen in the
+    /// current conversation.
+    ///
+    /// Some agents (notably opencode under ACP) implement `question` with an
+    /// interactive prompt that has no client binding: it never emits
+    /// `session/request_permission`, so nothing is shown and the tool fails
+    /// immediately. Once seen, every later turn in this conversation carries
+    /// [`QUESTION_TOOL_UNAVAILABLE_NOTE`] so the model asks in plain text
+    /// instead of failing the same way again.
+    question_tool_unavailable: bool,
+}
+
+/// Appended to an ACP prompt once [`AcpEngine::question_tool_unavailable`]
+/// is set. Short by design: it rides along every later turn of the session.
+const QUESTION_TOOL_UNAVAILABLE_NOTE: &str =
+    "[Client note: the `question` tool cannot display questions to the user in \
+     this client — its prompts are dismissed unseen. Ask any clarifying \
+     questions in plain text and wait for the user's reply instead of calling it.]";
+
+/// Whether a journaled ACP tool activity is a question prompt that was
+/// dismissed without reaching the user.
+///
+/// Matches the rewritten guidance text (the bridge replaces the agent's
+/// "dismissed" wording before journaling), so detection works on both the
+/// live turn outcome and reloaded transcripts.
+fn is_unseen_question_dismissal_activity(tool: &AcpTurnToolActivity) -> bool {
+    tool.name.eq_ignore_ascii_case("question")
+        && tool.result.as_ref().is_some_and(|result| {
+            result.is_error
+                && (result.content.contains("cannot display questions")
+                    || result.content.contains("dismissed this question"))
+        })
 }
 
 struct ActiveSession {
@@ -67,6 +104,25 @@ struct ActiveSession {
     /// The handler pushes onto this from the connection's read loop, which is
     /// what preserves the order the agent emitted them in; a turn drains it.
     updates: mpsc::UnboundedReceiver<AcpSessionNotification>,
+    /// Retained across local cancellation until the agent answers the prompt.
+    pending_prompt: Option<tokio::task::JoinHandle<Result<AcpStopReason, String>>>,
+    permission_turn: watch::Sender<PermissionTurn>,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct PermissionTurn {
+    generation: u64,
+    cancelled: bool,
+}
+
+impl Drop for ActiveSession {
+    fn drop(&mut self) {
+        self.permission_turn
+            .send_modify(|turn| turn.cancelled = true);
+        if let Some(pending) = self.pending_prompt.take() {
+            pending.abort();
+        }
+    }
 }
 
 /// Sends `session/cancel` if the turn is dropped before it finishes.
@@ -76,6 +132,7 @@ struct ActiveSession {
 /// still tell the agent to stop.
 struct CancelOnDrop {
     session: Arc<AcpSession>,
+    permission_turn: watch::Sender<PermissionTurn>,
     completed: bool,
 }
 
@@ -84,6 +141,8 @@ impl Drop for CancelOnDrop {
         if self.completed {
             return;
         }
+        self.permission_turn
+            .send_modify(|turn| turn.cancelled = true);
         let session = self.session.clone();
         // Drop is synchronous, so the notification has to outlive this frame.
         match tokio::runtime::Handle::try_current() {
@@ -105,6 +164,7 @@ impl AcpEngine {
             global_dir,
             work_dir,
             active: None,
+            question_tool_unavailable: false,
         }
     }
 
@@ -128,7 +188,16 @@ impl AcpEngine {
     ) -> Result<String, String> {
         self.run_turn_detailed(agent_id, prompt, images, effort, event_tx, permissions)
             .await
-            .map(|outcome| outcome.reply)
+            .map(|outcome| {
+                outcome
+                    .tools
+                    .into_iter()
+                    .map(|tool| tool.preamble)
+                    .chain(std::iter::once(outcome.reply))
+                    .filter(|text| !text.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
+            })
     }
 
     pub(crate) async fn run_turn_detailed(
@@ -146,12 +215,23 @@ impl AcpEngine {
             });
             return Err(error);
         }
+        self.finish_pending_turn(agent_id).await;
         let active = self
             .active
             .as_mut()
             .expect("ensure_session leaves a live session on success");
         let session = active.session.clone();
         let session_id = session.session_id().to_string();
+        // Once this conversation has shown the `question` tool dismisses
+        // unseen, say so on every later turn: without the reminder the model
+        // keeps calling it and the user keeps seeing nothing.
+        let prompt_owned;
+        let prompt = if self.question_tool_unavailable {
+            prompt_owned = format!("{prompt}\n\n{QUESTION_TOOL_UNAVAILABLE_NOTE}");
+            prompt_owned.as_str()
+        } else {
+            prompt
+        };
         let blocks = prompt_blocks(
             prompt,
             images,
@@ -171,38 +251,60 @@ impl AcpEngine {
         }
 
         let _ = event_tx.send(AgentEvent::AgentStart);
+        active.permission_turn.send_modify(|turn| {
+            turn.generation = turn.generation.wrapping_add(1);
+            turn.cancelled = false;
+        });
         let mut guard = CancelOnDrop {
             session: session.clone(),
+            permission_turn: active.permission_turn.clone(),
             completed: false,
         };
 
         let session_for_prompt = session.clone();
-        let turn = async move { session_for_prompt.prompt(blocks).await };
-        tokio::pin!(turn);
+        active.pending_prompt = Some(tokio::spawn(async move {
+            session_for_prompt.prompt(blocks).await
+        }));
 
         // Updates and the prompt response arrive on the same connection, so
         // they must be awaited together: draining only after the prompt
         // resolves would withhold the whole turn's output until the end.
         let mut reply = String::new();
         let mut tools = Vec::new();
+        let mut plan = None;
         let outcome = loop {
             tokio::select! {
                 notification = active.updates.recv() => match notification {
                     Some(notification) => {
-                        forward_update(notification, &session_id, event_tx, &mut reply, &mut tools);
+                        forward_update(notification, &session_id, event_tx, &mut reply, &mut tools, &mut plan);
                     }
                     // The handler holds the sender for the session's lifetime,
                     // so this only closes if the connection is gone.
                     None => continue,
                 },
-                result = &mut turn => break result,
+                result = active.pending_prompt.as_mut().expect("prompt was installed") => {
+                    break result.unwrap_or_else(|error| Err(format!("ACP prompt task failed: {error}")));
+                },
             }
         };
+        active.pending_prompt = None;
 
         // The agent emits its closing chunks just before answering the prompt,
         // so anything already queued still belongs to this turn.
         while let Ok(notification) = active.updates.try_recv() {
-            forward_update(notification, &session_id, event_tx, &mut reply, &mut tools);
+            forward_update(
+                notification,
+                &session_id,
+                event_tx,
+                &mut reply,
+                &mut tools,
+                &mut plan,
+            );
+        }
+        // Remember an unseen question dismissal for later turns (the bridge
+        // rewrites the wording before journaling, so match that text).
+        if tools.iter().any(is_unseen_question_dismissal_activity) {
+            self.question_tool_unavailable = true;
         }
         guard.completed = true;
 
@@ -216,7 +318,7 @@ impl AcpEngine {
                 let _ = event_tx.send(AgentEvent::AgentEnd {
                     usage: TokenUsage::default(),
                 });
-                Ok(AcpTurnOutcome { reply, tools })
+                Ok(AcpTurnOutcome { reply, tools, plan })
             }
             Err(error) => {
                 // A failed turn can leave the connection in an unknown state;
@@ -227,6 +329,29 @@ impl AcpEngine {
                 });
                 Err(error)
             }
+        }
+    }
+
+    pub(crate) fn has_pending_turn(&self, agent_id: &str) -> bool {
+        self.active
+            .as_ref()
+            .is_some_and(|active| active.agent_id == agent_id && active.pending_prompt.is_some())
+    }
+
+    /// Finish cancellation before opening another operation, so late
+    /// permission observations retain their originating run and recorder.
+    pub(crate) async fn finish_pending_turn(&mut self, agent_id: &str) {
+        let Some(active) = self
+            .active
+            .as_mut()
+            .filter(|active| active.agent_id == agent_id)
+        else {
+            return;
+        };
+        if let Some(pending) = active.pending_prompt.as_mut() {
+            let _ = pending.await;
+            active.pending_prompt = None;
+            while active.updates.try_recv().is_ok() {}
         }
     }
 
@@ -248,11 +373,15 @@ impl AcpEngine {
         // Switching agents ends the previous conversation; leaving the old
         // subprocess running would leak it for the life of the app.
         self.shutdown().await;
-
         let (updates_tx, updates_rx) = mpsc::unbounded_channel();
+        let (permission_turn, permission_rx) = watch::channel(PermissionTurn::default());
         let handler = AcpWorkspaceClient::new(self.work_dir.clone())
             .with_update_sender(updates_tx)
-            .with_permission_responder(permission_responder(event_tx.clone(), permissions.clone()));
+            .with_permission_responder(permission_responder(
+                event_tx.clone(),
+                permissions.clone(),
+                permission_rx,
+            ));
 
         let manager = AcpManager::new(self.global_dir.clone(), Some(self.work_dir.clone()));
         let session = manager
@@ -264,6 +393,8 @@ impl AcpEngine {
             agent_id: agent_id.to_string(),
             session: Arc::new(session),
             updates: updates_rx,
+            pending_prompt: None,
+            permission_turn,
         });
         Ok(())
     }
@@ -354,6 +485,9 @@ impl AcpEngine {
 
     /// Ends the conversation and stops the agent subprocess.
     pub async fn shutdown(&mut self) {
+        // A new conversation may run an agent whose `question` tool works, so
+        // the unavailability learned above must not leak across sessions.
+        self.question_tool_unavailable = false;
         if let Some(active) = self.active.take() {
             active.session.shutdown().await;
         }
@@ -487,6 +621,14 @@ fn acp_effort_value(effort: ReasoningEffort) -> Option<&'static str> {
         ReasoningEffort::High => Some("high"),
         ReasoningEffort::XHigh => Some("xhigh"),
         ReasoningEffort::Max => Some("max"),
+        ReasoningEffort::Other(value) => {
+            let normalized = value.trim().to_ascii_lowercase();
+            if normalized.is_empty() || normalized == "off" || normalized == "none" {
+                Some("low")
+            } else {
+                Some(value)
+            }
+        }
     }
 }
 
@@ -547,7 +689,7 @@ fn decode_data_url(data_url: &str) -> Option<(String, String)> {
 }
 
 /// Translates one notification into transcript events, accumulating the
-/// assistant text into `reply`.
+/// assistant text into the preamble of each tool and the final `reply`.
 ///
 /// Notifications for another session are dropped: an agent may run several
 /// sessions on one connection, and the other one's output is not this turn's.
@@ -557,6 +699,7 @@ fn forward_update(
     event_tx: &broadcast::Sender<AgentEvent>,
     reply: &mut String,
     tools: &mut Vec<AcpTurnToolActivity>,
+    plan: &mut Option<SessionPlan>,
 ) {
     if notification.session_id != session_id {
         return;
@@ -567,11 +710,13 @@ fn forward_update(
                 text_delta: Some(text),
                 ..
             } => reply.push_str(text),
+            AgentEvent::PlanUpdated { plan: updated } => *plan = Some(updated.clone()),
             AgentEvent::ToolExecutionStart {
                 tool_call_id,
                 name,
                 arguments,
             } => tools.push(AcpTurnToolActivity {
+                preamble: std::mem::take(reply),
                 tool_call_id: tool_call_id.clone(),
                 name: name.clone(),
                 arguments: arguments.clone(),
@@ -635,10 +780,13 @@ fn start_failure_message(agent_id: &str, work_dir: &Path, error: &str) -> String
 fn permission_responder(
     event_tx: broadcast::Sender<AgentEvent>,
     permissions: PermissionHandle,
+    permission_turn: watch::Receiver<PermissionTurn>,
 ) -> crate::acp::AcpPermissionResponder {
     Arc::new(move |request: AcpPermissionRequest| {
         let event_tx = event_tx.clone();
         let permissions = permissions.clone();
+        let mut permission_turn = permission_turn.clone();
+        let requested_turn = *permission_turn.borrow_and_update();
         Box::pin(async move {
             let decision = permissions
                 .request_external(
@@ -647,9 +795,18 @@ fn permission_responder(
                     permission_title(request.tool_call()),
                     permission_detail(request.tool_call()),
                     request.offers_allow_always(),
+                    async move {
+                        let _ = permission_turn
+                            .wait_for(|turn| {
+                                turn.cancelled || turn.generation != requested_turn.generation
+                            })
+                            .await;
+                    },
                 )
                 .await;
-            select_option(&request, decision)
+            decision
+                .map(|decision| select_option(&request, decision))
+                .unwrap_or(AcpPermissionOutcome::Cancelled)
         })
     })
 }
@@ -910,6 +1067,7 @@ mod tests {
         let (event_tx, _) = broadcast::channel(8);
         let mut reply = String::new();
         let mut tools = Vec::new();
+        let mut plan = None;
         let start = serde_json::from_value::<AcpToolCall>(json!({
             "toolCallId": "call-1",
             "title": "Read main.rs",
@@ -926,6 +1084,7 @@ mod tests {
             &event_tx,
             &mut reply,
             &mut tools,
+            &mut plan,
         );
         let finish = serde_json::from_value::<AcpToolCall>(json!({
             "toolCallId": "call-1",
@@ -946,6 +1105,7 @@ mod tests {
             &event_tx,
             &mut reply,
             &mut tools,
+            &mut plan,
         );
 
         assert_eq!(tools.len(), 1);

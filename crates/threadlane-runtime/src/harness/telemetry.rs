@@ -8,7 +8,7 @@ pub struct ExecutionContext {
 }
 
 impl ExecutionContext {
-    pub fn set_attribute(&mut self, key: impl Into<String>, value: impl Into<String>) {
+    pub(crate) fn set_attribute(&mut self, key: impl Into<String>, value: impl Into<String>) {
         let key = key.into();
         let sensitive = [
             "prompt",

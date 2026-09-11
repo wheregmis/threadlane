@@ -2,8 +2,8 @@ use super::harness::CodingSessionHarness;
 #[cfg(test)]
 use async_trait::async_trait;
 use log::warn;
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-#[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use threadlane_runtime::harness::QueueKind;
@@ -34,7 +34,7 @@ pub(crate) type SubagentObserverState = Arc<std::sync::Mutex<Option<AgentWorkObs
 #[cfg(test)]
 pub(crate) type SubagentBoundaryObserver = Arc<dyn Fn() + Send + Sync>;
 
-pub(crate) fn enqueue_harness_queue(
+fn enqueue_harness_queue(
     session_file: &Path,
     queue: QueueKind,
     content: String,
@@ -52,34 +52,40 @@ pub(crate) fn enqueue_harness_follow_up(
     enqueue_harness_queue(session_file, QueueKind::FollowUp, content, images)
 }
 
-pub(crate) fn consume_harness_queue(session_file: &Path, queue: QueueKind) -> Result<(), String> {
-    let mut harness = CodingSessionHarness::open(session_file)?;
-    harness.consume_first_unbound_queue(queue)
-}
-
-pub(crate) fn consume_harness_follow_ups(session_file: &Path) -> Result<(), String> {
-    consume_harness_queue(session_file, QueueKind::FollowUp)
-}
-
 #[derive(Clone, Default)]
 pub(crate) struct AgentWorkScheduler {
-    pub(crate) pending: Arc<std::sync::Mutex<Vec<AgentWork>>>,
+    pending: Arc<std::sync::Mutex<VecDeque<AgentWork>>>,
+    acp_model: Arc<AtomicBool>,
     #[cfg(test)]
-    pub(crate) test_observer: SubagentObserverState,
+    test_observer: SubagentObserverState,
 }
 
 impl AgentWorkScheduler {
     pub(crate) fn schedule(&self, work: AgentWork) {
         if let Ok(mut pending) = self.pending.lock() {
-            pending.push(work);
+            pending.push_back(work);
         }
     }
 
-    pub(crate) fn drain(&self) -> Vec<AgentWork> {
+    fn drain(&self) -> Vec<AgentWork> {
         self.pending
             .lock()
-            .map(|mut pending| std::mem::take(&mut *pending))
+            .map(|mut pending| pending.drain(..).collect())
             .unwrap_or_default()
+    }
+
+    pub(crate) fn set_acp_model(&self, is_acp: bool) {
+        self.acp_model.store(is_acp, Ordering::SeqCst);
+    }
+
+    pub(crate) fn next(&self) -> Option<AgentWork> {
+        self.pending.lock().ok()?.front().cloned()
+    }
+
+    pub(crate) fn finish_next(&self) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.pop_front();
+        }
     }
 
     #[cfg(test)]
@@ -113,18 +119,7 @@ impl AgentWorkScheduler {
                         if let Ok(Some(message)) =
                             harness.consume_unbound_queue_entry(queue.clone(), &entry_id)
                         {
-                            match queue {
-                                QueueKind::Steer => agent.steer(message),
-                                QueueKind::FollowUp | QueueKind::NextRun => {
-                                    agent.follow_up(message)
-                                }
-                            }
-                            match queue {
-                                QueueKind::Steer => agent.run_steer().await,
-                                QueueKind::FollowUp | QueueKind::NextRun => {
-                                    agent.run_follow_up().await
-                                }
-                            }
+                            agent.run_consumed_queue_message(queue, message).await;
                         }
                     }
                 }
@@ -174,8 +169,8 @@ impl ToolExecutor for DeterministicSubagentToolExecutor {
 
 #[derive(Clone)]
 pub struct CodingAgentWorkHandle {
-    pub(crate) scheduler: AgentWorkScheduler,
-    pub(crate) session_file: Option<PathBuf>,
+    scheduler: AgentWorkScheduler,
+    session_file: Option<PathBuf>,
 }
 
 impl CodingAgentWorkHandle {
@@ -190,23 +185,13 @@ impl CodingAgentWorkHandle {
         self.queue_follow_up_with_images(content, Vec::new());
     }
 
-    pub(crate) fn queue_follow_up_with_images(
+    fn queue_follow_up_with_images(
         &self,
         content: impl Into<String>,
         images: Vec<ImageAttachment>,
     ) {
-        let content = content.into();
-        if let Some(path) = self.session_file.as_deref() {
-            match enqueue_harness_follow_up(path, content, images) {
-                Ok(entry_id) => self.scheduler.schedule(AgentWork::DurableQueueWake {
-                    queue: QueueKind::FollowUp,
-                    entry_id,
-                }),
-                Err(error) => warn!("Failed to persist queued follow-up: {error}"),
-            }
-        } else {
-            self.scheduler
-                .schedule(AgentWork::QueueMessage { content, images });
+        if let Err(error) = self.try_queue_follow_up_with_images(content, images) {
+            warn!("Failed to persist queued follow-up: {error}");
         }
     }
 
@@ -215,6 +200,9 @@ impl CodingAgentWorkHandle {
         content: impl Into<String>,
         images: Vec<ImageAttachment>,
     ) -> Result<(), String> {
+        if self.scheduler.acp_model.load(Ordering::SeqCst) {
+            return Err("This agent does not support live steering; use Queue.".into());
+        }
         let content = content.into();
         if let Some(path) = self.session_file.as_deref() {
             let entry_id = enqueue_harness_queue(path, QueueKind::Steer, content, images)?;
@@ -236,11 +224,16 @@ impl CodingAgentWorkHandle {
     ) -> Result<(), String> {
         let content = content.into();
         if let Some(path) = self.session_file.as_deref() {
-            let entry_id = enqueue_harness_follow_up(path, content, images)?;
-            self.scheduler.schedule(AgentWork::DurableQueueWake {
-                queue: QueueKind::FollowUp,
-                entry_id,
-            });
+            // ACP accepts the next prompt only after its current turn ends.
+            // NextRun also retains the unsent input when that turn is stopped.
+            let queue = if self.scheduler.acp_model.load(Ordering::SeqCst) {
+                QueueKind::NextRun
+            } else {
+                QueueKind::FollowUp
+            };
+            let entry_id = enqueue_harness_queue(path, queue.clone(), content, images)?;
+            self.scheduler
+                .schedule(AgentWork::DurableQueueWake { queue, entry_id });
         } else {
             self.scheduler
                 .schedule(AgentWork::QueueMessage { content, images });

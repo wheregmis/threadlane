@@ -6,18 +6,19 @@ use super::subagents::*;
 
 use super::broker::ManagedProcessRegistry;
 use super::capabilities::{
-    build_broker_dispatcher, render_agent_catalog, restored_tool_policy, ContextCapability,
-    McpCapability, PlanCapability, PrewalkCapability, SkillCapability, SubagentCapability,
-    WasiCapability,
+    build_broker_dispatcher, render_agent_catalog, restored_tool_policy, BrowserCapability,
+    ContextCapability, GitHubCapability, McpCapability, PlanCapability,
+    QuestionCapability, SkillCapability, SubagentCapability, WasiCapability, WorktreeCapability,
 };
 use super::harness::{CodingSessionHarness, HarnessWatch, InterruptedSubagentRecoveryState};
 use crate::commands::{execute_slash_command, parse_slash_command, CommandAction};
+use crate::computer::ComputerCapability;
 use crate::context::ProjectContext;
 use crate::extension_broker::CapabilityDispatcher;
 use crate::plan::SessionPlanStore;
 use crate::policy::ToolPolicy;
+use crate::question::QuestionManager;
 use crate::system_prompt::{build_system_prompt, SystemPromptBuildOptions};
-use log::warn;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -25,7 +26,7 @@ use threadlane_mcp::McpManager;
 use threadlane_protocol::ProviderPort;
 use threadlane_provider::openai::fetch_available_models;
 use threadlane_provider::router::ProviderClient;
-use threadlane_runtime::harness::{OperationOutcome, QueueKind, Reducer, SessionStore, Snapshot};
+use threadlane_runtime::harness::{OperationOutcome, Reducer, SessionStore, Snapshot};
 use threadlane_runtime::{
     AgentEvent, AgentMessage, AgentRuntime, ImageAttachment, ReasoningEffort, TokenUsage,
 };
@@ -36,19 +37,20 @@ use tokio::sync::broadcast;
 
 pub struct CodingAgent {
     pub(crate) agent: AgentRuntime,
-    pub session_id: String,
-    pub session_file: Option<PathBuf>,
-    pub wasi_extensions: Arc<WasiExtensionManager>,
+    pub(crate) session_id: String,
+    pub(crate) session_file: Option<PathBuf>,
+    pub(crate) wasi_extensions: Arc<WasiExtensionManager>,
     pub(crate) tool_policy: Arc<tokio::sync::Mutex<ToolPolicy>>,
     pub(crate) work_dir: PathBuf,
     pub(crate) agent_config: threadlane_runtime::AgentConfig,
     pub(crate) skills: Arc<SkillRegistry>,
     pub(crate) agent_runner: AgentRunner,
     pub(crate) broker_dispatcher: Arc<CapabilityDispatcher>,
-    pub(crate) managed_processes: ManagedProcessRegistry,
+    managed_processes: ManagedProcessRegistry,
     pub(crate) permission_handle: crate::permission::PermissionHandle,
-    pub(crate) agent_work: AgentWorkScheduler,
-    pub(crate) mcp_manager: Arc<McpManager>,
+    pub(crate) question_handle: crate::question::QuestionHandle,
+    agent_work: AgentWorkScheduler,
+    mcp_manager: Arc<McpManager>,
     pub(crate) prompt_templates: Option<Vec<crate::prompt_templates::PromptTemplate>>,
     pub(crate) dispatch_parent_leaf: Arc<std::sync::Mutex<Option<String>>>,
     pub(crate) completed_subagent_lanes: Arc<std::sync::Mutex<Vec<CompletedSubagentLane>>>,
@@ -56,13 +58,16 @@ pub struct CodingAgent {
     pub(crate) harness_journal_error: Option<String>,
     pub(crate) harness_run_id: Arc<std::sync::Mutex<Option<String>>>,
     pub(crate) prewalk: Arc<std::sync::Mutex<Option<crate::orchestrator::PrewalkState>>>,
-    pub(crate) cancellation: CodingAgentCancellation,
+    /// Live agent-to-agent mailbox shared by sibling `message_peer` and the
+    /// parent `hub` tool (oh-my-pi hub/IRC parity).
+    pub(crate) hub: super::mailbox::SubagentHub,
+    cancellation: CodingAgentCancellation,
     pub(crate) interrupted_subagent_recovery: InterruptedSubagentRecoveryState,
     /// Connection to an external ACP agent, opened on first use.
     ///
     /// An ACP agent keeps its own conversation state, so this is held for the
     /// life of the session rather than rebuilt per turn.
-    pub(crate) acp: crate::acp_runtime::AcpEngine,
+    acp: crate::acp_runtime::AcpEngine,
     #[cfg(test)]
     pub(crate) subagent_work_observer: SubagentObserverState,
     #[cfg(test)]
@@ -70,8 +75,12 @@ pub struct CodingAgent {
 }
 
 impl CodingAgent {
-    pub fn permission_handle(&self) -> crate::permission::PermissionHandle {
+    pub(crate) fn permission_handle(&self) -> crate::permission::PermissionHandle {
         self.permission_handle.clone()
+    }
+
+    pub(crate) fn question_handle(&self) -> crate::question::QuestionHandle {
+        self.question_handle.clone()
     }
 
     pub(crate) fn set_tool_intent_recorder(
@@ -88,28 +97,28 @@ impl CodingAgent {
         self.agent.tool_dispatcher.tool_completion_recorder = recorder;
     }
 
-    pub(crate) async fn run_scheduled_agent_work(&mut self) {
+    async fn run_scheduled_agent_work(&mut self) -> Option<Result<String, String>> {
+        // Extension follow-ups are queued through the same scheduler as native
+        // work. ACP agents own their conversation, so routing those messages
+        // through `AgentRuntime::run_follow_up` would send them to the
+        // configured OpenAI provider instead of back to the ACP process.
+        let model = self.agent.model();
+        if let Some(agent_id) = crate::acp_bridge::acp_agent_id(&model) {
+            return self.run_queued_acp_work(agent_id).await;
+        }
         while self
             .agent_work
             .run_executor(&mut self.agent, self.session_file.as_deref())
             .await
         {
             self.sync_harness_and_dispatch_assistant_hooks().await;
-            if let Some(path) = self.session_file.as_deref() {
-                if let Err(error) = consume_harness_follow_ups(path) {
-                    warn!("Failed to consume queued follow-up: {error}");
-                }
-                if let Err(error) = consume_harness_queue(path, QueueKind::Steer) {
-                    warn!("Failed to consume queued steer: {error}");
-                }
-                if let Err(error) = consume_harness_queue(path, QueueKind::NextRun) {
-                    warn!("Failed to consume queued next-run input: {error}");
-                }
-            }
         }
+        None
     }
 
-    pub fn work_handle(&self) -> CodingAgentWorkHandle {
+    pub(crate) fn work_handle(&self) -> CodingAgentWorkHandle {
+        self.agent_work
+            .set_acp_model(crate::acp_bridge::is_acp_model(&self.agent.model()));
         CodingAgentWorkHandle::new(self.agent_work.clone(), self.session_file.clone())
     }
 
@@ -129,13 +138,13 @@ impl CodingAgent {
             .map_err(|error| error.to_string())
     }
 
-    pub fn harness_error(&self) -> Option<&str> {
+    pub(crate) fn harness_error(&self) -> Option<&str> {
         self.harness_journal_error.as_deref()
     }
 
     /// Returns the fully built system prompt used by this runtime when the
     /// agent state is not currently locked by an active turn.
-    pub fn system_prompt_snapshot(&self) -> Option<String> {
+    pub(crate) fn system_prompt_snapshot(&self) -> Option<String> {
         self.agent
             .turn
             .try_lock()
@@ -150,11 +159,11 @@ impl CodingAgent {
         journal.watch().map(Some)
     }
 
-    pub fn cancellation_handle(&self) -> CodingAgentCancellation {
+    pub(crate) fn cancellation_handle(&self) -> CodingAgentCancellation {
         self.cancellation.clone()
     }
 
-    pub fn has_interrupted_work(&self) -> bool {
+    pub(crate) fn has_interrupted_work(&self) -> bool {
         matches!(
             self.interrupted_subagent_recovery,
             InterruptedSubagentRecoveryState::Pending
@@ -165,11 +174,11 @@ impl CodingAgent {
         self.recover_interrupted_subagent_lanes().await
     }
 
-    pub fn set_model_roles(&mut self, roles: threadlane_runtime::ModelRoles) {
+    pub(crate) fn set_model_roles(&mut self, roles: threadlane_runtime::ModelRoles) {
         self.agent.set_model_roles(roles);
     }
 
-    pub fn set_needle_enabled(&mut self, enabled: bool) {
+    pub(crate) fn set_needle_enabled(&mut self, enabled: bool) {
         self.agent.set_needle_enabled(enabled);
     }
 
@@ -193,7 +202,9 @@ impl CodingAgent {
     ///
     /// Returns an empty list for a non-ACP model rather than an error: asking
     /// what an agent offers is a question the UI may ask about any selection.
-    pub async fn acp_config_options(&mut self) -> Result<Vec<crate::acp::AcpConfigOption>, String> {
+    pub(crate) async fn acp_config_options(
+        &mut self,
+    ) -> Result<Vec<crate::acp::AcpConfigOption>, String> {
         let model = self.agent.model();
         let Some(agent_id) = crate::acp_bridge::acp_agent_id(&model) else {
             return Ok(Vec::new());
@@ -206,7 +217,7 @@ impl CodingAgent {
     }
 
     /// Applies one of the selected external agent's settings.
-    pub async fn set_acp_config_option(
+    pub(crate) async fn set_acp_config_option(
         &mut self,
         config_id: &str,
         value: &str,
@@ -232,7 +243,7 @@ impl CodingAgent {
         self.acp.model_label(agent_id)
     }
 
-    pub fn model(&self) -> String {
+    pub(crate) fn model(&self) -> String {
         self.agent.model()
     }
 
@@ -246,7 +257,7 @@ impl CodingAgent {
         fetch_available_models(&api_key, account_id.as_deref()).await
     }
 
-    pub async fn reload_extensions(&mut self) -> Result<usize, String> {
+    pub(crate) async fn reload_extensions(&mut self) -> Result<usize, String> {
         let global_threadlane_dir = default_global_threadlane_dir();
         let loaded = self
             .wasi_extensions
@@ -268,7 +279,7 @@ impl CodingAgent {
         self.mcp_manager.discover_and_connect().await;
     }
 
-    pub(crate) async fn set_model(&mut self, model: String) -> Result<(), String> {
+    async fn set_model(&mut self, model: String) -> Result<(), String> {
         let model = model.trim();
         if model.is_empty() {
             return Err("model cannot be empty".into());
@@ -286,10 +297,42 @@ impl CodingAgent {
             self.sync_turn_from_model_context().await?;
         }
         self.agent.turn.lock().await.model = model.to_string();
+        self.agent_work
+            .set_acp_model(crate::acp_bridge::is_acp_model(model));
+        self.refresh_provider_credentials();
         Ok(())
     }
 
-    pub(crate) fn set_name(&mut self, name: String) -> Result<(), String> {
+    /// Re-resolve the signing credential for the current turn model and
+    /// rotate the shared provider cell. In-place model changes (slash
+    /// `/model`, prewalk handoffs) otherwise keep the previous provider's
+    /// credential — e.g. a Google `ya29` token sent to `api.openai.com`
+    /// (401 `invalid_api_key`) after switching off an Antigravity model.
+    /// Skips silently when nothing usable resolves, preserving legacy
+    /// behavior for credential-less contexts.
+    pub(crate) fn refresh_provider_credentials(&mut self) {
+        let model = self
+            .agent
+            .turn
+            .try_lock()
+            .map(|turn| turn.model.clone())
+            .unwrap_or_default();
+        Self::rotate_credentials_for(&mut self.agent, &model);
+    }
+
+    pub(crate) fn rotate_credentials_for(
+        agent: &mut threadlane_runtime::AgentRuntime,
+        model: &str,
+    ) {
+        let (key, account) = crate::credentials::provider_credentials(model);
+        if key.trim().is_empty() {
+            return;
+        }
+        agent.set_credentials(key, account);
+        crate::credentials::refresh_provider_for_model(&agent.provider_client_arc(), model);
+    }
+
+    fn set_name(&mut self, name: String) -> Result<(), String> {
         if let Some(journal) = self.harness.as_mut() {
             journal.refresh().map_err(|error| error.to_string())?;
             journal
@@ -360,6 +403,9 @@ impl CodingAgent {
             },
             None => (None, None),
         };
+        let github_issue_work = harness
+            .as_ref()
+            .is_some_and(|harness| harness.store.facts().contains_key("github_issue"));
         let mut initial_plan = threadlane_runtime::SessionPlan::default();
         if let Some(h) = harness.as_ref() {
             if let Some(model) = h.store.facts().get("model") {
@@ -462,8 +508,25 @@ impl CodingAgent {
         ));
         let dispatch_parent_leaf = Arc::new(std::sync::Mutex::new(None));
         let completed_subagent_lanes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let hub = super::mailbox::SubagentHub::new();
+        // Cloned separately for the `hub revive` spawner below; the
+        // `agent_runner` closure moves its own copies.
+        let revive_api_key = runner_api_key.clone();
+        let revive_account_id = runner_account_id.clone();
+        let revive_state = runner_state.clone();
+        let revive_config = runner_config.clone();
+        let revive_work_dir = runner_work_dir.clone();
+        let revive_extensions = runner_extensions.clone();
+        let revive_event_tx = runner_event_tx.clone();
+        let revive_session_file = runner_session_file.clone();
+        let revive_semaphore = runner_semaphore.clone();
+        let revive_hub = hub.clone();
+        let revive_parent_leaf = dispatch_parent_leaf.clone();
+        let revive_completed_lanes = completed_subagent_lanes.clone();
+        let revive_parent_session_id = session_id.clone();
         let runner_parent_leaf = dispatch_parent_leaf.clone();
         let runner_completed_lanes = completed_subagent_lanes.clone();
+        let runner_hub = hub.clone();
         let parent_session_id = session_id.clone();
         let agent_runner: AgentRunner = Arc::new(move |tasks, parallel, tool_call_id| {
             #[cfg(test)]
@@ -477,6 +540,7 @@ impl CodingAgent {
             let event_tx = runner_event_tx.clone();
             let session_file = runner_session_file.clone();
             let semaphore = runner_semaphore.clone();
+            let hub = runner_hub.clone();
             let parent_leaf_id = runner_parent_leaf.lock().ok().and_then(|leaf| leaf.clone());
             let completed_lanes = runner_completed_lanes.clone();
             let parent_session_id = parent_session_id.clone();
@@ -489,13 +553,25 @@ impl CodingAgent {
                     .subagent_model
                     .clone()
                     .unwrap_or_else(|| model.clone());
+                // Resolve live: the parent may have switched providers since
+                // construction (slash `/model`, prewalk handoff). Falls back
+                // to the construction key when nothing is stored.
+                let (api_key, account_id) = {
+                    let (key, account) =
+                        crate::credentials::provider_credentials(&child_model);
+                    if key.trim().is_empty() {
+                        (api_key, account_id)
+                    } else {
+                        (key, account)
+                    }
+                };
                 let child_reasoning_effort = runner_config
                     .subagent_reasoning_effort
                     .unwrap_or(parent_reasoning_effort);
                 #[cfg(test)]
                 let observer = observer
                     .and_then(|observer| observer.lock().ok().and_then(|value| value.clone()));
-                let (output, thinking, lanes) = run_subagents_with_context(
+                let (output, thinking, _) = run_subagents_with_context(
                     tasks,
                     parallel,
                     tool_call_id,
@@ -510,17 +586,20 @@ impl CodingAgent {
                         parent_event_tx: event_tx,
                         parent_leaf_id,
                         session_file,
+                        completed_lanes,
+                        hub,
                         #[cfg(test)]
                         scheduler_observer: observer,
                         #[cfg(test)]
                         child_work_observer: None,
                         #[cfg(test)]
                         child_tool_observer: None,
+                        #[cfg(test)]
+                        child_run_override: None,
                         semaphore,
                     },
                 )
                 .await?;
-                accept_completed_subagent_lanes(&completed_lanes, lanes)?;
                 Ok(serde_json::json!({
                     "message": output,
                     "output": output,
@@ -528,16 +607,89 @@ impl CodingAgent {
                 }))
             })
         });
-        let (broker_dispatcher, managed_processes, permission_handle) = build_broker_dispatcher(
-            tool_policy.clone(),
-            wasi_extensions.clone(),
-            true,
-            options.work_dir.clone(),
-            agent.event_tx.clone(),
-            agent_work.clone(),
-            Some(agent_runner.clone()),
-            options.session_file.clone(),
-        );
+        // `hub revive` spawner: reuses the subagent ingredients above to open
+        // a follow-up operation on the settled lane (same history).
+        let revive_hook: super::mailbox::ReviveHook = Arc::new(move |req: super::mailbox::ReviveRequest| {
+            let api_key = revive_api_key.clone();
+            let account_id = revive_account_id.clone();
+            let state = revive_state.clone();
+            let runner_config = revive_config.clone();
+            let work_dir = revive_work_dir.clone();
+            let extensions = revive_extensions.clone();
+            let event_tx = revive_event_tx.clone();
+            let session_file = revive_session_file.clone();
+            let semaphore = revive_semaphore.clone();
+            let hub = revive_hub.clone();
+            let parent_leaf = revive_parent_leaf.clone();
+            let completed_lanes = revive_completed_lanes.clone();
+            let parent_session_id = revive_parent_session_id.clone();
+            Box::pin(async move {
+                let parent_reasoning_effort = {
+                    let state = state.lock().await;
+                    state.reasoning_effort()
+                };
+                let child_reasoning_effort = runner_config
+                    .subagent_reasoning_effort
+                    .unwrap_or(parent_reasoning_effort);
+                let parent_leaf_id = parent_leaf.lock().ok().and_then(|leaf| leaf.clone());
+                // The revived run keeps the lane's original model so history
+                // and behavior stay continuous.
+                let child_model = req.model.clone();
+                // Resolve live (see the foreground runner above).
+                let (api_key, account_id) = {
+                    let (key, account) =
+                        crate::credentials::provider_credentials(&child_model);
+                    if key.trim().is_empty() {
+                        (api_key, account_id)
+                    } else {
+                        (key, account)
+                    }
+                };
+                revive_subagent_lane(
+                    ReviveLaneRequest {
+                        lane_name: req.lane_name,
+                        agent: req.agent,
+                        task: req.task,
+                        model: req.model,
+                        message: req.message,
+                    },
+                    SubagentRunContext {
+                        api_key,
+                        account_id,
+                        child_model,
+                        child_reasoning_effort,
+                        parent_session_id: parent_session_id.clone(),
+                        work_dir,
+                        extensions,
+                        parent_event_tx: event_tx,
+                        parent_leaf_id,
+                        session_file,
+                        completed_lanes,
+                        hub,
+                        #[cfg(test)]
+                        scheduler_observer: None,
+                        #[cfg(test)]
+                        child_work_observer: None,
+                        #[cfg(test)]
+                        child_tool_observer: None,
+                        #[cfg(test)]
+                        child_run_override: None,
+                        semaphore,
+                    },
+                )
+                .await
+            })
+        });
+        let (broker_dispatcher, managed_processes, permission_handle, permissions) =
+            build_broker_dispatcher(                tool_policy.clone(),
+                wasi_extensions.clone(),
+                true,
+                options.work_dir.clone(),
+                agent.event_tx.clone(),
+                agent_work.clone(),
+                Some(agent_runner.clone()),
+                options.session_file.clone(),
+            );
         let mcp_manager = Arc::new(McpManager::new(
             default_global_threadlane_dir(),
             Some(options.work_dir.clone()),
@@ -548,9 +700,18 @@ impl CodingAgent {
         }));
         registry.register(Box::new(SubagentCapability {
             agent_runner: agent_runner.clone(),
+            hub: hub.clone(),
+            session_file: session_file.clone(),
+            revive_hook: Some(revive_hook),
         }));
         registry.register(Box::new(PlanCapability {
             plan_store: plan_store.clone(),
+            event_tx: agent.event_tx.clone(),
+        }));
+        let question_manager = QuestionManager::new();
+        let question_handle = question_manager.handle();
+        registry.register(Box::new(QuestionCapability {
+            handle: question_handle.clone(),
             event_tx: agent.event_tx.clone(),
         }));
         if let Some(session_file) = options.session_file.clone() {
@@ -559,7 +720,18 @@ impl CodingAgent {
                 work_dir: options.work_dir.clone(),
             }));
         }
-        registry.register(Box::new(PrewalkCapability));
+        if github_issue_work {
+            registry.register(Box::new(GitHubCapability {
+                work_dir: options.work_dir.clone(),
+            }));
+        }
+        if threadlane_git::is_git_repo(&options.work_dir) {
+            registry.register(Box::new(WorktreeCapability {
+                work_dir: options.work_dir.clone(),
+            }));
+        }
+        // No PrewalkCapability: oh-my-pi parity handoff is automatic at the
+        // first qualifying edit/write, not an explicit model-invoked tool.
 
         registry.register(Box::new(WasiCapability {
             extensions: wasi_extensions.clone(),
@@ -568,6 +740,12 @@ impl CodingAgent {
         }));
         registry.register(Box::new(McpCapability {
             mcp_manager: mcp_manager.clone(),
+        }));
+        registry.register(Box::new(BrowserCapability {
+            bridge: options.browser.clone(),
+        }));
+        registry.register(Box::new(ComputerCapability {
+            permissions: Some(permissions.clone()),
         }));
         let (_wired, errors) = registry.wire_all(&mut agent.tool_dispatcher, &agent.hook_registry);
         for error in &errors {
@@ -629,6 +807,7 @@ impl CodingAgent {
             broker_dispatcher,
             managed_processes,
             permission_handle,
+            question_handle,
             agent_work,
             mcp_manager,
             prompt_templates: None,
@@ -638,6 +817,7 @@ impl CodingAgent {
             harness_journal_error,
             harness_run_id,
             prewalk: Arc::new(std::sync::Mutex::new(None)),
+            hub,
             cancellation,
             interrupted_subagent_recovery,
             acp,
@@ -659,9 +839,41 @@ impl CodingAgent {
         agent_id: &str,
         input: &str,
         images: Vec<ImageAttachment>,
+        queued: Option<(threadlane_runtime::harness::QueueKind, &str)>,
     ) -> Option<Result<String, String>> {
+        // A retry can arrive while the external agent is still answering Stop.
+        // Retain that input as existing queue intent before waiting, then open
+        // the new operation only after all old permission responses are sent.
+        let staged_entry = if queued.is_none() && self.acp.has_pending_turn(agent_id) {
+            if let Some(journal) = self.harness.as_mut() {
+                let queue = threadlane_runtime::harness::QueueKind::NextRun;
+                let entry_id = match journal.enqueue_unbound_with_images(
+                    queue.clone(),
+                    input.to_string(),
+                    images.clone(),
+                ) {
+                    Ok(entry_id) => entry_id,
+                    Err(error) => return Some(Err(format!("Harness Error: {error}"))),
+                };
+                self.agent_work.schedule(AgentWork::DurableQueueWake {
+                    queue,
+                    entry_id: entry_id.clone(),
+                });
+                Some(entry_id)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let queued = queued.or_else(|| {
+            staged_entry
+                .as_deref()
+                .map(|entry_id| (threadlane_runtime::harness::QueueKind::NextRun, entry_id))
+        });
+        self.acp.finish_pending_turn(agent_id).await;
         let msg = AgentMessage::user(input, images.clone());
-        let harness_run_id = match self.begin_harness_run(msg).await {
+        let harness_run_id = match self.begin_harness_run_with_queue(msg, queued).await {
             Ok(run_id) => run_id,
             Err(error) => {
                 let message = format!("Harness Error: {error}");
@@ -699,46 +911,49 @@ impl CodingAgent {
             }
         };
 
-        if let (Some(run_id), Some(journal)) = (run_id, self.harness.as_mut()) {
-            let tool_calls = (!outcome.tools.is_empty()).then(|| {
-                outcome
-                    .tools
-                    .iter()
-                    .map(|tool| threadlane_provider::openai::ToolCall {
-                        id: tool.tool_call_id.clone(),
-                        r#type: "function".into(),
-                        function: threadlane_provider::openai::ToolCallFunction {
-                            name: tool.name.clone(),
-                            arguments: tool.arguments.clone(),
-                        },
-                        thought_signature: None,
-                    })
-                    .collect()
-            });
-            let recorded = journal.append_message_to_lane(
-                "main",
-                run_id,
-                AgentMessage::Assistant {
-                    content: Some(outcome.reply),
-                    tool_calls,
-                    stop_reason: None,
-                    deferred_handle: None,
-                },
-            );
-            if let Err(error) = recorded {
+        if let Some(plan) = outcome.plan {
+            let saved = serde_json::to_string(&plan)
+                .map_err(|error| error.to_string())
+                .and_then(|plan| self.set_fact("session_plan", &plan));
+            if let Err(error) = saved {
                 let _ = self
-                    .finish_harness_run(Some(run_id), OperationOutcome::Failed, Some(error.clone()))
+                    .finish_harness_run(run_id, OperationOutcome::Failed, Some(error.clone()))
                     .await;
                 return Some(Err(format!("Harness Error: {error}")));
             }
+        }
 
+        if let (Some(run_id), Some(journal)) = (run_id, self.harness.as_mut()) {
             // ACP tools execute inside the external agent, but their ordered
-            // lifecycle still belongs in the canonical trajectory.
+            // preambles and results must precede the final reply after reload.
+            let has_tools = !outcome.tools.is_empty();
             for tool in outcome.tools {
                 let arguments = serde_json::from_str(&tool.arguments)
                     .unwrap_or_else(|_| serde_json::Value::String(tool.arguments.clone()));
                 let recorded = journal
-                    .tool_started_on_lane("main", run_id, &tool.tool_call_id, &tool.name, arguments)
+                    .append_message(AgentMessage::Assistant {
+                        content: (!tool.preamble.is_empty()).then_some(tool.preamble),
+                        tool_calls: Some(vec![threadlane_provider::openai::ToolCall {
+                            id: tool.tool_call_id.clone(),
+                            r#type: "function".into(),
+                            function: threadlane_provider::openai::ToolCallFunction {
+                                name: tool.name.clone(),
+                                arguments: tool.arguments.clone(),
+                            },
+                            thought_signature: None,
+                        }]),
+                        stop_reason: None,
+                        deferred_handle: None,
+                    })
+                    .and_then(|_| {
+                        journal.tool_started_on_lane(
+                            "main",
+                            run_id,
+                            &tool.tool_call_id,
+                            &tool.name,
+                            arguments,
+                        )
+                    })
                     .and_then(|_| {
                         let mut result = tool.result.unwrap_or_else(|| {
                             threadlane_runtime::types::AgentToolResult::external(
@@ -754,6 +969,25 @@ impl CodingAgent {
                         result.name = tool.name;
                         journal.finish_tool_result(run_id, &result)
                     });
+                if let Err(error) = recorded {
+                    let _ = self
+                        .finish_harness_run(
+                            Some(run_id),
+                            OperationOutcome::Failed,
+                            Some(error.clone()),
+                        )
+                        .await;
+                    return Some(Err(format!("Harness Error: {error}")));
+                }
+            }
+
+            if !outcome.reply.is_empty() || !has_tools {
+                let recorded = journal.append_message(AgentMessage::Assistant {
+                    content: Some(outcome.reply),
+                    tool_calls: None,
+                    stop_reason: None,
+                    deferred_handle: None,
+                });
                 if let Err(error) = recorded {
                     let _ = self
                         .finish_harness_run(
@@ -788,6 +1022,47 @@ impl CodingAgent {
         None
     }
 
+    async fn run_queued_acp_work(&mut self, agent_id: &str) -> Option<Result<String, String>> {
+        while let Some(work) = self.agent_work.next() {
+            let result = match &work {
+                AgentWork::DurableQueueWake { queue, entry_id } => {
+                    let message = match self.harness.as_mut() {
+                        Some(journal) => journal.unbound_queue_message(queue.clone(), entry_id),
+                        None => Err("session persistence is unavailable".into()),
+                    };
+                    let message = match message {
+                        Ok(Some(message)) => message,
+                        Ok(None) => {
+                            self.agent_work.finish_next();
+                            continue;
+                        }
+                        Err(error) => return Some(Err(format!("Harness Error: {error}"))),
+                    };
+                    let (content, images) = match message {
+                        AgentMessage::User { content } => (content, Vec::new()),
+                        AgentMessage::UserWithImages { content, images } => (content, images),
+                        _ => return Some(Err("Queued ACP input must be a user message".into())),
+                    };
+                    self.run_acp_turn(agent_id, &content, images, Some((queue.clone(), entry_id)))
+                        .await
+                }
+                AgentWork::QueueMessage { content, images }
+                | AgentWork::SteerMessage { content, images } => {
+                    // Legacy pending steer inputs are retained as later prompts.
+                    self.run_acp_turn(agent_id, content, images.clone(), None)
+                        .await
+                }
+            };
+            if result.is_some() {
+                // The durable wake stays until its accepted input is observed
+                // as consumed on retry. All later queued inputs remain pending.
+                return result;
+            }
+            self.agent_work.finish_next();
+        }
+        None
+    }
+
     pub async fn handle_input_with_images(
         &mut self,
         input: &str,
@@ -809,12 +1084,17 @@ impl CodingAgent {
             .lock()
             .ok()
             .is_some_and(|run_id| run_id.is_some());
-        if !adopted_harness_run {
+        if !adopted_harness_run || crate::acp_bridge::is_acp_model(&self.agent.model()) {
             if let Some(journal) = self.harness.as_mut() {
                 match journal.recover_abort() {
                     Ok(_) => {}
                     Err(error) => return Some(Err(format!("Harness Error: {error}"))),
                 }
+            }
+            // ACP never adopts an already accepted native runtime run. A
+            // dropped turn can leave this handle behind after Stop.
+            if let Ok(mut run_id) = self.harness_run_id.lock() {
+                *run_id = None;
             }
         }
         *self.dispatch_parent_leaf.lock().unwrap() = None;
@@ -998,7 +1278,9 @@ impl CodingAgent {
                         }
                     }
                 }
-                self.run_scheduled_agent_work().await;
+                // Close the command's harness run before draining follow-up work.
+                // ACP turns open their own run and reject nested runs while this
+                // extension command is still active.
                 if let Err(error) = self
                     .finish_harness_run(
                         harness_run_id.as_ref().map(|run| run.run_id.as_str()),
@@ -1008,6 +1290,9 @@ impl CodingAgent {
                     .await
                 {
                     return Some(Err(format!("Harness Error: {error}")));
+                }
+                if let Some(result) = self.run_scheduled_agent_work().await {
+                    return Some(result);
                 }
                 return Some(Ok(output));
             }
@@ -1097,7 +1382,6 @@ impl CodingAgent {
                             });
                         self.wasi_extensions
                             .enqueue_broker_results(dispatch.operation_results);
-                        self.run_scheduled_agent_work().await;
                         if result.api_version == 1 {
                             for effect in result.effects {
                                 match effect {
@@ -1165,6 +1449,12 @@ impl CodingAgent {
                         {
                             return Some(Err(format!("Harness Error: {error}")));
                         }
+                        // The command run must be closed before an ACP follow-up
+                        // can open its own harness run. Propagate follow-up errors
+                        // so the command is not reported as successfully complete.
+                        if let Some(scheduled_result) = self.run_scheduled_agent_work().await {
+                            return Some(scheduled_result);
+                        }
                         result
                     }
                     Err(err) => {
@@ -1210,29 +1500,50 @@ impl CodingAgent {
                 if let CommandAction::Prewalk(objective) = &cmd_action {
                     let task_prompt = objective.trim();
                     if task_prompt.is_empty() {
-                        return Some(Ok("Usage: /prewalk <task objective> - explore with frontier model, land first edit, then transition to fast model.".into()));
+                        return Some(Ok("Usage: /prewalk <task objective> - plan with frontier model, land first edit behind an update_plan todo gate, then auto-handoff to fast model.".into()));
                     }
-                    let active_model = self.agent.turn.lock().await.model.clone();
+                    let (active_model, active_effort) = {
+                        let turn = self.agent.turn.lock().await;
+                        (turn.model.clone(), Some(turn.reasoning_effort))
+                    };
                     let fast_model = self
                         .agent
                         .model_roles()
                         .resolve_fast(&active_model)
                         .to_string();
                     let fast_reasoning = self.agent.config().fast_reasoning_effort;
-                    *self.prewalk.lock().unwrap() = Some(crate::orchestrator::PrewalkState {
-                        target_model: fast_model.clone(),
-                        target_reasoning: fast_reasoning,
-                        started_at: std::time::Instant::now(),
-                    });
+                    if crate::orchestrator::prewalk_would_be_noop(
+                        &active_model,
+                        active_effort,
+                        &fast_model,
+                        fast_reasoning,
+                    ) {
+                        let _ = self.agent.event_tx.send(AgentEvent::PrewalkCompleted {
+                            model: active_model.clone(),
+                            message: format!("Prewalk: target `{fast_model}` already matches the active model and reasoning; nothing to switch."),
+                        });
+                        effective_input = task_prompt.to_string();
+                    } else {
+                        let requires_todo = self
+                            .agent
+                            .configured_tool_definitions()
+                            .iter()
+                            .any(|tool| tool.name == crate::orchestrator::PREWALK_TODO_TOOL);
+                        *self.prewalk.lock().unwrap() = Some(crate::orchestrator::PrewalkState::new(
+                            fast_model.clone(),
+                            fast_reasoning,
+                            requires_todo,
+                        ));
 
-                    let _ = self.agent.event_tx.send(AgentEvent::PrewalkCompleted {
-                        model: active_model.clone(),
-                        message: format!("Prewalk started with `{active_model}`. Target fast model: `{fast_model}`."),
-                    });
+                        let _ = self.agent.event_tx.send(AgentEvent::PrewalkCompleted {
+                            model: active_model.clone(),
+                            message: format!("Prewalk armed with `{active_model}`. Will auto-switch to `{fast_model}` after the first edit/write behind an opened update_plan gate."),
+                        });
 
-                    effective_input = task_prompt.to_string();
-                    architect_directive =
-                        Some(crate::orchestrator::build_architect_directive(&fast_model));
+                        effective_input = task_prompt.to_string();
+                        architect_directive =
+                            Some(crate::orchestrator::build_architect_directive(&fast_model, requires_todo));
+                    }
                 } else {
                     let output = execute_slash_command(cmd_action, &mut self.agent).await;
                     return Some(Ok(output));
@@ -1240,9 +1551,14 @@ impl CodingAgent {
             }
         }
 
-        // --- OMP-style Entrypoint Orchestrator: Intent Classification & Automatic Prewalk ---
+        // --- One-shot Prewalk orchestrator (oh-my-pi parity): no classifier.
+        // Only `Always` mode arms automatically; explicit `/prewalk` above
+        // bypasses this. `Auto` is deprecated and inert.
         if architect_directive.is_none() && self.prewalk.lock().unwrap().is_none() {
-            let active_model = self.agent.turn.lock().await.model.clone();
+            let (active_model, active_effort) = {
+                let turn = self.agent.turn.lock().await;
+                (turn.model.clone(), Some(turn.reasoning_effort))
+            };
             let fast_model = self
                 .agent
                 .model_roles()
@@ -1250,7 +1566,14 @@ impl CodingAgent {
                 .to_string();
             let fast_reasoning = self.agent.config().fast_reasoning_effort;
             let orchestrator_mode = self.agent.config().orchestrator_mode;
-            let provider_client = Some(self.agent.provider_client_arc());
+            // Mirror the gate the armed state will use: without the todo tool
+            // in the schema the gate is open from the start, so the directive
+            // must not demand an unfulfillable `update_plan` call.
+            let requires_todo = self
+                .agent
+                .configured_tool_definitions()
+                .iter()
+                .any(|tool| tool.name == crate::orchestrator::PREWALK_TODO_TOOL);
 
             let decision = crate::orchestrator::Orchestrator::evaluate(
                 &effective_input,
@@ -1258,9 +1581,8 @@ impl CodingAgent {
                 &active_model,
                 &fast_model,
                 fast_reasoning,
-                provider_client,
-            )
-            .await;
+                requires_todo,
+            );
 
             if let crate::orchestrator::OrchestratorDecision::EngagePrewalk {
                 fast_model: target_fast,
@@ -1268,20 +1590,32 @@ impl CodingAgent {
                 architect_system_directive,
             } = decision
             {
-                *self.prewalk.lock().unwrap() = Some(crate::orchestrator::PrewalkState {
-                    target_model: target_fast.clone(),
-                    target_reasoning: target_effort,
-                    started_at: std::time::Instant::now(),
-                });
+                if crate::orchestrator::prewalk_would_be_noop(
+                    &active_model,
+                    active_effort,
+                    &target_fast,
+                    target_effort,
+                ) {
+                    let _ = self.agent.event_tx.send(AgentEvent::PrewalkCompleted {
+                        model: active_model.clone(),
+                        message: format!("Prewalk: target `{target_fast}` already matches the active model and reasoning; nothing to switch."),
+                    });
+                } else {
+                    *self.prewalk.lock().unwrap() = Some(crate::orchestrator::PrewalkState::new(
+                        target_fast.clone(),
+                        target_effort,
+                        requires_todo,
+                    ));
 
-                let _ = self.agent.event_tx.send(AgentEvent::PrewalkCompleted {
-                    model: active_model.clone(),
-                    message: format!(
-                        "Auto-Prewalk engaged: Frontier architect (`{active_model}`) exploring and landing first edit before handoff to `{target_fast}`."
-                    ),
-                });
+                    let _ = self.agent.event_tx.send(AgentEvent::PrewalkCompleted {
+                        model: active_model.clone(),
+                        message: format!(
+                            "Auto-Prewalk armed: frontier architect (`{active_model}`) planning behind an update_plan gate before auto-handoff to `{target_fast}`."
+                        ),
+                    });
 
-                architect_directive = Some(architect_system_directive);
+                    architect_directive = Some(architect_system_directive);
+                }
             }
         }
 
@@ -1300,7 +1634,14 @@ impl CodingAgent {
         // here rather than through the provider run below.
         if let Some(agent_id) = crate::acp_bridge::acp_agent_id(&self.agent.model()) {
             let agent_id = agent_id.to_string();
-            return self.run_acp_turn(&agent_id, &effective_input, images).await;
+            let result = self
+                .run_acp_turn(&agent_id, &effective_input, images, None)
+                .await;
+            return if result.is_some() {
+                result
+            } else {
+                self.run_queued_acp_work(&agent_id).await
+            };
         }
 
         let msg = AgentMessage::user(effective_input, images);
@@ -1375,6 +1716,49 @@ impl CodingAgent {
             return Some(Err(error));
         }
         *self.dispatch_parent_leaf.lock().unwrap() = None;
+        // Bounded continuation safety net (oh-my-pi `prewalk-continue.md`
+        // parity): if prewalk is still armed after the turn and the last
+        // assistant message made no tool calls, the plan nudge's prose reply
+        // would otherwise end the run before any code exists. Emit a one-time
+        // reminder and keep the prewalk armed for the next turn instead of
+        // looping. Fires at most once per armed prewalk via `continue_pending`.
+        {
+            let mut fire_reminder = false;
+            if let Ok(mut guard) = self.prewalk.lock() {
+                if let Some(state) = guard.as_mut() {
+                    if state.continue_pending {
+                        state.continue_pending = false;
+                        fire_reminder = true;
+                    }
+                }
+            }
+            if fire_reminder {
+                let text_only = {
+                    let turn = self.agent.turn.lock().await;
+                    turn.messages.iter().rev().find_map(|message| match message {
+                        AgentMessage::Assistant { content, tool_calls, .. } => Some(
+                            tool_calls.as_ref().is_none_or(|calls| calls.is_empty())
+                                && content.as_ref().is_some_and(|text| !text.trim().is_empty()),
+                        ),
+                        AgentMessage::Tool { .. } => Some(false),
+                        _ => None,
+                    })
+                    .unwrap_or(false)
+                };
+                // Only remind when the turn truly ended text-only with no
+                // handoff. If tools ran (todo opened, edits attempted), the
+                // normal gate/handoff path already applies.
+                if text_only && self.prewalk.lock().unwrap().is_some() {
+                    let _ = self.agent.event_tx.send(AgentEvent::PrewalkCompleted {
+                        model: self.agent.model(),
+                        message: format!(
+                            "Prewalk: plan received but no todo/edits yet. {}",
+                            crate::orchestrator::PREWALK_CONTINUE_PROMPT
+                        ),
+                    });
+                }
+            }
+        }
         let mut tool_termination = HashMap::new();
         let (usage, failure) = loop {
             match harness_events.try_recv() {
@@ -1460,6 +1844,7 @@ mod compaction_sync_tests {
         CodingAgentOptions, CompletedSubagentLane, SubagentLaneStatus,
         MAX_PERSISTED_SYSTEM_PROMPT_BYTES,
     };
+    use crate::browser::BrowserBridge;
     use crate::system_prompt::SystemPromptConfig;
     use async_trait::async_trait;
     use std::{
@@ -1485,6 +1870,101 @@ mod compaction_sync_tests {
         AgentMessage::Custom {
             custom_type: "compaction_summary".into(),
             payload: serde_json::json!({"summary": "older context"}),
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingProvider {
+        refreshed: Arc<Mutex<Vec<(String, Option<String>)>>>,
+    }
+
+    #[async_trait]
+    impl ProviderPort for RecordingProvider {
+        async fn stream_request(
+            &self,
+            _request: RuntimeRequest,
+            events: tokio::sync::mpsc::Sender<RuntimeStreamEvent>,
+        ) {
+            let _ = events
+                .send(RuntimeStreamEvent::Finished {
+                    tool_calls: vec![],
+                    usage: RuntimeUsage::default(),
+                })
+                .await;
+        }
+
+        async fn fetch_deferred(
+            &self,
+            _model: &str,
+            _handle_id: &str,
+        ) -> Result<DeferredResponse, String> {
+            Ok(DeferredResponse::Pending)
+        }
+
+        async fn cancel_deferred(&self, _model: &str, _handle_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn refresh_openai_credentials(&self, key: String, account: Option<String>) {
+            self.refreshed.lock().unwrap().push((key, account));
+        }
+
+        fn provider_kind(&self, _model: &str) -> &'static str {
+            "test"
+        }
+    }
+
+    #[tokio::test]
+    async fn set_model_rotates_provider_credentials_across_providers() {
+        // Reproduces the mid-task 401: a session constructed with a Google
+        // `ya29` token that switches to an OpenAI model must stop signing
+        // with the stale key. Assertions use the same resolver production
+        // uses, so they hold with or without stored credentials.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let refreshed = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(RecordingProvider {
+            refreshed: refreshed.clone(),
+        });
+        let mut agent = CodingAgent::new_with_provider(
+            CodingAgentOptions {
+                api_key: "ya29.stale-google-token".into(),
+                account_id: None,
+                model: "antigravity/gemini-3.7-flash".into(),
+                work_dir: dir.path().to_path_buf(),
+                session_file: Some(path),
+                system_prompt: SystemPromptConfig::default(),
+                agent_config: None,
+                coding_config: None,
+                browser: BrowserBridge::unavailable(),
+            },
+            provider,
+        );
+        let (openai_key, openai_account) =
+            crate::credentials::provider_credentials("gpt-4o");
+        agent.set_model("gpt-4o".into()).await.unwrap();
+        if openai_key.trim().is_empty() {
+            // Credential-less contexts keep legacy behavior: untouched.
+            assert_eq!(agent.agent.api_key, "ya29.stale-google-token");
+            assert!(refreshed.lock().unwrap().is_empty());
+        } else {
+            assert_eq!(agent.agent.api_key, openai_key);
+            assert_eq!(
+                *refreshed.lock().unwrap(),
+                vec![(openai_key, openai_account)]
+            );
+        }
+        // Switching to a non-OpenAI model never touches the shared cell.
+        let before = refreshed.lock().unwrap().len();
+        let (ag_key, _) =
+            crate::credentials::provider_credentials("antigravity/gemini-3.1-pro");
+        agent
+            .set_model("antigravity/gemini-3.1-pro".into())
+            .await
+            .unwrap();
+        assert_eq!(refreshed.lock().unwrap().len(), before);
+        if !ag_key.trim().is_empty() {
+            assert_eq!(agent.agent.api_key, ag_key);
         }
     }
 
@@ -1545,6 +2025,7 @@ mod compaction_sync_tests {
             system_prompt: SystemPromptConfig::default(),
             agent_config: None,
             coding_config: None,
+            browser: BrowserBridge::unavailable(),
         });
         let harness = agent.harness.as_mut().unwrap();
         let run_id = harness.unique_run_id("snapshot").unwrap();
@@ -1649,6 +2130,7 @@ mod compaction_sync_tests {
             system_prompt: SystemPromptConfig::default(),
             agent_config: None,
             coding_config: None,
+            browser: BrowserBridge::unavailable(),
         });
         agent
             .begin_harness_run(AgentMessage::user("prompt", vec![]))
@@ -1701,6 +2183,116 @@ mod compaction_sync_tests {
         previous_serialized_request: Mutex<Option<String>>,
     }
 
+    #[derive(Default)]
+    struct FollowUpProvider {
+        work: Mutex<Option<super::CodingAgentWorkHandle>>,
+        prompts: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl ProviderPort for FollowUpProvider {
+        async fn stream_request(
+            &self,
+            request: RuntimeRequest,
+            events: tokio::sync::mpsc::Sender<RuntimeStreamEvent>,
+        ) {
+            let messages: Vec<AgentMessage> = serde_json::from_value(request.messages).unwrap();
+            let prompt = messages
+                .iter()
+                .rev()
+                .find_map(|message| match message {
+                    AgentMessage::User { content } => Some(content.clone()),
+                    _ => None,
+                })
+                .unwrap();
+            self.prompts.lock().unwrap().push(prompt.clone());
+            {
+                let work = self.work.lock().unwrap();
+                let work = work.as_ref().unwrap();
+                match prompt.as_str() {
+                    "initial" => work
+                        .try_queue_follow_up_with_images("first follow-up", vec![])
+                        .unwrap(),
+                    "first follow-up" => work.queue_steer_with_images("new steer", vec![]).unwrap(),
+                    _ => {}
+                }
+            }
+            events
+                .send(RuntimeStreamEvent::ContentToken("done".into()))
+                .await
+                .unwrap();
+            events
+                .send(RuntimeStreamEvent::Finished {
+                    tool_calls: vec![],
+                    usage: RuntimeUsage::default(),
+                })
+                .await
+                .unwrap();
+        }
+
+        async fn fetch_deferred(
+            &self,
+            _model: &str,
+            _handle_id: &str,
+        ) -> Result<DeferredResponse, String> {
+            Ok(DeferredResponse::Pending)
+        }
+
+        async fn cancel_deferred(&self, _model: &str, _handle_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn provider_kind(&self, _model: &str) -> &'static str {
+            "test"
+        }
+    }
+
+    #[tokio::test]
+    async fn steer_queued_during_follow_up_reaches_provider_and_survives_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let provider = Arc::new(FollowUpProvider::default());
+        let mut agent = CodingAgent::new_with_provider(
+            CodingAgentOptions {
+                api_key: "test-key".into(),
+                account_id: None,
+                model: "test-model".into(),
+                work_dir: dir.path().to_path_buf(),
+                session_file: Some(path.clone()),
+                system_prompt: SystemPromptConfig::default(),
+                agent_config: None,
+                coding_config: None,
+                browser: BrowserBridge::unavailable(),
+            },
+            provider.clone(),
+        );
+        *provider.work.lock().unwrap() = Some(agent.work_handle());
+
+        let result = agent.handle_input_with_images("initial", vec![]).await;
+        assert!(result.is_none(), "foreground run failed: {result:?}");
+        let expected = ["initial", "first follow-up", "new steer"];
+        assert_eq!(*provider.prompts.lock().unwrap(), expected);
+
+        drop(agent);
+        let store = JsonlStore::open(&path).unwrap();
+        let context = store.model_context("main").unwrap();
+        let prompts: Vec<_> = context
+            .messages()
+            .into_iter()
+            .filter_map(|message| match message {
+                AgentMessage::User { content } => Some(content),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(prompts, expected);
+        assert!(threadlane_runtime::harness::Reducer::reduce(&store)
+            .unwrap()
+            .lane("main")
+            .unwrap()
+            .queued
+            .is_empty());
+    }
+
     impl LongToolLoopProvider {
         fn attempts(&self) -> usize {
             self.attempts.load(Ordering::SeqCst)
@@ -1718,6 +2310,20 @@ mod compaction_sync_tests {
             request: RuntimeRequest,
             events: tokio::sync::mpsc::Sender<RuntimeStreamEvent>,
         ) {
+            let messages: Vec<AgentMessage> =
+                serde_json::from_value(request.messages.clone()).unwrap();
+            let (instructions, _) = threadlane_runtime::convert_to_codex_llm(&messages);
+            assert!(
+                instructions.contains("You are an expert coding assistant"),
+                "every outgoing request, including after compaction, must retain system instructions"
+            );
+            assert_eq!(
+                messages
+                    .iter()
+                    .filter(|message| matches!(message, AgentMessage::System { .. }))
+                    .count(),
+                1
+            );
             let serialized_request = format!("{}\n{}", request.messages, request.tools);
             let estimate = serialized_request.len().div_ceil(4);
             let cache_read_tokens = {
@@ -1817,8 +2423,16 @@ mod compaction_sync_tests {
                 work_dir: dir.path().to_path_buf(),
                 session_file: Some(path.clone()),
                 system_prompt: SystemPromptConfig::default(),
-                agent_config: Some(AgentConfig::default()),
+                // This synthetic provider repeats one identical call 101
+                // times to stress compaction; the loop guard would rightly
+                // trip it in production, so it stays off here.
+                agent_config: Some(
+                    threadlane_runtime::AgentConfig::builder()
+                        .loop_guard_enabled(false)
+                        .build(),
+                ),
                 coding_config: None,
+                browser: BrowserBridge::unavailable(),
             },
             provider.clone(),
         );

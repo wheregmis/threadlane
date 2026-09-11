@@ -11,6 +11,7 @@ use crate::coding_agent::{
     CodingAgent, CodingAgentCancellation, CodingAgentOptions, CodingAgentWorkHandle,
 };
 use crate::permission::{PermissionDecision, PermissionHandle};
+use crate::question::QuestionHandle;
 use crate::ModelRoles;
 
 /// Execution mode configured for a session.
@@ -40,15 +41,16 @@ pub struct SessionController {
     pub cancellation: CodingAgentCancellation,
     pub work_handle: CodingAgentWorkHandle,
     permission_handle: PermissionHandle,
-    pub prompt_lock: Arc<tokio::sync::Mutex<()>>,
+    question_handle: QuestionHandle,
+    pub(crate) prompt_lock: Arc<tokio::sync::Mutex<()>>,
     pub session_file: PathBuf,
-    pub mode: ExecutionMode,
+    mode: ExecutionMode,
     pub selected_model: String,
     pub system_prompt: String,
     pub harness_error: Option<String>,
     is_generating: AtomicBool,
     status: Mutex<SessionStatus>,
-    pub recovery_loaded: AtomicBool,
+    pub(crate) recovery_loaded: AtomicBool,
 }
 
 impl SessionController {
@@ -62,8 +64,10 @@ impl SessionController {
         let cancellation = agent.cancellation_handle();
         let work_handle = agent.work_handle();
         let permission_handle = agent.permission_handle();
+        let question_handle = agent.question_handle();
         if mode == ExecutionMode::Interactive {
             permission_handle.set_interactive(true);
+            question_handle.set_interactive(true);
         }
         let system_prompt = agent.system_prompt_snapshot().unwrap_or_default();
         let harness_error = agent.harness_error().map(str::to_owned);
@@ -82,6 +86,7 @@ impl SessionController {
             cancellation,
             work_handle,
             permission_handle,
+            question_handle,
             prompt_lock: Arc::new(tokio::sync::Mutex::new(())),
             session_file,
             mode,
@@ -160,6 +165,18 @@ impl SessionController {
         self.permission_handle.resolve(request_id, decision)
     }
 
+    pub fn question_handle(&self) -> QuestionHandle {
+        self.question_handle.clone()
+    }
+
+    pub fn resolve_question(
+        &self,
+        request_id: &str,
+        answer: threadlane_runtime::QuestionAnswer,
+    ) -> bool {
+        self.question_handle.resolve(request_id, answer)
+    }
+
     pub fn cancel(&self) -> Result<(), String> {
         self.cancellation.cancel()
     }
@@ -177,7 +194,7 @@ impl SessionController {
         true
     }
 
-    pub async fn reload_extensions(&self) -> Result<usize, String> {
+    pub(crate) async fn reload_extensions(&self) -> Result<usize, String> {
         let _guard = self.prompt_lock.lock().await;
         let mut agent = self.agent.lock().await;
         agent.reload_extensions().await

@@ -91,7 +91,7 @@ pub struct AgentRuntime {
     /// Assistant message recorder (for persistence).
     message_recorder: Option<crate::provider::AssistantMessageRecorder>,
     /// Harness event hub for wiring durability events.
-    pub harness_event_hub: HarnessEventHub,
+    harness_event_hub: HarnessEventHub,
 }
 
 impl AgentRuntime {
@@ -235,7 +235,7 @@ impl AgentRuntime {
     }
 
     /// Returns the canonical messages from a specific harness lane projection.
-    pub async fn projected_messages_on_lane(
+    async fn projected_messages_on_lane(
         &self,
         lane: &str,
     ) -> Result<Vec<AgentMessage>, AgentError> {
@@ -630,6 +630,21 @@ impl AgentRuntime {
                 turn.messages.extend(items);
             }
             self.run_turns().await;
+        }
+    }
+
+    /// Execute a queued input whose durable intent the caller has already consumed.
+    /// Reuse message persistence without creating another queue entry for replay.
+    pub async fn run_consumed_queue_message(&mut self, queue: QueueKind, message: AgentMessage) {
+        match queue {
+            QueueKind::Steer => {
+                self.steering_queue.push(message);
+                self.run_steer().await;
+            }
+            QueueKind::FollowUp | QueueKind::NextRun => {
+                self.follow_up_queue.push(message);
+                self.run_follow_up().await;
+            }
         }
     }
 
@@ -1061,6 +1076,7 @@ mod tests {
                 content: "contents".into(),
                 is_error: false,
                 terminate: false,
+                images: Vec::new(),
             },
             AgentMessage::UserWithImages {
                 content: "inspect".into(),

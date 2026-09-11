@@ -36,6 +36,22 @@ pub struct AgentConfig {
     pub(crate) context_maximum_retained_tail_tokens: usize,
     pub(crate) context_retained_tail_percent: usize,
 
+    // ── Loop Guard ──────────────────────────────────────────────────────
+    /// Master switch for the turn-level loop circuit breaker. When enabled,
+    /// consecutive identical calls, ping-pong cycles, and same-error runs
+    /// trip with a terminal message instead of burning to the context limit.
+    #[serde(default = "default_loop_guard_enabled")]
+    pub(crate) loop_guard_enabled: bool,
+    /// Consecutive identical (tool+args+output) calls that trip the breaker.
+    #[serde(default = "default_loop_identical_limit")]
+    pub(crate) loop_identical_limit: usize,
+    /// Repeated A→B→A… rounds (period 2-3) that trip the breaker.
+    #[serde(default = "default_loop_pingpong_rounds")]
+    pub(crate) loop_pingpong_rounds: usize,
+    /// Consecutive same-error failures that trip the breaker.
+    #[serde(default = "default_loop_error_limit")]
+    pub(crate) loop_error_limit: usize,
+
     // ── Stream Rules ────────────────────────────────────────────────────
     /// Maximum bytes of accumulated streaming text to retain for regex
     /// matching. Text beyond this window is discarded.
@@ -82,10 +98,11 @@ pub struct AgentConfig {
     max_tool_output_bytes: Option<usize>,
 
     /// When enabled, restricts the model-visible JSON tool schema to the essential core tools
-    /// (read_file, edit_file_hashline, edit_files_hashline, write_file, run_command, subagent).
+    /// (read_file, edit_file_hashline, edit_files_hashline, write_file, run_command, subagent,
+    /// plus the browser_* panel and computer_* native tools).
     /// Auxiliary tools remain executable directly or via the in-process `dyn` CLI.
     #[serde(default = "default_core_tool_schema_mode")]
-    pub core_tool_schema_mode: bool,
+    pub(crate) core_tool_schema_mode: bool,
 
     // ── Event Channel ───────────────────────────────────────────────────
     /// Capacity of the broadcast channel for [`AgentEvent`]s.
@@ -94,6 +111,22 @@ pub struct AgentConfig {
 
 fn default_core_tool_schema_mode() -> bool {
     true
+}
+
+fn default_loop_guard_enabled() -> bool {
+    true
+}
+
+fn default_loop_identical_limit() -> usize {
+    5
+}
+
+fn default_loop_pingpong_rounds() -> usize {
+    3
+}
+
+fn default_loop_error_limit() -> usize {
+    3
 }
 
 impl Default for AgentConfig {
@@ -111,7 +144,7 @@ impl Default for AgentConfig {
             context_maximum_retained_tail_tokens: 64_000,
             context_retained_tail_percent: 25,
             stream_rule_max_window_bytes: 4096,
-            default_system_prompt: "You are threadlane AI coding agent.".into(),
+            default_system_prompt: "You are threadlane AI coding agent. Lead with answers and actions. Omit conversational filler, preambles, and recaps. Keep edits minimal, focused on root causes, and strictly avoid unrequested refactoring or speculative abstractions.".into(),
             model_roles: ModelRoles::default(),
             subagent_model: None,
             subagent_reasoning_effort: None,
@@ -119,6 +152,10 @@ impl Default for AgentConfig {
             orchestrator_mode: OrchestratorMode::default(),
             needle_enabled: false,
             core_tool_schema_mode: true,
+            loop_guard_enabled: true,
+            loop_identical_limit: 5,
+            loop_pingpong_rounds: 3,
+            loop_error_limit: 3,
             tool_execution_timeout: None,
             max_tool_output_bytes: None,
             event_channel_capacity: 500,
@@ -153,12 +190,14 @@ pub struct AgentConfigBuilder {
 }
 
 impl AgentConfigBuilder {
-    pub fn auto_compaction_threshold_tokens(mut self, value: usize) -> Self {
+    #[cfg(test)]
+    pub(crate) fn auto_compaction_threshold_tokens(mut self, value: usize) -> Self {
         self.config.auto_compaction_threshold_tokens = value;
         self
     }
 
-    pub fn auto_compaction_keep_recent_tokens(mut self, value: usize) -> Self {
+    #[cfg(test)]
+    pub(crate) fn auto_compaction_keep_recent_tokens(mut self, value: usize) -> Self {
         self.config.auto_compaction_keep_recent_tokens = value;
         self
     }
@@ -168,7 +207,8 @@ impl AgentConfigBuilder {
         self
     }
 
-    pub fn estimated_image_tokens(mut self, value: usize) -> Self {
+    #[cfg(test)]
+    pub(crate) fn estimated_image_tokens(mut self, value: usize) -> Self {
         self.config.estimated_image_tokens = value;
         self
     }
@@ -218,7 +258,8 @@ impl AgentConfigBuilder {
         self
     }
 
-    pub fn model_roles(mut self, value: ModelRoles) -> Self {
+    #[cfg(test)]
+    pub(crate) fn model_roles(mut self, value: ModelRoles) -> Self {
         self.config.model_roles = value;
         self
     }
@@ -240,6 +281,26 @@ impl AgentConfigBuilder {
 
     pub fn core_tool_schema_mode(mut self, value: bool) -> Self {
         self.config.core_tool_schema_mode = value;
+        self
+    }
+
+    pub fn loop_guard_enabled(mut self, value: bool) -> Self {
+        self.config.loop_guard_enabled = value;
+        self
+    }
+
+    pub fn loop_identical_limit(mut self, value: usize) -> Self {
+        self.config.loop_identical_limit = value;
+        self
+    }
+
+    pub fn loop_pingpong_rounds(mut self, value: usize) -> Self {
+        self.config.loop_pingpong_rounds = value;
+        self
+    }
+
+    pub fn loop_error_limit(mut self, value: usize) -> Self {
+        self.config.loop_error_limit = value;
         self
     }
 

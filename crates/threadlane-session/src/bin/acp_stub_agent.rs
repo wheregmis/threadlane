@@ -16,8 +16,12 @@
 //!   which is how a test observes that the notification arrived without
 //!   inspecting global process state.
 //! * `no_images` — declares no image support, and echoes the prompt back.
+//! * `dismissed_question` — emits a `question` tool call that fails unseen
+//!   with a dismissal (as opencode does under ACP), then echoes the prompt
+//!   back so tests can observe per-turn prompt changes.
 //! * `config` — exposes model and effort settings and replies with the values
 //!   currently applied, so a test can prove a setting crossed the wire.
+//! * `queued` — pauses selected prompts and reports session/prompt counters.
 
 use std::io::{BufRead, Write};
 
@@ -29,6 +33,9 @@ fn main() {
     // `session/set_config_option` exactly as a real agent would.
     let mut model = "default".to_string();
     let mut effort = "default".to_string();
+    let mut sessions = 0;
+    let mut prompts = 0;
+    let mut permission_cancel_proof = String::new();
 
     while let Some(Ok(line)) = lines.next() {
         let line = line.trim().to_string();
@@ -58,6 +65,7 @@ fn main() {
                 }),
             ),
             "session/new" => {
+                sessions += 1;
                 if mode == "config" {
                     reply(
                         id,
@@ -95,7 +103,30 @@ fn main() {
                 );
             }
             "session/prompt" => {
-                if mode == "config" {
+                prompts += 1;
+                if mode == "queued" {
+                    let text = prompt_text(&message);
+                    if text == "wait for cancelled permission" {
+                        permission_cancel_proof = cancelled_permission_prompt(&mut lines);
+                        reply(id, serde_json::json!({ "stopReason": "cancelled" }));
+                        continue;
+                    }
+                    if text == "wait for stop" {
+                        handle_prompt("cancel_late_update", id, &message, &mut lines);
+                        continue;
+                    }
+                    if text == "wait for permission" {
+                        request_permission(&mut lines);
+                    }
+                    notify_update(serde_json::json!({
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {
+                            "type": "text",
+                            "text": format!("session:{sessions} prompt:{prompts} input:{text}{permission_cancel_proof}"),
+                        },
+                    }));
+                    reply(id, serde_json::json!({ "stopReason": "end_turn" }));
+                } else if mode == "config" {
                     notify_update(serde_json::json!({
                         "sessionUpdate": "agent_message_chunk",
                         "content": {
@@ -143,7 +174,7 @@ fn handle_prompt(
             }));
             reply(id, serde_json::json!({ "stopReason": "end_turn" }));
         }
-        "cancel" => {
+        "cancel" | "cancel_late_update" => {
             notify_update(serde_json::json!({
                 "sessionUpdate": "agent_message_chunk",
                 "content": { "type": "text", "text": "working" },
@@ -154,6 +185,12 @@ fn handle_prompt(
                 if line.contains("session/cancel") {
                     if let Ok(marker) = std::env::var("THREADLANE_STUB_CANCEL_MARKER") {
                         let _ = std::fs::write(marker, "cancelled");
+                    }
+                    if mode == "cancel_late_update" {
+                        notify_update(serde_json::json!({
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": { "type": "text", "text": "cancelled tail" },
+                        }));
                     }
                     reply(id, serde_json::json!({ "stopReason": "cancelled" }));
                     return;
@@ -168,7 +205,73 @@ fn handle_prompt(
             }));
             reply(id, serde_json::json!({ "stopReason": "end_turn" }));
         }
+        // Mirrors opencode's `question` tool under ACP: its interactive
+        // prompt has no client binding, so it never emits
+        // `session/request_permission` and fails unseen with a dismissal.
+        "dismissed_question" => {
+            notify_update(serde_json::json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call_q",
+                "title": "question",
+                "kind": "other",
+                "rawInput": {},
+            }));
+            notify_update(serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_q",
+                "status": "in_progress",
+                "title": "question",
+                "rawInput": {
+                    "questions": [{
+                        "question": "What should we build?",
+                        "header": "Focus",
+                        "options": [
+                            {"label": "Explore", "description": "Look around."},
+                            {"label": "Build", "description": "Start fresh."},
+                        ],
+                    }],
+                },
+            }));
+            notify_update(serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_q",
+                "status": "failed",
+                "title": "question",
+                "rawInput": {
+                    "questions": [{
+                        "question": "What should we build?",
+                        "header": "Focus",
+                        "options": [
+                            {"label": "Explore", "description": "Look around."},
+                            {"label": "Build", "description": "Start fresh."},
+                        ],
+                    }],
+                },
+                "content": [{
+                    "type": "content",
+                    "content": { "type": "text", "text": "The user dismissed this question" },
+                }],
+            }));
+            // Echo the received prompt so the test can prove the reminder
+            // note rode along on the following turn.
+            let text = prompt_text(message);
+            notify_update(serde_json::json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": format!("echo:{text}") },
+            }));
+            reply(id, serde_json::json!({ "stopReason": "end_turn" }));
+        }
         _ => {
+            if mode == "stream_after_tool" {
+                notify_update(serde_json::json!({
+                    "sessionUpdate": "plan",
+                    "entries": [{
+                        "content": "Read main.rs",
+                        "priority": "high",
+                        "status": "in_progress",
+                    }],
+                }));
+            }
             notify_update(serde_json::json!({
                 "sessionUpdate": "agent_thought_chunk",
                 "content": { "type": "text", "text": "thinking" },
@@ -197,6 +300,20 @@ fn handle_prompt(
                     "content": { "type": "text", "text": "fn main() {}" },
                 }],
             }));
+            if mode == "stream_after_tool" {
+                notify_update(serde_json::json!({
+                    "sessionUpdate": "plan",
+                    "entries": [{
+                        "content": "Read main.rs",
+                        "priority": "high",
+                        "status": "completed",
+                    }],
+                }));
+                notify_update(serde_json::json!({
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": { "type": "text", "text": "The file is ready." },
+                }));
+            }
             // An update addressed to another session must not reach this turn.
             send(serde_json::json!({
                 "jsonrpc": "2.0",
@@ -291,25 +408,7 @@ fn prompt_text(message: &serde_json::Value) -> String {
 /// Reads from the caller's iterator rather than locking stdin again: the lock
 /// is not reentrant, so a second `stdin().lock()` on this thread would hang.
 fn request_permission(lines: &mut std::io::Lines<std::io::StdinLock<'_>>) -> String {
-    send(serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 9001,
-        "method": "session/request_permission",
-        "params": {
-            "sessionId": "stub-session",
-            "toolCall": {
-                "toolCallId": "call_1",
-                "title": "Run `echo hi`",
-                "kind": "execute",
-                "rawInput": { "command": "echo hi" },
-            },
-            "options": [
-                { "optionId": "yes", "name": "Allow", "kind": "allow_once" },
-                { "optionId": "no", "name": "Deny", "kind": "reject_once" },
-            ],
-        },
-    }));
-
+    send_permission_request(9001);
     for line in lines.by_ref().map_while(Result::ok) {
         let Ok(message) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
             continue;
@@ -326,6 +425,63 @@ fn request_permission(lines: &mut std::io::Lines<std::io::StdinLock<'_>>) -> Str
             .to_string();
     }
     "closed".to_string()
+}
+
+fn send_permission_request(id: u64) {
+    send(serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "session/request_permission",
+        "params": {
+            "sessionId": "stub-session",
+            "toolCall": {
+                "toolCallId": "call_1",
+                "title": "Run `echo hi`",
+                "kind": "execute",
+                "rawInput": { "command": "echo hi" },
+            },
+            "options": [
+                { "optionId": "yes", "name": "Allow", "kind": "allow_once" },
+                { "optionId": "no", "name": "Deny", "kind": "reject_once" },
+            ],
+        },
+    }));
+}
+
+// Withhold the original prompt response until both the pending permission and
+// a request sent after session/cancel receive real cancellation responses.
+fn cancelled_permission_prompt(lines: &mut std::io::Lines<std::io::StdinLock<'_>>) -> String {
+    send_permission_request(9001);
+    let mut pending = None;
+    let mut late = None;
+    let mut cancelled = false;
+    for line in lines.by_ref().map_while(Result::ok) {
+        let Ok(message) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        if message.get("method").and_then(|method| method.as_str()) == Some("session/cancel") {
+            cancelled = true;
+            send_permission_request(9002);
+            continue;
+        }
+        let outcome = message
+            .pointer("/result/outcome/outcome")
+            .and_then(|value| value.as_str());
+        match message.get("id").and_then(|id| id.as_u64()) {
+            Some(9001) => pending = outcome.map(str::to_string),
+            Some(9002) => late = outcome.map(str::to_string),
+            _ => {}
+        }
+        if let (true, Some(pending), Some(late)) = (cancelled, &pending, &late) {
+            if let Ok(path) = std::env::var("THREADLANE_STUB_CANCEL_RELEASE") {
+                while !std::path::Path::new(&path).exists() {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+            return format!(" cancel:true pending:{pending} late:{late}");
+        }
+    }
+    " cancel:connection-closed".to_string()
 }
 
 fn notify_update(update: serde_json::Value) {

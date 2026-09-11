@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::ops::Range;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use std::time::Duration;
@@ -8,8 +7,8 @@ use std::time::Duration;
 use base64::Engine as _;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use gpui_component::Root;
 use gpui_component::button::{Button, ButtonVariants, Toggle, ToggleVariants};
-use gpui_component::collapsible::Collapsible;
 use gpui_component::hover_card::HoverCard;
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
@@ -17,186 +16,204 @@ use gpui_component::notification::Notification;
 use gpui_component::popover::Popover;
 use gpui_component::progress::ProgressCircle;
 use gpui_component::scroll::ScrollableElement;
+use gpui_component::spinner::Spinner;
 use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::text::{TextView, TextViewState};
 use gpui_component::theme::ActiveTheme;
 use gpui_component::{Disableable, Icon, IconName, Selectable, Sizable, WindowExt};
 
 use crate::app::{actions::AppAction, controller};
+use crate::screens::computer_mirror::MirrorView;
 use crate::screens::editor::EditorView;
 use crate::state::{
-    AppState, ChatMessageInfo, ChatStreamEvent, MessageRole, SubagentActivityInfo,
-    SubagentActivityStatus, ToolActivityInfo, TrajectoryEntry, WorkMode,
+    AppState, ChatMessageInfo, ChatStreamEvent, MessageRole, SessionAttention,
+    SubagentActivityInfo, SubagentActivityStatus, ToolActivityInfo, WorkMode,
 };
+
+use super::composer::*;
+use super::context_meter::*;
+use super::markdown::*;
+use super::trajectory::*;
+use super::transcript::*;
 
 fn editor_target_matches_active_work_dir(target: &Path, active: Option<&Path>) -> bool {
     active == Some(target)
 }
 
-#[derive(Clone, Debug)]
-struct ContextMeterContext {
-    current_tokens: u64,
-    context_limit: u64,
-    context_limit_is_estimate: bool,
-    effective_model: String,
-    last_compaction_seq: Option<u64>,
-    provisional: bool,
-    estimating: bool,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct ContextMeterMetrics {
-    billed_input_tokens: u64,
-    output_tokens: u64,
-    cache_hit_percent: Option<u64>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct ContextMeterViewModel {
-    percent: Option<f64>,
-    bar_percent: f64,
-    current_label: String,
-    detail_label: String,
-    total_processed_label: String,
-    cache_hit_label: Option<String>,
-    effective_model: Option<String>,
-    last_compaction_seq: Option<u64>,
-    provisional: bool,
-}
-
-#[derive(IntoElement)]
-struct ContextMeterTrigger {
-    toggle: Toggle,
-    selected: bool,
-}
-
-impl Selectable for ContextMeterTrigger {
-    fn selected(mut self, selected: bool) -> Self {
-        self.selected = selected;
-        self
+fn chat_error_summary(error: &str) -> (String, bool) {
+    let expired = ["token_expired", "token has expired", "sign-in expired"]
+        .iter()
+        .any(|marker| contains_case_insensitive(error, marker));
+    if expired {
+        return (
+            "Your provider sign-in has expired. Sign in again in Settings → Providers, then resend your message.".into(),
+            true,
+        );
     }
-
-    fn is_selected(&self) -> bool {
-        self.selected
+    let rejected = ["invalid_api_key", "http 401", "401 unauthorized"]
+        .iter()
+        .any(|marker| contains_case_insensitive(error, marker));
+    if rejected {
+        return (
+            "The provider rejected your credentials. Check your sign-in or API key in Settings → Providers, then resend your message.".into(),
+            true,
+        );
     }
+    let first_line = error
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("");
+    let mut chars = first_line.trim().chars();
+    let mut summary: String = chars.by_ref().take(240).collect();
+    if chars.next().is_some() {
+        summary.push('…');
+    }
+    if summary.is_empty() {
+        summary = "The turn stopped without an error description.".into();
+    }
+    (summary, false)
 }
 
-impl RenderOnce for ContextMeterTrigger {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        self.toggle.checked(self.selected)
-    }
+fn visible_session_status<'a>(
+    status: Option<&'a str>,
+    last_message: Option<&ChatMessageInfo>,
+) -> Option<&'a str> {
+    status.filter(|status| {
+        !status.trim().is_empty()
+            && !matches!(*status, "Working…" | "Reconciling session…")
+            && !last_message.is_some_and(|message| {
+                message.role == MessageRole::Error && message.content == *status
+            })
+    })
 }
 
-#[derive(IntoElement)]
-struct SubagentPopoverTrigger {
-    toggle: Toggle,
-    selected: bool,
-}
-
-impl Selectable for SubagentPopoverTrigger {
-    fn selected(mut self, selected: bool) -> Self {
-        self.selected = selected;
-        self
-    }
-
-    fn is_selected(&self) -> bool {
-        self.selected
-    }
-}
-
-impl RenderOnce for SubagentPopoverTrigger {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        self.toggle.checked(self.selected)
-    }
-}
-
-fn format_meter_tokens(tokens: u64) -> String {
-    if tokens >= 1_000_000 {
-        format!("{:.1}M", tokens as f64 / 1_000_000.0)
-    } else if tokens >= 1_000 {
-        format!("{:.1}k", tokens as f64 / 1_000.0)
-    } else {
-        tokens.to_string()
-    }
-}
-
-fn context_meter_view_model(
-    context: Option<&ContextMeterContext>,
-    metrics: &ContextMeterMetrics,
-    reports_usage: bool,
-) -> ContextMeterViewModel {
-    let total_processed = metrics
-        .billed_input_tokens
-        .saturating_add(metrics.output_tokens);
-    let cache_hit_label = metrics.cache_hit_percent.map(|value| format!("{value}%"));
-
-    // An external ACP agent runs its own loop and reports no token accounting,
-    // so there is no context window to measure. Saying "Estimating…" would
-    // promise a number that never arrives.
-    if !reports_usage {
-        return ContextMeterViewModel {
-            percent: None,
-            bar_percent: 0.0,
-            current_label: "Not reported".into(),
-            detail_label: "Context usage is not reported by this agent".into(),
-            total_processed_label: format_meter_tokens(total_processed),
-            cache_hit_label,
-            effective_model: None,
-            last_compaction_seq: None,
-            provisional: false,
-        };
-    }
-
-    let Some(context) = context else {
-        return ContextMeterViewModel {
-            percent: None,
-            bar_percent: 0.0,
-            current_label: "Estimating…".into(),
-            detail_label: "Context usage details, estimating usage".into(),
-            total_processed_label: format_meter_tokens(total_processed),
-            cache_hit_label,
-            effective_model: None,
-            last_compaction_seq: None,
-            provisional: false,
-        };
+/// Open the computer-use mirror popup: a small non-activating window in the
+/// bottom-right corner showing the target as live video plus the current
+/// action. Resizable so the user can enlarge the picture; guarded by
+/// `AppState::mirror_open` so repeated triggers reuse the window.
+fn open_computer_mirror(model: &Entity<AppState>, cx: &mut AsyncApp) {
+    let previews_dir = model.update(cx, |state, _cx| {
+        if state.mirror_open {
+            return None;
+        }
+        // The live mirror is global (one popup, many project sessions); the
+        // session tools write latest.json here and frames arrive in-process.
+        threadlane_session::computer::global_previews_dir().or_else(|| {
+            state
+                .active_work_dir
+                .clone()
+                .map(|work_dir| work_dir.join(".threadlane").join("previews"))
+        })
+    });
+    let Some(previews_dir) = previews_dir else {
+        return;
     };
-
-    let unknown = context.estimating || context.context_limit == 0;
-    let percent =
-        (!unknown).then(|| context.current_tokens as f64 / context.context_limit as f64 * 100.0);
-    let limit_prefix = if context.context_limit_is_estimate {
-        "~"
-    } else {
-        ""
+    let bounds = cx.update(|cx| {
+        cx.primary_display().map(|display| {
+            let area = display.visible_bounds();
+            Bounds {
+                origin: point(
+                    area.origin.x + area.size.width - px(496.0),
+                    area.origin.y + area.size.height - px(376.0),
+                ),
+                size: size(px(480.0), px(360.0)),
+            }
+        })
+    });
+    let Some(bounds) = bounds else {
+        return;
     };
-    let current_label = if unknown {
-        "Estimating…".into()
-    } else {
-        format!(
-            "{} / {limit_prefix}{}",
-            format_meter_tokens(context.current_tokens),
-            format_meter_tokens(context.context_limit)
-        )
-    };
-    let detail_label = percent.map_or_else(
-        || "Context usage details, estimating usage".into(),
-        |percent| format!("Context usage details, {percent:.0}% used"),
+    let opened = cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            titlebar: None,
+            focus: false,
+            show: true,
+            kind: WindowKind::PopUp,
+            is_movable: true,
+            is_resizable: true,
+            is_minimizable: false,
+            ..Default::default()
+        },
+        {
+            let model = model.clone();
+            move |window, cx| {
+                let view = MirrorView::build(model.clone(), previews_dir.clone(), window, cx);
+                cx.new(|cx| Root::new(view, window, cx))
+            }
+        },
     );
-    ContextMeterViewModel {
-        percent,
-        bar_percent: percent.unwrap_or_default().clamp(0.0, 100.0),
-        current_label,
-        detail_label,
-        total_processed_label: format_meter_tokens(total_processed),
-        cache_hit_label,
-        effective_model: (!context.effective_model.is_empty())
-            .then(|| context.effective_model.clone()),
-        last_compaction_seq: context.last_compaction_seq,
-        provisional: context.provisional,
+    if opened.is_ok() {
+        let _ = model.update(cx, |state, _cx| state.mirror_open = true);
     }
 }
-use threadlane_session::commands::{available_slash_commands, SlashCommandInfo};
-use threadlane_session::{ImageAttachment, PlanItemStatus, ReasoningEffort, SessionPlan};
+
+fn render_chat_error(id: &str, error: &str, model: &Entity<AppState>, cx: &App) -> Div {
+    let theme = cx.theme().colors;
+    let (summary, needs_provider_settings) = chat_error_summary(error);
+    let details = error.to_owned();
+    div().w_full().my_2().px_4().child(
+        div()
+            .w_full()
+            .p_3()
+            .rounded(cx.theme().radius)
+            .bg(theme.danger.opacity(0.08))
+            .border_1()
+            .border_color(theme.danger.opacity(0.4))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.danger)
+                    .child("Turn stopped"),
+            )
+            .child(
+                div()
+                    .mt_1()
+                    .text_sm()
+                    .text_color(theme.foreground)
+                    .child(summary),
+            )
+            .child(
+                div()
+                    .mt_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .children(needs_provider_settings.then(|| {
+                        let model = model.clone();
+                        Button::new(SharedString::from(format!("chat-error-settings-{id}")))
+                            .label("Settings…")
+                            .small()
+                            .tooltip("Open provider settings")
+                            .debug_selector(|| "chat-error-settings".into())
+                            .on_click(move |_, _, cx| {
+                                model.update(cx, |state, cx| {
+                                    controller::dispatch(state, AppAction::OpenSettings);
+                                    cx.notify();
+                                });
+                            })
+                    }))
+                    .child(
+                        Button::new(SharedString::from(format!("chat-error-copy-{id}")))
+                            .label("Copy details")
+                            .ghost()
+                            .small()
+                            .tooltip("Copy full error to clipboard")
+                            .debug_selector(|| "chat-error-copy".into())
+                            .on_click(move |_, window, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(details.clone()));
+                                window.push_notification(
+                                    Notification::info("Copied error details"),
+                                    cx,
+                                );
+                            }),
+                    ),
+            ),
+    )
+}
+use threadlane_session::commands::{SlashCommandInfo, available_slash_commands};
+use threadlane_session::{ImageAttachment, PlanItemStatus, SessionPlan};
 
 actions!(
     threadlane_composer,
@@ -209,601 +226,12 @@ actions!(
     ]
 );
 
-const INPUT_KEY_CONTEXT: &str = "Input";
-const SLASH_COMMAND_KEY_CONTEXT: &str = "SlashCommandMenu";
-const SLASH_COMMAND_BINDING_CONTEXT: &str = "SlashCommandMenu > Input";
-
-const CHAT_CONTENT_MAX_WIDTH: f32 = 1040.0;
-const USER_BUBBLE_MAX_WIDTH: f32 = 680.0;
-
-/// Context-window usage thresholds where the meter shifts to warning/danger colors.
-const CONTEXT_METER_WARN_PCT: f64 = 80.0;
-const CONTEXT_METER_DANGER_PCT: f64 = 95.0;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum CentralTab {
     #[default]
     Chat,
     Trajectory,
     Editor,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-enum TrajectoryMode {
-    #[default]
-    Execution,
-    Requests,
-    ModelContext,
-    DurableEvents,
-    Recovery,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-enum TrajectoryInspectorTab {
-    #[default]
-    Overview,
-    Preview,
-    Raw,
-    Source,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MarkdownUpdate<'a> {
-    Unchanged,
-    Append(&'a str),
-    Replace,
-}
-
-fn classify_markdown_update<'a>(current: &str, next: &'a str) -> MarkdownUpdate<'a> {
-    if current == next {
-        MarkdownUpdate::Unchanged
-    } else if let Some(suffix) = next.strip_prefix(current) {
-        MarkdownUpdate::Append(suffix)
-    } else {
-        MarkdownUpdate::Replace
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum ChatLinkTarget {
-    Web,
-    ProjectFile(String),
-    Rejected,
-}
-
-fn classify_chat_link(link: &str) -> ChatLinkTarget {
-    if link.starts_with("http://") || link.starts_with("https://") {
-        return ChatLinkTarget::Web;
-    }
-
-    let mut normalized = PathBuf::new();
-    for component in Path::new(link).components() {
-        match component {
-            Component::Normal(part) => normalized.push(part),
-            Component::CurDir => {}
-            Component::ParentDir if normalized.pop() => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return ChatLinkTarget::Rejected;
-            }
-        }
-    }
-
-    if normalized.as_os_str().is_empty() {
-        ChatLinkTarget::Rejected
-    } else {
-        ChatLinkTarget::ProjectFile(normalized.to_string_lossy().into_owned())
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum MarkdownSegment {
-    Markdown(String),
-    CodeBlock {
-        language: String,
-        header_path: Option<String>,
-        code: String,
-    },
-}
-
-fn is_terminal_runnable_language(lang: &str) -> bool {
-    matches!(
-        lang.to_lowercase().as_str(),
-        "bash" | "sh" | "zsh" | "shell" | "terminal" | "console" | "cmd" | "powershell"
-    )
-}
-
-fn active_shell_supports_language(lang: &str) -> bool {
-    let shell = std::env::var("SHELL")
-        .ok()
-        .and_then(|path| {
-            Path::new(&path)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(str::to_ascii_lowercase)
-        })
-        .unwrap_or_else(|| "sh".into());
-    match lang.trim().to_ascii_lowercase().as_str() {
-        "bash" => shell == "bash",
-        "zsh" => shell == "zsh",
-        "sh" => matches!(shell.as_str(), "sh" | "bash" | "zsh"),
-        "cmd" => matches!(shell.as_str(), "cmd" | "cmd.exe"),
-        "powershell" => matches!(shell.as_str(), "pwsh" | "powershell"),
-        "shell" | "terminal" | "console" => true,
-        _ => false,
-    }
-}
-
-fn normalize_terminal_command(command: &str) -> String {
-    command
-        .lines()
-        .map(|line| {
-            line.strip_prefix("$ ")
-                .or_else(|| line.strip_prefix(">>> "))
-                .or_else(|| line.strip_prefix("> "))
-                .unwrap_or(line)
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-fn is_fence_line(raw: &str, idx: usize) -> bool {
-    let line_start = raw[..idx].rfind('\n').map_or(0, |p| p + 1);
-    raw[line_start..idx].len() <= 3 && raw[line_start..idx].bytes().all(|b| b == b' ')
-}
-
-fn parse_code_block_header(header: &str, code: &str) -> (String, Option<String>) {
-    let header_trimmed = header.trim();
-    let parts: Vec<&str> = header_trimmed.split_whitespace().collect();
-    let language = parts.first().copied().unwrap_or("text").to_lowercase();
-
-    let mut detected_path = if parts.len() > 1 {
-        Some(parts[1].to_string())
-    } else if let Some((_, path)) = language.split_once(':') {
-        Some(path.to_string())
-    } else {
-        None
-    };
-
-    let clean_language = language.split(':').next().unwrap_or("text").to_string();
-
-    if detected_path.is_none() {
-        if let Some(first_line) = code.lines().next() {
-            let trimmed = first_line.trim();
-            let comment_content = trimmed
-                .strip_prefix("//")
-                .or_else(|| trimmed.strip_prefix('#'))
-                .or_else(|| {
-                    trimmed
-                        .strip_prefix("/*")
-                        .and_then(|s| s.strip_suffix("*/"))
-                })
-                .or_else(|| {
-                    trimmed
-                        .strip_prefix("<!--")
-                        .and_then(|s| s.strip_suffix("-->"))
-                });
-
-            if let Some(candidate) = comment_content {
-                let candidate = candidate.trim();
-                if candidate.contains('/')
-                    && !candidate.contains(' ')
-                    && candidate.len() < 120
-                    && !candidate.starts_with("http")
-                    && !candidate.starts_with('!')
-                {
-                    detected_path = Some(candidate.to_string());
-                }
-            }
-        }
-    }
-
-    (clean_language, detected_path)
-}
-
-pub fn extract_markdown_segments(raw: &str) -> Vec<MarkdownSegment> {
-    let mut segments = Vec::new();
-    let mut current_pos = 0;
-    let mut search_from = 0;
-
-    while let Some(start_fence) = raw[search_from..].find("```") {
-        let fence_start_idx = search_from + start_fence;
-
-        if !is_fence_line(raw, fence_start_idx) {
-            search_from = fence_start_idx + 3;
-            continue;
-        }
-
-        if fence_start_idx > current_pos {
-            let text = &raw[current_pos..fence_start_idx];
-            if !text.is_empty() {
-                segments.push(MarkdownSegment::Markdown(text.to_string()));
-            }
-        }
-
-        let header_start = fence_start_idx + 3;
-        let Some(header_newline) = raw[header_start..].find('\n') else {
-            segments.push(MarkdownSegment::Markdown(
-                raw[fence_start_idx..].to_string(),
-            ));
-            return segments;
-        };
-
-        let header_line = raw[header_start..header_start + header_newline].trim();
-        let code_start = header_start + header_newline + 1;
-
-        let mut close_fence_idx = None;
-        let mut search_pos = code_start;
-        while let Some(close_pos) = raw[search_pos..].find("```") {
-            let candidate_idx = search_pos + close_pos;
-            if is_fence_line(raw, candidate_idx) {
-                close_fence_idx = Some(candidate_idx);
-                break;
-            }
-            search_pos = candidate_idx + 3;
-        }
-
-        if let Some(close_idx) = close_fence_idx {
-            let code = &raw[code_start..close_idx];
-            let (language, header_path) = parse_code_block_header(header_line, code);
-            segments.push(MarkdownSegment::CodeBlock {
-                language,
-                header_path,
-                code: code.to_string(),
-            });
-            let after_close = close_idx + 3;
-            let next_pos = if after_close < raw.len() && raw.as_bytes()[after_close] == b'\n' {
-                after_close + 1
-            } else {
-                after_close
-            };
-            current_pos = next_pos;
-            search_from = current_pos;
-        } else {
-            let code = &raw[code_start..];
-            let (language, header_path) = parse_code_block_header(header_line, code);
-            segments.push(MarkdownSegment::CodeBlock {
-                language,
-                header_path,
-                code: code.to_string(),
-            });
-            return segments;
-        }
-    }
-
-    if current_pos < raw.len() {
-        let remainder = &raw[current_pos..];
-        if !remainder.is_empty() {
-            segments.push(MarkdownSegment::Markdown(remainder.to_string()));
-        }
-    }
-
-    if segments.is_empty() && !raw.is_empty() {
-        segments.push(MarkdownSegment::Markdown(raw.to_string()));
-    }
-
-    segments
-}
-
-struct MarkdownRenderState {
-    source: String,
-    state: Entity<TextViewState>,
-}
-
-const MARKDOWN_CACHE_ENTRY_LIMIT: usize = 512;
-
-fn markdown_cache_exceeded(entry_count: usize) -> bool {
-    entry_count > MARKDOWN_CACHE_ENTRY_LIMIT
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum TranscriptRow {
-    Message(usize),
-    Activities(Range<usize>),
-    Working,
-}
-
-fn is_activity_only(message: &ChatMessageInfo) -> bool {
-    message.role == MessageRole::Assistant
-        && message.content.is_empty()
-        && message.reasoning_content.is_none()
-        && message
-            .tool_activities
-            .iter()
-            .any(|activity| activity.title != "update_plan")
-}
-
-fn build_transcript_rows(messages: &[ChatMessageInfo], generating: bool) -> Vec<TranscriptRow> {
-    let mut rows = Vec::with_capacity(messages.len().saturating_add(1));
-    let mut index = 0;
-    while index < messages.len() {
-        if !is_activity_only(&messages[index]) {
-            rows.push(TranscriptRow::Message(index));
-            index += 1;
-            continue;
-        }
-
-        let start = index;
-        while index < messages.len() && is_activity_only(&messages[index]) {
-            index += 1;
-        }
-        rows.push(TranscriptRow::Activities(start..index));
-    }
-    if generating {
-        rows.push(TranscriptRow::Working);
-    }
-    rows
-}
-
-fn grouped_tool_activities(
-    messages: &[ChatMessageInfo],
-) -> impl Iterator<Item = &ToolActivityInfo> + Clone {
-    messages
-        .iter()
-        .flat_map(|message| message.tool_activities.iter())
-        .filter(|activity| activity.title != "update_plan")
-}
-
-fn subagent_popover_counts(
-    statuses: impl IntoIterator<Item = SubagentActivityStatus>,
-) -> Option<(usize, usize)> {
-    let (count, active_count) = statuses
-        .into_iter()
-        .fold((0, 0), |(count, active), status| {
-            (
-                count + 1,
-                active
-                    + usize::from(matches!(
-                        status,
-                        SubagentActivityStatus::Queued | SubagentActivityStatus::Running
-                    )),
-            )
-        });
-    (count > 0).then_some((count, active_count))
-}
-
-fn format_trajectory_raw_json(entry: &TrajectoryEntry) -> String {
-    serde_json::to_string_pretty(entry).unwrap_or_else(|_| entry.detail.clone())
-}
-
-#[cfg(test)]
-fn reconcile_trajectory_entries(
-    cached: Vec<TrajectoryEntry>,
-    source: &[TrajectoryEntry],
-) -> Vec<TrajectoryEntry> {
-    reconcile_trajectory_entries_with_append(cached, source).0
-}
-
-fn reconcile_trajectory_entries_with_append(
-    mut cached: Vec<TrajectoryEntry>,
-    source: &[TrajectoryEntry],
-) -> (Vec<TrajectoryEntry>, bool) {
-    if source.starts_with(&cached) {
-        cached.extend_from_slice(&source[cached.len()..]);
-        (cached, true)
-    } else {
-        (source.to_vec(), false)
-    }
-}
-
-fn reconcile_trajectory_entries_by_epoch(
-    mut cached: Vec<TrajectoryEntry>,
-    source: &[TrajectoryEntry],
-    cached_epoch: u64,
-    source_epoch: u64,
-) -> (Vec<TrajectoryEntry>, bool) {
-    if cached_epoch == source_epoch && source.len() >= cached.len() {
-        cached.extend_from_slice(&source[cached.len()..]);
-        (cached, true)
-    } else {
-        reconcile_trajectory_entries_with_append(cached, source)
-    }
-}
-
-fn contains_case_insensitive(haystack: &str, lowercase_query: &str) -> bool {
-    if lowercase_query.is_empty() {
-        return true;
-    }
-    if lowercase_query.is_ascii() && haystack.is_ascii() {
-        return haystack
-            .as_bytes()
-            .windows(lowercase_query.len())
-            .any(|window| window.eq_ignore_ascii_case(lowercase_query.as_bytes()));
-    }
-    haystack.to_lowercase().contains(lowercase_query)
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct TrajectoryCacheKey {
-    revision: u64,
-    epoch: u64,
-    mode: TrajectoryMode,
-    query: String,
-    category: Option<String>,
-    lane: Option<String>,
-}
-
-fn extend_trajectory_facets(
-    categories: &mut Vec<String>,
-    lane_latest: &mut std::collections::BTreeMap<String, String>,
-    filtered_indices: &mut Vec<usize>,
-    entries: &[TrajectoryEntry],
-    start: usize,
-    key: &TrajectoryCacheKey,
-) {
-    for (index, entry) in entries.iter().enumerate().skip(start) {
-        if let Err(position) = categories.binary_search(&entry.category) {
-            categories.insert(position, entry.category.clone());
-        }
-        if let Some(lane) = &entry.lane {
-            lane_latest.insert(lane.clone(), entry.summary.clone());
-        }
-        let matches = key
-            .category
-            .as_ref()
-            .is_none_or(|category| &entry.category == category)
-            && key
-                .lane
-                .as_ref()
-                .is_none_or(|lane| entry.lane.as_ref() == Some(lane))
-            && [
-                entry.category.as_str(),
-                entry.summary.as_str(),
-                entry.detail.as_str(),
-                entry.lane.as_deref().unwrap_or(""),
-                entry.correlation_id.as_deref().unwrap_or(""),
-            ]
-            .iter()
-            .any(|value| contains_case_insensitive(value, &key.query));
-        if matches {
-            filtered_indices.push(index);
-        }
-    }
-}
-
-fn extend_trajectory_previews(
-    previews: &mut Vec<SharedString>,
-    entries: &[TrajectoryEntry],
-    start: usize,
-) {
-    previews.reserve(entries.len().saturating_sub(start));
-    previews.extend(entries[start..].iter().map(|entry| {
-        if entry.detail.trim().is_empty() {
-            entry.summary.clone().into()
-        } else {
-            format!("{}  {}", entry.summary, entry.detail.replace('\n', " ")).into()
-        }
-    }));
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum TrajectoryRow {
-    RequestHeader(u32),
-    Setup,
-    TurnHeader(u32),
-    Entry(usize),
-}
-
-fn build_trajectory_rows(
-    all_entries: &[TrajectoryEntry],
-    filtered_indices: &[usize],
-    mode: TrajectoryMode,
-) -> Vec<TrajectoryRow> {
-    let mut rows = Vec::with_capacity(filtered_indices.len());
-    extend_trajectory_rows(&mut rows, all_entries, filtered_indices, 0, mode);
-    rows
-}
-
-fn extend_trajectory_rows(
-    rows: &mut Vec<TrajectoryRow>,
-    all_entries: &[TrajectoryEntry],
-    filtered_indices: &[usize],
-    start: usize,
-    mode: TrajectoryMode,
-) {
-    let previous = start
-        .checked_sub(1)
-        .and_then(|index| filtered_indices.get(index))
-        .map(|&index| &all_entries[index]);
-    let mut previous_turn = previous.and_then(|entry| entry.turn);
-    let mut previous_request = previous.and_then(|entry| entry.request);
-    let mut request_input_seen = previous_request.is_some();
-    rows.reserve(filtered_indices.len().saturating_sub(start));
-    for &all_index in &filtered_indices[start..] {
-        let entry = &all_entries[all_index];
-        if mode == TrajectoryMode::Requests && entry.request != previous_request {
-            if let Some(request) = entry.request {
-                rows.push(TrajectoryRow::RequestHeader(request));
-                request_input_seen = false;
-            }
-            previous_request = entry.request;
-        }
-        if mode == TrajectoryMode::Requests && entry.request.is_some() && !request_input_seen {
-            if entry.category != "Input" {
-                rows.push(TrajectoryRow::Setup);
-            }
-            request_input_seen = true;
-        }
-        if mode != TrajectoryMode::Requests && entry.turn != previous_turn {
-            if let Some(turn) = entry.turn {
-                rows.push(TrajectoryRow::TurnHeader(turn));
-            }
-            previous_turn = entry.turn;
-        }
-        rows.push(TrajectoryRow::Entry(all_index));
-    }
-}
-
-#[derive(Default)]
-struct TrajectorySummary {
-    overview_positions: [HashSet<usize>; 3],
-    overview_prefix: [Vec<u32>; 3],
-    tool_count: usize,
-    total_duration_ms: u64,
-    anomaly_count: usize,
-    max_turn: u32,
-}
-
-fn summarize_trajectory(entries: &[TrajectoryEntry]) -> TrajectorySummary {
-    let mut summary = TrajectorySummary::default();
-    extend_trajectory_summary(&mut summary, entries);
-    summary
-}
-
-fn extend_trajectory_summary(summary: &mut TrajectorySummary, entries: &[TrajectoryEntry]) {
-    for prefix in &mut summary.overview_prefix {
-        if prefix.is_empty() {
-            prefix.push(0);
-        }
-    }
-    for entry in entries {
-        let groups = [
-            matches!(
-                entry.category.as_str(),
-                "Input" | "Context" | "Context Manifest" | "Queue" | "Request"
-            ),
-            matches!(
-                entry.category.as_str(),
-                "Operation" | "Step" | "Retry" | "Turn" | "Error" | "Provider" | "Anomaly"
-            ),
-            matches!(entry.category.as_str(), "Tool" | "Tool runtime"),
-        ];
-        for (prefix, present) in summary.overview_prefix.iter_mut().zip(groups) {
-            prefix.push(prefix.last().copied().unwrap_or_default() + u32::from(present));
-        }
-        summary.tool_count += usize::from(groups[2]);
-        summary.total_duration_ms = summary
-            .total_duration_ms
-            .saturating_add(entry.diagnostics.duration_ms.unwrap_or_default());
-        summary.anomaly_count +=
-            usize::from(entry.diagnostics.is_anomaly || entry.category == "Anomaly");
-        summary.max_turn = summary.max_turn.max(entry.turn.unwrap_or_default());
-    }
-    let entry_count = summary.overview_prefix[0].len().saturating_sub(1);
-    for (positions, prefix) in summary
-        .overview_positions
-        .iter_mut()
-        .zip(&summary.overview_prefix)
-    {
-        positions.clear();
-        for position in 0..48 {
-            let start = (position * entry_count).div_ceil(48);
-            let end = ((position + 1) * entry_count).div_ceil(48);
-            if prefix[end] > prefix[start] {
-                positions.insert(position);
-            }
-        }
-    }
-}
-
-struct TrajectoryRenderCache {
-    key: TrajectoryCacheKey,
-    all_entries: Vec<TrajectoryEntry>,
-    categories: Arc<Vec<String>>,
-    lanes: Arc<Vec<String>>,
-    lane_latest: Arc<std::collections::BTreeMap<String, String>>,
-    filtered_indices: Vec<usize>,
-    previews: Vec<SharedString>,
-    rows: Vec<TrajectoryRow>,
-    summary: TrajectorySummary,
 }
 
 pub fn init(cx: &mut App) {
@@ -846,9 +274,12 @@ pub struct ChatListView {
     transcript_generating: bool,
     trajectory_list_state: ListState,
     expanded_activity_groups: HashSet<String>,
+    progress_summary_expanded: bool,
     markdown_states: HashMap<(SharedString, String), MarkdownRenderState>,
     markdown_cache_namespace: SharedString,
     pasted_images: Vec<ImageAttachment>,
+    composer_key: (Option<PathBuf>, Option<String>),
+    composer_drafts: HashMap<(Option<PathBuf>, Option<String>), ComposerDraft>,
     last_session_key: Option<(std::path::PathBuf, String)>,
     initial_scroll_frames: u8,
     current_tab: CentralTab,
@@ -872,23 +303,20 @@ pub struct ChatListView {
     dismiss_slash_menu: bool,
     permission_details_open: bool,
     context_meter_open: bool,
+    /// Selected options per question, keyed by `request_id\0question_id`.
+    /// Options toggle multi-select; Submit sends one answer per question.
+    question_selections: std::collections::HashMap<String, Vec<String>>,
+    /// Custom-text inputs per question allowing free text, keyed the same way.
+    /// Entities are created lazily when the card renders and dropped on
+    /// submit/dismiss/session-switch.
+    question_inputs: std::collections::HashMap<String, Entity<InputState>>,
     subagents_popover_open: bool,
     selected_subagent_run_id: Option<String>,
+    copied_code_block: Option<(String, std::time::Instant)>,
+    expanded_tool_aggregates: HashSet<String>,
+    segment_cache: HashMap<String, (String, Vec<MarkdownSegment>)>,
     _subscriptions: Vec<Subscription>,
 }
-
-fn active_slash_command_query(text: &str) -> Option<&str> {
-    let trimmed = text.trim_start();
-    if !trimmed.starts_with('/') {
-        return None;
-    }
-    let rest = &trimmed[1..];
-    if rest.contains(char::is_whitespace) {
-        return None;
-    }
-    Some(rest)
-}
-
 async fn next_chat_stream_batch(
     receiver: &mut tokio::sync::mpsc::UnboundedReceiver<ChatStreamEvent>,
 ) -> Option<Vec<ChatStreamEvent>> {
@@ -913,7 +341,7 @@ impl ChatListView {
         let trajectory_list_state = ListState::new(0, ListAlignment::Top, px(400.0));
         let input_state = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .placeholder("Do anything...")
+                .placeholder("Ask a question, describe a task, or type / for commands...")
                 .auto_grow(2, 8)
                 .submit_on_enter(true)
                 .soft_wrap(true)
@@ -927,7 +355,8 @@ impl ChatListView {
 
         let editor = cx.new(|cx| EditorView::new(model.clone(), window, cx));
 
-        let sub1 = cx.observe(&model, |this, model, cx| {
+        let sub1 = cx.observe_in(&model, window, |this, model, window, cx| {
+            this.sync_composer_draft(window, cx);
             if let Some(target) =
                 model.update(cx, |state, _cx| state.requested_editor_target.take())
             {
@@ -1017,6 +446,15 @@ impl ChatListView {
                         if !text.trim().is_empty()
                             || (!is_generating && !this.pasted_images.is_empty())
                         {
+                            if is_generating && *secondary
+                                && threadlane_session::is_acp_model(&model_clone.read(cx).selected_model)
+                            {
+                                model_clone.update(cx, |state, cx| {
+                                    state.session_status = Some("This agent does not support live steering. Use Queue to send your message after this turn.".into());
+                                    cx.notify();
+                                });
+                                return;
+                            }
                             let images = std::mem::take(&mut this.pasted_images);
                             let is_steer = *secondary;
                             model_clone.update(cx, |state, cx| {
@@ -1052,6 +490,14 @@ impl ChatListView {
 
         let stream_model = model.clone();
         cx.spawn(async move |this, cx| {
+            // Dev hook: `THREADLANE_MIRROR_DEBUG=1` opens the mirror on the
+            // main display at launch, so the live feed can be observed and
+            // profiled without a model turn or an approval prompt. Nothing
+            // reaches a model through this path.
+            if std::env::var_os("THREADLANE_MIRROR_DEBUG").is_some() {
+                threadlane_session::computer::watch_display_for_debug();
+                open_computer_mirror(&stream_model, cx);
+            }
             while let Some(events) = next_chat_stream_batch(&mut stream_rx).await {
                 let changed = stream_model.update(cx, |state, cx| {
                     let changed = state.drain_chat_stream(events);
@@ -1060,6 +506,11 @@ impl ChatListView {
                     }
                     changed
                 });
+                let mirror_trigger =
+                    stream_model.update(cx, |state, _cx| state.take_computer_mirror_trigger());
+                if mirror_trigger {
+                    open_computer_mirror(&stream_model, cx);
+                }
                 cx.background_executor()
                     .timer(Duration::from_millis(30))
                     .await;
@@ -1071,10 +522,17 @@ impl ChatListView {
         .detach();
 
         let sub3 = cx.observe(&trajectory_search_input, |this, input, cx| {
-            this.trajectory_search = input.read(cx).value().to_string();
+            this.trajectory_search = input.read(cx).value().to_lowercase();
             cx.notify();
         });
 
+        let composer_key = {
+            let state = model.read(cx);
+            (
+                state.active_work_dir.clone(),
+                state.active_session_id.clone(),
+            )
+        };
         Self {
             model,
             input_state,
@@ -1085,9 +543,12 @@ impl ChatListView {
             transcript_generating: false,
             trajectory_list_state,
             expanded_activity_groups: HashSet::new(),
+            progress_summary_expanded: false,
             markdown_states: HashMap::new(),
             markdown_cache_namespace: SharedString::from(""),
             pasted_images: Vec::new(),
+            composer_key,
+            composer_drafts: HashMap::new(),
             last_session_key: None,
             initial_scroll_frames: 0,
             current_tab: CentralTab::Chat,
@@ -1107,10 +568,46 @@ impl ChatListView {
             dismiss_slash_menu: false,
             permission_details_open: false,
             context_meter_open: false,
+            question_selections: std::collections::HashMap::new(),
+            question_inputs: std::collections::HashMap::new(),
             subagents_popover_open: false,
             selected_subagent_run_id: None,
+            copied_code_block: None,
+            expanded_tool_aggregates: HashSet::new(),
+            segment_cache: HashMap::new(),
             _subscriptions: vec![sub1, sub2, sub3, sub_editor],
         }
+    }
+
+    fn sync_composer_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let key = {
+            let state = self.model.read(cx);
+            (
+                state.active_work_dir.clone(),
+                state.active_session_id.clone(),
+            )
+        };
+        if key == self.composer_key {
+            return;
+        }
+
+        // An explicit stash is separate from the unsent text and attachments in each task.
+        let draft = ComposerDraft {
+            text: self.input_state.read(cx).value(),
+            images: std::mem::take(&mut self.pasted_images),
+        };
+        let previous = std::mem::replace(&mut self.composer_key, key);
+        if !draft.text.is_empty() || !draft.images.is_empty() {
+            self.composer_drafts.insert(previous, draft);
+        }
+        let draft = self
+            .composer_drafts
+            .remove(&self.composer_key)
+            .unwrap_or_default();
+        self.pasted_images = draft.images;
+        self.input_state.update(cx, |input, cx| {
+            input.set_value(draft.text, window, cx);
+        });
     }
 
     fn paste_composer_clipboard(
@@ -1168,29 +665,23 @@ impl ChatListView {
         cx.notify();
     }
 
-    pub(crate) fn set_composer_text(
-        &mut self,
-        text: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.current_tab = CentralTab::Chat;
-        self.input_state.update(cx, |input, cx| {
-            input.set_value(text, window, cx);
-        });
-        cx.notify();
-    }
-
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let active_title = {
+        let (active_title, active_attention, linked_issue, active_work_dir) = {
             let state = self.model.read(cx);
-            state
+            let active_session = state
                 .projects
                 .iter()
                 .flat_map(|project| project.sessions.iter())
-                .find(|session| state.active_session_id.as_deref() == Some(&session.id))
+                .find(|session| state.active_session_id.as_deref() == Some(&session.id));
+            let title = active_session
                 .map(|session| session.title.clone())
-                .unwrap_or_else(|| "New task".to_string())
+                .unwrap_or_else(|| "New task".to_string());
+            let attention = active_session
+                .map(|session| state.session_attention(session))
+                .unwrap_or(SessionAttention::Idle);
+            let linked_issue = active_session.and_then(|session| session.github_issue.clone());
+            let work_dir = active_session.map(|session| session.work_dir.clone());
+            (title, attention, linked_issue, work_dir)
         };
         let theme = cx.theme().colors;
         let editor_tab_count = self.editor.read(cx).tab_count();
@@ -1198,6 +689,67 @@ impl ChatListView {
             format!("Editor ({editor_tab_count})")
         } else {
             "Editor".to_string()
+        };
+
+        let status_badge = match active_attention {
+            SessionAttention::NeedsYou => Some(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(4.0))
+                    .px_2()
+                    .py(px(1.5))
+                    .rounded_full()
+                    .bg(theme.warning.opacity(0.15))
+                    .text_color(theme.warning)
+                    .child(div().size(px(6.0)).rounded_full().bg(theme.warning))
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child("Needs you"),
+                    ),
+            ),
+            SessionAttention::Working => Some(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(4.0))
+                    .px_2()
+                    .py(px(1.5))
+                    .rounded_full()
+                    .bg(theme.accent.opacity(0.15))
+                    .text_color(theme.accent)
+                    .child(Spinner::new().xsmall())
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child("Working"),
+                    ),
+            ),
+            SessionAttention::Ready => Some(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(4.0))
+                    .px_2()
+                    .py(px(1.5))
+                    .rounded_full()
+                    .bg(theme.success.opacity(0.15))
+                    .text_color(theme.success)
+                    .child(div().size(px(6.0)).rounded_full().bg(theme.success))
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child("Ready"),
+                    ),
+            ),
+            SessionAttention::Idle => None,
         };
 
         div()
@@ -1208,6 +760,8 @@ impl ChatListView {
             .gap_3()
             .px_4()
             .pl(self.header_left_padding)
+            // The workspace owns the rightmost 128px for command palette,
+            // environment, and panel buttons rendered as absolute overlays.
             .pr(px(128.0))
             .border_b_1()
             .border_color(theme.title_bar_border)
@@ -1217,17 +771,50 @@ impl ChatListView {
                     .flex_1()
                     .flex()
                     .items_center()
+                    .gap_2()
                     .justify_start()
                     .min_w_0()
                     .child(
                         div()
+                            .id("chat-header-title")
                             .truncate()
-                            .text_size(px(13.0))
+                            .text_sm()
                             .line_height(px(18.0))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.foreground)
+                            .tooltip({
+                                let title = active_title.clone();
+                                move |window, cx| {
+                                    gpui_component::tooltip::Tooltip::new(title.clone())
+                                        .build(window, cx)
+                                }
+                            })
                             .child(active_title),
-                    ),
+                    )
+                    .children(status_badge)
+                    .children(linked_issue.clone().map(|issue| {
+                        let model = self.model.clone();
+                        Button::new("chat-open-task-context")
+                            .label(format!("#{}", issue.number))
+                            .icon(IconName::Github)
+                            .tooltip(format!("{} / {} · Open task context", issue.owner, issue.repo))
+                            .ghost()
+                            .xsmall()
+                            .on_click(move |_, _, cx| {
+                                if let Some(work_dir) = active_work_dir.clone() {
+                                    model.update(cx, |state, cx| {
+                                        controller::dispatch(
+                                            state,
+                                            AppAction::OpenGitHubIssue {
+                                                work_dir,
+                                                number: issue.number,
+                                            },
+                                        );
+                                        cx.notify();
+                                    });
+                                }
+                            })
+                    }))
             )
             .child(
                 div()
@@ -1301,7 +888,7 @@ impl ChatListView {
                 .rounded_full()
                 .border_1()
                 .border_color(colors.success)
-                .text_size(px(10.0))
+                .text_xs()
                 .font_weight(FontWeight::BOLD)
                 .text_color(colors.success)
                 .child("✓")
@@ -1458,7 +1045,9 @@ impl ChatListView {
         let (marker, marker_color) = match activity.category.as_str() {
             "Error" => ("!", theme.danger),
             "Working" | "Thinking" => ("◌", theme.primary),
-            "Completed" | "Edited" | "Created" | "Ran" | "Loaded" => ("✓", theme.success),
+            "Completed" | "Edited" | "Created" | "Ran" | "Loaded" | "Explored" => {
+                ("✓", theme.success)
+            }
             _ => ("✓", theme.muted_foreground),
         };
         let model = self.model.clone();
@@ -1476,6 +1065,12 @@ impl ChatListView {
             .child(
                 div()
                     .id(row_id)
+                    .tooltip({
+                        let summary = display_summary.clone();
+                        move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(summary.clone()).build(window, cx)
+                        }
+                    })
                     .h(px(28.0))
                     .px_1()
                     .rounded_md()
@@ -1513,7 +1108,7 @@ impl ChatListView {
                             .truncate()
                             .text_sm()
                             .text_color(theme.muted_foreground)
-                            .child(display_summary),
+                            .child(display_summary.clone()),
                     )
                     .children(has_detail.then(|| {
                         Icon::new(if activity.is_expanded {
@@ -1663,7 +1258,7 @@ impl ChatListView {
                 .flex()
                 .items_center()
                 .border_b_1()
-                .border_color(theme.border.opacity(0.65))
+                .border_color(theme.border.opacity(0.5))
                 .bg(theme.muted.opacity(0.35))
                 .text_sm()
                 .font_weight(FontWeight::SEMIBOLD)
@@ -1676,7 +1271,7 @@ impl ChatListView {
                 .flex()
                 .items_center()
                 .border_b_1()
-                .border_color(theme.border.opacity(0.35))
+                .border_color(theme.border.opacity(0.5))
                 .text_xs()
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme.muted_foreground)
@@ -1770,7 +1365,16 @@ impl ChatListView {
                 let lane = entry.lane.clone();
                 let view = cx.entity().clone();
                 div()
-                    .id(SharedString::from(format!("trajectory-{all_index}")))
+                    .id(("trajectory", all_index))
+                    .tooltip({
+                        let tip = match lane.clone() {
+                            Some(lane) => format!("{lane} · {preview}"),
+                            None => preview.to_string(),
+                        };
+                        move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                        }
+                    })
                     .h(px(34.0))
                     .w_full()
                     .min_w_0()
@@ -1781,11 +1385,13 @@ impl ChatListView {
                     .border_b_1()
                     .border_color(theme.border.opacity(0.45))
                     .cursor_pointer()
-                    .when(selected, |this| {
-                        this.bg(theme.accent.opacity(0.16))
-                            .border_l_2()
-                            .border_color(theme.accent)
+                    .border_l_2()
+                    .border_color(if selected {
+                        theme.accent
+                    } else {
+                        theme.border.opacity(0.0)
                     })
+                    .when(selected, |this| this.bg(theme.accent.opacity(0.16)))
                     .hover(|style| style.bg(theme.muted.opacity(0.65)))
                     .child(div().size(px(6.0)).flex_none().rounded_full().bg(dot_color))
                     .child(
@@ -1804,7 +1410,14 @@ impl ChatListView {
                             .text_color(badge_fg)
                             .child(badge_label),
                     )
-                    .child(div().min_w_0().flex_1().text_sm().truncate().child(preview))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .text_sm()
+                            .truncate()
+                            .child(preview.clone()),
+                    )
                     .children(exit_code.map(|code| {
                         let is_ok = code == 0;
                         div()
@@ -1880,7 +1493,7 @@ impl ChatListView {
             revision,
             epoch,
             mode: self.trajectory_mode,
-            query: self.trajectory_search.to_lowercase(),
+            query: self.trajectory_search.clone(),
             category: self.trajectory_category.clone(),
             lane: self.trajectory_lane.clone(),
         };
@@ -2855,6 +2468,21 @@ impl ChatListView {
         entry.state.clone()
     }
 
+    fn cached_segments(&mut self, message_id: &str, content: &str) -> Vec<MarkdownSegment> {
+        if let Some((cached_content, segments)) = self.segment_cache.get(message_id) {
+            if cached_content == content {
+                return segments.clone();
+            }
+        }
+
+        let segments = extract_markdown_segments(content);
+        self.segment_cache.insert(
+            message_id.to_owned(),
+            (content.to_owned(), segments.clone()),
+        );
+        segments
+    }
+
     fn chat_markdown_view(&self, state: &Entity<TextViewState>) -> TextView {
         let model = self.model.clone();
         TextView::new(state)
@@ -2945,9 +2573,19 @@ impl ChatListView {
                             )
                             .children(path_opt.map(|path| {
                                 div()
+                                    .id(SharedString::from(format!(
+                                        "code-path-{msg_id}-{block_index}"
+                                    )))
                                     .text_xs()
                                     .text_color(theme.muted_foreground)
                                     .truncate()
+                                    .tooltip({
+                                        let tip = path.clone();
+                                        move |window, cx| {
+                                            gpui_component::tooltip::Tooltip::new(tip.clone())
+                                                .build(window, cx)
+                                        }
+                                    })
                                     .child(path)
                             })),
                     )
@@ -3015,23 +2653,42 @@ impl ChatListView {
                                 })
                             }))
                             .when(!streaming, |actions| {
+                                let block_key = format!("copy-code-{msg_id}-{block_index}");
+                                let is_copied = self.copied_code_block.as_ref().is_some_and(|(id, time)| {
+                                    id == &block_key && time.elapsed() < std::time::Duration::from_secs(2)
+                                });
+                                let copy_code_key = block_key.clone();
                                 actions.child(
-                                    Button::new(SharedString::from(format!(
-                                        "copy-code-{msg_id}-{block_index}"
-                                    )))
-                                    .icon(IconName::Copy)
-                                    .xsmall()
-                                    .ghost()
-                                    .tooltip("Copy code to clipboard")
-                                    .on_click(move |_event, window, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            copy_code.clone(),
-                                        ));
-                                        window.push_notification(
-                                            Notification::info("Code copied to clipboard"),
-                                            cx,
-                                        );
-                                    }),
+                                    Button::new(SharedString::from(block_key))
+                                        .icon(if is_copied {
+                                            IconName::Check
+                                        } else {
+                                            IconName::Copy
+                                        })
+                                        .accessibility_label(if is_copied {
+                                            "Code copied"
+                                        } else {
+                                            "Copy code"
+                                        })
+                                        .xsmall()
+                                        .ghost()
+                                        .tooltip(if is_copied {
+                                            "Copied!"
+                                        } else {
+                                            "Copy code to clipboard"
+                                        })
+                                        .when(is_copied, |btn| btn.text_color(theme.success))
+                                        .on_click(cx.listener(move |this, _event, window, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                copy_code.clone(),
+                                            ));
+                                            this.copied_code_block = Some((copy_code_key.clone(), std::time::Instant::now()));
+                                            window.push_notification(
+                                                Notification::info("Code copied to clipboard"),
+                                                cx,
+                                            );
+                                            cx.notify();
+                                        })),
                                 )
                             }),
                     ),
@@ -3043,13 +2700,16 @@ impl ChatListView {
                     .font_family("monospace")
                     .text_xs()
                     .text_color(theme.foreground)
-                    .child(
-                        TextView::markdown(
+                    .child({
+                        let formatted_code =
+                            format!("```{language}\n{}\n```", code.trim_end());
+                        let code_state = self.markdown_state(
                             format!("code-{msg_id}-{block_index}"),
-                            format!("```{language}\n{}\n```", code.trim_end()),
-                        )
-                        .selectable(true),
-                    ),
+                            &formatted_code,
+                            cx,
+                        );
+                        self.chat_markdown_view(&code_state)
+                    }),
             )
     }
 
@@ -3068,44 +2728,54 @@ impl ChatListView {
         let model = self.model.clone();
         let msg_id = msg.id.clone();
 
-        let icon_element = div()
-            .text_xs()
-            .text_color(if is_streaming {
-                theme.primary
+        let approx_tokens = (reasoning.len() + 3) / 4;
+        let token_badge = Tag::new()
+            .child(if is_streaming {
+                "thinking…".to_string()
             } else {
-                theme.muted_foreground
+                format!("~{approx_tokens} tokens")
             })
-            .child("✦")
-            .into_any_element();
+            .small()
+            .with_variant(TagVariant::Secondary);
 
         let header = div()
             .id(SharedString::from(format!("reasoning-toggle-{}", msg.id)))
-            .h(px(28.0))
-            .px_1()
-            .rounded_md()
+            .h(px(32.0))
+            .px_2()
+            .rounded_lg()
             .flex()
             .items_center()
-            .gap_2()
+            .justify_between()
             .cursor_pointer()
-            .hover(|s| s.bg(theme.muted))
+            .hover(|s| s.bg(theme.muted.opacity(0.5)))
             .child(
                 div()
-                    .w(px(18.0))
-                    .flex_none()
-                    .text_center()
-                    .child(icon_element),
-            )
-            .child(
-                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
                     .min_w_0()
-                    .flex_1()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child(if is_streaming {
-                        "Thinking…"
-                    } else {
-                        "Thought process"
-                    }),
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(if is_streaming {
+                                theme.primary
+                            } else {
+                                theme.muted_foreground
+                            })
+                            .child("✦"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.muted_foreground)
+                            .child(if is_streaming {
+                                "Thinking…"
+                            } else {
+                                "Thought process"
+                            }),
+                    )
+                    .child(token_badge),
             )
             .child(
                 Icon::new(if is_expanded {
@@ -3125,14 +2795,14 @@ impl ChatListView {
 
         let detail = is_expanded.then(|| {
             let container = div()
-                .ml(px(26.0))
-                .mt_1()
-                .p_2()
-                .max_h(px(300.0))
+                .mx_2()
+                .mb_2()
+                .p_2p5()
+                .max_h(px(340.0))
                 .rounded_md()
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.title_bar)
+                .border_t_1()
+                .border_color(theme.border.opacity(0.4))
+                .bg(theme.secondary.opacity(0.3))
                 .text_xs()
                 .text_color(theme.muted_foreground)
                 .overflow_y_scrollbar();
@@ -3148,10 +2818,199 @@ impl ChatListView {
         });
 
         Some(
-            Collapsible::new()
-                .open(is_expanded)
+            div()
+                .w_full()
+                .min_w_0()
+                .rounded_lg()
+                .border_1()
+                .border_color(theme.border.opacity(0.6))
+                .bg(theme.title_bar)
                 .child(header)
-                .when_some(detail, |c, content| c.content(content))
+                .children(detail)
+                .into_any_element(),
+        )
+    }
+
+    fn render_tool_activities_block(
+        &mut self,
+        msg_id: &str,
+        tools: &[ToolActivityInfo],
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if tools.is_empty() {
+            return None;
+        }
+        if tools.len() == 1 {
+            return Some(self.render_tool_activity(&tools[0], cx).into_any_element());
+        }
+
+        let mut reads = 0;
+        let mut edits = 0;
+        let mut runs = 0;
+        let mut others = 0;
+        let mut has_error = false;
+        let mut has_running = false;
+        for t in tools {
+            if t.category == "Error" {
+                has_error = true;
+            } else if t.category == "Working" || t.category == "Thinking" {
+                has_running = true;
+            }
+            match t.title.as_str() {
+                "read_file" | "view_file" | "grep_search" | "find_by_name" | "list_dir" => {
+                    reads += 1
+                }
+                "write_to_file" | "replace_file_content" | "apply_diff" | "edit_file" => edits += 1,
+                "run_command" | "execute" => runs += 1,
+                _ => others += 1,
+            }
+        }
+
+        let mut parts = Vec::new();
+        if reads > 0 {
+            parts.push(format!(
+                "inspected {reads} file{}",
+                if reads == 1 { "" } else { "s" }
+            ));
+        }
+        if edits > 0 {
+            parts.push(format!(
+                "edited {edits} file{}",
+                if edits == 1 { "" } else { "s" }
+            ));
+        }
+        if runs > 0 {
+            parts.push(format!(
+                "ran {runs} command{}",
+                if runs == 1 { "" } else { "s" }
+            ));
+        }
+        if others > 0 {
+            parts.push(format!(
+                "{others} other tool{}",
+                if others == 1 { "" } else { "s" }
+            ));
+        }
+        let summary = if parts.is_empty() {
+            format!("Ran {} tools", tools.len())
+        } else {
+            let mut s = parts.join(", ");
+            if let Some(c) = s.get_mut(0..1) {
+                c.make_ascii_uppercase();
+            }
+            s
+        };
+
+        let group_key = format!("tool-group-{msg_id}");
+        let is_expanded = if has_running {
+            !self
+                .expanded_tool_aggregates
+                .contains(&format!("collapsed-{group_key}"))
+        } else {
+            self.expanded_tool_aggregates
+                .contains(&format!("expanded-{group_key}"))
+        };
+
+        let theme = cx.theme().colors;
+        let status_icon = if has_running {
+            Spinner::new()
+                .xsmall()
+                .color(theme.primary)
+                .into_any_element()
+        } else if has_error {
+            Icon::new(IconName::CircleX)
+                .xsmall()
+                .text_color(theme.danger)
+                .into_any_element()
+        } else {
+            Icon::new(IconName::CircleCheck)
+                .xsmall()
+                .text_color(theme.success)
+                .into_any_element()
+        };
+
+        let toggle_key = group_key.clone();
+        let toggle_has_running = has_running;
+        let header = div()
+            .id(SharedString::from(format!("tool-toggle-{msg_id}")))
+            .h(px(28.0))
+            .px_2()
+            .rounded_md()
+            .bg(theme.muted.opacity(0.25))
+            .hover(|s| s.bg(theme.muted.opacity(0.5)))
+            .flex()
+            .items_center()
+            .justify_between()
+            .cursor_pointer()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .min_w_0()
+                    .child(status_icon)
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.muted_foreground)
+                            .truncate()
+                            .child(summary),
+                    )
+                    .child(
+                        Tag::new()
+                            .child(format!("{} tools", tools.len()))
+                            .small()
+                            .with_variant(TagVariant::Secondary),
+                    ),
+            )
+            .child(
+                Icon::new(if is_expanded {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                })
+                .xsmall()
+                .text_color(theme.muted_foreground),
+            )
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                if toggle_has_running {
+                    let key = format!("collapsed-{toggle_key}");
+                    if !this.expanded_tool_aggregates.remove(&key) {
+                        this.expanded_tool_aggregates.insert(key);
+                    }
+                } else {
+                    let key = format!("expanded-{toggle_key}");
+                    if !this.expanded_tool_aggregates.remove(&key) {
+                        this.expanded_tool_aggregates.insert(key);
+                    }
+                }
+                cx.notify();
+            }));
+
+        let tool_rows = tools
+            .iter()
+            .map(|t| self.render_tool_activity(t, cx))
+            .collect::<Vec<_>>();
+        let detail_rows = is_expanded.then(|| {
+            div()
+                .flex()
+                .flex_col()
+                .pl_2()
+                .mt_1()
+                .border_l_2()
+                .border_color(theme.border.opacity(0.4))
+                .children(tool_rows)
+        });
+
+        Some(
+            div()
+                .w_full()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(header)
+                .children(detail_rows)
                 .into_any_element(),
         )
     }
@@ -3227,12 +3086,13 @@ impl ChatListView {
             }
             MessageRole::Assistant => {
                 let reasoning_element = self.render_reasoning_block(msg, cx);
-                let tool_elements: Vec<_> = msg
+                let filtered_tools: Vec<ToolActivityInfo> = msg
                     .tool_activities
                     .iter()
                     .filter(|tool| tool.title != "update_plan")
-                    .map(|tool| self.render_tool_activity(tool, cx))
+                    .cloned()
                     .collect();
+                let tools_element = self.render_tool_activities_block(&msg.id, &filtered_tools, cx);
 
                 div()
                     .w_full()
@@ -3250,7 +3110,7 @@ impl ChatListView {
                             .gap_2()
                             .children(reasoning_element)
                             .children(if !msg.content.is_empty() {
-                                let segments = extract_markdown_segments(&msg.content);
+                                let segments = self.cached_segments(&msg.id, &msg.content);
                                 let rendered_segments: Vec<AnyElement> = segments
                                     .into_iter()
                                     .enumerate()
@@ -3302,7 +3162,7 @@ impl ChatListView {
                             } else {
                                 None
                             })
-                            .children(tool_elements)
+                            .children(tools_element)
                             .context_menu({
                                 let content = msg.content.clone();
                                 move |menu, _window, _cx| {
@@ -3351,51 +3211,7 @@ impl ChatListView {
                         }
                     }),
             ),
-            MessageRole::Error => div().flex().justify_center().my_2().px_4().child(
-                div()
-                    .w_full()
-                    .p_3()
-                    .rounded_lg()
-                    .bg(theme.danger)
-                    .border_1()
-                    .border_color(theme.danger)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(theme.danger_foreground)
-                                    .child("ERROR"),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(theme.danger_foreground)
-                                    .child(msg.content.clone())
-                                    .context_menu({
-                                        let content = msg.content.clone();
-                                        move |menu, _window, _cx| {
-                                            let text = content.clone();
-                                            menu.item(PopupMenuItem::new("Copy Message").on_click(
-                                                move |_event, window, cx| {
-                                                    cx.write_to_clipboard(
-                                                        ClipboardItem::new_string(text.clone()),
-                                                    );
-                                                    window.push_notification(
-                                                        Notification::info("Copied to clipboard"),
-                                                        cx,
-                                                    );
-                                                },
-                                            ))
-                                        }
-                                    }),
-                            ),
-                    ),
-            ),
+            MessageRole::Error => render_chat_error(&msg.id, &msg.content, &self.model, cx),
         }
         .into_any_element()
     }
@@ -3508,6 +3324,101 @@ impl ChatListView {
         cx.notify();
     }
 
+    fn question_selection_key(request_id: &str, question_id: &str) -> String {
+        format!("{request_id}\0{question_id}")
+    }
+
+    fn toggle_question_option(
+        &mut self,
+        request_id: &str,
+        question_id: &str,
+        option: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let key = Self::question_selection_key(request_id, question_id);
+        let entry = self.question_selections.entry(key).or_default();
+        if let Some(pos) = entry.iter().position(|item| item == option) {
+            entry.remove(pos);
+        } else {
+            entry.push(option.to_string());
+        }
+        cx.notify();
+    }
+
+    fn submit_active_question(&mut self, cx: &mut Context<Self>) {
+        let request = {
+            let state = self.model.read(cx);
+            state
+                .active_session_id
+                .as_ref()
+                .and_then(|session_id| state.pending_questions.get(session_id))
+                .cloned()
+        };
+        let Some(request) = request else {
+            return;
+        };
+        let answers = request
+            .questions
+            .iter()
+            .map(|item| {
+                let key = Self::question_selection_key(&request.id, &item.id);
+                let custom_text = self
+                    .question_inputs
+                    .get(&key)
+                    .map(|input| input.read(cx).value().to_string())
+                    .map(|text| text.trim().to_string())
+                    .filter(|text| !text.is_empty());
+                threadlane_session::QuestionItemAnswer {
+                    question_id: item.id.clone(),
+                    selected: self
+                        .question_selections
+                        .get(&key)
+                        .cloned()
+                        .unwrap_or_default(),
+                    custom_text,
+                }
+            })
+            .collect::<Vec<_>>();
+        let answer = threadlane_session::QuestionAnswer {
+            request_id: request.id.clone(),
+            answers,
+            dismissed: false,
+        };
+        let request_id = request.id.clone();
+        self.question_selections
+            .retain(|key, _| !key.starts_with(&format!("{request_id}\0")));
+        self.question_inputs
+            .retain(|key, _| !key.starts_with(&format!("{request_id}\0")));
+        self.model.update(cx, |state, cx| {
+            state.resolve_active_question_answer(&request_id, answer);
+            cx.notify();
+        });
+        cx.notify();
+    }
+
+    fn dismiss_active_question(&mut self, cx: &mut Context<Self>) {
+        let request_id = {
+            let state = self.model.read(cx);
+            state
+                .active_session_id
+                .as_ref()
+                .and_then(|session_id| state.pending_questions.get(session_id))
+                .map(|request| request.id.clone())
+        };
+        let Some(request_id) = request_id else {
+            return;
+        };
+        self.question_selections
+            .retain(|key, _| !key.starts_with(&format!("{request_id}\0")));
+        self.question_inputs
+            .retain(|key, _| !key.starts_with(&format!("{request_id}\0")));
+        self.model.update(cx, |state, cx| {
+            state.resolve_active_question(&request_id);
+            cx.notify();
+        });
+        cx.notify();
+    }
+
     fn complete_slash_command(
         &mut self,
         command_name: &str,
@@ -3519,6 +3430,7 @@ impl ChatListView {
             state.set_value(&value, window, cx);
             let cursor = value.len();
             state.set_selected_range(cursor..cursor, cx);
+            state.focus(window, cx);
         });
         self.selected_slash_index = 0;
         self.slash_scroll_handle.scroll_to_item(0);
@@ -3737,7 +3649,7 @@ impl ChatListView {
                 .id("permission-details-backdrop")
                 .absolute()
                 .inset_0()
-                .bg(hsla(0.0, 0.0, 0.0, 0.6))
+                .bg(crate::theme::overlay_scrim())
                 .flex()
                 .items_center()
                 .justify_center()
@@ -3969,6 +3881,182 @@ impl ChatListView {
         )
     }
 
+    fn render_question_prompt(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let state = self.model.read(cx);
+        let session_id = state.active_session_id.as_ref()?;
+        let request = state.pending_questions.get(session_id)?.clone();
+        let theme = cx.theme().colors;
+
+        // Lazily create one custom-text input per allow_custom question so
+        // the entity (and focus) survives re-renders.
+        for item in request.questions.iter().filter(|item| item.allow_custom) {
+            let key = Self::question_selection_key(&request.id, &item.id);
+            if !self.question_inputs.contains_key(&key) {
+                let input = cx
+                    .new(|cx| InputState::new(window, cx).placeholder("Custom answer (optional)…"));
+                self.question_inputs.insert(key, input);
+            }
+        }
+        // Drop state for superseded requests so a new question starts clean.
+        let prefix = format!("{}\0", request.id);
+        self.question_inputs
+            .retain(|key, _| key.starts_with(&prefix));
+        self.question_selections
+            .retain(|key, _| key.starts_with(&prefix));
+
+        let questions = request
+            .questions
+            .iter()
+            .map(|item| {
+                let key = Self::question_selection_key(&request.id, &item.id);
+                let selected = self
+                    .question_selections
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or_default();
+                let header = item.header.clone();
+                let body = item.question.clone();
+                let options = item
+                    .options
+                    .iter()
+                    .map(|option| {
+                        let option_label = option.clone();
+                        let is_selected = selected.iter().any(|item| item == option);
+                        let request_id = request.id.clone();
+                        let question_id = item.id.clone();
+                        let option_value = option.clone();
+                        Button::new(SharedString::from(format!(
+                            "question-{request_id}-{}-{}",
+                            item.id, option_label
+                        )))
+                        .label(option_label.clone())
+                        .small()
+                        .when(is_selected, |button| button.primary())
+                        .when(!is_selected, |button| button.ghost())
+                        .tooltip("Toggle this answer")
+                        .on_click(cx.listener(
+                            move |this, _event, _window, cx| {
+                                this.toggle_question_option(
+                                    &request_id,
+                                    &question_id,
+                                    &option_value,
+                                    cx,
+                                );
+                            },
+                        ))
+                    })
+                    .collect::<Vec<_>>();
+                let custom_input = item
+                    .allow_custom
+                    .then(|| {
+                        self.question_inputs
+                            .get(&key)
+                            .map(|input| div().w_full().child(Input::new(input).small()))
+                    })
+                    .flatten();
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.foreground)
+                            .child(header),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(body),
+                    )
+                    .child(div().flex().flex_wrap().gap_1().children(options))
+                    .children(custom_input)
+            })
+            .collect::<Vec<_>>();
+
+        Some(
+            div()
+                .w_full()
+                .flex_none()
+                .px_4()
+                .pt_1()
+                .bg(theme.background)
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(px(1000.0))
+                        .mx_auto()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.title_bar)
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_xs()
+                                        .text_color(theme.foreground)
+                                        .child("Model question"),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .truncate()
+                                        .child("The run waits for your answer."),
+                                ),
+                        )
+                        .children(questions)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    Button::new("question-dismiss")
+                                        .label("Dismiss")
+                                        .ghost()
+                                        .xsmall()
+                                        .tooltip("Dismiss without answering")
+                                        .on_click(cx.listener(|this, _event, _window, cx| {
+                                            this.dismiss_active_question(cx);
+                                        })),
+                                )
+                                .child(
+                                    Button::new("question-submit")
+                                        .label("Send answers")
+                                        .small()
+                                        .primary()
+                                        .tooltip("Send the selected answers")
+                                        .on_click(cx.listener(|this, _event, _window, cx| {
+                                            this.submit_active_question(cx);
+                                        })),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// Cached slash-command discovery. `available_slash_commands` scans
     /// extension directories and compiles each installed WASM module just to
     /// read its manifest, so it must not run per keystroke in render. The
@@ -4077,11 +4165,12 @@ impl ChatListView {
                 .find(|item| item.journal_run_id.as_deref() == Some(run_id.as_str()))
         });
         let mut rows = Vec::new();
-        for (index, item) in subagents.iter().enumerate() {
+        for item in &subagents {
             let run_id = item
                 .journal_run_id
                 .clone()
                 .unwrap_or_else(|| format!("queued-{}-{}", item.batch_run_id, item.task_index));
+            let row_id = run_id.clone();
             let is_selected = selected_run_id.as_deref() == Some(run_id.as_str());
             let (marker, color, status) = match item.status {
                 SubagentActivityStatus::Queued => ("○", theme.muted_foreground, "Queued"),
@@ -4092,17 +4181,19 @@ impl ChatListView {
             };
             let entity = cx.entity();
             rows.push(
-                div()
-                    .id(SharedString::from(format!("subagent-popup-row-{index}")))
+                Button::new(SharedString::from(format!("subagent-popup-row-{row_id}")))
+                    .accessibility_label(format!("{} · {status}", item.agent))
+                    .ghost()
+                    .h_auto()
                     .w_full()
                     .px_3()
                     .py_2()
                     .rounded_md()
                     .cursor_pointer()
                     .when(is_selected, |row| row.bg(theme.muted))
-                    .hover(|row| row.bg(theme.muted))
                     .flex()
                     .items_start()
+                    .text_left()
                     .gap_2()
                     .on_click(move |_event, _window, cx| {
                         entity.update(cx, |this, cx| {
@@ -4171,7 +4262,7 @@ impl ChatListView {
         let count_label = if active_count > 0 {
             format!("{active_count} active")
         } else {
-            format!("{} completed", subagents.len())
+            format!("{} total", subagents.len())
         };
         div()
             .w(px(520.0))
@@ -4256,6 +4347,192 @@ impl ChatListView {
             .rev()
             .map(|message| self.render_message(message, cx))
             .collect::<Vec<_>>();
+        let workspace = item
+            .isolation
+            .as_ref()
+            .map(|isolation| (isolation.workspace.clone(), isolation.branch.clone()));
+        let branch_controls = workspace.map(|(worktree, branch)| {
+            let inspect_model = self.model.clone();
+            let inspect_root = self.model.read(cx).active_git_work_dir().unwrap();
+            let inspect_branch = branch.clone();
+            let apply_model = self.model.clone();
+            let apply_root = inspect_root.clone();
+            let apply_branch = branch.clone();
+            let apply_worktree = worktree.clone();
+            let discard_model = self.model.clone();
+            let discard_root = inspect_root.clone();
+            let discard_branch = branch.clone();
+            let discard_worktree = worktree.clone();
+            let terminal_model = self.model.clone();
+            let terminal_worktree = worktree.clone();
+            let worktree_available = worktree.is_dir();
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .p_2()
+                .rounded_md()
+                .border_1()
+                .border_color(theme.border)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(Icon::default().path("icons/git/branch.svg").xsmall())
+                        .child(branch.clone()),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            Button::new(SharedString::from(format!("inspect-{branch}")))
+                                .label("Inspect diff")
+                                .outline()
+                                .xsmall()
+                                .on_click(move |_, _, cx| {
+                                    let branch = inspect_branch.clone();
+                                    let root = inspect_root.clone();
+                                    let task = cx.background_executor().spawn(async move {
+                                        threadlane_git::diff_branch(&root, &branch)
+                                            .map(|diff| (root, branch, diff))
+                                            .map_err(|error| error.to_string())
+                                    });
+                                    let model = inspect_model.clone();
+                                    cx.spawn(async move |cx| {
+                                        let result = task.await;
+                                        let _ = model.update(cx, |state, cx| {
+                                            match result {
+                                                Ok((root, branch, diff)) => state.request_open_diff(
+                                                    root,
+                                                    format!("{branch}.diff"),
+                                                    if diff.is_empty() {
+                                                        "No committed changes on this branch."
+                                                            .into()
+                                                    } else {
+                                                        diff
+                                                    },
+                                                ),
+                                                Err(error) => state.session_status = Some(error),
+                                            }
+                                            cx.notify();
+                                        });
+                                    })
+                                    .detach();
+                                }),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("terminal-{branch}")))
+                                .label("Terminal")
+                                .ghost()
+                                .xsmall()
+                                .disabled(!worktree_available)
+                                .tooltip(if worktree_available {
+                                    format!("Open terminal in {}", worktree.display())
+                                } else {
+                                    "This worktree was cleaned up; the branch is still available."
+                                        .into()
+                                })
+                                .on_click(move |_, _, cx| {
+                                    terminal_model.update(cx, |state, cx| {
+                                        controller::dispatch(
+                                            state,
+                                            AppAction::OpenTerminalAt(terminal_worktree.clone()),
+                                        );
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("apply-{branch}")))
+                                .label("Apply")
+                                .xsmall()
+                                .disabled(item.status != SubagentActivityStatus::Completed)
+                                .on_click(move |_, _, cx| {
+                                    let root = apply_root.clone();
+                                    let branch = apply_branch.clone();
+                                    let worktree = apply_worktree.clone();
+                                    let task = cx.background_executor().spawn(async move {
+                                        let parent = threadlane_git::inspect(&root)
+                                            .map_err(|error| error.to_string())?;
+                                        if parent.has_changes {
+                                            return Err("Commit or stash parent changes before applying a subagent branch.".into());
+                                        }
+                                        if worktree.is_dir()
+                                            && threadlane_git::inspect(&worktree)
+                                                .map_err(|error| error.to_string())?
+                                                .has_changes
+                                        {
+                                            return Err("The subagent worktree has uncommitted changes; commit them before applying.".into());
+                                        }
+                                        threadlane_git::merge(&root, &branch)
+                                            .map_err(|error| error.to_string())?;
+                                        if worktree.is_dir() {
+                                            threadlane_git::remove_worktree(&root, &worktree, false)
+                                                .map_err(|error| error.to_string())?;
+                                        }
+                                        threadlane_git::delete_branch(&root, &branch, false)
+                                            .map_err(|error| error.to_string())?;
+                                        Ok(format!("Applied {branch}"))
+                                    });
+                                    let model = apply_model.clone();
+                                    cx.spawn(async move |cx| {
+                                        let result = task.await;
+                                        let _ = model.update(cx, |state, cx| {
+                                            state.session_status = Some(result.unwrap_or_else(|error| error));
+                                            cx.notify();
+                                        });
+                                    })
+                                    .detach();
+                                }),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("discard-{branch}")))
+                                .label("Discard…")
+                                .ghost()
+                                .xsmall()
+                                .on_click(move |_, _, cx| {
+                                    let root = discard_root.clone();
+                                    let branch = discard_branch.clone();
+                                    let worktree = discard_worktree.clone();
+                                    let model = discard_model.clone();
+                                    cx.spawn(async move |cx| {
+                                        let confirmed = rfd::AsyncMessageDialog::new()
+                                            .set_title("Discard subagent branch?")
+                                            .set_description(format!(
+                                                "Delete {branch} and its worktree? This cannot be undone."
+                                            ))
+                                            .set_buttons(rfd::MessageButtons::YesNo)
+                                            .show()
+                                            .await;
+                                        if !matches!(confirmed, rfd::MessageDialogResult::Yes) {
+                                            return;
+                                        }
+                                        let task = cx.background_executor().spawn(async move {
+                                            if worktree.is_dir() {
+                                                threadlane_git::remove_worktree(&root, &worktree, true)
+                                                    .map_err(|error| error.to_string())?;
+                                            }
+                                            threadlane_git::delete_branch(&root, &branch, true)
+                                                .map_err(|error| error.to_string())?;
+                                            let _ = threadlane_git::prune_worktrees(&root);
+                                            Ok::<_, String>(format!("Discarded {branch}"))
+                                        });
+                                        let result = task.await;
+                                        let _ = model.update(cx, |state, cx| {
+                                            state.session_status = Some(result.unwrap_or_else(|error| error));
+                                            cx.notify();
+                                        });
+                                    })
+                                    .detach();
+                                }),
+                        ),
+                )
+        });
         div()
             .w_full()
             .flex()
@@ -4306,6 +4583,7 @@ impl ChatListView {
                         )
                     }),
             )
+            .children(branch_controls)
             .children(item.error.as_ref().map(|error| {
                 div()
                     .p_2()
@@ -4316,12 +4594,18 @@ impl ChatListView {
                     .child(error.clone())
             }))
             .children(messages.is_empty().then(|| {
-                div()
-                    .py_6()
-                    .text_center()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child("Waiting for progress…")
+                div().w_full().flex().justify_center().py_4().child(
+                    div()
+                        .px_4()
+                        .py_2()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.title_bar)
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child("No messages yet — the subagent hasn't responded."),
+                )
             }))
             .children(messages)
             .into_any_element()
@@ -4344,7 +4628,8 @@ impl ChatListView {
                 state.is_generating,
                 state.active_pending_composer_message().map(str::to_owned),
                 state.active_session_id.clone(),
-                state.session_status.clone(),
+                visible_session_status(state.session_status.as_deref(), state.messages.last())
+                    .map(str::to_owned),
             )
         };
         let (metrics, context_window) = {
@@ -4363,6 +4648,12 @@ impl ChatListView {
             (state.active_session_metrics(), context_window)
         };
         let subagent_count = self.model.read(cx).active_subagents().len();
+        let supports_live_steering = !threadlane_session::is_acp_model(&selected_model);
+        let steer_tooltip = if supports_live_steering {
+            "Steer current turn immediately (Cmd+Enter)"
+        } else {
+            "This agent does not support live steering. Use Queue for the next turn."
+        };
         let has_composer_text = !self.input_state.read(cx).value().trim().is_empty();
         let has_prompt =
             !self.input_state.read(cx).value().trim().is_empty() || !self.pasted_images.is_empty();
@@ -4383,23 +4674,35 @@ impl ChatListView {
         // model. Naming it here rather than only in the settings menu is what
         // makes choosing a model visibly take effect, since this is the control
         // a user reads to answer "which model am I on".
-        let model_label = match self.model.read(cx).active_acp_model_name() {
+        let model_label = match self.model.read(cx).active_acp_model_label() {
             Some(agent_model) => format!("{model_label} · {agent_model}"),
             None => model_label,
         };
         // Selecting an ACP agent picks the *agent*; the agent then runs one of
         // its own models. Both are "which model am I on", so both belong in
         // this one control rather than split across two.
-        let acp_model_option = threadlane_session::is_acp_model(&selected_model)
-            .then(|| {
-                threadlane_session::config_option_for(
-                    self.model.read(cx).active_acp_config_options(),
-                    threadlane_session::ACP_CONFIG_CATEGORY_MODEL,
-                )
-                .cloned()
-            })
-            .flatten();
-        let acp_model_menu_model = self.model.clone();
+        // Per-agent model settings behind each "External agents" row: live
+        // options for the selected agent, launch-time cache for the rest, so
+        // every agent's models are visible before it is picked.
+        let acp_model_sections: HashMap<String, Vec<threadlane_session::AcpConfigOption>> = {
+            let state = self.model.read(cx);
+            let mut sections = HashMap::new();
+            for option in &model_options {
+                if option.provider != crate::model_catalog::ModelProvider::Acp {
+                    continue;
+                }
+                let Some(agent_id) = threadlane_session::acp_agent_id(&option.id) else {
+                    continue;
+                };
+                let options = if option.id == selected_model {
+                    state.active_acp_config_options()
+                } else {
+                    crate::model_catalog::cached_acp_config_options(agent_id)
+                };
+                sections.insert(agent_id.to_string(), options);
+            }
+            sections
+        };
         let model_for_picker = self.model.clone();
         let queue_model = self.model.clone();
         let steer_model = self.model.clone();
@@ -4422,17 +4725,34 @@ impl ChatListView {
                 div()
                     .flex()
                     .items_center()
-                    .gap_1()
-                    .px_2()
+                    .gap_1p5()
+                    .px_2p5()
                     .py_1()
-                    .rounded_md()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(theme.border)
                     .bg(theme.secondary)
                     .text_xs()
-                    .child("▣")
-                    .child(name)
+                    .text_color(theme.foreground)
+                    .child(Icon::new(IconName::File).xsmall().text_color(theme.primary))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("pasted-image-{index}")))
+                            .max_w(px(160.0))
+                            .truncate()
+                            .tooltip({
+                                let tip = name.clone();
+                                move |window, cx| {
+                                    gpui_component::tooltip::Tooltip::new(tip.clone())
+                                        .build(window, cx)
+                                }
+                            })
+                            .child(name),
+                    )
                     .child(
                         Button::new(("remove-pasted-image", index))
                             .icon(IconName::Close)
+                            .accessibility_label("Remove image")
                             .xsmall()
                             .ghost()
                             .tooltip("Remove image")
@@ -4566,7 +4886,7 @@ impl ChatListView {
             .icon(IconName::Folder)
             .label(selected_project_name)
             .dropdown_caret(true)
-            .ghost()
+            .outline()
             .xsmall()
             .dropdown_menu(move |menu, _window, _cx| {
                 let mut menu = menu;
@@ -4628,9 +4948,10 @@ impl ChatListView {
             })
             .label(work_mode_label)
             .dropdown_caret(true)
-            .ghost()
+            .outline()
             .xsmall()
             .dropdown_menu(move |menu, _window, _cx| {
+                let menu = menu.check_side(gpui_component::Side::Right);
                 let local_model = work_mode_model.clone();
                 let wt_model = work_mode_model.clone();
                 menu.item(PopupMenuItem::label("Work in"))
@@ -4671,10 +4992,10 @@ impl ChatListView {
             .w_full()
             .max_w(px(1000.0))
             .mx_auto()
-            .mb_1p5()
+            .mb_2()
             .flex()
             .items_center()
-            .gap_1p5()
+            .gap_2()
             .child(project_chip)
             .child(work_mode_chip);
 
@@ -4711,6 +5032,7 @@ impl ChatListView {
                 .child(
                     Button::new("queue-pending-message")
                         .icon(IconName::Plus)
+                        .accessibility_label("Queue pending message")
                         .xsmall()
                         .secondary()
                         .tooltip("Queue after the current response")
@@ -4724,9 +5046,11 @@ impl ChatListView {
                 .child(
                     Button::new("steer-pending-message")
                         .icon(IconName::ArrowRight)
+                        .accessibility_label("Steer with pending message")
                         .xsmall()
                         .primary()
-                        .tooltip("Steer the current response")
+                        .disabled(!supports_live_steering)
+                        .tooltip(steer_tooltip)
                         .on_click(move |_event, _window, cx| {
                             steer_model.update(cx, |state, cx| {
                                 controller::dispatch(state, AppAction::SteerPendingMessage);
@@ -4737,6 +5061,7 @@ impl ChatListView {
                 .child(
                     Button::new("dismiss-pending-message")
                         .icon(IconName::Undo2)
+                        .accessibility_label("Edit pending message")
                         .xsmall()
                         .ghost()
                         .tooltip("Edit message in the composer")
@@ -4758,65 +5083,173 @@ impl ChatListView {
         });
 
         let model_picker = Button::new("composer-model-picker")
-            .label(model_label)
+            .label(model_label.clone())
             .dropdown_caret(true)
             .ghost()
-            .disabled(!has_models);
+            .disabled(!has_models)
+            .tooltip(if has_models {
+                format!("Model: {model_label}")
+            } else {
+                "No models available — connect a provider in Settings".to_string()
+            });
 
         let model_picker = if let Some(option) = selected_option.as_ref() {
             model_picker.icon(Icon::default().path(option.provider.icon_path()))
         } else {
             model_picker
         };
+        let selected_model_for_picker = selected_model.clone();
+        let submenu_click_model = self.model.clone();
         let model_picker = model_picker.dropdown_menu(move |menu, _window, _cx| {
-            let menu = model_options.iter().cloned().fold(menu, |menu, option| {
-                let model = model_for_picker.clone();
-                menu.item(
-                    PopupMenuItem::new(option.label)
-                        .icon(Icon::default().path(option.provider.icon_path()))
-                        .on_click(move |_event, _window, cx| {
-                            model.update(cx, |state, cx| {
-                                controller::dispatch(
-                                    state,
-                                    AppAction::SelectModel(option.id.to_string()),
-                                );
-                                cx.notify();
-                            });
-                        }),
-                )
-            });
-            let Some(acp_model) = acp_model_option.as_ref() else {
-                return menu;
-            };
-            let current = acp_model.current_value();
-            let config_id = acp_model.id.clone();
-            let menu = menu
-                .item(PopupMenuItem::separator())
-                .item(PopupMenuItem::label(acp_model.name.clone()));
-            acp_model.options.iter().fold(menu, |menu, choice| {
-                let model = acp_model_menu_model.clone();
-                let config_id = config_id.clone();
-                let value = choice.value.clone();
-                menu.item(
-                    PopupMenuItem::new(choice.name.clone())
-                        .checked(current == Some(choice.value.as_str()))
-                        .on_click(move |_event, _window, cx| {
-                            model.update(cx, |state, cx| {
-                                controller::dispatch(
-                                    state,
-                                    AppAction::SetAcpConfigOption {
-                                        config_id: config_id.clone(),
-                                        value: value.clone(),
+            let menu = menu.check_side(gpui_component::Side::Right);
+            let mut previous_provider = None;
+            let menu = model_options.iter().cloned().fold(
+                menu.max_h(px(320.0)).scrollable(true),
+                |menu, option| {
+                    let menu = if previous_provider == Some(option.provider) {
+                        menu
+                    } else {
+                        previous_provider = Some(option.provider);
+                        menu.item(PopupMenuItem::label(option.provider.label()))
+                    };
+                    if option.provider != crate::model_catalog::ModelProvider::Acp {
+                        let model = model_for_picker.clone();
+                        let is_current = option.id == selected_model_for_picker;
+                        let label = if is_current {
+                            format!("{} · Current", option.label)
+                        } else {
+                            option.label
+                        };
+                        return menu.item(
+                            PopupMenuItem::new(label)
+                                .icon(Icon::default().path(option.provider.icon_path()))
+                                .checked(is_current)
+                                .on_click(move |_event, _window, cx| {
+                                    model.update(cx, |state, cx| {
+                                        controller::dispatch(
+                                            state,
+                                            AppAction::SelectModel(option.id.to_string()),
+                                        );
+                                        cx.notify();
+                                    });
+                                }),
+                        );
+                    }
+                    // External agents list their own models inline, fed by the
+                    // shared launch-time cache until this session's engine
+                    // connects. Picking one selects the agent and applies the
+                    // model in a single gesture — no hover, no pre-select.
+                    let agent_key = threadlane_session::acp_agent_id(&option.id)
+                        .unwrap_or_default()
+                        .to_string();
+                    let agent_options = acp_model_sections
+                        .get(&agent_key)
+                        .cloned()
+                        .unwrap_or_default();
+                    let agent_setting = threadlane_session::config_option_for(
+                        &agent_options,
+                        threadlane_session::ACP_CONFIG_CATEGORY_MODEL,
+                    )
+                    .cloned();
+                    let is_current = option.id == selected_model_for_picker;
+                    let agent_label = if is_current {
+                        format!("{} · Current", option.label)
+                    } else {
+                        option.label.clone()
+                    };
+                    let select_model = submenu_click_model.clone();
+                    let select_id = option.id.clone();
+                    let menu = menu.item(
+                        PopupMenuItem::new(agent_label)
+                            .icon(Icon::default().path(option.provider.icon_path()))
+                            .checked(is_current)
+                            .on_click(move |_event, _window, cx| {
+                                select_model.update(cx, |state, cx| {
+                                    controller::dispatch(
+                                        state,
+                                        AppAction::SelectModel(select_id.clone()),
+                                    );
+                                    cx.notify();
+                                });
+                            }),
+                    );
+                    match agent_setting {
+                        Some(setting) => {
+                            let current = setting.current_value().map(str::to_string);
+                            let config_id = setting.id.clone();
+                            setting.options.into_iter().fold(menu, |menu, choice| {
+                                let click_model = submenu_click_model.clone();
+                                let select_id = option.id.clone();
+                                let config_id = config_id.clone();
+                                let value = choice.value.clone();
+                                // Only the selected agent's live state can
+                                // mark a current model; cached currents may
+                                // be stale, so other agents show none.
+                                let checked =
+                                    is_current && current.as_deref() == Some(choice.value.as_str());
+                                let label = if checked {
+                                    format!("{} · Current", choice.name)
+                                } else {
+                                    choice.name.clone()
+                                };
+                                menu.item(PopupMenuItem::new(label).checked(checked).on_click(
+                                    move |_event, _window, cx| {
+                                        click_model.update(cx, |state, cx| {
+                                            controller::dispatch(
+                                                state,
+                                                AppAction::SelectModel(select_id.clone()),
+                                            );
+                                            controller::dispatch(
+                                                state,
+                                                AppAction::SetAcpConfigOption {
+                                                    config_id: config_id.clone(),
+                                                    value: value.clone(),
+                                                },
+                                            );
+                                            cx.notify();
+                                        });
                                     },
-                                );
-                                cx.notify();
-                            });
-                        }),
-                )
-            })
+                                ))
+                            })
+                        }
+                        None => {
+                            let reason = crate::model_catalog::cached_acp_error(&agent_key)
+                                .map(|error| {
+                                    let short: String = error.chars().take(120).collect();
+                                    if error.chars().count() > 120 {
+                                        format!("{short}…")
+                                    } else {
+                                        short
+                                    }
+                                })
+                                .unwrap_or_else(|| format!("Connecting to {}…", option.label));
+                            let settings_model = submenu_click_model.clone();
+                            menu.item(PopupMenuItem::new(reason).disabled(true)).item(
+                                PopupMenuItem::new("Check Settings → ACP Agents").on_click(
+                                    move |_event, _window, cx| {
+                                        settings_model.update(cx, |state, cx| {
+                                            controller::dispatch(state, AppAction::OpenSettings);
+                                            cx.notify();
+                                        });
+                                    },
+                                ),
+                            )
+                        }
+                    }
+                },
+            );
+            menu
         });
 
         let effort_model = self.model.clone();
+        let effort_options =
+            crate::model_catalog::efforts_for_model(&selected_model, project_root.as_deref());
+        // Models without thinking (ACP agents, off-only registry entries)
+        // offer no effort control instead of dead options.
+        let show_effort_picker = crate::model_catalog::supports_reasoning(
+            &selected_model,
+            project_root.as_deref(),
+        );
         let effort_picker = Button::new("composer-reasoning-effort-picker")
             .icon(Icon::default().path("icons/effort.svg"))
             .label(reasoning_effort.label())
@@ -4824,33 +5257,27 @@ impl ChatListView {
             .dropdown_caret(true)
             .ghost()
             .dropdown_menu(move |menu, _window, _cx| {
-                [
-                    ReasoningEffort::Off,
-                    ReasoningEffort::Minimal,
-                    ReasoningEffort::Low,
-                    ReasoningEffort::Medium,
-                    ReasoningEffort::High,
-                    ReasoningEffort::XHigh,
-                    ReasoningEffort::Max,
-                ]
-                .into_iter()
-                .fold(menu, |menu, effort| {
-                    let model = effort_model.clone();
-                    menu.item(
-                        PopupMenuItem::new(effort.label())
-                            .icon(Icon::default().path("icons/effort.svg"))
-                            .checked(effort == reasoning_effort)
-                            .on_click(move |_event, _window, cx| {
-                                model.update(cx, |state, cx| {
-                                    controller::dispatch(
-                                        state,
-                                        AppAction::SelectReasoningEffort(effort),
-                                    );
-                                    cx.notify();
-                                });
-                            }),
-                    )
-                })
+                let menu = menu.check_side(gpui_component::Side::Right);
+                effort_options
+                    .clone()
+                    .into_iter()
+                    .fold(menu, |menu, effort| {
+                        let model = effort_model.clone();
+                        menu.item(
+                            PopupMenuItem::new(effort.label())
+                                .icon(Icon::default().path("icons/effort.svg"))
+                                .checked(effort == reasoning_effort)
+                                .on_click(move |_event, _window, cx| {
+                                    model.update(cx, |state, cx| {
+                                        controller::dispatch(
+                                            state,
+                                            AppAction::SelectReasoningEffort(effort),
+                                        );
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                    })
             });
 
         let input_value = self.input_state.read(cx).value().to_string();
@@ -4880,7 +5307,7 @@ impl ChatListView {
                     .max_h(px(320.0))
                     .flex()
                     .flex_col()
-                    .rounded_xl()
+                    .rounded_lg()
                     .border_1()
                     .border_color(theme.border)
                     .bg(theme.title_bar)
@@ -4891,8 +5318,10 @@ impl ChatListView {
                             .flex()
                             .items_center()
                             .justify_between()
-                            .h(px(26.0))
+                            .h(px(28.0))
                             .px_2()
+                            .border_b_1()
+                            .border_color(theme.border.opacity(0.4))
                             .text_xs()
                             .text_color(theme.muted_foreground)
                             .child(
@@ -4918,7 +5347,9 @@ impl ChatListView {
                     .child(
                         div()
                             .id("slash-command-list")
+                            .role(Role::List)
                             .relative()
+                            .mt_1()
                             .track_scroll(&self.slash_scroll_handle)
                             .overflow_y_scroll()
                             .vertical_scrollbar(&self.slash_scroll_handle)
@@ -4937,12 +5368,16 @@ impl ChatListView {
                             })
                             .children(commands.into_iter().enumerate().map(|(idx, command)| {
                                 let is_active = idx == selected_idx;
+                                let command_label =
+                                    format!("/{}: {}", &command.name, &command.description);
                                 let command_name = command.name.clone();
                                 div()
                                     .id(SharedString::from(format!(
                                         "composer-command-{}",
                                         command.name
                                     )))
+                                    .role(Role::Button)
+                                    .aria_label(command_label)
                                     .h(px(30.0))
                                     .flex()
                                     .items_center()
@@ -4952,7 +5387,7 @@ impl ChatListView {
                                     .bg(if is_active {
                                         theme.accent.opacity(0.16)
                                     } else {
-                                        hsla(0.0, 0.0, 0.0, 0.0)
+                                        gpui::transparent_black()
                                     })
                                     .hover(|style| style.bg(theme.list_hover))
                                     .cursor_pointer()
@@ -5066,7 +5501,7 @@ impl ChatListView {
                 div()
                     .w(px(340.0))
                     .p_4()
-                    .rounded_xl()
+                    .rounded_lg()
                     .border_1()
                     .border_color(theme.border)
                     .bg(theme.background)
@@ -5157,7 +5592,7 @@ impl ChatListView {
                         div()
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .child("Context is compacted automatically when needed."),
+                            .child("Context is compacted automatically when needed. Percent reflects the current model request."),
                     )
             });
 
@@ -5234,6 +5669,7 @@ impl ChatListView {
                         .child(
                             Button::new("dismiss-stashed-draft")
                                 .icon(IconName::Close)
+                                .accessibility_label("Discard stashed draft")
                                 .ghost()
                                 .xsmall()
                                 .tooltip("Discard stash")
@@ -5255,6 +5691,7 @@ impl ChatListView {
             let do_stash_session_id = active_session_id.clone();
             Button::new("stash-prompt-btn")
                 .icon(IconName::Folder)
+                .accessibility_label("Stash draft")
                 .tooltip("Stash draft")
                 .ghost()
                 .small()
@@ -5291,14 +5728,16 @@ impl ChatListView {
             .pb_2()
             .bg(theme.background)
             .children(provider_setup_banner)
-            .children(session_status.filter(|status| {
-                !status.trim().is_empty()
-                    && status != "Working…"
-                    && status != "Reconciling session…"
-            }).map(|status| {
+            .children(session_status.map(|status| {
+                let (summary, needs_provider_settings) = chat_error_summary(&status);
                 let is_error = status.starts_with("Could not")
                     || status.starts_with("Failed")
-                    || status.starts_with("Error");
+                    || status.starts_with("Error")
+                    || needs_provider_settings;
+                if is_error {
+                    return render_chat_error("session-status", &status, &self.model, cx)
+                        .into_any_element();
+                }
                 div()
                     .w_full()
                     .max_w(px(1000.0))
@@ -5308,31 +5747,16 @@ impl ChatListView {
                     .py_2()
                     .rounded_lg()
                     .border_1()
-                    .border_color(if is_error {
-                        theme.danger.opacity(0.4)
-                    } else {
-                        theme.border
-                    })
-                    .bg(if is_error {
-                        theme.danger.opacity(0.08)
-                    } else {
-                        theme.title_bar
-                    })
+                    .border_color(theme.border)
+                    .bg(theme.title_bar)
                     .flex()
                     .items_center()
                     .gap_2()
                     .text_sm()
-                    .text_color(if is_error {
-                        theme.danger
-                    } else {
-                        theme.muted_foreground
-                    })
-                    .child(if is_error {
-                        IconName::CircleX
-                    } else {
-                        IconName::Asterisk
-                    })
-                    .child(div().min_w_0().child(status))
+                    .text_color(theme.muted_foreground)
+                    .child(IconName::Asterisk)
+                    .child(div().min_w_0().child(summary))
+                    .into_any_element()
             }))
             .children(pending_preview)
             .child(composer_context_bar)
@@ -5342,7 +5766,7 @@ impl ChatListView {
                     .max_w(px(1000.0))
                     .mx_auto()
                     .relative()
-                    .min_h(px(132.0))
+                    .min_h(px(136.0))
                     .flex()
                     .flex_col()
                     .justify_between()
@@ -5351,6 +5775,8 @@ impl ChatListView {
                     .border_1()
                     .border_color(theme.border)
                     .bg(theme.title_bar)
+                    .shadow_md()
+                    .hover(|style| style.border_color(theme.border.opacity(0.85)))
                     .on_action(cx.listener(Self::paste_composer_clipboard))
                     .when(slash_completion_active, |composer| {
                         composer
@@ -5367,9 +5793,15 @@ impl ChatListView {
                     )
                     .child(command_menu)
                     .child(
-                        Textarea::new(&self.input_state)
-                            .appearance(false)
-                            .bordered(false),
+                        div()
+                            .w_full()
+                            .flex_1()
+                            .min_h(px(48.0))
+                            .child(
+                                Textarea::new(&self.input_state)
+                                    .appearance(false)
+                                    .bordered(false),
+                            ),
                     )
                     .child(
                         div()
@@ -5377,7 +5809,7 @@ impl ChatListView {
                             .items_center()
                             .gap_1()
                             .child(model_picker)
-                            .child(effort_picker)
+                            .children(show_effort_picker.then_some(effort_picker))
                             .child(div().flex_1())
                             .child(stash_button)
                             .children(subagent_popover)
@@ -5413,8 +5845,8 @@ impl ChatListView {
                                             .label("Steer")
                                             .small()
                                             .primary()
-                                            .disabled(!has_composer_text)
-                                            .tooltip("Steer current turn immediately (Cmd+Enter)")
+                                            .disabled(!has_composer_text || !supports_live_steering)
+                                            .tooltip(steer_tooltip)
                                             .on_click(cx.listener(move |this, _event, window, cx| {
                                                 let text = steer_prompt_input.read(cx).value().to_string();
                                                 if !text.trim().is_empty() {
@@ -5434,6 +5866,7 @@ impl ChatListView {
                                             .into_any_element(),
                                         Button::new("composer-stop-btn")
                                             .icon(IconName::CircleX)
+                                            .accessibility_label("Stop generation")
                                             .small()
                                             .danger()
                                             .tooltip("Stop generation (Esc)")
@@ -5451,9 +5884,10 @@ impl ChatListView {
                             } else {
                                 vec![
                                     Button::new("send-btn")
-                                        .w(px(40.0))
-                                        .h(px(40.0))
+                                        .w(px(34.0))
+                                        .h(px(34.0))
                                         .icon(IconName::ArrowUp)
+                                        .accessibility_label("Send message")
                                         .tooltip(if needs_provider {
                                             "Connect a model provider in Settings before sending"
                                         } else if has_prompt {
@@ -5461,8 +5895,8 @@ impl ChatListView {
                                         } else {
                                             "Type a message to send"
                                         })
-                                        .primary()
-                                        .disabled(!has_prompt || needs_provider)
+                                        .when(has_prompt && !needs_provider, |b| b.primary())
+                                        .when(!has_prompt || needs_provider, |b| b.ghost().disabled(true))
                                         .on_click(cx.listener(move |this, _event, window, cx| {
                                             let text = send_input.read(cx).value().to_string();
                                             if !text.trim().is_empty() || !this.pasted_images.is_empty() {
@@ -5489,44 +5923,249 @@ impl ChatListView {
                             }),
                     ),
             )
-            .when(
-                metrics.turns > 0
-                    || metrics.tool_calls > 0
-                    || billed_input_tokens > 0
-                    || metrics.output_tokens > 0
-                    || subagent_count > 0,
-                |this| {
-                    this.child(
-                        div()
-                            .w_full()
-                            .max_w(px(1000.0))
-                            .mx_auto()
-                            .flex()
-                            .justify_center()
-                            .pt_1()
-                            .pb_2()
-                            .px_1()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(format!(
-                                "{} turns · {} tool calls{cache_hit} · {} input / {} output tokens · {} subagents",
-                                metrics.turns,
-                                metrics.tool_calls,
-                                crate::model_catalog::format_tokens(
-                                    billed_input_tokens.min(u64::from(u32::MAX)) as u32
-                                ),
-                                crate::model_catalog::format_tokens(
-                                    metrics.output_tokens.min(u64::from(u32::MAX)) as u32
-                                ),
-                                subagent_count,
-                            )),
-                    )
-                },
+            // Keep this summary mounted even before the first response metrics arrive.
+            // Otherwise the composer gains a new row mid-turn, shifting the transcript and
+            // input as soon as the first tool call or token count is reported.
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(1000.0))
+                    .mx_auto()
+                    .flex()
+                    .justify_center()
+                    .pt_1()
+                    .pb_2()
+                    .px_1()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(format!(
+                        "{} turns · {} tool calls{cache_hit} · {} input / {} output tokens · {} subagents",
+                        metrics.turns,
+                        metrics.tool_calls,
+                        crate::model_catalog::format_tokens(
+                            billed_input_tokens.min(u64::from(u32::MAX)) as u32
+                        ),
+                        crate::model_catalog::format_tokens(
+                            metrics.output_tokens.min(u64::from(u32::MAX)) as u32
+                        ),
+                        subagent_count,
+                    )),
             )
     }
 }
 
+impl ChatListView {
+    fn render_progress_summary(&self, cx: &mut Context<Self>) -> AnyElement {
+        let (summary, category, tool_detail, active_subagent_tasks) = {
+            let state = self.model.read(cx);
+            let latest_tool = state
+                .messages
+                .iter()
+                .rev()
+                .flat_map(|message| message.tool_activities.iter().rev())
+                .next();
+            let active_subagents = state
+                .active_subagents()
+                .iter()
+                .filter(|subagent| {
+                    matches!(
+                        subagent.status,
+                        SubagentActivityStatus::Queued | SubagentActivityStatus::Running
+                    )
+                })
+                .map(|s| (s.agent.clone(), s.task.clone()))
+                .collect::<Vec<_>>();
+            let summary = latest_tool
+                .map(|tool| {
+                    if tool.display_summary.trim().is_empty() {
+                        tool.title.clone()
+                    } else {
+                        tool.display_summary.clone()
+                    }
+                })
+                .unwrap_or_else(|| "Preparing the next step".to_string());
+            let category = latest_tool
+                .map(|tool| tool.category.clone())
+                .unwrap_or_else(|| "Agent activity".to_string());
+            let tool_detail = latest_tool
+                .map(|tool| tool.detail.trim().to_string())
+                .filter(|detail| !detail.is_empty());
+            (summary, category, tool_detail, active_subagents)
+        };
+        let theme = cx.theme().colors;
+        let subagent_count = active_subagent_tasks.len();
+        let subagent_label = (subagent_count > 0).then(|| {
+            format!(
+                "{} subagent{}",
+                subagent_count,
+                if subagent_count == 1 { "" } else { "s" }
+            )
+        });
+
+        let mut container = div()
+            .id("chat-progress-summary")
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_progress_summary(cx)))
+            .flex_none()
+            .mx_4()
+            .mt_2()
+            .mb_1()
+            .px_3()
+            .py_2()
+            .flex()
+            .flex_col()
+            .gap_1p5()
+            .rounded_lg()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.muted.opacity(0.35))
+            .cursor_pointer();
+
+        let header_row = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(Spinner::new().xsmall())
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.foreground)
+                            .child("Working on:"),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(summary),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(subagent_label.unwrap_or(category)),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(theme.muted_foreground)
+                    .child(
+                        Icon::new(if self.progress_summary_expanded {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .xsmall(),
+                    ),
+            );
+
+        container = container.child(header_row);
+
+        if self.progress_summary_expanded {
+            let mut expanded_content = div()
+                .flex()
+                .flex_col()
+                .gap_1p5()
+                .pt_1p5()
+                .border_t_1()
+                .border_color(theme.border.opacity(0.5));
+
+            if let Some(detail) = tool_detail {
+                expanded_content = expanded_content.child(
+                    div()
+                        .max_h(px(120.0))
+                        .overflow_y_scrollbar()
+                        .px_2()
+                        .py_1()
+                        .rounded_lg()
+                        .bg(theme.background)
+                        .border_1()
+                        .border_color(theme.border.opacity(0.4))
+                        .text_xs()
+                        .text_color(theme.foreground)
+                        .child(detail),
+                );
+            }
+
+            if !active_subagent_tasks.is_empty() {
+                let subagents_view = div().flex().flex_col().gap_1().children(
+                    active_subagent_tasks
+                        .into_iter()
+                        .take(3)
+                        .map(|(agent, task)| {
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1p5()
+                                .text_xs()
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .px_1p5()
+                                        .py(px(0.5))
+                                        .rounded_lg()
+                                        .bg(theme.accent.opacity(0.15))
+                                        .text_color(theme.accent)
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child(agent),
+                                )
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_color(theme.muted_foreground)
+                                        .child(task),
+                                )
+                        }),
+                );
+                expanded_content = expanded_content.child(subagents_view);
+            }
+
+            expanded_content = expanded_content.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child("Click to collapse")
+                    .child(
+                        Button::new("progress-open-trajectory")
+                            .label("Open Trajectory")
+                            .icon(IconName::ChevronRight)
+                            .ghost()
+                            .xsmall()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.progress_summary_expanded = false;
+                                this.current_tab = CentralTab::Trajectory;
+                                cx.notify();
+                            })),
+                    ),
+            );
+
+            container = container.child(expanded_content);
+        }
+
+        container.into_any_element()
+    }
+
+    fn toggle_progress_summary(&mut self, cx: &mut Context<Self>) {
+        self.progress_summary_expanded = !self.progress_summary_expanded;
+        cx.notify();
+    }
+}
+
 impl Render for ChatListView {
+
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (messages, is_new_task, active_plan, session_key, is_generating, has_active_permission) = {
             let state = self.model.read(cx);
@@ -5556,6 +6195,7 @@ impl Render for ChatListView {
                 .unwrap_or_else(|| SharedString::from(""));
             if markdown_cache_exceeded(self.markdown_states.len()) {
                 self.markdown_states.clear();
+                self.segment_cache.clear();
             }
             self.last_session_key = session_key;
             self.initial_scroll_frames = 6;
@@ -5570,6 +6210,8 @@ impl Render for ChatListView {
             self.selected_slash_index = 0;
             self.dismiss_slash_menu = false;
             self.permission_details_open = false;
+            self.question_selections.clear();
+            self.question_inputs.clear();
             self.trajectory_search_input.update(cx, |state, cx| {
                 state.set_value("", window, cx);
             });
@@ -5603,6 +6245,10 @@ impl Render for ChatListView {
             .bg(theme.background)
             .on_key_down(cx.listener(Self::handle_key_down))
             .child(self.render_header(cx))
+            .children(
+                (self.current_tab == CentralTab::Chat && is_generating)
+                    .then(|| self.render_progress_summary(cx)),
+            )
             .child(match self.current_tab {
                 CentralTab::Editor => self.editor.clone().into_any_element(),
                 CentralTab::Trajectory => self.render_trajectory(cx),
@@ -5707,6 +6353,11 @@ impl Render for ChatListView {
                     .then(|| self.render_permission_prompt(cx))
                     .flatten(),
             )
+            .children(
+                (self.current_tab == CentralTab::Chat)
+                    .then(|| self.render_question_prompt(window, cx))
+                    .flatten(),
+            )
             .children((self.current_tab == CentralTab::Chat).then(|| self.render_composer(cx)))
             .children(
                 (self.current_tab == CentralTab::Chat && self.permission_details_open)
@@ -5716,784 +6367,6 @@ impl Render for ChatListView {
     }
 }
 
+#[path = "tests.rs"]
 #[cfg(test)]
-mod hot_path_tests {
-    use super::{
-        active_slash_command_query, build_trajectory_rows, build_transcript_rows,
-        classify_chat_link, classify_markdown_update, contains_case_insensitive,
-        context_meter_view_model, editor_target_matches_active_work_dir, extend_trajectory_facets,
-        extend_trajectory_previews, extend_trajectory_rows, extend_trajectory_summary,
-        extract_markdown_segments, format_trajectory_raw_json, grouped_tool_activities,
-        is_terminal_runnable_language, markdown_cache_exceeded, next_chat_stream_batch,
-        normalize_terminal_command, reconcile_trajectory_entries,
-        reconcile_trajectory_entries_by_epoch, subagent_popover_counts, summarize_trajectory,
-        ChatLinkTarget, ContextMeterContext, ContextMeterMetrics, MarkdownSegment, MarkdownUpdate,
-        TrajectoryCacheKey, TrajectoryMode, TrajectoryRow, TranscriptRow, INPUT_KEY_CONTEXT,
-        MARKDOWN_CACHE_ENTRY_LIMIT, SLASH_COMMAND_BINDING_CONTEXT, SLASH_COMMAND_KEY_CONTEXT,
-    };
-
-    #[test]
-    fn editor_targets_only_open_for_the_active_git_checkout() {
-        let worktree = std::path::Path::new("/projects/app/.threadlane/worktrees/session");
-        let canonical = std::path::Path::new("/projects/app");
-
-        assert!(editor_target_matches_active_work_dir(
-            worktree,
-            Some(worktree)
-        ));
-        assert!(!editor_target_matches_active_work_dir(
-            worktree,
-            Some(canonical)
-        ));
-        assert!(!editor_target_matches_active_work_dir(worktree, None));
-    }
-    use crate::state::{
-        reported_session_shape_state, ChatMessageInfo, ChatStreamEvent, MessageRole,
-        SubagentActivityStatus, ToolActivityInfo, TrajectoryDiagnostics, TrajectoryEntry,
-    };
-
-    #[test]
-    fn markdown_cache_resets_only_after_its_limit() {
-        assert!(!markdown_cache_exceeded(MARKDOWN_CACHE_ENTRY_LIMIT));
-        assert!(markdown_cache_exceeded(MARKDOWN_CACHE_ENTRY_LIMIT + 1));
-    }
-
-    #[tokio::test]
-    async fn chat_stream_batch_waits_then_caps_ready_events() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        assert!(tokio::time::timeout(
-            std::time::Duration::from_millis(10),
-            next_chat_stream_batch(&mut rx),
-        )
-        .await
-        .is_err());
-        for index in 0..130 {
-            tx.send(ChatStreamEvent::Finished {
-                session_id: index.to_string(),
-                session_file: std::path::PathBuf::new(),
-            })
-            .unwrap();
-        }
-        assert_eq!(next_chat_stream_batch(&mut rx).await.unwrap().len(), 128);
-        assert_eq!(next_chat_stream_batch(&mut rx).await.unwrap().len(), 2);
-    }
-
-    #[test]
-    fn trajectory_search_matches_ascii_without_case_sensitivity() {
-        assert!(contains_case_insensitive("Read File", "read"));
-        assert!(contains_case_insensitive("TOOL-CALL-42", "call-42"));
-        assert!(!contains_case_insensitive("Write File", "read"));
-    }
-
-    #[test]
-    fn subagent_popover_counts_items_without_owning_them() {
-        assert_eq!(subagent_popover_counts([]), None);
-        assert_eq!(
-            subagent_popover_counts([
-                SubagentActivityStatus::Queued,
-                SubagentActivityStatus::Running,
-                SubagentActivityStatus::Completed,
-            ]),
-            Some((3, 2))
-        );
-    }
-
-    #[test]
-    fn trajectory_search_preserves_unicode_lowercase_matching() {
-        assert!(contains_case_insensitive("CAFÉ output", "café"));
-        assert!(contains_case_insensitive("Kelvin", "kelvin"));
-        assert!(!contains_case_insensitive("CAFÉ output", "résumé"));
-    }
-
-    #[test]
-    fn chat_link_classifies_web_urls_as_external() {
-        assert_eq!(
-            classify_chat_link("https://example.com/spec"),
-            ChatLinkTarget::Web
-        );
-        assert_eq!(
-            classify_chat_link("http://example.com/spec"),
-            ChatLinkTarget::Web
-        );
-    }
-
-    #[test]
-    fn chat_link_normalizes_safe_project_relative_paths() {
-        assert_eq!(
-            classify_chat_link("docs/spec.md"),
-            ChatLinkTarget::ProjectFile("docs/spec.md".into())
-        );
-        assert_eq!(
-            classify_chat_link("docs/design/../spec.md"),
-            ChatLinkTarget::ProjectFile("docs/spec.md".into())
-        );
-    }
-
-    #[test]
-    fn chat_link_rejects_absolute_and_escaping_paths() {
-        assert_eq!(classify_chat_link("/tmp/spec.md"), ChatLinkTarget::Rejected);
-        assert_eq!(
-            classify_chat_link("../../outside.md"),
-            ChatLinkTarget::Rejected
-        );
-    }
-
-    #[test]
-    fn chat_link_does_not_parse_line_or_fragment_suffixes() {
-        assert_eq!(
-            classify_chat_link("src/main.rs:42"),
-            ChatLinkTarget::ProjectFile("src/main.rs:42".into())
-        );
-        assert_eq!(
-            classify_chat_link("src/main.rs#L42"),
-            ChatLinkTarget::ProjectFile("src/main.rs#L42".into())
-        );
-    }
-    fn metrics_with_usage(
-        input_tokens: u64,
-        output_tokens: u64,
-        cache_read_tokens: u64,
-        cache_write_tokens: u64,
-    ) -> ContextMeterMetrics {
-        let billed_input_tokens = input_tokens
-            .saturating_add(cache_read_tokens)
-            .saturating_add(cache_write_tokens);
-        ContextMeterMetrics {
-            billed_input_tokens,
-            output_tokens,
-            cache_hit_percent: (billed_input_tokens > 0).then(|| {
-                (((cache_read_tokens as u128) * 100 + (billed_input_tokens as u128) / 2)
-                    / billed_input_tokens as u128) as u64
-            }),
-        }
-    }
-
-    fn estimating_context() -> ContextMeterContext {
-        ContextMeterContext {
-            current_tokens: 0,
-            context_limit: 0,
-            context_limit_is_estimate: false,
-            effective_model: "new-model".into(),
-            last_compaction_seq: None,
-            provisional: false,
-            estimating: true,
-        }
-    }
-
-    #[test]
-    fn a_model_that_never_reports_usage_is_not_shown_as_estimating() {
-        // An ACP agent runs its own loop and sends no token accounting, so the
-        // meter has nothing to project. Rendering that as "Estimating…" both
-        // promises a number that never arrives and leaves the badge animating
-        // for the whole turn.
-        let view = context_meter_view_model(None, &ContextMeterMetrics::default(), false);
-        assert_eq!(view.current_label, "Not reported");
-        assert_eq!(view.percent, None);
-        assert_eq!(view.bar_percent, 0.0);
-
-        // A model that does report usage keeps the pending label until a
-        // context figure arrives.
-        let estimating = context_meter_view_model(None, &ContextMeterMetrics::default(), true);
-        assert_eq!(estimating.current_label, "Estimating…");
-    }
-
-    #[test]
-    fn an_unreported_context_still_shows_what_was_processed() {
-        // Turn counts and any usage Threadlane did observe stay meaningful
-        // even when the context window itself is unmeasurable.
-        let view = context_meter_view_model(
-            None,
-            &ContextMeterMetrics {
-                billed_input_tokens: 1_200,
-                output_tokens: 800,
-                cache_hit_percent: Some(40),
-            },
-            false,
-        );
-        assert_eq!(view.total_processed_label, "2.0k");
-        assert_eq!(view.cache_hit_label.as_deref(), Some("40%"));
-    }
-
-    #[tokio::test]
-    async fn meter_separates_current_context_from_total_processed() {
-        let (path, state) = reported_session_shape_state().await;
-        let projected_context = state.active_context_window().unwrap();
-        let projected_metrics = state.active_session_metrics();
-        let view = context_meter_view_model(
-            Some(&ContextMeterContext {
-                current_tokens: 38_278,
-                context_limit: 128_000,
-                context_limit_is_estimate: false,
-                effective_model: "gpt-4o".into(),
-                last_compaction_seq: None,
-                provisional: false,
-                estimating: false,
-            }),
-            &ContextMeterMetrics {
-                billed_input_tokens: projected_metrics.billed_input_tokens(),
-                output_tokens: projected_metrics.output_tokens,
-                cache_hit_percent: projected_metrics.cache_hit_percent(),
-            },
-            true,
-        );
-        let percent = view.percent.expect("known context percentage");
-        assert!((percent - 29.904_687_5).abs() < 1e-12);
-        assert!((view.bar_percent - 29.904_687_5).abs() < 1e-12);
-        assert_eq!(view.current_label, "38.3k / 128.0k");
-        assert!(view.total_processed_label.ends_with('M'));
-        assert_ne!(view.total_processed_label, view.current_label);
-        assert!(view.cache_hit_label.is_some());
-        assert_eq!(view.detail_label, "Context usage details, 30% used");
-    }
-
-    #[test]
-    fn meter_estimating_context_has_no_false_percentage() {
-        let view = context_meter_view_model(
-            Some(&estimating_context()),
-            &ContextMeterMetrics::default(),
-            true,
-        );
-        assert_eq!(view.percent, None);
-        assert_eq!(view.current_label, "Estimating…");
-        assert_eq!(view.bar_percent, 0.0);
-        assert_eq!(view.detail_label, "Context usage details, estimating usage");
-    }
-
-    #[test]
-    fn meter_treats_zero_context_limit_as_unknown_even_when_not_estimating() {
-        let mut context = estimating_context();
-        context.current_tokens = 42;
-        context.estimating = false;
-
-        let view = context_meter_view_model(Some(&context), &ContextMeterMetrics::default(), true);
-
-        assert_eq!(view.percent, None);
-        assert_eq!(view.current_label, "Estimating…");
-        assert_eq!(view.bar_percent, 0.0);
-        assert_eq!(view.detail_label, "Context usage details, estimating usage");
-    }
-
-    #[test]
-    fn meter_cache_hit_rounding_uses_wide_intermediates_at_u64_max() {
-        let metrics = metrics_with_usage(0, 0, u64::MAX, 0);
-
-        assert_eq!(metrics.billed_input_tokens, u64::MAX);
-        assert_eq!(metrics.cache_hit_percent, Some(100));
-    }
-
-    #[test]
-    fn meter_labels_estimated_limit_and_clamps_only_bar() {
-        let view = context_meter_view_model(
-            Some(&ContextMeterContext {
-                current_tokens: 120_000,
-                context_limit: 100_000,
-                context_limit_is_estimate: true,
-                effective_model: "model".into(),
-                last_compaction_seq: Some(42),
-                provisional: true,
-                estimating: false,
-            }),
-            &ContextMeterMetrics::default(),
-            true,
-        );
-        assert_eq!(view.percent, Some(120.0));
-        assert_eq!(view.bar_percent, 100.0);
-        assert_eq!(view.current_label, "120.0k / ~100.0k");
-        assert_eq!(view.last_compaction_seq, Some(42));
-        assert!(view.provisional);
-    }
-
-    #[test]
-    fn markdown_update_appends_only_the_new_suffix() {
-        assert_eq!(
-            classify_markdown_update("Hello", "Hello **world**"),
-            MarkdownUpdate::Append(" **world**")
-        );
-    }
-
-    #[test]
-    fn markdown_update_skips_identical_content() {
-        assert_eq!(
-            classify_markdown_update("Hello", "Hello"),
-            MarkdownUpdate::Unchanged
-        );
-    }
-
-    #[test]
-    fn markdown_update_replaces_non_append_changes() {
-        assert_eq!(
-            classify_markdown_update("Hello", "Jello"),
-            MarkdownUpdate::Replace
-        );
-        assert_eq!(
-            classify_markdown_update("Hello", "Hello there"),
-            MarkdownUpdate::Append(" there")
-        );
-        assert_eq!(
-            classify_markdown_update("Hello there", "Hello"),
-            MarkdownUpdate::Replace
-        );
-        assert_eq!(
-            classify_markdown_update("Hello", "Hello!"),
-            MarkdownUpdate::Append("!")
-        );
-        assert_eq!(
-            classify_markdown_update("Hello", "Jello there"),
-            MarkdownUpdate::Replace
-        );
-    }
-
-    #[test]
-    fn grouped_tool_activities_borrows_in_order_and_hides_plan_updates() {
-        let activity_message = |activities: &[(&str, &str)]| ChatMessageInfo {
-            id: activities[0].0.into(),
-            role: MessageRole::Assistant,
-            content: String::new(),
-            tool_activities: activities
-                .iter()
-                .map(|(id, title)| ToolActivityInfo {
-                    id: (*id).into(),
-                    category: "tool".into(),
-                    title: (*title).into(),
-                    display_summary: String::new(),
-                    detail: String::new(),
-                    is_expanded: false,
-                })
-                .collect(),
-            streaming: false,
-            reasoning_content: None,
-            reasoning_expanded: false,
-        };
-        let messages = vec![
-            activity_message(&[("tool-1", "read_file"), ("plan", "update_plan")]),
-            activity_message(&[("tool-2", "write_file")]),
-        ];
-
-        let ids = grouped_tool_activities(&messages)
-            .map(|activity| activity.id.as_str())
-            .collect::<Vec<_>>();
-
-        assert_eq!(ids, vec!["tool-1", "tool-2"]);
-    }
-
-    #[test]
-    fn transcript_rows_group_consecutive_tool_only_messages() {
-        let message = |id: &str, activity: bool| ChatMessageInfo {
-            id: id.into(),
-            role: if activity {
-                MessageRole::Assistant
-            } else {
-                MessageRole::User
-            },
-            content: if activity { "" } else { id }.into(),
-            tool_activities: activity
-                .then(|| ToolActivityInfo {
-                    id: format!("tool-{id}"),
-                    category: "tool".into(),
-                    title: "read_file".into(),
-                    display_summary: String::new(),
-                    detail: String::new(),
-                    is_expanded: false,
-                })
-                .into_iter()
-                .collect(),
-            streaming: false,
-            reasoning_content: None,
-            reasoning_expanded: false,
-        };
-        let messages = vec![
-            message("user", false),
-            message("tool-1", true),
-            message("tool-2", true),
-            message("answer", false),
-        ];
-
-        assert_eq!(
-            build_transcript_rows(&messages, true),
-            vec![
-                TranscriptRow::Message(0),
-                TranscriptRow::Activities(1..3),
-                TranscriptRow::Message(3),
-                TranscriptRow::Working,
-            ]
-        );
-    }
-
-    #[test]
-    fn selected_trajectory_entry_formats_as_raw_json() {
-        let entry = TrajectoryEntry {
-            seq: Some(1),
-            run_id: None,
-            turn: None,
-            request: None,
-            category: "Tool".into(),
-            summary: "Read file".into(),
-            detail: "src/main.rs".into(),
-            lane: None,
-            correlation_id: None,
-            diagnostics: TrajectoryDiagnostics::default(),
-        };
-
-        let raw = format_trajectory_raw_json(&entry);
-
-        assert!(raw.contains("\"category\": \"Tool\""));
-        assert!(raw.contains("\"summary\": \"Read file\""));
-    }
-
-    fn trajectory_entry(
-        category: &str,
-        request: Option<u32>,
-        turn: Option<u32>,
-    ) -> TrajectoryEntry {
-        TrajectoryEntry {
-            seq: None,
-            run_id: None,
-            turn,
-            request,
-            category: category.into(),
-            summary: category.into(),
-            detail: String::new(),
-            lane: None,
-            correlation_id: None,
-            diagnostics: TrajectoryDiagnostics::default(),
-        }
-    }
-
-    #[test]
-    fn trajectory_cache_reuses_entries_for_append_only_updates() {
-        let cached = vec![trajectory_entry("Input", Some(1), Some(1))];
-        let source = vec![
-            cached[0].clone(),
-            trajectory_entry("Tool", Some(1), Some(1)),
-        ];
-
-        assert_eq!(reconcile_trajectory_entries(cached, &source), source);
-    }
-
-    #[test]
-    fn trajectory_cache_replaces_entries_when_existing_data_changes() {
-        let cached = vec![trajectory_entry("Input", Some(1), Some(1))];
-        let source = vec![trajectory_entry("Assistant", Some(1), Some(1))];
-
-        assert_eq!(reconcile_trajectory_entries(cached, &source), source);
-    }
-
-    #[test]
-    fn trajectory_epoch_distinguishes_append_from_replacement() {
-        let cached = vec![trajectory_entry("Input", Some(1), Some(1))];
-        let appended_source = vec![
-            cached[0].clone(),
-            trajectory_entry("Tool", Some(1), Some(1)),
-        ];
-        let (entries, appended) =
-            reconcile_trajectory_entries_by_epoch(cached.clone(), &appended_source, 7, 7);
-        assert!(appended);
-        assert_eq!(entries, appended_source);
-
-        let replacement = vec![trajectory_entry("Assistant", Some(1), Some(1))];
-        let (entries, appended) = reconcile_trajectory_entries_by_epoch(cached, &replacement, 7, 8);
-        assert!(!appended);
-        assert_eq!(entries, replacement);
-    }
-
-    #[test]
-    fn trajectory_incremental_facets_match_full_rebuild() {
-        let mut input = trajectory_entry("Input", Some(1), Some(1));
-        input.lane = Some("main".into());
-        let mut tool = trajectory_entry("Tool", Some(1), Some(1));
-        tool.lane = Some("main".into());
-        let mut anomaly = trajectory_entry("Anomaly", Some(1), Some(2));
-        anomaly.lane = Some("child".into());
-        let appended_tool = trajectory_entry("Tool", Some(1), Some(2));
-        let entries = vec![input, tool, anomaly, appended_tool];
-        let key = TrajectoryCacheKey {
-            revision: 4,
-            epoch: 1,
-            mode: TrajectoryMode::Execution,
-            query: "tool".into(),
-            category: None,
-            lane: None,
-        };
-
-        let mut incremental = (Vec::new(), std::collections::BTreeMap::new(), Vec::new());
-        extend_trajectory_facets(
-            &mut incremental.0,
-            &mut incremental.1,
-            &mut incremental.2,
-            &entries[..2],
-            0,
-            &key,
-        );
-        extend_trajectory_facets(
-            &mut incremental.0,
-            &mut incremental.1,
-            &mut incremental.2,
-            &entries,
-            2,
-            &key,
-        );
-
-        let mut rebuilt = (Vec::new(), std::collections::BTreeMap::new(), Vec::new());
-        extend_trajectory_facets(
-            &mut rebuilt.0,
-            &mut rebuilt.1,
-            &mut rebuilt.2,
-            &entries,
-            0,
-            &key,
-        );
-        assert_eq!(incremental, rebuilt);
-        assert_eq!(incremental.0, vec!["Anomaly", "Input", "Tool"]);
-        assert_eq!(incremental.2, vec![1, 3]);
-    }
-
-    #[test]
-    fn trajectory_previews_extend_without_reformatting_existing_entries() {
-        let mut input = trajectory_entry("Input", Some(1), Some(1));
-        input.summary = "Prompt".into();
-        input.detail = "first\nsecond".into();
-        let mut tool = trajectory_entry("Tool", Some(1), Some(1));
-        tool.summary = "read_file".into();
-        tool.detail.clear();
-        let entries = vec![input, tool];
-        let mut previews = Vec::new();
-
-        extend_trajectory_previews(&mut previews, &entries[..1], 0);
-        extend_trajectory_previews(&mut previews, &entries, 1);
-
-        assert_eq!(previews, ["Prompt  first second", "read_file"]);
-    }
-
-    #[test]
-    fn trajectory_rows_preserve_request_headers_and_setup_boundaries() {
-        let entries = vec![
-            trajectory_entry("Provider", Some(1), Some(1)),
-            trajectory_entry("Input", Some(1), Some(1)),
-            trajectory_entry("Input", Some(2), Some(2)),
-        ];
-
-        assert_eq!(
-            build_trajectory_rows(&entries, &[0, 1, 2], TrajectoryMode::Requests),
-            vec![
-                TrajectoryRow::RequestHeader(1),
-                TrajectoryRow::Setup,
-                TrajectoryRow::Entry(0),
-                TrajectoryRow::Entry(1),
-                TrajectoryRow::RequestHeader(2),
-                TrajectoryRow::Entry(2),
-            ]
-        );
-    }
-
-    #[test]
-    fn trajectory_incremental_rows_match_full_rebuild() {
-        let entries = vec![
-            trajectory_entry("Provider", Some(1), Some(1)),
-            trajectory_entry("Input", Some(1), Some(1)),
-            trajectory_entry("Input", Some(2), Some(2)),
-        ];
-        let indices = [0, 1, 2];
-        let mut incremental = Vec::new();
-        extend_trajectory_rows(
-            &mut incremental,
-            &entries,
-            &indices[..2],
-            0,
-            TrajectoryMode::Requests,
-        );
-        extend_trajectory_rows(
-            &mut incremental,
-            &entries,
-            &indices,
-            2,
-            TrajectoryMode::Requests,
-        );
-
-        assert_eq!(
-            incremental,
-            build_trajectory_rows(&entries, &indices, TrajectoryMode::Requests)
-        );
-    }
-
-    #[test]
-    fn trajectory_summary_is_computed_once_from_canonical_entries() {
-        let mut tool = trajectory_entry("Tool", Some(1), Some(3));
-        tool.diagnostics.duration_ms = Some(25);
-        let mut anomaly = trajectory_entry("Anomaly", Some(1), Some(4));
-        anomaly.diagnostics.duration_ms = Some(75);
-        anomaly.diagnostics.is_anomaly = true;
-
-        let summary = summarize_trajectory(&[tool, anomaly]);
-
-        assert_eq!(summary.tool_count, 1);
-        assert_eq!(summary.total_duration_ms, 100);
-        assert_eq!(summary.anomaly_count, 1);
-        assert_eq!(summary.max_turn, 4);
-    }
-
-    #[test]
-    fn trajectory_summary_append_matches_full_rebuild() {
-        let initial = vec![trajectory_entry("Input", Some(1), Some(1))];
-        let mut tool = trajectory_entry("Tool", Some(1), Some(1));
-        tool.diagnostics.duration_ms = Some(25);
-        let mut anomaly = trajectory_entry("Anomaly", Some(1), Some(2));
-        anomaly.diagnostics.duration_ms = Some(75);
-        let appended = vec![tool, anomaly];
-        let mut incremental = summarize_trajectory(&initial);
-        extend_trajectory_summary(&mut incremental, &appended);
-
-        let rebuilt =
-            summarize_trajectory(&initial.into_iter().chain(appended).collect::<Vec<_>>());
-        assert_eq!(incremental.overview_positions, rebuilt.overview_positions);
-        assert_eq!(incremental.tool_count, rebuilt.tool_count);
-        assert_eq!(incremental.total_duration_ms, 100);
-        assert_eq!(incremental.anomaly_count, rebuilt.anomaly_count);
-        assert_eq!(incremental.max_turn, rebuilt.max_turn);
-    }
-    #[test]
-    fn trajectory_cache_key_changes_with_data_or_filter() {
-        let base = TrajectoryCacheKey {
-            revision: 7,
-            epoch: 2,
-            mode: TrajectoryMode::Execution,
-            query: "tool".into(),
-            category: None,
-            lane: None,
-        };
-        let mut changed = base.clone();
-        changed.revision += 1;
-        assert_ne!(base, changed);
-
-        let mut changed = base.clone();
-        changed.query = "provider".into();
-        assert_ne!(base, changed);
-    }
-
-    #[test]
-    fn extract_markdown_segments_parses_mixed_content_with_paths() {
-        let input = "Here is the command:\n```bash\ncargo build --workspace\n```\nAnd code in file:\n```rust src/main.rs\n// src/main.rs\nfn main() {}\n```\nFinished!";
-        let segments = extract_markdown_segments(input);
-        assert_eq!(segments.len(), 5);
-        assert_eq!(
-            segments[0],
-            MarkdownSegment::Markdown("Here is the command:\n".into())
-        );
-        assert_eq!(
-            segments[1],
-            MarkdownSegment::CodeBlock {
-                language: "bash".into(),
-                header_path: None,
-                code: "cargo build --workspace\n".into(),
-            }
-        );
-        assert_eq!(
-            segments[2],
-            MarkdownSegment::Markdown("And code in file:\n".into())
-        );
-        assert_eq!(
-            segments[3],
-            MarkdownSegment::CodeBlock {
-                language: "rust".into(),
-                header_path: Some("src/main.rs".into()),
-                code: "// src/main.rs\nfn main() {}\n".into(),
-            }
-        );
-        assert_eq!(segments[4], MarkdownSegment::Markdown("Finished!".into()));
-    }
-
-    #[test]
-    fn extract_markdown_segments_handles_comment_path_heuristic() {
-        let input =
-            "```typescript\n// app/routes/index.tsx\nexport default function Home() {}\n```";
-        let segments = extract_markdown_segments(input);
-        assert_eq!(segments.len(), 1);
-        assert_eq!(
-            segments[0],
-            MarkdownSegment::CodeBlock {
-                language: "typescript".into(),
-                header_path: Some("app/routes/index.tsx".into()),
-                code: "// app/routes/index.tsx\nexport default function Home() {}\n".into(),
-            }
-        );
-    }
-
-    #[test]
-    fn extract_markdown_segments_rejects_version_and_shebang_as_paths() {
-        for input in [
-            "```sh\n#!/bin/sh\necho hi\n```",
-            "```rust\n// v1.2\nfn main() {}\n```",
-        ] {
-            let segments = extract_markdown_segments(input);
-            assert!(matches!(
-                segments.as_slice(),
-                [MarkdownSegment::CodeBlock {
-                    header_path: None,
-                    ..
-                }]
-            ));
-        }
-    }
-
-    #[test]
-    fn extract_markdown_segments_accepts_indented_closing_fence() {
-        let segments = extract_markdown_segments("```rust\nlet x = 1;\n  ```\nAfter");
-        assert!(
-            matches!(segments.as_slice(), [MarkdownSegment::CodeBlock { .. }, MarkdownSegment::Markdown(text)] if text == "After")
-        );
-    }
-
-    #[test]
-    fn extract_markdown_segments_keeps_text_before_mid_line_backticks() {
-        let segments = extract_markdown_segments("Prefix ```inline\n```rust\ncode\n```");
-        assert!(
-            matches!(segments.as_slice(), [MarkdownSegment::Markdown(text), MarkdownSegment::CodeBlock { language, .. }] if text == "Prefix ```inline\n" && language == "rust")
-        );
-    }
-
-    #[test]
-    fn normalize_terminal_command_removes_prompt_markers() {
-        assert_eq!(
-            normalize_terminal_command("$ echo one\n>>> echo two\n> echo three"),
-            "echo one\necho two\necho three"
-        );
-    }
-
-    #[test]
-    fn terminal_runnable_language_identifies_shell_flavors() {
-        assert!(is_terminal_runnable_language("bash"));
-        assert!(is_terminal_runnable_language("sh"));
-        assert!(is_terminal_runnable_language("zsh"));
-        assert!(is_terminal_runnable_language("shell"));
-        assert!(!is_terminal_runnable_language("rust"));
-        assert!(!is_terminal_runnable_language("python"));
-        assert!(!is_terminal_runnable_language("json"));
-    }
-
-    #[test]
-    fn active_slash_command_query_identifies_autocomplete_prefixes() {
-        assert_eq!(active_slash_command_query("/"), Some(""));
-        assert_eq!(active_slash_command_query("/com"), Some("com"));
-        assert_eq!(active_slash_command_query("  /help"), Some("help"));
-        assert_eq!(active_slash_command_query("/commit message"), None);
-        assert_eq!(active_slash_command_query("/commit "), None);
-        assert_eq!(active_slash_command_query("hello /help"), None);
-        assert_eq!(active_slash_command_query("plain text"), None);
-    }
-
-    #[test]
-    fn slash_command_binding_context_matches_nested_input() {
-        use gpui::{KeyBindingContextPredicate, KeyContext};
-
-        let predicate = KeyBindingContextPredicate::parse(SLASH_COMMAND_BINDING_CONTEXT).unwrap();
-        let menu_ctx = KeyContext::try_from(SLASH_COMMAND_KEY_CONTEXT).unwrap();
-        let input_ctx = KeyContext::try_from(INPUT_KEY_CONTEXT).unwrap();
-
-        let active_contexts = vec![menu_ctx, input_ctx.clone()];
-        assert_eq!(predicate.depth_of(&active_contexts), Some(2));
-        assert!(predicate.eval(&active_contexts));
-
-        let normal_contexts = vec![input_ctx];
-        assert_eq!(predicate.depth_of(&normal_contexts), None);
-        assert!(!predicate.eval(&normal_contexts));
-    }
-}
+mod hot_path_tests;

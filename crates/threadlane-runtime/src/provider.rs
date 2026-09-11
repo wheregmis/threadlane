@@ -300,12 +300,36 @@ pub fn convert_to_llm(messages: &[AgentMessage]) -> Vec<Value> {
                 tool_call_id,
                 name,
                 content,
+                images,
                 ..
             } => {
                 let id_str = if tool_call_id.is_empty() {
                     "call_0"
                 } else {
                     tool_call_id
+                };
+                // Chat Completions accepts content parts in tool messages, so
+                // screenshots ride alongside the text result.
+                let content = if images.is_empty() {
+                    serde_json::Value::String(content.clone())
+                } else {
+                    let mut parts = Vec::new();
+                    if !content.trim().is_empty() {
+                        parts.push(serde_json::json!({
+                            "type": "text",
+                            "text": content
+                        }));
+                    }
+                    parts.extend(images.iter().map(|image| {
+                        serde_json::json!({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": image.data_url,
+                                "detail": "auto"
+                            }
+                        })
+                    }));
+                    serde_json::Value::Array(parts)
                 };
                 Some(serde_json::json!({
                     "role": "tool",
@@ -394,12 +418,38 @@ pub fn convert_to_codex_llm(messages: &[AgentMessage]) -> (String, Vec<Value>) {
             AgentMessage::Tool {
                 tool_call_id,
                 content,
+                images,
                 ..
             } => {
+                // Responses function outputs accept a mixed text/image list,
+                // so screenshots ride alongside the text result. Text-only
+                // results keep the legacy string shape.
+                if images.is_empty() {
+                    items.push(serde_json::json!({
+                        "type": "function_call_output",
+                        "call_id": tool_call_id,
+                        "output": content
+                    }));
+                    continue;
+                }
+                let mut output = Vec::new();
+                if !content.trim().is_empty() {
+                    output.push(serde_json::json!({
+                        "type": "input_text",
+                        "text": content
+                    }));
+                }
+                output.extend(images.iter().map(|image| {
+                    serde_json::json!({
+                        "type": "input_image",
+                        "image_url": image.data_url,
+                        "detail": "auto"
+                    })
+                }));
                 items.push(serde_json::json!({
                     "type": "function_call_output",
                     "call_id": tool_call_id,
-                    "output": content
+                    "output": output
                 }));
             }
             AgentMessage::Custom { .. } => {
@@ -455,6 +505,7 @@ fn normalize_tool_call_ids(messages: &[AgentMessage]) -> Vec<AgentMessage> {
                 content,
                 is_error,
                 terminate,
+                images,
             } => {
                 let normalized = normalized_tool_call_id(tool_call_id, tool_index);
                 tool_index += 1;
@@ -464,6 +515,7 @@ fn normalize_tool_call_ids(messages: &[AgentMessage]) -> Vec<AgentMessage> {
                     content: content.clone(),
                     is_error: *is_error,
                     terminate: *terminate,
+                    images: images.clone(),
                 }
             }
             other => {
@@ -862,6 +914,7 @@ mod normalize_tool_arguments_tests {
                 content: "one".into(),
                 is_error: false,
                 terminate: false,
+                images: Vec::new(),
             },
             AgentMessage::Tool {
                 tool_call_id: String::new(),
@@ -869,6 +922,7 @@ mod normalize_tool_arguments_tests {
                 content: "two".into(),
                 is_error: false,
                 terminate: false,
+                images: Vec::new(),
             },
         ];
 
@@ -915,6 +969,7 @@ mod normalize_tool_arguments_tests {
                 content: "one".into(),
                 is_error: false,
                 terminate: false,
+                images: Vec::new(),
             },
             AgentMessage::Tool {
                 tool_call_id: String::new(),
@@ -922,10 +977,59 @@ mod normalize_tool_arguments_tests {
                 content: "two".into(),
                 is_error: false,
                 terminate: false,
+                images: Vec::new(),
             },
         ];
 
         let chat = convert_to_llm(&messages);
         assert_eq!(chat[2]["tool_call_id"], "call_1");
+    }
+
+    #[test]
+    fn tool_images_translate_to_provider_parts() {
+        use crate::types::ImageAttachment;
+        let messages = vec![AgentMessage::Tool {
+            tool_call_id: "call-1".into(),
+            name: "computer_screenshot".into(),
+            content: "Screenshot saved.".into(),
+            is_error: false,
+            terminate: false,
+            images: vec![ImageAttachment {
+                display_name: "shot.jpg".into(),
+                data_url: "data:image/jpeg;base64,AAA".into(),
+            }],
+        }];
+
+        let chat = convert_to_llm(&messages);
+        let content = &chat[0]["content"];
+        assert!(content.is_array(), "tool images must use parts array");
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "Screenshot saved.");
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(content[1]["image_url"]["url"], "data:image/jpeg;base64,AAA");
+
+        let (_, codex) = convert_to_codex_llm(&messages);
+        assert_eq!(codex[0]["type"], "function_call_output");
+        let output = &codex[0]["output"];
+        assert!(output.is_array(), "codex output must be a mixed list");
+        assert_eq!(output[0]["type"], "input_text");
+        assert_eq!(output[1]["type"], "input_image");
+        assert_eq!(output[1]["image_url"], "data:image/jpeg;base64,AAA");
+    }
+
+    #[test]
+    fn tool_without_images_keeps_legacy_shapes() {
+        let messages = vec![AgentMessage::Tool {
+            tool_call_id: "call-1".into(),
+            name: "read_file".into(),
+            content: "contents".into(),
+            is_error: false,
+            terminate: false,
+            images: Vec::new(),
+        }];
+        let chat = convert_to_llm(&messages);
+        assert_eq!(chat[0]["content"], "contents");
+        let (_, codex) = convert_to_codex_llm(&messages);
+        assert_eq!(codex[0]["output"], "contents");
     }
 }

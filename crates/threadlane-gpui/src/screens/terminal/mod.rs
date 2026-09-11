@@ -21,6 +21,18 @@ const TERMINAL_READ_CHUNK_BYTES: usize = 8192;
 const TERMINAL_OUTPUT_BUFFERED_CHUNKS: usize = 8;
 const TERMINAL_PARSE_BUDGET_PER_FRAME: usize = TERMINAL_READ_CHUNK_BYTES * 2;
 
+/// Terminal text metrics. The painted glyph size, row height, hit-testing,
+/// and resize math must all agree; they share these constants so a font
+/// change cannot drift click-to-select away from what is painted.
+/// Row height = font size × line height (13.0 × 1.35 = 17.55).
+/// The screen container uses `p_3`, so the content inset is 12px per side.
+const TERMINAL_FONT_SIZE: f32 = 13.0;
+const TERMINAL_LINE_HEIGHT: f32 = 1.35;
+const TERMINAL_ROW_HEIGHT: f32 = TERMINAL_FONT_SIZE * TERMINAL_LINE_HEIGHT;
+const TERMINAL_CONTENT_INSET: f32 = 12.0;
+/// Fallback advance width until the text system measures `.ZedMono`.
+const TERMINAL_CELL_WIDTH_FALLBACK: f32 = 7.8;
+
 fn terminal_frame_policy(saturated: bool) -> (Duration, usize) {
     if saturated {
         (
@@ -317,7 +329,7 @@ impl TerminalView {
             screen_bounds: None,
             selection_anchor: None,
             selection_head: None,
-            cell_width: 7.8,
+            cell_width: TERMINAL_CELL_WIDTH_FALLBACK,
             cursor_visible: true,
             scrollback_offset: 0,
             scroll_accumulator: 0.0,
@@ -327,7 +339,7 @@ impl TerminalView {
     }
 
     /// Sends raw input bytes into the terminal PTY.
-    pub fn send_input(&self, input: &str) {
+    pub(crate) fn send_input(&self, input: &str) {
         if let Some(session) = &self.session {
             session.write(input.as_bytes());
         }
@@ -342,7 +354,7 @@ impl TerminalView {
     }
 
     /// Terminates the current shell and starts a fresh login-capable interactive shell.
-    pub fn restart(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn restart(&mut self, cx: &mut Context<Self>) {
         self.session.take();
         self.parser_command_tx = None;
         self.screen = vt100::Parser::new(self.rows, self.cols, 0).screen().clone();
@@ -354,7 +366,7 @@ impl TerminalView {
     }
 
     /// Clears both the emulator scrollback and the visible screen.
-    pub fn clear(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn clear(&mut self, cx: &mut Context<Self>) {
         self.screen = vt100::Parser::new(self.rows, self.cols, 0).screen().clone();
         if let Some(parser) = &self.parser_command_tx {
             let _ = parser.send(ParserCommand::Clear);
@@ -366,7 +378,7 @@ impl TerminalView {
     }
 
     /// Scrolls the terminal view by a number of lines (positive = into scrollback history, negative = towards bottom).
-    pub fn scroll_by(&mut self, lines: f32, cx: &mut Context<Self>) {
+    fn scroll_by(&mut self, lines: f32, cx: &mut Context<Self>) {
         self.scroll_accumulator += lines;
         let whole_lines = self.scroll_accumulator.trunc() as isize;
         if whole_lines != 0 {
@@ -383,7 +395,7 @@ impl TerminalView {
     }
 
     /// Resets scrollback to the bottom (live / auto-scroll mode).
-    pub fn scroll_to_bottom(&mut self, cx: &mut Context<Self>) {
+    fn scroll_to_bottom(&mut self, cx: &mut Context<Self>) {
         if self.scrollback_offset != 0 {
             self.clear_selection();
         }
@@ -394,7 +406,7 @@ impl TerminalView {
     }
 
     /// Scrolls all the way to the top of available scrollback history.
-    pub fn scroll_to_top(&mut self, cx: &mut Context<Self>) {
+    fn scroll_to_top(&mut self, cx: &mut Context<Self>) {
         let previous_offset = self.scrollback_offset;
         self.scroll_accumulator = 0.0;
         self.set_scrollback(SCROLLBACK_ROWS);
@@ -406,7 +418,7 @@ impl TerminalView {
 
     /// Updates the PTY and terminal parser dimensions. Parents can call this when
     /// they have measured cell dimensions for their allocated terminal bounds.
-    pub fn resize(&mut self, rows: u16, cols: u16, cx: &mut Context<Self>) {
+    fn resize(&mut self, rows: u16, cols: u16, cx: &mut Context<Self>) {
         let rows = rows.max(1);
         let cols = cols.max(1);
         if (rows, cols) == (self.rows, self.cols) {
@@ -652,8 +664,9 @@ impl TerminalView {
 
     fn cell_at(&self, position: Point<Pixels>) -> Option<(u16, u16)> {
         let bounds = self.screen_bounds?;
-        let x = ((position.x - bounds.left()).as_f32() - 12.0) / self.cell_width;
-        let y = ((position.y - bounds.top()).as_f32() - 12.0) / 17.55;
+        let x = ((position.x - bounds.left()).as_f32() - TERMINAL_CONTENT_INSET) / self.cell_width;
+        let y =
+            ((position.y - bounds.top()).as_f32() - TERMINAL_CONTENT_INSET) / TERMINAL_ROW_HEIGHT;
         Some((
             y.floor()
                 .max(0.0)
@@ -719,13 +732,13 @@ impl TerminalView {
         pos >= start && pos <= end
     }
 
-    pub fn select_all(&mut self, cx: &mut Context<Self>) {
+    fn select_all(&mut self, cx: &mut Context<Self>) {
         self.selection_anchor = Some((0, 0));
         self.selection_head = Some((self.rows.saturating_sub(1), self.cols.saturating_sub(1)));
         cx.notify();
     }
 
-    pub fn paste_from_clipboard(&mut self, cx: &mut Context<Self>) {
+    fn paste_from_clipboard(&mut self, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             self.paste(text);
         }
@@ -828,7 +841,7 @@ impl Render for TerminalView {
         let font_id = window.text_system().resolve_font(&font(".ZedMono"));
         let measured_cell_width = window
             .text_system()
-            .layout_width(font_id, px(13.0), '0')
+            .layout_width(font_id, px(TERMINAL_FONT_SIZE), '0')
             .as_f32();
         if measured_cell_width > 0.0 {
             self.cell_width = measured_cell_width;
@@ -947,7 +960,7 @@ impl Render for TerminalView {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .h(px(17.55))
+                    .h(px(TERMINAL_ROW_HEIGHT))
                     .children(row_spans),
             );
         }
@@ -1000,6 +1013,7 @@ impl Render for TerminalView {
                             self.scrollback_offset
                         ))
                         .icon(IconName::ChevronDown)
+                        .tooltip("Jump to live output")
                         .xsmall()
                         .on_click(move |_event, _window, cx| {
                             scroll_to_bottom_handle.update(cx, |t, cx| t.scroll_to_bottom(cx));
@@ -1011,12 +1025,18 @@ impl Render for TerminalView {
         };
 
         div()
+            .id("pty-terminal-root")
             .size_full()
             .min_h_0()
             .flex()
             .flex_col()
             .bg(theme.background)
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .focus(|style| style.border_color(theme.primary))
             .track_focus(&self.focus_handle)
+            .role(Role::Terminal)
             .on_key_down(cx.listener(Self::key_down))
             .child(
                 div()
@@ -1026,22 +1046,27 @@ impl Render for TerminalView {
                     .min_h_0()
                     .p_3()
                     .font_family(".ZedMono")
-                    .text_size(px(13.0))
-                    .line_height(relative(1.35))
+                    // Raster-bound: glyph size must match TERMINAL_ROW_HEIGHT
+                    // and the measured cell width; not a type-scale step.
+                    .text_size(px(TERMINAL_FONT_SIZE))
+                    .line_height(relative(TERMINAL_LINE_HEIGHT))
                     .cursor_text()
                     .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
                         let delta = match event.delta {
                             ScrollDelta::Lines(lines) => lines.y * 2.0,
-                            ScrollDelta::Pixels(pixels) => pixels.y.as_f32() / 17.55,
+                            ScrollDelta::Pixels(pixels) => pixels.y.as_f32() / TERMINAL_ROW_HEIGHT,
                         };
                         if delta.abs() > 0.01 {
                             this.scroll_by(delta, cx);
                         }
                     }))
                     .on_prepaint(move |bounds, _, cx| {
-                        let rows = ((bounds.size.height.as_f32() - 24.0) / 17.55).floor() as u16;
-                        let cols =
-                            ((bounds.size.width.as_f32() - 24.0) / cell_width).floor() as u16;
+                        let rows = ((bounds.size.height.as_f32() - TERMINAL_CONTENT_INSET * 2.0)
+                            / TERMINAL_ROW_HEIGHT)
+                            .floor() as u16;
+                        let cols = ((bounds.size.width.as_f32() - TERMINAL_CONTENT_INSET * 2.0)
+                            / cell_width)
+                            .floor() as u16;
                         terminal_resize.update(cx, |terminal, cx| {
                             terminal.screen_bounds = Some(bounds);
                             terminal.resize(rows, cols, cx);

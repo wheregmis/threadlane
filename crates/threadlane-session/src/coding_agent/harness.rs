@@ -46,8 +46,8 @@ fn last_path_operation_thread() -> Option<std::thread::ThreadId> {
 }
 
 pub struct HarnessWatch {
-    pub(crate) hub: HarnessEventHub,
-    pub(crate) subscription: Subscription,
+    hub: HarnessEventHub,
+    subscription: Subscription,
 }
 
 impl HarnessWatch {
@@ -105,7 +105,7 @@ pub(crate) struct SubagentLaneIdentity {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct StartedSubagentLane {
     pub(crate) identity: SubagentLaneIdentity,
-    pub(crate) accepted: AcceptedRun,
+    accepted: AcceptedRun,
 }
 
 #[derive(Debug)]
@@ -527,7 +527,22 @@ impl CodingSessionHarness {
             .unwrap_or(0)
             .saturating_add(1);
         let provider_request_id = format!("provider-request-{run_id}-{provider_attempt}");
-        let mut current = self.model_context("main")?.messages();
+        // System instructions are runtime configuration, not transcript entries.
+        // Reattach them after every durable projection, including compaction reloads.
+        let with_system = |messages: Vec<AgentMessage>| {
+            request
+                .messages
+                .iter()
+                .filter(|message| matches!(message, AgentMessage::System { .. }))
+                .cloned()
+                .chain(
+                    messages
+                        .into_iter()
+                        .filter(|message| !matches!(message, AgentMessage::System { .. })),
+                )
+                .collect::<Vec<_>>()
+        };
+        let mut current = with_system(self.model_context("main")?.messages());
         let pre_tokens =
             estimate_request_tokens(&current, request.tool_schema_json.as_deref(), config);
         if pre_tokens < budget.trigger_tokens && !request.overflow_recovery {
@@ -567,7 +582,7 @@ impl CodingSessionHarness {
                 reason,
                 prepared,
             )?;
-            current = self.model_context("main")?.messages();
+            current = with_system(self.model_context("main")?.messages());
             let post_tokens =
                 estimate_request_tokens(&current, request.tool_schema_json.as_deref(), config);
             if post_tokens < budget.trigger_tokens {
@@ -1483,6 +1498,85 @@ impl CodingSessionHarness {
         Ok(accepted)
     }
 
+    /// Start a follow-up operation on an already-settled subagent lane
+    /// (`hub revive` parity with oh-my-pi's parked-agent revive).
+    ///
+    /// The lane keeps its history: the child syncs the lane context, so the
+    /// revived run continues where the previous turn left off. Fails when
+    /// the lane is missing or still has an open operation (use `hub send`).
+    pub(crate) fn resume_subagent_lane(
+        &mut self,
+        lane: &str,
+        prompt: &str,
+    ) -> Result<(SubagentLaneIdentity, AcceptedRun), String> {
+        if prompt.trim().is_empty() {
+            return Err("revive prompt must be non-empty".into());
+        }
+        self.ensure_fresh()?;
+        let state = Reducer::reduce(self.store.store()).map_err(|error| error.to_string())?;
+        let lane_state = state
+            .lane(lane)
+            .ok_or_else(|| format!("unknown subagent lane: {lane}"))?;
+        if lane_state.open_operation.is_some() {
+            return Err(format!("lane {lane} is still live; use `hub send` to steer it"));
+        }
+        let run_id = self.unique_run_id("subagent-run")?;
+        let source_leaf_id = lane_state.leaf_id.clone();
+        if let Err(error) = self.store.start_operation_on_lane(
+            lane,
+            &run_id,
+            source_leaf_id.clone(),
+            OperationIntent::Run,
+        ) {
+            return Err(error.to_string());
+        }
+        self.store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())?;
+        let prompt_message = AgentMessage::user(prompt.to_owned(), Vec::new());
+        let assistant_entry_id = self
+            .store
+            .accept_prompt_on_lane(lane, &run_id, prompt_message)
+            .map_err(|error| error.to_string())?;
+        self.store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())?;
+        let started_seq = self
+            .store
+            .records()
+            .iter()
+            .find_map(|record| match record {
+                HarnessRecord::OperationStarted { id, seq, .. } if id == &run_id => Some(*seq),
+                _ => None,
+            })
+            .unwrap_or(0);
+        let identity = SubagentLaneIdentity {
+            lane_name: lane.to_owned(),
+            run_id: run_id.clone(),
+            source_leaf_id,
+            started_seq,
+        };
+        let accepted = AcceptedRun {
+            session_id: self.store.session_id().to_owned(),
+            run_id,
+            lane: lane.to_owned(),
+            prompt_entry_id: format!("entry-{}-user", identity.run_id),
+            assistant_entry_id,
+            accepted_through_seq: self
+                .store
+                .entries()
+                .iter()
+                .map(|entry| entry.seq)
+                .chain(self.store.records().iter().map(HarnessRecord::seq))
+                .max()
+                .unwrap_or(0),
+        };
+        self.store
+            .validate_accepted_run(&accepted)
+            .map_err(|error| error.to_string())?;
+        Ok((identity, accepted))
+    }
+
     pub(crate) fn append_subagent_context(
         &mut self,
         lane: &str,
@@ -1562,6 +1656,7 @@ impl CodingSessionHarness {
                                         .unwrap_or_else(|| "Tool execution cancelled.".into()),
                                     is_error: true,
                                     terminate: false,
+                                    images: Vec::new(),
                                 },
                             )?;
                             any_provisioned = true;
@@ -1570,14 +1665,15 @@ impl CodingSessionHarness {
                 }
             }
             if any_provisioned {
-                let _ = self.refresh();
+                self.refresh().map_err(|error| error.to_string())?;
             }
+            // Best-effort abort request; reconcile errors are observed below
+            // but must not skip the terminal lifecycle record.
             let _ = self.store.request_abort(run_id);
             let _ = self.store.drive_to_completion();
             let _ = self.refresh();
             if self.store.reconcile_abort_run(run_id).is_ok() {
                 let _ = self.store.drive_to_completion();
-                return Ok(());
             }
         }
 
@@ -1765,28 +1861,34 @@ impl CodingSessionHarness {
         queue: QueueKind,
         entry_id: &str,
     ) -> Result<Option<AgentMessage>, String> {
+        let Some(message) = self.unbound_queue_message(queue, entry_id)? else {
+            return Ok(None);
+        };
+        self.store
+            .consume_unbound(entry_id)
+            .map_err(|error| error.to_string())?;
+        self.store
+            .drive_to_completion()
+            .map_err(|error| error.to_string())?;
+        Ok(Some(message))
+    }
+
+    pub(crate) fn unbound_queue_message(
+        &mut self,
+        queue: QueueKind,
+        entry_id: &str,
+    ) -> Result<Option<AgentMessage>, String> {
         self.ensure_fresh()?;
         let state = Reducer::reduce(self.store.store())
             .map_err(|error| format!("reduce failed: {error:?}"))?;
         let lane = state
             .lane(&self.main_lane_name)
             .ok_or_else(|| format!("unknown lane: {}", self.main_lane_name))?;
-        let Some(queued) = lane
+        Ok(lane
             .queued
             .iter()
             .find(|q| q.run_id.is_none() && q.queue == queue && q.target.id == entry_id)
-            .cloned()
-        else {
-            return Ok(None);
-        };
-        let message = queued.target.message.clone();
-        self.store
-            .consume_unbound(&queued.target.id)
-            .map_err(|error| error.to_string())?;
-        self.store
-            .drive_to_completion()
-            .map_err(|error| error.to_string())?;
-        Ok(Some(message))
+            .map(|queued| queued.target.message.clone()))
     }
 
     pub(crate) fn cancel_queued_unbound(&mut self, entry_id: &str) -> Result<(), String> {
@@ -1969,6 +2071,19 @@ impl CodingSessionHarness {
         self.ensure_fresh()?;
         let state = Reducer::reduce(&self.store).map_err(|error| error.to_string())?;
         let attempt = state.lane("main").map(|lane| lane.attempts);
+        let finished_ids: std::collections::HashSet<&str> = self
+            .store
+            .records()
+            .iter()
+            .filter_map(|candidate| match candidate {
+                HarnessRecord::ProviderRequestFinished {
+                    run_id: finished_run_id,
+                    request_id: Some(finished_request_id),
+                    ..
+                } if finished_run_id == run_id => Some(finished_request_id.as_str()),
+                _ => None,
+            })
+            .collect();
         let unfinished_requests = self
             .store
             .records()
@@ -1979,18 +2094,7 @@ impl CodingSessionHarness {
                     attempt,
                     request_id: Some(request_id),
                     ..
-                } if provider_run_id == run_id
-                    && !self.store.records().iter().any(|candidate| {
-                        matches!(
-                            candidate,
-                            HarnessRecord::ProviderRequestFinished {
-                                run_id: finished_run_id,
-                                request_id: Some(finished_request_id),
-                                ..
-                            } if finished_run_id == run_id && finished_request_id == request_id
-                        )
-                    }) =>
-                {
+                } if provider_run_id == run_id && !finished_ids.contains(request_id.as_str()) => {
                     Some((*attempt, request_id.clone()))
                 }
                 _ => None,
@@ -2075,7 +2179,7 @@ impl CodingSessionHarness {
             .store
             .entries()
             .iter()
-            .filter(|entry| entry.seq > start_seq)
+            .filter(|entry| entry.seq > start_seq && entry.lane == "main")
             .find_map(|entry| {
                 matches!(&entry.message, AgentMessage::Assistant { .. }).then_some(entry.id.clone())
             })
@@ -2096,7 +2200,9 @@ impl CodingSessionHarness {
                 })
         });
         let had_result_entry = result_entry_id.is_some();
-        let entry_id = result_entry_id.unwrap_or_else(|| format!("abort-entry-{run_id}"));
+        let seq_hint = self.next_seq();
+        let entry_id =
+            result_entry_id.unwrap_or_else(|| format!("abort-entry-{run_id}-{seq_hint}"));
         let has_abort_entry = self.store.entries().iter().any(|entry| {
             entry.id == entry_id
                 && matches!(
@@ -2108,10 +2214,11 @@ impl CodingSessionHarness {
                 )
         });
         if !had_result_entry && !has_abort_entry {
+            let attempt_seq = self.next_seq();
             self.store
                 .append_record_gated(HarnessRecord::StepAttempt {
-                    id: format!("abort-attempt-{run_id}"),
-                    seq: self.next_seq(),
+                    id: format!("abort-attempt-{run_id}-{attempt_seq}"),
+                    seq: attempt_seq,
                     lane: "main".into(),
                     timestamp: timestamp(),
                     run_id: run_id.clone(),
@@ -2159,8 +2266,12 @@ impl CodingSessionHarness {
 
     /// Append a user/assistant/tool message as a harness entry on the main
     /// lane.
+    ///
+    /// Consecutive identical messages are legitimate (e.g. two `"hello"`
+    /// user turns), so no last-entry content dedup is applied. Idempotency
+    /// for tool results is handled by deterministic entry ids below.
     pub(crate) fn append_message(&mut self, message: AgentMessage) -> Result<String, String> {
-        self.append_message_inner(message, true, false)
+        self.append_message_inner(message, false, false)
     }
 
     /// Append a message discovered while reconciling the provider transcript.
@@ -2188,28 +2299,28 @@ impl CodingSessionHarness {
     fn append_message_inner(
         &mut self,
         message: AgentMessage,
-        deduplicate_last_entry: bool,
+        _deduplicate_last_entry: bool,
         context_restoration: bool,
     ) -> Result<String, String> {
         self.ensure_fresh()?;
-        if deduplicate_last_entry {
-            if let Some(entry) = self.store.entries().last() {
-                if entry.message == message {
-                    return Ok(entry.id.clone());
-                }
-            }
-        }
-        let parent_id = Reducer::reduce(&self.store)
-            .ok()
-            .and_then(|state| state.lane("main").and_then(|lane| lane.leaf_id.clone()))
-            .or_else(|| {
-                self.store
-                    .entries()
-                    .iter()
-                    .rev()
-                    .find(|entry| entry.lane == "main")
-                    .map(|entry| entry.id.clone())
-            });
+        // Single reduce + one id set replaces the previous double-reduce
+        // and nested `entries.iter().any` scans.
+        let reduced = Reducer::reduce(&self.store).ok();
+        let main_lane = reduced.as_ref().and_then(|state| state.lane("main"));
+        let parent_id = main_lane.and_then(|lane| lane.leaf_id.clone()).or_else(|| {
+            self.store
+                .entries()
+                .iter()
+                .rev()
+                .find(|entry| entry.lane == "main")
+                .map(|entry| entry.id.clone())
+        });
+        let entry_ids: std::collections::HashSet<&str> = self
+            .store
+            .entries()
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect();
         let seq = self.next_seq();
         let terminate = matches!(
             &message,
@@ -2219,13 +2330,8 @@ impl CodingSessionHarness {
             }
         );
         let id = match &message {
-            AgentMessage::Assistant { .. } => Reducer::reduce(&self.store)
-                .ok()
-                .and_then(|state| {
-                    state
-                        .lane("main")
-                        .and_then(|lane| lane.open_operation.clone())
-                })
+            AgentMessage::Assistant { .. } => main_lane
+                .and_then(|lane| lane.open_operation.clone())
                 .and_then(|run_id| {
                     self.store
                         .records()
@@ -2237,11 +2343,7 @@ impl CodingSessionHarness {
                                 result_entry_id,
                                 ..
                             } if record_run_id == &run_id
-                                && !self
-                                    .store
-                                    .entries()
-                                    .iter()
-                                    .any(|entry| entry.id == result_entry_id.as_str()) =>
+                                && !entry_ids.contains(result_entry_id.as_str()) =>
                             {
                                 Some(result_entry_id.clone())
                             }
@@ -2255,11 +2357,12 @@ impl CodingSessionHarness {
         // Tool completions are recorded both by the execution lifecycle and
         // by the model-visible transcript.  They may be separated by other
         // journal records, so checking only the last entry is insufficient.
-        if self
-            .store
-            .entries()
-            .iter()
-            .any(|entry| entry.id == id && entry.message == message)
+        if entry_ids.contains(id.as_str())
+            && self
+                .store
+                .entries()
+                .iter()
+                .any(|entry| entry.id == id && entry.message == message)
         {
             return Ok(id);
         }
@@ -2578,40 +2681,84 @@ impl CodingSessionHarness {
             return Ok(());
         }
         let result_entry_id = format!("subagent-result-{run_id}-{tool_call_id}");
-        let assistant_entry_id = match self
+        // Prefer the assistant entry that actually declares this call: the
+        // reducer validates `(call_id, name)` at `calls[tool_index]`, so both
+        // the entry and the index must come from the declaration. Counting
+        // prior `ToolStarted` records is only correct within a single batch;
+        // across turns it points past the end of a one-call declaration and
+        // faults with "tool intent does not match assistant declaration".
+        let declaring = self
             .store
             .entries()
             .iter()
             .rev()
             .find(|entry| {
-                entry.lane == lane && matches!(entry.message, AgentMessage::Assistant { .. })
+                entry.lane == lane
+                    && matches!(
+                        &entry.message,
+                        AgentMessage::Assistant { tool_calls: Some(calls), .. }
+                        if calls.iter().any(|call| call.id == tool_call_id)
+                    )
             })
-            .map(|entry| entry.id.clone())
-        {
+            .map(|entry| entry.id.clone());
+        let assistant_entry_id = match declaring {
             Some(id) => id,
-            None => {
-                let assistant_msg = AgentMessage::Assistant {
-                    content: None,
-                    tool_calls: None,
-                    stop_reason: None,
-                    deferred_handle: None,
-                };
-                self.append_message_to_lane(lane, run_id, assistant_msg)?
-            }
+            None => match self
+                .store
+                .entries()
+                .iter()
+                .rev()
+                .find(|entry| {
+                    entry.lane == lane && matches!(entry.message, AgentMessage::Assistant { .. })
+                })
+                .map(|entry| entry.id.clone())
+            {
+                Some(id) => id,
+                None => {
+                    let assistant_msg = AgentMessage::Assistant {
+                        content: None,
+                        tool_calls: None,
+                        stop_reason: None,
+                        deferred_handle: None,
+                    };
+                    self.append_message_to_lane(lane, run_id, assistant_msg)?
+                }
+            },
         };
-        let tool_index = self
-            .store
-            .records()
-            .iter()
-            .filter(|record| match record {
-                HarnessRecord::ToolStarted {
-                    run_id: r_id,
-                    lane: r_lane,
+        let tool_index = match self.store.entries().iter().find(|entry| {
+            entry.id == assistant_entry_id
+                && matches!(
+                    &entry.message,
+                    AgentMessage::Assistant { tool_calls: Some(calls), .. }
+                    if calls.iter().any(|call| call.id == tool_call_id)
+                )
+        }) {
+            Some(entry) => match &entry.message {
+                AgentMessage::Assistant {
+                    tool_calls: Some(calls),
                     ..
-                } => r_id == run_id && r_lane == lane,
-                _ => false,
-            })
-            .count();
+                } => calls
+                    .iter()
+                    .position(|call| call.id == tool_call_id)
+                    .unwrap_or(0),
+                _ => 0,
+            },
+            // No declaring entry (synthesized empty assistant): keep the
+            // count-based ordinal so sequential undeclared tools stay unique.
+            None => self
+                .store
+                .records()
+                .iter()
+                .filter(|record| match record {
+                    HarnessRecord::ToolStarted {
+                        run_id: r_id,
+                        lane: r_lane,
+                        ..
+                    } => r_id == run_id && r_lane == lane,
+                    _ => false,
+                })
+                .count(),
+        };
         let record = HarnessRecord::ToolStarted {
             id: format!("tool-started-{run_id}-{tool_call_id}"),
             seq: harness_next_seq(self.store.store()),
@@ -2649,6 +2796,7 @@ impl CodingSessionHarness {
             content,
             is_error,
             terminate,
+            images,
         } = message
         else {
             return Ok(());
@@ -2663,6 +2811,7 @@ impl CodingSessionHarness {
                     content: content.clone(),
                     is_error: *is_error,
                     terminate: *terminate,
+                    images: images.clone(),
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -2687,12 +2836,14 @@ impl CodingSessionHarness {
                     content: result.content.clone(),
                     is_error: result.is_error,
                     terminate: result.terminates(),
+                    images: result.images.clone(),
                 },
             )
             .map_err(|error| error.to_string())?;
         self.store
             .drive_to_completion()
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        Ok(())
     }
 
     /// Finish a replayed tool result.
@@ -2711,6 +2862,7 @@ impl CodingSessionHarness {
                     content: result.content.clone(),
                     is_error: result.is_error,
                     terminate: result.terminates(),
+                    images: result.images.clone(),
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -2837,6 +2989,7 @@ impl CodingSessionHarness {
                         content: persisted_result.0,
                         is_error: persisted_result.1,
                         terminate,
+                        images: Vec::new(),
                     },
                 )
                 .map_err(|error| error.to_string())?;
@@ -3014,6 +3167,7 @@ impl CodingSessionHarness {
                     content: result.content.clone(),
                     is_error: result.is_error,
                     terminate: result.terminates(),
+                    images: result.images.clone(),
                 },
                 surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
                 terminate: result.terminates(),
@@ -3048,16 +3202,19 @@ impl CodingSessionHarness {
             else {
                 continue;
             };
-            let already_completed =
-                records.iter().any(|record| {
-                    matches!(
-                        record,
-                        HarnessRecord::ToolFinished {
-                            tool_call_id: finished_call,
-                            ..
-                        } if finished_call == tool_call_id
-                    )
-                }) || entries.iter().any(|entry| entry.id.contains(tool_call_id));
+            let already_completed = records.iter().any(|record| {
+                matches!(
+                    record,
+                    HarnessRecord::ToolFinished {
+                        run_id: finished_run,
+                        tool_call_id: finished_call,
+                        result_entry_id: finished_result,
+                        ..
+                    } if finished_run == run_id
+                        && finished_call == tool_call_id
+                        && finished_result == result_entry_id
+                )
+            }) || entries.iter().any(|entry| entry.id == *result_entry_id);
             if already_completed {
                 continue;
             }
@@ -3312,6 +3469,7 @@ impl CodingSessionHarness {
                 content: result.content.clone(),
                 is_error: result.is_error,
                 terminate: result.terminates(),
+                images: result.images.clone(),
             };
             let entry_id = self.append_message_to_lane(lane, run_id, msg)?;
             let _ = self.finish_tool_result(run_id, result);
@@ -3440,6 +3598,54 @@ mod tests {
             messages: Vec::new(),
             tool_schema_json: None,
             overflow_recovery,
+        }
+    }
+
+    #[test]
+    fn provider_boundary_retains_and_budgets_current_system_after_reload() {
+        let config = AgentConfig::default();
+        for overflow_recovery in [false, true] {
+            let (_dir, path) = temp_session();
+            let mut harness = open_long_run(&path);
+            let system = AgentMessage::System {
+                content: format!(
+                    "current instructions {overflow_recovery} {}",
+                    "rule ".repeat(1000)
+                ),
+            };
+            let mut request = boundary_request(overflow_recovery);
+            request.messages = vec![
+                system.clone(),
+                AgentMessage::user("stale runtime history", vec![]),
+            ];
+            let prepared = harness
+                .prepare_provider_boundary("run-compact", request, &config)
+                .unwrap();
+            assert_eq!(prepared.messages.first(), Some(&system));
+            assert!(!prepared.messages.iter().any(|message| {
+                matches!(message, AgentMessage::User { content } if content == "stale runtime history")
+            }));
+            let actual = estimate_request_tokens(&prepared.messages, None, &config);
+            assert!(actual < prepared.context_limit);
+            assert_eq!(prepared.provisional_estimated_tokens, Some(actual));
+            drop(harness);
+            harness = CodingSessionHarness::open(&path).unwrap();
+            assert!(!harness
+                .model_context("main")
+                .unwrap()
+                .messages()
+                .iter()
+                .any(|message| { matches!(message, AgentMessage::System { .. }) }));
+            let updated_system = AgentMessage::System {
+                content: "updated instructions after restart".into(),
+            };
+            let mut request = boundary_request(false);
+            request.messages = vec![updated_system.clone()];
+            let resumed = harness
+                .prepare_provider_boundary("run-compact", request, &config)
+                .unwrap();
+            assert_eq!(resumed.messages.first(), Some(&updated_system));
+            assert!(!resumed.messages.contains(&system));
         }
     }
 
@@ -4315,6 +4521,7 @@ mod tests {
                         content: "contents".into(),
                         is_error: false,
                         terminate: false,
+                        images: Vec::new(),
                     },
                 ],
             )
@@ -4621,6 +4828,7 @@ mod tests {
             content: "contents".into(),
             is_error: false,
             terminate: false,
+            images: Vec::new(),
         };
         harness.sync_messages(&[result.clone()]).unwrap();
 
@@ -4757,6 +4965,7 @@ mod tests {
                 content: read_output.clone(),
                 is_error: false,
                 terminate: false,
+                images: Vec::new(),
             })
             .unwrap();
         std::fs::write(dir.path().join("README.md"), "changed after read").unwrap();
@@ -4862,6 +5071,7 @@ mod tests {
                 content: read_output.clone(),
                 is_error: false,
                 terminate: false,
+                images: Vec::new(),
             })
             .unwrap();
 
@@ -4938,6 +5148,7 @@ mod tests {
                 content: read_output.clone(),
                 is_error: false,
                 terminate: false,
+                images: Vec::new(),
             })
             .unwrap();
         let context_id = harness
@@ -4964,6 +5175,7 @@ mod tests {
                     content: "later non-indexed duplicate tool body".into(),
                     is_error: false,
                     terminate: false,
+                    images: Vec::new(),
                 },
                 surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
                 terminate: false,
@@ -5174,6 +5386,7 @@ mod tests {
                 content: "not found".into(),
                 is_error: true,
                 terminate: false,
+                images: Vec::new(),
             })
             .unwrap();
         let virtual_entry = harness
@@ -5183,6 +5396,7 @@ mod tests {
                 content: "body".into(),
                 is_error: false,
                 terminate: false,
+                images: Vec::new(),
             })
             .unwrap();
         let remote_entry = harness
@@ -5192,6 +5406,7 @@ mod tests {
                 content: "body".into(),
                 is_error: false,
                 terminate: false,
+                images: Vec::new(),
             })
             .unwrap();
         let unbound_entry = harness
@@ -5201,6 +5416,7 @@ mod tests {
                 content: "body without an execution-bound digest".into(),
                 is_error: false,
                 terminate: false,
+                images: Vec::new(),
             })
             .unwrap();
         let unrecorded_entry = harness
@@ -5210,6 +5426,7 @@ mod tests {
                 content: "body".into(),
                 is_error: false,
                 terminate: false,
+                images: Vec::new(),
             })
             .unwrap();
 
@@ -5289,6 +5506,7 @@ mod tests {
             content: "first".into(),
             is_error: false,
             terminate: false,
+            images: Vec::new(),
         };
         let second_tool = AgentMessage::Tool {
             tool_call_id: "call-2".into(),
@@ -5296,6 +5514,7 @@ mod tests {
             content: "second".into(),
             is_error: false,
             terminate: false,
+            images: Vec::new(),
         };
         let final_assistant = AgentMessage::Assistant {
             content: Some("done".into()),
@@ -5457,5 +5676,45 @@ mod tests {
         } else {
             panic!("expected ProviderResponseAttached");
         }
+    }
+
+    #[test]
+    fn sequential_single_call_turns_start_tools_on_lane() {
+        // Regression for session_1788900913874865000: the second ACP tool
+        // faulted the gate with "tool intent does not match assistant
+        // declaration" because the lane path derived the tool index from the
+        // count of prior ToolStarted records instead of the declaring entry.
+        let (_dir, path) = temp_session();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        harness
+            .begin_run("run-1", AgentMessage::user("prompt", vec![]))
+            .unwrap();
+        for call_id in ["call-a", "call-b"] {
+            // ACP flow: one assistant entry declaring exactly one call.
+            harness
+                .append_message(AgentMessage::Assistant {
+                    content: None,
+                    tool_calls: Some(vec![threadlane_provider::openai::ToolCall {
+                        id: call_id.into(),
+                        r#type: "function".into(),
+                        function: threadlane_provider::openai::ToolCallFunction {
+                            name: "read".into(),
+                            arguments: "{}".into(),
+                        },
+                        thought_signature: None,
+                    }]),
+                    stop_reason: None,
+                    deferred_handle: None,
+                })
+                .unwrap();
+            harness
+                .tool_started_on_lane("main", "run-1", call_id, "read", serde_json::json!({}))
+                .unwrap();
+        }
+        let state = Reducer::reduce(&harness.store).unwrap();
+        let tools = &state.lane("main").unwrap().tools;
+        assert_eq!(tools.len(), 2);
+        assert_ne!(tools[0].assistant_entry_id, tools[1].assistant_entry_id);
+        assert_eq!((tools[0].tool_index, tools[1].tool_index), (0, 0));
     }
 }

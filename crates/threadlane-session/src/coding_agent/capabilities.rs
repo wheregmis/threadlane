@@ -3,15 +3,18 @@ use super::broker::{
 };
 use super::cancellation::AgentRunTask;
 use super::context_snapshots::{ContextSnapshotToolExecutor, MAX_SUBAGENT_CONTEXT_REFS};
+use super::mailbox::{HubToolExecutor, ReviveHook};
 use super::scheduler::AgentWorkScheduler;
 use super::subagents::{AgentRunner, MAX_SUBAGENT_TASKS};
 use crate::agents::{discover_agents, AgentScope};
+use crate::browser::{BrowserBridge, BrowserToolExecutor};
 use crate::extension_broker::{
     BrokerError, CapabilityDispatcher, HostBrokerRequest, BROKER_API_VERSION,
 };
 use crate::permission::{PermissionHandle, PermissionManager};
 use crate::plan::{SessionPlanStore, UpdatePlanToolExecutor};
 use crate::policy::ToolPolicy;
+use crate::question::{AskQuestionToolExecutor, QuestionHandle};
 use async_trait::async_trait;
 use log::warn;
 use serde_json::Value;
@@ -27,7 +30,13 @@ use threadlane_wasi::WasiExtensionManager;
 use tokio::sync::broadcast;
 
 const SUBAGENT_TOOL_NAME: &str = "subagent";
-pub(crate) const PREWALK_HANDOFF_TOOL_NAME: &str = "complete_prewalk";
+const MANAGE_SUBAGENT_BRANCH_TOOL_NAME: &str = "manage_subagent_branch";
+const CREATE_DRAFT_PR_TOOL_NAME: &str = "create_draft_pull_request";
+// HUB_TOOL_NAME / MESSAGE_PEER_TOOL_NAME live in `super::mailbox` (single
+// channel shared by parent `hub` and child `message_peer`).
+// NOTE: oh-my-pi parity removed the explicit `complete_prewalk` handoff tool.
+// The handoff is automatic at the first qualifying edit/write behind an
+// opened `update_plan` todo gate (see `crate::orchestrator`).
 
 // ── Capability implementations ─────────────────────────────────────────
 // Each wraps a subsystem and implements [`crate::capability_registry::Capability`]
@@ -47,15 +56,24 @@ impl Capability for SkillCapability {
 
 pub(crate) struct SubagentCapability {
     pub(crate) agent_runner: AgentRunner,
+    pub(crate) hub: super::mailbox::SubagentHub,
+    pub(crate) session_file: Option<PathBuf>,
+    pub(crate) revive_hook: Option<ReviveHook>,
 }
 impl Capability for SubagentCapability {
     fn id(&self) -> &str {
         "subagent"
     }
     fn tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
-        vec![Arc::new(SubagentToolExecutor::new(
-            self.agent_runner.clone(),
-        ))]
+        let hub_executor = HubToolExecutor::new(self.hub.clone(), self.session_file.clone());
+        let hub_executor = match self.revive_hook.clone() {
+            Some(hook) => hub_executor.with_revive_hook(hook),
+            None => hub_executor,
+        };
+        vec![
+            Arc::new(SubagentToolExecutor::new(self.agent_runner.clone())),
+            Arc::new(hub_executor),
+        ]
     }
 }
 
@@ -82,42 +100,210 @@ impl Capability for ContextCapability {
     }
 }
 
-pub(crate) struct PrewalkCapability;
+pub(crate) struct GitHubCapability {
+    pub(crate) work_dir: PathBuf,
+}
 
-impl Capability for PrewalkCapability {
+impl Capability for GitHubCapability {
     fn id(&self) -> &str {
-        "prewalk"
+        "github"
     }
 
     fn tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
-        vec![Arc::new(PrewalkToolExecutor)]
+        vec![Arc::new(GitHubToolExecutor {
+            work_dir: self.work_dir.clone(),
+        })]
     }
 }
 
-struct PrewalkToolExecutor;
+pub(crate) struct WorktreeCapability {
+    pub(crate) work_dir: PathBuf,
+}
+
+impl Capability for WorktreeCapability {
+    fn id(&self) -> &str {
+        "worktree"
+    }
+
+    fn tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
+        vec![Arc::new(WorktreeToolExecutor {
+            work_dir: self.work_dir.clone(),
+        })]
+    }
+}
+
+struct WorktreeToolExecutor {
+    work_dir: PathBuf,
+}
 
 #[async_trait]
-impl ToolExecutor for PrewalkToolExecutor {
+impl ToolExecutor for WorktreeToolExecutor {
     fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
         vec![AgentToolDefinition {
-            name: PREWALK_HANDOFF_TOOL_NAME.into(),
+            name: MANAGE_SUBAGENT_BRANCH_TOOL_NAME.into(),
             description: Some(
-                "Signal that the foundational prewalk change is implemented and verified.".into(),
+                "Inspect, integrate, or discard a branch created by a parallel Threadlane subagent. Integration requires a clean parent checkout.".into(),
             ),
             parameters: serde_json::json!({
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["inspect", "integrate", "discard"]
+                    },
+                    "branch": {
+                        "type": "string",
+                        "description": "Exact threadlane/subagent-* branch returned by the subagent."
+                    }
+                },
+                "required": ["action", "branch"],
                 "additionalProperties": false
             }),
-            strict: None,
+            strict: Some(true),
         }]
         .into()
     }
 
-    async fn execute_tool(&self, name: &str, _args: &str) -> Option<Result<String, String>> {
-        (name == PREWALK_HANDOFF_TOOL_NAME).then(|| Ok("Prewalk handoff requested.".into()))
+    async fn execute_tool(&self, name: &str, args: &str) -> Option<Result<String, String>> {
+        if name != MANAGE_SUBAGENT_BRANCH_TOOL_NAME {
+            return None;
+        }
+        Some(self.execute(args))
     }
 }
+
+impl WorktreeToolExecutor {
+    fn execute(&self, args: &str) -> Result<String, String> {
+        let args: Value =
+            serde_json::from_str(args).map_err(|error| format!("invalid arguments: {error}"))?;
+        let branch = args
+            .get("branch")
+            .and_then(Value::as_str)
+            .filter(|branch| branch.starts_with("threadlane/subagent-"))
+            .ok_or_else(|| "branch must start with `threadlane/subagent-`".to_string())?;
+        let action = args
+            .get("action")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "missing required string field `action`".to_string())?;
+        let worktree = threadlane_git::list_worktrees(&self.work_dir)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .find(|worktree| worktree.branch.as_deref() == Some(branch));
+
+        match action {
+            "inspect" => {
+                let mut diff = threadlane_git::diff_branch(&self.work_dir, branch)
+                    .map_err(|error| error.to_string())?;
+                if diff.len() > 64 * 1024 {
+                    let end = (0..=64 * 1024)
+                        .rev()
+                        .find(|end| diff.is_char_boundary(*end))
+                        .unwrap_or(0);
+                    diff.truncate(end);
+                    diff.push_str("\n[diff truncated]");
+                }
+                Ok(match worktree {
+                    Some(worktree) => format!(
+                        "Branch: {branch}\nWorktree: {}\n{diff}",
+                        worktree.path.display()
+                    ),
+                    None => format!("Branch: {branch}\n{diff}"),
+                })
+            }
+            "integrate" => {
+                if threadlane_git::inspect(&self.work_dir)
+                    .map_err(|error| error.to_string())?
+                    .has_changes
+                {
+                    return Err("parent checkout has uncommitted changes".into());
+                }
+                if let Some(worktree) = worktree {
+                    threadlane_git::remove_worktree(&self.work_dir, &worktree.path, false)
+                        .map_err(|_| "subagent worktree has uncommitted changes".to_string())?;
+                }
+                let output = threadlane_git::merge(&self.work_dir, branch)
+                    .map_err(|error| error.to_string())?;
+                threadlane_git::delete_branch(&self.work_dir, branch, false)
+                    .map_err(|error| error.to_string())?;
+                let _ = threadlane_git::prune_worktrees(&self.work_dir);
+                Ok(format!("Integrated and removed {branch}.\n{output}"))
+            }
+            "discard" => {
+                if let Some(worktree) = worktree {
+                    threadlane_git::remove_worktree(&self.work_dir, &worktree.path, true)
+                        .map_err(|error| error.to_string())?;
+                }
+                threadlane_git::delete_branch(&self.work_dir, branch, true)
+                    .map_err(|error| error.to_string())?;
+                let _ = threadlane_git::prune_worktrees(&self.work_dir);
+                Ok(format!("Discarded {branch}."))
+            }
+            _ => Err("action must be `inspect`, `integrate`, or `discard`".into()),
+        }
+    }
+}
+
+struct GitHubToolExecutor {
+    work_dir: PathBuf,
+}
+
+#[async_trait]
+impl ToolExecutor for GitHubToolExecutor {
+    fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
+        vec![AgentToolDefinition {
+            name: CREATE_DRAFT_PR_TOOL_NAME.into(),
+            description: Some(
+                "Publish the current branch to origin and create a GitHub draft pull request using Threadlane's configured credentials. Call only after committing the intended changes.".into(),
+            ),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "base": { "type": "string", "description": "Base branch for the pull request." },
+                    "title": { "type": "string", "description": "Pull request title." },
+                    "body": { "type": "string", "description": "Pull request description." }
+                },
+                "required": ["base", "title", "body"],
+                "additionalProperties": false
+            }),
+            strict: Some(true),
+        }]
+        .into()
+    }
+
+    async fn execute_tool(&self, name: &str, args: &str) -> Option<Result<String, String>> {
+        if name != CREATE_DRAFT_PR_TOOL_NAME {
+            return None;
+        }
+        let args: Value = match serde_json::from_str(args) {
+            Ok(args) => args,
+            Err(error) => return Some(Err(format!("invalid arguments: {error}"))),
+        };
+        let required = |field| {
+            args.get(field)
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("missing required string field `{field}`"))
+        };
+        let base = match required("base") {
+            Ok(value) => value,
+            Err(error) => return Some(Err(error)),
+        };
+        let title = match required("title") {
+            Ok(value) => value,
+            Err(error) => return Some(Err(error)),
+        };
+        let body = match required("body") {
+            Ok(value) => value,
+            Err(error) => return Some(Err(error)),
+        };
+        let result = threadlane_git::push(&self.work_dir)
+            .and_then(|()| {
+                threadlane_git::create_draft_pull_request(&self.work_dir, base, title, body)
+            })
+            .map_err(|error| error.to_string());
+        Some(result)
+    }
+}
+
 impl Capability for PlanCapability {
     fn id(&self) -> &str {
         "plan"
@@ -125,6 +311,23 @@ impl Capability for PlanCapability {
     fn tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
         vec![Arc::new(UpdatePlanToolExecutor::new(
             self.plan_store.clone(),
+            self.event_tx.clone(),
+        ))]
+    }
+}
+
+pub(crate) struct QuestionCapability {
+    pub(crate) handle: QuestionHandle,
+    pub(crate) event_tx: broadcast::Sender<AgentEvent>,
+}
+
+impl Capability for QuestionCapability {
+    fn id(&self) -> &str {
+        "question"
+    }
+    fn tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
+        vec![Arc::new(AskQuestionToolExecutor::new(
+            self.handle.clone(),
             self.event_tx.clone(),
         ))]
     }
@@ -180,6 +383,18 @@ impl Capability for McpCapability {
     }
 }
 
+pub(crate) struct BrowserCapability {
+    pub(crate) bridge: BrowserBridge,
+}
+impl Capability for BrowserCapability {
+    fn id(&self) -> &str {
+        "browser"
+    }
+    fn tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
+        vec![Arc::new(BrowserToolExecutor::new(self.bridge.clone()))]
+    }
+}
+
 #[derive(Clone)]
 pub struct SubagentToolExecutor {
     runner: AgentRunner,
@@ -195,7 +410,7 @@ fn subagent_tool_definition() -> AgentToolDefinition {
     AgentToolDefinition {
         name: SUBAGENT_TOOL_NAME.to_string(),
         description: Some(
-            "Delegate one or more tasks to subagents in parallel or sequentially. Choose the role, task, instructions, and tools; project settings control child model and reasoning.".to_string(),
+            "Delegate one or more tasks to subagents in parallel or sequentially. Choose the role, task, instructions, and tools; project settings control child model and reasoning. Parallel siblings can coordinate live via `message_peer`; persistent background workers (wait=false) are steered via `hub`.".to_string(),
         ),
         parameters: serde_json::json!({
             "type": "object",
@@ -221,7 +436,7 @@ fn subagent_tool_definition() -> AgentToolDefinition {
                             "tools": {
                                 "type": "array",
                                 "items": { "type": "string" },
-                                "description": "Optional whitelist of tool names exposed to this subagent (e.g. ['read_file', 'edit_file_hashline'])."
+                                "description": "Optional whitelist of tool names exposed to this subagent (e.g. ['read_file', 'edit_file_hashline']). `message_peer` is always added for parallel batches."
                             },
                             "model": {
                                 "type": "string",
@@ -240,6 +455,10 @@ fn subagent_tool_definition() -> AgentToolDefinition {
                 "parallel": {
                     "type": "boolean",
                     "description": "Set to true to run tasks concurrently in parallel, false for a sequential chain."
+                },
+                "wait": {
+                    "type": "boolean",
+                    "description": "Set to false to spawn persistent background workers and return immediately with lane IDs; use `hub list`/`hub send`/`hub read` to supervise. Defaults to true (block until all children finish)."
                 }
             },
             "required": ["tasks"]
@@ -261,6 +480,28 @@ mod subagent_definition_tests {
             .unwrap();
         assert!(description.contains("Accepted but ignored"));
         assert!(description.contains("project settings"));
+    }
+
+    #[test]
+    fn subagent_tool_supports_background_wait_flag() {
+        let definition = subagent_tool_definition();
+        assert!(definition.parameters["properties"]["wait"].is_object());
+        assert!(definition
+            .description
+            .as_deref()
+            .unwrap_or_default()
+            .contains("hub"));
+    }
+
+    #[test]
+    fn worktree_tool_rejects_non_subagent_branches() {
+        let executor = WorktreeToolExecutor {
+            work_dir: PathBuf::from("/unused"),
+        };
+        let error = executor
+            .execute(r#"{"action":"discard","branch":"main"}"#)
+            .unwrap_err();
+        assert!(error.contains("threadlane/subagent-"));
     }
 }
 
@@ -361,6 +602,25 @@ impl SubagentToolExecutor {
             .get("parallel")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let wait = parsed
+            .get("wait")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+
+        if !wait {
+            // Persistent background workers: return immediately so the parent
+            // can supervise via `hub list`/`hub send`/`hub read`. Completion
+            // lands in the shared completed-lane sink and commits on a later
+            // turn; failures are observed via `hub read`, not here.
+            let runner = self.runner.clone();
+            let count = tasks.len();
+            tokio::spawn(async move {
+                let _ = runner(tasks, parallel, tool_call_id).await;
+            });
+            return Some(Ok(format!(
+                "Spawned {count} background subagent worker(s). Use `hub list` to see lanes, `hub send` to steer live lanes, `hub read` for outputs."
+            )));
+        }
 
         match (self.runner)(tasks, parallel, tool_call_id).await {
             Ok(val) => {
@@ -433,7 +693,7 @@ pub(crate) fn render_agent_catalog(work_dir: &Path) -> String {
     agents.truncate(32);
 
     let mut catalog = String::from(
-        "=== Subagent Task Execution ===\nYou have access to the native `subagent` tool to spin off subagents in parallel or sequentially. You can use preset agent roles or spin dynamic subagents on the fly by providing custom `instructions` (system prompt), a whitelist of `tools`, and an optional `model` override for each task.\n\nPrefer delegating subtasks (research, searching, edits, tests, code reviews) to subagents so work finishes faster in parallel.\n",
+        "=== Subagent Task Execution ===\nYou have access to the native `subagent` tool to spin off subagents in parallel or sequentially. You can use preset agent roles or spin dynamic subagents on the fly by providing custom `instructions` (system prompt), a whitelist of `tools`, and an optional `model` override for each task.\n\nPrefer delegating subtasks (research, searching, edits, tests, code reviews) to subagents so work finishes faster in parallel.\n\nAgent-to-agent messaging: parallel siblings coordinate live via their `message_peer` tool (address by agent role, lane name, or `all`; one call both sends and drains the inbox). Pass `wait=false` to spawn persistent background workers and supervise them with `hub list` (roster), `hub send` (steer a live lane), `hub read` (latest output + recent activity), `hub revive` (restart a settled lane on its history), `hub kill` (stop a live lane), and `hub wait` (block until lanes settle).\n",
     );
     if !agents.is_empty() {
         catalog.push_str("\nAvailable Preset Agent Roles:\n");
@@ -475,6 +735,7 @@ pub(crate) fn build_broker_dispatcher(
     Arc<CapabilityDispatcher>,
     ManagedProcessRegistry,
     PermissionHandle,
+    Arc<PermissionManager>,
 ) {
     let allowed_hosts: Arc<HashSet<String>> = Arc::new(
         std::env::var("THREADLANE_NETWORK_ALLOW_HOSTS")
@@ -510,7 +771,12 @@ pub(crate) fn build_broker_dispatcher(
             }),
         );
     }
-    (Arc::new(dispatcher), managed_processes, permission_handle)
+    (
+        Arc::new(dispatcher),
+        managed_processes,
+        permission_handle,
+        permissions,
+    )
 }
 
 pub(crate) async fn dispatch_hook_requests(
@@ -525,7 +791,7 @@ pub(crate) async fn dispatch_hook_requests(
     Ok(())
 }
 
-pub(crate) async fn dispatch_hook_requests_isolated(
+async fn dispatch_hook_requests_isolated(
     dispatcher: &Arc<CapabilityDispatcher>,
     extensions: &WasiExtensionManager,
     requests: Vec<HostBrokerRequest>,
@@ -561,6 +827,7 @@ pub fn extension_before_tool_hook_handler(
                         | "write"
                         | "edit"
                         | "run_command"
+                        | MANAGE_SUBAGENT_BRANCH_TOOL_NAME
                 )
             {
                 return Err(format!(
@@ -693,7 +960,7 @@ pub(crate) fn create_after_tool_hook_handler(
     })
 }
 
-pub(crate) async fn run_lsp_diagnostics_after_write(
+async fn run_lsp_diagnostics_after_write(
     extensions: &WasiExtensionManager,
     broker_dispatcher: &Arc<CapabilityDispatcher>,
     path: &str,
@@ -735,8 +1002,8 @@ pub(crate) async fn run_lsp_diagnostics_after_write(
 }
 
 pub(crate) struct BrokerAwareWasiToolExecutor {
-    pub(crate) extensions: Arc<WasiExtensionManager>,
-    pub(crate) broker_dispatcher: Arc<CapabilityDispatcher>,
+    extensions: Arc<WasiExtensionManager>,
+    broker_dispatcher: Arc<CapabilityDispatcher>,
 }
 
 #[async_trait]
@@ -812,5 +1079,43 @@ impl ToolExecutor for BrokerAwareWasiToolExecutor {
                 });
             return Some(Ok(broker_message.unwrap_or(immediate_message)));
         }
+    }
+}
+
+#[cfg(test)]
+mod github_tests {
+    use super::*;
+
+    #[test]
+    fn draft_pr_tool_discloses_publish_behavior_and_requires_pr_fields() {
+        let executor = GitHubToolExecutor {
+            work_dir: PathBuf::from("."),
+        };
+        let definitions = executor.tool_definitions();
+        let definition = &definitions[0];
+
+        assert_eq!(definition.name, CREATE_DRAFT_PR_TOOL_NAME);
+        assert!(definition
+            .description
+            .as_deref()
+            .is_some_and(|description| description.contains("Publish the current branch")));
+        assert_eq!(
+            definition.parameters["required"],
+            serde_json::json!(["base", "title", "body"])
+        );
+    }
+
+    #[tokio::test]
+    async fn draft_pr_tool_rejects_missing_fields_before_git_operations() {
+        let executor = GitHubToolExecutor {
+            work_dir: PathBuf::from("."),
+        };
+        let result = executor
+            .execute_tool(CREATE_DRAFT_PR_TOOL_NAME, r#"{"base":"main"}"#)
+            .await
+            .expect("tool should handle its own name")
+            .expect_err("missing fields should fail");
+
+        assert_eq!(result, "missing required string field `title`");
     }
 }

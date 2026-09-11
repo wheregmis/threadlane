@@ -223,6 +223,7 @@ pub struct SidebarView {
     history_fingerprint: u64,
     /// Flattened, sorted rows cached per fingerprint for the virtual list.
     history_cache: Option<(u64, Vec<HistoryRow>)>,
+    attention_filter: Option<SessionAttention>,
     history_list_state: ListState,
     _subscriptions: Vec<Subscription>,
 }
@@ -297,7 +298,9 @@ fn sidebar_fingerprint(state: &AppState, now: u64) -> u64 {
     state.active_session_id.hash(&mut hasher);
     state.workspace_page.hash(&mut hasher);
     state.sidebar_project_filter.hash(&mut hasher);
-    state.search_query.trim().to_lowercase().hash(&mut hasher);
+    for byte in state.search_query.trim().bytes() {
+        hasher.write_u8(byte.to_ascii_lowercase());
+    }
     (now / 60).hash(&mut hasher);
     for project in &state.projects {
         project.name.hash(&mut hasher);
@@ -307,11 +310,11 @@ fn sidebar_fingerprint(state: &AppState, now: u64) -> u64 {
                 .hash(&mut hasher);
         }
     }
-    let mut git_work_dirs: Vec<&std::path::PathBuf> = state.git_statuses.keys().collect();
-    git_work_dirs.sort();
-    for work_dir in git_work_dirs {
+    // Hash-map iteration is stable between notifications unless the map changes;
+    // avoiding temporary sorted key vectors keeps streaming notifications cheap.
+    for (work_dir, status) in &state.git_statuses {
         work_dir.hash(&mut hasher);
-        if let Some(pr) = state.git_statuses[work_dir].pr.as_ref() {
+        if let Some(pr) = status.pr.as_ref() {
             pr.number.hash(&mut hasher);
             pr.state.hash(&mut hasher);
             pr.is_draft.hash(&mut hasher);
@@ -321,9 +324,7 @@ fn sidebar_fingerprint(state: &AppState, now: u64) -> u64 {
             pr.passing_checks.hash(&mut hasher);
         }
     }
-    let mut git_prs: Vec<_> = state.git_prs.iter().collect();
-    git_prs.sort_by(|left, right| left.0.cmp(right.0));
-    for ((work_dir, branch), pr) in git_prs {
+    for ((work_dir, branch), pr) in &state.git_prs {
         work_dir.hash(&mut hasher);
         branch.hash(&mut hasher);
         if let Some(pr) = pr {
@@ -417,6 +418,7 @@ impl SidebarView {
             model,
             search_input,
             history_fingerprint,
+            attention_filter: None,
             history_cache: None,
             history_list_state: ListState::new(0, ListAlignment::Top, px(72.0)),
             _subscriptions: vec![sub1, sub2],
@@ -424,7 +426,6 @@ impl SidebarView {
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let model = self.model.clone();
         let theme = cx.theme().colors;
 
         div()
@@ -432,20 +433,31 @@ impl SidebarView {
             .flex_col()
             .gap_0p5()
             .px_3()
-            .pt(px(48.0))
+            .pt(crate::theme::WINDOW_CONTROLS_CLEARANCE)
             .pb_1()
             .bg(theme.title_bar)
             .child(
                 Button::new("new-task-btn")
                     .icon(IconName::Plus)
-                    .label("New Task")
-                    .ghost()
+                    .label("New Session")
+                    .outline()
+                    .small()
                     .w_full()
-                    .on_click(move |_event, _window, cx| {
-                        model.update(cx, |state, cx| {
-                            controller::dispatch(state, AppAction::BeginNewTask);
-                            cx.notify();
-                        });
+                    .justify_between()
+                    .tooltip("Start a new session (⌘N)")
+                    .child(
+                        div()
+                            .px_1p5()
+                            .py(px(0.5))
+                            .rounded_sm()
+                            .bg(theme.muted)
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("⌘N"),
+                    )
+                    .on_click(move |_event, window, cx| {
+                        window
+                            .dispatch_action(Box::new(crate::screens::workspace::BeginNewTask), cx);
                     }),
             )
             .child(
@@ -504,6 +516,7 @@ impl SidebarView {
                     Button::new("sidebar-project-filter")
                         .icon(IconName::Folder)
                         .label(selected_label)
+                        .tooltip("Filter sessions by project")
                         .dropdown_caret(true)
                         .selected(true)
                         .w_full()
@@ -570,7 +583,7 @@ impl SidebarView {
             .bg(theme.title_bar)
     }
 
-    fn render_history_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_history_header(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
         let state = self.model.read(cx);
         let session_count = state
@@ -584,6 +597,24 @@ impl SidebarView {
             })
             .map(|project| project.sessions.len())
             .sum::<usize>();
+        let mut attention_counts = [0usize; 3];
+        for project in &state.projects {
+            if state
+                .sidebar_project_filter
+                .as_ref()
+                .is_some_and(|selected| &project.work_dir != selected)
+            {
+                continue;
+            }
+            for session in &project.sessions {
+                match state.session_attention(session) {
+                    SessionAttention::NeedsYou => attention_counts[0] += 1,
+                    SessionAttention::Working => attention_counts[1] += 1,
+                    SessionAttention::Ready => attention_counts[2] += 1,
+                    SessionAttention::Idle => {}
+                }
+            }
+        }
 
         div()
             .flex()
@@ -615,6 +646,35 @@ impl SidebarView {
                             .child(session_count.to_string()),
                     ),
             )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .children([
+                        (SessionAttention::NeedsYou, attention_counts[0], theme.warning),
+                        (SessionAttention::Working, attention_counts[1], theme.primary),
+                        (SessionAttention::Ready, attention_counts[2], theme.success),
+                    ]
+                    .into_iter()
+                    .map(|(attention, count, color)| {
+                        let selected = self.attention_filter == Some(attention);
+                        Button::new(format!("sidebar-filter-{}", attention.label()))
+                            .label(format!("{} {}", count, attention.label()))
+                            .xsmall()
+                            .ghost()
+                            .selected(selected)
+                            .text_color(color)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.attention_filter = if this.attention_filter == Some(attention) {
+                                    None
+                                } else {
+                                    Some(attention)
+                                };
+                                cx.notify();
+                            }))
+                    })),
+            )
     }
 
     fn render_session_card(
@@ -631,19 +691,19 @@ impl SidebarView {
                     .flex()
                     .flex_none()
                     .items_center()
-                    .gap(px(3.0))
-                    .px_1()
+                    .gap(px(3.5))
+                    .px_1p5()
+                    .py(px(0.5))
                     .rounded_full()
-                    .bg(theme.warning.opacity(0.12))
+                    .bg(theme.warning.opacity(0.15))
                     .text_color(theme.warning)
-                    .child(Icon::new(IconName::Info).xsmall())
+                    .child(div().size(px(6.0)).rounded_full().bg(theme.warning))
                     .child(
                         div()
                             .text_xs()
                             .font_weight(FontWeight::MEDIUM)
                             .child(attention.label()),
                     )
-                    .group_hover("session-card", |style| style.opacity(0.0))
                     .into_any_element(),
             ),
             SessionAttention::Working => Some(
@@ -651,10 +711,11 @@ impl SidebarView {
                     .flex()
                     .flex_none()
                     .items_center()
-                    .gap(px(4.0))
-                    .px_1()
+                    .gap(px(3.5))
+                    .px_1p5()
+                    .py(px(0.5))
                     .rounded_full()
-                    .bg(theme.primary.opacity(0.08))
+                    .bg(theme.primary.opacity(0.12))
                     .text_color(theme.primary)
                     .child(Spinner::new().xsmall().color(theme.primary))
                     .child(
@@ -663,7 +724,6 @@ impl SidebarView {
                             .font_weight(FontWeight::MEDIUM)
                             .child(attention.label()),
                     )
-                    .group_hover("session-card", |style| style.opacity(0.0))
                     .into_any_element(),
             ),
             SessionAttention::Ready => Some(
@@ -671,19 +731,19 @@ impl SidebarView {
                     .flex()
                     .flex_none()
                     .items_center()
-                    .gap(px(3.0))
-                    .px_1()
+                    .gap(px(3.5))
+                    .px_1p5()
+                    .py(px(0.5))
                     .rounded_full()
                     .bg(theme.success.opacity(0.12))
                     .text_color(theme.success)
-                    .child(Icon::new(IconName::CircleCheck).xsmall())
+                    .child(div().size(px(6.0)).rounded_full().bg(theme.success))
                     .child(
                         div()
                             .text_xs()
                             .font_weight(FontWeight::MEDIUM)
                             .child(attention.label()),
                     )
-                    .group_hover("session-card", |style| style.opacity(0.0))
                     .into_any_element(),
             ),
             SessionAttention::Idle => None,
@@ -714,6 +774,9 @@ impl SidebarView {
         let work_dir = session.work_dir.clone();
         let session_id = session.id.clone();
         let model = self.model.clone();
+        let title_work_dir = session.work_dir.clone();
+        let title_session_id = session.id.clone();
+        let title_model = self.model.clone();
         let context_work_dir = session.work_dir.clone();
         let context_session_id = session.id.clone();
         let context_model = self.model.clone();
@@ -747,29 +810,33 @@ impl SidebarView {
             let is_closed = state_upper == "CLOSED";
             let tooltip = pr_status_tooltip(&pr);
 
-            let (pr_bg, pr_fg, pr_label) = if is_merged {
+            let (pr_bg, pr_fg, pr_label, pr_icon) = if is_merged {
                 (
                     theme.success.opacity(0.18),
                     theme.success,
                     format!("#{}", pr.number),
+                    Icon::default().path("icons/git/branch.svg"),
                 )
             } else if is_draft {
                 (
                     theme.secondary,
                     theme.muted_foreground,
                     format!("#{}", pr.number),
+                    Icon::default().path("icons/git/compare.svg"),
                 )
             } else if is_closed {
                 (
                     theme.danger.opacity(0.12),
                     theme.danger,
                     format!("#{}", pr.number),
+                    Icon::default().path("icons/git/compare.svg"),
                 )
             } else {
                 (
                     theme.primary.opacity(0.12),
                     theme.primary,
                     format!("#{}", pr.number),
+                    Icon::default().path("icons/git/compare.svg"),
                 )
             };
 
@@ -782,7 +849,7 @@ impl SidebarView {
                         .gap(px(2.0))
                         .px_1()
                         .py(px(0.5))
-                        .rounded(px(3.0))
+                        .rounded_sm()
                         .bg(theme.danger.opacity(0.12))
                         .text_color(theme.danger)
                         .child(IconName::Close)
@@ -797,7 +864,7 @@ impl SidebarView {
                         .gap(px(2.0))
                         .px_1()
                         .py(px(0.5))
-                        .rounded(px(3.0))
+                        .rounded_sm()
                         .bg(theme.warning.opacity(0.12))
                         .text_color(theme.warning)
                         .child(IconName::Asterisk)
@@ -812,7 +879,7 @@ impl SidebarView {
                         .gap(px(2.0))
                         .px_1()
                         .py(px(0.5))
-                        .rounded(px(3.0))
+                        .rounded_sm()
                         .bg(theme.success.opacity(0.12))
                         .text_color(theme.success)
                         .child(IconName::CircleCheck)
@@ -830,7 +897,7 @@ impl SidebarView {
                     .gap(px(2.0))
                     .px_1()
                     .py(px(0.5))
-                    .rounded(px(3.0))
+                    .rounded_sm()
                     .bg(theme.secondary)
                     .text_color(theme.muted_foreground)
                     .child(
@@ -852,7 +919,7 @@ impl SidebarView {
                         "session-pr-{}-{}",
                         session.id, pr.number
                     )))
-                    .icon(Icon::default().path("icons/git/compare.svg"))
+                    .icon(pr_icon)
                     .label(pr_label)
                     .tooltip(tooltip)
                     .ghost()
@@ -893,12 +960,13 @@ impl SidebarView {
         }
 
         if session.is_worktree {
+            let branch_display = session.git_branch.as_deref().unwrap_or("worktree");
             let (background, foreground, tooltip) = if session.worktree_available {
                 (
                     theme.secondary,
                     theme.muted_foreground,
                     format!(
-                        "Local worktree\nChecked out at {}",
+                        "Local worktree on branch '{branch_display}'\nChecked out at {}",
                         session.runtime_work_dir.display()
                     ),
                 )
@@ -907,7 +975,7 @@ impl SidebarView {
                     theme.warning.opacity(0.12),
                     theme.warning,
                     format!(
-                        "Worktree unavailable\nNot checked out locally\nRecorded path: {}\nSession history remains available",
+                        "Worktree unavailable\nBranch: '{branch_display}'\nNot checked out locally\nRecorded path: {}\nSession history remains available",
                         session.runtime_work_dir.display()
                     ),
                 )
@@ -918,6 +986,7 @@ impl SidebarView {
                     session.id
                 )))
                 .icon(Icon::default().path("icons/git/branch.svg"))
+                .label(branch_display.to_string())
                 .tooltip(tooltip)
                 .ghost()
                 .xsmall()
@@ -990,27 +1059,59 @@ impl SidebarView {
                             .justify_between()
                             .gap_2()
                             .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_sm()
-                                    .font_weight(if is_active {
-                                        FontWeight::SEMIBOLD
-                                    } else {
-                                        FontWeight::MEDIUM
-                                    })
-                                    .text_color(title_color)
-                                    .truncate()
-                                    .child(session_title),
+                                Button::new(SharedString::from(format!(
+                                    "session-title-{}",
+                                    session.id
+                                )))
+                                .debug_selector({
+                                    let id = session.id.clone();
+                                    move || format!("session-title-{id}")
+                                })
+                                .accessibility_label(session_title.clone())
+                                .ghost()
+                                .xsmall()
+                                .compact()
+                                .flex_1()
+                                .min_w_0()
+                                .px_0()
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation();
+                                })
+                                .on_click(move |_, _, cx| {
+                                    title_model.update(cx, |state, cx| {
+                                        controller::dispatch(
+                                            state,
+                                            AppAction::SelectSession {
+                                                work_dir: title_work_dir.clone(),
+                                                session_id: title_session_id.clone(),
+                                            },
+                                        );
+                                        cx.notify();
+                                    });
+                                })
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .min_w_0()
+                                        .text_sm()
+                                        .font_weight(if is_active {
+                                            FontWeight::SEMIBOLD
+                                        } else {
+                                            FontWeight::MEDIUM
+                                        })
+                                        .text_color(title_color)
+                                        .truncate()
+                                        .child(session_title),
+                                ),
                             )
                             .child(
                                 div()
                                     .relative()
                                     .flex_none()
                                     .flex()
-                                    .w(px(76.0))
                                     .items_center()
                                     .justify_end()
+                                    .gap_1()
                                     .child(
                                         div()
                                             .flex()
@@ -1024,9 +1125,6 @@ impl SidebarView {
                                                         .text_color(theme.muted_foreground)
                                                         .child(time_ago),
                                                 )
-                                            })
-                                            .group_hover("session-card", |style| {
-                                                style.opacity(0.0)
                                             }),
                                     )
                                     .child(
@@ -1034,16 +1132,13 @@ impl SidebarView {
                                             "settle-session-{}",
                                             session.id
                                         )))
-                                        .label("Archive")
+                                        .icon(Icon::default().path("icons/archive.svg"))
                                         .ghost()
                                         .xsmall()
-                                        .compact()
-                                        .bg(theme.secondary)
-                                        .absolute()
-                                        .right(px(0.0))
-                                        .top(px(0.0))
+                                        .accessibility_label("Archive session")
                                         .opacity(0.0)
                                         .group_hover("session-card", |style| style.opacity(1.0))
+                                        .focus_visible(|style| style.opacity(1.0))
                                         .tooltip("Archive session")
                                         // The card selects a session on mouse-down. Keep action buttons from
                                         // bubbling that event, otherwise archiving first selects the row and
@@ -1323,66 +1418,38 @@ impl SidebarView {
     }
 
     fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let github_model = self.model.clone();
         let settings_model = self.model.clone();
         let theme = cx.theme().colors;
-        let github_selected =
-            self.model.read(cx).workspace_page == crate::state::WorkspacePage::GitHub;
         let settings_selected =
             self.model.read(cx).workspace_page == crate::state::WorkspacePage::Settings;
 
-        div()
-            .flex_none()
-            .px_3()
-            .py_2()
-            .child(
-                Button::new("sidebar-github")
-                    .child(
-                        div()
-                            .w_full()
-                            .flex()
-                            .items_center()
-                            .justify_start()
-                            .gap_2()
-                            .child(IconName::Github)
-                            .child("GitHub"),
-                    )
-                    .ghost()
-                    .selected(github_selected)
-                    .w_full()
-                    .justify_start()
-                    .text_color(theme.muted_foreground)
-                    .on_click(move |_event, _window, cx| {
-                        github_model.update(cx, |state, cx| {
-                            controller::dispatch(state, AppAction::OpenGitHub);
-                            cx.notify();
-                        });
-                    }),
-            )
-            .child(
-                Button::new("sidebar-settings")
-                    .child(
-                        div()
-                            .w_full()
-                            .flex()
-                            .items_center()
-                            .justify_start()
-                            .gap_2()
-                            .child(IconName::Settings)
-                            .child("Settings"),
-                    )
-                    .ghost()
-                    .selected(settings_selected)
-                    .w_full()
-                    .justify_start()
-                    .text_color(theme.muted_foreground)
-                    .on_click(move |_event, _window, cx| {
-                        settings_model.update(cx, |state, cx| {
-                            controller::dispatch(state, AppAction::OpenSettings);
-                            cx.notify();
-                        });
-                    }),
-            )
+        div().flex_none().px_3().py_2().child(
+            Button::new("sidebar-settings")
+                .debug_selector(|| "sidebar-settings".into())
+                .accessibility_label("Settings")
+                .tooltip("Open settings")
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .justify_start()
+                        .gap_2()
+                        .child(IconName::Settings)
+                        .child("Settings"),
+                )
+                .ghost()
+                .selected(settings_selected)
+                .w_full()
+                .justify_start()
+                .text_color(theme.muted_foreground)
+                .on_click(move |_event, _window, cx| {
+                    settings_model.update(cx, |state, cx| {
+                        controller::dispatch(state, AppAction::OpenSettings);
+                        cx.notify();
+                    });
+                }),
+        )
     }
 
     /// Filter, group, and sort sessions for the history list. Only runs when
@@ -1411,7 +1478,11 @@ impl SidebarView {
             {
                 continue;
             }
-            sessions.push((session.clone(), state.session_attention(session)));
+            let attention = state.session_attention(session);
+            if self.attention_filter.is_some_and(|filter| filter != attention) {
+                continue;
+            }
+            sessions.push((session.clone(), attention));
         }
         flatten_history_sessions(sessions, now)
     }
@@ -1458,12 +1529,17 @@ impl SidebarView {
 
     fn render_history(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().colors;
-        let model = self.model.clone();
         let state = self.model.read(cx);
         let query = state.search_query.trim().to_lowercase();
         let now = now_unix_secs();
 
-        let fingerprint = sidebar_fingerprint(state, now);
+        let mut fingerprint = sidebar_fingerprint(state, now);
+        if let Some(filter) = self.attention_filter {
+            use std::hash::{Hash, Hasher};
+            let mut filter_hasher = std::collections::hash_map::DefaultHasher::new();
+            filter.label().hash(&mut filter_hasher);
+            fingerprint ^= filter_hasher.finish();
+        }
         self.history_fingerprint = fingerprint;
         let cache_matches = self
             .history_cache
@@ -1509,11 +1585,11 @@ impl SidebarView {
                         .label("New Task")
                         .ghost()
                         .small()
-                        .on_click(move |_event, _window, cx| {
-                            model.update(cx, |state, cx| {
-                                controller::dispatch(state, AppAction::BeginNewTask);
-                                cx.notify();
-                            });
+                        .on_click(move |_event, window, cx| {
+                            window.dispatch_action(
+                                Box::new(crate::screens::workspace::BeginNewTask),
+                                cx,
+                            );
                         })
                 }))
                 .into_any_element();
@@ -1567,6 +1643,108 @@ mod tests {
             github_issue: None,
             is_worktree: false,
             worktree_available: true,
+        }
+    }
+
+    #[gpui::test]
+    fn sidebar_task_title_and_navigation_support_keyboard_activation(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::state::{AppState, WorkspacePage};
+        use gpui::*;
+        use std::{cell::Cell, rc::Rc};
+
+        struct Harness {
+            sidebar: Entity<super::SidebarView>,
+            session: SessionInfo,
+        }
+
+        impl Render for Harness {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.sidebar.update(cx, |sidebar, cx| {
+                    div()
+                        .tab_group()
+                        .w(px(320.0))
+                        .child(sidebar.render_session_card(
+                            &self.session,
+                            SessionAttention::Idle,
+                            false,
+                            cx,
+                        ))
+                        .child(sidebar.render_footer(cx))
+                        .into_any_element()
+                })
+            }
+        }
+
+        cx.update(gpui_component::init);
+        let temporary = tempfile::tempdir().unwrap();
+        let mut task = session("keyboard-task");
+        // A missing project cannot be persisted to the user's project registry.
+        task.work_dir = temporary.path().join("missing-project");
+        let (harness, cx) = cx.add_window_view(|window, cx| Harness {
+            sidebar: cx.new(|cx| {
+                let model = cx.new(|_| {
+                    let mut state = AppState::default();
+                    state.active_work_dir = None;
+                    state.active_session_id = None;
+                    state.pending_hydrations.clear();
+                    state
+                });
+                super::SidebarView::new(model, window, cx)
+            }),
+            session: task.clone(),
+        });
+        let model = harness.read_with(cx, |harness, cx| harness.sidebar.read(cx).model.clone());
+        let changes = Rc::new(Cell::new(0));
+        let _subscription = cx.update(|_, cx| {
+            let changes = changes.clone();
+            cx.observe(&model, move |_, _| changes.set(changes.get() + 1))
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let title = cx.debug_bounds("session-title-keyboard-task").unwrap();
+        cx.simulate_click(title.center(), Modifiers::default());
+        assert_eq!(changes.get(), 1, "title click must select only once");
+        model.read_with(cx, |state, _| {
+            assert_eq!(state.active_session_id.as_deref(), Some("keyboard-task"));
+            assert_eq!(state.pending_hydrations.len(), 1);
+        });
+
+        model.update(cx, |state, _| state.active_session_id = None);
+        cx.update(|window, cx| {
+            window.blur(cx);
+            window.focus_next(cx);
+            window.draw(cx).clear(cx);
+        });
+        for key in ["enter", "space"] {
+            let previous_changes = changes.get();
+            let keystroke = Keystroke::parse(key).unwrap();
+            cx.simulate_event(KeyDownEvent {
+                keystroke: keystroke.clone(),
+                is_held: false,
+                prefer_character_input: false,
+            });
+            cx.simulate_event(KeyUpEvent { keystroke });
+            assert_eq!(changes.get(), previous_changes + 1);
+            model.read_with(cx, |state, _| {
+                assert_eq!(state.active_session_id.as_deref(), Some("keyboard-task"));
+            });
+        }
+
+        cx.update(|window, cx| window.focus_next(cx)); // Archive remains separate.
+        for page in [WorkspacePage::Settings] {
+            cx.update(|window, cx| {
+                window.focus_next(cx);
+                window.draw(cx).clear(cx);
+            });
+            let keystroke = Keystroke::parse("enter").unwrap();
+            cx.simulate_event(KeyDownEvent {
+                keystroke: keystroke.clone(),
+                is_held: false,
+                prefer_character_input: false,
+            });
+            cx.simulate_event(KeyUpEvent { keystroke });
+            model.read_with(cx, |state, _| assert_eq!(state.workspace_page, page));
         }
     }
 

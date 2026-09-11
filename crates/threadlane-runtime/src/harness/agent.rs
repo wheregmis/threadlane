@@ -21,7 +21,7 @@ impl<S: SessionStore> AgentHarness<S> {
         Self::with_events(store, HarnessEventHub::new(256))
     }
 
-    pub fn with_events(store: S, events: HarnessEventHub) -> Self {
+    pub(crate) fn with_events(store: S, events: HarnessEventHub) -> Self {
         Self {
             store,
             effects: GatedEffects::new(),
@@ -292,7 +292,8 @@ impl<S: SessionStore> AgentHarness<S> {
         PromptProcedure::accept_on_lane(&self.store, lane, run_id, prompt, &mut self.effects)
     }
 
-    pub fn accept_prompt_and_drive(
+    #[cfg(test)]
+    fn accept_prompt_and_drive(
         &mut self,
         run_id: &str,
         prompt: AgentMessage,
@@ -377,7 +378,7 @@ impl<S: SessionStore> AgentHarness<S> {
     /// Validates the public, compact accepted-run token against committed state.
     /// The named prompt must be in the committed prefix and the operation must
     /// still be open on the same lane.
-    pub fn validate_accepted_run_token(
+    pub(crate) fn validate_accepted_run_token(
         &self,
         run_id: &str,
         lane_name: &str,
@@ -1028,7 +1029,7 @@ impl<S: SessionStore> AgentHarness<S> {
         Ok(snapshot)
     }
 
-    pub fn events(&self) -> &HarnessEventHub {
+    pub(crate) fn events(&self) -> &HarnessEventHub {
         &self.events
     }
 

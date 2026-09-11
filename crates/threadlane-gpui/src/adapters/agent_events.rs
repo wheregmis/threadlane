@@ -1,4 +1,4 @@
-use threadlane_session::{AgentEvent, PermissionRequest, SessionPlan, TokenUsage};
+use threadlane_session::{AgentEvent, PermissionRequest, QuestionRequest, SessionPlan, TokenUsage};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChatAgentUpdate {
@@ -22,6 +22,7 @@ pub enum ChatAgentUpdate {
     Usage(TokenUsage),
     Error(String),
     PermissionRequested(PermissionRequest),
+    QuestionRequested(QuestionRequest),
     Ignore,
 }
 
@@ -66,6 +67,7 @@ pub(crate) fn adapt_agent_event(event: AgentEvent) -> ChatAgentUpdate {
         AgentEvent::PermissionRequested { request } => {
             ChatAgentUpdate::PermissionRequested(request)
         }
+        AgentEvent::QuestionRequested { request } => ChatAgentUpdate::QuestionRequested(request),
         _ => ChatAgentUpdate::Ignore,
     }
 }

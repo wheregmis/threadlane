@@ -17,8 +17,8 @@ pub enum CompactionStrategy {
 
 #[derive(Debug, Clone)]
 pub struct CompactionOptions {
-    pub max_messages: usize,
-    pub preserve_recent: usize,
+    max_messages: usize,
+    preserve_recent: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -64,6 +64,9 @@ pub(crate) fn estimate_message_tokens(message: &AgentMessage, config: &AgentConf
     let serialized_tokens = serialized_message(message).len().div_ceil(4);
     let image_tokens = match message {
         AgentMessage::UserWithImages { images, .. } => {
+            images.len().saturating_mul(config.estimated_image_tokens)
+        }
+        AgentMessage::Tool { images, .. } => {
             images.len().saturating_mul(config.estimated_image_tokens)
         }
         _ => 0,
@@ -120,7 +123,8 @@ pub fn compact_for_budget(
     })
 }
 
-pub fn compact_for_context_budget(
+#[cfg(test)]
+fn compact_for_context_budget(
     messages: &[AgentMessage],
     tool_schema_json: Option<&str>,
     budget: &ContextBudget,
@@ -489,8 +493,12 @@ pub fn prune_historical_tool_outputs(
                 content,
                 is_error,
                 terminate,
+                images,
             } => {
-                if keep_full[i] || content.len() <= INLINE_TOOL_OUTPUT_LIMIT {
+                let image_bytes: usize = images.iter().map(|image| image.data_url.len()).sum();
+                if keep_full[i]
+                    || content.len().saturating_add(image_bytes) <= INLINE_TOOL_OUTPUT_LIMIT
+                {
                     result.push(msg.clone());
                 } else {
                     let pruned_content = format!(
@@ -503,6 +511,9 @@ pub fn prune_historical_tool_outputs(
                         content: pruned_content,
                         is_error: *is_error,
                         terminate: *terminate,
+                        // Pruning bounds context: attached images age out
+                        // with the text they illustrated.
+                        images: Vec::new(),
                     });
                 }
             }
@@ -557,8 +568,16 @@ fn build_checkpoint_from_entries<'a>(
     let mut excerpts = Vec::new();
     let mut used_chars = 0;
 
-    for (message, output_omitted) in entries.rev() {
-        let Some(excerpt) = message_excerpt(message, output_omitted) else {
+    // Findings first: condensed dead-ends survive rotation while raw
+    // transcripts do not. A bounded slice of the same budget.
+    let dropped: Vec<(&AgentMessage, bool)> = entries.collect();
+    let findings = build_findings(&dropped);
+    if !findings.is_empty() {
+        used_chars += findings.len();
+    }
+
+    for (message, output_omitted) in dropped.iter().rev() {
+        let Some(excerpt) = message_excerpt(message, *output_omitted) else {
             continue;
         };
         if used_chars + excerpt.len() > config.max_checkpoint_chars {
@@ -570,10 +589,83 @@ fn build_checkpoint_from_entries<'a>(
     excerpts.reverse();
 
     format!(
-        "Context checkpoint from {} earlier messages. Continue the same task using the retained recent messages and these earlier excerpts:\n\n{}",
+        "Context checkpoint from {} earlier messages. Continue the same task using the retained recent messages and these earlier excerpts:\n\n{}{}",
         message_count,
+        findings,
         excerpts.join("\n\n")
     )
+}
+
+/// Condensed episodic memory for the dropped range: failed tool calls
+/// (deduplicated, with counts) and loop-guard trip notices. Raw outputs age
+/// out; what was tried and what failed must not.
+fn build_findings(dropped: &[(&AgentMessage, bool)]) -> String {
+    const MAX_FINDINGS: usize = 6;
+    const MAX_FINDING_CHARS: usize = 200;
+    const MAX_FINDINGS_CHARS: usize = 1_200;
+
+    let mut failures: Vec<(String, usize, String)> = Vec::new();
+    let mut trips: Vec<String> = Vec::new();
+    for (message, _) in dropped {
+        match message {
+            AgentMessage::Tool {
+                name,
+                content,
+                is_error,
+                ..
+            } if *is_error => {
+                let first_line: String = content
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .chars()
+                    .take(MAX_FINDING_CHARS)
+                    .collect();
+                match failures
+                    .iter_mut()
+                    .find(|(existing_name, _, existing_first)| {
+                        existing_name == name && existing_first == &first_line
+                    }) {
+                    Some((_, count, _)) => *count += 1,
+                    None => failures.push((name.clone(), 1, first_line)),
+                }
+            }
+            AgentMessage::Assistant {
+                content: Some(content),
+                ..
+            } if content.starts_with("Stopped:") => {
+                let line: String = content.chars().take(MAX_FINDING_CHARS).collect();
+                if !trips.contains(&line) {
+                    trips.push(line);
+                }
+            }
+            _ => {}
+        }
+    }
+    if failures.is_empty() && trips.is_empty() {
+        return String::new();
+    }
+    let mut lines = Vec::new();
+    for (name, count, first_line) in failures.iter().take(MAX_FINDINGS) {
+        let times = if *count > 1 {
+            format!(" {count}x")
+        } else {
+            String::new()
+        };
+        lines.push(format!("- `{name}` failed{times}: {first_line}"));
+    }
+    for trip in trips.iter().take(MAX_FINDINGS) {
+        lines.push(format!("- {trip}"));
+    }
+    let mut findings = format!(
+        "Tried and failed (do not retry verbatim):\n{}\n\n",
+        lines.join("\n")
+    );
+    if findings.len() > MAX_FINDINGS_CHARS {
+        findings.truncate(MAX_FINDINGS_CHARS);
+    }
+    findings
 }
 
 fn message_excerpt(message: &AgentMessage, output_omitted: bool) -> Option<String> {
@@ -702,6 +794,7 @@ mod tests {
                 content: "result".repeat(1_000),
                 is_error: false,
                 terminate: false,
+                images: Vec::new(),
             },
             AgentMessage::User {
                 content: "continue".into(),
@@ -925,6 +1018,7 @@ mod tests {
             content: "x".repeat(1_000),
             is_error: false,
             terminate: false,
+            images: Vec::new(),
         });
 
         let compacted = compact_messages_to_token_budget(&msgs, 1);
@@ -950,6 +1044,7 @@ mod tests {
                 content: "running cargo test ... finished cleanly".into(),
                 is_error: false,
                 terminate: false,
+                images: Vec::new(),
             },
             AgentMessage::Assistant {
                 content: Some("GPUI component guidelines must be followed.".into()),
@@ -1015,6 +1110,7 @@ mod tests {
                 content: "a".repeat(5_000),
                 is_error: false,
                 terminate: false,
+                images: Vec::new(),
             });
         }
 
@@ -1038,5 +1134,65 @@ mod tests {
         let optimal = prepare_token_optimal_context(&msgs, 10_000);
         assert!(!optimal.is_empty());
         assert_eq!(optimal[0].role_str(), "system");
+    }
+
+    #[test]
+    fn checkpoint_condenses_failures_into_findings() {
+        let config = AgentConfig::default();
+        let messages = vec![
+            AgentMessage::User {
+                content: "fix it".into(),
+            },
+            AgentMessage::Tool {
+                tool_call_id: "call-1".into(),
+                name: "read_file".into(),
+                content: "file not found: src/a.rs".into(),
+                is_error: true,
+                terminate: false,
+                images: Vec::new(),
+            },
+            AgentMessage::Tool {
+                tool_call_id: "call-2".into(),
+                name: "read_file".into(),
+                content: "file not found: src/a.rs".into(),
+                is_error: true,
+                terminate: false,
+                images: Vec::new(),
+            },
+            AgentMessage::Assistant {
+                content: Some("Stopped: `read_file` ran 5 times in a row.".into()),
+                tool_calls: None,
+                stop_reason: Some("loop_guard".into()),
+                deferred_handle: None,
+            },
+        ];
+        let checkpoint = build_checkpoint(&messages, &config);
+        assert!(
+            checkpoint.contains("Tried and failed"),
+            "failures must survive as findings: {checkpoint}"
+        );
+        assert!(checkpoint.contains("`read_file` failed 2x"));
+        assert!(checkpoint.contains("Stopped:"));
+    }
+
+    #[test]
+    fn checkpoint_without_failures_keeps_legacy_shape() {
+        let config = AgentConfig::default();
+        let messages = vec![
+            AgentMessage::User {
+                content: "hi".into(),
+            },
+            AgentMessage::Tool {
+                tool_call_id: "call-1".into(),
+                name: "read_file".into(),
+                content: "ok".into(),
+                is_error: false,
+                terminate: false,
+                images: Vec::new(),
+            },
+        ];
+        let checkpoint = build_checkpoint(&messages, &config);
+        assert!(!checkpoint.contains("Tried and failed"));
+        assert!(checkpoint.starts_with("Context checkpoint from"));
     }
 }

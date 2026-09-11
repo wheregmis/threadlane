@@ -32,7 +32,7 @@ use tokio::sync::{mpsc, oneshot, Mutex as TokioMutex};
 use tokio::task::JoinHandle;
 
 /// ACP major protocol version implemented by this client.
-pub const ACP_PROTOCOL_VERSION: u16 = 1;
+const ACP_PROTOCOL_VERSION: u16 = 1;
 
 const ACP_SETTINGS_FILE: &str = "acp.json";
 const MAX_CAPTURED_STDERR_BYTES: usize = 16 * 1024;
@@ -273,7 +273,7 @@ pub struct AcpPromptCapabilities {
 #[serde(rename_all = "camelCase")]
 pub struct AcpAgentCapabilities {
     #[serde(default)]
-    pub load_session: bool,
+    load_session: bool,
     #[serde(default)]
     prompt_capabilities: AcpPromptCapabilities,
 }
@@ -283,14 +283,14 @@ impl AcpAgentCapabilities {
     ///
     /// Agents that do not advertise this may reject the whole prompt, so an
     /// attachment has to be described in text instead of sent.
-    pub fn supports_image_prompts(&self) -> bool {
+    pub(crate) fn supports_image_prompts(&self) -> bool {
         self.prompt_capabilities.image
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AcpAuthMethod {
-    pub id: String,
+    id: String,
     name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     description: Option<String>,
@@ -299,18 +299,18 @@ pub struct AcpAuthMethod {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpInitializeResult {
-    pub protocol_version: u16,
+    protocol_version: u16,
     #[serde(default)]
-    pub agent_capabilities: AcpAgentCapabilities,
+    pub(crate) agent_capabilities: AcpAgentCapabilities,
     #[serde(default)]
-    pub auth_methods: Vec<AcpAuthMethod>,
+    auth_methods: Vec<AcpAuthMethod>,
     #[serde(default)]
     agent_info: Option<AcpImplementation>,
 }
 
 impl AcpInitializeResult {
     /// Display name reported by the agent, falling back to a generic label.
-    pub fn agent_display_name(&self) -> String {
+    fn agent_display_name(&self) -> String {
         self.agent_info
             .as_ref()
             .map(|info| info.name.clone())
@@ -342,7 +342,7 @@ pub struct AcpConfigOptionChoice {
     pub value: String,
     pub name: String,
     #[serde(default)]
-    pub description: Option<String>,
+    description: Option<String>,
 }
 
 /// A session setting the agent exposes for the client to change.
@@ -357,13 +357,13 @@ pub struct AcpConfigOption {
     pub id: String,
     pub name: String,
     #[serde(default)]
-    pub description: Option<String>,
+    description: Option<String>,
     #[serde(default)]
-    pub category: Option<String>,
+    category: Option<String>,
     /// Kept as raw JSON: `select` options carry strings today, but the type is
     /// agent-defined and a boolean or number must not fail the whole session.
     #[serde(default)]
-    pub current_value: Value,
+    current_value: Value,
     #[serde(default)]
     pub options: Vec<AcpConfigOptionChoice>,
 }
@@ -376,7 +376,7 @@ pub const ACP_CONFIG_CATEGORY_MODE: &str = "mode";
 pub const ACP_CONFIG_CATEGORY_EFFORT: &str = "thought_level";
 /// `id` of the agent-persona option, matched by id because it carries no
 /// `category`.
-pub const ACP_CONFIG_ID_AGENT: &str = "agent";
+const ACP_CONFIG_ID_AGENT: &str = "agent";
 
 impl AcpConfigOption {
     pub fn current_value(&self) -> Option<&str> {
@@ -399,15 +399,36 @@ impl AcpConfigOption {
             .or_else(|| self.current_value().map(str::to_string))
     }
 
-    /// The most specific description of the current selection.
+    /// The most specific label of the current selection.
     ///
-    /// Prefers the leading segment of the agent's description, because that is
-    /// where it names what is concretely running ("Opus 4.8 with 1M context ·
-    /// Best for everyday…") — a model's option *name* is often generic
-    /// ("Default (recommended)") and answers the wrong question. Only useful
-    /// where there is room for a phrase; a mode's description is a whole
-    /// sentence, so a button should use [`Self::current_label`] instead.
+    /// Model choices keep an explicit name ("GPT-6-Astra"); generic names such
+    /// as "Default (recommended)" use the leading description segment, where
+    /// agents such as Claude Code identify the concrete model. Other settings
+    /// prefer their description; buttons for those settings should use
+    /// [`Self::current_label`] instead.
     pub fn current_detail_label(&self) -> Option<String> {
+        if self.is_category(ACP_CONFIG_CATEGORY_MODEL) {
+            let label = self.current_label()?;
+            let name = label
+                .split('(')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase();
+            // ponytail: recognize advertised placeholder names; extend this
+            // list if another agent uses a different generic model label.
+            if !matches!(
+                name.as_str(),
+                "" | "default"
+                    | "default model"
+                    | "recommended"
+                    | "recommended model"
+                    | "auto"
+                    | "automatic"
+            ) {
+                return Some(label);
+            }
+        }
         self.current_description()
             .and_then(|description| description.split(" · ").next())
             .map(str::trim)
@@ -418,13 +439,24 @@ impl AcpConfigOption {
 
     /// Description the agent gave for the current selection, which is where it
     /// names the underlying model ("Opus 4.8 with 1M context").
-    pub fn current_description(&self) -> Option<&str> {
+    fn current_description(&self) -> Option<&str> {
         self.current_choice()
             .and_then(|choice| choice.description.as_deref())
     }
 
     pub fn has_choice(&self, value: &str) -> bool {
         self.options.iter().any(|choice| choice.value == value)
+    }
+
+    /// Clone with `current_value` overridden for optimistic display.
+    ///
+    /// Only applies when the agent actually offers `value`; an unknown value
+    /// is ignored so a stale pending selection cannot invent a model.
+    pub fn with_current_value_override(mut self, value: &str) -> Self {
+        if self.has_choice(value) {
+            self.current_value = Value::String(value.to_string());
+        }
+        self
     }
 
     fn is_category(&self, category: &str) -> bool {
@@ -435,7 +467,7 @@ impl AcpConfigOption {
     ///
     /// Excludes effort/thought level (owned by the reasoning picker) and
     /// agent persona (owned by the agent's internal routing).
-    pub fn is_user_configurable(&self) -> bool {
+    pub(crate) fn is_user_configurable(&self) -> bool {
         self.category.as_deref() != Some(ACP_CONFIG_CATEGORY_EFFORT)
             && self.id != ACP_CONFIG_ID_AGENT
     }
@@ -449,10 +481,33 @@ pub fn config_option_for<'a>(
     options.iter().find(|option| option.is_category(category))
 }
 
+/// Applies pending `config_id -> value` selections to cached options for
+/// optimistic display before a session exists to hold them.
+///
+/// Unknown config ids or values the agent does not offer are ignored.
+pub fn apply_pending_config_values(
+    options: Vec<AcpConfigOption>,
+    pending: &std::collections::HashMap<String, String>,
+) -> Vec<AcpConfigOption> {
+    if pending.is_empty() {
+        return options;
+    }
+    options
+        .into_iter()
+        .map(|option| {
+            if let Some(value) = pending.get(&option.id) {
+                option.with_current_value_override(value)
+            } else {
+                option
+            }
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpNewSessionResult {
-    pub session_id: String,
+    session_id: String,
     #[serde(default)]
     modes: Option<AcpSessionModeState>,
     #[serde(default)]
@@ -501,12 +556,12 @@ pub enum AcpContentBlock {
 }
 
 impl AcpContentBlock {
-    pub fn text(text: impl Into<String>) -> Self {
+    pub(crate) fn text(text: impl Into<String>) -> Self {
         Self::Text { text: text.into() }
     }
 
     /// Plain-text projection used for transcript rendering.
-    pub fn as_text(&self) -> Option<&str> {
+    pub(crate) fn as_text(&self) -> Option<&str> {
         match self {
             Self::Text { text } => Some(text),
             _ => None,
@@ -664,8 +719,8 @@ impl AcpSessionUpdate {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AcpSessionNotification {
-    pub session_id: String,
-    pub update: AcpSessionUpdate,
+    pub(crate) session_id: String,
+    pub(crate) update: AcpSessionUpdate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -709,7 +764,7 @@ pub struct AcpPermissionOption {
 }
 
 impl AcpPermissionOption {
-    pub fn option_id(&self) -> &str {
+    pub(crate) fn option_id(&self) -> &str {
         &self.option_id
     }
 
@@ -738,7 +793,7 @@ impl AcpPermissionRequest {
         &self.session_id
     }
 
-    pub fn tool_call(&self) -> Option<&AcpToolCall> {
+    pub(crate) fn tool_call(&self) -> Option<&AcpToolCall> {
         self.tool_call.as_ref()
     }
 
@@ -750,12 +805,12 @@ impl AcpPermissionRequest {
     ///
     /// Agents choose their own option ids, so a decision can only ever be
     /// expressed as one of the ids they actually sent.
-    pub fn option_for(&self, kind: AcpPermissionOptionKind) -> Option<&AcpPermissionOption> {
+    pub(crate) fn option_for(&self, kind: AcpPermissionOptionKind) -> Option<&AcpPermissionOption> {
         self.options.iter().find(|option| option.kind == kind)
     }
 
     /// Whether the agent offered a durable "always" grant for this request.
-    pub fn offers_allow_always(&self) -> bool {
+    pub(crate) fn offers_allow_always(&self) -> bool {
         self.option_for(AcpPermissionOptionKind::AllowAlways)
             .is_some()
     }
@@ -881,7 +936,7 @@ pub struct AcpWorkspaceClient {
 }
 
 impl AcpWorkspaceClient {
-    pub fn new(workspace_root: PathBuf) -> Self {
+    pub(crate) fn new(workspace_root: PathBuf) -> Self {
         Self {
             workspace_root,
             permission_policy: AcpPermissionPolicy::default(),
@@ -900,12 +955,12 @@ impl AcpWorkspaceClient {
     /// Takes precedence over [`Self::with_permission_policy`]: a responder is
     /// a real consent path, and the policy only exists for when there isn't
     /// one.
-    pub fn with_permission_responder(mut self, responder: AcpPermissionResponder) -> Self {
+    pub(crate) fn with_permission_responder(mut self, responder: AcpPermissionResponder) -> Self {
         self.permission_responder = Some(responder);
         self
     }
 
-    pub fn with_update_sender(
+    pub(crate) fn with_update_sender(
         mut self,
         sender: mpsc::UnboundedSender<AcpSessionNotification>,
     ) -> Self {
@@ -1066,7 +1121,7 @@ impl AcpConnection {
 
     /// Builds a connection over arbitrary byte streams. Used by [`Self::spawn`]
     /// and by tests that pair the client with an in-process stub agent.
-    pub fn from_streams<W, R>(
+    fn from_streams<W, R>(
         writer: W,
         reader: R,
         handler: Arc<dyn AcpClientHandler>,
@@ -1161,7 +1216,7 @@ impl AcpConnection {
         .await
     }
 
-    pub async fn initialize(&self) -> Result<AcpInitializeResult, String> {
+    async fn initialize(&self) -> Result<AcpInitializeResult, String> {
         let params = json!({
             "protocolVersion": ACP_PROTOCOL_VERSION,
             "clientCapabilities": {
@@ -1197,7 +1252,7 @@ impl AcpConnection {
         .map(|_| ())
     }
 
-    pub async fn new_session(
+    async fn new_session(
         &self,
         cwd: &Path,
         mcp_servers: Vec<Value>,
@@ -1214,7 +1269,7 @@ impl AcpConnection {
 
     /// Runs one prompt turn. Resolves when the agent reports a stop reason;
     /// use [`Self::cancel`] to interrupt it.
-    pub async fn prompt(
+    async fn prompt(
         &self,
         session_id: &str,
         blocks: Vec<AcpContentBlock>,
@@ -1230,7 +1285,7 @@ impl AcpConnection {
         Ok(AcpStopReason::from_value(stop_reason))
     }
 
-    pub async fn cancel(&self, session_id: &str) -> Result<(), String> {
+    async fn cancel(&self, session_id: &str) -> Result<(), String> {
         self.notify("session/cancel", json!({ "sessionId": session_id }))
             .await
     }
@@ -1241,7 +1296,7 @@ impl AcpConnection {
     /// The reply is authoritative rather than assumed: changing one option can
     /// change another, as picking a different model changes which effort
     /// levels that model offers.
-    pub async fn set_config_option(
+    async fn set_config_option(
         &self,
         session_id: &str,
         config_id: &str,
@@ -1270,7 +1325,7 @@ impl AcpConnection {
     }
 
     /// Terminates the agent process and stops the reader task.
-    pub async fn shutdown(&self) {
+    async fn shutdown(&self) {
         if let Some(child) = &self.child {
             let _ = child.lock().await.kill().await;
         }
@@ -1483,11 +1538,11 @@ impl AcpSession {
         })
     }
 
-    pub fn session_id(&self) -> &str {
+    pub(crate) fn session_id(&self) -> &str {
         &self.session_id
     }
 
-    pub fn agent(&self) -> &AcpInitializeResult {
+    pub(crate) fn agent(&self) -> &AcpInitializeResult {
         &self.agent
     }
 
@@ -1500,14 +1555,14 @@ impl AcpSession {
     }
 
     /// Inspects the agent's session settings without cloning the vector.
-    pub fn with_config_options<R>(&self, f: impl FnOnce(&[AcpConfigOption]) -> R) -> R {
+    fn with_config_options<R>(&self, f: impl FnOnce(&[AcpConfigOption]) -> R) -> R {
         let guard = self.config_options.lock();
         let options = guard.as_deref().map(Vec::as_slice).unwrap_or(&[]);
         f(options)
     }
 
     /// Snapshot of the agent's session settings.
-    pub fn config_options(&self) -> Vec<AcpConfigOption> {
+    pub(crate) fn config_options(&self) -> Vec<AcpConfigOption> {
         self.with_config_options(|options| options.to_vec())
     }
 
@@ -1524,7 +1579,11 @@ impl AcpSession {
     /// A value the agent does not offer is refused here rather than sent: an
     /// agent is free to reject it however it likes, including by failing the
     /// call, and a rejected setting must not look applied.
-    pub async fn set_config_option(&self, category: &str, value: &str) -> Result<(), String> {
+    pub(crate) async fn set_config_option(
+        &self,
+        category: &str,
+        value: &str,
+    ) -> Result<(), String> {
         let config_id = {
             let options = self.config_options();
             let Some(option) = config_option_for(&options, category) else {
@@ -1544,7 +1603,7 @@ impl AcpSession {
     /// A value the agent does not offer is refused here rather than sent: an
     /// agent is free to reject it however it likes, including by failing the
     /// call, and a rejected setting must not look applied.
-    pub async fn set_config_option_by_id(
+    pub(crate) async fn set_config_option_by_id(
         &self,
         config_id: &str,
         value: &str,
@@ -1584,15 +1643,18 @@ impl AcpSession {
             .await
     }
 
-    pub async fn prompt(&self, blocks: Vec<AcpContentBlock>) -> Result<AcpStopReason, String> {
+    pub(crate) async fn prompt(
+        &self,
+        blocks: Vec<AcpContentBlock>,
+    ) -> Result<AcpStopReason, String> {
         self.connection.prompt(&self.session_id, blocks).await
     }
 
-    pub async fn cancel(&self) -> Result<(), String> {
+    pub(crate) async fn cancel(&self) -> Result<(), String> {
         self.connection.cancel(&self.session_id).await
     }
 
-    pub async fn shutdown(&self) {
+    pub(crate) async fn shutdown(&self) {
         self.connection.shutdown().await;
     }
 }
@@ -1630,6 +1692,18 @@ impl AcpAgentStatus {
 pub struct AcpAgentRecord {
     pub config: AcpAgentConfig,
     pub status: AcpAgentStatus,
+}
+
+/// Settings one agent offers, read without opening a user-visible
+/// conversation. A failed agent carries the error and no options, so the
+/// picker can keep serving a previous successful load while settings shows
+/// why the fresh attempt failed.
+#[derive(Debug, Clone)]
+pub struct AcpPreloadedModels {
+    pub agent_id: String,
+    pub agent_name: String,
+    pub options: Vec<AcpConfigOption>,
+    pub error: Option<String>,
 }
 
 /// Discovers configured ACP agents and probes them for availability.
@@ -1702,6 +1776,50 @@ impl AcpManager {
         self.agents.lock().await.clone()
     }
 
+    /// Opens one throwaway session per enabled agent and snapshots the
+    /// settings it offers (chiefly its models), then shuts the session down.
+    ///
+    /// Like [`Self::discover_and_connect`] this runs with [`AcpProbeClient`],
+    /// so an agent that issues filesystem or permission requests during
+    /// `initialize`/`session/new` is refused rather than handed access to the
+    /// current directory. The result seeds a shared cache: the picker can
+    /// offer a cached agent's models before any session's engine connects,
+    /// and each session's `AcpEngine` still opens its own conversation when
+    /// the user picks the agent or sends the first turn.
+    pub async fn preload_models(&self) -> Vec<AcpPreloadedModels> {
+        let mut preloaded = Vec::new();
+        for config in self.configs().into_iter().filter(|config| config.enabled) {
+            let handler: Arc<dyn AcpClientHandler> = Arc::new(AcpProbeClient);
+            // The session is discarded after the snapshot; root it at the
+            // project when there is one so project-scoped agents resolve the
+            // same working directory a real turn would use.
+            let cwd = self
+                .project_root
+                .clone()
+                .or_else(|| self.global_dir.clone())
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+            match AcpSession::start(&config, &cwd, handler).await {
+                Ok(session) => {
+                    let entry = AcpPreloadedModels {
+                        agent_id: config.id.clone(),
+                        agent_name: session.agent().agent_display_name(),
+                        options: session.config_options(),
+                        error: None,
+                    };
+                    session.shutdown().await;
+                    preloaded.push(entry);
+                }
+                Err(error) => preloaded.push(AcpPreloadedModels {
+                    agent_id: config.id.clone(),
+                    agent_name: config.name.clone(),
+                    options: Vec::new(),
+                    error: Some(error),
+                }),
+            }
+        }
+        preloaded
+    }
+
     /// Completes a handshake and terminates the process.
     ///
     /// The probe runs with [`AcpProbeClient`], so an agent that issues
@@ -1754,7 +1872,7 @@ impl AcpManager {
     }
 
     /// Opens a working session against the configured agent `id`.
-    pub async fn start_session(
+    pub(crate) async fn start_session(
         &self,
         id: &str,
         cwd: &Path,
@@ -1775,6 +1893,58 @@ impl AcpManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_labels_keep_explicit_names_and_resolve_generic_names_from_descriptions() {
+        for (category, name, description, expected) in [
+            (
+                "model",
+                "GPT-6-Astra",
+                Some("Our most capable model for complex, demanding work."),
+                "GPT-6-Astra",
+            ),
+            (
+                "model",
+                "Default (recommended)",
+                Some("Opus 4.8 with 1M context · Best for everyday work"),
+                "Opus 4.8 with 1M context",
+            ),
+            (
+                "model",
+                "Recommended",
+                Some("Claude Sonnet 4.6"),
+                "Claude Sonnet 4.6",
+            ),
+            ("model", "Default", None, "Default"),
+            (
+                "model",
+                "GPT-6-Astra (recommended)",
+                Some("Most capable"),
+                "GPT-6-Astra (recommended)",
+            ),
+            (
+                "mode",
+                "Default",
+                Some("Standard behavior, prompts for dangerous operations"),
+                "Standard behavior, prompts for dangerous operations",
+            ),
+        ] {
+            let mut option: AcpConfigOption = serde_json::from_value(json!({
+                "id": "agent-defined-id",
+                "name": "Setting",
+                "category": category,
+                "currentValue": "configured-value",
+                "options": [{"value": "configured-value", "name": name, "description": description}],
+            })).unwrap();
+            assert_eq!(option.current_detail_label().as_deref(), Some(expected));
+            assert_eq!(option.current_label().as_deref(), Some(name));
+            option.options.clear();
+            assert_eq!(
+                option.current_detail_label().as_deref(),
+                Some("configured-value")
+            );
+        }
+    }
 
     #[test]
     fn agent_config_round_trips_through_settings_file() {
@@ -1803,6 +1973,35 @@ mod tests {
         assert!(file.agents[0].enabled);
         assert_eq!(file.agents[0].scope, AcpScope::Global);
         assert!(file.agents[0].args.is_empty());
+    }
+
+    #[test]
+    fn pending_values_override_cached_current_only_for_offered_choices() {
+        let option: AcpConfigOption = serde_json::from_value(json!({
+            "id": "model",
+            "name": "Model",
+            "category": "model",
+            "currentValue": "deepseek",
+            "options": [
+                {"value": "deepseek", "name": "openrouter/DeepSeek V4.1 Flash"},
+                {"value": "muse", "name": "opencode/Muse Spark 1.3 Free"},
+            ],
+        }))
+        .unwrap();
+        let mut pending = HashMap::new();
+        pending.insert("model".to_string(), "muse".to_string());
+        let applied = apply_pending_config_values(vec![option.clone()], &pending);
+        assert_eq!(applied[0].current_value(), Some("muse"));
+        assert_eq!(
+            applied[0].current_label().as_deref(),
+            Some("opencode/Muse Spark 1.3 Free")
+        );
+
+        // Unknown values never invent a model.
+        let mut bad = HashMap::new();
+        bad.insert("model".to_string(), "unknown".to_string());
+        let kept = apply_pending_config_values(vec![option], &bad);
+        assert_eq!(kept[0].current_value(), Some("deepseek"));
     }
 
     #[test]

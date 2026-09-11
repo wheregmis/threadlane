@@ -70,7 +70,12 @@ struct PermissionManagerInner {
 #[derive(Default, Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct PersistentPermissions {
     #[serde(default)]
-    pub network_hosts: HashSet<String>,
+    network_hosts: HashSet<String>,
+    /// Project-scoped computer-use grant: screenshots and input no longer
+    /// re-prompt once the user allows always. Unlike network hosts this is a
+    /// single flag, not a per-target list, so it stays obvious in the file.
+    #[serde(default)]
+    computer_allowed: bool,
 }
 
 impl PermissionManager {
@@ -86,7 +91,7 @@ impl PermissionManager {
         Self::with_session_prefix(project_root, session_prefix, event_tx)
     }
 
-    pub(crate) fn with_session_prefix(
+    fn with_session_prefix(
         project_root: PathBuf,
         session_prefix: impl Into<String>,
         event_tx: tokio::sync::broadcast::Sender<AgentEvent>,
@@ -270,6 +275,138 @@ impl PermissionManager {
         permissions.network_hosts.insert(host.to_owned());
         save_permissions(&self.handle.inner.project_root, &permissions)
     }
+
+    /// Ask the user to approve one computer-use action (screenshot or input).
+    /// A remembered project grant skips the prompt; otherwise every action
+    /// re-prompts with Once/Always scopes. Unattended sessions deny.
+    pub(crate) async fn request_computer(&self, title: &str, detail: &str) -> PermissionDecision {
+        let id = self.generate_request_id();
+        let interactive = self.handle.inner.interactive.load(Ordering::SeqCst);
+        let persisted = self.computer_is_approved();
+        let source = if persisted {
+            threadlane_runtime::harness::PermissionTraceSource::PersistedGrant
+        } else if interactive {
+            threadlane_runtime::harness::PermissionTraceSource::User
+        } else {
+            threadlane_runtime::harness::PermissionTraceSource::UnattendedDefault
+        };
+        let requested = PermissionTraceEvent::Requested {
+            request_id: id.clone(),
+            capability: "computer".into(),
+            scopes: vec![
+                threadlane_runtime::harness::PermissionTraceScope::Once,
+                threadlane_runtime::harness::PermissionTraceScope::Project,
+            ],
+            detail_sha256: format!("{:x}", Sha256::digest(detail.as_bytes())),
+            source: source.clone(),
+        };
+        if self.record_trace(requested).await.is_err() {
+            return PermissionDecision::Deny;
+        }
+        if persisted {
+            let _ = self
+                .record_trace(PermissionTraceEvent::Resolved {
+                    request_id: id,
+                    decision: threadlane_runtime::harness::PermissionTraceDecision::Allowed,
+                    scope: Some(threadlane_runtime::harness::PermissionTraceScope::Project),
+                    source,
+                    remembered: true,
+                })
+                .await;
+            return PermissionDecision::AllowOnce;
+        }
+        if !interactive {
+            let _ = self
+                .record_trace(PermissionTraceEvent::Resolved {
+                    request_id: id,
+                    decision: threadlane_runtime::harness::PermissionTraceDecision::Denied,
+                    scope: None,
+                    source: threadlane_runtime::harness::PermissionTraceSource::UnattendedDefault,
+                    remembered: false,
+                })
+                .await;
+            return PermissionDecision::Deny;
+        }
+        let (tx, rx) = oneshot::channel();
+        if let Ok(mut pending) = self.handle.inner.pending.lock() {
+            pending.insert(id.clone(), tx);
+        } else {
+            return PermissionDecision::Deny;
+        }
+        let request = PermissionRequest {
+            id: id.clone(),
+            capability: "computer".into(),
+            title: title.to_owned(),
+            detail: detail.to_owned(),
+            scopes: vec![PermissionScope::Once, PermissionScope::Always],
+        };
+        if self
+            .event_tx
+            .send(AgentEvent::PermissionRequested { request })
+            .is_err()
+        {
+            self.handle.remove_pending(&id);
+            return PermissionDecision::Deny;
+        }
+        let guard = PendingRequestGuard {
+            handle: self.handle.clone(),
+            request_id: id.clone(),
+        };
+        let decision = rx.await.unwrap_or(PermissionDecision::Deny);
+        drop(guard);
+        let mut effective = decision;
+        let mut remembered = false;
+        if decision == PermissionDecision::AllowAlways {
+            if self.persist_computer_grant().is_err() {
+                effective = PermissionDecision::Deny;
+            } else {
+                remembered = true;
+            }
+        }
+        let (trace_decision, scope) = match effective {
+            PermissionDecision::AllowOnce => (
+                threadlane_runtime::harness::PermissionTraceDecision::Allowed,
+                Some(threadlane_runtime::harness::PermissionTraceScope::Once),
+            ),
+            PermissionDecision::AllowAlways => (
+                threadlane_runtime::harness::PermissionTraceDecision::Allowed,
+                Some(threadlane_runtime::harness::PermissionTraceScope::Project),
+            ),
+            PermissionDecision::Deny => (
+                threadlane_runtime::harness::PermissionTraceDecision::Denied,
+                None,
+            ),
+        };
+        let _ = self
+            .record_trace(PermissionTraceEvent::Resolved {
+                request_id: id,
+                decision: trace_decision,
+                scope,
+                source: threadlane_runtime::harness::PermissionTraceSource::User,
+                remembered,
+            })
+            .await;
+        effective
+    }
+
+    pub(crate) fn computer_is_approved(&self) -> bool {
+        self.handle
+            .inner
+            .persistent
+            .lock()
+            .is_ok_and(|permissions| permissions.computer_allowed)
+    }
+
+    fn persist_computer_grant(&self) -> Result<(), String> {
+        let mut permissions = self
+            .handle
+            .inner
+            .persistent
+            .lock()
+            .map_err(|_| "permission settings are unavailable".to_string())?;
+        permissions.computer_allowed = true;
+        save_permissions(&self.handle.inner.project_root, &permissions)
+    }
 }
 
 struct PendingRequestGuard {
@@ -290,7 +427,7 @@ impl PermissionHandle {
         }
     }
 
-    pub(crate) fn generate_request_id(&self) -> String {
+    fn generate_request_id(&self) -> String {
         format!(
             "permission-{}-{}",
             self.inner.session_prefix,
@@ -298,7 +435,7 @@ impl PermissionHandle {
         )
     }
 
-    pub(crate) async fn record_trace(&self, event: PermissionTraceEvent) -> Result<(), String> {
+    async fn record_trace(&self, event: PermissionTraceEvent) -> Result<(), String> {
         let recorder = self
             .inner
             .trace_recorder
@@ -311,7 +448,7 @@ impl PermissionHandle {
         }
     }
 
-    pub fn is_interactive(&self) -> bool {
+    fn is_interactive(&self) -> bool {
         self.inner.interactive.load(Ordering::SeqCst)
     }
 
@@ -319,19 +456,25 @@ impl PermissionHandle {
     /// dispatcher, such as an external ACP agent's `session/request_permission`.
     ///
     /// Unlike the capability requests above this grants nothing on its own and
-    /// persists nothing: it renders a prompt, waits for the answer, and returns
+    /// persists no grants: it renders a prompt, waits for the answer, and returns
     /// it. Without a UI attached there is no informed consent to give, so the
     /// answer is [`PermissionDecision::Deny`] rather than a silent allow.
-    pub async fn request_external(
+    /// Cancellation returns `None` and records a cancelled permission decision.
+    pub(crate) async fn request_external(
         &self,
         event_tx: &tokio::sync::broadcast::Sender<AgentEvent>,
         capability: &str,
         title: String,
         detail: String,
         allow_always: bool,
-    ) -> PermissionDecision {
+        cancelled: impl Future<Output = ()>,
+    ) -> Option<PermissionDecision> {
         let id = self.generate_request_id();
         let interactive = self.is_interactive();
+        let recorder = match self.inner.trace_recorder.lock() {
+            Ok(recorder) => recorder.clone(),
+            Err(_) => return Some(PermissionDecision::Deny),
+        };
         let mut scopes = vec![PermissionScope::Once];
         if allow_always {
             scopes.push(PermissionScope::Always);
@@ -356,69 +499,73 @@ impl PermissionHandle {
                 threadlane_runtime::harness::PermissionTraceSource::UnattendedDefault
             },
         };
-        if self.record_trace(requested).await.is_err() {
-            return PermissionDecision::Deny;
+        if let Some(recorder) = &recorder {
+            if recorder(requested).await.is_err() {
+                return Some(PermissionDecision::Deny);
+            }
         }
-        if !interactive {
-            let _ = self
-                .record_trace(PermissionTraceEvent::Resolved {
-                    request_id: id,
-                    decision: threadlane_runtime::harness::PermissionTraceDecision::Denied,
-                    scope: None,
-                    source: threadlane_runtime::harness::PermissionTraceSource::UnattendedDefault,
-                    remembered: false,
-                })
-                .await;
-            return PermissionDecision::Deny;
-        }
-        let (tx, rx) = oneshot::channel();
-        if let Ok(mut pending) = self.inner.pending.lock() {
-            pending.insert(id.clone(), tx);
-        } else {
-            return PermissionDecision::Deny;
-        }
-        let request = PermissionRequest {
-            id: id.clone(),
-            capability: capability.to_string(),
-            title,
-            detail,
-            scopes,
+        let decision = tokio::select! {
+            biased;
+            _ = cancelled => None,
+            decision = async {
+                if !interactive {
+                    return PermissionDecision::Deny;
+                }
+                let (tx, rx) = oneshot::channel();
+                if let Ok(mut pending) = self.inner.pending.lock() {
+                    pending.insert(id.clone(), tx);
+                } else {
+                    return PermissionDecision::Deny;
+                }
+                let guard = PendingRequestGuard {
+                    handle: self.clone(),
+                    request_id: id.clone(),
+                };
+                let request = PermissionRequest {
+                    id: id.clone(),
+                    capability: capability.to_string(),
+                    title,
+                    detail,
+                    scopes,
+                };
+                if event_tx.send(AgentEvent::PermissionRequested { request }).is_err() {
+                    return PermissionDecision::Deny;
+                }
+                let decision = rx.await.unwrap_or(PermissionDecision::Deny);
+                drop(guard);
+                decision
+            } => Some(decision),
         };
-        if event_tx
-            .send(AgentEvent::PermissionRequested { request })
-            .is_err()
-        {
-            self.remove_pending(&id);
-            return PermissionDecision::Deny;
-        }
-        let guard = PendingRequestGuard {
-            handle: self.clone(),
-            request_id: id.clone(),
-        };
-        let decision = rx.await.unwrap_or(PermissionDecision::Deny);
-        drop(guard);
-        let _ = self
-            .record_trace(PermissionTraceEvent::Resolved {
+        if let Some(recorder) = recorder {
+            let _ = recorder(PermissionTraceEvent::Resolved {
                 request_id: id,
                 decision: match decision {
-                    PermissionDecision::Deny => {
+                    None => threadlane_runtime::harness::PermissionTraceDecision::Cancelled,
+                    Some(PermissionDecision::Deny) => {
                         threadlane_runtime::harness::PermissionTraceDecision::Denied
                     }
                     _ => threadlane_runtime::harness::PermissionTraceDecision::Allowed,
                 },
                 scope: match decision {
-                    PermissionDecision::AllowAlways => {
+                    Some(PermissionDecision::AllowAlways) => {
                         Some(threadlane_runtime::harness::PermissionTraceScope::Project)
                     }
-                    PermissionDecision::AllowOnce => {
+                    Some(PermissionDecision::AllowOnce) => {
                         Some(threadlane_runtime::harness::PermissionTraceScope::Once)
                     }
-                    PermissionDecision::Deny => None,
+                    _ => None,
                 },
-                source: threadlane_runtime::harness::PermissionTraceSource::User,
+                source: if decision.is_none() {
+                    threadlane_runtime::harness::PermissionTraceSource::System
+                } else if interactive {
+                    threadlane_runtime::harness::PermissionTraceSource::User
+                } else {
+                    threadlane_runtime::harness::PermissionTraceSource::UnattendedDefault
+                },
                 remembered: false,
             })
             .await;
+        }
         decision
     }
 
@@ -593,6 +740,54 @@ mod tests {
         let (event_tx, _) = tokio::sync::broadcast::channel(1);
         let restored = PermissionManager::new(dir.path().to_path_buf(), event_tx);
         assert!(restored.network_host_is_approved("example.com"));
+    }
+
+    #[tokio::test]
+    async fn computer_unattended_denies_without_prompt() {
+        let dir = tempdir().unwrap();
+        let (event_tx, mut events) = tokio::sync::broadcast::channel(4);
+        let manager = PermissionManager::new(dir.path().to_path_buf(), event_tx);
+        assert_eq!(
+            manager.request_computer("Click at (1, 1)", "click").await,
+            PermissionDecision::Deny
+        );
+        assert!(events.try_recv().is_err(), "unattended must not prompt");
+        assert!(!manager.computer_is_approved());
+    }
+
+    #[tokio::test]
+    async fn computer_allow_always_persists_project_grant() {
+        let dir = tempdir().unwrap();
+        let (event_tx, mut events) = tokio::sync::broadcast::channel(4);
+        let manager = Arc::new(PermissionManager::new(dir.path().to_path_buf(), event_tx));
+        let handle = manager.handle();
+        handle.set_interactive(true);
+        let request_manager = manager.clone();
+        let task = tokio::spawn(async move {
+            request_manager
+                .request_computer("Click at (1, 1)", "click")
+                .await
+        });
+        let AgentEvent::PermissionRequested { request } = events.recv().await.unwrap() else {
+            panic!("expected permission request");
+        };
+        assert_eq!(request.capability, "computer");
+        assert!(handle.resolve(&request.id, PermissionDecision::AllowAlways));
+        assert_eq!(task.await.unwrap(), PermissionDecision::AllowAlways);
+        assert!(manager.computer_is_approved());
+
+        // A fresh manager on the same project skips the prompt entirely.
+        let (event_tx, mut events) = tokio::sync::broadcast::channel(4);
+        let restored = PermissionManager::new(dir.path().to_path_buf(), event_tx);
+        assert!(restored.computer_is_approved());
+        assert_eq!(
+            restored.request_computer("Type", "type").await,
+            PermissionDecision::AllowOnce
+        );
+        assert!(
+            events.try_recv().is_err(),
+            "remembered grant must not prompt"
+        );
     }
 
     #[tokio::test]

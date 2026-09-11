@@ -20,6 +20,32 @@ use threadlane_session::{
 };
 use threadlane_updater::UpdateStatus;
 
+/// Fixed palette for the Appearance page's miniature theme previews. These
+/// depict the dark/light themes as static illustrations (audited exception to
+/// the token rule: the preview must show its own theme, not the active one),
+/// so they are defined once here instead of repeated at each swatch.
+fn preview_dark_surface() -> Hsla {
+    hsla(0.0, 0.0, 0.07, 1.0)
+}
+fn preview_dark_well() -> Hsla {
+    hsla(0.0, 0.0, 0.16, 1.0)
+}
+fn preview_light_surface() -> Hsla {
+    hsla(0.0, 0.0, 0.98, 1.0)
+}
+fn preview_light_well() -> Hsla {
+    hsla(0.0, 0.0, 0.88, 1.0)
+}
+fn preview_dot_close() -> Hsla {
+    hsla(0.0, 0.7, 0.6, 1.0)
+}
+fn preview_dot_minimize() -> Hsla {
+    hsla(0.12, 0.7, 0.6, 1.0)
+}
+fn preview_dot_zoom() -> Hsla {
+    hsla(0.35, 0.7, 0.6, 1.0)
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum SettingsPage {
     #[default]
@@ -178,6 +204,24 @@ impl SettingsView {
                                 state.reconcile_selected_model();
                                 cx.notify();
                             });
+                            // OAuth/API credentials changed (e.g. Antigravity
+                            // login): re-pull the live inventories whose
+                            // contents depend on them. TTL-guarded, so unrelated
+                            // connects are cheap.
+                            let dynamic_model = auth_model.clone();
+                            cx.spawn(async move |_this, cx| {
+                                crate::model_catalog::refresh_antigravity_models_and_update(
+                                    dynamic_model.clone(),
+                                    cx,
+                                )
+                                .await;
+                                crate::model_catalog::refresh_openai_models_and_update(
+                                    dynamic_model,
+                                    cx,
+                                )
+                                .await;
+                            })
+                            .detach();
                         }
                     }
                     if this.page == SettingsPage::Providers {
@@ -201,9 +245,20 @@ impl SettingsView {
             move |_this, input, event: &InputEvent, _window, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
                     let key = input.read(cx).value().to_string();
-                    openai_model.update(cx, |state, _cx| {
+                    openai_model.update(cx, |state, cx| {
                         controller::dispatch(state, AppAction::SaveOpenAiKey(key));
+                        cx.notify();
                     });
+                    // The key just changed, so re-pull the live OpenAI list.
+                    let openai_refresh = openai_model.clone();
+                    cx.spawn(async move |_this, cx| {
+                        crate::model_catalog::refresh_openai_models_and_update(
+                            openai_refresh,
+                            cx,
+                        )
+                        .await;
+                    })
+                    .detach();
                 }
             },
         );
@@ -214,9 +269,20 @@ impl SettingsView {
             move |_this, input, event: &InputEvent, _window, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
                     let key = input.read(cx).value().to_string();
-                    opencode_model.update(cx, |state, _cx| {
+                    opencode_model.update(cx, |state, cx| {
                         controller::dispatch(state, AppAction::SaveOpenCodeKey(key));
+                        cx.notify();
                     });
+                    // The key just changed, so re-pull the live Zen model list.
+                    let discovery_model = opencode_model.clone();
+                    cx.spawn(async move |_this, cx| {
+                        crate::model_catalog::refresh_discovered_models_and_update(
+                            discovery_model,
+                            cx,
+                        )
+                        .await;
+                    })
+                    .detach();
                 }
             },
         );
@@ -302,6 +368,16 @@ impl SettingsView {
         if let Err(error) = settings::probe_acp_agents(project, self.settings_tx.clone()) {
             self.capability_status = Some(error);
         }
+        // Keep the shared model cache warm while the status probe runs: the
+        // picker in any session serves these without spawning its own agent.
+        // The cache TTL makes repeat visits cheap.
+        let cache_model = self.model.clone();
+        let cache_project = self.active_project(cx);
+        cx.spawn(async move |_view, cx| {
+            crate::model_catalog::refresh_acp_models_and_update(cache_model, cx, cache_project)
+                .await;
+        })
+        .detach();
     }
 
     /// Renders the muted "no items" placeholder shared by the extension,
@@ -309,6 +385,12 @@ impl SettingsView {
     fn empty_state(message: &str, colors: gpui_component::ThemeColor) -> AnyElement {
         div()
             .p_6()
+            .mx_6()
+            .rounded_lg()
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.muted.opacity(0.3))
+            .text_center()
             .text_sm()
             .text_color(colors.muted_foreground)
             .child(message.to_string())
@@ -328,7 +410,7 @@ impl SettingsView {
             .border_r_1()
             .border_color(theme.border)
             .bg(theme.title_bar)
-            .child(div().h(px(48.0)).flex_none())
+            .child(div().h(crate::theme::WINDOW_CONTROLS_CLEARANCE).flex_none())
             .child(
                 div()
                     .px_3()
@@ -539,8 +621,9 @@ impl SettingsView {
                         .justify_start()
                         .text_color(theme.muted_foreground)
                         .on_click(move |_event, _window, cx| {
-                            model.update(cx, |state, _cx| {
+                            model.update(cx, |state, cx| {
                                 controller::dispatch(state, AppAction::CloseSettings);
+                                cx.notify();
                             });
                         }),
                 ),
@@ -554,51 +637,74 @@ impl SettingsView {
             return Self::empty_state("Attach a project to configure subagents.", theme);
         };
         let preferences = crate::services::subagent_settings::load(&project);
+        let available = crate::model_catalog::available_models_for_project(Some(&project));
         let selected_model = preferences.model.clone();
         let selected_reasoning = preferences.reasoning_effort;
         let model_label = selected_model
             .as_deref()
-            .and_then(crate::model_catalog::label_for)
+            .map(|id| crate::model_catalog::selection_label(id, &available))
             .unwrap_or_else(|| "Same as parent".into());
         let reasoning_label = selected_reasoning
             .map(|effort| effort.label())
             .unwrap_or("Same as parent");
-        let available = crate::model_catalog::available_models_for_project(Some(&project));
         let available_for_subagent = available.clone();
-        let available_for_fast = available;
+        let available_for_fast = available.clone();
         let model_entity = self.model.clone();
         let project_for_models = project.clone();
+        let reasoning_for_model = selected_model.clone().unwrap_or_default();
+        // Reasoning controls hide for models without thinking (ACP agents,
+        // off-only registry entries) instead of offering dead options. An
+        // unset model inherits the parent, so the control stays visible.
+        let show_reasoning = crate::model_catalog::supports_reasoning(
+            &reasoning_for_model,
+            Some(&project),
+        );
         let model_picker = Button::new("subagent-model-picker")
             .label(model_label)
             .dropdown_caret(true)
             .dropdown_menu(move |menu, _, _| {
+                let menu = menu.check_side(gpui_component::Side::Right);
                 let model_entity_for_parent = model_entity.clone();
                 let project_for_parent = project_for_models.clone();
+                let parent_label = if selected_model.is_none() {
+                    "Same as parent · Current"
+                } else {
+                    "Same as parent"
+                };
                 available_for_subagent.iter().cloned().fold(
-                    menu.item(
-                        PopupMenuItem::new("Same as parent").on_click(move |_, _, cx| {
-                            let mut settings =
-                                crate::services::subagent_settings::load(&project_for_parent);
-                            settings.model = None;
-                            if crate::services::subagent_settings::save(
-                                &project_for_parent,
-                                &settings,
-                            )
-                            .is_ok()
-                            {
-                                model_entity_for_parent.update(cx, |state, cx| {
-                                    state.invalidate_capability_runtimes();
-                                    cx.notify();
-                                });
-                            }
-                        }),
+                    menu.scrollable(true).item(
+                        PopupMenuItem::new(parent_label)
+                            .checked(selected_model.is_none())
+                            .on_click(move |_, _, cx| {
+                                let mut settings =
+                                    crate::services::subagent_settings::load(&project_for_parent);
+                                settings.model = None;
+                                if crate::services::subagent_settings::save(
+                                    &project_for_parent,
+                                    &settings,
+                                )
+                                .is_ok()
+                                {
+                                    model_entity_for_parent.update(cx, |state, cx| {
+                                        state.invalidate_capability_runtimes();
+                                        cx.notify();
+                                    });
+                                }
+                            }),
                     ),
                     |menu, option| {
                         let model_entity = model_entity.clone();
                         let project = project_for_models.clone();
+                        let is_current = selected_model.as_deref() == Some(option.id.as_str());
+                        let label = if is_current {
+                            format!("{} · Current", option.label)
+                        } else {
+                            option.label
+                        };
                         menu.item(
-                            PopupMenuItem::new(option.label)
+                            PopupMenuItem::new(label)
                                 .icon(Icon::default().path(option.provider.icon_path()))
+                                .checked(is_current)
                                 .on_click(move |_, _, cx| {
                                     let mut settings =
                                         crate::services::subagent_settings::load(&project);
@@ -618,21 +724,23 @@ impl SettingsView {
             });
         let reasoning_entity = self.model.clone();
         let project_for_reasoning = project.clone();
+        let reasoning_for_model_cloned = reasoning_for_model.clone();
         let reasoning_picker = Button::new("subagent-reasoning-picker")
             .label(reasoning_label)
             .dropdown_caret(true)
             .dropdown_menu(move |menu, _, _| {
                 let entity = reasoning_entity.clone();
                 let project = project_for_reasoning.clone();
-                [
-                    None,
-                    Some(threadlane_runtime::ReasoningEffort::Minimal),
-                    Some(threadlane_runtime::ReasoningEffort::Low),
-                    Some(threadlane_runtime::ReasoningEffort::Medium),
-                    Some(threadlane_runtime::ReasoningEffort::High),
-                ]
-                .into_iter()
-                .fold(menu, |menu, effort| {
+                let mut options: Vec<Option<threadlane_runtime::ReasoningEffort>> = vec![None];
+                options.extend(
+                    crate::model_catalog::efforts_for_model(
+                        &reasoning_for_model_cloned,
+                        Some(&project),
+                    )
+                    .into_iter()
+                    .map(Some),
+                );
+                options.into_iter().fold(menu, |menu, effort| {
                     let entity = entity.clone();
                     let project = project.clone();
                     menu.item(
@@ -641,6 +749,7 @@ impl SettingsView {
                                 .map(|value| value.label())
                                 .unwrap_or("Same as parent"),
                         )
+                        .checked(selected_reasoning == effort)
                         .on_click(move |_, _, cx| {
                             let mut settings = crate::services::subagent_settings::load(&project);
                             settings.reasoning_effort = effort;
@@ -658,7 +767,7 @@ impl SettingsView {
         let selected_fast_model = preferences.fast_model.clone();
         let fast_model_label = selected_fast_model
             .as_deref()
-            .and_then(crate::model_catalog::label_for)
+            .map(|id| crate::model_catalog::selection_label(id, &available))
             .unwrap_or_else(|| "Same as parent".into());
         let fast_model_entity = self.model.clone();
         let project_for_fast = project.clone();
@@ -666,33 +775,48 @@ impl SettingsView {
             .label(fast_model_label)
             .dropdown_caret(true)
             .dropdown_menu(move |menu, _, _| {
+                let menu = menu.check_side(gpui_component::Side::Right);
                 let model_entity_for_parent = fast_model_entity.clone();
                 let project_for_parent = project_for_fast.clone();
+                let parent_label = if selected_fast_model.is_none() {
+                    "Same as parent · Current"
+                } else {
+                    "Same as parent"
+                };
                 available_for_fast.iter().cloned().fold(
-                    menu.item(
-                        PopupMenuItem::new("Same as parent").on_click(move |_, _, cx| {
-                            let mut settings =
-                                crate::services::subagent_settings::load(&project_for_parent);
-                            settings.fast_model = None;
-                            if crate::services::subagent_settings::save(
-                                &project_for_parent,
-                                &settings,
-                            )
-                            .is_ok()
-                            {
-                                model_entity_for_parent.update(cx, |state, cx| {
-                                    state.invalidate_capability_runtimes();
-                                    cx.notify();
-                                });
-                            }
-                        }),
+                    menu.scrollable(true).item(
+                        PopupMenuItem::new(parent_label)
+                            .checked(selected_fast_model.is_none())
+                            .on_click(move |_, _, cx| {
+                                let mut settings =
+                                    crate::services::subagent_settings::load(&project_for_parent);
+                                settings.fast_model = None;
+                                if crate::services::subagent_settings::save(
+                                    &project_for_parent,
+                                    &settings,
+                                )
+                                .is_ok()
+                                {
+                                    model_entity_for_parent.update(cx, |state, cx| {
+                                        state.invalidate_capability_runtimes();
+                                        cx.notify();
+                                    });
+                                }
+                            }),
                     ),
                     |menu, option| {
                         let model_entity = fast_model_entity.clone();
                         let project = project_for_fast.clone();
+                        let is_current = selected_fast_model.as_deref() == Some(option.id.as_str());
+                        let label = if is_current {
+                            format!("{} · Current", option.label)
+                        } else {
+                            option.label
+                        };
                         menu.item(
-                            PopupMenuItem::new(option.label)
+                            PopupMenuItem::new(label)
                                 .icon(Icon::default().path(option.provider.icon_path()))
+                                .checked(is_current)
                                 .on_click(move |_, _, cx| {
                                     let mut settings =
                                         crate::services::subagent_settings::load(&project);
@@ -716,21 +840,24 @@ impl SettingsView {
             .unwrap_or("Same as parent");
         let fast_reasoning_entity = self.model.clone();
         let project_for_fast_reasoning = project.clone();
+        let fast_for_model = preferences.fast_model.clone().unwrap_or_default();
+        let show_fast_reasoning = crate::model_catalog::supports_reasoning(
+            &fast_for_model,
+            Some(&project),
+        );
         let fast_reasoning_picker = Button::new("fast-reasoning-picker")
             .label(fast_reasoning_label)
             .dropdown_caret(true)
             .dropdown_menu(move |menu, _, _| {
                 let entity = fast_reasoning_entity.clone();
                 let project = project_for_fast_reasoning.clone();
-                [
-                    None,
-                    Some(threadlane_runtime::ReasoningEffort::Minimal),
-                    Some(threadlane_runtime::ReasoningEffort::Low),
-                    Some(threadlane_runtime::ReasoningEffort::Medium),
-                    Some(threadlane_runtime::ReasoningEffort::High),
-                ]
-                .into_iter()
-                .fold(menu, |menu, effort| {
+                let mut options: Vec<Option<threadlane_runtime::ReasoningEffort>> = vec![None];
+                options.extend(
+                    crate::model_catalog::efforts_for_model(&fast_for_model, Some(&project))
+                        .into_iter()
+                        .map(Some),
+                );
+                options.into_iter().fold(menu, |menu, effort| {
                     let entity = entity.clone();
                     let project = project.clone();
                     menu.item(
@@ -739,6 +866,7 @@ impl SettingsView {
                                 .map(|value| value.label())
                                 .unwrap_or("Same as parent"),
                         )
+                        .checked(selected_fast_reasoning == effort)
                         .on_click(move |_, _, cx| {
                             let mut settings = crate::services::subagent_settings::load(&project);
                             settings.fast_reasoning_effort = effort;
@@ -764,7 +892,6 @@ impl SettingsView {
                 let entity = orchestrator_entity.clone();
                 let project = project_for_orchestrator.clone();
                 [
-                    threadlane_runtime::OrchestratorMode::Auto,
                     threadlane_runtime::OrchestratorMode::Always,
                     threadlane_runtime::OrchestratorMode::Off,
                 ]
@@ -819,24 +946,28 @@ impl SettingsView {
                 "Default model for every delegated child.",
                 model_picker.into_any_element(),
             ))
-            .child(row(
-                "Subagent reasoning effort",
-                "Default reasoning effort for every delegated child.",
-                reasoning_picker.into_any_element(),
-            ))
+            .children(show_reasoning.then(|| {
+                row(
+                    "Subagent reasoning effort",
+                    "Default reasoning effort for every delegated child.",
+                    reasoning_picker.into_any_element(),
+                )
+            }))
             .child(row(
                 "Fast model (/prewalk)",
                 "Model used for high-speed execution after /prewalk lands the first working edit.",
                 fast_model_picker.into_any_element(),
             ))
-            .child(row(
-                "Fast model reasoning effort",
-                "Reasoning effort for fast model execution after /prewalk.",
-                fast_reasoning_picker.into_any_element(),
-            ))
+            .children(show_fast_reasoning.then(|| {
+                row(
+                    "Fast model reasoning effort",
+                    "Reasoning effort for fast model execution after /prewalk.",
+                    fast_reasoning_picker.into_any_element(),
+                )
+            }))
             .child(row(
                 "Auto-Prewalk Orchestrator",
-                "Automatically engages /prewalk on actionable coding tasks when a fast model is configured.",
+                "Off by default. Always arms /prewalk planning + todo-gated auto-handoff; otherwise use explicit /prewalk.",
                 orchestrator_picker.into_any_element(),
             ))
             .into_any_element()
@@ -853,7 +984,9 @@ impl SettingsView {
             .unwrap_or_else(|| "No active project".to_string());
         let project_count = state.projects.len();
         let needle_enabled = state.needle_enabled;
-        let toggle_view = cx.entity().downgrade();
+        let auto_address_pr_reviews_enabled = state.auto_address_pr_reviews_enabled;
+        let toggle_view_needle = cx.entity().downgrade();
+        let toggle_view_auto_address = cx.entity().downgrade();
         let update_status_label = match &state.update_status {
             UpdateStatus::Checking => "Checking for updates...",
             UpdateStatus::Available(_) => "Update available",
@@ -1058,9 +1191,75 @@ impl SettingsView {
                                 "Enable Needle routing"
                             })
                             .on_click(move |checked, _window, cx| {
-                                let _ = toggle_view.update(cx, |this, cx| {
+                                let _ = toggle_view_needle.update(cx, |this, cx| {
                                     let result = this.model.update(cx, |state, _cx| {
                                         state.set_needle_enabled(*checked)
+                                    });
+                                    if let Err(error) = result {
+                                        this.capability_status = Some(error);
+                                    }
+                                    cx.notify();
+                                });
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.title_bar)
+                    .p_4()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme.foreground)
+                                            .child("Auto-Address PR Reviews"),
+                                    )
+                                    .child(
+                                        Tag::new()
+                                            .child(if auto_address_pr_reviews_enabled { "Enabled" } else { "Disabled" })
+                                            .with_variant(if auto_address_pr_reviews_enabled {
+                                                TagVariant::Success
+                                            } else {
+                                                TagVariant::Secondary
+                                            })
+                                            .small(),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .mt_1()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child("Automatically trigger the agent to address new code review feedback on open pull requests."),
+                            ),
+                    )
+                    .child(
+                        Switch::new("general-auto-address-pr-reviews-switch")
+                            .checked(auto_address_pr_reviews_enabled)
+                            .tooltip(if auto_address_pr_reviews_enabled {
+                                "Disable automatic PR review addressing"
+                            } else {
+                                "Enable automatic PR review addressing"
+                            })
+                            .on_click(move |checked, _window, cx| {
+                                let _ = toggle_view_auto_address.update(cx, |this, cx| {
+                                    let result = this.model.update(cx, |state, _cx| {
+                                        state.set_auto_address_pr_reviews_enabled(*checked)
                                     });
                                     if let Err(error) = result {
                                         this.capability_status = Some(error);
@@ -1110,7 +1309,7 @@ impl SettingsView {
                                     .rounded_lg()
                                     .border_1()
                                     .border_color(theme.border)
-                                    .bg(hsla(0.0, 0.0, 0.07, 1.0))
+                                    .bg(preview_dark_surface())
                                     .p_3()
                                     .flex()
                                     .flex_col()
@@ -1123,19 +1322,19 @@ impl SettingsView {
                                                 div()
                                                     .size(px(8.0))
                                                     .rounded_full()
-                                                    .bg(hsla(0.0, 0.7, 0.6, 1.0)),
+                                                    .bg(preview_dot_close()),
                                             )
                                             .child(
                                                 div()
                                                     .size(px(8.0))
                                                     .rounded_full()
-                                                    .bg(hsla(0.12, 0.7, 0.6, 1.0)),
+                                                    .bg(preview_dot_minimize()),
                                             )
                                             .child(
                                                 div()
                                                     .size(px(8.0))
                                                     .rounded_full()
-                                                    .bg(hsla(0.35, 0.7, 0.6, 1.0)),
+                                                    .bg(preview_dot_zoom()),
                                             ),
                                     )
                                     .child(
@@ -1143,7 +1342,7 @@ impl SettingsView {
                                             .h(px(16.0))
                                             .w_3_4()
                                             .rounded_md()
-                                            .bg(hsla(0.0, 0.0, 0.16, 1.0)),
+                                            .bg(preview_dark_well()),
                                     ),
                             )
                             .child(
@@ -1200,7 +1399,7 @@ impl SettingsView {
                                     .rounded_lg()
                                     .border_1()
                                     .border_color(theme.border)
-                                    .bg(hsla(0.0, 0.0, 0.98, 1.0))
+                                    .bg(preview_light_surface())
                                     .p_3()
                                     .flex()
                                     .flex_col()
@@ -1213,19 +1412,19 @@ impl SettingsView {
                                                 div()
                                                     .size(px(8.0))
                                                     .rounded_full()
-                                                    .bg(hsla(0.0, 0.7, 0.6, 1.0)),
+                                                    .bg(preview_dot_close()),
                                             )
                                             .child(
                                                 div()
                                                     .size(px(8.0))
                                                     .rounded_full()
-                                                    .bg(hsla(0.12, 0.7, 0.6, 1.0)),
+                                                    .bg(preview_dot_minimize()),
                                             )
                                             .child(
                                                 div()
                                                     .size(px(8.0))
                                                     .rounded_full()
-                                                    .bg(hsla(0.35, 0.7, 0.6, 1.0)),
+                                                    .bg(preview_dot_zoom()),
                                             ),
                                     )
                                     .child(
@@ -1233,7 +1432,7 @@ impl SettingsView {
                                             .h(px(16.0))
                                             .w_3_4()
                                             .rounded_md()
-                                            .bg(hsla(0.0, 0.0, 0.88, 1.0)),
+                                            .bg(preview_light_well()),
                                     ),
                             )
                             .child(
@@ -2166,8 +2365,9 @@ impl SettingsView {
                     .child(Button::new(button_id).label("Save").primary().on_click(
                         move |_event, _window, cx| {
                             let value = input.read(cx).value().to_string();
-                            model.update(cx, |state, _cx| {
+                            model.update(cx, |state, cx| {
                                 controller::dispatch(state, action(value));
+                                cx.notify();
                             });
                         },
                     )),
@@ -2328,6 +2528,11 @@ impl SettingsView {
                                     .label("Install .wasm")
                                     .primary()
                                     .disabled(!self.install_globally && !project_available)
+                                    .tooltip(if !self.install_globally && !project_available {
+                                        "Select install scope or attach a project first"
+                                    } else {
+                                        "Install a compiled WASI extension"
+                                    })
                                     .on_click(move |_event, _window, cx| {
                                         let Some(path) = rfd::FileDialog::new()
                                             .set_title("Install a compiled WASI extension")
@@ -2492,7 +2697,10 @@ impl SettingsView {
                     )
             }))
             .when(self.extension_rows.is_empty(), |view| {
-                view.child(Self::empty_state("No WASI extensions found.", theme))
+                view.child(Self::empty_state(
+                    "No WASI extensions found. Install one below.",
+                    theme,
+                ))
             })
             .into_any_element()
     }
@@ -2519,6 +2727,11 @@ impl SettingsView {
                             .label("Disable all")
                             .outline()
                             .disabled(!has_project || !has_enabled_skills)
+                            .tooltip(if !has_project {
+                                "Attach a project to manage skills"
+                            } else {
+                                "Disable all project skills"
+                            })
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 let Some(project) = this.active_project(cx) else {
                                     this.capability_status =
@@ -2656,7 +2869,10 @@ impl SettingsView {
                     )
             }))
             .when(self.skill_rows.is_empty(), |view| {
-                view.child(Self::empty_state("No skills found.", theme))
+                view.child(Self::empty_state(
+                    "No skills found. Attach a project to discover skills.",
+                    theme,
+                ))
             })
             .into_any_element()
     }
@@ -3055,7 +3271,7 @@ impl Render for SettingsView {
                             .w_full()
                             .max_w(px(760.0))
                             .mx_auto()
-                            .child(div().h(px(48.0)).flex_none())
+                            .child(div().h(crate::theme::WINDOW_CONTROLS_CLEARANCE).flex_none())
                             .child(
                                 div()
                                     .text_xl()

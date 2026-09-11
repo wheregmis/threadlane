@@ -85,7 +85,8 @@ pub struct HashlineApplyResult {
 }
 
 /// Apply a series of hash-anchored edits to a multi-line document.
-pub fn apply_hashline_edits(content: &str, edits: &[HashlineEdit]) -> Result<String, String> {
+#[cfg(test)]
+fn apply_hashline_edits(content: &str, edits: &[HashlineEdit]) -> Result<String, String> {
     apply_hashline_edits_detailed(content, edits, 0).map(|r| r.new_content)
 }
 

@@ -7,7 +7,6 @@ description = "OpenAI REST & Codex backend streaming client and device auth for 
 [dependencies]
 threadlane-protocol = { version = "0.1.0", path = "../threadlane-protocol" }
 threadlane-runtime = { version = "0.1.0", path = "../threadlane-runtime" }
-threadlane-tools = { version = "0.1.0", path = "../threadlane-tools" }
 threadlane-auth = { version = "0.1.0", path = "../threadlane-auth" }
 async-trait = "0.1"
 tokio = { version = "1.38", features = ["full"] }
@@ -18,7 +17,5 @@ futures-util = "0.3"
 bytes = "1.6"
 tokio-tungstenite = { version = "0.30", features = ["native-tls"] }
 sha2 = "0.10"
-base64 = "0.22"
 url = "2.5"
-getrandom = "0.4"
 tracing = "0.1"

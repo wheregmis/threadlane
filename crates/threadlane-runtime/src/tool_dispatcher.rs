@@ -8,12 +8,15 @@ use crate::events::AgentEvent;
 use crate::harness::{HookContext, HookRegistry};
 use crate::loop_engine::AbortOnDrop;
 use crate::tool_executor::{builtin_tool_executor, ToolExecutor};
-use crate::types::{AgentToolCall, AgentToolDefinition, AgentToolResult, ToolExecutionMode};
+use crate::types::{
+    AgentToolCall, AgentToolDefinition, AgentToolResult, ImageAttachment, ToolExecutionMode,
+    ToolOutput,
+};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use threadlane_protocol::RuntimeToolCall as ToolCall;
 use tokio::sync::broadcast;
@@ -65,6 +68,240 @@ struct ToolRunContext {
     work_dir: Option<PathBuf>,
     skip_before_hook: bool,
     session_id: String,
+    repetition: RepetitionCacheHandle,
+    /// Replay re-executes safe tools for verification and must observe live
+    /// state, never cached results.
+    skip_repetition_cache: bool,
+}
+
+/// Deduplicates identical tool calls within one turn: the 37×-identical-read
+/// failure mode. A global version counter invalidates every entry whenever a
+/// potentially-mutating tool runs, so cached reads can never go stale.
+/// Cloned dispatchers share one cache through the `Arc`.
+#[derive(Clone, Default)]
+struct RepetitionCacheHandle {
+    inner: Arc<std::sync::Mutex<RepetitionCache>>,
+}
+
+#[derive(Default)]
+struct RepetitionCache {
+    version: u64,
+    entries: std::collections::HashMap<(String, String), CachedToolResult>,
+}
+
+struct CachedToolResult {
+    version: u64,
+    content: String,
+    is_error: bool,
+    images: Vec<ImageAttachment>,
+    /// Canonicalized absolute path this entry depends on, if it reads one
+    /// file (currently only `read_file`). Lets same-path writes invalidate
+    /// precisely while unrelated writes keep their cache.
+    path: Option<PathBuf>,
+    /// File size + mtime at cache time, for external-mutation validation.
+    fingerprint: Option<FileFingerprint>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FileFingerprint {
+    size: u64,
+    mtime_secs: u64,
+    mtime_nanos: u32,
+}
+
+fn fingerprint_file(path: &Path) -> Option<FileFingerprint> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata.modified().ok()?;
+    let duration = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some(FileFingerprint {
+        size: metadata.len(),
+        mtime_secs: duration.as_secs(),
+        mtime_nanos: duration.subsec_nanos(),
+    })
+}
+
+/// Extract workspace file paths a tool call reads or writes, for
+/// path-precise invalidation. Returns an empty vec when the tool has no
+/// parseable path scope (unknown blast radius: bust everything).
+fn tool_paths(name: &str, args: &str) -> Vec<String> {
+    let parsed: serde_json::Value = match serde_json::from_str(args) {
+        Ok(parsed) => parsed,
+        Err(_) => return Vec::new(),
+    };
+    match name {
+        "read_file" | "write_file" | "edit_file_hashline" => parsed
+            .get("path")
+            .and_then(|value| value.as_str())
+            .map(|path| vec![path.to_string()])
+            .unwrap_or_default(),
+        "edit_files_hashline" => parsed
+            .get("files")
+            .and_then(|value| value.as_array())
+            .map(|files| {
+                files
+                    .iter()
+                    .filter_map(|file| file.get("path")?.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// Resolve a tool path argument against the workspace root. Falls back to
+/// the raw path when there is no work dir — identity comparison only needs
+/// both sides resolved the same way.
+fn resolve_workspace_path(work_dir: Option<&Path>, path: &str) -> PathBuf {
+    match work_dir {
+        Some(root) => {
+            let candidate = Path::new(path);
+            if candidate.is_absolute() {
+                candidate.to_path_buf()
+            } else {
+                root.join(candidate)
+            }
+        }
+        None => PathBuf::from(path),
+    }
+}
+
+/// Tools pure enough to serve from cache: deterministic reads whose inputs
+/// cannot change without a mutating tool running first (which bumps the
+/// version). Everything else always executes. Live or mutating tools
+/// (`browser_snapshot`, screenshots, `evaluate`, all writes/commands) stay
+/// out even though that costs re-execution: correctness first.
+const CACHEABLE_TOOLS: &[&str] = &[
+    "read_file",
+    "grep_search",
+    "list_dir",
+    "get_repo_map",
+    "computer_status",
+    "computer_windows",
+    "browser_current_url",
+    "load_skill",
+];
+
+const REPETITION_CACHE_CAP: usize = 64;
+
+const REPETITION_NOTE: &str = "Repeated invocation: identical arguments already ran earlier this turn and produced this same result (served from cache, not re-executed). If you need different information, change the arguments or use another tool.";
+
+impl RepetitionCacheHandle {
+    /// Returns the cached content (with steering note), images, and the
+    /// original error flag for an identical call in the current version.
+    fn lookup(
+        &self,
+        name: &str,
+        args: &str,
+        work_dir: Option<&Path>,
+    ) -> Option<(ToolOutput, bool)> {
+        if !CACHEABLE_TOOLS.contains(&name) {
+            return None;
+        }
+        let mut guard = self.inner.lock().ok()?;
+        let key = (name.to_string(), args.to_string());
+        let entry = guard.entries.get(&key)?;
+        if entry.version != guard.version {
+            return None;
+        }
+        // External-mutation guard: a file changed outside the tool loop
+        // (user edits, watchers, other agents) must not serve stale bytes.
+        // Size+mtime both compared: coarse filesystems can share mtimes.
+        if let Some(path) = entry.path.as_deref() {
+            if fingerprint_file(path) != entry.fingerprint {
+                guard.entries.remove(&key);
+                return None;
+            }
+            let _ = work_dir;
+        }
+        Some((
+            ToolOutput {
+                content: format!("{}\n\n[{REPETITION_NOTE}]", entry.content),
+                images: entry.images.clone(),
+            },
+            entry.is_error,
+        ))
+    }
+
+    fn store(
+        &self,
+        name: &str,
+        args: &str,
+        output: &ToolOutput,
+        is_error: bool,
+        work_dir: Option<&Path>,
+    ) {
+        if !CACHEABLE_TOOLS.contains(&name) {
+            self.invalidate_for_mutation(name, args, work_dir);
+            return;
+        }
+        // Errors cache too: identical error loops are worth short-circuiting,
+        // and any later mutation invalidates by version.
+        if let Ok(mut guard) = self.inner.lock() {
+            if guard.entries.len() >= REPETITION_CACHE_CAP {
+                guard.entries.clear();
+            }
+            let version = guard.version;
+            let (path, fingerprint): (Option<PathBuf>, Option<FileFingerprint>) =
+                if name == "read_file" {
+                    tool_paths(name, args)
+                        .into_iter()
+                        .next()
+                        .map(|path| {
+                            let absolute = resolve_workspace_path(work_dir, &path);
+                            let fingerprint = fingerprint_file(&absolute);
+                            (Some(absolute), fingerprint)
+                        })
+                        .unwrap_or((None, None))
+                } else {
+                    (None, None)
+                };
+            guard.entries.insert(
+                (name.to_string(), args.to_string()),
+                CachedToolResult {
+                    version,
+                    content: output.content.clone(),
+                    is_error,
+                    images: output.images.clone(),
+                    path,
+                    fingerprint,
+                },
+            );
+        }
+    }
+
+    /// A mutating tool ran: drop precisely what it could have touched.
+    /// Path-scoped writes bust the same-path reads plus every workspace-wide
+    /// read (grep/list/map depend on whole-tree contents); anything without
+    /// parseable paths busts the global version as before.
+    fn invalidate_for_mutation(&self, name: &str, args: &str, work_dir: Option<&Path>) {
+        let paths: Vec<PathBuf> = tool_paths(name, args)
+            .into_iter()
+            .map(|path| resolve_workspace_path(work_dir, &path))
+            .collect();
+        let Ok(mut guard) = self.inner.lock() else {
+            return;
+        };
+        if paths.is_empty() {
+            guard.version = guard.version.wrapping_add(1);
+            return;
+        }
+        guard.entries.retain(|(entry_name, _), entry| {
+            if entry_name != "read_file" {
+                return false;
+            }
+            match entry.path.as_deref() {
+                Some(path) => !paths.iter().any(|touched| touched == path),
+                None => false,
+            }
+        });
+    }
+
+    fn clear(&self) {
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.entries.clear();
+            guard.version = guard.version.wrapping_add(1);
+        }
+    }
 }
 
 struct PreparedToolCall {
@@ -92,15 +329,36 @@ pub struct ToolDispatcher {
 
     tool_executors: Vec<Arc<dyn ToolExecutor>>,
     event_tx: broadcast::Sender<AgentEvent>,
+    repetition: RepetitionCacheHandle,
 }
 
-pub const CORE_TOOL_NAMES: &[&str] = &[
+const CORE_TOOL_NAMES: &[&str] = &[
     "read_file",
     "edit_file_hashline",
     "edit_files_hashline",
     "write_file",
     "run_command",
     "subagent",
+    // Embedded browser panel (threadlane-session/src/browser.rs). The tools
+    // report a helpful error when no panel is attached, so they are safe to
+    // advertise unconditionally.
+    "browser_navigate",
+    "browser_back",
+    "browser_reload",
+    "browser_current_url",
+    "browser_snapshot",
+    "browser_act",
+    "browser_evaluate_script",
+    "browser_screenshot",
+    "browser_console_logs",
+    "browser_wait",
+    // Native computer use (threadlane-session/src/computer.rs). Every
+    // screenshot and input action re-prompts for approval, so the schemas
+    // are safe to advertise; unattended sessions deny at execution.
+    "computer_status",
+    "computer_windows",
+    "computer_screenshot",
+    "computer_act",
 ];
 
 impl ToolDispatcher {
@@ -118,7 +376,14 @@ impl ToolDispatcher {
             session_id: String::new(),
             tool_executors: vec![builtin_tool_executor()],
             event_tx,
+            repetition: RepetitionCacheHandle::default(),
         }
+    }
+
+    /// Drops all cached repetition results and invalidates outstanding ones.
+    /// Called once per turn so cached reads can never leak across turns.
+    pub(crate) fn clear_repetition_cache(&self) {
+        self.repetition.clear();
     }
 
     // ── Executor registry ─────────────────────────────────────────────
@@ -183,7 +448,7 @@ impl ToolDispatcher {
         Ok(())
     }
 
-    pub fn tool_executor_count(&self) -> usize {
+    pub(crate) fn tool_executor_count(&self) -> usize {
         self.ordered_tool_executors().len()
     }
 
@@ -195,7 +460,7 @@ impl ToolDispatcher {
 
     /// Executes tools and returns results. Intents are recorded before execution.
     pub(crate) async fn execute_tools(&self, tool_calls: &[ToolCall]) -> Vec<AgentToolResult> {
-        self.execute_tools_with_options(tool_calls, self.tool_intent_recorder.clone(), false)
+        self.execute_tools_with_options(tool_calls, self.tool_intent_recorder.clone(), false, false)
             .await
     }
 
@@ -205,17 +470,19 @@ impl ToolDispatcher {
         &self,
         tool_calls: &[ToolCall],
     ) -> Vec<AgentToolResult> {
-        self.execute_tools_with_options(tool_calls, None, false)
+        self.execute_tools_with_options(tool_calls, None, false, false)
             .await
     }
 
     /// Replays already-intended safe tools. The before hook is intentionally
     /// skipped: the durable ToolStarted record is the clearance boundary.
+    /// The repetition cache is skipped as well: replay must observe live
+    /// state for verification, never cached results.
     pub(crate) async fn execute_tools_for_replay(
         &self,
         tool_calls: &[ToolCall],
     ) -> Vec<AgentToolResult> {
-        self.execute_tools_with_options(tool_calls, None, true)
+        self.execute_tools_with_options(tool_calls, None, true, true)
             .await
     }
 
@@ -224,6 +491,7 @@ impl ToolDispatcher {
         tool_calls: &[ToolCall],
         intent_recorder: Option<ToolIntentRecorder>,
         skip_before_hook: bool,
+        skip_repetition_cache: bool,
     ) -> Vec<AgentToolResult> {
         let mut results = Vec::new();
         let tool_routes = self.tool_execution_routes().await;
@@ -238,6 +506,7 @@ impl ToolDispatcher {
                         allowed_tool_names.clone(),
                         intent_recorder.clone(),
                         skip_before_hook,
+                        skip_repetition_cache,
                     )
                     .await;
                 results.push(res);
@@ -256,6 +525,8 @@ impl ToolDispatcher {
                     work_dir: self.work_dir.clone(),
                     skip_before_hook,
                     session_id: self.session_id.clone(),
+                    repetition: self.repetition.clone(),
+                    skip_repetition_cache,
                 };
                 match Self::prepare_tool_call(tc.clone(), context).await {
                     Ok(call) => prepared.push((index, call)),
@@ -284,6 +555,7 @@ impl ToolDispatcher {
                             content: format!("Tool execution task failed: {error}"),
                             is_error: true,
                             terminate: false,
+                            images: Vec::new(),
                         };
                         slots[index] = Some(result);
                     }
@@ -322,6 +594,7 @@ impl ToolDispatcher {
         allowed_tool_names: Option<HashSet<String>>,
         intent_recorder: Option<ToolIntentRecorder>,
         skip_before_hook: bool,
+        skip_repetition_cache: bool,
     ) -> AgentToolResult {
         let result = AssertUnwindSafe(Self::run_tool_with_hooks(
             tc.clone(),
@@ -335,6 +608,8 @@ impl ToolDispatcher {
                 work_dir: self.work_dir.clone(),
                 skip_before_hook,
                 session_id: self.session_id.clone(),
+                repetition: self.repetition.clone(),
+                skip_repetition_cache,
             },
         ))
         .catch_unwind()
@@ -366,6 +641,7 @@ impl ToolDispatcher {
                     ),
                     is_error: true,
                     terminate: false,
+                    images: Vec::new(),
                 };
                 let _ = self.event_tx.send(AgentEvent::ToolExecutionEnd {
                     tool_call_id: tc.id.clone(),
@@ -403,6 +679,7 @@ impl ToolDispatcher {
                     },
                     is_error: nested_result.is_error,
                     terminate: nested_result.terminate,
+                    images: nested_result.images,
                 };
             }
         }
@@ -441,6 +718,7 @@ impl ToolDispatcher {
                 ),
                 is_error: true,
                 terminate: false,
+                images: Vec::new(),
             };
             let _ = context.event_tx.send(AgentEvent::ToolExecutionEnd {
                 tool_call_id: tc.id,
@@ -474,6 +752,7 @@ impl ToolDispatcher {
                     content: reason,
                     is_error: true,
                     terminate: false,
+                    images: Vec::new(),
                 };
                 let _ = context.event_tx.send(AgentEvent::ToolExecutionEnd {
                     tool_call_id: tc.id.clone(),
@@ -492,6 +771,7 @@ impl ToolDispatcher {
                     content: error,
                     is_error: true,
                     terminate: false,
+                    images: Vec::new(),
                 };
                 let _ = context.event_tx.send(AgentEvent::ToolExecutionEnd {
                     tool_call_id: tc.id,
@@ -544,6 +824,7 @@ impl ToolDispatcher {
                     content: format!("Failed to persist tool execution start: {error}"),
                     is_error: true,
                     terminate: false,
+                    images: Vec::new(),
                 };
             }
         }
@@ -558,13 +839,31 @@ impl ToolDispatcher {
         });
 
         let mut execution_result = None;
+        // Error flag for cache hits: the cached content already carries the
+        // original error text, so it must not be re-prefixed below.
+        let mut cached_is_error = false;
+        let mut served_from_cache = false;
+        if !context.skip_repetition_cache {
+            if let Some((cached, was_error)) = context.repetition.lookup(
+                &tc.function.name,
+                &arguments,
+                context.work_dir.as_deref(),
+            ) {
+                execution_result = Some(Ok(cached));
+                cached_is_error = was_error;
+                served_from_cache = true;
+            }
+        }
         for route in context.tool_routes {
+            if execution_result.is_some() {
+                break;
+            }
             if !route.tool_names.contains(&tc.function.name) {
                 continue;
             }
             if let Some(result) = route
                 .executor
-                .execute_tool_in_workspace(
+                .execute_tool_with_output_in_workspace(
                     &agent_tool_call.name,
                     &arguments,
                     context.work_dir.as_deref(),
@@ -581,10 +880,26 @@ impl ToolDispatcher {
                 tc.function.name, tc.function.name
             ))
         });
-        let (content, is_error) = match execution_result {
-            Ok(content) => (content, false),
-            Err(error) => (format!("Tool executor error: {error}"), true),
+        let (content, is_error, images) = match execution_result {
+            Ok(output) => (output.content, cached_is_error, output.images),
+            Err(error) => (format!("Tool executor error: {error}"), true, Vec::new()),
         };
+        if !context.skip_repetition_cache && !served_from_cache {
+            // Record fresh executions for identical-call dedup, including
+            // fresh errors: identical error loops are worth short-circuiting,
+            // and any later mutation invalidates by version. Cache hits never
+            // re-store (that would nest steering notes).
+            context.repetition.store(
+                &tc.function.name,
+                &arguments,
+                &ToolOutput {
+                    content: content.clone(),
+                    images: images.clone(),
+                },
+                is_error,
+                context.work_dir.as_deref(),
+            );
+        }
         let duration_ms = start_time.elapsed().as_millis();
         if is_error {
             warn!(
@@ -603,6 +918,7 @@ impl ToolDispatcher {
             content,
             is_error,
             terminate: false,
+            images,
         };
 
         let hook_ctx = HookContext {
@@ -785,6 +1101,293 @@ mod tests {
             "",
             serde_json::json!({"type": "object", "properties": {}}),
         )
+    }
+
+    struct CountingExecutor {
+        id: String,
+        tools: Vec<AgentToolDefinition>,
+        result: String,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ToolExecutor for CountingExecutor {
+        fn executor_id(&self) -> &str {
+            &self.id
+        }
+
+        fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
+            self.tools.clone().into()
+        }
+
+        async fn execute_tool(&self, _name: &str, _args: &str) -> Option<Result<String, String>> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Some(Ok(self.result.clone()))
+        }
+    }
+
+    struct PanickingExecutor;
+
+    #[async_trait::async_trait]
+    impl ToolExecutor for PanickingExecutor {
+        fn executor_id(&self) -> &str {
+            "panicking"
+        }
+
+        fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
+            vec![stub_tool("panic_tool")].into()
+        }
+
+        async fn execute_tool(&self, _name: &str, _args: &str) -> Option<Result<String, String>> {
+            panic!("tool panic")
+        }
+
+        async fn execute_tool_with_call(
+            &self,
+            _call: &AgentToolCall,
+            _args: &str,
+        ) -> Option<Result<String, String>> {
+            panic!("tool panic")
+        }
+    }
+
+    #[tokio::test]
+    async fn sequential_tool_panic_records_completion() {
+        let (event_tx, _) = broadcast::channel(8);
+        let mut dispatcher = ToolDispatcher::new(event_tx, HookRegistry::default());
+        dispatcher
+            .register_tool_executor(Arc::new(PanickingExecutor))
+            .unwrap();
+        let completions = Arc::new(std::sync::Mutex::new(Vec::new()));
+        dispatcher.tool_completion_recorder = Some({
+            let completions = completions.clone();
+            Arc::new(move |result| {
+                let result = result.clone();
+                let completions = completions.clone();
+                Box::pin(async move {
+                    completions.lock().unwrap().push(result);
+                    Ok(())
+                })
+            })
+        });
+
+        let results = dispatcher
+            .execute_tools_without_intent_recording(&[ToolCall {
+                id: "panic_call".into(),
+                r#type: "function".into(),
+                function: threadlane_protocol::RuntimeToolCallFunction {
+                    name: "panic_tool".into(),
+                    arguments: "{}".into(),
+                },
+                thought_signature: None,
+            }])
+            .await;
+
+        assert!(results[0].is_error);
+        assert!(results[0].content.contains("panicked during execution"));
+        let completions = completions.lock().unwrap();
+        assert_eq!(completions.len(), 1);
+        assert_eq!(completions[0].tool_call_id, "panic_call");
+        assert!(completions[0].is_error);
+    }
+
+    fn counting_dispatcher(
+        tools: &[(&str, &str)],
+    ) -> (
+        ToolDispatcher,
+        std::collections::HashMap<String, Arc<std::sync::atomic::AtomicUsize>>,
+    ) {
+        let (event_tx, _) = broadcast::channel(8);
+        let mut dispatcher = ToolDispatcher::new(event_tx, HookRegistry::default());
+        let mut counters = std::collections::HashMap::new();
+        for (index, (name, result)) in tools.iter().enumerate() {
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            counters.insert(name.to_string(), calls.clone());
+            dispatcher
+                .register_tool_executor(Arc::new(CountingExecutor {
+                    id: format!("stub-{index}"),
+                    tools: vec![stub_tool(name)],
+                    result: result.to_string(),
+                    calls,
+                }))
+                .expect("register stub");
+        }
+        (dispatcher, counters)
+    }
+
+    fn tool_call(id: &str, name: &str, args: &str) -> ToolCall {
+        ToolCall {
+            id: id.into(),
+            r#type: "function".into(),
+            function: threadlane_protocol::RuntimeToolCallFunction {
+                name: name.into(),
+                arguments: args.into(),
+            },
+            thought_signature: None,
+        }
+    }
+
+    fn call_count(
+        counters: &std::collections::HashMap<String, Arc<std::sync::atomic::AtomicUsize>>,
+        name: &str,
+    ) -> usize {
+        counters[name].load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[tokio::test]
+    async fn repetition_cache_serves_identical_reads_once() {
+        // computer_windows is cacheable and unclaimed by the builtin
+        // executor, so the stub owns its schema without conflicts.
+        let (dispatcher, counters) =
+            counting_dispatcher(&[("computer_windows", "win1"), ("browser_act", "ok")]);
+        let call = tool_call("call-1", "computer_windows", "{}");
+        let first = dispatcher.execute_tools(&[call.clone()]).await;
+        let second = dispatcher.execute_tools(&[call]).await;
+        assert_eq!(call_count(&counters, "computer_windows"), 1);
+        assert_eq!(first[0].content, "win1");
+        assert!(
+            second[0].content.contains("served from cache"),
+            "cache hit must steer the model: {}",
+            second[0].content
+        );
+        assert!(!second[0].is_error);
+    }
+
+    #[tokio::test]
+    async fn mutation_busts_the_repetition_cache() {
+        let (dispatcher, counters) =
+            counting_dispatcher(&[("computer_windows", "win1"), ("browser_act", "ok")]);
+        let read = tool_call("call-1", "computer_windows", "{}");
+        let write = tool_call("call-2", "browser_act", "{}");
+        dispatcher.execute_tools(&[read.clone()]).await;
+        dispatcher.execute_tools(&[write]).await;
+        dispatcher.execute_tools(&[read]).await;
+        assert_eq!(call_count(&counters, "computer_windows"), 2);
+        assert_eq!(call_count(&counters, "browser_act"), 1);
+    }
+
+    #[tokio::test]
+    async fn mutating_tools_always_execute() {
+        let (dispatcher, counters) = counting_dispatcher(&[("browser_act", "ok")]);
+        let call = tool_call("call-1", "browser_act", "{}");
+        dispatcher.execute_tools(&[call.clone()]).await;
+        dispatcher.execute_tools(&[call]).await;
+        assert_eq!(call_count(&counters, "browser_act"), 2);
+    }
+
+    #[tokio::test]
+    async fn clearing_resets_the_repetition_cache() {
+        let (dispatcher, counters) = counting_dispatcher(&[("computer_windows", "win1")]);
+        let call = tool_call("call-1", "computer_windows", "{}");
+        dispatcher.execute_tools(&[call.clone()]).await;
+        dispatcher.clear_repetition_cache();
+        dispatcher.execute_tools(&[call]).await;
+        assert_eq!(call_count(&counters, "computer_windows"), 2);
+    }
+
+    #[tokio::test]
+    async fn replay_skips_the_repetition_cache() {
+        let (dispatcher, counters) = counting_dispatcher(&[("computer_windows", "win1")]);
+        let call = tool_call("call-1", "computer_windows", "{}");
+        dispatcher.execute_tools(&[call.clone()]).await;
+        dispatcher.execute_tools_for_replay(&[call]).await;
+        assert_eq!(call_count(&counters, "computer_windows"), 2);
+    }
+
+    #[test]
+    fn tool_paths_extracts_read_and_write_scopes() {
+        assert_eq!(
+            tool_paths("read_file", r#"{"path":"src/a.rs"}"#),
+            vec!["src/a.rs".to_string()]
+        );
+        assert_eq!(
+            tool_paths(
+                "edit_files_hashline",
+                r#"{"files":[{"path":"x.rs"},{"path":"y.rs"}]}"#
+            ),
+            vec!["x.rs".to_string(), "y.rs".to_string()]
+        );
+        assert!(tool_paths("run_command", r#"{"command":"ls"}"#).is_empty());
+        assert!(tool_paths("read_file", "not-json").is_empty());
+    }
+
+    #[test]
+    fn same_path_write_busts_only_that_read() {
+        let cache = RepetitionCacheHandle::default();
+        let output = |text: &str| ToolOutput {
+            content: text.into(),
+            images: Vec::new(),
+        };
+        cache.store("read_file", r#"{"path":"a.rs"}"#, &output("A"), false, None);
+        cache.store("read_file", r#"{"path":"b.rs"}"#, &output("B"), false, None);
+        cache.store(
+            "grep_search",
+            r#"{"pattern":"x"}"#,
+            &output("G"),
+            false,
+            None,
+        );
+        // Same-path write busts read_file(a) plus all workspace-wide reads.
+        cache.invalidate_for_mutation("write_file", r#"{"path":"a.rs"}"#, None);
+        assert!(cache
+            .lookup("read_file", r#"{"path":"a.rs"}"#, None)
+            .is_none());
+        assert!(cache
+            .lookup("read_file", r#"{"path":"b.rs"}"#, None)
+            .is_some());
+        assert!(cache
+            .lookup("grep_search", r#"{"pattern":"x"}"#, None)
+            .is_none());
+    }
+
+    #[test]
+    fn external_modification_busts_the_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("watched.rs");
+        std::fs::write(&file, "version one!!!!").unwrap();
+        let args = r#"{"path":"watched.rs"}"#;
+        let work_dir = Some(dir.path());
+        let cache = RepetitionCacheHandle::default();
+        cache.store(
+            "read_file",
+            args,
+            &ToolOutput {
+                content: "version one!!!!".into(),
+                images: Vec::new(),
+            },
+            false,
+            work_dir,
+        );
+        assert!(cache.lookup("read_file", args, work_dir).is_some());
+        // External edit (different size forces detection even on filesystems
+        // with coarse mtime granularity).
+        std::fs::write(&file, "version two, changed").unwrap();
+        assert!(
+            cache.lookup("read_file", args, work_dir).is_none(),
+            "externally modified file must re-execute"
+        );
+    }
+
+    #[test]
+    fn deleted_file_busts_the_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("gone.rs");
+        std::fs::write(&file, "here").unwrap();
+        let args = r#"{"path":"gone.rs"}"#;
+        let work_dir = Some(dir.path());
+        let cache = RepetitionCacheHandle::default();
+        cache.store(
+            "read_file",
+            args,
+            &ToolOutput {
+                content: "here".into(),
+                images: Vec::new(),
+            },
+            false,
+            work_dir,
+        );
+        std::fs::remove_file(&file).unwrap();
+        assert!(cache.lookup("read_file", args, work_dir).is_none());
     }
 
     #[tokio::test]

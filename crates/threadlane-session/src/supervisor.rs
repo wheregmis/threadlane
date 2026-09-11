@@ -2,6 +2,8 @@
 // HarnessSupervisor is publicly exported but most methods are currently
 // exercised only in tests; dead-code warnings are intentionally suppressed.
 #![allow(dead_code)]
+#[cfg(test)]
+use crate::browser::BrowserBridge;
 use crate::coding_agent::harness::CodingSessionHarness;
 use crate::coding_agent::{CodingAgentOptions, SubagentCancellationGuard};
 use crate::controller::{ExecutionMode, SessionController};
@@ -1526,6 +1528,7 @@ mod tests {
             system_prompt: Default::default(),
             agent_config: None,
             coding_config: None,
+            browser: BrowserBridge::unavailable(),
         });
 
         let results = agent
@@ -1571,6 +1574,7 @@ mod tests {
                     system_prompt: Default::default(),
                     agent_config: None,
                     coding_config: None,
+                    browser: BrowserBridge::unavailable(),
                 },
             )
             .unwrap();
@@ -1790,6 +1794,7 @@ mod tests {
                     system_prompt: Default::default(),
                     agent_config: None,
                     coding_config: None,
+                    browser: BrowserBridge::unavailable(),
                 },
             )
             .unwrap();
@@ -2174,6 +2179,7 @@ mod tests {
                     content: "ok".into(),
                     is_error: false,
                     terminate: false,
+                    images: Vec::new(),
                 },
                 surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
                 terminate: false,
@@ -2191,6 +2197,7 @@ mod tests {
                     content: "ok".into(),
                     is_error: false,
                     terminate: false,
+                    images: Vec::new(),
                 },
             )
             .unwrap();

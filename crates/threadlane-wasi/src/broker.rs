@@ -10,8 +10,8 @@ pub const BROKER_API_VERSION: u32 = 2;
 /// host attaches the identity used by identity-sensitive capabilities.
 #[derive(Debug, Clone)]
 pub struct HostBrokerRequest {
-    pub request: BrokerRequest,
-    pub invoking_extension: String,
+    pub(crate) request: BrokerRequest,
+    pub(crate) invoking_extension: String,
 }
 
 #[async_trait]
@@ -37,7 +37,7 @@ pub trait CapabilityHandler: Send + Sync {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct BrokerRequest {
-    pub api_version: u32,
+    pub(crate) api_version: u32,
     pub capability: String,
     pub operation: String,
     #[serde(default)]
@@ -52,11 +52,11 @@ pub struct BrokerError {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct BrokerResponse {
-    pub ok: bool,
+    ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     value: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<BrokerError>,
+    error: Option<BrokerError>,
 }
 
 impl BrokerResponse {
@@ -82,7 +82,7 @@ impl BrokerResponse {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BrokerOperationResult {
-    pub invoking_extension: String,
+    pub(crate) invoking_extension: String,
     pub request: BrokerRequest,
     pub value: Value,
     pub error: Option<BrokerError>,
@@ -171,17 +171,17 @@ pub struct CapabilityPolicy {
 }
 
 impl CapabilityPolicy {
-    pub fn new(granted: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub(crate) fn new(granted: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             granted: granted.into_iter().map(Into::into).collect(),
         }
     }
 
-    pub fn allows(&self, capability: &str) -> bool {
+    pub(crate) fn allows(&self, capability: &str) -> bool {
         self.granted.contains(capability)
     }
 
-    pub fn denied_response(&self, capability: &str) -> BrokerResponse {
+    pub(crate) fn denied_response(&self, capability: &str) -> BrokerResponse {
         BrokerResponse::error(
             "capability_denied",
             format!("Capability `{capability}` is not granted to this extension"),

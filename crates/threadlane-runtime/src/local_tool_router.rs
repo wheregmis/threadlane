@@ -1,18 +1,21 @@
 use crate::types::AgentToolDefinition;
+#[cfg(any(test, feature = "needle"))]
 use std::collections::HashSet;
 
 /// Optional local shortlist stage. The provider remains authoritative.
+#[cfg(feature = "needle")]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LocalToolRouter {
     max_tools: usize,
 }
 
+#[cfg(feature = "needle")]
 impl LocalToolRouter {
-    pub fn new(max_tools: usize) -> Self {
+    fn new(max_tools: usize) -> Self {
         Self { max_tools }
     }
 
-    pub fn shortlist(
+    fn shortlist(
         &self,
         selected_names: impl IntoIterator<Item = String>,
         definitions: &[AgentToolDefinition],
@@ -23,7 +26,7 @@ impl LocalToolRouter {
 }
 
 #[cfg(feature = "needle")]
-pub async fn shortlist_from_environment(
+pub(crate) async fn shortlist_from_environment(
     query: &str,
     definitions: &[AgentToolDefinition],
     enabled: bool,
@@ -126,7 +129,8 @@ pub async fn shortlist_from_environment(
     definitions.to_vec()
 }
 
-pub fn filter_tool_definitions(
+#[cfg(any(test, feature = "needle"))]
+fn filter_tool_definitions(
     selected_names: &HashSet<String>,
     definitions: &[AgentToolDefinition],
     max_tools: usize,

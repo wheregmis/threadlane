@@ -53,6 +53,7 @@ pub enum AppAction {
         value: String,
     },
     OpenGitHub,
+    OpenGitHubIssue { work_dir: PathBuf, number: u64 },
     CloseGitHub,
     OpenSettings,
     CloseSettings,
@@ -63,4 +64,5 @@ pub enum AppAction {
     ToggleReasoningExpanded(String),
     OpenFileInEditor(String),
     RunTerminalCommand(String),
+    OpenTerminalAt(PathBuf),
 }
