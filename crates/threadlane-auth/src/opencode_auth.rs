@@ -13,6 +13,7 @@ pub fn save_opencode_api_key_in(key: &str, locations: &CredentialStore) -> Resul
         return Err("OpenCode API key cannot be empty".to_string());
     }
 
+    locations.ensure_threadlane_dir();
     crate::openai_auth::write_secure_text_file(&locations.opencode_api_key_path(), key)
 }
 

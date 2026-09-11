@@ -137,4 +137,34 @@ mod tests {
             root.join(".codex").join("auth.json")
         );
     }
+
+    #[test]
+    fn injected_store_isolates_credential_round_trips() {
+        let _guard = crate::test_env_guard_lock();
+        let root = std::env::temp_dir().join(format!(
+            "threadlane-auth-store-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let locations = CredentialStore::isolated(root.clone());
+
+        crate::openai_auth::save_openai_api_key_in("sk-test-key", &locations).unwrap();
+        assert_eq!(
+            crate::openai_auth::load_openai_api_key_in(&locations).as_deref(),
+            Some("sk-test-key")
+        );
+
+        crate::github_auth::save_github_token_in("ghp-x", None, "token", &locations).unwrap();
+        assert!(locations.github_credentials_path().exists());
+
+        crate::opencode_auth::save_opencode_api_key_in("opencode-key", &locations).unwrap();
+        assert_eq!(
+            crate::opencode_auth::load_opencode_api_key_in(&locations).as_deref(),
+            Some("opencode-key")
+        );
+
+        // Nothing leaked into the real default locations.
+        assert!(!root.join(".codex").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

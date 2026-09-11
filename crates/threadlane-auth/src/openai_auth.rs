@@ -219,7 +219,7 @@ fn extract_jwt_claim(jwt: &str, claim_key: &str) -> Option<String> {
 
 /// Test helper: the default store (tests point `HOME` at a temp dir).
 #[cfg(test)]
-fn get_credentials_path() -> PathBuf {
+fn get_credentials_path() -> std::path::PathBuf {
     CredentialStore::default().credentials_path()
 }
 
@@ -233,6 +233,7 @@ fn save_credentials_store_in(
     store: &CodexAccountsStore,
     locations: &CredentialStore,
 ) -> Result<(), String> {
+    locations.ensure_threadlane_dir();
     let path = locations.credentials_path();
     let json = serde_json::to_string_pretty(store)
         .map_err(|_| "Failed to serialize credentials".to_string())?;
@@ -455,6 +456,7 @@ pub fn save_openai_api_key_in(key: &str, locations: &CredentialStore) -> Result<
         return Err("OpenAI API key cannot be empty".to_string());
     }
 
+    locations.ensure_threadlane_dir();
     write_secure_text_file(&locations.openai_api_key_path(), key)
 }
 
@@ -1760,7 +1762,7 @@ mod tests {
             expires_at: Some(u64::MAX),
             ..original.clone()
         };
-        let refreshed = commit_codex_account_refresh(&original, refreshed).unwrap();
+        let refreshed = commit_codex_account_refresh(&original, refreshed, &CredentialStore::default()).unwrap();
         assert_eq!(get_active_codex_account().unwrap(), refreshed);
 
         let new_sign_in = add_or_update_account(&OAuthTokens {
@@ -1772,13 +1774,13 @@ mod tests {
         })
         .unwrap();
         assert_eq!(
-            commit_codex_account_refresh(&original, refreshed.clone()).unwrap(),
+            commit_codex_account_refresh(&original, refreshed.clone(), &CredentialStore::default()).unwrap(),
             new_sign_in
         );
         assert_eq!(get_active_codex_account().unwrap(), new_sign_in);
 
         remove_codex_account("work").unwrap();
-        assert!(commit_codex_account_refresh(&original, refreshed).is_err());
+        assert!(commit_codex_account_refresh(&original, refreshed, &CredentialStore::default()).is_err());
         assert!(!get_credentials_path().exists());
     }
 
@@ -1819,7 +1821,16 @@ mod tests {
         let caller_id = account.id.clone();
         let caller_endpoint = endpoint.clone();
         let caller = tokio::spawn(async move {
-            get_valid_codex_account_token_at(&caller_id, &caller_endpoint).await
+            let config = CodexOAuthConfig {
+                token_url: caller_endpoint,
+                ..CodexOAuthConfig::default()
+            };
+            get_valid_codex_account_token_at(
+                &caller_id,
+                &config,
+                CredentialStore::default(),
+            )
+            .await
         });
         started_rx.await.unwrap();
         caller.abort();
@@ -1829,8 +1840,12 @@ mod tests {
 
         // The next caller waits for the existing refresh, then reads its saved
         // token. The mock listener is gone, so a duplicate request would fail.
+        let config = CodexOAuthConfig {
+            token_url: endpoint,
+            ..CodexOAuthConfig::default()
+        };
         assert_eq!(
-            get_valid_codex_account_token_at(&account.id, &endpoint)
+            get_valid_codex_account_token_at(&account.id, &config, CredentialStore::default())
                 .await
                 .unwrap(),
             "fresh-access"
