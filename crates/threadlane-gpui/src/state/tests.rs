@@ -126,7 +126,7 @@ fn take_stream_events(state: &mut AppState, limit: usize) -> Vec<ChatStreamEvent
 }
 
 #[derive(Default)]
-struct ModelSelectionProvider(Mutex<Vec<String>>);
+struct ModelSelectionProvider(Mutex<Vec<(String, Option<String>)>>);
 
 #[async_trait::async_trait]
 impl threadlane_protocol::ProviderPort for ModelSelectionProvider {
@@ -135,7 +135,10 @@ impl threadlane_protocol::ProviderPort for ModelSelectionProvider {
         request: threadlane_protocol::RuntimeRequest,
         events: tokio::sync::mpsc::Sender<threadlane_protocol::RuntimeStreamEvent>,
     ) {
-        self.0.lock().unwrap().push(request.model);
+        self.0
+            .lock()
+            .unwrap()
+            .push((request.model, request.reasoning_effort));
         events
             .send(threadlane_protocol::RuntimeStreamEvent::ContentToken(
                 "done".into(),
@@ -169,7 +172,7 @@ impl threadlane_protocol::ProviderPort for ModelSelectionProvider {
 }
 
 #[tokio::test]
-async fn model_picker_persists_before_rebuild_and_next_provider_request() {
+async fn model_and_reasoning_pickers_persist_before_rebuild_and_next_request() {
     let selected = "opencode-go/minimax-m2.7";
     for has_runtime in [false, true] {
         let temp = tempfile::tempdir().unwrap();
@@ -203,12 +206,21 @@ async fn model_picker_persists_before_rebuild_and_next_provider_request() {
         }
 
         state.set_selected_model(selected.into());
+        state.set_reasoning_effort(ReasoningEffort::High);
 
         assert_eq!(state.selected_model, selected);
         assert_eq!(state.session_runtimes[&session_file].model(), selected);
         assert_eq!(
+            state.session_runtimes[&session_file].reasoning_effort(),
+            ReasoningEffort::High
+        );
+        assert_eq!(
             JsonlStore::open_read_only(&session_file).unwrap().facts()["model"],
             selected
+        );
+        assert_eq!(
+            JsonlStore::open_read_only(&session_file).unwrap().facts()["reasoning_effort"],
+            "High"
         );
         drop(state);
 
@@ -221,7 +233,10 @@ async fn model_picker_persists_before_rebuild_and_next_provider_request() {
         );
         let result = restored.handle_input_with_images("continue", vec![]).await;
         assert!(result.is_none(), "generation failed: {result:?}");
-        assert_eq!(*provider.0.lock().unwrap(), [selected]);
+        assert_eq!(
+            *provider.0.lock().unwrap(),
+            [(selected.to_string(), Some("high".into()))]
+        );
         let store = JsonlStore::open_read_only(&session_file).unwrap();
         assert!(store.records().iter().any(|record| matches!(
             record,
@@ -1146,6 +1161,24 @@ fn issue_work_state(work_dir: &Path) -> AppState {
     state.active_work_dir = Some(work_dir);
     state.active_session_id = None;
     state
+}
+
+#[test]
+fn new_session_persists_draft_reasoning_effort() {
+    let project = tempfile::tempdir().unwrap();
+    let mut state = issue_work_state(project.path());
+    state.reasoning_effort = ReasoningEffort::High;
+
+    let session_id = state.create_new_session().unwrap();
+    let session_file = project
+        .path()
+        .join(".threadlane/sessions")
+        .join(format!("{session_id}.jsonl"));
+
+    assert_eq!(
+        JsonlStore::open_read_only(session_file).unwrap().facts()["reasoning_effort"],
+        "High"
+    );
 }
 
 #[test]

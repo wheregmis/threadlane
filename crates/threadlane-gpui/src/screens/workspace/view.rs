@@ -256,6 +256,7 @@ impl WorkspaceView {
                             .or_insert(runtime);
                         state.is_generating = runtime.is_generating();
                         state.selected_model = runtime.selected_model.clone();
+                        state.reasoning_effort = runtime.reasoning_effort();
                         if let Some(status) = runtime_status_text(runtime.status()) {
                             state.session_status = Some(status);
                         }
