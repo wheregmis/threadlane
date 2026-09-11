@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.1.16](https://github.com/wheregmis/threadlane/compare/v0.1.15...v0.1.16) (2026-09-11)
+
+
+### Features
+
+* follow conventional commits format for generated commit messages ([728a15d](https://github.com/wheregmis/threadlane/commit/728a15df207e6ce0d2fb7ba84651f7ed655c3f32))
+* follow conventional commits format for generated commit messages ([e4a70b7](https://github.com/wheregmis/threadlane/commit/e4a70b73adc72aed874c5628c2652ac205d4fe17))
+* **gpui:** float the computer-use mirror inside the chat view ([ea27e83](https://github.com/wheregmis/threadlane/commit/ea27e839ac0324c5faa2388ac2561cad67153bd3))
+
+
+### Bug Fixes
+
+* address dynamic model review feedback ([744a216](https://github.com/wheregmis/threadlane/commit/744a2167f2243e7cf523c93ef5aba19a506d2c19))
+* **gpui:** keep the floating mirror inside the host and release its frames ([a6451dd](https://github.com/wheregmis/threadlane/commit/a6451dd47ff150c1debcdbc97143abb5f7b012d2))
+* **gpui:** keep wasmi off GPUI's 512 KiB worker stacks during hydration ([3fd90f8](https://github.com/wheregmis/threadlane/commit/3fd90f819823585f742e853406f2898ffe8a0bde))
+* preserve effort for draft and background sessions ([9ff57f7](https://github.com/wheregmis/threadlane/commit/9ff57f76d9e56824bf6140fe7c1ebc2e36973b2c))
+* preserve model and reasoning across sessions ([1ceae22](https://github.com/wheregmis/threadlane/commit/1ceae221d52d1b88a0168b74221e4784aea3f4f1))
+* preserve session reasoning effort ([6cca1fe](https://github.com/wheregmis/threadlane/commit/6cca1fe20cfe2150e19b8023bca4cb22919325aa))
+* **router:** address review feedback for commit message normalization ([85b9708](https://github.com/wheregmis/threadlane/commit/85b9708ec12b5451342d0b29f6cef302805ef41a))
+
 ## [0.1.15](https://github.com/wheregmis/threadlane/compare/v0.1.14...v0.1.15) (2026-09-11)
 
 
