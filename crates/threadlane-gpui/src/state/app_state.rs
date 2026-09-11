@@ -1246,10 +1246,11 @@ impl AppState {
         let runtime_status = runtime.map(|runtime| runtime.status());
         let is_active = self.active_work_dir.as_ref() == Some(&session.work_dir)
             && self.active_session_id.as_deref() == Some(session.id.as_str());
-        let git_status = self
-            .git_statuses
-            .get(&session.runtime_work_dir)
-            .or_else(|| self.git_statuses.get(&session.work_dir));
+        let git_status = self.git_statuses.get(&session.runtime_work_dir).or_else(|| {
+            (!session.is_worktree)
+                .then(|| self.git_statuses.get(&session.work_dir))
+                .flatten()
+        });
         let linked_pr = session
             .git_branch
             .as_ref()
