@@ -1271,11 +1271,15 @@ impl AppState {
                     || pr.state.eq_ignore_ascii_case("draft"))
         });
         // A checkout's git status is shared by local sessions, so expose
-        // actionable work to every session that points at that checkout.
+        // actionable work to every session that points at that checkout. A
+        // known completed PR still owns its session and must not be revived
+        // by stale changes left in the shared checkout.
         let actionable_git_work = git_status
             .is_some_and(|status| status.has_changes || status.ahead > 0 || status.pr_ready);
         let branch_is_actionable = session.git_branch.is_some()
             && (linked_pr_is_active || (linked_pr.is_none() && actionable_git_work));
+        let ready_work = branch_is_actionable
+            || (linked_pr.is_none() && actionable_git_work);
         derive_session_attention(
             self.pending_permissions.contains_key(&session.id)
                 || self.pending_questions.contains_key(&session.id),
@@ -1283,7 +1287,7 @@ impl AppState {
             runtime_status.as_ref(),
             runtime.is_some_and(|runtime| runtime.is_generating())
                 || (is_active && self.is_generating),
-            branch_is_actionable || linked_pr_is_active || actionable_git_work,
+            ready_work,
         )
     }
 
