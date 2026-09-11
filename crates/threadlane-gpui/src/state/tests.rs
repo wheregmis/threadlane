@@ -1164,6 +1164,24 @@ fn issue_work_state(work_dir: &Path) -> AppState {
 }
 
 #[test]
+fn new_session_persists_draft_reasoning_effort() {
+    let project = tempfile::tempdir().unwrap();
+    let mut state = issue_work_state(project.path());
+    state.reasoning_effort = ReasoningEffort::High;
+
+    let session_id = state.create_new_session().unwrap();
+    let session_file = project
+        .path()
+        .join(".threadlane/sessions")
+        .join(format!("{session_id}.jsonl"));
+
+    assert_eq!(
+        JsonlStore::open_read_only(session_file).unwrap().facts()["reasoning_effort"],
+        "High"
+    );
+}
+
+#[test]
 fn issue_work_session_persists_link_and_uses_isolated_worktree() {
     let repo = tempfile::tempdir().unwrap();
     run_git(repo.path(), &["init", "-b", "main"]);

@@ -1219,6 +1219,7 @@ impl AppState {
             }
         } else {
             let model = runtime.model().to_owned();
+            let reasoning_effort = runtime.reasoning_effort();
             let (api_key, _) = provider_credentials(&model);
             if api_key.is_empty() && !threadlane_session::is_acp_model(&model) {
                 return None;
@@ -1232,7 +1233,7 @@ impl AppState {
                 session_id.clone(),
                 prompt.clone(),
                 Vec::new(),
-                self.reasoning_effort,
+                reasoning_effort,
                 self.stream_tx.clone(),
                 pending_acp,
             )
@@ -1467,6 +1468,15 @@ impl AppState {
                 }
             }
         }
+
+        threadlane_session::coding_agent::harness::CodingSessionHarness::append_fact_to_path(
+            &session_file,
+            "main",
+            "reasoning_effort",
+            self.reasoning_effort.label(),
+            None,
+        )
+        .map_err(|error| format!("failed to persist reasoning effort: {error}"))?;
 
         if let Some(project) = self
             .projects
