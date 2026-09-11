@@ -1,3 +1,4 @@
+use crate::store::CredentialStore;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::Write;

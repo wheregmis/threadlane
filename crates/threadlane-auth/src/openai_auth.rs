@@ -1,3 +1,4 @@
+use crate::store::CredentialStore;
 use crate::traits::AuthProvider;
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
@@ -6,7 +7,7 @@ use std::fmt;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
@@ -24,6 +25,39 @@ extern "system" {
 
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+const AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
+const DEVICE_USERCODE_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/usercode";
+const DEVICE_TOKEN_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/token";
+
+/// Provider-specific Codex OAuth configuration.
+///
+/// The client ID must stay synchronized with the current Codex login
+/// implementation, and the browser/device redirect URIs with the loopback
+/// listeners below; stale values fail after browser authorization. Hosts that
+/// embed this flow under their own registration pass their own values instead
+/// of editing the defaults.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexOAuthConfig {
+    pub client_id: String,
+    pub token_url: String,
+    pub authorize_url: String,
+    pub browser_redirect_uri: String,
+    pub device_usercode_url: String,
+    pub device_token_url: String,
+}
+
+impl Default for CodexOAuthConfig {
+    fn default() -> Self {
+        Self {
+            client_id: CLIENT_ID.to_string(),
+            token_url: TOKEN_URL.to_string(),
+            authorize_url: AUTHORIZE_URL.to_string(),
+            browser_redirect_uri: BROWSER_REDIRECT_URI.to_string(),
+            device_usercode_url: DEVICE_USERCODE_URL.to_string(),
+            device_token_url: DEVICE_TOKEN_URL.to_string(),
+        }
+    }
+}
 
 fn account_store_guard() -> std::sync::MutexGuard<'static, ()> {
     // ponytail: in-process transactions around atomic file replacement; use
@@ -155,20 +189,6 @@ pub struct StoredCredentials {
     pub source: String,
 }
 
-fn get_threadlane_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let mut path = PathBuf::from(home);
-    path.push(".threadlane");
-    let _ = fs::create_dir_all(&path);
-    path
-}
-
-fn get_credentials_path() -> PathBuf {
-    let mut path = get_threadlane_dir();
-    path.push("credentials.json");
-    path
-}
-
 fn jwt_claims(jwt: &str) -> Option<Value> {
     use base64::Engine;
     let payload = jwt.split('.').nth(1)?;
@@ -197,16 +217,40 @@ fn extract_jwt_claim(jwt: &str, claim_key: &str) -> Option<String> {
     None
 }
 
+/// Test helper: the default store (tests point `HOME` at a temp dir).
+#[cfg(test)]
+fn get_credentials_path() -> PathBuf {
+    CredentialStore::default().credentials_path()
+}
+
+/// Test helper: the default store (tests point `HOME` at a temp dir).
+#[cfg(test)]
 fn save_credentials_store(store: &CodexAccountsStore) -> Result<(), String> {
-    let path = get_credentials_path();
+    save_credentials_store_in(store, &CredentialStore::default())
+}
+
+fn save_credentials_store_in(
+    store: &CodexAccountsStore,
+    locations: &CredentialStore,
+) -> Result<(), String> {
+    let path = locations.credentials_path();
     let json = serde_json::to_string_pretty(store)
         .map_err(|_| "Failed to serialize credentials".to_string())?;
     write_secure_text_file(&path, &json)
 }
 
+/// Test helper: the default store (tests point `HOME` at a temp dir).
+#[cfg(test)]
 fn add_or_update_account(tokens: &OAuthTokens) -> Result<CodexAccount, String> {
+    add_or_update_account_in(tokens, &CredentialStore::default())
+}
+
+fn add_or_update_account_in(
+    tokens: &OAuthTokens,
+    locations: &CredentialStore,
+) -> Result<CodexAccount, String> {
     let _guard = account_store_guard();
-    let mut store = load_credentials_store_unlocked();
+    let mut store = load_credentials_store_unlocked_in(locations);
     let email = tokens
         .id_token
         .as_deref()
@@ -272,12 +316,21 @@ fn add_or_update_account(tokens: &OAuthTokens) -> Result<CodexAccount, String> {
         store.active_account_id = Some(id);
     }
 
-    save_credentials_store(&store)?;
+    save_credentials_store_in(&store, locations)?;
     Ok(account)
 }
 
+/// Test helper: the default store (tests point `HOME` at a temp dir).
+#[cfg(test)]
 fn save_credentials(tokens: &OAuthTokens) -> Result<(), String> {
-    add_or_update_account(tokens).map(|_| ())
+    save_credentials_in(tokens, &CredentialStore::default())
+}
+
+fn save_credentials_in(
+    tokens: &OAuthTokens,
+    locations: &CredentialStore,
+) -> Result<(), String> {
+    add_or_update_account_in(tokens, locations).map(|_| ())
 }
 
 pub fn is_own_source(source: &str) -> bool {
@@ -285,22 +338,21 @@ pub fn is_own_source(source: &str) -> bool {
 }
 
 pub fn remove_credentials() -> Result<(), String> {
-    let _guard = account_store_guard();
-    remove_credentials_file()
+    remove_credentials_in(&CredentialStore::default())
 }
 
-fn remove_credentials_file() -> Result<(), String> {
-    let path = get_credentials_path();
+/// Removes the credentials file at the injected store's location.
+pub fn remove_credentials_in(locations: &CredentialStore) -> Result<(), String> {
+    let _guard = account_store_guard();
+    remove_credentials_file_in(locations)
+}
+
+fn remove_credentials_file_in(locations: &CredentialStore) -> Result<(), String> {
+    let path = locations.credentials_path();
     if path.exists() {
         fs::remove_file(path).map_err(|e| e.to_string())?;
     }
     Ok(())
-}
-
-fn get_openai_api_key_path() -> PathBuf {
-    let mut path = get_threadlane_dir();
-    path.push("openai_api_key");
-    path
 }
 
 #[cfg(windows)]
@@ -394,15 +446,25 @@ fn write_secure_text_file_with_replacer(
 }
 
 pub fn save_openai_api_key(key: &str) -> Result<(), String> {
+    save_openai_api_key_in(key, &CredentialStore::default())
+}
+
+/// Saves the API key file at the injected store's location.
+pub fn save_openai_api_key_in(key: &str, locations: &CredentialStore) -> Result<(), String> {
     if key.trim().is_empty() {
         return Err("OpenAI API key cannot be empty".to_string());
     }
 
-    write_secure_text_file(&get_openai_api_key_path(), key)
+    write_secure_text_file(&locations.openai_api_key_path(), key)
 }
 
 pub fn load_openai_api_key() -> Option<String> {
-    let path = get_openai_api_key_path();
+    load_openai_api_key_in(&CredentialStore::default())
+}
+
+/// Loads the API key file from the injected store's location.
+pub fn load_openai_api_key_in(locations: &CredentialStore) -> Option<String> {
+    let path = locations.openai_api_key_path();
     let key = fs::read_to_string(path).ok()?;
     let key = key.trim().to_string();
     if key.is_empty() {
@@ -412,14 +474,19 @@ pub fn load_openai_api_key() -> Option<String> {
     }
 }
 
+/// Test helper: the default store (tests point `HOME` at a temp dir).
+#[cfg(test)]
 fn load_credentials_store() -> CodexAccountsStore {
-    let _guard = account_store_guard();
-    load_credentials_store_unlocked()
+    load_credentials_store_in(&CredentialStore::default())
 }
 
-fn load_credentials_store_unlocked() -> CodexAccountsStore {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let threadlane_path = get_credentials_path();
+fn load_credentials_store_in(locations: &CredentialStore) -> CodexAccountsStore {
+    let _guard = account_store_guard();
+    load_credentials_store_unlocked_in(locations)
+}
+
+fn load_credentials_store_unlocked_in(locations: &CredentialStore) -> CodexAccountsStore {
+    let threadlane_path = locations.credentials_path();
 
     if threadlane_path.exists() {
         if let Ok(content) = fs::read_to_string(&threadlane_path) {
@@ -451,14 +518,14 @@ fn load_credentials_store_unlocked() -> CodexAccountsStore {
                             source: legacy.source,
                         }],
                     };
-                    let _ = save_credentials_store(&store);
+                    let _ = save_credentials_store_in(&store, locations);
                     return store;
                 }
             }
         }
     }
 
-    let codex_path = PathBuf::from(&home).join(".codex").join("auth.json");
+    let codex_path = locations.codex_cli_auth_path();
     if codex_path.exists() {
         if let Ok(content) = fs::read_to_string(&codex_path) {
             if let Ok(val) = serde_json::from_str::<Value>(&content) {
@@ -513,7 +580,12 @@ fn load_credentials_store_unlocked() -> CodexAccountsStore {
 }
 
 pub fn load_credentials() -> Option<StoredCredentials> {
-    let store = load_credentials_store();
+    load_credentials_in(&CredentialStore::default())
+}
+
+/// Loads the active account from the injected store's location.
+pub fn load_credentials_in(locations: &CredentialStore) -> Option<StoredCredentials> {
+    let store = load_credentials_store_in(locations);
     let account = store.active_account()?;
     Some(StoredCredentials {
         access_token: account.access_token.clone(),
@@ -524,18 +596,33 @@ pub fn load_credentials() -> Option<StoredCredentials> {
 }
 
 pub fn load_all_codex_accounts() -> Vec<CodexAccount> {
-    load_credentials_store().accounts
+    load_all_codex_accounts_in(&CredentialStore::default())
+}
+
+/// Lists all accounts in the injected store's location.
+pub fn load_all_codex_accounts_in(locations: &CredentialStore) -> Vec<CodexAccount> {
+    load_credentials_store_in(locations).accounts
 }
 
 pub fn get_active_codex_account() -> Option<CodexAccount> {
-    load_credentials_store().active_account().cloned()
+    get_active_codex_account_in(&CredentialStore::default())
+}
+
+/// Returns the active account from the injected store's location.
+pub fn get_active_codex_account_in(locations: &CredentialStore) -> Option<CodexAccount> {
+    load_credentials_store_in(locations).active_account().cloned()
 }
 
 /// Find the Threadlane account behind a token, including a token another
 /// running provider has already refreshed. Never borrow another app's login.
 pub fn codex_account_id_for_token(token: &str) -> Option<String> {
+    codex_account_id_for_token_in(token, &CredentialStore::default())
+}
+
+/// Finds the owning account for `token` in the injected store's location.
+pub fn codex_account_id_for_token_in(token: &str, locations: &CredentialStore) -> Option<String> {
     let identity = codex_token_identity(token);
-    load_all_codex_accounts()
+    load_all_codex_accounts_in(locations)
         .into_iter()
         .filter(|account| is_own_source(&account.source))
         .find(|account| {
@@ -558,7 +645,12 @@ fn codex_token_identity(token: &str) -> Option<(String, String)> {
 }
 
 pub fn get_backup_codex_accounts() -> Vec<CodexAccount> {
-    let store = load_credentials_store();
+    get_backup_codex_accounts_in(&CredentialStore::default())
+}
+
+/// Lists non-active accounts from the injected store's location.
+pub fn get_backup_codex_accounts_in(locations: &CredentialStore) -> Vec<CodexAccount> {
+    let store = load_credentials_store_in(locations);
     let active_id = store.active_account().map(|a| a.id.clone());
     store
         .accounts
@@ -568,18 +660,28 @@ pub fn get_backup_codex_accounts() -> Vec<CodexAccount> {
 }
 
 pub fn set_active_codex_account(id: &str) -> Result<(), String> {
+    set_active_codex_account_in(id, &CredentialStore::default())
+}
+
+/// Marks `id` active in the injected store's location.
+pub fn set_active_codex_account_in(id: &str, locations: &CredentialStore) -> Result<(), String> {
     let _guard = account_store_guard();
-    let mut store = load_credentials_store_unlocked();
+    let mut store = load_credentials_store_unlocked_in(locations);
     if !store.accounts.iter().any(|a| a.id == id) {
         return Err(format!("Account '{id}' not found"));
     }
     store.active_account_id = Some(id.to_string());
-    save_credentials_store(&store)
+    save_credentials_store_in(&store, locations)
 }
 
 pub fn remove_codex_account(id: &str) -> Result<(), String> {
+    remove_codex_account_in(id, &CredentialStore::default())
+}
+
+/// Removes `id` from the injected store's location.
+pub fn remove_codex_account_in(id: &str, locations: &CredentialStore) -> Result<(), String> {
     let _guard = account_store_guard();
-    let mut store = load_credentials_store_unlocked();
+    let mut store = load_credentials_store_unlocked_in(locations);
     let initial_len = store.accounts.len();
     store.accounts.retain(|a| a.id != id);
     if store.accounts.len() == initial_len {
@@ -589,9 +691,9 @@ pub fn remove_codex_account(id: &str) -> Result<(), String> {
         store.active_account_id = store.accounts.first().map(|a| a.id.clone());
     }
     if store.accounts.is_empty() {
-        remove_credentials_file()
+        remove_credentials_file_in(locations)
     } else {
-        save_credentials_store(&store)
+        save_credentials_store_in(&store, locations)
     }
 }
 
@@ -609,25 +711,44 @@ fn codex_token_needs_refresh(account: &CodexAccount, now: u64) -> bool {
 /// Resolve the account captured when a provider was created, even if the user
 /// switches the active account while that provider is running.
 pub async fn get_valid_codex_account_token(id: &str) -> Result<String, String> {
-    get_valid_codex_account_token_at(id, TOKEN_URL).await
+    get_valid_codex_account_token_in(id, &CredentialStore::default()).await
 }
 
-async fn get_valid_codex_account_token_at(id: &str, token_url: &str) -> Result<String, String> {
+/// Resolves a usable token for `id` from the injected store's location,
+/// refreshing with the default [`CodexOAuthConfig`] when near expiry.
+pub async fn get_valid_codex_account_token_in(
+    id: &str,
+    locations: &CredentialStore,
+) -> Result<String, String> {
+    let config = CodexOAuthConfig::default();
+    get_valid_codex_account_token_at(id, &config, locations.clone()).await
+}
+
+async fn get_valid_codex_account_token_at(
+    id: &str,
+    config: &CodexOAuthConfig,
+    locations: CredentialStore,
+) -> Result<String, String> {
     let id = id.to_string();
-    let token_url = token_url.to_string();
+    let config = config.clone();
+    let locations = locations;
     // Dropping a Tokio JoinHandle detaches it: cancelling a turn must not
     // abandon a rotated refresh token between the response and secure save.
-    tokio::spawn(async move { resolve_codex_account_token(&id, &token_url).await })
+    tokio::spawn(async move { resolve_codex_account_token(&id, &config, &locations).await })
         .await
         .map_err(|_| "Couldn't refresh ChatGPT sign-in. Try again.".to_string())?
 }
 
-async fn resolve_codex_account_token(id: &str, token_url: &str) -> Result<String, String> {
+async fn resolve_codex_account_token(
+    id: &str,
+    config: &CodexOAuthConfig,
+    locations: &CredentialStore,
+) -> Result<String, String> {
     // ponytail: one refresh gate for all accounts; use per-account gates if
     // concurrent refreshes become common. Reload inside it for rotating tokens.
     static REFRESH_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _guard = REFRESH_GATE.lock().await;
-    let account = load_all_codex_accounts()
+    let account = load_all_codex_accounts_in(locations)
         .into_iter()
         .find(|account| account.id == id && is_own_source(&account.source))
         .ok_or_else(|| {
@@ -641,18 +762,29 @@ async fn resolve_codex_account_token(id: &str, token_url: &str) -> Result<String
     if !codex_token_needs_refresh(&account, now) {
         return Ok(account.access_token);
     }
-    refresh_codex_account_token_at(&account, token_url)
+    refresh_codex_account_token_at(&account, config, locations)
         .await
         .map(|account| account.access_token)
 }
 
 pub async fn refresh_codex_account_token(account: &CodexAccount) -> Result<CodexAccount, String> {
-    refresh_codex_account_token_at(account, TOKEN_URL).await
+    refresh_codex_account_token_in(account, &CredentialStore::default()).await
+}
+
+/// Refreshes `account` with the default [`CodexOAuthConfig`], committing the
+/// rotated tokens to the injected store's location.
+pub async fn refresh_codex_account_token_in(
+    account: &CodexAccount,
+    locations: &CredentialStore,
+) -> Result<CodexAccount, String> {
+    let config = CodexOAuthConfig::default();
+    refresh_codex_account_token_at(account, &config, locations).await
 }
 
 async fn refresh_codex_account_token_at(
     account: &CodexAccount,
-    token_url: &str,
+    config: &CodexOAuthConfig,
+    locations: &CredentialStore,
 ) -> Result<CodexAccount, String> {
     let refresh_token = account.refresh_token.as_ref().ok_or_else(|| {
         "ChatGPT sign-in expired. Sign in again in Settings → Providers.".to_string()
@@ -661,12 +793,12 @@ async fn refresh_codex_account_token_at(
     let body = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("grant_type", "refresh_token")
         .append_pair("refresh_token", refresh_token)
-        .append_pair("client_id", CLIENT_ID)
+        .append_pair("client_id", &config.client_id)
         .finish();
 
     let client = reqwest::Client::new();
     let res = client
-        .post(token_url)
+        .post(&config.token_url)
         .timeout(std::time::Duration::from_secs(30))
         .header(
             reqwest::header::CONTENT_TYPE,
@@ -726,15 +858,16 @@ async fn refresh_codex_account_token_at(
     updated_account.refresh_token = new_refresh;
     updated_account.expires_at = expires_at;
 
-    commit_codex_account_refresh(account, updated_account)
+    commit_codex_account_refresh(account, updated_account, locations)
 }
 
 fn commit_codex_account_refresh(
     original: &CodexAccount,
     refreshed: CodexAccount,
+    locations: &CredentialStore,
 ) -> Result<CodexAccount, String> {
     let _guard = account_store_guard();
-    let mut store = load_credentials_store_unlocked();
+    let mut store = load_credentials_store_unlocked_in(locations);
     let existing = store.accounts.iter_mut()
         .find(|account| account.id == original.id && is_own_source(&account.source))
         .ok_or_else(|| "ChatGPT account was disconnected during refresh. Sign in again in Settings → Providers.".to_string())?;
@@ -748,7 +881,7 @@ fn commit_codex_account_refresh(
     existing.refresh_token = refreshed.refresh_token;
     existing.expires_at = refreshed.expires_at;
     let updated = existing.clone();
-    save_credentials_store(&store)
+    save_credentials_store_in(&store, locations)
         .map_err(|_| "Couldn't save the refreshed ChatGPT sign-in. Check that your Threadlane settings folder is writable, then sign in again.".to_string())?;
     Ok(updated)
 }
@@ -756,11 +889,20 @@ fn commit_codex_account_refresh(
 const BROWSER_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
 
 pub fn build_browser_oauth_url(challenge: &str, state: &str) -> String {
-    let mut url = url::Url::parse("https://auth.openai.com/oauth/authorize").unwrap();
+    build_browser_oauth_url_with(challenge, state, &CodexOAuthConfig::default())
+}
+
+/// Builds the browser OAuth URL from an explicit provider configuration.
+pub fn build_browser_oauth_url_with(
+    challenge: &str,
+    state: &str,
+    config: &CodexOAuthConfig,
+) -> String {
+    let mut url = url::Url::parse(&config.authorize_url).unwrap();
     url.query_pairs_mut()
-        .append_pair("client_id", CLIENT_ID)
+        .append_pair("client_id", &config.client_id)
         .append_pair("response_type", "code")
-        .append_pair("redirect_uri", BROWSER_REDIRECT_URI)
+        .append_pair("redirect_uri", &config.browser_redirect_uri)
         .append_pair("scope", "openid profile email offline_access")
         .append_pair("code_challenge", challenge)
         .append_pair("code_challenge_method", "S256")
@@ -873,17 +1015,34 @@ pub async fn exchange_browser_code_for_tokens(
     code: &str,
     code_verifier: &str,
 ) -> Result<CodexAccount, String> {
+    exchange_browser_code_for_tokens_in(
+        code,
+        code_verifier,
+        &CodexOAuthConfig::default(),
+        &CredentialStore::default(),
+    )
+    .await
+}
+
+/// Exchanges a browser OAuth code with an explicit provider configuration,
+/// persisting the account to the injected store's location.
+pub async fn exchange_browser_code_for_tokens_in(
+    code: &str,
+    code_verifier: &str,
+    config: &CodexOAuthConfig,
+    locations: &CredentialStore,
+) -> Result<CodexAccount, String> {
     let body = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("grant_type", "authorization_code")
         .append_pair("code", code)
-        .append_pair("redirect_uri", BROWSER_REDIRECT_URI)
-        .append_pair("client_id", CLIENT_ID)
+        .append_pair("redirect_uri", &config.browser_redirect_uri)
+        .append_pair("client_id", &config.client_id)
         .append_pair("code_verifier", code_verifier)
         .finish();
 
     let client = reqwest::Client::new();
     let res = client
-        .post("https://auth.openai.com/oauth/token")
+        .post(&config.token_url)
         .header(
             reqwest::header::CONTENT_TYPE,
             "application/x-www-form-urlencoded",
@@ -923,18 +1082,25 @@ pub async fn exchange_browser_code_for_tokens(
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
         };
-        return add_or_update_account(&tokens);
+        return add_or_update_account_in(&tokens, locations);
     }
 
     Err("Code exchange returned no access token".into())
 }
 
 pub async fn start_device_login() -> Result<DeviceCodeResponse, String> {
+    start_device_login_with(&CodexOAuthConfig::default()).await
+}
+
+/// Starts device login against an explicit provider configuration.
+pub async fn start_device_login_with(
+    config: &CodexOAuthConfig,
+) -> Result<DeviceCodeResponse, String> {
     let client = reqwest::Client::new();
     let res = client
-        .post("https://auth.openai.com/api/accounts/deviceauth/usercode")
+        .post(&config.device_usercode_url)
         .json(&serde_json::json!({
-            "client_id": CLIENT_ID,
+            "client_id": config.client_id,
         }))
         .send()
         .await
@@ -957,8 +1123,26 @@ pub async fn poll_device_token(
     device_auth_id: &str,
     user_code: &str,
 ) -> Result<OAuthTokens, String> {
-    let tokens = poll_device_token_without_saving(device_auth_id, user_code).await?;
-    save_credentials(&tokens)?;
+    poll_device_token_in(
+        device_auth_id,
+        user_code,
+        &CodexOAuthConfig::default(),
+        &CredentialStore::default(),
+    )
+    .await
+}
+
+/// Polls the device endpoint from an explicit provider configuration,
+/// persisting the tokens to the injected store's location.
+pub async fn poll_device_token_in(
+    device_auth_id: &str,
+    user_code: &str,
+    config: &CodexOAuthConfig,
+    locations: &CredentialStore,
+) -> Result<OAuthTokens, String> {
+    let tokens =
+        poll_device_token_without_saving(device_auth_id, user_code, config).await?;
+    save_credentials_in(&tokens, locations)?;
     Ok(tokens)
 }
 
@@ -1000,10 +1184,11 @@ fn device_token_error(status: reqwest::StatusCode, body: &str) -> Option<String>
 async fn poll_device_token_without_saving(
     device_auth_id: &str,
     user_code: &str,
+    config: &CodexOAuthConfig,
 ) -> Result<OAuthTokens, String> {
     let client = reqwest::Client::new();
     let res = client
-        .post("https://auth.openai.com/api/accounts/deviceauth/token")
+        .post(&config.device_token_url)
         .json(&serde_json::json!({
             "device_auth_id": device_auth_id,
             "user_code": user_code
@@ -1048,6 +1233,7 @@ async fn poll_device_token_without_saving(
         return exchange_authorization_code_without_saving(
             &code.authorization_code,
             &code.code_verifier,
+            config,
         )
         .await;
     }
@@ -1055,7 +1241,7 @@ async fn poll_device_token_without_saving(
     Err("Unexpected OAuth token response".into())
 }
 
-fn token_exchange_body(code: &str, code_verifier: &str) -> String {
+fn token_exchange_body(code: &str, code_verifier: &str, config: &CodexOAuthConfig) -> String {
     url::form_urlencoded::Serializer::new(String::new())
         .append_pair("grant_type", "authorization_code")
         .append_pair("code", code)
@@ -1063,7 +1249,7 @@ fn token_exchange_body(code: &str, code_verifier: &str) -> String {
             "redirect_uri",
             "https://auth.openai.com/deviceauth/callback",
         )
-        .append_pair("client_id", CLIENT_ID)
+        .append_pair("client_id", &config.client_id)
         .append_pair("code_verifier", code_verifier)
         .finish()
 }
@@ -1071,15 +1257,16 @@ fn token_exchange_body(code: &str, code_verifier: &str) -> String {
 async fn exchange_authorization_code_without_saving(
     code: &str,
     code_verifier: &str,
+    config: &CodexOAuthConfig,
 ) -> Result<OAuthTokens, String> {
     let client = reqwest::Client::new();
     let res = client
-        .post("https://auth.openai.com/oauth/token")
+        .post(&config.token_url)
         .header(
             reqwest::header::CONTENT_TYPE,
             "application/x-www-form-urlencoded",
         )
-        .body(token_exchange_body(code, code_verifier))
+        .body(token_exchange_body(code, code_verifier, config))
         .send()
         .await
         .map_err(|e| format!("Error exchanging code for OAuth token: {e}"))?;
@@ -1241,7 +1428,8 @@ mod tests {
 
     #[test]
     fn test_token_exchange_body_uses_device_callback_and_pkce() {
-        let body = token_exchange_body("code with spaces", "verifier+/=");
+        let config = CodexOAuthConfig::default();
+        let body = token_exchange_body("code with spaces", "verifier+/=", &config);
         let params = url::form_urlencoded::parse(body.as_bytes())
             .into_owned()
             .collect::<std::collections::HashMap<_, _>>();
