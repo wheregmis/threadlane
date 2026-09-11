@@ -34,7 +34,7 @@ fn open_archive_session_dialog(
         let work_dir = work_dir.clone();
         let session_id = session_id.clone();
         let delete_worktree = delete_worktree.clone();
-        move |alert, _window, cx| {
+        move |alert, _window, _cx| {
             let model = model.clone();
             let work_dir = work_dir.clone();
             let session_id = session_id.clone();
@@ -114,7 +114,7 @@ fn open_remove_session_dialog(
         let work_dir = work_dir.clone();
         let session_id = session_id.clone();
         let delete_worktree = delete_worktree.clone();
-        move |alert, _window, cx| {
+        move |alert, _window, _cx| {
             let model = model.clone();
             let work_dir = work_dir.clone();
             let session_id = session_id.clone();
@@ -946,6 +946,8 @@ impl SidebarView {
         let context_work_dir = session.work_dir.clone();
         let context_session_id = session.id.clone();
         let context_model = self.model.clone();
+        let context_is_worktree = session.is_worktree;
+        let context_git_branch = session.git_branch.clone();
         let copy_session_file = session.session_file.display().to_string();
         let export_log_source = session.session_file.clone();
         let export_trajectory_title = session.title.clone();
@@ -1376,13 +1378,13 @@ impl SidebarView {
                 let settle_model = context_model.clone();
                 let settle_work_dir = context_work_dir.clone();
                 let settle_session_id = context_session_id.clone();
-                let settle_is_worktree = session.is_worktree;
-                let settle_git_branch = session.git_branch.clone();
+                let settle_is_worktree = context_is_worktree;
+                let settle_git_branch = context_git_branch.clone();
                 let remove_model = context_model.clone();
                 let remove_work_dir = context_work_dir.clone();
                 let remove_session_id = context_session_id.clone();
-                let remove_is_worktree = session.is_worktree;
-                let remove_git_branch = session.git_branch.clone();
+                let remove_is_worktree = context_is_worktree;
+                let remove_git_branch = context_git_branch.clone();
 
                 menu.item(PopupMenuItem::new("Open Session").on_click(
                     move |_event, _window, cx| {

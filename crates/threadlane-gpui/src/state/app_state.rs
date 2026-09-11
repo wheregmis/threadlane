@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Sender};
 use std::time::{SystemTime, UNIX_EPOCH};
-use threadlane_session::harness::JsonlStore;
+use threadlane_session::harness::{JsonlStore, SessionStore};
 use threadlane_session::{
     AcpConfigOption, AgentEvent, AgentMessage, ImageAttachment, ReasoningEffort, SessionPlan,
     SubagentProgressUpdate, TokenUsage,
