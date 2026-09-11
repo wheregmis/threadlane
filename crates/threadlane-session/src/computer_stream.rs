@@ -11,10 +11,12 @@
 //!   did not change. This is what makes the mirror feel like video instead
 //!   of a slideshow.
 //! - **Model tier**: a best-resolution composite kept in memory as a raw
-//!   1560px BGRA frame at most every 500ms, so `computer_screenshot` serves
-//!   the current picture instantly; the JPEG is encoded only when the model
-//!   asks. Full resolution keeps text legible when the target is a small
-//!   window. Nothing touches disk until a screenshot is actually served.
+//!   1560px BGRA frame at most every 500ms while computer calls are recent,
+//!   so `computer_screenshot` serves the current picture instantly during a
+//!   screenshot/act sequence; the JPEG is encoded only when the model asks,
+//!   and a screenshot after a quiet spell simply takes the one-shot path.
+//!   Full resolution keeps text legible when the target is a small window.
+//!   Nothing touches disk until a screenshot is actually served.
 //!
 //! Frames are never pushed into model context automatically: the model only
 //! receives pixels when it explicitly calls `computer_screenshot`.
@@ -251,6 +253,13 @@ pub(crate) fn tick_interval_ms(
     }
 }
 
+/// Whether the model tier should refresh this tick: only while the model is
+/// actively using the computer, so a mirror-only feed never pays for 2×
+/// composites nobody will ask for, and only once per model interval.
+pub(crate) fn model_tier_due(since_activity_ms: u128, since_model_ms: u128) -> bool {
+    since_activity_ms < LIVE_BOOST_MS && since_model_ms >= u128::from(MODEL_FRAME_INTERVAL_MS)
+}
+
 /// True once the poller should stop: no computer calls for two minutes with
 /// nobody watching, or ten minutes regardless.
 pub(crate) fn should_exit(watchers: usize, since_activity_ms: u128) -> bool {
@@ -341,8 +350,7 @@ fn poll_loop() {
             since_activity,
             started.saturating_sub(current.last_change_ms),
         );
-        let model_due =
-            started.saturating_sub(last_model_ms) >= u128::from(MODEL_FRAME_INTERVAL_MS);
+        let model_due = model_tier_due(since_activity, started.saturating_sub(last_model_ms));
         // Nobody watching and nothing due: nothing to composite this tick.
         if watchers == 0 && !model_due {
             sleep_ms = interval;
@@ -521,6 +529,16 @@ mod tests {
         );
         assert!(LIVE_ACTIVE_INTERVAL_MS < LIVE_QUIET_INTERVAL_MS);
         assert!(LIVE_QUIET_INTERVAL_MS < MODEL_FRAME_INTERVAL_MS);
+    }
+
+    #[test]
+    fn model_tier_refreshes_only_during_recent_activity() {
+        // Fresh activity: refresh once the model interval has elapsed.
+        assert!(model_tier_due(0, u128::from(MODEL_FRAME_INTERVAL_MS)));
+        assert!(!model_tier_due(0, u128::from(MODEL_FRAME_INTERVAL_MS) - 1));
+        // A quiet model: nothing to keep warm, whatever the clock says.
+        assert!(!model_tier_due(LIVE_BOOST_MS, u128::MAX));
+        assert!(model_tier_due(LIVE_BOOST_MS - 1, u128::MAX));
     }
 
     #[test]
