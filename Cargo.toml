@@ -11,6 +11,7 @@ edition = "2021"
 
 [workspace.dependencies]
 # Internal workspace crates
+threadlane-acp = { version = "0.1.0", path = "crates/threadlane-acp" }
 threadlane-auth = { version = "0.1.0", path = "crates/threadlane-auth" }
 threadlane-benchmarks = { version = "0.0.0", path = "crates/threadlane-benchmarks" }
 threadlane-git = { version = "0.1.0", path = "crates/threadlane-git" }

@@ -8237,6 +8237,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "threadlane-acp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "threadlane-auth"
 version = "0.1.0"
 dependencies = [
@@ -8405,6 +8416,7 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.20",
+ "threadlane-acp",
  "threadlane-auth",
  "threadlane-git",
  "threadlane-mcp",

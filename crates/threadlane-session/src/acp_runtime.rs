@@ -30,7 +30,7 @@ use crate::acp::{
     config_option_for, AcpClientHandler, AcpConfigOption, AcpContentBlock, AcpManager,
     AcpPermissionOptionKind, AcpPermissionOutcome, AcpPermissionRequest, AcpReadTextFileRequest,
     AcpSession, AcpSessionNotification, AcpSessionUpdate, AcpStopReason, AcpToolCall,
-    AcpWorkspaceClient, AcpWriteTextFileRequest, ACP_CONFIG_CATEGORY_EFFORT,
+    AcpWriteTextFileRequest, ACP_CONFIG_CATEGORY_EFFORT,
     ACP_CONFIG_CATEGORY_MODEL,
 };
 use crate::acp_bridge::agent_events_for;
@@ -375,7 +375,7 @@ impl AcpEngine {
         self.shutdown().await;
         let (updates_tx, updates_rx) = mpsc::unbounded_channel();
         let (permission_turn, permission_rx) = watch::channel(PermissionTurn::default());
-        let handler = AcpWorkspaceClient::new(self.work_dir.clone())
+        let handler = crate::acp::session_workspace_client(self.work_dir.clone())
             .with_update_sender(updates_tx)
             .with_permission_responder(permission_responder(
                 event_tx.clone(),
