@@ -5,6 +5,7 @@ pub mod agents;
 pub mod browser;
 pub mod commands;
 pub mod computer;
+pub mod computer_live;
 #[cfg(target_os = "macos")]
 pub(crate) mod computer_stream;
 pub mod config;

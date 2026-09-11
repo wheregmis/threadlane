@@ -10,6 +10,11 @@
 //! Screenshots reach the model as JPEG images attached to the tool result
 //! alongside text metadata; the full file also lands in
 //! `<work_dir>/.threadlane/previews/` for the user.
+//!
+//! Every screenshot and act also feeds the in-process live mirror
+//! ([`crate::computer_live`]): the poller in `computer_stream` streams the
+//! target as video while the GPUI popup watches, and acts publish overlays
+//! so the user sees where a click lands.
 
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
@@ -570,129 +575,220 @@ mod mac {
         })
     }
 
-    /// Composite every on-screen window except ours into a bounded JPEG.
-    /// Returns (jpeg bytes, served width, served height, source points
-    /// width). Unlike `screencapture` this never includes Threadlane's own
-    /// windows, so a mirror popup cannot recurse. Fails closed (Err) when
-    /// the composite is blank, e.g. without Screen Recording permission —
-    /// the caller falls back to `screencapture`.
-    pub(super) fn capture_composited_jpeg(
-        max_width: u32,
-        quality: u8,
-    ) -> Result<(Vec<u8>, u32, u32, f64), String> {
-        use core_graphics::display::CGDisplay;
-        let source_points = CGDisplay::main().bounds().size.width;
-        let (bytes, width, height) =
-            capture_composited_ids(&capture_window_ids(), max_width, quality)?;
-        Ok((bytes, width, height, source_points))
+    /// One WindowServer composite of a target: full-resolution pixels plus
+    /// the screen-space geometry needed to scale and map them. Both tiers
+    /// (live BGRA for the mirror, JPEG for the model) derive from one
+    /// composite, so a poll costs one WindowServer round trip.
+    pub(crate) struct Composite {
+        image: core_graphics::image::CGImage,
+        /// Top-left of the captured region in display points.
+        pub(crate) origin_points: (f64, f64),
+        /// Captured region size in display points.
+        pub(crate) points_size: (f64, f64),
     }
 
-    /// Composite one window by id, cropped to the window rect: the model sees
-    /// just that window and coordinates are window-local. Returns (jpeg
-    /// bytes, served width, served height, source points width).
-    pub(super) fn capture_composited_window(
-        window_id: i32,
-        max_width: u32,
-        quality: u8,
-    ) -> Result<(Vec<u8>, u32, u32, f64), String> {
-        use core_graphics::display::CGDisplay;
-
-        let bounds = window_infos()
-            .ok()
-            .and_then(|infos| {
-                infos.into_iter().find_map(|window| {
-                    (window.id == window_id && window.onscreen).then_some(window.bounds)
-                })
-            })
-            .ok_or_else(|| {
-                format!(
-                    "Window {window_id} is gone; re-list with computer_windows and pick a live id."
-                )
-            })?;
-        let display_points = CGDisplay::main().bounds().size.width;
-        if display_points <= 0.0 {
-            return Err("Could not read display bounds.".to_string());
+    impl Composite {
+        /// Downscale to at most `max_width` pixels wide as premultiplied
+        /// little-endian BGRA (B, G, R, A in memory), the layout gpui uploads
+        /// untouched. CoreGraphics resamples in one pass; no Rust per-pixel
+        /// loop. Fails closed on a blank composite, which is what a denied
+        /// Screen Recording permission produces.
+        pub(crate) fn bgra(&self, max_width: u32) -> Result<(Vec<u8>, u32, u32), String> {
+            let (bgra, width, height) = scale_bgra(&self.image, max_width)?;
+            if crate::computer_stream::is_blank(&bgra, 4) {
+                return Err(
+                    "Window composite is blank (Screen Recording permission likely missing)."
+                        .to_string(),
+                );
+            }
+            Ok((bgra, width, height))
         }
-        // Near-native composite (2x points, bounded) so the crop stays sharp,
-        // then downscale the crop for context.
-        let cap = ((display_points * 2.0).round() as u32).max(1);
-        let (bytes, served_w, _) = capture_composited_ids(&[window_id], cap, 100)?;
-        let pixel_scale = f64::from(served_w) / display_points;
-        let image = image::load_from_memory(&bytes)
-            .map_err(|error| format!("Could not decode composite: {error}"))?
-            .to_rgb8();
-        let (img_w, img_h) = (image.width(), image.height());
-        let left = ((bounds.0 * pixel_scale).round() as u32).min(img_w.saturating_sub(1));
-        let top = ((bounds.1 * pixel_scale).round() as u32).min(img_h.saturating_sub(1));
-        let width = ((bounds.2 * pixel_scale).round() as u32)
-            .min(img_w.saturating_sub(left))
-            .max(1);
-        let height = ((bounds.3 * pixel_scale).round() as u32)
-            .min(img_h.saturating_sub(top))
-            .max(1);
-        let cropped = image::imageops::crop_imm(&image, left, top, width, height).to_image();
-        let (bytes, width, height) = crate::computer_stream::encode_bounded_jpeg(
-            cropped.as_raw(),
-            width,
-            height,
-            max_width,
-            quality,
-        )?;
-        Ok((bytes, width, height, bounds.2))
+
+        /// Bounded JPEG for the model from the same composite.
+        pub(crate) fn jpeg(
+            &self,
+            max_width: u32,
+            quality: u8,
+        ) -> Result<(Vec<u8>, u32, u32), String> {
+            let (bgra, width, height) = self.bgra(max_width)?;
+            let jpeg = crate::computer_stream::encode_bgra_jpeg(&bgra, width, height, quality)?;
+            Ok((jpeg, width, height))
+        }
     }
 
-    fn capture_composited_ids(
-        ids: &[i32],
-        max_width: u32,
-        quality: u8,
-    ) -> Result<(Vec<u8>, u32, u32), String> {
+    /// Whether this process may read other apps' pixels. Never prompts.
+    /// Without the grant a composite is not blank but hollow — other apps'
+    /// windows are silently omitted — so ask first instead of inspecting.
+    pub(crate) fn screen_capture_granted() -> bool {
+        #[link(name = "CoreGraphics", kind = "framework")]
+        extern "C" {
+            fn CGPreflightScreenCaptureAccess() -> bool;
+        }
+        unsafe { CGPreflightScreenCaptureAccess() }
+    }
+
+    pub(crate) const SCREEN_RECORDING_HINT: &str = "Screen Recording permission is missing: grant it to this app in System Settings → Privacy & Security, then retry.";
+
+    pub(crate) enum CaptureResolution {
+        /// Display-point resolution for the live mirror.
+        Nominal,
+        /// Full-resolution capture for model screenshots.
+        Best,
+    }
+
+    /// Composite `target` through the WindowServer: every on-screen window
+    /// except ours for the display, or one window cropped to its bounds so
+    /// the model sees just what it drives and coordinates stay window-local.
+    /// Unlike `screencapture` this never includes Threadlane's own windows,
+    /// so a mirror popup cannot recurse. Fails closed without Screen
+    /// Recording access so callers fall back to `screencapture`, which owns
+    /// the TCC prompt.
+    pub(crate) fn composite_target(
+        target: crate::computer_stream::StreamTarget,
+        resolution: CaptureResolution,
+    ) -> Result<Composite, String> {
         use core_foundation::array::CFArray;
         use core_graphics::display::CGDisplay;
-        use core_graphics::window::{create_image_from_array, kCGWindowImageDefault};
+        use core_graphics::geometry::{CGPoint, CGRect, CGSize};
+        use core_graphics::window::{
+            create_image_from_array, kCGWindowImageDefault, kCGWindowImageNominalResolution,
+        };
 
-        if ids.is_empty() {
-            return Err("No capturable windows.".to_string());
+        if !screen_capture_granted() {
+            return Err(SCREEN_RECORDING_HINT.to_string());
         }
-        // Raw u32 values with no CF callbacks, exactly like the system
-        // `create_window_list` array: WindowServer reads plain window numbers
-        // here, not CFNumber objects.
-        let raw: Vec<u32> = ids.iter().map(|id| *id as u32).collect();
+        let (ids, rect) = match target {
+            crate::computer_stream::StreamTarget::Display => {
+                let ids = capture_window_ids();
+                if ids.is_empty() {
+                    return Err("No capturable windows.".to_string());
+                }
+                (ids, CGDisplay::main().bounds())
+            }
+            crate::computer_stream::StreamTarget::Window(id) => {
+                let id = id as i32;
+                let bounds = window_infos()
+                    .ok()
+                    .and_then(|infos| {
+                        infos.into_iter().find_map(|window| {
+                            (window.id == id && window.onscreen).then_some(window.bounds)
+                        })
+                    })
+                    .ok_or_else(|| {
+                        format!(
+                            "Window {id} is gone; re-list with computer_windows and pick a live id."
+                        )
+                    })?;
+                if bounds.2 < 1.0 || bounds.3 < 1.0 {
+                    return Err(format!("Window {id} has no visible area."));
+                }
+                (
+                    vec![id],
+                    CGRect::new(
+                        &CGPoint::new(bounds.0, bounds.1),
+                        &CGSize::new(bounds.2, bounds.3),
+                    ),
+                )
+            }
+        };
+        // Plain window numbers with no CF callbacks, exactly like the system
+        // `create_window_list` array: WindowServer reads each element as a
+        // `CGWindowID` cast to `void*`, not a CFNumber object. The elements
+        // must be pointer-sized — `CFArrayCreate` copies `len` pointers out
+        // of the buffer, so a `u32` slice would pair up ids and read past
+        // its end.
+        let raw: Vec<usize> = ids.iter().map(|id| *id as u32 as usize).collect();
         let array = CFArray::from_copyable(&raw).to_untyped();
-        let bounds = CGDisplay::main().bounds();
-        let image = create_image_from_array(bounds, array, kCGWindowImageDefault)
+        let option = match resolution {
+            CaptureResolution::Nominal => kCGWindowImageNominalResolution,
+            CaptureResolution::Best => kCGWindowImageDefault,
+        };
+        let image = create_image_from_array(rect, array, option)
             .ok_or_else(|| "Window composite failed.".to_string())?;
-        let width = image.width() as u32;
-        let height = image.height() as u32;
-        if width == 0 || height == 0 {
+        if image.width() == 0 || image.height() == 0 {
             return Err("Window composite is empty.".to_string());
         }
-        if image.bits_per_pixel() != 32 {
-            return Err(format!(
-                "Unexpected composite depth: {}bpp.",
-                image.bits_per_pixel()
-            ));
+        Ok(Composite {
+            image,
+            origin_points: (rect.origin.x, rect.origin.y),
+            points_size: (rect.size.width, rect.size.height),
+        })
+    }
+
+    /// Draw `image` into a bounded bitmap context and hand back its bytes:
+    /// opaque BGRA, rows top-down, `width × 4` bytes per row. The context is
+    /// first filled with a dark backdrop: windows-only composites leave
+    /// uncovered desktop transparent, and gpui blends with straight alpha,
+    /// so opaque output is the only layout both tiers agree on.
+    fn scale_bgra(
+        image: &core_graphics::image::CGImage,
+        max_width: u32,
+    ) -> Result<(Vec<u8>, u32, u32), String> {
+        use core_graphics::base::{kCGBitmapByteOrder32Little, kCGImageAlphaPremultipliedFirst};
+        use core_graphics::context::{CGContext, CGInterpolationQuality};
+        use core_graphics::geometry::{CGPoint, CGRect, CGSize};
+
+        let source_width = u32::try_from(image.width()).unwrap_or(u32::MAX);
+        let source_height = u32::try_from(image.height()).unwrap_or(u32::MAX);
+        if source_width == 0 || source_height == 0 {
+            return Err("Window composite is empty.".to_string());
         }
-        let stride = image.bytes_per_row();
-        let pixels = image.data();
-        let raw = pixels.bytes();
-        // BGRA, honoring row stride, alpha assumed opaque (window server output).
-        let mut rgb = Vec::with_capacity((width as usize) * (height as usize) * 3);
-        for y in 0..height as usize {
-            let row = &raw[y * stride..];
-            for x in 0..width as usize {
-                let offset = x * 4;
-                rgb.push(row[offset + 2]);
-                rgb.push(row[offset + 1]);
-                rgb.push(row[offset]);
+        let width = source_width.min(max_width.max(1));
+        let height =
+            ((u64::from(source_height) * u64::from(width)) / u64::from(source_width)).max(1) as u32;
+        let bytes_per_row = width as usize * 4;
+        // The composite's own profile: a DeviceRGB/sRGB context would colour
+        // match every pixel (+25ms measured) for a picture that is, by
+        // definition, already what the screen shows.
+        let color_space = image.color_space();
+        let mut context = CGContext::create_bitmap_context(
+            None,
+            width as usize,
+            height as usize,
+            8,
+            bytes_per_row,
+            &color_space,
+            kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little,
+        );
+        let rect = CGRect::new(
+            &CGPoint::new(0.0, 0.0),
+            &CGSize::new(f64::from(width), f64::from(height)),
+        );
+        context.set_rgb_fill_color(0.08, 0.08, 0.09, 1.0);
+        context.fill_rect(rect);
+        context.set_interpolation_quality(if width < source_width {
+            CGInterpolationQuality::CGInterpolationQualityLow
+        } else {
+            CGInterpolationQuality::CGInterpolationQualityNone
+        });
+        context.draw_image(rect, image);
+        context.flush();
+        let stride = context.bytes_per_row();
+        let rows = height as usize;
+        let data = context.data();
+        if data.len() < stride * rows {
+            return Err("Bitmap context is short.".to_string());
+        }
+        let mut bgra = Vec::with_capacity(bytes_per_row * rows);
+        if stride == bytes_per_row {
+            bgra.extend_from_slice(&data[..bytes_per_row * rows]);
+        } else {
+            for row in 0..rows {
+                bgra.extend_from_slice(&data[row * stride..row * stride + bytes_per_row]);
             }
         }
-        if crate::computer_stream::is_blank(&rgb) {
-            return Err(
-                "Window composite is blank (Screen Recording permission likely missing)."
-                    .to_string(),
-            );
-        }
-        crate::computer_stream::encode_bounded_jpeg(&rgb, width, height, max_width, quality)
+        Ok((bgra, width, height))
+    }
+
+    /// Current pointer position in display points (top-left origin), for the
+    /// mirror's cursor overlay. `None` without an event source.
+    pub(crate) fn pointer_location() -> Option<(f64, f64)> {
+        use core_graphics::event::CGEvent;
+        use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+        let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState).ok()?;
+        let location = CGEvent::new(source).ok()?.location();
+        Some((location.x, location.y))
     }
 
     /// Display points per served image pixel: window bounds and input
@@ -882,21 +978,35 @@ impl ComputerToolExecutor {
             Some(id) => crate::computer_stream::StreamTarget::Window(id as u32),
             None => crate::computer_stream::StreamTarget::Display,
         };
-        crate::computer_stream::ensure_stream(target, Some(mirror_dir.join("latest-frame.jpg")));
+        crate::computer_stream::ensure_stream(target);
         if let Some(frame) = crate::computer_stream::fresh_frame(target) {
-            std::fs::write(&path, &frame.jpeg)
+            // Only the JPEG encode is paid here, off the async executor.
+            let (width, height, src_points_width) =
+                (frame.width, frame.height, frame.src_points_width);
+            let jpeg = tokio::task::spawn_blocking(move || {
+                crate::computer_stream::encode_bgra_jpeg(
+                    &frame.bgra,
+                    frame.width,
+                    frame.height,
+                    SCREENSHOT_JPEG_QUALITY,
+                )
+            })
+            .await
+            .map_err(|error| format!("Screenshot encode failed: {error}"))??;
+            std::fs::write(&path, &jpeg)
                 .map_err(|error| format!("Could not save screenshot: {error}"))?;
             write_mirror_sidecar(
                 &mirror_dir,
                 Some(&path),
                 &format!("Screenshot {} (live)", target.label()),
             );
+            note_screenshot(target);
             return Ok(attach_jpeg(
                 &path,
-                &frame.jpeg,
-                &format!("{}x{}", frame.width, frame.height),
+                &jpeg,
+                &format!("{width}x{height}"),
                 Some(target),
-                frame.src_points_width / f64::from(frame.width.max(1)),
+                src_points_width / f64::from(width.max(1)),
             ));
         }
         // One-shot capture, target-aware: a window id composites just that
@@ -905,12 +1015,11 @@ impl ComputerToolExecutor {
         // the TCC prompt) when the composite is unavailable or blank.
         // Each arm yields (bytes, dims text, source points width) so clicks
         // convert image pixels back to display points exactly.
-        let (bytes, dims, src_points_width) = match match window_id {
-            Some(id) => {
-                mac::capture_composited_window(id as i32, SCREENSHOT_WIDTH, SCREENSHOT_JPEG_QUALITY)
-            }
-            None => mac::capture_composited_jpeg(SCREENSHOT_WIDTH, SCREENSHOT_JPEG_QUALITY),
-        } {
+        let (bytes, dims, src_points_width) = match capture_composited_for_target(
+            target,
+            SCREENSHOT_WIDTH,
+            SCREENSHOT_JPEG_QUALITY,
+        ) {
             Ok((bytes, width, height, src_points_width)) => {
                 std::fs::write(&path, &bytes)
                     .map_err(|error| format!("Could not save screenshot: {error}"))?;
@@ -940,6 +1049,7 @@ impl ComputerToolExecutor {
             Some(&path),
             &format!("Screenshot {}", target.label()),
         );
+        note_screenshot(target);
         let served_width = dims
             .split('x')
             .next()
@@ -1000,22 +1110,72 @@ impl ComputerToolExecutor {
             format!("{title} on this Mac. {delivery} Deny if the target looks wrong."),
         )
         .await?;
+        // Keep the live mirror rolling through act sequences and show the
+        // user where this one lands as it happens.
+        let mirror_dir = global_previews_dir().unwrap_or_else(|| mac::previews_dir(work_dir));
+        crate::computer_stream::touch_or_start(
+            scale_target.unwrap_or(crate::computer_stream::StreamTarget::Display),
+        );
+        publish_act_overlay(&targeted.intent, &title);
         let outcome =
             tokio::task::spawn_blocking(move || perform_act(&targeted.intent, targeted.pid))
                 .await
                 .map_err(|error| format!("Input task failed: {error}"))?;
         if let Ok(outcome) = &outcome {
-            let dir = global_previews_dir().unwrap_or_else(|| mac::previews_dir(work_dir));
-            write_mirror_sidecar(&dir, None, &format!("{title} — {outcome}{scale_note}"));
+            write_mirror_sidecar(
+                &mirror_dir,
+                None,
+                &format!("{title} — {outcome}{scale_note}"),
+            );
         }
         outcome.map(|outcome| format!("{outcome}{scale_note}"))
     }
+}
+
+/// Flash the mirror: the model just took a picture of `target`.
+#[cfg(target_os = "macos")]
+fn note_screenshot(target: crate::computer_stream::StreamTarget) {
+    crate::computer_live::publish_overlay(
+        crate::computer_live::LiveOverlayKind::Screenshot,
+        None,
+        None,
+        format!("Screenshot {}", target.label()),
+    );
+}
+
+/// Publish the mirror overlay for an act in screen space, after target
+/// resolution so window-relative coordinates already carry the window
+/// origin.
+#[cfg(target_os = "macos")]
+fn publish_act_overlay(intent: &ComputerAct, label: &str) {
+    use crate::computer_live::{publish_overlay, LiveOverlayKind};
+    match intent {
+        ComputerAct::Click { x, y, .. } => {
+            publish_overlay(LiveOverlayKind::Click, Some((*x, *y)), None, label)
+        }
+        ComputerAct::DoubleClick { x, y, .. } => {
+            publish_overlay(LiveOverlayKind::DoubleClick, Some((*x, *y)), None, label)
+        }
+        ComputerAct::Move { x, y } => {
+            publish_overlay(LiveOverlayKind::Move, Some((*x, *y)), None, label)
+        }
+        // Wheel events land under the pointer.
+        ComputerAct::Scroll { dx, dy } => publish_overlay(
+            LiveOverlayKind::Scroll,
+            mac::pointer_location(),
+            Some((*dx, *dy)),
+            label,
+        ),
+        ComputerAct::Type { .. } => publish_overlay(LiveOverlayKind::Type, None, None, label),
+        ComputerAct::Press { .. } => publish_overlay(LiveOverlayKind::Press, None, None, label),
+    };
 }
 
 /// Build the screenshot tool output: text metadata plus the JPEG for the
 /// model, unless it exceeds the model byte cap (metadata only then) or is
 /// pixel-identical to what the model last received for the target (a
 /// one-line unchanged note, no re-attached image).
+#[cfg(target_os = "macos")]
 fn attach_jpeg(
     path: &Path,
     bytes: &[u8],
@@ -1070,43 +1230,38 @@ fn attach_jpeg(
     }
 }
 
-/// Target-aware one-shot composite for the stream poller: a single window by
-/// id, or the display minus our own windows.
+/// Target-aware one-shot JPEG for the model: a single window by id, or the
+/// display minus our own windows. Returns (jpeg bytes, served width, served
+/// height, source points width).
 #[cfg(target_os = "macos")]
 pub(crate) fn capture_composited_for_target(
     target: crate::computer_stream::StreamTarget,
     max_width: u32,
     quality: u8,
 ) -> Result<(Vec<u8>, u32, u32, f64), String> {
-    match target {
-        crate::computer_stream::StreamTarget::Window(id) => {
-            mac::capture_composited_window(id as i32, max_width, quality)
-        }
-        crate::computer_stream::StreamTarget::Display => {
-            mac::capture_composited_jpeg(max_width, quality)
-        }
-    }
+    let composite = mac::composite_target(target, mac::CaptureResolution::Best)?;
+    let (jpeg, width, height) = composite.jpeg(max_width, quality)?;
+    Ok((jpeg, width, height, composite.points_size.0))
 }
 
-/// Mirror-popup action line without a new preview (e.g. after an input
-/// action): keeps the last image, refreshes the status text.
-pub(crate) fn write_mirror_sidecar_action(dir: &Path, action: &str) {
-    let path = serde_json::from_str::<serde_json::Value>(
-        &std::fs::read_to_string(dir.join("latest.json")).unwrap_or_default(),
-    )
-    .ok()
-    .and_then(|value| {
-        value
-            .get("path")
-            .and_then(|value| value.as_str())
-            .map(PathBuf::from)
-    });
-    write_mirror_sidecar(dir, path.as_deref(), action);
+#[cfg(target_os = "macos")]
+pub(crate) use mac::{composite_target, pointer_location, CaptureResolution};
+
+/// Start the live feed on the main display for the user's own mirror, with
+/// no model in the loop: a developer hook (`THREADLANE_MIRROR_DEBUG`) for
+/// observing and profiling the video path. Frames stay in-process and are
+/// never attached to a tool result, so no permission gate applies.
+#[cfg(target_os = "macos")]
+pub fn watch_display_for_debug() {
+    crate::computer_stream::ensure_stream(crate::computer_stream::StreamTarget::Display);
 }
+
+#[cfg(not(target_os = "macos"))]
+pub fn watch_display_for_debug() {}
 
 /// Global live-mirror dir (`~/.threadlane/previews/`): the popup is global
-/// while sessions live in per-project worktrees, so `latest.json` and
-/// `latest-frame.jpg` live here. Timestamped history files stay per-project.
+/// while sessions live in per-project worktrees, so `latest.json` lives
+/// here. Timestamped history files stay per-project.
 #[cfg(target_os = "macos")]
 pub fn global_previews_dir() -> Option<PathBuf> {
     threadlane_wasi::packages::default_global_threadlane_dir().map(|dir| dir.join("previews"))
@@ -1650,6 +1805,65 @@ mod tests {
         }
     }
 
+    /// Live composite to BGRA: needs Screen Recording TCC, so ignored in CI.
+    /// Proves the bitmap-context path yields opaque, bounded, non-blank
+    /// frames with the geometry the mirror needs to map points.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn live_composite_scales_to_bgra() {
+        use crate::computer_live::LIVE_FRAME_MAX_WIDTH;
+        let composite = super::mac::composite_target(
+            crate::computer_stream::StreamTarget::Display,
+            super::mac::CaptureResolution::Nominal,
+        )
+        .expect("display composite");
+        let (bgra, width, height) = composite.bgra(LIVE_FRAME_MAX_WIDTH).expect("bgra frame");
+        assert!(width <= LIVE_FRAME_MAX_WIDTH && width > 0 && height > 0);
+        assert_eq!(bgra.len(), (width * height * 4) as usize);
+        // Windows-only composites leave uncovered desktop transparent, so
+        // alpha is premultiplied and mixed: some opaque, none half-baked
+        // beyond what premultiplication allows (colour never exceeds alpha).
+        assert!(
+            bgra.chunks_exact(4).any(|pixel| pixel[3] == 255),
+            "some opaque"
+        );
+        assert!(
+            bgra.chunks_exact(4)
+                .all(|pixel| pixel[0] <= pixel[3] && pixel[1] <= pixel[3] && pixel[2] <= pixel[3]),
+            "premultiplied"
+        );
+        assert!(composite.points_size.0 > 0.0);
+        let started = std::time::Instant::now();
+        for _ in 0..10 {
+            let composite = super::mac::composite_target(
+                crate::computer_stream::StreamTarget::Display,
+                super::mac::CaptureResolution::Nominal,
+            )
+            .expect("display composite");
+            composite.bgra(LIVE_FRAME_MAX_WIDTH).expect("bgra frame");
+        }
+        eprintln!(
+            "live tier (nominal composite + bgra): {:.1}ms per frame at {}x{}",
+            started.elapsed().as_secs_f64() * 100.0,
+            width,
+            height
+        );
+        let started = std::time::Instant::now();
+        for _ in 0..5 {
+            super::capture_composited_for_target(
+                crate::computer_stream::StreamTarget::Display,
+                super::SCREENSHOT_WIDTH,
+                super::SCREENSHOT_JPEG_QUALITY,
+            )
+            .expect("model jpeg");
+        }
+        eprintln!(
+            "model tier (best composite + jpeg): {:.1}ms per frame",
+            started.elapsed().as_secs_f64() * 200.0
+        );
+    }
+
     /// Live capture: needs Screen Recording TCC, so ignored in CI. Run by
     /// hand with `-- --ignored` to prove pixels flow end to end.
     #[cfg(target_os = "macos")]
@@ -1716,8 +1930,8 @@ mod tests {
             .into_iter()
             .find(|window| window.bounds.2 > 400.0 && window.bounds.3 > 300.0)
             .expect("a sizable window");
-        let (bytes, width, height, src_points) = super::mac::capture_composited_window(
-            big.id,
+        let (bytes, width, height, src_points) = super::capture_composited_for_target(
+            crate::computer_stream::StreamTarget::Window(big.id as u32),
             super::SCREENSHOT_WIDTH,
             super::SCREENSHOT_JPEG_QUALITY,
         )
