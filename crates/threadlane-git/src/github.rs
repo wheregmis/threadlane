@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -15,11 +16,30 @@ use crate::types::{
 };
 
 const PR_INSPECTION_TTL: Duration = Duration::from_secs(30);
+const GITHUB_RESPONSE_TTL: Duration = Duration::from_secs(30);
 
 type PrCacheKey = (PathBuf, String);
+type GithubListCacheKey = (PathBuf, String);
+type GithubIssueCacheKey = (PathBuf, u64);
 
 static PR_CACHE: OnceLock<Mutex<HashMap<PrCacheKey, (Instant, Option<GitHubPrInfo>)>>> =
     OnceLock::new();
+static ISSUE_LIST_CACHE: OnceLock<
+    Mutex<HashMap<GithubListCacheKey, (Instant, Vec<GitHubIssueSummary>)>>,
+> = OnceLock::new();
+static PR_LIST_CACHE: OnceLock<
+    Mutex<HashMap<GithubListCacheKey, (Instant, Vec<GitHubPullRequestSummary>)>>,
+> = OnceLock::new();
+static ISSUE_DETAIL_CACHE: OnceLock<
+    Mutex<HashMap<GithubIssueCacheKey, (Instant, GitHubIssueDetail)>>,
+> = OnceLock::new();
+
+pub(crate) fn prune_expired<K, T>(cache: &mut HashMap<K, (Instant, T)>, now: Instant, ttl: Duration)
+where
+    K: Eq + Hash,
+{
+    cache.retain(|_, (created, _)| now.duration_since(*created) <= ttl);
+}
 
 pub(crate) fn fresh_cache_value<T: Clone>(
     entry: &(Instant, T),
@@ -43,6 +63,30 @@ pub(crate) fn invalidate_pr_cache(work_dir: &Path, branch: &str) {
     if let Some(cache) = PR_CACHE.get() {
         if let Ok(mut cache) = cache.lock() {
             cache.remove(&pr_cache_key(work_dir, branch));
+        }
+    }
+}
+
+pub fn invalidate_github_cache(work_dir: &Path) {
+    let repository = repository_key(work_dir);
+    if let Some(cache) = PR_CACHE.get() {
+        if let Ok(mut cache) = cache.lock() {
+            cache.retain(|(path, _), _| path != &repository);
+        }
+    }
+    if let Some(cache) = ISSUE_LIST_CACHE.get() {
+        if let Ok(mut cache) = cache.lock() {
+            cache.retain(|(path, _), _| path != &repository);
+        }
+    }
+    if let Some(cache) = PR_LIST_CACHE.get() {
+        if let Ok(mut cache) = cache.lock() {
+            cache.retain(|(path, _), _| path != &repository);
+        }
+    }
+    if let Some(cache) = ISSUE_DETAIL_CACHE.get() {
+        if let Ok(mut cache) = cache.lock() {
+            cache.retain(|(path, _), _| path != &repository);
         }
     }
 }
@@ -507,6 +551,9 @@ pub fn inspect_pr_for_branch(
     let key = pr_cache_key(work_dir, branch);
     let now = Instant::now();
     let cache = PR_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut cache) = cache.lock() {
+        prune_expired(&mut cache, now, PR_INSPECTION_TTL);
+    }
     if let Some(info) = cache.lock().ok().and_then(|cache| {
         cache
             .get(&key)
@@ -759,6 +806,19 @@ pub fn list_github_issues(
 ) -> Result<Vec<GitHubIssueSummary>, GitError> {
     let args = github_issue_list_args(state, query, limit)
         .map_err(|message| GitError::new(work_dir, message))?;
+    let key = (repository_key(work_dir), args.join("\0"));
+    let now = Instant::now();
+    let cache = ISSUE_LIST_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut cache) = cache.lock() {
+        prune_expired(&mut cache, now, GITHUB_RESPONSE_TTL);
+    }
+    if let Some(rows) = cache.lock().ok().and_then(|cache| {
+        cache
+            .get(&key)
+            .and_then(|entry| fresh_cache_value(entry, now, GITHUB_RESPONSE_TTL))
+    }) {
+        return Ok(rows);
+    }
     let output = execute_gh(work_dir, &args)?;
     let values: Vec<serde_json::Value> = serde_json::from_str(&output).map_err(|error| {
         GitError::new(
@@ -766,22 +826,43 @@ pub fn list_github_issues(
             format!("could not parse GitHub issue list: {error}"),
         )
     })?;
-    values
+    let rows = values
         .into_iter()
         .map(|value| parse_github_issue_json(&value.to_string()).map(|detail| detail.summary))
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| GitError::new(work_dir, format!("could not parse GitHub issue: {error}")))
+        .map_err(|error| {
+            GitError::new(work_dir, format!("could not parse GitHub issue: {error}"))
+        })?;
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(key, (now, rows.clone()));
+    }
+    Ok(rows)
 }
-
 pub fn inspect_github_issue(work_dir: &Path, number: u64) -> Result<GitHubIssueDetail, GitError> {
+    let key = (repository_key(work_dir), number);
+    let now = Instant::now();
+    let cache = ISSUE_DETAIL_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut cache) = cache.lock() {
+        prune_expired(&mut cache, now, GITHUB_RESPONSE_TTL);
+    }
+    if let Some(detail) = cache.lock().ok().and_then(|cache| {
+        cache
+            .get(&key)
+            .and_then(|entry| fresh_cache_value(entry, now, GITHUB_RESPONSE_TTL))
+    }) {
+        return Ok(detail);
+    }
     let args =
         github_issue_view_args(number).map_err(|message| GitError::new(work_dir, message))?;
     let output = execute_gh(work_dir, &args)?;
-    parse_github_issue_json(&output).map_err(|message| {
+    let detail = parse_github_issue_json(&output).map_err(|message| {
         GitError::new(work_dir, format!("could not parse GitHub issue: {message}"))
-    })
+    })?;
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(key, (now, detail.clone()));
+    }
+    Ok(detail)
 }
-
 pub fn list_github_pull_requests(
     work_dir: &Path,
     state: &str,
@@ -790,6 +871,19 @@ pub fn list_github_pull_requests(
 ) -> Result<Vec<GitHubPullRequestSummary>, GitError> {
     let args = github_pr_list_args(state, query, limit)
         .map_err(|message| GitError::new(work_dir, message))?;
+    let key = (repository_key(work_dir), args.join("\0"));
+    let now = Instant::now();
+    let cache = PR_LIST_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut cache) = cache.lock() {
+        prune_expired(&mut cache, now, GITHUB_RESPONSE_TTL);
+    }
+    if let Some(rows) = cache.lock().ok().and_then(|cache| {
+        cache
+            .get(&key)
+            .and_then(|entry| fresh_cache_value(entry, now, GITHUB_RESPONSE_TTL))
+    }) {
+        return Ok(rows);
+    }
     let output = execute_gh(work_dir, &args)?;
     let values: Vec<serde_json::Value> = serde_json::from_str(&output).map_err(|error| {
         GitError::new(
@@ -797,7 +891,7 @@ pub fn list_github_pull_requests(
             format!("could not parse GitHub pull request list: {error}"),
         )
     })?;
-    values
+    let rows = values
         .into_iter()
         .map(|value| {
             let pr = parse_gh_pr_json(&value.to_string())?;
@@ -823,13 +917,17 @@ pub fn list_github_pull_requests(
                 work_dir,
                 format!("could not parse GitHub pull request: {message}"),
             )
-        })
+        })?;
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(key, (now, rows.clone()));
+    }
+    Ok(rows)
 }
 
 pub fn inspect_pr_number(work_dir: &Path, number: u64) -> Result<GitHubPrInfo, GitError> {
     validate_github_number(number, "pull request")
         .map_err(|message| GitError::new(work_dir, message))?;
-    inspect_pr_uncached(work_dir, &number.to_string())?.ok_or_else(|| {
+    inspect_pr_for_branch(work_dir, &number.to_string())?.ok_or_else(|| {
         GitError::new(
             work_dir,
             format!("GitHub pull request #{number} was not found"),
@@ -914,6 +1012,7 @@ pub fn comment_on_github_issue(
     validate_github_number(number, "issue").map_err(|message| GitError::new(work_dir, message))?;
     let body =
         validated_text(body, "comment body").map_err(|message| GitError::new(work_dir, message))?;
+    invalidate_github_cache(work_dir);
     execute_gh(
         work_dir,
         &[
@@ -933,6 +1032,7 @@ pub fn comment_on_pull_request(
 ) -> Result<String, GitError> {
     let args =
         github_pr_comment_args(number, body).map_err(|message| GitError::new(work_dir, message))?;
+    invalidate_github_cache(work_dir);
     execute_gh(work_dir, &args)
 }
 
@@ -981,6 +1081,7 @@ pub fn reply_to_pull_request_review_comment(
         repository.owner, repository.repo
     );
     let body = format!("body={body}");
+    invalidate_github_cache(work_dir);
     execute_gh(
         work_dir,
         &github_api_args(
@@ -1009,6 +1110,7 @@ pub fn submit_pull_request_review(
     };
     let (repository, _review_endpoint) = validated_review_endpoint(pull_request)
         .map_err(|message| GitError::new(work_dir, message))?;
+    invalidate_github_cache(work_dir);
     let review = execute_gh(work_dir, &args)?;
     let endpoint = format!(
         "repos/{}/{}/pulls/{}/comments",
