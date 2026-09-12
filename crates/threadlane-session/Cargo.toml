@@ -22,6 +22,7 @@ threadlane-acp.workspace = true
 threadlane-runtime.workspace = true
 threadlane-protocol.workspace = true
 threadlane-auth.workspace = true
+threadlane-computer.workspace = true
 threadlane-tools.workspace = true
 threadlane-provider.workspace = true
 threadlane-mcp.workspace = true
@@ -44,8 +45,3 @@ reqwest = { workspace = true, features = ["rustls-tls", "stream"] }
 
 [dev-dependencies]
 tempfile.workspace = true
-
-[target.'cfg(target_os = "macos")'.dependencies]
-core-graphics = { version = "0.25", features = ["elcapitan", "highsierra"] }
-core-foundation = "0.10"
-image.workspace = true

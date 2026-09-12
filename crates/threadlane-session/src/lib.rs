@@ -8,12 +8,6 @@ pub use threadlane_skills::agents as agents;
 pub mod browser;
 pub mod commands;
 pub mod computer;
-/// Live computer-use feed, canonical in `threadlane-protocol::live`.
-/// Re-exported here so existing `threadlane_session::computer_live` paths
-/// keep working; new code should import `threadlane_protocol::live` directly.
-pub use threadlane_protocol::live as computer_live;
-#[cfg(target_os = "macos")]
-pub(crate) mod computer_stream;
 pub mod config;
 /// Project context discovery, canonical in `threadlane-prompt`.
 /// Re-exported here so existing `threadlane_session::context` paths keep
@@ -28,7 +22,10 @@ pub mod mcp;
 /// working; new code should import `threadlane_runtime::orchestrator` directly.
 pub use threadlane_runtime::orchestrator as orchestrator;
 pub mod permission;
-mod plan;
+/// Model-managed session plans, canonical in `threadlane_runtime::plan`.
+/// Re-exported here so existing `threadlane_session::plan` paths keep
+/// working; new code should import `threadlane_runtime::plan` directly.
+pub use threadlane_runtime::plan as plan;
 /// Execution policy, canonical in `threadlane_runtime::capability`.
 /// Re-exported here so existing `threadlane_session::ToolPolicy` paths keep
 /// working; new code should import `threadlane_runtime::ToolPolicy` directly.

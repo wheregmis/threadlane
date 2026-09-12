@@ -1,3 +1,4 @@
+pub mod browser;
 pub mod capability;
 pub mod compaction;
 pub mod config;
@@ -9,7 +10,9 @@ pub(crate) mod loop_detector;
 pub(crate) mod loop_engine;
 pub mod model_metadata;
 pub mod orchestrator;
+pub mod plan;
 pub mod provider;
+pub mod question;
 pub mod rules;
 pub mod tool_dispatcher;
 pub mod tool_executor;
@@ -29,7 +32,7 @@ pub use compaction::{
     CompactionOptions, CompactionStrategy, compact_messages, compact_messages_with_strategy,
     compaction_summary_text, prepare_token_optimal_context, prune_historical_tool_outputs,
 };
-pub use config::{AgentConfig, AgentConfigBuilder};
+pub use config::{AgentConfig, AgentConfigBuilder, CodingAgentConfig, CodingAgentConfigBuilder};
 pub use error::AgentError;
 pub use events::{
     AgentEvent, HarnessMetrics, PermissionRequest, PermissionScope, QuestionAnswer, QuestionItem,

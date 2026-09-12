@@ -14,6 +14,7 @@ edition = "2021"
 threadlane-acp = { version = "0.1.0", path = "crates/threadlane-acp" }
 threadlane-auth = { version = "0.1.0", path = "crates/threadlane-auth" }
 threadlane-benchmarks = { version = "0.0.0", path = "crates/threadlane-benchmarks" }
+threadlane-computer = { version = "0.1.0", path = "crates/threadlane-computer" }
 threadlane-git = { version = "0.1.0", path = "crates/threadlane-git" }
 threadlane-gpui = { version = "0.1.16", path = "crates/threadlane-gpui" }
 threadlane-hashline = { version = "0.1.0", path = "crates/threadlane-hashline" }

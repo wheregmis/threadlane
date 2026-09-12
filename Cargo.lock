@@ -8277,6 +8277,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "threadlane-computer"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "core-foundation 0.10.1",
+ "core-graphics 0.25.0",
+ "image",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "threadlane-protocol",
+ "threadlane-runtime",
+ "threadlane-wasi",
+ "tokio",
+]
+
+[[package]]
 name = "threadlane-git"
 version = "0.1.0"
 dependencies = [
@@ -8284,6 +8302,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "threadlane-auth",
+ "threadlane-project",
 ]
 
 [[package]]
@@ -8423,11 +8442,8 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64",
- "core-foundation 0.10.1",
- "core-graphics 0.25.0",
  "directories",
  "futures",
- "image",
  "log",
  "reqwest",
  "serde",
@@ -8437,6 +8453,7 @@ dependencies = [
  "thiserror 2.0.20",
  "threadlane-acp",
  "threadlane-auth",
+ "threadlane-computer",
  "threadlane-git",
  "threadlane-mcp",
  "threadlane-project",

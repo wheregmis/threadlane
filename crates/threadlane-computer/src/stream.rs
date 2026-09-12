@@ -5,7 +5,7 @@
 //! evaluated and rejected: they link Swift runtime dylibs that break the
 //! build and packaged app). Each poll serves two tiers:
 //!
-//! - **Live tier** ([`crate::computer_live`]): a nominal-resolution composite
+//! - **Live tier** ([`threadlane_protocol::live`]): a nominal-resolution composite
 //!   scaled to bounded opaque BGRA for the GPUI mirror, published in-process
 //!   at up to 20fps while a mirror is subscribed and skipped when the pixels
 //!   did not change. This is what makes the mirror feel like video instead
@@ -31,8 +31,8 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use super::computer::{composite_target, pointer_location, CaptureResolution, SCREENSHOT_WIDTH};
-pub(crate) use crate::computer_live::StreamTarget;
-use crate::computer_live::{self, LiveFrame, LiveStatus, LIVE_FRAME_MAX_WIDTH};
+pub(crate) use threadlane_protocol::live::StreamTarget;
+use threadlane_protocol::live::{self as computer_live, LiveFrame, LiveStatus, LIVE_FRAME_MAX_WIDTH};
 
 /// Model tier cadence: refresh the in-memory best-resolution frame at most
 /// this often.

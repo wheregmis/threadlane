@@ -1,12 +1,22 @@
+//! Model-managed session plans (`update_plan` tool).
+//!
+//! Canonical home for the plan tool executor previously defined in
+//! `threadlane_session::plan`. It depends only on runtime types
+//! (`SessionPlan`, `ToolExecutor`, `AgentEvent`, `harness::JsonlStore`), so
+//! it lives with the execution engine. Re-exported through
+//! `threadlane_session::plan` for compatibility; new code should import
+//! `threadlane_runtime::plan` directly.
+
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use threadlane_runtime::{
+use tokio::sync::broadcast;
+
+use crate::{
     harness::JsonlStore, AgentEvent, AgentToolDefinition, PlanItem, PlanItemStatus, SessionPlan,
     ToolExecutor,
 };
-use tokio::sync::broadcast;
 
 const UPDATE_PLAN_TOOL_NAME: &str = "update_plan";
 const MAX_PLAN_ITEMS: usize = 20;
@@ -67,7 +77,7 @@ fn parse_update_plan(args: &str) -> Result<SessionPlan, String> {
 }
 
 #[derive(Clone)]
-pub(crate) struct SessionPlanStore {
+pub struct SessionPlanStore {
     inner: Arc<Mutex<SessionPlanState>>,
 }
 
@@ -77,14 +87,14 @@ struct SessionPlanState {
 }
 
 impl SessionPlanStore {
-    pub(crate) fn new(plan: SessionPlan, session_file: Option<PathBuf>) -> Self {
+    pub fn new(plan: SessionPlan, session_file: Option<PathBuf>) -> Self {
         Self {
             inner: Arc::new(Mutex::new(SessionPlanState { plan, session_file })),
         }
     }
 
     #[allow(dead_code)]
-    pub(crate) fn current(&self) -> SessionPlan {
+    pub fn current(&self) -> SessionPlan {
         self.inner.lock().unwrap().plan.clone()
     }
 
@@ -105,13 +115,13 @@ impl SessionPlanStore {
     }
 }
 
-pub(crate) struct UpdatePlanToolExecutor {
+pub struct UpdatePlanToolExecutor {
     store: SessionPlanStore,
     event_tx: broadcast::Sender<AgentEvent>,
 }
 
 impl UpdatePlanToolExecutor {
-    pub(crate) fn new(store: SessionPlanStore, event_tx: broadcast::Sender<AgentEvent>) -> Self {
+    pub fn new(store: SessionPlanStore, event_tx: broadcast::Sender<AgentEvent>) -> Self {
         Self { store, event_tx }
     }
 }
@@ -186,8 +196,8 @@ impl ToolExecutor for UpdatePlanToolExecutor {
 mod tests {
     use super::*;
     use std::time::Duration;
-    use threadlane_runtime::harness::SessionStore;
-    use threadlane_runtime::{AgentEvent, PlanItemStatus, ToolExecutor};
+    use crate::harness::SessionStore;
+    use crate::{AgentEvent, PlanItemStatus, ToolExecutor};
 
     #[test]
     fn parses_a_complete_replacement_plan() {
@@ -244,7 +254,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            threadlane_runtime::harness::JsonlStore::open_read_only(&path)
+            crate::harness::JsonlStore::open_read_only(&path)
                 .unwrap()
                 .plan(),
             store.current()

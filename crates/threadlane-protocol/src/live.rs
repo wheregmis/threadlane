@@ -1,7 +1,7 @@
 //! In-process live feed for native computer use.
 //!
 //! The GPUI mirror wants video, not a slideshow. The macOS poller in
-//! `threadlane-session::computer_stream` publishes bounded opaque BGRA frames
+//! `threadlane_computer::stream` publishes bounded opaque BGRA frames
 //! here at up to 20fps while a mirror is subscribed, along with input
 //! overlays (where a click landed, what was typed) and poller status for the
 //! mirror header. Everything is process-global because the poller is: one
@@ -10,9 +10,8 @@
 //! This module lives in `threadlane-protocol` (moved from
 //! `threadlane-session::computer_live`) because it is the contract between
 //! the session producer and the GPUI consumer: it has no session, runtime,
-//! or GPUI dependencies, only `tokio::sync` channels. `threadlane-session`
-//! `threadlane-session` re-exports it as `computer_live` for backward
-//! compatibility; new code should import from here directly. Nothing here
+//! or GPUI dependencies, only `tokio::sync` channels. New code should import
+//! from here directly. Nothing here
 //! reaches the model: pixels enter context only through explicit
 //! `computer_screenshot` calls.
 

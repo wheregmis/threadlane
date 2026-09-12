@@ -9,8 +9,8 @@
 //!
 //! Moved verbatim from `threadlane-session::browser` (bridge, commands, and
 //! tool-name constants). The tool *executor* (`BrowserToolExecutor`, schema
-//! definitions, argument parsing) stays in `threadlane-session`, which owns
-//! the runtime `ToolExecutor` trait. `threadlane-session` re-exports this
+//! definitions, argument parsing) lives in `threadlane_runtime::browser`,
+//! which owns the `ToolExecutor` trait. `threadlane-session` re-exports this
 //! module as `browser` for compatibility; new code should import
 //! `threadlane_protocol::browser` directly.
 //!

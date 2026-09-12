@@ -15,10 +15,11 @@ Threadlane is a Rust workspace centered on a native GPUI desktop application (`c
 - `crates/threadlane-runtime/` — agent execution engine, harness V2 durability, provider routing, compaction, and turn driver. Depends on `threadlane-provider`, never the reverse.
 - `crates/threadlane-session/` — session orchestration (CodingAgent, supervisor), ACP client, WASI broker, skills, subagents, and project context. Owns the auth-backed provider credential bridge (`credentials::AuthCredentialBridge`).
 - `crates/threadlane-provider/` — dependency-free provider layer: payload translation (`convert`), model registry, shared Tokio reactor (`exec`), and per-backend clients. Takes credentials as arguments/traits, never reads a credential store.
-- `crates/threadlane-protocol/` — shared contract types: wire shapes plus the model-visible message cluster (`messages`: `AgentMessage`, `AgentToolDefinition`, `ReasoningEffort`, …) used by both provider and runtime.
+- `crates/threadlane-protocol/` — shared contract types: wire shapes plus the model-visible message cluster (`messages`: `AgentMessage`, `AgentToolDefinition`, `ReasoningEffort`, …) and user-interaction contracts (`interaction`: `PermissionRequest`/`PermissionScope`, `QuestionRequest`/`QuestionAnswer`, …) used by runtime, session, and UI surfaces.
 - `crates/threadlane-tools/` — tool implementations and capability support.
 - `crates/threadlane-auth/` — authentication helpers.
-- `crates/threadlane-git/` — git repository integration.
+- `crates/threadlane-computer/` — native computer-use tools (macOS window listing, screenshots, input) behind the `ComputerApproval` trait; session implements approval with its permission manager.
+- `crates/threadlane-git/` — git repository integration and PR review feedback (forge types, actionable-feedback extraction, tracking store, auto-address prompts).
 - `crates/threadlane-updater/` — signed update checks, downloads, installation, and relaunch.
 - `crates/threadlane-wasi/` — WASI extension runner.
 - `extensions/` — WASI extensions built for `wasm32-wasip1`.

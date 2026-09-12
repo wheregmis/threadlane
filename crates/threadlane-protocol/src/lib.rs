@@ -1,10 +1,15 @@
 use serde::{Deserialize, Serialize};
 
 pub mod browser;
+pub mod interaction;
 pub mod live;
 pub mod messages;
 
 pub use browser::{ActTarget, BrowserBridge, BrowserCommand, BrowserRequest};
+pub use interaction::{
+    PermissionRequest, PermissionScope, QuestionAnswer, QuestionItem, QuestionItemAnswer,
+    QuestionRequest,
+};
 pub use live::{
     LiveFrame, LiveOverlay, LiveOverlayKind, LiveStatus, StreamTarget, LIVE_FRAME_MAX_WIDTH,
 };
