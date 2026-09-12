@@ -40,7 +40,7 @@ fn dump_config(args: &[String]) -> Result<(), String> {
         system_prompt: Default::default(),
         agent_config: None,
         coding_config: None,
-        browser: threadlane_session::BrowserBridge::unavailable(),
+        browser: threadlane_protocol::browser::BrowserBridge::unavailable(),
     };
     let mut manager = SkillManager::new();
     manager.discover_skills(Some(&project));

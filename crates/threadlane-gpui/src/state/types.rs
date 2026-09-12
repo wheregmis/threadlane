@@ -7,7 +7,7 @@ use threadlane_session::{AcpConfigOption, AgentEvent, ImageAttachment, SessionPl
 use super::AppState;
 use crate::services::sessions::{SessionRuntime, SessionRuntimeStatus};
 
-pub type AttachedProject = threadlane_session::ProjectRecord;
+pub type AttachedProject = threadlane_project::ProjectRecord;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum SessionHealth {
@@ -318,7 +318,7 @@ pub(crate) struct SessionHydrationRequest {
         PathBuf,
         String,
         threadlane_session::ModelRoles,
-        threadlane_session::BrowserBridge,
+        threadlane_protocol::browser::BrowserBridge,
     )>,
 }
 

@@ -4,9 +4,12 @@ use crate::types::AgentMessage;
 
 use serde::{Deserialize, Serialize};
 
-pub const MAX_CONTEXT_SNAPSHOT_INDEX_ENTRIES: usize = 20;
-pub const MAX_CONTEXT_SNAPSHOT_INDEX_CHARS: usize = 4_000;
-const CONTEXT_SNAPSHOT_INDEX_HEADING: &str = "## Available context snapshots";
+// Checkpoint text helpers live in `threadlane-provider` (payload translation
+// needs them); re-exported here so existing paths keep working.
+pub use threadlane_provider::convert::{
+    compaction_checkpoint_text, compaction_summary_text, MAX_CONTEXT_SNAPSHOT_INDEX_CHARS,
+    MAX_CONTEXT_SNAPSHOT_INDEX_ENTRIES,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum CompactionStrategy {
@@ -174,66 +177,6 @@ pub(crate) fn is_context_overflow_error(error: &str) -> bool {
         || error.contains("too many tokens")
 }
 
-pub fn compaction_summary_text(message: &AgentMessage) -> Option<&str> {
-    let AgentMessage::Custom {
-        custom_type,
-        payload,
-    } = message
-    else {
-        return None;
-    };
-    if custom_type != "compaction_summary" {
-        return None;
-    }
-    payload.get("summary").and_then(serde_json::Value::as_str)
-}
-
-pub(crate) fn compaction_checkpoint_text(message: &AgentMessage) -> Option<String> {
-    let summary = compaction_summary_text(message)?;
-    let AgentMessage::Custom { payload, .. } = message else {
-        unreachable!();
-    };
-    let Some(entries) = payload
-        .get("context_snapshot_index")
-        .and_then(serde_json::Value::as_array)
-    else {
-        return Some(summary.to_owned());
-    };
-    let mut index = CONTEXT_SNAPSHOT_INDEX_HEADING.to_owned();
-    let mut included = 0;
-    for entry in entries.iter().take(MAX_CONTEXT_SNAPSHOT_INDEX_ENTRIES) {
-        let (Some(context_id), Some(path), Some(file_sha256)) = (
-            entry.get("context_id").and_then(serde_json::Value::as_str),
-            entry.get("path").and_then(serde_json::Value::as_str),
-            entry.get("file_sha256").and_then(serde_json::Value::as_str),
-        ) else {
-            continue;
-        };
-        let location = match (
-            entry.get("start_line").and_then(serde_json::Value::as_u64),
-            entry.get("end_line").and_then(serde_json::Value::as_u64),
-        ) {
-            (None, None) => path.to_owned(),
-            (start, end) => format!(
-                "{path}:{}-{}",
-                start.map_or_else(String::new, |line| line.to_string()),
-                end.map_or_else(String::new, |line| line.to_string())
-            ),
-        };
-        let line = format!("- {context_id} {location} sha256={file_sha256}");
-        if index.chars().count() + 1 + line.chars().count() > MAX_CONTEXT_SNAPSHOT_INDEX_CHARS {
-            break;
-        }
-        index.push('\n');
-        index.push_str(&line);
-        included += 1;
-    }
-    Some(if included == 0 {
-        summary.to_owned()
-    } else {
-        format!("{summary}\n\n{index}")
-    })
-}
 
 pub fn compact_messages(
     messages: &[AgentMessage],

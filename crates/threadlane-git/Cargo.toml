@@ -8,6 +8,7 @@ description = "Project-local Git operations and status parsing for threadlane ag
 serde.workspace = true
 serde_json.workspace = true
 threadlane-auth.workspace = true
+threadlane-project.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

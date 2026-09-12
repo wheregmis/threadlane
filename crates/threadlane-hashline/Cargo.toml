@@ -3,6 +3,11 @@ name = "threadlane-hashline"
 version = "0.1.0"
 edition = "2021"
 description = "Line:hash anchor calculation and precise text edit engine for threadlane tools"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/threadlane/threadlane"
+keywords = ["text-editing", "diff", "anchors"]
+categories = ["text-processing"]
+rust-version = "1.95"
 
 [dependencies]
 serde.workspace = true

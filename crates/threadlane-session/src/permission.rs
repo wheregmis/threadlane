@@ -409,6 +409,25 @@ impl PermissionManager {
     }
 }
 
+/// Approval channel backing `threadlane_computer`: the executor prompts
+/// through the session permission manager, so computer actions keep the
+/// Once/Always scopes, per-project persisted grant, and default-deny
+/// unattended posture of every other capability.
+#[async_trait::async_trait]
+impl threadlane_computer::ComputerApproval for PermissionManager {
+    async fn request_computer(
+        &self,
+        title: &str,
+        detail: &str,
+    ) -> threadlane_computer::ComputerDecision {
+        match PermissionManager::request_computer(self, title, detail).await {
+            PermissionDecision::AllowOnce => threadlane_computer::ComputerDecision::AllowOnce,
+            PermissionDecision::AllowAlways => threadlane_computer::ComputerDecision::AllowAlways,
+            PermissionDecision::Deny => threadlane_computer::ComputerDecision::Deny,
+        }
+    }
+}
+
 struct PendingRequestGuard {
     handle: PermissionHandle,
     request_id: String,

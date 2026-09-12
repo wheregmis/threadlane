@@ -1,6 +1,31 @@
-use crate::capabilities_catalog::CapabilityCatalog;
 use std::path::Path;
 use threadlane_runtime::AgentRuntime;
+use threadlane_wasi::packages::{ExtensionManager, ExtensionRecord};
+
+/// Extension inventory backing slash-command discovery. Lives here (rather
+/// than as a separate module) because `available_slash_commands` below is its
+/// only consumer: commands contributed by enabled WASI extensions.
+#[derive(Debug, Clone)]
+struct CapabilityCatalog {
+    extensions: Vec<ExtensionRecord>,
+}
+
+impl CapabilityCatalog {
+    fn discover(project_root: Option<&Path>) -> Self {
+        let global_threadlane_dir =
+            threadlane_wasi::packages::default_global_threadlane_dir();
+        let extensions = ExtensionManager::new(
+            global_threadlane_dir,
+            project_root.map(Path::to_path_buf),
+        )
+        .discover();
+        Self { extensions }
+    }
+
+    fn extensions(&self) -> &[ExtensionRecord] {
+        &self.extensions
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlashCommandInfo {

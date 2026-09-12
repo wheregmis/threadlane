@@ -7,7 +7,6 @@ description = "Built-in coding tools and execution primitives for threadlane age
 
 [dependencies]
 threadlane-hashline.workspace = true
-threadlane-auth.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 

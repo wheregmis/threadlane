@@ -375,7 +375,7 @@ pub(crate) fn coding_agent_options(
     session_file: PathBuf,
     model: String,
     model_roles: threadlane_session::ModelRoles,
-    browser: threadlane_session::BrowserBridge,
+    browser: threadlane_protocol::browser::BrowserBridge,
 ) -> threadlane_session::CodingAgentOptions {
     let (api_key, account_id) = provider_credentials(&model);
     let mut agent_config = threadlane_session::AgentConfig::default();

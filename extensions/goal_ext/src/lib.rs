@@ -295,7 +295,9 @@ Before deciding that the goal is achieved, perform a completion audit against th
 6. Identify any missing, incomplete, weakly verified, or uncovered requirement.
 7. Treat uncertainty as not achieved: perform more verification or continue the work.
 
-Only call the `update_goal` tool with `status: "complete"` and detailed evidence when the audit verifies that ALL requirements have been fully satisfied. If work remains, continue executing."#,
+Only call the `update_goal` tool with `status: "complete"` and detailed evidence when the audit verifies that ALL requirements have been fully satisfied. If work remains, continue executing.
+
+If the `update_goal` tool is not available in your environment (external ACP agent), emit the marker `<!-- GOAL_COMPLETE -->` on its own line followed by the same detailed evidence instead — the host treats it exactly like `update_goal` with `status: "complete"`."#,
         goal.objective, goal.turns_count, budget_line
     )
 }
@@ -675,20 +677,30 @@ fn handle_hook_invocation(
         );
     }
 
-    // Check if the assistant completed the goal in this turn
+    // Check if the assistant completed the goal in this turn.
+    // Tool calls arrive flat (`{"name":..,"arguments":..}`) from some hosts
+    // and nested (`{"function":{"name":..,"arguments":..}}`) from the native
+    // `ToolCall` serialization — accept either so completion detection does
+    // not depend on which shape the host emitted.
     let called_complete =
         args.get("tool_calls")
             .and_then(|v| v.as_array())
             .map_or(false, |calls| {
                 calls.iter().any(|call| {
-                    call.get("name").and_then(|n| n.as_str()) == Some("update_goal")
-                        && (call
-                            .get("arguments")
-                            .and_then(|a| a.get("status"))
-                            .and_then(|s| s.as_str())
+                    let (name, arguments) = match call.get("function") {
+                        Some(function) => (
+                            function.get("name").and_then(|n| n.as_str()),
+                            function.get("arguments"),
+                        ),
+                        None => (
+                            call.get("name").and_then(|n| n.as_str()),
+                            call.get("arguments"),
+                        ),
+                    };
+                    name == Some("update_goal")
+                        && (arguments.and_then(|a| a.get("status")).and_then(|s| s.as_str())
                             == Some("complete")
-                            || call
-                                .get("arguments")
+                            || arguments
                                 .and_then(|a| a.as_str())
                                 .is_some_and(|s| s.contains("\"complete\"")))
                 })
@@ -1161,6 +1173,49 @@ mod tests {
             GoalStatus::Complete
         );
         // Does NOT request another turn!
+        assert!(!reqs.iter().any(|r| r.operation == "request_turn"));
+    }
+
+    #[test]
+    fn hook_recognizes_nested_tool_shape_and_marker_completion() {
+        let goal = || GoalState {
+            version: 1,
+            id: "goal_1".into(),
+            objective: "migrate database".into(),
+            status: GoalStatus::Active,
+            token_budget: None,
+            tokens_used: 0,
+            turns_count: 1,
+            created_at: 0,
+            updated_at: 0,
+        };
+        // Native `ToolCall` serialization nests name/arguments under `function`.
+        let state = ExtensionState {
+            current_goal: Some(goal()),
+        };
+        let args = serde_json::json!({
+            "content": "All done and verified.",
+            "tool_calls": [
+                { "id": "call_1", "type": "function",
+                  "function": { "name": "update_goal",
+                    "arguments": "{\"status\":\"complete\",\"evidence\":\"Verified\"}" } }
+            ]
+        });
+        let (res, reqs) = handle_hook_invocation("assistant_message", &args, state);
+        assert_eq!(res.message, "goal completed by assistant tool call");
+        assert!(!reqs.iter().any(|r| r.operation == "request_turn"));
+
+        // External ACP agents have no `update_goal` tool; the marker is the
+        // completion path.
+        let state = ExtensionState {
+            current_goal: Some(goal()),
+        };
+        let args = serde_json::json!({
+            "content": "All requirements verified.\n<!-- GOAL_COMPLETE -->\nEvidence: tests pass.",
+            "tool_calls": []
+        });
+        let (res, reqs) = handle_hook_invocation("assistant_message", &args, state);
+        assert_eq!(res.message, "goal completed by assistant tool call");
         assert!(!reqs.iter().any(|r| r.operation == "request_turn"));
     }
 

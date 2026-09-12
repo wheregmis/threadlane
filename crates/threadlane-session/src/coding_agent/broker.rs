@@ -1,6 +1,6 @@
 use crate::extension_broker::{BrokerError, BrokerRequest, CapabilityHandler};
 use crate::permission::{PermissionDecision, PermissionManager};
-use crate::policy::ToolPolicy;
+use threadlane_runtime::ToolPolicy;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;

@@ -10,6 +10,10 @@
 //! `api.openai.com`, surfacing as 401 `invalid_api_key` mid-task).
 
 use threadlane_protocol::ProviderPort;
+use threadlane_provider::credentials::{
+    AntigravityCredentialSnapshot, AntigravityCredentialSource, CodexAccountResolver,
+    CodexBackupAccount, SharedAntigravityCredentials, SharedCodexResolver,
+};
 use threadlane_provider::router::{is_antigravity_model, is_opencode_model};
 
 /// True when `model` signs OpenAI-branch requests with the resolved pair.
@@ -48,7 +52,7 @@ pub(crate) fn refresh_provider_for_model(
 pub fn provider_credentials(model: &str) -> (String, Option<String>) {
     if is_antigravity_model(model) {
         return (
-            threadlane_provider::antigravity_auth::load_antigravity_credentials()
+            threadlane_auth::antigravity_auth::load_antigravity_credentials()
                 .map(|credentials| credentials.access_token)
                 .unwrap_or_default(),
             None,
@@ -73,6 +77,80 @@ pub fn provider_credentials(model: &str) -> (String, Option<String>) {
     (
         std::env::var("OPENAI_API_KEY").unwrap_or_default(),
         None,
+    )
+}
+
+/// Host bridge from the provider credential traits to `threadlane-auth`.
+#[derive(Debug, Default)]
+pub struct AuthCredentialBridge;
+
+impl AuthCredentialBridge {
+    pub fn shared() -> SharedCodexResolver {
+        std::sync::Arc::new(Self)
+    }
+
+    pub fn shared_antigravity() -> SharedAntigravityCredentials {
+        std::sync::Arc::new(Self)
+    }
+}
+
+#[async_trait::async_trait]
+impl CodexAccountResolver for AuthCredentialBridge {
+    fn account_id_for_token(&self, token: &str) -> Option<String> {
+        threadlane_auth::openai_auth::codex_account_id_for_token(token)
+    }
+
+    async fn valid_token_for_account(&self, account_id: &str) -> Result<String, String> {
+        threadlane_auth::openai_auth::get_valid_codex_account_token(account_id).await
+    }
+
+    fn backup_accounts(&self) -> Vec<CodexBackupAccount> {
+        threadlane_auth::openai_auth::get_backup_codex_accounts()
+            .into_iter()
+            .map(|account| CodexBackupAccount {
+                access_token: account.access_token,
+                account_id: account.account_id,
+            })
+            .collect()
+    }
+}
+
+#[async_trait::async_trait]
+impl AntigravityCredentialSource for AuthCredentialBridge {
+    async fn valid_token(&self) -> Result<String, String> {
+        threadlane_auth::antigravity_auth::get_valid_antigravity_token().await
+    }
+
+    fn stored_snapshot(&self) -> Option<AntigravityCredentialSnapshot> {
+        threadlane_auth::antigravity_auth::load_antigravity_credentials().map(|credentials| {
+            AntigravityCredentialSnapshot {
+                access_token: credentials.access_token,
+                refresh_token: credentials.refresh_token,
+                expires_at: credentials.expires_at,
+                account_email: credentials.account_email,
+                project_id: credentials.project_id,
+            }
+        })
+    }
+}
+
+/// Stored OpenCode API key for Zen requests, if the host has one.
+pub fn opencode_api_key() -> Option<String> {
+    threadlane_auth::opencode_auth::load_opencode_api_key()
+}
+
+/// Builds a fully-wired provider client: stored Codex/Antigravity/OpenCode
+/// credentials resolve exactly as before the provider decoupling.
+pub fn provider_client_for(
+    api_key: impl Into<String>,
+    account_id: Option<String>,
+) -> threadlane_provider::router::ProviderClient {
+    threadlane_provider::router::ProviderClient::new_with_resolver(
+        api_key,
+        account_id,
+        AuthCredentialBridge::shared(),
+        opencode_api_key(),
+        AuthCredentialBridge::shared_antigravity(),
     )
 }
 

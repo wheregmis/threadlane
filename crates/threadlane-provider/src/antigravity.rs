@@ -1,4 +1,4 @@
-use crate::antigravity_auth::{get_valid_antigravity_token, load_antigravity_credentials};
+use crate::credentials::SharedAntigravityCredentials;
 use crate::openai::{ProviderUsage, StreamEvent, ToolCall, ToolCallFunction};
 use futures_util::StreamExt;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
@@ -211,6 +211,7 @@ pub struct AntigravityClient {
     /// tries it first so steady state costs one request even when the other
     /// host is dead for the account; a fallback success re-points it.
     endpoint_hint: Arc<Mutex<Option<usize>>>,
+    credentials: SharedAntigravityCredentials,
 }
 
 impl Default for AntigravityClient {
@@ -221,10 +222,19 @@ impl Default for AntigravityClient {
 
 impl AntigravityClient {
     pub(crate) fn new() -> Self {
+        Self::new_with_credentials(Arc::new(crate::credentials::NoopAntigravityCredentials))
+    }
+
+    /// Injects the host's Antigravity credential source. Without one,
+    /// requests fail fast instead of reading the host's credential store.
+    pub fn new_with_credentials(
+    credentials: SharedAntigravityCredentials,
+    ) -> Self {
         Self {
             client: reqwest::Client::new(),
             project_cache: Arc::new(Mutex::new(HashMap::new())),
             endpoint_hint: Arc::new(Mutex::new(None)),
+            credentials,
         }
     }
 
@@ -248,7 +258,7 @@ impl AntigravityClient {
         api_payload: Value,
         event_tx: &mpsc::Sender<StreamEvent>,
     ) -> Result<(), String> {
-        let token = get_valid_antigravity_token().await?;
+        let token = self.credentials.valid_token().await?;
         let project = self.resolve_project(&token).await;
         let (runtime_model, request) = convert_openai_payload(&api_payload)?;
         tracing::debug!(
@@ -264,7 +274,7 @@ impl AntigravityClient {
     }
 
     async fn resolve_project(&self, token: &str) -> String {
-        let credential_key = credential_cache_key(token);
+        let credential_key = credential_cache_key(token, self.credentials.stored_snapshot());
         let project = {
             let mut cache = self.project_cache.lock().await;
             Arc::clone(
@@ -316,7 +326,7 @@ impl AntigravityClient {
             }
         }
 
-        let credentials = load_antigravity_credentials();
+        let credentials = self.credentials.stored_snapshot();
         let project = credentials
             .as_ref()
             .and_then(|creds| creds.project_id.clone())
@@ -432,7 +442,7 @@ impl AntigravityClient {
 
     pub async fn run_diagnostics(&self) -> String {
         let mut report = vec!["=== Antigravity Doctor Diagnostics ===".to_string()];
-        let Some(credentials) = load_antigravity_credentials() else {
+        let Some(credentials) = self.credentials.stored_snapshot() else {
             report.push("No stored Antigravity credentials found.".to_string());
             report.push("Run /login antigravity to authenticate.".to_string());
             return report.join("\n");
@@ -453,7 +463,7 @@ impl AntigravityClient {
             "Refresh token is missing; re-login is recommended.".to_string()
         });
 
-        match get_valid_antigravity_token().await {
+        match self.credentials.valid_token().await {
             Ok(token) => {
                 report.push("Successfully retrieved a valid access token.".to_string());
                 let project = self.resolve_project(&token).await;
@@ -493,8 +503,10 @@ impl crate::traits::ModelProvider for AntigravityClient {
     }
 }
 
-fn credential_cache_key(token: &str) -> [u8; 32] {
-    let credentials = load_antigravity_credentials();
+fn credential_cache_key(
+    token: &str,
+    credentials: Option<crate::credentials::AntigravityCredentialSnapshot>,
+) -> [u8; 32] {
     let mut hasher = Sha256::new();
 
     if let Some(refresh_token) = credentials
@@ -724,26 +736,35 @@ fn parse_available_models(value: &Value) -> Vec<AntigravityModelInfo> {
 /// Hops onto the shared Tokio runtime when the caller has none: GPUI
 /// background tasks run on GPUI's executor, where hyper panics without a
 /// reactor.
-pub async fn fetch_available_models() -> Vec<AntigravityModelInfo> {
+/// Fetches the live Antigravity model inventory for an explicit access token.
+///
+/// The caller resolves the token (stored credentials, refresh) through its
+/// own [`AntigravityCredentialSource`](crate::credentials::AntigravityCredentialSource);
+/// an empty token returns an empty list without a network round trip.
+pub async fn fetch_available_models(access_token: &str) -> Vec<AntigravityModelInfo> {
+    let access_token = access_token.trim().to_string();
+    if access_token.is_empty() {
+        return Vec::new();
+    }
     if tokio::runtime::Handle::try_current().is_ok() {
-        fetch_available_models_inner().await
+        fetch_available_models_inner(&access_token).await
     } else {
-        let handle = threadlane_runtime::get_runtime().spawn(fetch_available_models_inner());
+        let handle =
+            crate::exec::get_runtime().spawn(async move {
+                fetch_available_models_inner(&access_token).await
+            });
         handle.await.unwrap_or_default()
     }
 }
 
-async fn fetch_available_models_inner() -> Vec<AntigravityModelInfo> {
-    let Ok(token) = get_valid_antigravity_token().await else {
-        return Vec::new();
-    };
+async fn fetch_available_models_inner(access_token: &str) -> Vec<AntigravityModelInfo> {
     let probe = AntigravityClient::new();
-    let project = probe.resolve_project(&token).await;
+    let project = probe.resolve_project(access_token).await;
     let client = reqwest::Client::new();
     for endpoint in endpoint_candidates() {
         let response = client
             .post(format!("{endpoint}/v1internal:fetchAvailableModels"))
-            .headers(antigravity_headers(&token))
+            .headers(antigravity_headers(access_token))
             .json(&json!({ "project": project }))
             .timeout(std::time::Duration::from_secs(10))
             .send()
@@ -1688,34 +1709,24 @@ mod tests {
     /// Regression: GPUI background tasks have no Tokio reactor, where hyper
     /// panics on first I/O poll. Drives the fetch on a bare thread with a
     /// park/unpark waker — mirroring that context — so a missing hop fails
-    /// here instead of aborting the app at startup. The live fetch runs only
-    /// under `THREADLANE_LIVE_ANTIGRAVITY=1`; without credentials the
-    /// credential-less empty result is asserted.
+    /// here instead of aborting the app at startup. An empty token short-
+    /// circuits to the empty result without touching the network.
     #[test]
     fn fetch_available_models_survives_without_a_reactor() {
         use std::future::Future;
         assert!(tokio::runtime::Handle::try_current().is_err());
-        if load_antigravity_credentials().is_some()
-            && std::env::var("THREADLANE_LIVE_ANTIGRAVITY").is_err()
-        {
-            return;
-        }
         let waker = std::task::Waker::from(Arc::new(ThreadUnparker {
             thread: std::thread::current(),
         }));
         let mut context = std::task::Context::from_waker(&waker);
-        let mut future = Box::pin(fetch_available_models());
+        let mut future = Box::pin(fetch_available_models(""));
         let models = loop {
             match future.as_mut().poll(&mut context) {
                 std::task::Poll::Ready(models) => break models,
                 std::task::Poll::Pending => std::thread::park(),
             }
         };
-        if std::env::var("THREADLANE_LIVE_ANTIGRAVITY").is_err()
-            && load_antigravity_credentials().is_none()
-        {
-            assert!(models.is_empty());
-        }
+        assert!(models.is_empty());
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use crate::store::CredentialStore;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -28,24 +29,12 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-fn get_threadlane_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let mut path = PathBuf::from(home);
-    path.push(".threadlane");
-    let _ = fs::create_dir_all(&path);
-    path
+fn get_gitlab_credentials_path(locations: &CredentialStore) -> PathBuf {
+    locations.gitlab_credentials_path()
 }
 
-fn get_github_credentials_path() -> PathBuf {
-    let mut path = get_threadlane_dir();
-    path.push("github_credentials.json");
-    path
-}
-
-fn get_gitlab_credentials_path() -> PathBuf {
-    let mut path = get_threadlane_dir();
-    path.push("gitlab_credentials.json");
-    path
+fn get_github_credentials_path(locations: &CredentialStore) -> PathBuf {
+    locations.github_credentials_path()
 }
 
 fn write_secure_file(path: &PathBuf, content: &str) -> Result<(), String> {
@@ -81,7 +70,12 @@ fn write_secure_file(path: &PathBuf, content: &str) -> Result<(), String> {
 // ── GitHub ─────────────────────────────────────────────────────────────
 
 pub fn load_github_credentials() -> Option<GitHubCredentials> {
-    let path = get_github_credentials_path();
+    load_github_credentials_in(&CredentialStore::default())
+}
+
+/// Loads stored GitHub credentials from the injected store's location.
+pub fn load_github_credentials_in(locations: &CredentialStore) -> Option<GitHubCredentials> {
+    let path = get_github_credentials_path(locations);
     if !path.exists() {
         return None;
     }
@@ -94,6 +88,16 @@ pub fn save_github_token(
     username: Option<&str>,
     auth_type: &str,
 ) -> Result<GitHubCredentials, String> {
+    save_github_token_in(token, username, auth_type, &CredentialStore::default())
+}
+
+/// Saves a GitHub token to the injected store's location.
+pub fn save_github_token_in(
+    token: &str,
+    username: Option<&str>,
+    auth_type: &str,
+    locations: &CredentialStore,
+) -> Result<GitHubCredentials, String> {
     let creds = GitHubCredentials {
         token: token.trim().to_string(),
         username: username.map(|s| s.trim().to_string()),
@@ -102,12 +106,18 @@ pub fn save_github_token(
     };
     let json = serde_json::to_string_pretty(&creds)
         .map_err(|e| format!("Failed to serialize GitHub credentials: {e}"))?;
-    write_secure_file(&get_github_credentials_path(), &json)?;
+    locations.ensure_threadlane_dir();
+    write_secure_file(&get_github_credentials_path(locations), &json)?;
     Ok(creds)
 }
 
 pub fn remove_github_credentials() -> Result<(), String> {
-    let path = get_github_credentials_path();
+    remove_github_credentials_in(&CredentialStore::default())
+}
+
+/// Removes the GitHub credentials file at the injected store's location.
+pub fn remove_github_credentials_in(locations: &CredentialStore) -> Result<(), String> {
+    let path = get_github_credentials_path(locations);
     if path.exists() {
         fs::remove_file(path).map_err(|e| format!("Failed to remove GitHub credentials: {e}"))?;
     }
@@ -172,6 +182,11 @@ pub fn get_github_auth_status() -> Option<String> {
 }
 
 pub fn sync_from_gh_cli() -> Result<GitHubCredentials, String> {
+    sync_from_gh_cli_in(&CredentialStore::default())
+}
+
+/// Imports the `gh` CLI token into the injected store's location.
+pub fn sync_from_gh_cli_in(locations: &CredentialStore) -> Result<GitHubCredentials, String> {
     let token_output = Command::new("gh")
         .args(["auth", "token"])
         .output()
@@ -211,13 +226,17 @@ pub fn sync_from_gh_cli() -> Result<GitHubCredentials, String> {
         None
     };
 
-    save_github_token(&token, username.as_deref(), "cli")
+    save_github_token_in(&token, username.as_deref(), "cli", locations)
 }
 
 // ── GitLab ─────────────────────────────────────────────────────────────
 
 fn load_gitlab_credentials() -> Option<GitLabCredentials> {
-    let path = get_gitlab_credentials_path();
+    load_gitlab_credentials_in(&CredentialStore::default())
+}
+
+fn load_gitlab_credentials_in(locations: &CredentialStore) -> Option<GitLabCredentials> {
+    let path = get_gitlab_credentials_path(locations);
     if !path.exists() {
         return None;
     }
@@ -230,6 +249,16 @@ pub fn save_gitlab_token(
     username: Option<&str>,
     host: Option<&str>,
 ) -> Result<GitLabCredentials, String> {
+    save_gitlab_token_in(token, username, host, &CredentialStore::default())
+}
+
+/// Saves a GitLab token to the injected store's location.
+pub fn save_gitlab_token_in(
+    token: &str,
+    username: Option<&str>,
+    host: Option<&str>,
+    locations: &CredentialStore,
+) -> Result<GitLabCredentials, String> {
     let creds = GitLabCredentials {
         token: token.trim().to_string(),
         username: username.map(|s| s.trim().to_string()),
@@ -238,12 +267,18 @@ pub fn save_gitlab_token(
     };
     let json = serde_json::to_string_pretty(&creds)
         .map_err(|e| format!("Failed to serialize GitLab credentials: {e}"))?;
-    write_secure_file(&get_gitlab_credentials_path(), &json)?;
+    locations.ensure_threadlane_dir();
+    write_secure_file(&get_gitlab_credentials_path(locations), &json)?;
     Ok(creds)
 }
 
 pub fn remove_gitlab_credentials() -> Result<(), String> {
-    let path = get_gitlab_credentials_path();
+    remove_gitlab_credentials_in(&CredentialStore::default())
+}
+
+/// Removes the GitLab credentials file at the injected store's location.
+pub fn remove_gitlab_credentials_in(locations: &CredentialStore) -> Result<(), String> {
+    let path = get_gitlab_credentials_path(locations);
     if path.exists() {
         fs::remove_file(path).map_err(|e| format!("Failed to remove GitLab credentials: {e}"))?;
     }

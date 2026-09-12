@@ -11,12 +11,16 @@ edition = "2021"
 
 [workspace.dependencies]
 # Internal workspace crates
+threadlane-acp = { version = "0.1.0", path = "crates/threadlane-acp" }
 threadlane-auth = { version = "0.1.0", path = "crates/threadlane-auth" }
 threadlane-benchmarks = { version = "0.0.0", path = "crates/threadlane-benchmarks" }
+threadlane-computer = { version = "0.1.0", path = "crates/threadlane-computer" }
 threadlane-git = { version = "0.1.0", path = "crates/threadlane-git" }
 threadlane-gpui = { version = "0.1.16", path = "crates/threadlane-gpui" }
 threadlane-hashline = { version = "0.1.0", path = "crates/threadlane-hashline" }
 threadlane-mcp = { version = "0.1.0", path = "crates/threadlane-mcp" }
+threadlane-project = { version = "0.1.0", path = "crates/threadlane-project" }
+threadlane-prompt = { version = "0.1.0", path = "crates/threadlane-prompt" }
 threadlane-protocol = { version = "0.1.0", path = "crates/threadlane-protocol" }
 threadlane-provider = { version = "0.1.0", path = "crates/threadlane-provider" }
 threadlane-runtime = { version = "0.1.0", path = "crates/threadlane-runtime" }

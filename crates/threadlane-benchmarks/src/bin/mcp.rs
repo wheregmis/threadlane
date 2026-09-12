@@ -5,9 +5,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use threadlane_mcp::{
-    McpManager, McpScope, McpServerConfig, McpSettings, McpToolExecutor, McpTransport,
+    McpManager, McpScope, McpServerConfig, McpSettings, McpTransport,
 };
-use threadlane_runtime::ToolExecutor;
 
 const SAMPLES: usize = 10;
 
@@ -65,11 +64,12 @@ async fn discover_repeat(manager: &McpManager) {
 }
 
 #[hotpath::measure]
-async fn tool_calls(executor: &McpToolExecutor) {
+async fn tool_calls(manager: &McpManager) {
+    let args = serde_json::json!({});
     for _ in 0..20 {
         std::hint::black_box(
-            executor
-                .execute_tool("mcp__stub__echo", "{}")
+            manager
+                .call_tool("mcp__stub__echo", &args)
                 .await
                 .unwrap()
                 .unwrap(),
@@ -102,7 +102,7 @@ async fn async_main() {
         discover_repeat(&manager).await;
     }
 
-    let executor = McpToolExecutor::new(Arc::clone(&manager));
+    let executor = Arc::clone(&manager);
     for _ in 0..SAMPLES {
         tool_calls(&executor).await;
     }

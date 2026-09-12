@@ -1,31 +1,52 @@
 pub mod acp;
 pub mod acp_bridge;
 pub mod acp_runtime;
-pub mod agents;
+/// Agent definitions, canonical in `threadlane_skills::agents`.
+/// Re-exported here so existing `threadlane_session::agents` paths keep
+/// working; new code should import `threadlane_skills::agents` directly.
+pub use threadlane_skills::agents as agents;
 pub mod browser;
 pub mod commands;
 pub mod computer;
-pub mod computer_live;
-#[cfg(target_os = "macos")]
-pub(crate) mod computer_stream;
 pub mod config;
-pub mod context;
+/// Project context discovery, canonical in `threadlane-prompt`.
+/// Re-exported here so existing `threadlane_session::context` paths keep
+/// working; new code should import `threadlane_prompt` directly.
+pub use threadlane_prompt as context;
 pub mod controller;
 pub mod credentials;
-pub mod error;
 pub mod extension_broker;
-pub mod orchestrator;
+pub mod mcp;
+/// Prewalk orchestration, canonical in `threadlane_runtime::orchestrator`.
+/// Re-exported here so existing `threadlane_session::orchestrator` paths keep
+/// working; new code should import `threadlane_runtime::orchestrator` directly.
+pub use threadlane_runtime::orchestrator as orchestrator;
 pub mod permission;
-mod plan;
-pub mod policy;
-pub mod project_registry;
-pub mod prompt_templates;
+/// Model-managed session plans, canonical in `threadlane_runtime::plan`.
+/// Re-exported here so existing `threadlane_session::plan` paths keep
+/// working; new code should import `threadlane_runtime::plan` directly.
+pub use threadlane_runtime::plan as plan;
+/// Execution policy, canonical in `threadlane_runtime::capability`.
+/// Re-exported here so existing `threadlane_session::ToolPolicy` paths keep
+/// working; new code should import `threadlane_runtime::ToolPolicy` directly.
+pub use threadlane_runtime::ToolPolicy;
+/// Attached-project registry, canonical in `threadlane-project`.
+/// Re-exported here so existing `threadlane_session::project_registry` and
+/// `threadlane_session::ProjectRecord` paths keep working; new code should
+/// import `threadlane_project` directly.
+pub use threadlane_project as project_registry;
+/// Prompt templates, canonical in `threadlane_skills::prompts`.
+/// Re-exported here so existing `threadlane_session::prompt_templates` paths
+/// keep working; new code should import `threadlane_skills::prompts` directly.
+pub use threadlane_skills::prompts as prompt_templates;
 pub mod question;
 pub mod supervisor;
-pub mod system_prompt;
+/// System-prompt builder, canonical in `threadlane-prompt`.
+/// Re-exported here so existing `threadlane_session::system_prompt` paths
+/// keep working; new code should import `threadlane_prompt` directly.
+pub use threadlane_prompt as system_prompt;
 
 // ── SessionController & CodingAgent ──────────────────────────────────
-mod capabilities_catalog;
 pub mod coding_agent;
 pub use coding_agent::harness::{
     CodingSessionHarness, HarnessRecord, InterruptedSubagentRecoveryState,
@@ -50,19 +71,20 @@ pub use acp_runtime::AcpEngine;
 pub use browser::{ActTarget, BrowserBridge, BrowserCommand, BrowserRequest};
 pub use commands::{available_slash_commands, SlashCommandInfo};
 pub use config::CodingAgentConfig;
-pub use credentials::provider_credentials;
+pub use credentials::{
+    opencode_api_key, provider_client_for, provider_credentials, AuthCredentialBridge,
+};
 pub use permission::{PermissionDecision, PermissionHandle};
-pub use policy::ToolPolicy;
-pub use project_registry::{
+pub use threadlane_project::{
     load_project_registry, register_project, save_project_registry, select_project, ProjectRecord,
 };
-pub use prompt_templates::PromptTemplate;
+pub use threadlane_skills::prompts::PromptTemplate;
 pub use question::QuestionHandle;
 pub use system_prompt::SystemPromptConfig;
 
 // Re-export the runtime crate's public API so downstream crates (GPUI)
 // can use a single dependency.
-pub use threadlane_mcp::*;
+pub use mcp::*;
 pub use threadlane_runtime::*;
 pub use threadlane_skills::*;
 pub use threadlane_wasi::broker::*;

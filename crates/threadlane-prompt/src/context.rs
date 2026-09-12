@@ -1,3 +1,9 @@
+//! Project context discovery (`AGENTS.md`/`THREADLANE.md` files, `.threadlane/memory.md`).
+//!
+//! Moved verbatim from `threadlane-session::context`. It has no Threadlane
+//! dependencies (std only) and is owned here alongside the system-prompt
+//! builder that consumes it. `threadlane-session` re-exports it as `context`
+//! for compatibility; new code should import `threadlane_prompt` directly.
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Default)]
@@ -7,7 +13,7 @@ pub struct ProjectContext {
 }
 
 impl ProjectContext {
-    pub(crate) fn discover(start_dir: &Path) -> Self {
+    pub fn discover(start_dir: &Path) -> Self {
         let mut current = start_dir.to_path_buf();
         let mut context_files = Vec::new();
 

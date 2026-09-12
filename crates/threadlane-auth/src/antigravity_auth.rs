@@ -1,3 +1,4 @@
+use crate::store::CredentialStore;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -5,7 +6,6 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_CLIENT_ID: &str =
@@ -25,19 +25,61 @@ pub struct AntigravityCredentials {
     pub project_id: Option<String>,
 }
 
-fn get_antigravity_credentials_path() -> PathBuf {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_else(|_| ".".to_string());
-    let mut path = PathBuf::from(home);
-    path.push(".threadlane");
-    let _ = fs::create_dir_all(&path);
-    path.push("antigravity_credentials.json");
-    path
+/// Provider-specific Google OAuth configuration for Antigravity.
+///
+/// The client ID/secret default to the bundled registration; hosts embedding
+/// this flow under their own Google Cloud credentials override them (directly
+/// or via `ANTIGRAVITY_CLIENT_ID` / `ANTIGRAVITY_CLIENT_SECRET` /
+/// `ANTIGRAVITY_PROJECT_ID` through [`AntigravityOAuthConfig::from_env`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AntigravityOAuthConfig {
+    pub client_id: String,
+    pub client_secret: String,
+    pub redirect_uri: String,
+    pub project_id: Option<String>,
+}
+
+impl Default for AntigravityOAuthConfig {
+    fn default() -> Self {
+        Self {
+            client_id: DEFAULT_CLIENT_ID.to_string(),
+            client_secret: DEFAULT_CLIENT_SECRET.to_string(),
+            redirect_uri: DEFAULT_REDIRECT_URI.to_string(),
+            project_id: None,
+        }
+    }
+}
+
+impl AntigravityOAuthConfig {
+    /// Defaults overlaid with `ANTIGRAVITY_CLIENT_ID`,
+    /// `ANTIGRAVITY_CLIENT_SECRET`, and `ANTIGRAVITY_PROJECT_ID` when set.
+    pub fn from_env() -> Self {
+        Self {
+            client_id: std::env::var("ANTIGRAVITY_CLIENT_ID")
+                .unwrap_or_else(|_| DEFAULT_CLIENT_ID.to_string()),
+            client_secret: std::env::var("ANTIGRAVITY_CLIENT_SECRET")
+                .unwrap_or_else(|_| DEFAULT_CLIENT_SECRET.to_string()),
+            redirect_uri: DEFAULT_REDIRECT_URI.to_string(),
+            project_id: std::env::var("ANTIGRAVITY_PROJECT_ID").ok(),
+        }
+    }
+}
+
+/// Test helper: the default store (tests point `HOME` at a temp dir).
+#[cfg(test)]
+fn get_antigravity_credentials_path() -> std::path::PathBuf {
+    CredentialStore::default().antigravity_credentials_path()
 }
 
 pub fn load_antigravity_credentials() -> Option<AntigravityCredentials> {
-    let path = get_antigravity_credentials_path();
+    load_antigravity_credentials_in(&CredentialStore::default())
+}
+
+/// Loads stored credentials from the injected store's location.
+pub fn load_antigravity_credentials_in(
+    locations: &CredentialStore,
+) -> Option<AntigravityCredentials> {
+    let path = locations.antigravity_credentials_path();
     if path.exists() {
         if let Ok(content) = fs::read_to_string(&path) {
             if let Ok(creds) = serde_json::from_str::<AntigravityCredentials>(&content) {
@@ -50,15 +92,30 @@ pub fn load_antigravity_credentials() -> Option<AntigravityCredentials> {
     None
 }
 
+/// Test helper: the default store (tests point `HOME` at a temp dir).
+#[cfg(test)]
 fn save_antigravity_credentials(creds: &AntigravityCredentials) -> Result<(), String> {
-    let path = get_antigravity_credentials_path();
+    save_antigravity_credentials_in(creds, &CredentialStore::default())
+}
+
+fn save_antigravity_credentials_in(
+    creds: &AntigravityCredentials,
+    locations: &CredentialStore,
+) -> Result<(), String> {
+    locations.ensure_threadlane_dir();
+    let path = locations.antigravity_credentials_path();
     let json = serde_json::to_string_pretty(creds)
         .map_err(|_| "Failed to serialize credentials".to_string())?;
     crate::openai_auth::write_secure_text_file(&path, &json)
 }
 
 pub fn clear_antigravity_credentials() -> Result<(), String> {
-    let path = get_antigravity_credentials_path();
+    clear_antigravity_credentials_in(&CredentialStore::default())
+}
+
+/// Removes the credentials file at the injected store's location.
+pub fn clear_antigravity_credentials_in(locations: &CredentialStore) -> Result<(), String> {
+    let path = locations.antigravity_credentials_path();
     if path.exists() {
         fs::remove_file(path).map_err(|e| e.to_string())?;
     }
@@ -86,6 +143,15 @@ fn current_timestamp() -> u64 {
 }
 
 pub fn build_authorization_url(code_challenge: &str, state: &str) -> String {
+    build_authorization_url_with(code_challenge, state, &AntigravityOAuthConfig::from_env())
+}
+
+/// Builds the Google OAuth URL from an explicit provider configuration.
+pub fn build_authorization_url_with(
+    code_challenge: &str,
+    state: &str,
+    config: &AntigravityOAuthConfig,
+) -> String {
     let scopes = [
         "https://www.googleapis.com/auth/cloud-platform",
         "https://www.googleapis.com/auth/userinfo.email",
@@ -95,13 +161,10 @@ pub fn build_authorization_url(code_challenge: &str, state: &str) -> String {
     ]
     .join(" ");
 
-    let client_id =
-        std::env::var("ANTIGRAVITY_CLIENT_ID").unwrap_or_else(|_| DEFAULT_CLIENT_ID.to_string());
-
     let mut url = url::Url::parse(OAUTH_AUTH_URL).unwrap();
     url.query_pairs_mut()
-        .append_pair("client_id", &client_id)
-        .append_pair("redirect_uri", DEFAULT_REDIRECT_URI)
+        .append_pair("client_id", &config.client_id)
+        .append_pair("redirect_uri", &config.redirect_uri)
         .append_pair("response_type", "code")
         .append_pair("scope", &scopes)
         .append_pair("code_challenge", code_challenge)
@@ -117,30 +180,43 @@ pub async fn exchange_code_for_tokens(
     code: &str,
     code_verifier: &str,
 ) -> Result<AntigravityCredentials, String> {
-    let creds = exchange_code_for_tokens_without_saving(code, code_verifier).await?;
-    save_antigravity_credentials(&creds)?;
+    exchange_code_for_tokens_in(
+        code,
+        code_verifier,
+        &AntigravityOAuthConfig::from_env(),
+        &CredentialStore::default(),
+    )
+    .await
+}
+
+/// Exchanges an OAuth code with an explicit provider configuration,
+/// persisting the credentials to the injected store's location.
+pub async fn exchange_code_for_tokens_in(
+    code: &str,
+    code_verifier: &str,
+    config: &AntigravityOAuthConfig,
+    locations: &CredentialStore,
+) -> Result<AntigravityCredentials, String> {
+    let creds = exchange_code_for_tokens_without_saving(code, code_verifier, config).await?;
+    save_antigravity_credentials_in(&creds, locations)?;
     Ok(creds)
 }
 
 async fn exchange_code_for_tokens_without_saving(
     code: &str,
     code_verifier: &str,
+    config: &AntigravityOAuthConfig,
 ) -> Result<AntigravityCredentials, String> {
-    let client_id =
-        std::env::var("ANTIGRAVITY_CLIENT_ID").unwrap_or_else(|_| DEFAULT_CLIENT_ID.to_string());
-    let client_secret = std::env::var("ANTIGRAVITY_CLIENT_SECRET")
-        .unwrap_or_else(|_| DEFAULT_CLIENT_SECRET.to_string());
-
     let client = reqwest::Client::new();
     let mut params = vec![
-        ("client_id", client_id.as_str()),
+        ("client_id", config.client_id.as_str()),
         ("code", code),
         ("code_verifier", code_verifier),
         ("grant_type", "authorization_code"),
-        ("redirect_uri", DEFAULT_REDIRECT_URI),
+        ("redirect_uri", config.redirect_uri.as_str()),
     ];
-    if !client_secret.is_empty() {
-        params.push(("client_secret", client_secret.as_str()));
+    if !config.client_secret.is_empty() {
+        params.push(("client_secret", config.client_secret.as_str()));
     }
 
     let res = client
@@ -188,7 +264,7 @@ async fn exchange_code_for_tokens_without_saving(
         refresh_token,
         expires_at,
         account_email,
-        project_id: std::env::var("ANTIGRAVITY_PROJECT_ID").ok(),
+        project_id: config.project_id.clone(),
     };
 
     Ok(creds)
@@ -213,25 +289,22 @@ async fn fetch_user_email(client: &reqwest::Client, access_token: &str) -> Resul
 
 async fn refresh_antigravity_token(
     creds: &AntigravityCredentials,
+    config: &AntigravityOAuthConfig,
+    locations: &CredentialStore,
 ) -> Result<AntigravityCredentials, String> {
     let refresh_token = creds
         .refresh_token
         .as_ref()
         .ok_or_else(|| "No refresh token available".to_string())?;
 
-    let client_id =
-        std::env::var("ANTIGRAVITY_CLIENT_ID").unwrap_or_else(|_| DEFAULT_CLIENT_ID.to_string());
-    let client_secret = std::env::var("ANTIGRAVITY_CLIENT_SECRET")
-        .unwrap_or_else(|_| DEFAULT_CLIENT_SECRET.to_string());
-
     let client = reqwest::Client::new();
     let mut params = vec![
-        ("client_id", client_id.as_str()),
+        ("client_id", config.client_id.as_str()),
         ("refresh_token", refresh_token.as_str()),
         ("grant_type", "refresh_token"),
     ];
-    if !client_secret.is_empty() {
-        params.push(("client_secret", client_secret.as_str()));
+    if !config.client_secret.is_empty() {
+        params.push(("client_secret", config.client_secret.as_str()));
     }
 
     let res = client
@@ -280,19 +353,32 @@ async fn refresh_antigravity_token(
         project_id: creds.project_id.clone(),
     };
 
-    save_antigravity_credentials(&updated_creds)?;
+    save_antigravity_credentials_in(&updated_creds, locations)?;
     Ok(updated_creds)
 }
 
 pub async fn get_valid_antigravity_token() -> Result<String, String> {
-    let creds = load_antigravity_credentials().ok_or_else(|| {
+    get_valid_antigravity_token_in(
+        &AntigravityOAuthConfig::from_env(),
+        &CredentialStore::default(),
+    )
+    .await
+}
+
+/// Returns a usable token from the injected store's location, refreshing with
+/// the explicit provider configuration when near expiry.
+pub async fn get_valid_antigravity_token_in(
+    config: &AntigravityOAuthConfig,
+    locations: &CredentialStore,
+) -> Result<String, String> {
+    let creds = load_antigravity_credentials_in(locations).ok_or_else(|| {
         "No stored Google Antigravity credentials found. Please run /login antigravity".to_string()
     })?;
 
     let now = current_timestamp();
     // Refresh if within 5 minutes (300 seconds) of expiration
     if creds.expires_at <= now + 300 && creds.refresh_token.is_some() {
-        let refreshed = refresh_antigravity_token(&creds).await?;
+        let refreshed = refresh_antigravity_token(&creds, config, locations).await?;
         return Ok(refreshed.access_token);
     }
 
@@ -391,6 +477,7 @@ mod tests {
     use super::*;
     use crate::traits::AuthProvider;
     use std::ffi::OsString;
+    use std::path::PathBuf;
 
     struct TestHomeGuard {
         _lock: std::sync::MutexGuard<'static, ()>,

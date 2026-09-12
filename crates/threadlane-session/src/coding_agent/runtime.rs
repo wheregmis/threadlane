@@ -16,7 +16,7 @@ use crate::computer::ComputerCapability;
 use crate::context::ProjectContext;
 use crate::extension_broker::CapabilityDispatcher;
 use crate::plan::SessionPlanStore;
-use crate::policy::ToolPolicy;
+use threadlane_runtime::ToolPolicy;
 use crate::question::QuestionManager;
 use crate::system_prompt::{build_system_prompt, SystemPromptBuildOptions};
 use std::collections::HashMap;
@@ -25,7 +25,6 @@ use std::sync::Arc;
 use threadlane_mcp::McpManager;
 use threadlane_protocol::ProviderPort;
 use threadlane_provider::openai::fetch_available_models;
-use threadlane_provider::router::ProviderClient;
 use threadlane_runtime::harness::{OperationOutcome, Reducer, SessionStore, Snapshot};
 use threadlane_runtime::{
     AgentEvent, AgentMessage, AgentRuntime, ImageAttachment, ReasoningEffort, TokenUsage,
@@ -57,7 +56,7 @@ pub struct CodingAgent {
     pub(crate) harness: Option<CodingSessionHarness>,
     pub(crate) harness_journal_error: Option<String>,
     pub(crate) harness_run_id: Arc<std::sync::Mutex<Option<String>>>,
-    pub(crate) prewalk: Arc<std::sync::Mutex<Option<crate::orchestrator::PrewalkState>>>,
+    pub(crate) prewalk: Arc<std::sync::Mutex<Option<threadlane_runtime::orchestrator::PrewalkState>>>,
     /// Live agent-to-agent mailbox shared by sibling `message_peer` and the
     /// parent `hub` tool (oh-my-pi hub/IRC parity).
     pub(crate) hub: super::mailbox::SubagentHub,
@@ -363,7 +362,7 @@ impl CodingAgent {
     }
 
     pub fn new(options: CodingAgentOptions) -> Self {
-        let provider = Arc::new(ProviderClient::new(
+        let provider = Arc::new(crate::credentials::provider_client_for(
             &options.api_key,
             options.account_id.clone(),
         ));
@@ -940,6 +939,34 @@ impl CodingAgent {
         }
 
         if let (Some(run_id), Some(journal)) = (run_id, self.harness.as_mut()) {
+            // Hook view of this turn for WASI extensions (goal loop, etc.).
+            // ACP tools carry display titles as names, so the hook gets the
+            // same nested `ToolCall` shape the native path emits; goal
+            // completion from an external agent arrives via the
+            // `<!-- GOAL_COMPLETE -->` content marker instead.
+            let hook_tool_calls = outcome
+                .tools
+                .iter()
+                .map(|tool| threadlane_provider::openai::ToolCall {
+                    id: tool.tool_call_id.clone(),
+                    r#type: "function".into(),
+                    function: threadlane_provider::openai::ToolCallFunction {
+                        name: tool.name.clone(),
+                        arguments: tool.arguments.clone(),
+                    },
+                    thought_signature: None,
+                })
+                .collect::<Vec<_>>();
+            let hook_message = AgentMessage::Assistant {
+                content: Some(outcome.reply.clone()),
+                tool_calls: if hook_tool_calls.is_empty() {
+                    None
+                } else {
+                    Some(hook_tool_calls)
+                },
+                stop_reason: None,
+                deferred_handle: None,
+            };
             // ACP tools execute inside the external agent, but their ordered
             // preambles and results must precede the final reply after reload.
             let has_tools = !outcome.tools.is_empty();
@@ -1025,6 +1052,11 @@ impl CodingAgent {
                     .await;
                 return Some(Err(format!("Harness Error: {error}")));
             }
+            // Fire the same `assistant_message` extension hooks the native
+            // turn path fires so autonomous loops (goal) keep chaining on
+            // ACP models. The hook's `agent.request_turn` schedules the next
+            // ACP follow-up, drained by the caller.
+            self.dispatch_assistant_hook(&hook_message).await;
         }
 
         if let Err(error) = self
@@ -1528,7 +1560,7 @@ impl CodingAgent {
                         .resolve_fast(&active_model)
                         .to_string();
                     let fast_reasoning = self.agent.config().fast_reasoning_effort;
-                    if crate::orchestrator::prewalk_would_be_noop(
+                    if threadlane_runtime::orchestrator::prewalk_would_be_noop(
                         &active_model,
                         active_effort,
                         &fast_model,
@@ -1544,8 +1576,8 @@ impl CodingAgent {
                             .agent
                             .configured_tool_definitions()
                             .iter()
-                            .any(|tool| tool.name == crate::orchestrator::PREWALK_TODO_TOOL);
-                        *self.prewalk.lock().unwrap() = Some(crate::orchestrator::PrewalkState::new(
+                            .any(|tool| tool.name == threadlane_runtime::orchestrator::PREWALK_TODO_TOOL);
+                        *self.prewalk.lock().unwrap() = Some(threadlane_runtime::orchestrator::PrewalkState::new(
                             fast_model.clone(),
                             fast_reasoning,
                             requires_todo,
@@ -1558,7 +1590,7 @@ impl CodingAgent {
 
                         effective_input = task_prompt.to_string();
                         architect_directive =
-                            Some(crate::orchestrator::build_architect_directive(&fast_model, requires_todo));
+                            Some(threadlane_runtime::orchestrator::build_architect_directive(&fast_model, requires_todo));
                     }
                 } else {
                     let output = execute_slash_command(cmd_action, &mut self.agent).await;
@@ -1589,9 +1621,9 @@ impl CodingAgent {
                 .agent
                 .configured_tool_definitions()
                 .iter()
-                .any(|tool| tool.name == crate::orchestrator::PREWALK_TODO_TOOL);
+                .any(|tool| tool.name == threadlane_runtime::orchestrator::PREWALK_TODO_TOOL);
 
-            let decision = crate::orchestrator::Orchestrator::evaluate(
+            let decision = threadlane_runtime::orchestrator::Orchestrator::evaluate(
                 &effective_input,
                 orchestrator_mode,
                 &active_model,
@@ -1600,13 +1632,13 @@ impl CodingAgent {
                 requires_todo,
             );
 
-            if let crate::orchestrator::OrchestratorDecision::EngagePrewalk {
+            if let threadlane_runtime::orchestrator::OrchestratorDecision::EngagePrewalk {
                 fast_model: target_fast,
                 fast_reasoning: target_effort,
                 architect_system_directive,
             } = decision
             {
-                if crate::orchestrator::prewalk_would_be_noop(
+                if threadlane_runtime::orchestrator::prewalk_would_be_noop(
                     &active_model,
                     active_effort,
                     &target_fast,
@@ -1617,7 +1649,7 @@ impl CodingAgent {
                         message: format!("Prewalk: target `{target_fast}` already matches the active model and reasoning; nothing to switch."),
                     });
                 } else {
-                    *self.prewalk.lock().unwrap() = Some(crate::orchestrator::PrewalkState::new(
+                    *self.prewalk.lock().unwrap() = Some(threadlane_runtime::orchestrator::PrewalkState::new(
                         target_fast.clone(),
                         target_effort,
                         requires_todo,
@@ -1639,7 +1671,7 @@ impl CodingAgent {
             let mut turn = self.agent.turn.lock().await;
             if !turn
                 .system_prompt
-                .contains(crate::orchestrator::ARCHITECT_PROTOCOL_HEADER)
+                .contains(threadlane_runtime::orchestrator::ARCHITECT_PROTOCOL_HEADER)
             {
                 turn.system_prompt.push_str(&directive);
             }
@@ -1769,7 +1801,7 @@ impl CodingAgent {
                         model: self.agent.model(),
                         message: format!(
                             "Prewalk: plan received but no todo/edits yet. {}",
-                            crate::orchestrator::PREWALK_CONTINUE_PROMPT
+                            threadlane_runtime::orchestrator::PREWALK_CONTINUE_PROMPT
                         ),
                     });
                 }

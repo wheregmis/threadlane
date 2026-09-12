@@ -1,5 +1,12 @@
 //! One-shot Prewalk handoff (oh-my-pi parity).
 //!
+//! Moved from `threadlane-session::orchestrator` (body verbatim): the
+//! prewalk state machine and its prompt directives sit next to the
+//! `OrchestratorMode` turn-driving config they interpret, in the execution
+//! engine. `threadlane-session` re-exports this module as `orchestrator` for
+//! compatibility; new code should import
+//! `threadlane_runtime::orchestrator` directly.
+//!
 //! Prewalk is off by default. When armed (explicit `/prewalk` or
 //! `OrchestratorMode::Always`), the starting model inspects the repository,
 //! writes a complete execution plan, captures it with the `update_plan` todo
@@ -23,25 +30,25 @@
 //! - One-shot with noop detection: identical target model + effort disarms
 //!   with a notice instead of a pointless switch.
 
-use threadlane_runtime::{OrchestratorMode, ReasoningEffort};
+use crate::types::{OrchestratorMode, ReasoningEffort};
 
 #[derive(Debug)]
-pub(crate) struct PrewalkState {
-    pub(crate) target_model: String,
-    pub(crate) target_reasoning: Option<ReasoningEffort>,
-    pub(crate) started_at: std::time::Instant,
+pub struct PrewalkState {
+    pub target_model: String,
+    pub target_reasoning: Option<ReasoningEffort>,
+    pub started_at: std::time::Instant,
     /// A successful `update_plan` call opened the handoff gate. Includes
     /// read-only `view`, matching oh-my-pi's `todo` gate.
-    pub(crate) todo_seen: bool,
+    pub todo_seen: bool,
     /// Whether `update_plan` is in the active toolset. When false the gate
     /// is considered open from the start.
-    pub(crate) requires_todo: bool,
+    pub requires_todo: bool,
     /// Continuation safety net armed (fires at most once).
-    pub(crate) continue_pending: bool,
+    pub continue_pending: bool,
 }
 
 impl PrewalkState {
-    pub(crate) fn new(
+    pub fn new(
         target_model: String,
         target_reasoning: Option<ReasoningEffort>,
         requires_todo: bool,
@@ -56,27 +63,27 @@ impl PrewalkState {
         }
     }
 
-    pub(crate) fn todo_gate_open(&self) -> bool {
+    pub fn todo_gate_open(&self) -> bool {
         self.todo_seen || !self.requires_todo
     }
 }
 
-pub(crate) const ARCHITECT_PROTOCOL_HEADER: &str =
+pub const ARCHITECT_PROTOCOL_HEADER: &str =
     "[ARCHITECT PROTOCOL: Frontier Architect -> Fast Model Handoff]";
 const ARCHITECT_PROTOCOL_FOOTER: &str = "[END ARCHITECT PROTOCOL]";
 
 /// Marker for the hidden post-handoff verification checklist appended after
 /// the plan nudge is scrubbed.
-pub(crate) const PREWALK_CHECKLIST_HEADER: &str = "[PREWALK CHECKLIST: Fast Model Verification]";
+pub const PREWALK_CHECKLIST_HEADER: &str = "[PREWALK CHECKLIST: Fast Model Verification]";
 
 /// Tool that opens the todo gate (oh-my-pi `todo` === Threadlane `update_plan`).
-pub(crate) const PREWALK_TODO_TOOL: &str = "update_plan";
+pub const PREWALK_TODO_TOOL: &str = "update_plan";
 
 /// First workspace-mutating actions that trigger the handoff once the todo
 /// gate is open. Read-only tools (`read_file`, `grep_search`, `run_command`
 /// diagnostics, etc.) never trigger, matching oh-my-pi where only
 /// `edit`/`write` count.
-pub(crate) fn is_prewalk_implementation_action(tool_name: &str, is_error: bool) -> bool {
+pub fn is_prewalk_implementation_action(tool_name: &str, is_error: bool) -> bool {
     if is_error {
         return false;
     }
@@ -87,11 +94,11 @@ pub(crate) fn is_prewalk_implementation_action(tool_name: &str, is_error: bool) 
 }
 
 /// Successful todo calls open the gate, including read-only views.
-pub(crate) fn is_prewalk_todo_gate_opener(tool_name: &str, is_error: bool) -> bool {
+pub fn is_prewalk_todo_gate_opener(tool_name: &str, is_error: bool) -> bool {
     !is_error && tool_name == PREWALK_TODO_TOOL
 }
 
-pub(crate) fn prewalk_would_be_noop(
+pub fn prewalk_would_be_noop(
     active_model: &str,
     active_effort: Option<ReasoningEffort>,
     target_model: &str,
@@ -114,10 +121,10 @@ pub enum OrchestratorDecision {
     },
 }
 
-pub(crate) struct Orchestrator;
+pub struct Orchestrator;
 
 impl Orchestrator {
-    pub(crate) fn evaluate(
+    pub fn evaluate(
         prompt: &str,
         mode: OrchestratorMode,
         active_model: &str,
@@ -154,7 +161,7 @@ impl Orchestrator {
 /// tool is absent from the active toolset (core schema mode), the gate is
 /// open from the start, so the directive must not demand an unfulfillable
 /// `update_plan` call — the written plan itself is the checkpoint.
-pub(crate) fn build_architect_directive(fast_model: &str, requires_todo: bool) -> String {
+pub fn build_architect_directive(fast_model: &str, requires_todo: bool) -> String {
     let todo_step = if requires_todo {
         "Then, in the SAME reply and only after the complete plan, use `update_plan` to capture 5-9 items: one per MEANINGFUL step, each with a concrete target + verification. Only code-changing or code-verifying steps; exclude reporting, bookkeeping, and cleanup ceremony.\n\
          Checkpoint, not final answer: after the todo list, continue the task; do not stop on the plan alone.\n"
@@ -184,7 +191,7 @@ pub(crate) fn build_architect_directive(fast_model: &str, requires_todo: bool) -
 /// Hidden post-handoff verification checklist for the fast model. Adapted
 /// from oh-my-pi's `prewalk-checklist.md`; injected by replacing the plan
 /// nudge at handoff time.
-pub(crate) fn build_checklist_directive() -> String {
+pub fn build_checklist_directive() -> String {
     format!(
         "\n\n{PREWALK_CHECKLIST_HEADER}\n\
          Before claiming task complete, verify:\n\
@@ -199,7 +206,7 @@ pub(crate) fn build_checklist_directive() -> String {
 /// Adapted from oh-my-pi's `prewalk-continue.md`. Fires at most once per
 /// armed prewalk; without it the turn loop treats zero tool calls as a
 /// natural stop and production runs die before any code is written.
-pub(crate) const PREWALK_CONTINUE_PROMPT: &str = "Continue task now; do not end turn here.";
+pub const PREWALK_CONTINUE_PROMPT: &str = "Continue task now; do not end turn here.";
 
 #[cfg(test)]
 mod tests {

@@ -92,7 +92,7 @@ pub struct AppState {
     /// Bridge to the embedded browser panel. The channel is created with the
     /// app; the first constructed right panel claims the receiver and pumps
     /// agent browser commands into the live view.
-    pub(crate) browser_bridge: threadlane_session::BrowserBridge,
+    pub(crate) browser_bridge: threadlane_protocol::browser::BrowserBridge,
     /// Whether the computer-use mirror popup is currently open. Set when the
     /// popup opens and cleared by its close button; guards duplicate popups.
     pub(crate) mirror_open: bool,
@@ -166,7 +166,7 @@ impl AppState {
                 if is_attachable_project_root(&curr) {
                     let project = AttachedProject::from_path(curr);
                     registry_projects.push(project.clone());
-                    let _ = threadlane_session::save_project_registry(&registry_projects);
+                    let _ = threadlane_project::save_project_registry(&registry_projects);
                 }
             }
         }
@@ -300,7 +300,7 @@ impl AppState {
             session_refresh_rx: Some(session_refresh_rx),
             session_runtimes,
             deferred_stream_events: HashMap::new(),
-            browser_bridge: threadlane_session::BrowserBridge::channel(),
+            browser_bridge: threadlane_protocol::browser::BrowserBridge::channel(),
             mirror_open: false,
             mirror_seen: HashSet::new(),
             pending_permissions: HashMap::new(),
@@ -649,7 +649,7 @@ impl AppState {
     }
 
     fn persist_project_selection(&self, work_dir: &Path, session_id: Option<&str>) {
-        if let Err(error) = threadlane_session::select_project(work_dir, session_id) {
+        if let Err(error) = threadlane_project::select_project(work_dir, session_id) {
             tracing::warn!("Failed to persist selected project: {error}");
         }
     }
@@ -1389,7 +1389,7 @@ impl AppState {
             return Err("Selected path is not a directory".into());
         }
 
-        let record = threadlane_session::register_project(&canonical)?;
+        let record = threadlane_project::register_project(&canonical)?;
 
         let discovered_sessions = discover_sessions_in_project(&canonical);
         let session_to_restore = record

@@ -49,13 +49,36 @@ fn strip_opencode_prefix(model: &str) -> &str {
 #[derive(Debug, Clone, Default)]
 pub struct OpenCodeGoClient {
     client: reqwest::Client,
+    api_key: Option<String>,
 }
 
 impl OpenCodeGoClient {
     pub(crate) fn new() -> Self {
         Self {
             client: reqwest::Client::new(),
+            api_key: None,
         }
+    }
+
+    /// Injects the stored OpenCode API key. Without one, requests fall back
+    /// to `OPENCODE_API_KEY`/`OPENCODE_GO_API_KEY` from the environment.
+    pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
+        let key = api_key.into();
+        self.api_key = (!key.trim().is_empty()).then_some(key);
+        self
+    }
+
+    fn api_key(&self) -> Option<String> {
+        self.api_key
+            .clone()
+            .filter(|key| !key.trim().is_empty())
+            .or_else(|| {
+                ["OPENCODE_API_KEY", "OPENCODE_GO_API_KEY"]
+                    .into_iter()
+                    .filter_map(|name| std::env::var(name).ok())
+                    .map(|key| key.trim().to_string())
+                    .find(|key| !key.is_empty())
+            })
     }
 
     fn get_base_url() -> String {
@@ -123,9 +146,16 @@ async fn fetch_available_models_network(
 /// Lists bare Zen model ids from the OpenAI-compatible `/models` endpoint.
 ///
 /// Results are cached per API key for [`MODELS_CACHE_TTL`]; failures fall back
-/// to [`FALLBACK_MODELS`] so the picker keeps working offline.
-pub async fn fetch_available_models() -> Vec<String> {
-    let api_key = threadlane_auth::load_opencode_api_key().unwrap_or_default();
+/// to [`FALLBACK_MODELS`] so the picker keeps working offline. An empty key
+/// returns the fallback list without a network round trip.
+pub async fn fetch_available_models(api_key: &str) -> Vec<String> {
+    let api_key = api_key.trim().to_string();
+    if api_key.is_empty() {
+        return FALLBACK_MODELS
+            .iter()
+            .map(|model| model.to_string())
+            .collect();
+    }
     let cache_key = models_cache_key(&api_key);
     let now = Instant::now();
     if let Some(models) = MODELS_CACHE
@@ -145,7 +175,7 @@ pub async fn fetch_available_models() -> Vec<String> {
     if tokio::runtime::Handle::try_current().is_ok() {
         fetch_available_models_network(api_key, cache_key, now).await
     } else {
-        let handle = threadlane_runtime::get_runtime()
+        let handle = crate::exec::get_runtime()
             .spawn(fetch_available_models_network(api_key, cache_key, now));
         match handle.await {
             Ok(models) => models,
@@ -173,7 +203,7 @@ impl ModelProvider for OpenCodeGoClient {
         _prompt_cache_key: Option<String>,
         event_tx: mpsc::Sender<StreamEvent>,
     ) {
-        let api_key = match threadlane_auth::load_opencode_api_key() {
+        let api_key = match self.api_key() {
             Some(key) => key,
             None => {
                 let _ = event_tx

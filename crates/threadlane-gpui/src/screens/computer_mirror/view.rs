@@ -8,7 +8,7 @@
 //! it), and toggled to fill the chat panel with the expand button. The host
 //! view owns the entity and drops it when `AppState::mirror_open` clears.
 //!
-//! Frames arrive in-process from `threadlane_session::computer_live`: the
+//! Frames arrive in-process from `threadlane_protocol::live`: the
 //! macOS poller publishes bounded BGRA frames at up to 20fps while this view
 //! holds a subscription, and each one is painted straight from a
 //! `RenderImage` — no JPEG round trip and no file polling on the hot path.
@@ -30,8 +30,8 @@ use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::{ActiveTheme, IconName, Sizable};
 use image::{Frame, RgbaImage};
-use threadlane_session::computer_live::{
-    self, LiveFrame, LiveOverlay, LiveOverlayKind, LiveStatus,
+use threadlane_protocol::live::{
+    self as computer_live, LiveFrame, LiveOverlay, LiveOverlayKind, LiveStatus,
 };
 
 use crate::state::AppState;
@@ -1133,7 +1133,7 @@ impl Render for MirrorView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use threadlane_session::computer_live::StreamTarget;
+    use threadlane_protocol::live::StreamTarget;
 
     fn frame(width: u32, height: u32) -> LiveFrame {
         LiveFrame {

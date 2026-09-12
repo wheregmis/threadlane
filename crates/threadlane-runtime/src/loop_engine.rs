@@ -1,4 +1,4 @@
-use crate::provider::normalized_tool_call_id;
+use threadlane_provider::convert::normalized_tool_call_id;
 use crate::types::AgentMessage;
 use std::collections::HashSet;
 

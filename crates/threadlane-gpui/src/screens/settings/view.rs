@@ -86,7 +86,7 @@ impl ProvidersStatusSnapshot {
             active_codex_account_id: threadlane_auth::openai_auth::get_active_codex_account()
                 .map(|account| account.id),
             antigravity_connected:
-                threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some(),
+                threadlane_auth::antigravity_auth::load_antigravity_credentials().is_some(),
         }
     }
 }
@@ -1687,7 +1687,7 @@ impl SettingsView {
                             let _ = view.update(cx, |this, cx| {
                                 if connected {
                                     let result = if antigravity {
-                                        threadlane_provider::antigravity_auth::clear_antigravity_credentials()
+                                        threadlane_auth::antigravity_auth::clear_antigravity_credentials()
                                     } else {
                                         threadlane_auth::openai_auth::remove_credentials()
                                     };
@@ -2404,7 +2404,7 @@ impl SettingsView {
             .as_ref()
             .map(|snapshot| snapshot.antigravity_connected)
             .unwrap_or_else(|| {
-                threadlane_provider::antigravity_auth::load_antigravity_credentials().is_some()
+                threadlane_auth::antigravity_auth::load_antigravity_credentials().is_some()
             });
 
         div()

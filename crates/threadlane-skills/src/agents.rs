@@ -1,3 +1,10 @@
+//! Agent definitions (`~/.agents/agents`, `.threadlane/agents/*.md`).
+//!
+//! Moved verbatim from `threadlane-session::agents`: the only non-std
+//! dependency is the skill frontmatter parser owned by this crate, so agent
+//! discovery lives next to skill discovery. `threadlane-session` re-exports
+//! this module as `agents` for compatibility; new code should import
+//! `threadlane_skills::agents` directly.
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -34,18 +41,18 @@ impl AgentSource {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentDefinition {
-    pub(crate) name: String,
-    pub(crate) description: String,
-    pub(crate) tools: Option<Vec<String>>,
-    pub(crate) model: Option<String>,
-    pub(crate) system_prompt: String,
-    pub(crate) source: AgentSource,
-    pub(crate) file_path: PathBuf,
+    pub name: String,
+    pub description: String,
+    pub tools: Option<Vec<String>>,
+    pub model: Option<String>,
+    pub system_prompt: String,
+    pub source: AgentSource,
+    pub file_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentDiscoveryResult {
-    pub(crate) agents: Vec<AgentDefinition>,
+    pub agents: Vec<AgentDefinition>,
     project_agents_dir: Option<PathBuf>,
 }
 
@@ -58,7 +65,7 @@ struct AgentFrontmatterMeta {
 }
 
 fn parse_agent_frontmatter(content: &str) -> (AgentFrontmatterMeta, Option<String>, String) {
-    let parsed = threadlane_skills::frontmatter::parse_frontmatter(content);
+    let parsed = crate::frontmatter::parse_frontmatter(content);
     let mut meta = AgentFrontmatterMeta::default();
 
     if let Some(err) = parsed.parse_error {
@@ -189,8 +196,8 @@ fn find_nearest_project_agent_dirs(cwd: &Path) -> (Option<PathBuf>, Vec<PathBuf>
     }
 }
 
-pub(crate) fn discover_agents(cwd: &Path, scope: AgentScope) -> AgentDiscoveryResult {
-    let home = threadlane_runtime::utils::dirs_home();
+pub fn discover_agents(cwd: &Path, scope: AgentScope) -> AgentDiscoveryResult {
+    let home = crate::dirs_home();
     let user_dirs = home
         .map(|h| {
             vec![

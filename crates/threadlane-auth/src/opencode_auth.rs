@@ -1,34 +1,30 @@
+use crate::store::CredentialStore;
 use crate::traits::AuthProvider;
 use std::fs;
-use std::path::PathBuf;
-
-fn get_threadlane_dir() -> PathBuf {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_else(|_| ".".to_string());
-    let mut path = PathBuf::from(home);
-    path.push(".threadlane");
-    let _ = fs::create_dir_all(&path);
-    path
-}
-
-fn get_opencode_api_key_path() -> PathBuf {
-    let mut path = get_threadlane_dir();
-    path.push("opencode_api_key");
-    path
-}
 
 pub fn save_opencode_api_key(key: &str) -> Result<(), String> {
+    save_opencode_api_key_in(key, &CredentialStore::default())
+}
+
+/// Saves the API key file at the injected store's location.
+pub fn save_opencode_api_key_in(key: &str, locations: &CredentialStore) -> Result<(), String> {
     let key = key.trim();
     if key.is_empty() {
         return Err("OpenCode API key cannot be empty".to_string());
     }
 
-    crate::openai_auth::write_secure_text_file(&get_opencode_api_key_path(), key)
+    locations.ensure_threadlane_dir();
+    crate::openai_auth::write_secure_text_file(&locations.opencode_api_key_path(), key)
 }
 
 pub fn load_opencode_api_key() -> Option<String> {
-    let path = get_opencode_api_key_path();
+    load_opencode_api_key_in(&CredentialStore::default())
+}
+
+/// Loads the API key file from the injected store's location (env fallback
+/// preserved: `OPENCODE_API_KEY`, then `OPENCODE_GO_API_KEY`).
+pub fn load_opencode_api_key_in(locations: &CredentialStore) -> Option<String> {
+    let path = locations.opencode_api_key_path();
     if path.exists() {
         if let Ok(content) = fs::read_to_string(path) {
             let key = content.trim().to_string();
@@ -51,7 +47,12 @@ pub fn load_opencode_api_key() -> Option<String> {
 }
 
 pub fn clear_opencode_api_key() -> Result<(), String> {
-    let path = get_opencode_api_key_path();
+    clear_opencode_api_key_in(&CredentialStore::default())
+}
+
+/// Removes the API key file at the injected store's location.
+pub fn clear_opencode_api_key_in(locations: &CredentialStore) -> Result<(), String> {
+    let path = locations.opencode_api_key_path();
     if path.exists() {
         fs::remove_file(path).map_err(|e| e.to_string())?;
     }

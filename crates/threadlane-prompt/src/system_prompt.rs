@@ -1,7 +1,15 @@
+//! System-prompt builder: base identity, tool-specific guidelines, project context.
+//!
+//! Moved verbatim from `threadlane-session::system_prompt` together with
+//! `context.rs`. The only Threadlane dependency is the model-visible
+//! `AgentToolDefinition` contract from `threadlane-protocol` (the same type
+//! `threadlane-runtime` re-exports, so no conversion is needed).
+//! `threadlane-session` re-exports this module as `system_prompt` for
+//! compatibility; new code should import `threadlane_prompt` directly.
 use crate::context::ProjectContext;
 use std::collections::HashSet;
 use std::path::Path;
-use threadlane_runtime::AgentToolDefinition;
+use threadlane_protocol::AgentToolDefinition;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SystemPromptConfig {
@@ -10,17 +18,17 @@ pub struct SystemPromptConfig {
     /// Text appended after the base prompt and before project resources.
     append_prompt: Option<String>,
     /// Additional guideline bullets for the default prompt.
-    pub(crate) guidelines: Vec<String>,
+    pub guidelines: Vec<String>,
 }
 
-pub(crate) struct SystemPromptBuildOptions<'a> {
-    pub(crate) config: &'a SystemPromptConfig,
-    pub(crate) work_dir: &'a Path,
-    pub(crate) tools: &'a [AgentToolDefinition],
-    pub(crate) project_context: &'a ProjectContext,
-    pub(crate) skill_catalog: Option<&'a str>,
-    pub(crate) agent_catalog: Option<&'a str>,
-    pub(crate) loaded_extension_count: usize,
+pub struct SystemPromptBuildOptions<'a> {
+    pub config: &'a SystemPromptConfig,
+    pub work_dir: &'a Path,
+    pub tools: &'a [AgentToolDefinition],
+    pub project_context: &'a ProjectContext,
+    pub skill_catalog: Option<&'a str>,
+    pub agent_catalog: Option<&'a str>,
+    pub loaded_extension_count: usize,
 }
 
 fn normalize_line(value: &str) -> String {
@@ -73,7 +81,7 @@ fn append_catalog(prompt: &mut String, catalog: Option<&str>) {
     }
 }
 
-pub(crate) fn build_system_prompt(options: SystemPromptBuildOptions<'_>) -> String {
+pub fn build_system_prompt(options: SystemPromptBuildOptions<'_>) -> String {
     let available_tool_names = visible_tool_names(options.tools);
 
     let mut prompt = if let Some(custom_prompt) = options

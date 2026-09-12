@@ -8237,6 +8237,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "threadlane-acp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "threadlane-auth"
 version = "0.1.0"
 dependencies = [
@@ -8256,12 +8267,31 @@ name = "threadlane-benchmarks"
 version = "0.0.0"
 dependencies = [
  "hotpath",
+ "serde_json",
  "tempfile",
  "threadlane-mcp",
  "threadlane-runtime",
  "threadlane-tools",
  "tokio",
  "vt100",
+]
+
+[[package]]
+name = "threadlane-computer"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "core-foundation 0.10.1",
+ "core-graphics 0.25.0",
+ "image",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "threadlane-protocol",
+ "threadlane-runtime",
+ "threadlane-wasi",
+ "tokio",
 ]
 
 [[package]]
@@ -8272,6 +8302,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "threadlane-auth",
+ "threadlane-project",
 ]
 
 [[package]]
@@ -8301,6 +8332,7 @@ dependencies = [
  "tempfile",
  "threadlane-auth",
  "threadlane-git",
+ "threadlane-project",
  "threadlane-protocol",
  "threadlane-provider",
  "threadlane-runtime",
@@ -8326,13 +8358,30 @@ dependencies = [
 name = "threadlane-mcp"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "futures",
  "serde",
  "serde_json",
  "tempfile",
- "threadlane-runtime",
  "tokio",
+]
+
+[[package]]
+name = "threadlane-project"
+version = "0.1.0"
+dependencies = [
+ "directories",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+]
+
+[[package]]
+name = "threadlane-prompt"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "threadlane-protocol",
 ]
 
 [[package]]
@@ -8351,14 +8400,14 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "directories",
  "futures-util",
  "reqwest",
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "threadlane-auth",
+ "tempfile",
  "threadlane-protocol",
- "threadlane-runtime",
  "tokio",
  "tokio-tungstenite",
  "tracing",
@@ -8393,11 +8442,8 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64",
- "core-foundation 0.10.1",
- "core-graphics 0.25.0",
  "directories",
  "futures",
- "image",
  "log",
  "reqwest",
  "serde",
@@ -8405,9 +8451,13 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.20",
+ "threadlane-acp",
  "threadlane-auth",
+ "threadlane-computer",
  "threadlane-git",
  "threadlane-mcp",
+ "threadlane-project",
+ "threadlane-prompt",
  "threadlane-protocol",
  "threadlane-provider",
  "threadlane-runtime",
@@ -8421,12 +8471,10 @@ dependencies = [
 name = "threadlane-skills"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "serde",
  "serde_json",
  "serde_yaml",
  "tempfile",
- "threadlane-runtime",
 ]
 
 [[package]]
@@ -8436,7 +8484,6 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
- "threadlane-auth",
  "threadlane-hashline",
 ]
 

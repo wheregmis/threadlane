@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender as Sender;
 
-use threadlane_provider::ProviderClient;
+use threadlane_session::provider_client_for;
 use threadlane_session::harness::{JsonlStore, SessionStore};
 use threadlane_session::{AgentEvent, ImageAttachment, ReasoningEffort};
 
@@ -332,7 +332,7 @@ pub(crate) fn maybe_generate_session_title(
             let raw = match threadlane_session::acp_agent_id(&model) {
                 Some(agent_id) => {
                     threadlane_session::acp_runtime::generate_title(
-                        threadlane_session::default_global_threadlane_dir(),
+                        threadlane_project::default_global_threadlane_dir(),
                         work_dir,
                         agent_id,
                         &submitted_prompt,
@@ -340,7 +340,7 @@ pub(crate) fn maybe_generate_session_title(
                     .await?
                 }
                 None => {
-                    ProviderClient::new(api_key, account_id)
+                    provider_client_for(api_key, account_id)
                         .generate_title(&model, &submitted_prompt)
                         .await?
                 }

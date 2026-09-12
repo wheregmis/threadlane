@@ -52,10 +52,10 @@ pub(crate) fn start_chatgpt_login(tx: Sender<ProviderAuthEvent>) -> Result<(), S
 }
 
 pub(crate) fn start_antigravity_login(tx: Sender<ProviderAuthEvent>) -> Result<(), String> {
-    let (verifier, challenge) = threadlane_provider::antigravity_auth::generate_pkce_pair();
-    let (state, _) = threadlane_provider::antigravity_auth::generate_pkce_pair();
+    let (verifier, challenge) =     threadlane_auth::antigravity_auth::generate_pkce_pair();
+    let (state, _) =     threadlane_auth::antigravity_auth::generate_pkce_pair();
     let authorization_url =
-        threadlane_provider::antigravity_auth::build_authorization_url(&challenge, &state);
+        threadlane_auth::antigravity_auth::build_authorization_url(&challenge, &state);
     robius_open::Uri::new(&authorization_url)
         .open()
         .map_err(|error| format!("Failed to open Google sign-in: {error:?}"))?;
@@ -66,8 +66,8 @@ pub(crate) fn start_antigravity_login(tx: Sender<ProviderAuthEvent>) -> Result<(
     executor()?.spawn(async move {
         let result = async {
             let code =
-                threadlane_provider::antigravity_auth::listen_for_oauth_callback(state).await?;
-            threadlane_provider::antigravity_auth::exchange_code_for_tokens(&code, &verifier).await
+                threadlane_auth::antigravity_auth::listen_for_oauth_callback(state).await?;
+            threadlane_auth::antigravity_auth::exchange_code_for_tokens(&code, &verifier).await
         }
         .await;
 

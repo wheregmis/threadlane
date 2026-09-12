@@ -12,6 +12,7 @@ hotpath-alloc = ["hotpath/hotpath-alloc"]
 
 [dependencies]
 hotpath.workspace = true
+serde_json.workspace = true
 tempfile.workspace = true
 threadlane-mcp.workspace = true
 threadlane-runtime.workspace = true

@@ -1,3 +1,9 @@
+//! Drift-resistant `line:hash` anchored text edits.
+//!
+//! Each anchor names a 1-based line number plus the short hash rendered by
+//! [`format_line_hashline`]. The hash is a 12-bit FNV-1a checksum: it detects
+//! stale anchors after concurrent edits, it is **not** a cryptographic
+//! integrity check and must not be used as one.
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,10 +37,34 @@ impl HashlineEdit {
             new_content: new_content.into(),
         }
     }
+
+    /// Start anchor in `line:hash` form (e.g. `12:a3f`).
+    pub fn start_anchor(&self) -> &str {
+        &self.start_anchor
+    }
+
+    /// Optional inclusive end anchor for range edits.
+    pub fn end_anchor(&self) -> Option<&str> {
+        self.end_anchor.as_deref()
+    }
+
+    /// Edit action to apply at the anchor.
+    pub fn action(&self) -> &HashlineAction {
+        &self.action
+    }
+
+    /// Replacement text; empty for [`HashlineAction::Delete`].
+    pub fn new_content(&self) -> &str {
+        &self.new_content
+    }
 }
 
 /// Compute a 3-character hex hash for a line of text.
-fn compute_line_hash(line: &str) -> String {
+///
+/// 12-bit FNV-1a over the line without trailing newline characters.
+/// Public so standalone consumers can anchor lines without calling
+/// [`format_line_hashline`] and reparsing the output.
+pub fn compute_line_hash(line: &str) -> String {
     let clean = line.trim_end_matches(['\r', '\n']);
     let mut hash: u32 = 2166136261;
     for byte in clean.bytes() {
@@ -51,7 +81,7 @@ pub fn format_line_hashline(line_no: usize, line: &str) -> String {
 }
 
 /// Parse a line anchor string like `"12:a3f"` into line index (1-based) and lowercased hash.
-fn parse_anchor(anchor: &str) -> Result<(usize, String), String> {
+pub fn parse_anchor(anchor: &str) -> Result<(usize, String), String> {
     let (first, second) = anchor.split_once(':').ok_or_else(|| {
         format!(
             "Invalid anchor format '{anchor}'. Expected format 'line_number:hash' (e.g. '12:a3f')."
@@ -85,8 +115,7 @@ pub struct HashlineApplyResult {
 }
 
 /// Apply a series of hash-anchored edits to a multi-line document.
-#[cfg(test)]
-fn apply_hashline_edits(content: &str, edits: &[HashlineEdit]) -> Result<String, String> {
+pub fn apply_hashline_edits(content: &str, edits: &[HashlineEdit]) -> Result<String, String> {
     apply_hashline_edits_detailed(content, edits, 0).map(|r| r.new_content)
 }
 

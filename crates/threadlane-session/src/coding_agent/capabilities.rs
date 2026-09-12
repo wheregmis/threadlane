@@ -13,7 +13,7 @@ use crate::extension_broker::{
 };
 use crate::permission::{PermissionHandle, PermissionManager};
 use crate::plan::{SessionPlanStore, UpdatePlanToolExecutor};
-use crate::policy::ToolPolicy;
+use threadlane_runtime::ToolPolicy;
 use crate::question::{AskQuestionToolExecutor, QuestionHandle};
 use async_trait::async_trait;
 use log::warn;
@@ -21,11 +21,11 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use threadlane_mcp::McpManager;
+use crate::mcp::{McpManager, McpToolExecutor};
 use threadlane_runtime::harness::{HookContext, HookEffect, HookHandler, HookKind};
 use threadlane_runtime::Capability;
 use threadlane_runtime::{AgentEvent, AgentToolCall, AgentToolDefinition, ToolExecutor};
-use threadlane_skills::{LoadSkillToolExecutor, SkillRegistry};
+use threadlane_skills::{LoadSkillToolExecutor as SkillLoader, SkillRegistry};
 use threadlane_wasi::WasiExtensionManager;
 use tokio::sync::broadcast;
 
@@ -36,7 +36,7 @@ const CREATE_DRAFT_PR_TOOL_NAME: &str = "create_draft_pull_request";
 // channel shared by parent `hub` and child `message_peer`).
 // NOTE: oh-my-pi parity removed the explicit `complete_prewalk` handoff tool.
 // The handoff is automatic at the first qualifying edit/write behind an
-// opened `update_plan` todo gate (see `crate::orchestrator`).
+// opened `update_plan` todo gate (see `threadlane_runtime::orchestrator`).
 
 // ── Capability implementations ─────────────────────────────────────────
 // Each wraps a subsystem and implements [`crate::capability_registry::Capability`]
@@ -45,12 +45,41 @@ const CREATE_DRAFT_PR_TOOL_NAME: &str = "create_draft_pull_request";
 pub(crate) struct SkillCapability {
     pub(crate) skills: Arc<SkillRegistry>,
 }
+/// Session-owned `ToolExecutor` adapter over the runtime-agnostic skills loader.
+struct SessionLoadSkillExecutor(SkillLoader);
+
+#[async_trait]
+impl ToolExecutor for SessionLoadSkillExecutor {
+    fn executor_id(&self) -> &str {
+        "threadlane.host.load_skill"
+    }
+
+    fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
+        self.0
+            .tool_definitions()
+            .iter()
+            .map(|definition| AgentToolDefinition {
+                name: definition.name.clone(),
+                description: definition.description.clone(),
+                parameters: definition.parameters.clone(),
+                strict: definition.strict,
+            })
+            .collect::<Vec<_>>()
+            .into()
+    }
+
+    async fn execute_tool(&self, name: &str, args: &str) -> Option<Result<String, String>> {
+        self.0.execute(name, args)
+    }
+}
 impl Capability for SkillCapability {
     fn id(&self) -> &str {
         "skills"
     }
     fn tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
-        vec![Arc::new(LoadSkillToolExecutor::new(self.skills.clone()))]
+        vec![Arc::new(SessionLoadSkillExecutor(SkillLoader::new(
+            self.skills.clone(),
+        )))]
     }
 }
 
@@ -379,7 +408,7 @@ impl Capability for McpCapability {
         "mcp"
     }
     fn tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
-        vec![self.mcp_manager.clone()]
+        vec![Arc::new(McpToolExecutor::new(self.mcp_manager.clone()))]
     }
 }
 

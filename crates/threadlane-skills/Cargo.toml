@@ -5,11 +5,9 @@ edition = "2021"
 description = "Skill directory scanning, YAML frontmatter parsing, and load_skill tool for threadlane agent"
 
 [dependencies]
-threadlane-runtime.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
-async-trait.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

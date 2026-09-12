@@ -81,6 +81,24 @@ pub fn try_execute_tool_in_workspace(
     args_json: &str,
     workspace_root: &Path,
 ) -> Result<String, String> {
+    try_execute_tool_in_workspace_with(
+        name,
+        args_json,
+        workspace_root,
+        &virtual_read::RemoteCredentials::default(),
+    )
+}
+
+/// Executes a tool with explicit remote-forge credentials.
+///
+/// Stored credential lookup lives with the host; pass stored tokens via
+/// `credentials` and ambient (`gh`/`glab`/env) fallbacks still apply.
+pub fn try_execute_tool_in_workspace_with(
+    name: &str,
+    args_json: &str,
+    workspace_root: &Path,
+    credentials: &virtual_read::RemoteCredentials,
+) -> Result<String, String> {
     let args: Value = serde_json::from_str(args_json)
         .map_err(|error| format!("Error parsing tool arguments JSON: {error}"))?;
 
@@ -114,7 +132,7 @@ pub fn try_execute_tool_in_workspace(
                         || path.starts_with("https://gitlab.com/")
                         || path.starts_with("http://gitlab.com/") =>
                 {
-                    return virtual_read::try_remote_ref_path(workspace_root, path);
+                    return virtual_read::try_remote_ref_path_with(workspace_root, path, credentials);
                 }
                 Some(p) => p,
                 None => return Err("Error: 'path' parameter is required".into()),
