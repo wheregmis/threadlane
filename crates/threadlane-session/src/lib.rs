@@ -21,7 +21,6 @@ pub mod config;
 pub use threadlane_prompt as context;
 pub mod controller;
 pub mod credentials;
-pub mod error;
 pub mod extension_broker;
 pub mod mcp;
 pub mod orchestrator;
@@ -45,7 +44,6 @@ pub mod supervisor;
 pub use threadlane_prompt as system_prompt;
 
 // ── SessionController & CodingAgent ──────────────────────────────────
-mod capabilities_catalog;
 pub mod coding_agent;
 pub use coding_agent::harness::{
     CodingSessionHarness, HarnessRecord, InterruptedSubagentRecoveryState,
