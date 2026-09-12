@@ -2,6 +2,7 @@ name: hotpath-profile
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths-ignore:
       - "**/*.md"
       - "docs/**"
@@ -15,6 +16,7 @@ concurrency:
 
 jobs:
   profile:
+    if: ${{ !github.event.pull_request.draft }}
     env:
       HOTPATH_METRICS_SERVER_OFF: 1
     runs-on: ubuntu-latest
