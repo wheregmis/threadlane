@@ -1,15 +1,24 @@
 pub mod acp;
 pub mod acp_bridge;
 pub mod acp_runtime;
-pub mod agents;
+/// Agent definitions, canonical in `threadlane_skills::agents`.
+/// Re-exported here so existing `threadlane_session::agents` paths keep
+/// working; new code should import `threadlane_skills::agents` directly.
+pub use threadlane_skills::agents as agents;
 pub mod browser;
 pub mod commands;
 pub mod computer;
-pub mod computer_live;
+/// Live computer-use feed, canonical in `threadlane-protocol::live`.
+/// Re-exported here so existing `threadlane_session::computer_live` paths
+/// keep working; new code should import `threadlane_protocol::live` directly.
+pub use threadlane_protocol::live as computer_live;
 #[cfg(target_os = "macos")]
 pub(crate) mod computer_stream;
 pub mod config;
-pub mod context;
+/// Project context discovery, canonical in `threadlane-prompt`.
+/// Re-exported here so existing `threadlane_session::context` paths keep
+/// working; new code should import `threadlane_prompt` directly.
+pub use threadlane_prompt as context;
 pub mod controller;
 pub mod credentials;
 pub mod error;
@@ -19,11 +28,21 @@ pub mod orchestrator;
 pub mod permission;
 mod plan;
 pub mod policy;
-pub mod project_registry;
-pub mod prompt_templates;
+/// Attached-project registry, canonical in `threadlane-project`.
+/// Re-exported here so existing `threadlane_session::project_registry` and
+/// `threadlane_session::ProjectRecord` paths keep working; new code should
+/// import `threadlane_project` directly.
+pub use threadlane_project as project_registry;
+/// Prompt templates, canonical in `threadlane_skills::prompts`.
+/// Re-exported here so existing `threadlane_session::prompt_templates` paths
+/// keep working; new code should import `threadlane_skills::prompts` directly.
+pub use threadlane_skills::prompts as prompt_templates;
 pub mod question;
 pub mod supervisor;
-pub mod system_prompt;
+/// System-prompt builder, canonical in `threadlane-prompt`.
+/// Re-exported here so existing `threadlane_session::system_prompt` paths
+/// keep working; new code should import `threadlane_prompt` directly.
+pub use threadlane_prompt as system_prompt;
 
 // ── SessionController & CodingAgent ──────────────────────────────────
 mod capabilities_catalog;
@@ -56,10 +75,10 @@ pub use credentials::{
 };
 pub use permission::{PermissionDecision, PermissionHandle};
 pub use policy::ToolPolicy;
-pub use project_registry::{
+pub use threadlane_project::{
     load_project_registry, register_project, save_project_registry, select_project, ProjectRecord,
 };
-pub use prompt_templates::PromptTemplate;
+pub use threadlane_skills::prompts::PromptTemplate;
 pub use question::QuestionHandle;
 pub use system_prompt::SystemPromptConfig;
 

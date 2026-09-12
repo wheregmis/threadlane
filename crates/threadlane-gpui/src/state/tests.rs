@@ -1289,7 +1289,7 @@ fn issue_work_prompt_failure_rolls_back_artifacts_and_selection() {
     let workspace_page = state.workspace_page;
     let session_status = state.session_status.clone();
     let pending_hydrations = state.pending_hydrations.clone();
-    let persisted_before = threadlane_session::load_project_registry()
+    let persisted_before = threadlane_project::load_project_registry()
         .into_iter()
         .find(|project| project.path == work_dir)
         .map(|project| (project.last_session_id, project.last_opened_at));
@@ -1348,7 +1348,7 @@ fn issue_work_prompt_failure_rolls_back_artifacts_and_selection() {
             .count(),
         1
     );
-    let persisted_after = threadlane_session::load_project_registry()
+    let persisted_after = threadlane_project::load_project_registry()
         .into_iter()
         .find(|project| project.path == work_dir)
         .map(|project| (project.last_session_id, project.last_opened_at));

@@ -1,7 +1,11 @@
 use serde::{Deserialize, Serialize};
 
+pub mod live;
 pub mod messages;
 
+pub use live::{
+    LiveFrame, LiveOverlay, LiveOverlayKind, LiveStatus, StreamTarget, LIVE_FRAME_MAX_WIDTH,
+};
 pub use messages::{
     AgentMessage, AgentToolCall, AgentToolDefinition, DeferredHandle, ImageAttachment,
     ReasoningEffort,

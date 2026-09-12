@@ -57,7 +57,7 @@ pub fn save_pr_review_tracking(
 }
 
 fn auto_address_preferences_path() -> Option<PathBuf> {
-    threadlane_session::default_global_threadlane_dir()
+    threadlane_project::default_global_threadlane_dir()
         .map(|dir| dir.join("gui").join("auto_address_pr_reviews.json"))
 }
 

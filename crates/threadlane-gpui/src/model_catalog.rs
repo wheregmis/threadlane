@@ -542,7 +542,7 @@ pub async fn refresh_acp_models(project_root: Option<std::path::PathBuf>) {
         return;
     }
     let manager = threadlane_session::AcpManager::new(
-        threadlane_session::default_global_threadlane_dir(),
+        threadlane_project::default_global_threadlane_dir(),
         project_root,
     );
     // ACP spawns agent subprocesses through `tokio::process`, which needs a
@@ -731,7 +731,7 @@ fn models_for_credentials(has_antigravity: bool, has_opencode: bool) -> Vec<Mode
 
 fn append_acp_models(models: &mut Vec<ModelOption>, project_root: Option<&std::path::Path>) {
     let manager = threadlane_session::AcpManager::new(
-        threadlane_session::default_global_threadlane_dir(),
+        threadlane_project::default_global_threadlane_dir(),
         project_root.map(std::path::Path::to_path_buf),
     );
     for config in manager

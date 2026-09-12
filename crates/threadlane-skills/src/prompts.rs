@@ -1,9 +1,16 @@
+//! Prompt templates (`/name args` expansion for `.threadlane/prompts/*.md`).
+//!
+//! Moved verbatim from `threadlane-session::prompt_templates`: the only
+//! non-std dependency is the skill frontmatter parser owned by this crate,
+//! so templates live next to it. `threadlane-session` re-exports this module
+//! as `prompt_templates` for compatibility; new code should import
+//! `threadlane_skills::prompts` directly.
 use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptTemplate {
-    pub(crate) name: String,
+    pub name: String,
     description: String,
     argument_hint: Option<String>,
     content: String,
@@ -164,7 +171,7 @@ fn eval_braced_expr(expr: &str, args: &[String], all_args: &str) -> String {
 
 /// Parse frontmatter metadata from markdown file content.
 fn parse_frontmatter(content: &str) -> (Option<String>, Option<String>, String) {
-    let parsed = threadlane_skills::frontmatter::parse_frontmatter(content);
+    let parsed = crate::frontmatter::parse_frontmatter(content);
     let description = parsed.get_str("description").map(ToString::to_string);
     let argument_hint = parsed.get_str("argument-hint").map(ToString::to_string);
     (description, argument_hint, parsed.body)
@@ -221,7 +228,7 @@ fn load_prompt_templates_from_dir(dir: &Path, scope: &str) -> Vec<PromptTemplate
 }
 
 /// Load all prompt templates from global, project, and package locations.
-pub(crate) fn load_prompt_templates(project_dir: &Path, global_dir: &Path) -> Vec<PromptTemplate> {
+pub fn load_prompt_templates(project_dir: &Path, global_dir: &Path) -> Vec<PromptTemplate> {
     let mut templates = Vec::new();
 
     // 1. Global prompts: ~/.threadlane/prompts/
@@ -260,7 +267,7 @@ pub(crate) fn load_prompt_templates(project_dir: &Path, global_dir: &Path) -> Ve
 
 /// Expand a prompt template if the input starts with `/name`.
 /// Returns the expanded prompt string, or the original text if no template matched.
-pub(crate) fn expand_prompt_template(text: &str, templates: &[PromptTemplate]) -> String {
+pub fn expand_prompt_template(text: &str, templates: &[PromptTemplate]) -> String {
     let trimmed = text.trim();
     if !trimmed.starts_with('/') {
         return text.to_string();

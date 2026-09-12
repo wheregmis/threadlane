@@ -7,7 +7,7 @@ use crate::browser::BrowserBridge;
 use crate::coding_agent::harness::CodingSessionHarness;
 use crate::coding_agent::{CodingAgentOptions, SubagentCancellationGuard};
 use crate::controller::{ExecutionMode, SessionController};
-use crate::project_registry::{
+use threadlane_project::{
     load_project_registry_from, merge_and_save_project_registry_to, ProjectRecord,
 };
 use log::error;

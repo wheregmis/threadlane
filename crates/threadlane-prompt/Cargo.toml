@@ -1,0 +1,11 @@
+[package]
+name = "threadlane-prompt"
+version = "0.1.0"
+edition = "2021"
+description = "System-prompt builder and project context discovery for Threadlane"
+
+[dependencies]
+threadlane-protocol.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

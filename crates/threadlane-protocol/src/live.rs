@@ -1,15 +1,20 @@
 //! In-process live feed for native computer use.
 //!
 //! The GPUI mirror wants video, not a slideshow. The macOS poller in
-//! `computer_stream` publishes bounded opaque BGRA frames here at up to
-//! 20fps while a mirror is subscribed, along with input overlays (where a
-//! click landed, what was typed) and poller status for the mirror header.
-//! Everything is process-global because the poller is: one machine, one
-//! live feed, many project sessions.
+//! `threadlane-session::computer_stream` publishes bounded opaque BGRA frames
+//! here at up to 20fps while a mirror is subscribed, along with input
+//! overlays (where a click landed, what was typed) and poller status for the
+//! mirror header. Everything is process-global because the poller is: one
+//! machine, one live feed, many project sessions.
 //!
-//! This module is cross-platform so the mirror compiles everywhere; frames
-//! only ever arrive on macOS. Nothing here reaches the model: pixels enter
-//! context only through explicit `computer_screenshot` calls.
+//! This module lives in `threadlane-protocol` (moved from
+//! `threadlane-session::computer_live`) because it is the contract between
+//! the session producer and the GPUI consumer: it has no session, runtime,
+//! or GPUI dependencies, only `tokio::sync` channels. `threadlane-session`
+//! `threadlane-session` re-exports it as `computer_live` for backward
+//! compatibility; new code should import from here directly. Nothing here
+//! reaches the model: pixels enter context only through explicit
+//! `computer_screenshot` calls.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -171,7 +176,7 @@ pub fn watcher_count() -> usize {
     frames().receiver_count()
 }
 
-pub(crate) fn now_ms() -> u128 {
+pub fn now_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
@@ -186,16 +191,14 @@ fn next_seq() -> u64 {
 /// Publish a frame to every subscribed mirror, returning its sequence
 /// number. Stale frames are replaced, never queued: a slow mirror sees the
 /// newest picture, not a backlog.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub(crate) fn publish_frame(mut frame: LiveFrame) -> u64 {
+pub fn publish_frame(mut frame: LiveFrame) -> u64 {
     frame.seq = next_seq();
     let seq = frame.seq;
     frames().send_replace(Some(Arc::new(frame)));
     seq
 }
 
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub(crate) fn publish_overlay(
+pub fn publish_overlay(
     kind: LiveOverlayKind,
     point: Option<(f64, f64)>,
     delta: Option<(f64, f64)>,
@@ -215,8 +218,7 @@ pub(crate) fn publish_overlay(
 }
 
 /// Record poller status; unchanged status wakes nobody.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub(crate) fn set_status(status: LiveStatus) {
+pub fn set_status(status: LiveStatus) {
     status_slot().send_if_modified(|current| {
         if *current == status {
             false

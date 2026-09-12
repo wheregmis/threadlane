@@ -1,3 +1,11 @@
+//! Attached-project registry: the canonical `~/.threadlane/projects.json` store.
+//!
+//! Moved verbatim from `threadlane-session::project_registry` so session,
+//! daemon, and GPUI consumers share one registry without depending on the
+//! session crate. The only dependencies are `serde`/`serde_json` for the
+//! file format, `sha2` for stable project ids, and `directories` for home
+//! resolution — no runtime, wasi, or GPUI coupling.
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
@@ -103,7 +111,7 @@ pub fn select_project(raw_path: &Path, session_id: Option<&str>) -> Result<Proje
     Ok(result)
 }
 
-pub(crate) fn merge_and_save_project_registry_to(
+pub fn merge_and_save_project_registry_to(
     global_dir: &Path,
     incoming: &[ProjectRecord],
 ) -> Result<(), String> {
@@ -136,13 +144,27 @@ pub(crate) fn merge_and_save_project_registry_to(
     save_project_registry_to(global_dir, &merged)
 }
 
-pub(crate) fn load_project_registry_from(global_dir: &Path) -> Vec<ProjectRecord> {
+pub fn load_project_registry_from(global_dir: &Path) -> Vec<ProjectRecord> {
     let canonical_file = global_dir.join("projects.json");
     let projects = fs::read(&canonical_file)
         .map(|contents| parse_project_records(&contents))
         .unwrap_or_default();
 
     normalize_projects(projects)
+}
+
+/// Canonical global Threadlane directory (`~/.threadlane`).
+///
+/// Matches the historical resolution used by `threadlane-wasi` (home dir via
+/// `UserDirs`, falling back to `$HOME`, then `BaseDirs`): kept here so the
+/// registry has no wasi/runtime dependency.
+pub fn default_global_threadlane_dir() -> Option<PathBuf> {
+    directories::UserDirs::new()
+        .map(|dirs| dirs.home_dir().join(".threadlane"))
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".threadlane")))
+        .or_else(|| {
+            directories::BaseDirs::new().map(|dirs| dirs.home_dir().join(".threadlane"))
+        })
 }
 
 fn save_project_registry_to(global_dir: &Path, projects: &[ProjectRecord]) -> Result<(), String> {
@@ -202,11 +224,7 @@ fn registry_lock() -> &'static Mutex<()> {
 }
 
 fn default_global_dir() -> PathBuf {
-    threadlane_wasi::packages::default_global_threadlane_dir().unwrap_or_else(|| {
-        directories::BaseDirs::new()
-            .map(|dirs| dirs.home_dir().join(".threadlane"))
-            .unwrap_or_else(|| PathBuf::from(".threadlane"))
-    })
+    default_global_threadlane_dir().unwrap_or_else(|| PathBuf::from(".threadlane"))
 }
 
 fn project_id(path: &Path) -> String {

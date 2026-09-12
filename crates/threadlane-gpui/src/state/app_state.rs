@@ -166,7 +166,7 @@ impl AppState {
                 if is_attachable_project_root(&curr) {
                     let project = AttachedProject::from_path(curr);
                     registry_projects.push(project.clone());
-                    let _ = threadlane_session::save_project_registry(&registry_projects);
+                    let _ = threadlane_project::save_project_registry(&registry_projects);
                 }
             }
         }
@@ -649,7 +649,7 @@ impl AppState {
     }
 
     fn persist_project_selection(&self, work_dir: &Path, session_id: Option<&str>) {
-        if let Err(error) = threadlane_session::select_project(work_dir, session_id) {
+        if let Err(error) = threadlane_project::select_project(work_dir, session_id) {
             tracing::warn!("Failed to persist selected project: {error}");
         }
     }
@@ -1389,7 +1389,7 @@ impl AppState {
             return Err("Selected path is not a directory".into());
         }
 
-        let record = threadlane_session::register_project(&canonical)?;
+        let record = threadlane_project::register_project(&canonical)?;
 
         let discovered_sessions = discover_sessions_in_project(&canonical);
         let session_to_restore = record

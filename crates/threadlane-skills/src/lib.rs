@@ -1,4 +1,6 @@
+pub mod agents;
 pub mod frontmatter;
+pub mod prompts;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1555,7 +1557,7 @@ fn valid_package_component(component: &str) -> bool {
         && !component.chars().any(char::is_control)
 }
 
-fn dirs_home() -> Option<PathBuf> {
+pub(crate) fn dirs_home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 

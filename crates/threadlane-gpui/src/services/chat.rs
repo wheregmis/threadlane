@@ -332,7 +332,7 @@ pub(crate) fn maybe_generate_session_title(
             let raw = match threadlane_session::acp_agent_id(&model) {
                 Some(agent_id) => {
                     threadlane_session::acp_runtime::generate_title(
-                        threadlane_session::default_global_threadlane_dir(),
+                        threadlane_project::default_global_threadlane_dir(),
                         work_dir,
                         agent_id,
                         &submitted_prompt,

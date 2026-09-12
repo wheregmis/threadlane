@@ -1,0 +1,14 @@
+[package]
+name = "threadlane-project"
+version = "0.1.0"
+edition = "2021"
+description = "Attached-project registry for Threadlane (canonical ~/.threadlane/projects.json store)"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+directories.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -8313,6 +8313,7 @@ dependencies = [
  "tempfile",
  "threadlane-auth",
  "threadlane-git",
+ "threadlane-project",
  "threadlane-protocol",
  "threadlane-provider",
  "threadlane-runtime",
@@ -8343,6 +8344,25 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "threadlane-project"
+version = "0.1.0"
+dependencies = [
+ "directories",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+]
+
+[[package]]
+name = "threadlane-prompt"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "threadlane-protocol",
 ]
 
 [[package]]
@@ -8419,6 +8439,8 @@ dependencies = [
  "threadlane-auth",
  "threadlane-git",
  "threadlane-mcp",
+ "threadlane-project",
+ "threadlane-prompt",
  "threadlane-protocol",
  "threadlane-provider",
  "threadlane-runtime",
