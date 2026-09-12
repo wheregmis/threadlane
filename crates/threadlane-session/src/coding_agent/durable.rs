@@ -32,7 +32,7 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod prewalk_tests {
-    use crate::orchestrator::{
+    use threadlane_runtime::orchestrator::{
         is_prewalk_implementation_action, is_prewalk_todo_gate_opener, prewalk_would_be_noop,
     };
 
@@ -257,7 +257,7 @@ impl CodingAgent {
                     match guard.as_mut() {
                         None => None,
                         Some(state)
-                            if crate::orchestrator::is_prewalk_todo_gate_opener(
+                            if threadlane_runtime::orchestrator::is_prewalk_todo_gate_opener(
                                 &result.name,
                                 result.is_error,
                             ) =>
@@ -269,7 +269,7 @@ impl CodingAgent {
                         }
                         Some(state)
                             if state.todo_gate_open()
-                                && crate::orchestrator::is_prewalk_implementation_action(
+                                && threadlane_runtime::orchestrator::is_prewalk_implementation_action(
                                     &result.name,
                                     result.is_error,
                                 ) =>
@@ -286,7 +286,7 @@ impl CodingAgent {
                                 }
                             };
                             if !active_model.is_empty()
-                                && crate::orchestrator::prewalk_would_be_noop(
+                                && threadlane_runtime::orchestrator::prewalk_would_be_noop(
                                     &active_model,
                                     active_effort,
                                     &state.target_model,
@@ -322,17 +322,17 @@ impl CodingAgent {
                         // post-handoff verification checklist.
                         if let Some(pos) = turn
                             .system_prompt
-                            .find(crate::orchestrator::ARCHITECT_PROTOCOL_HEADER)
+                            .find(threadlane_runtime::orchestrator::ARCHITECT_PROTOCOL_HEADER)
                         {
                             turn.system_prompt.truncate(pos);
                             turn.system_prompt = turn.system_prompt.trim_end().to_string();
                         }
                         if !turn
                             .system_prompt
-                            .contains(crate::orchestrator::PREWALK_CHECKLIST_HEADER)
+                            .contains(threadlane_runtime::orchestrator::PREWALK_CHECKLIST_HEADER)
                         {
                             turn.system_prompt
-                                .push_str(&crate::orchestrator::build_checklist_directive());
+                                .push_str(&threadlane_runtime::orchestrator::build_checklist_directive());
                         }
                     }
                     // The handoff crosses providers mid-turn: re-resolve the

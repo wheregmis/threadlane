@@ -23,7 +23,10 @@ pub mod controller;
 pub mod credentials;
 pub mod extension_broker;
 pub mod mcp;
-pub mod orchestrator;
+/// Prewalk orchestration, canonical in `threadlane_runtime::orchestrator`.
+/// Re-exported here so existing `threadlane_session::orchestrator` paths keep
+/// working; new code should import `threadlane_runtime::orchestrator` directly.
+pub use threadlane_runtime::orchestrator as orchestrator;
 pub mod permission;
 mod plan;
 /// Execution policy, canonical in `threadlane_runtime::capability`.

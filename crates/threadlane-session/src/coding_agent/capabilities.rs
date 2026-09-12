@@ -36,7 +36,7 @@ const CREATE_DRAFT_PR_TOOL_NAME: &str = "create_draft_pull_request";
 // channel shared by parent `hub` and child `message_peer`).
 // NOTE: oh-my-pi parity removed the explicit `complete_prewalk` handoff tool.
 // The handoff is automatic at the first qualifying edit/write behind an
-// opened `update_plan` todo gate (see `crate::orchestrator`).
+// opened `update_plan` todo gate (see `threadlane_runtime::orchestrator`).
 
 // ── Capability implementations ─────────────────────────────────────────
 // Each wraps a subsystem and implements [`crate::capability_registry::Capability`]

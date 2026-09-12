@@ -56,7 +56,7 @@ pub struct CodingAgent {
     pub(crate) harness: Option<CodingSessionHarness>,
     pub(crate) harness_journal_error: Option<String>,
     pub(crate) harness_run_id: Arc<std::sync::Mutex<Option<String>>>,
-    pub(crate) prewalk: Arc<std::sync::Mutex<Option<crate::orchestrator::PrewalkState>>>,
+    pub(crate) prewalk: Arc<std::sync::Mutex<Option<threadlane_runtime::orchestrator::PrewalkState>>>,
     /// Live agent-to-agent mailbox shared by sibling `message_peer` and the
     /// parent `hub` tool (oh-my-pi hub/IRC parity).
     pub(crate) hub: super::mailbox::SubagentHub,
@@ -1527,7 +1527,7 @@ impl CodingAgent {
                         .resolve_fast(&active_model)
                         .to_string();
                     let fast_reasoning = self.agent.config().fast_reasoning_effort;
-                    if crate::orchestrator::prewalk_would_be_noop(
+                    if threadlane_runtime::orchestrator::prewalk_would_be_noop(
                         &active_model,
                         active_effort,
                         &fast_model,
@@ -1543,8 +1543,8 @@ impl CodingAgent {
                             .agent
                             .configured_tool_definitions()
                             .iter()
-                            .any(|tool| tool.name == crate::orchestrator::PREWALK_TODO_TOOL);
-                        *self.prewalk.lock().unwrap() = Some(crate::orchestrator::PrewalkState::new(
+                            .any(|tool| tool.name == threadlane_runtime::orchestrator::PREWALK_TODO_TOOL);
+                        *self.prewalk.lock().unwrap() = Some(threadlane_runtime::orchestrator::PrewalkState::new(
                             fast_model.clone(),
                             fast_reasoning,
                             requires_todo,
@@ -1557,7 +1557,7 @@ impl CodingAgent {
 
                         effective_input = task_prompt.to_string();
                         architect_directive =
-                            Some(crate::orchestrator::build_architect_directive(&fast_model, requires_todo));
+                            Some(threadlane_runtime::orchestrator::build_architect_directive(&fast_model, requires_todo));
                     }
                 } else {
                     let output = execute_slash_command(cmd_action, &mut self.agent).await;
@@ -1588,9 +1588,9 @@ impl CodingAgent {
                 .agent
                 .configured_tool_definitions()
                 .iter()
-                .any(|tool| tool.name == crate::orchestrator::PREWALK_TODO_TOOL);
+                .any(|tool| tool.name == threadlane_runtime::orchestrator::PREWALK_TODO_TOOL);
 
-            let decision = crate::orchestrator::Orchestrator::evaluate(
+            let decision = threadlane_runtime::orchestrator::Orchestrator::evaluate(
                 &effective_input,
                 orchestrator_mode,
                 &active_model,
@@ -1599,13 +1599,13 @@ impl CodingAgent {
                 requires_todo,
             );
 
-            if let crate::orchestrator::OrchestratorDecision::EngagePrewalk {
+            if let threadlane_runtime::orchestrator::OrchestratorDecision::EngagePrewalk {
                 fast_model: target_fast,
                 fast_reasoning: target_effort,
                 architect_system_directive,
             } = decision
             {
-                if crate::orchestrator::prewalk_would_be_noop(
+                if threadlane_runtime::orchestrator::prewalk_would_be_noop(
                     &active_model,
                     active_effort,
                     &target_fast,
@@ -1616,7 +1616,7 @@ impl CodingAgent {
                         message: format!("Prewalk: target `{target_fast}` already matches the active model and reasoning; nothing to switch."),
                     });
                 } else {
-                    *self.prewalk.lock().unwrap() = Some(crate::orchestrator::PrewalkState::new(
+                    *self.prewalk.lock().unwrap() = Some(threadlane_runtime::orchestrator::PrewalkState::new(
                         target_fast.clone(),
                         target_effort,
                         requires_todo,
@@ -1638,7 +1638,7 @@ impl CodingAgent {
             let mut turn = self.agent.turn.lock().await;
             if !turn
                 .system_prompt
-                .contains(crate::orchestrator::ARCHITECT_PROTOCOL_HEADER)
+                .contains(threadlane_runtime::orchestrator::ARCHITECT_PROTOCOL_HEADER)
             {
                 turn.system_prompt.push_str(&directive);
             }
@@ -1768,7 +1768,7 @@ impl CodingAgent {
                         model: self.agent.model(),
                         message: format!(
                             "Prewalk: plan received but no todo/edits yet. {}",
-                            crate::orchestrator::PREWALK_CONTINUE_PROMPT
+                            threadlane_runtime::orchestrator::PREWALK_CONTINUE_PROMPT
                         ),
                     });
                 }
