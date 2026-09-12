@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.1.17](https://github.com/wheregmis/threadlane/compare/v0.1.16...v0.1.17) (2026-09-12)
+
+
+### Features
+
+* **auth:** Add injectable credential storage ([e483c61](https://github.com/wheregmis/threadlane/commit/e483c615b8906b2394690a0fe1535c5f8e28fc13))
+
+
+### Bug Fixes
+
+* **acp:** Dispatch assistant hooks for ACP turns ([47c5fe1](https://github.com/wheregmis/threadlane/commit/47c5fe1ca360b08bad1349b4e754de43fa600fc8))
+
+
+### Code Refactoring
+
+* **acp:** Extract protocol into standalone crate ([061577f](https://github.com/wheregmis/threadlane/commit/061577f787f121b752ca4bf631e7105dde8e1f6e))
+* **auth:** Inject credential storage ([38e3d55](https://github.com/wheregmis/threadlane/commit/38e3d5505ab78fb595f5920c460c21a85cabd831))
+* Centralize shared tools and contracts ([bd7f764](https://github.com/wheregmis/threadlane/commit/bd7f7643776d71a97400da778fe021cf9de3c581))
+* Decouple MCP client from runtime ([3bb9581](https://github.com/wheregmis/threadlane/commit/3bb95812aeb5453ed9db4132a8510299cf831649))
+* Decouple skills and expose hashline APIs ([610a6ab](https://github.com/wheregmis/threadlane/commit/610a6ab4ca76fca6841b6ab5138362b642805392))
+* Extract shared modules from session ([5d67c38](https://github.com/wheregmis/threadlane/commit/5d67c3823eed727f59f6b9b03593de7f93c64b06))
+* Move browser bridge to protocol ([4e886a9](https://github.com/wheregmis/threadlane/commit/4e886a98a00c8001cc314db9c99f578c4e800c9c))
+* Move prewalk orchestration to runtime ([894be5c](https://github.com/wheregmis/threadlane/commit/894be5c726cf667f0067c28570bd687c1fdc3d4f))
+* Move provider contracts out of runtime ([24dac1e](https://github.com/wheregmis/threadlane/commit/24dac1ee41c6763d6699f3340364b9c03900ec4b))
+* Move ToolPolicy into runtime crate ([6de220d](https://github.com/wheregmis/threadlane/commit/6de220d7e3944900bb509ab1c0623a5db417c1bf))
+* **session:** Simplify module organization ([0a95727](https://github.com/wheregmis/threadlane/commit/0a95727597e10c4c75965eb80bdeff65503c15f7))
+* **tools:** Inject remote forge credentials ([b489b8a](https://github.com/wheregmis/threadlane/commit/b489b8a39a32961932b794dc98be4543a2e73e06))
+
+
+### CI
+
+* skip draft PRs and run checks when ready for review ([c3faf75](https://github.com/wheregmis/threadlane/commit/c3faf75c8d4c8ec5e1bb320984c57549360d2d78))
+
+
+### Maintenance
+
+* configure nightly Rust with parallel compilation ([ff57a65](https://github.com/wheregmis/threadlane/commit/ff57a650523b515e0c4dad4bfa216326fab74005))
+* deduplicate workspace dependencies into root cargo.toml ([445e6bc](https://github.com/wheregmis/threadlane/commit/445e6bcdd139b34d41e745734d3501f4b7cf70c8))
+* Document provider layer boundaries ([8114c85](https://github.com/wheregmis/threadlane/commit/8114c855dde6716a2790d6f18128adf07305d596))
+
 ## [0.1.16](https://github.com/wheregmis/threadlane/compare/v0.1.15...v0.1.16) (2026-09-11)
 
 
