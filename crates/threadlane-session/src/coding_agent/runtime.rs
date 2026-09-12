@@ -939,6 +939,34 @@ impl CodingAgent {
         }
 
         if let (Some(run_id), Some(journal)) = (run_id, self.harness.as_mut()) {
+            // Hook view of this turn for WASI extensions (goal loop, etc.).
+            // ACP tools carry display titles as names, so the hook gets the
+            // same nested `ToolCall` shape the native path emits; goal
+            // completion from an external agent arrives via the
+            // `<!-- GOAL_COMPLETE -->` content marker instead.
+            let hook_tool_calls = outcome
+                .tools
+                .iter()
+                .map(|tool| threadlane_provider::openai::ToolCall {
+                    id: tool.tool_call_id.clone(),
+                    r#type: "function".into(),
+                    function: threadlane_provider::openai::ToolCallFunction {
+                        name: tool.name.clone(),
+                        arguments: tool.arguments.clone(),
+                    },
+                    thought_signature: None,
+                })
+                .collect::<Vec<_>>();
+            let hook_message = AgentMessage::Assistant {
+                content: Some(outcome.reply.clone()),
+                tool_calls: if hook_tool_calls.is_empty() {
+                    None
+                } else {
+                    Some(hook_tool_calls)
+                },
+                stop_reason: None,
+                deferred_handle: None,
+            };
             // ACP tools execute inside the external agent, but their ordered
             // preambles and results must precede the final reply after reload.
             let has_tools = !outcome.tools.is_empty();
@@ -1024,6 +1052,11 @@ impl CodingAgent {
                     .await;
                 return Some(Err(format!("Harness Error: {error}")));
             }
+            // Fire the same `assistant_message` extension hooks the native
+            // turn path fires so autonomous loops (goal) keep chaining on
+            // ACP models. The hook's `agent.request_turn` schedules the next
+            // ACP follow-up, drained by the caller.
+            self.dispatch_assistant_hook(&hook_message).await;
         }
 
         if let Err(error) = self

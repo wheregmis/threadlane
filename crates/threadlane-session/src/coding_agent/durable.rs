@@ -924,7 +924,7 @@ impl CodingAgent {
         }
     }
 
-    async fn dispatch_assistant_hook(&self, message: &AgentMessage) {
+    pub(crate) async fn dispatch_assistant_hook(&self, message: &AgentMessage) {
         let AgentMessage::Assistant {
             content,
             tool_calls,
