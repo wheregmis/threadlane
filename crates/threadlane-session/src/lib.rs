@@ -26,7 +26,10 @@ pub mod mcp;
 pub mod orchestrator;
 pub mod permission;
 mod plan;
-pub mod policy;
+/// Execution policy, canonical in `threadlane_runtime::capability`.
+/// Re-exported here so existing `threadlane_session::ToolPolicy` paths keep
+/// working; new code should import `threadlane_runtime::ToolPolicy` directly.
+pub use threadlane_runtime::ToolPolicy;
 /// Attached-project registry, canonical in `threadlane-project`.
 /// Re-exported here so existing `threadlane_session::project_registry` and
 /// `threadlane_session::ProjectRecord` paths keep working; new code should
@@ -72,7 +75,6 @@ pub use credentials::{
     opencode_api_key, provider_client_for, provider_credentials, AuthCredentialBridge,
 };
 pub use permission::{PermissionDecision, PermissionHandle};
-pub use policy::ToolPolicy;
 pub use threadlane_project::{
     load_project_registry, register_project, save_project_registry, select_project, ProjectRecord,
 };

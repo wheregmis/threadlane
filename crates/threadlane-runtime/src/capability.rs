@@ -98,3 +98,15 @@ impl CapabilityRegistry {
         (tool_count + hook_count, errors)
     }
 }
+
+/// Execution and tool safety policy.
+///
+/// Moved from `threadlane-session::policy`: the engine owns the policy type
+/// while session code owns the UI/approval flows that set it. `ReadOnly`
+/// restricts the agent to non-mutating tools; `FullAccess` allows workspace
+/// writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolPolicy {
+    FullAccess,
+    ReadOnly,
+}

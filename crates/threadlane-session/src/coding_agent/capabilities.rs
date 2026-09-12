@@ -13,7 +13,7 @@ use crate::extension_broker::{
 };
 use crate::permission::{PermissionHandle, PermissionManager};
 use crate::plan::{SessionPlanStore, UpdatePlanToolExecutor};
-use crate::policy::ToolPolicy;
+use threadlane_runtime::ToolPolicy;
 use crate::question::{AskQuestionToolExecutor, QuestionHandle};
 use async_trait::async_trait;
 use log::warn;

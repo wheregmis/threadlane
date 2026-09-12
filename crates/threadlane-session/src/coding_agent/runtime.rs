@@ -16,7 +16,7 @@ use crate::computer::ComputerCapability;
 use crate::context::ProjectContext;
 use crate::extension_broker::CapabilityDispatcher;
 use crate::plan::SessionPlanStore;
-use crate::policy::ToolPolicy;
+use threadlane_runtime::ToolPolicy;
 use crate::question::QuestionManager;
 use crate::system_prompt::{build_system_prompt, SystemPromptBuildOptions};
 use std::collections::HashMap;

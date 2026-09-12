@@ -15,7 +15,7 @@ use super::scheduler::{
 use crate::agents::{AgentDefinition, AgentScope, discover_agents};
 #[cfg(test)]
 use crate::browser::BrowserBridge;
-use crate::policy::ToolPolicy;
+use threadlane_runtime::ToolPolicy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;

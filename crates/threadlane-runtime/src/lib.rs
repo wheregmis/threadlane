@@ -23,7 +23,7 @@ pub use runtime::{AgentRuntime, ModelContextProjector, ModelContextSource};
 // ── Re-exports matching the old threadlane-agent public API ────────
 pub use utils::{AbortOnDrop, dirs_home, now_timestamp_ms, now_timestamp_secs};
 
-pub use capability::{Capability, CapabilityRegistry};
+pub use capability::{Capability, CapabilityRegistry, ToolPolicy};
 pub use compaction::{
     CompactionOptions, CompactionStrategy, compact_messages, compact_messages_with_strategy,
     compaction_summary_text, prepare_token_optimal_context, prune_historical_tool_outputs,
