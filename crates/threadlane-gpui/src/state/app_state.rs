@@ -92,7 +92,7 @@ pub struct AppState {
     /// Bridge to the embedded browser panel. The channel is created with the
     /// app; the first constructed right panel claims the receiver and pumps
     /// agent browser commands into the live view.
-    pub(crate) browser_bridge: threadlane_session::BrowserBridge,
+    pub(crate) browser_bridge: threadlane_protocol::browser::BrowserBridge,
     /// Whether the computer-use mirror popup is currently open. Set when the
     /// popup opens and cleared by its close button; guards duplicate popups.
     pub(crate) mirror_open: bool,
@@ -300,7 +300,7 @@ impl AppState {
             session_refresh_rx: Some(session_refresh_rx),
             session_runtimes,
             deferred_stream_events: HashMap::new(),
-            browser_bridge: threadlane_session::BrowserBridge::channel(),
+            browser_bridge: threadlane_protocol::browser::BrowserBridge::channel(),
             mirror_open: false,
             mirror_seen: HashSet::new(),
             pending_permissions: HashMap::new(),

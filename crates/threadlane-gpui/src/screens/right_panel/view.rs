@@ -1109,7 +1109,7 @@ impl RightPanelView {
     /// bridge pump, never from a tool worker directly.
     fn apply_browser_command(
         &mut self,
-        command: threadlane_session::BrowserCommand,
+        command: threadlane_protocol::browser::BrowserCommand,
         cx: &mut Context<Self>,
     ) -> Result<String, String> {
         #[cfg(not(target_os = "macos"))]
@@ -1120,7 +1120,7 @@ impl RightPanelView {
         #[cfg(target_os = "macos")]
         {
             use super::browser::{resolve_address, search_url, AddressTarget};
-            use threadlane_session::BrowserCommand;
+            use threadlane_protocol::browser::BrowserCommand;
             let Some(browser) = self.browser.clone() else {
                 return Err("The browser panel is not ready.".to_string());
             };
@@ -4545,10 +4545,10 @@ const MAX_BROWSER_EVAL_CHARS: usize = 8_000;
 
 fn start_browser_request(
     panel: &mut RightPanelView,
-    command: threadlane_session::BrowserCommand,
+    command: threadlane_protocol::browser::BrowserCommand,
     cx: &mut Context<RightPanelView>,
 ) -> BrowserReply {
-    use threadlane_session::BrowserCommand;
+    use threadlane_protocol::browser::BrowserCommand;
     match command {
         BrowserCommand::Screenshot => {
             #[cfg(target_os = "macos")]
@@ -4600,10 +4600,10 @@ fn start_browser_request(
                     key,
                 } => {
                     let target_json = match target {
-                        threadlane_session::ActTarget::Ref(number) => {
+                        threadlane_protocol::browser::ActTarget::Ref(number) => {
                             serde_json::json!({"ref": number, "selector": serde_json::Value::Null})
                         }
-                        threadlane_session::ActTarget::Selector(selector) => {
+                        threadlane_protocol::browser::ActTarget::Selector(selector) => {
                             serde_json::json!({"ref": serde_json::Value::Null, "selector": selector})
                         }
                     }

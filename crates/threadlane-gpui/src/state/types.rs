@@ -318,7 +318,7 @@ pub(crate) struct SessionHydrationRequest {
         PathBuf,
         String,
         threadlane_session::ModelRoles,
-        threadlane_session::BrowserBridge,
+        threadlane_protocol::browser::BrowserBridge,
     )>,
 }
 

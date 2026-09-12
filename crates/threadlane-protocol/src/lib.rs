@@ -1,8 +1,10 @@
 use serde::{Deserialize, Serialize};
 
+pub mod browser;
 pub mod live;
 pub mod messages;
 
+pub use browser::{ActTarget, BrowserBridge, BrowserCommand, BrowserRequest};
 pub use live::{
     LiveFrame, LiveOverlay, LiveOverlayKind, LiveStatus, StreamTarget, LIVE_FRAME_MAX_WIDTH,
 };
