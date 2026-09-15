@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use threadlane_runtime::{AgentToolDefinition, Capability, ToolExecutor, ToolOutput};
+use threadlane_protocol::{AgentToolDefinition, ImageAttachment, ToolExecutor, ToolOutput};
 
 use crate::{ComputerApproval, ComputerDecision};
 
@@ -1242,7 +1242,7 @@ fn attach_jpeg(
     );
     ToolOutput {
         content,
-        images: vec![threadlane_runtime::ImageAttachment {
+        images: vec![ImageAttachment {
             display_name: path
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
@@ -1288,7 +1288,7 @@ pub fn watch_display_for_debug() {}
 /// here. Timestamped history files stay per-project.
 #[cfg(target_os = "macos")]
 pub fn global_previews_dir() -> Option<PathBuf> {
-    threadlane_wasi::packages::default_global_threadlane_dir().map(|dir| dir.join("previews"))
+    threadlane_project::default_global_threadlane_dir().map(|dir| dir.join("previews"))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1582,22 +1582,6 @@ fn perform_act(intent: &ComputerAct, pid: Option<i32>) -> Result<String, String>
             post(&up);
             Ok(format!("Pressed {key}.{}", background_note.unwrap_or("")))
         }
-    }
-}
-
-pub struct ComputerCapability {
-    pub permissions: Option<Arc<dyn ComputerApproval>>,
-}
-
-impl Capability for ComputerCapability {
-    fn id(&self) -> &str {
-        "computer"
-    }
-
-    fn tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
-        vec![Arc::new(ComputerToolExecutor::new(
-            self.permissions.clone(),
-        ))]
     }
 }
 

@@ -1,11 +1,11 @@
 //! One-shot Prewalk handoff (oh-my-pi parity).
 //!
-//! Moved from `threadlane-session::orchestrator` (body verbatim): the
-//! prewalk state machine and its prompt directives sit next to the
-//! `OrchestratorMode` turn-driving config they interpret, in the execution
-//! engine. `threadlane-session` re-exports this module as `orchestrator` for
-//! compatibility; new code should import
-//! `threadlane_runtime::orchestrator` directly.
+//! The prewalk state machine and its prompt directives sit next to the
+//! `OrchestratorMode` turn-driving config they interpret (both contract
+//! types live in `threadlane-protocol`). Re-exported through
+//! `threadlane_runtime::orchestrator` and `threadlane_session::orchestrator`
+//! for compatibility; new code should import `threadlane_orchestrator`
+//! directly.
 //!
 //! Prewalk is off by default. When armed (explicit `/prewalk` or
 //! `OrchestratorMode::Always`), the starting model inspects the repository,
@@ -30,7 +30,7 @@
 //! - One-shot with noop detection: identical target model + effort disarms
 //!   with a notice instead of a pointless switch.
 
-use crate::types::{OrchestratorMode, ReasoningEffort};
+use threadlane_protocol::{OrchestratorMode, ReasoningEffort};
 
 #[derive(Debug)]
 pub struct PrewalkState {

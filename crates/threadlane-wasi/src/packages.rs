@@ -61,9 +61,10 @@ impl ExtensionRecord {
     }
 }
 
-pub fn default_global_threadlane_dir() -> Option<PathBuf> {
-    threadlane_runtime::utils::dirs_home().map(|home| home.join(".threadlane"))
-}
+/// Canonical global Threadlane directory, owned by `threadlane-project`.
+/// Re-exported here so existing `threadlane_wasi::packages::…` paths keep
+/// working; new code should import `threadlane_project` directly.
+pub use threadlane_project::default_global_threadlane_dir;
 
 pub struct ExtensionManager {
     global_threadlane_dir: Option<PathBuf>,

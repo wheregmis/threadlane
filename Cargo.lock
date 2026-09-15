@@ -8277,6 +8277,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "threadlane-browser"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde_json",
+ "threadlane-protocol",
+ "tokio",
+]
+
+[[package]]
+name = "threadlane-compaction"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "threadlane-context",
+ "threadlane-protocol",
+ "threadlane-provider",
+]
+
+[[package]]
 name = "threadlane-computer"
 version = "0.1.0"
 dependencies = [
@@ -8288,10 +8309,16 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "threadlane-project",
  "threadlane-protocol",
- "threadlane-runtime",
- "threadlane-wasi",
  "tokio",
+]
+
+[[package]]
+name = "threadlane-context"
+version = "0.1.0"
+dependencies = [
+ "threadlane-provider",
 ]
 
 [[package]]
@@ -8355,6 +8382,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "threadlane-loop"
+version = "0.1.0"
+
+[[package]]
 name = "threadlane-mcp"
 version = "0.1.0"
 dependencies = [
@@ -8362,6 +8393,38 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "threadlane-orchestrator"
+version = "0.1.0"
+dependencies = [
+ "threadlane-protocol",
+]
+
+[[package]]
+name = "threadlane-permission"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "threadlane-computer",
+ "threadlane-protocol",
+ "tokio",
+]
+
+[[package]]
+name = "threadlane-plan"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "threadlane-protocol",
  "tokio",
 ]
 
@@ -8415,6 +8478,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "threadlane-question"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "threadlane-protocol",
+ "tokio",
+]
+
+[[package]]
 name = "threadlane-runtime"
 version = "0.1.0"
 dependencies = [
@@ -8429,8 +8503,16 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.20",
+ "threadlane-browser",
+ "threadlane-compaction",
+ "threadlane-context",
+ "threadlane-loop",
+ "threadlane-orchestrator",
+ "threadlane-plan",
+ "threadlane-project",
  "threadlane-protocol",
  "threadlane-provider",
+ "threadlane-question",
  "threadlane-tools",
  "tokio",
  "tracing",
@@ -8453,13 +8535,16 @@ dependencies = [
  "thiserror 2.0.20",
  "threadlane-acp",
  "threadlane-auth",
+ "threadlane-browser",
  "threadlane-computer",
  "threadlane-git",
  "threadlane-mcp",
+ "threadlane-permission",
  "threadlane-project",
  "threadlane-prompt",
  "threadlane-protocol",
  "threadlane-provider",
+ "threadlane-question",
  "threadlane-runtime",
  "threadlane-skills",
  "threadlane-tools",
@@ -8475,6 +8560,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "tempfile",
+ "threadlane-project",
 ]
 
 [[package]]
@@ -8485,6 +8571,7 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "threadlane-hashline",
+ "threadlane-project",
 ]
 
 [[package]]
@@ -8502,7 +8589,8 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "threadlane-runtime",
+ "threadlane-project",
+ "threadlane-protocol",
  "wasmi",
 ]
 

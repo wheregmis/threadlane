@@ -1,5 +1,11 @@
 use super::queue::SteerPriority;
 use crate::types::{AgentMessage, ImageAttachment, ReasoningEffort, TokenUsage};
+// Durable permission-trace vocabulary lives in `threadlane-protocol` so the
+// permission manager and trajectory analysis share it without depending on
+// the harness. Re-exported here so existing `harness::…` paths keep working.
+pub use threadlane_protocol::interaction::{
+    PermissionTraceDecision, PermissionTraceScope, PermissionTraceSource,
+};
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
@@ -200,28 +206,9 @@ pub struct ProviderErrorSummary {
     pub retryable: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PermissionTraceScope {
-    Once,
-    Session,
-    Project,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PermissionTraceDecision {
-    Allowed,
-    Denied,
-    Cancelled,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PermissionTraceSource {
-    User,
-    Policy,
-    PersistedGrant,
-    UnattendedDefault,
-    System,
-}
+/// Durable permission-trace vocabulary, canonical in
+/// `threadlane_protocol::interaction`; re-exported above so existing
+/// `harness::…` paths keep working.
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ToolExecutionPhase {

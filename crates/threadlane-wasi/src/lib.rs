@@ -14,6 +14,7 @@ use std::fs;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
+use threadlane_protocol::AgentToolDefinition;
 use wasmi::{Caller, Engine, Extern, Func, Linker, Memory, Module, Store};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -466,7 +467,7 @@ type PendingExtensionEvents = HashMap<Option<String>, HashMap<String, Vec<WasiEx
 #[derive(Default)]
 pub struct WasiExtensionManager {
     extensions: RwLock<HashMap<String, Arc<WasiExtension>>>,
-    tool_definitions: RwLock<Arc<[threadlane_runtime::AgentToolDefinition]>>,
+    tool_definitions: RwLock<Arc<[AgentToolDefinition]>>,
     states: Mutex<HashMap<String, Value>>,
     host_state: Mutex<HashMap<String, Value>>,
     subscriptions: Mutex<HashMap<String, HashSet<String>>>,
@@ -1123,7 +1124,7 @@ impl WasiExtensionManager {
             .values()
             .flat_map(|extension| extension.manifest.tools.iter())
             .map(|tool| {
-                threadlane_runtime::AgentToolDefinition::new(
+                AgentToolDefinition::new(
                     tool.name.clone(),
                     tool.description.clone(),
                     tool.parameters.clone(),
@@ -1138,7 +1139,7 @@ impl WasiExtensionManager {
         Ok(())
     }
 
-    pub fn tool_definitions(&self) -> Arc<[threadlane_runtime::AgentToolDefinition]> {
+    pub fn tool_definitions(&self) -> Arc<[AgentToolDefinition]> {
         self.tool_definitions
             .read()
             .map(|tools| tools.clone())

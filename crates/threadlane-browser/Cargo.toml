@@ -1,0 +1,11 @@
+[package]
+name = "threadlane-browser"
+version = "0.1.0"
+edition = "2021"
+description = "Embedded-browser tool executor for Threadlane: protocol bridge round-trips behind the ToolExecutor contract"
+
+[dependencies]
+threadlane-protocol.workspace = true
+async-trait.workspace = true
+tokio = { workspace = true, features = ["sync", "macros", "rt"] }
+serde_json.workspace = true

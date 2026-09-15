@@ -5,7 +5,8 @@ edition = "2021"
 description = "WASI WebAssembly extension sandbox host and capability broker for threadlane agent"
 
 [dependencies]
-threadlane-runtime.workspace = true
+threadlane-project.workspace = true
+threadlane-protocol.workspace = true
 wasmi.workspace = true
 serde.workspace = true
 serde_json.workspace = true

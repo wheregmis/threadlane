@@ -11,7 +11,8 @@ pub mod traits;
 
 pub use convert::{
     compaction_checkpoint_text, compaction_summary_text, convert_to_codex_llm, convert_to_llm,
-    MAX_CONTEXT_SNAPSHOT_INDEX_CHARS, MAX_CONTEXT_SNAPSHOT_INDEX_ENTRIES,
+    repair_interrupted_tool_turn, MAX_CONTEXT_SNAPSHOT_INDEX_CHARS,
+    MAX_CONTEXT_SNAPSHOT_INDEX_ENTRIES,
 };
 pub use credentials::{
     AntigravityCredentialSnapshot, AntigravityCredentialSource, CodexAccountResolver,

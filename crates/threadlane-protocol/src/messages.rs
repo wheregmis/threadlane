@@ -328,3 +328,103 @@ pub struct AgentToolCall {
     pub name: String,
     pub arguments: String,
 }
+
+/// Model-managed todo-plan state (`update_plan` tool).
+///
+/// Moved from `threadlane-runtime::types` (body verbatim): the plan is
+/// model-visible session state shared by the engine, the plan tool executor,
+/// durability, and UI rendering, so it lives with the other message
+/// contracts. `threadlane-runtime` re-exports it for compatibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanItemStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanItem {
+    pub step: String,
+    pub status: PlanItemStatus,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionPlan {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<String>,
+    #[serde(default)]
+    pub items: Vec<PlanItem>,
+}
+
+/// Cumulative token accounting for a turn or session.
+///
+/// Moved from `threadlane-runtime::types` (body verbatim) alongside the
+/// transcript types it annotates.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct TokenUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub cache_read_tokens: u32,
+    pub cache_write_tokens: u32,
+    pub total_tokens: u32,
+}
+
+impl TokenUsage {
+    pub fn accumulate(&mut self, usage: &Self) {
+        self.input_tokens = self.input_tokens.saturating_add(usage.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(usage.output_tokens);
+        self.cache_read_tokens = self
+            .cache_read_tokens
+            .saturating_add(usage.cache_read_tokens);
+        self.cache_write_tokens = self
+            .cache_write_tokens
+            .saturating_add(usage.cache_write_tokens);
+        self.total_tokens = self.total_tokens.saturating_add(usage.total_tokens);
+    }
+}
+
+/// One executed tool outcome as the model and transcript see it.
+///
+/// Moved from `threadlane-runtime::types` (body verbatim). The `terminate`
+/// flag was `pub(crate)` in the runtime; it is `pub` here so engine-external
+/// constructors (tests, adapters) keep working — treat it as engine-owned.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentToolResult {
+    pub tool_call_id: String,
+    pub name: String,
+    pub content: String,
+    pub is_error: bool,
+    pub terminate: bool,
+    /// Model-visible images attached by the tool. Serialized inline so the
+    /// durable transcript reproduces the exact provider-visible context.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageAttachment>,
+}
+
+impl AgentToolResult {
+    pub fn terminates(&self) -> bool {
+        self.terminate
+    }
+
+    /// Builds a tool result produced outside the built-in tool loop.
+    ///
+    /// External agents (ACP) report tool outcomes that need to reach the same
+    /// transcript rendering as native tool calls, but they never terminate the
+    /// loop, so `terminate` stays false.
+    pub fn external(
+        tool_call_id: impl Into<String>,
+        name: impl Into<String>,
+        content: impl Into<String>,
+        is_error: bool,
+    ) -> Self {
+        Self {
+            tool_call_id: tool_call_id.into(),
+            name: name.into(),
+            content: content.into(),
+            is_error,
+            terminate: false,
+            images: Vec::new(),
+        }
+    }
+}

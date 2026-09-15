@@ -7,10 +7,32 @@
 //! for compatibility; new code should import `threadlane_computer` directly.
 
 pub use threadlane_computer::{
-    global_previews_dir, watch_display_for_debug, ComputerAct, ComputerCapability,
+    global_previews_dir, watch_display_for_debug, ComputerAct, ComputerApproval, ComputerDecision,
     ComputerToolExecutor, TargetedAct, COMPUTER_ACT_TOOL, COMPUTER_SCREENSHOT_TOOL,
     COMPUTER_STATUS_TOOL, COMPUTER_UNAVAILABLE, COMPUTER_WINDOWS_TOOL,
 };
+
+/// Runtime capability adapter for native computer-use tools.
+///
+/// Lives in the session (not `threadlane-computer`) so the computer crate
+/// stays a leaf depending only on `threadlane-protocol`: it exposes the
+/// executor, while engine wiring (`Capability` → dispatcher) stays with the
+/// orchestrator.
+pub struct ComputerCapability {
+    pub permissions: Option<std::sync::Arc<dyn ComputerApproval>>,
+}
+
+impl threadlane_runtime::Capability for ComputerCapability {
+    fn id(&self) -> &str {
+        "computer"
+    }
+
+    fn tool_executors(&self) -> Vec<std::sync::Arc<dyn threadlane_protocol::ToolExecutor>> {
+        vec![std::sync::Arc::new(ComputerToolExecutor::new(
+            self.permissions.clone(),
+        ))]
+    }
+}
 
 #[cfg(test)]
 mod tests {

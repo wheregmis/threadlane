@@ -1,0 +1,5 @@
+[package]
+name = "threadlane-loop"
+version = "0.1.0"
+edition = "2021"
+description = "Turn-level tool-loop circuit breaker for Threadlane: identical, ping-pong, and error-loop tripwires"

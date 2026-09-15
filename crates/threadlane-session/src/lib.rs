@@ -17,14 +17,16 @@ pub mod controller;
 pub mod credentials;
 pub mod extension_broker;
 pub mod mcp;
-/// Prewalk orchestration, canonical in `threadlane_runtime::orchestrator`.
+/// Prewalk orchestration, canonical in `threadlane_orchestrator`.
 /// Re-exported here so existing `threadlane_session::orchestrator` paths keep
-/// working; new code should import `threadlane_runtime::orchestrator` directly.
+/// working; new code should import `threadlane_orchestrator` directly.
 pub use threadlane_runtime::orchestrator as orchestrator;
 pub mod permission;
-/// Model-managed session plans, canonical in `threadlane_runtime::plan`.
+/// Model-managed session plans, canonical in `threadlane_plan` (persisted
+/// through its `PlanJournal` trait; `threadlane_runtime::plan` adapts the
+/// session JSONL).
 /// Re-exported here so existing `threadlane_session::plan` paths keep
-/// working; new code should import `threadlane_runtime::plan` directly.
+/// working; new code should import `threadlane_plan` directly.
 pub use threadlane_runtime::plan as plan;
 /// Execution policy, canonical in `threadlane_runtime::capability`.
 /// Re-exported here so existing `threadlane_session::ToolPolicy` paths keep

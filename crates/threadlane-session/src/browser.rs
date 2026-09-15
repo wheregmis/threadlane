@@ -3,9 +3,10 @@
 //! The session↔UI contract (`BrowserBridge`, `BrowserCommand`, `ActTarget`,
 //! `BrowserRequest`, tool-name constants) is canonical in
 //! `threadlane_protocol::browser`, and the tool executor
-//! (`BrowserToolExecutor`) is canonical in `threadlane_runtime::browser`;
-//! both are re-exported below for compatibility. New code should import from
-//! those crates directly.
+//! (`BrowserToolExecutor`) is canonical in `threadlane_browser` (re-exported
+//! through `threadlane_runtime::browser` for compatibility); both are
+//! re-exported below for compatibility. New code should import from those
+//! crates directly.
 
 pub use threadlane_protocol::browser::{
     ActTarget, BrowserBridge, BrowserCommand, BrowserRequest, BROWSER_ACT_TOOL,
@@ -13,7 +14,7 @@ pub use threadlane_protocol::browser::{
     BROWSER_EVALUATE_TOOL, BROWSER_NAVIGATE_TOOL, BROWSER_RELOAD_TOOL, BROWSER_SCREENSHOT_TOOL,
     BROWSER_SNAPSHOT_TOOL, BROWSER_UNAVAILABLE, BROWSER_WAIT_TOOL,
 };
-pub use threadlane_runtime::browser::BrowserToolExecutor;
+pub use threadlane_browser::BrowserToolExecutor;
 
 #[cfg(test)]
 mod tests {

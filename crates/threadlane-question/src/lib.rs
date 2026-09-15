@@ -1,11 +1,12 @@
 //! Model-initiated clarifying questions (issue #40: Ask Questions).
 //!
-//! Canonical home for the question manager, handle, and `ask_question` tool
-//! executor, previously defined in `threadlane_session::question`. It
-//! depends only on runtime types (`AgentEvent`, `QuestionRequest`,
-//! `ToolExecutor`), so it lives with the execution engine. Re-exported
-//! through `threadlane_session::question` for compatibility; new code should
-//! import `threadlane_runtime::question` directly.
+//! Model-initiated clarifying questions (`ask_question` tool).
+//!
+//! The question manager, handle, and tool executor depend only on
+//! `threadlane-protocol` contracts (`AgentEvent`, interaction types,
+//! `ToolExecutor`) — never on the execution engine. Re-exported through
+//! `threadlane_runtime::question` and `threadlane_session::question` for
+//! compatibility; new code should import `threadlane_question` directly.
 //!
 //! The `ask_question` tool gives the model a structured way to ask the user
 //! for decisions instead of guessing. It mirrors the existing permission
@@ -24,7 +25,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use crate::{
+use threadlane_protocol::{
     AgentEvent, AgentToolDefinition, QuestionAnswer, QuestionItem, QuestionRequest, ToolExecutor,
 };
 use tokio::sync::{broadcast, oneshot};
@@ -380,7 +381,7 @@ mod tests {
             &request.id,
             QuestionAnswer {
                 request_id: request.id.clone(),
-                answers: vec![crate::QuestionItemAnswer {
+                answers: vec![threadlane_protocol::QuestionItemAnswer {
                     question_id: "q1".into(),
                     selected: vec!["a".into()],
                     custom_text: None,

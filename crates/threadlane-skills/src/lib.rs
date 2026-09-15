@@ -1557,8 +1557,10 @@ fn valid_package_component(component: &str) -> bool {
         && !component.chars().any(char::is_control)
 }
 
+/// Home directory resolution, canonical in `threadlane-project`; new code
+/// should import `threadlane_project::dirs_home` directly.
 pub(crate) fn dirs_home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    threadlane_project::dirs_home()
 }
 
 #[cfg(test)]

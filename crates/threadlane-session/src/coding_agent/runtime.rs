@@ -15,7 +15,7 @@ use crate::commands::{execute_slash_command, parse_slash_command, CommandAction}
 use crate::computer::ComputerCapability;
 use crate::context::ProjectContext;
 use crate::extension_broker::CapabilityDispatcher;
-use crate::plan::SessionPlanStore;
+use crate::plan::session_plan_store;
 use threadlane_runtime::ToolPolicy;
 use crate::question::QuestionManager;
 use crate::system_prompt::{build_system_prompt, SystemPromptBuildOptions};
@@ -438,7 +438,7 @@ impl CodingAgent {
         } else {
             InterruptedSubagentRecoveryState::Complete
         };
-        let plan_store = SessionPlanStore::new(initial_plan, session_file.clone());
+        let plan_store = session_plan_store(initial_plan, session_file.clone());
         let mut agent = if let Some(h) = harness.as_ref() {
             let runtime_harness = threadlane_runtime::harness::AgentHarness::with_events_and_hooks(
                 h.store.store().clone(),

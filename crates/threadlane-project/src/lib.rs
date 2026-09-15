@@ -153,18 +153,27 @@ pub fn load_project_registry_from(global_dir: &Path) -> Vec<ProjectRecord> {
     normalize_projects(projects)
 }
 
+/// Canonical home directory resolution (`UserDirs`, falling back to `$HOME`,
+/// then `BaseDirs`).
+///
+/// All crates must use this instead of maintaining a second implementation:
+/// `threadlane-runtime::utils::dirs_home`, `threadlane-wasi`, and
+/// `threadlane-computer` previously each reimplemented the first two steps,
+/// while `threadlane-tools`/`threadlane-skills` only checked `$HOME`.
+pub fn dirs_home() -> Option<PathBuf> {
+    directories::UserDirs::new()
+        .map(|dirs| dirs.home_dir().to_path_buf())
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+        .or_else(|| directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf()))
+}
+
 /// Canonical global Threadlane directory (`~/.threadlane`).
 ///
 /// Matches the historical resolution used by `threadlane-wasi` (home dir via
 /// `UserDirs`, falling back to `$HOME`, then `BaseDirs`): kept here so the
 /// registry has no wasi/runtime dependency.
 pub fn default_global_threadlane_dir() -> Option<PathBuf> {
-    directories::UserDirs::new()
-        .map(|dirs| dirs.home_dir().join(".threadlane"))
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".threadlane")))
-        .or_else(|| {
-            directories::BaseDirs::new().map(|dirs| dirs.home_dir().join(".threadlane"))
-        })
+    dirs_home().map(|home| home.join(".threadlane"))
 }
 
 fn save_project_registry_to(global_dir: &Path, projects: &[ProjectRecord]) -> Result<(), String> {

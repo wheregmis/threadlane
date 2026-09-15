@@ -6,6 +6,7 @@
 //! to them; `threadlane-runtime` re-exports them for backward compatibility.
 
 use serde_json::Value;
+use std::collections::HashSet;
 use threadlane_protocol::AgentMessage;
 
 pub const MAX_CONTEXT_SNAPSHOT_INDEX_ENTRIES: usize = 20;
@@ -83,6 +84,61 @@ pub fn normalized_tool_call_id(id: &str, empty_index: usize) -> String {
     } else {
         id.to_string()
     }
+}
+
+/// Removes an assistant tool-call turn that was interrupted before every call
+/// received a tool result. Provider APIs reject replaying such incomplete turns.
+///
+/// Moved from `threadlane-runtime::loop_engine` (body verbatim): it sits with
+/// `normalized_tool_call_id`, which it uses to match calls to results, and
+/// only touches the shared `AgentMessage` contract — never engine state.
+/// `threadlane-runtime` re-exports it for compatibility.
+pub fn repair_interrupted_tool_turn(messages: &mut Vec<AgentMessage>) -> bool {
+    let mut index = 0;
+    while index < messages.len() {
+        let AgentMessage::Assistant {
+            tool_calls: Some(tool_calls),
+            ..
+        } = &messages[index]
+        else {
+            index += 1;
+            continue;
+        };
+        if tool_calls.is_empty() {
+            index += 1;
+            continue;
+        }
+
+        let expected_ids: HashSet<String> = tool_calls
+            .iter()
+            .enumerate()
+            .map(|(idx, call)| normalized_tool_call_id(&call.id, idx))
+            .collect();
+        let mut completed_ids = HashSet::new();
+        let mut next = index + 1;
+        let mut tool_index = 0;
+        while let Some(AgentMessage::Tool { tool_call_id, .. }) = messages.get(next) {
+            let id = normalized_tool_call_id(tool_call_id, tool_index);
+            tool_index += 1;
+            completed_ids.insert(id);
+            next += 1;
+        }
+
+        if expected_ids.is_subset(&completed_ids) {
+            index = next;
+            continue;
+        }
+
+        let truncate_at = index.checked_sub(1).filter(|previous| {
+            matches!(
+                &messages[*previous],
+                AgentMessage::Custom { custom_type, .. } if custom_type == "thinking"
+            )
+        });
+        messages.truncate(truncate_at.unwrap_or(index));
+        return true;
+    }
+    false
 }
 
 /// Converts agent messages into the standard Chat Completions message array.
@@ -367,4 +423,71 @@ fn normalize_tool_call_ids(messages: &[AgentMessage]) -> Vec<AgentMessage> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod repair_tests {
+    use super::*;
+    use threadlane_protocol::{RuntimeToolCall, RuntimeToolCallFunction};
+
+    fn assistant_with_calls(ids: &[&str]) -> AgentMessage {
+        AgentMessage::Assistant {
+            content: None,
+            tool_calls: Some(
+                ids.iter()
+                    .map(|id| RuntimeToolCall {
+                        id: id.to_string(),
+                        r#type: "function".to_string(),
+                        function: RuntimeToolCallFunction {
+                            name: "read_file".to_string(),
+                            arguments: "{}".to_string(),
+                        },
+                        thought_signature: None,
+                    })
+                    .collect(),
+            ),
+            stop_reason: None,
+            deferred_handle: None,
+        }
+    }
+
+    fn tool_result(id: &str) -> AgentMessage {
+        AgentMessage::Tool {
+            tool_call_id: id.to_string(),
+            name: "read_file".to_string(),
+            content: "ok".to_string(),
+            is_error: false,
+            terminate: false,
+            images: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn complete_turn_is_left_alone() {
+        let mut messages = vec![
+            assistant_with_calls(&["a", "b"]),
+            tool_result("a"),
+            tool_result("b"),
+        ];
+        assert!(!repair_interrupted_tool_turn(&mut messages));
+        assert_eq!(messages.len(), 3);
+    }
+
+    #[test]
+    fn interrupted_turn_truncates_and_drops_thinking_prefix() {
+        let thinking = AgentMessage::Custom {
+            custom_type: "thinking".to_string(),
+            payload: serde_json::json!({}),
+        };
+        let mut messages = vec![
+            AgentMessage::user("go", Vec::new()),
+            thinking,
+            assistant_with_calls(&["a", "b"]),
+            tool_result("a"),
+        ];
+        assert!(repair_interrupted_tool_turn(&mut messages));
+        // Truncates before the thinking prefix; the incomplete turn is gone.
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].is_user());
+    }
 }

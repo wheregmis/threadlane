@@ -1,12 +1,10 @@
 //! Embedded-browser tool executor.
 //!
-//! Canonical home for `BrowserToolExecutor`, previously defined in
-//! `threadlane_session::browser`. It turns tool calls into
-//! [`threadlane_protocol::browser`] bridge round-trips and depends only on
-//! runtime types (`ToolExecutor`, `AgentToolDefinition`, `ToolOutput`) plus
-//! the protocol contract, so it lives with the execution engine.
-//! Re-exported through `threadlane_session::browser` for compatibility; new
-//! code should import `threadlane_runtime::browser` directly.
+//! Turns tool calls into [`threadlane_protocol::browser`] bridge round-trips.
+//! Depends only on `threadlane-protocol` tool contracts plus the protocol
+//! browser contract — never on the runtime engine. Re-exported through
+//! `threadlane_runtime::browser` and `threadlane_session::browser` for
+//! compatibility; new code should import `threadlane_browser` directly.
 
 pub use threadlane_protocol::browser::{
     ActTarget, BrowserBridge, BrowserCommand, BrowserRequest, BROWSER_ACT_TOOL,
@@ -18,7 +16,7 @@ pub use threadlane_protocol::browser::{
 use async_trait::async_trait;
 use std::sync::Arc;
 
-use crate::{AgentToolDefinition, ToolExecutor, ToolOutput};
+use threadlane_protocol::{AgentToolDefinition, ImageAttachment, ToolExecutor, ToolOutput};
 
 #[cfg(test)]
 use tokio::sync::mpsc;
@@ -308,7 +306,7 @@ impl ToolExecutor for BrowserToolExecutor {
                                 };
                             return Some(Ok(ToolOutput {
                                 content,
-                                images: vec![crate::ImageAttachment {
+                                images: vec![ImageAttachment {
                                     data_url: data_url.to_string(),
                                     display_name: "Embedded browser screenshot".to_string(),
                                 }],

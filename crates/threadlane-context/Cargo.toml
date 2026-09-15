@@ -1,0 +1,8 @@
+[package]
+name = "threadlane-context"
+version = "0.1.0"
+edition = "2021"
+description = "Context-window budgeting for Threadlane: model limits and token budgets"
+
+[dependencies]
+threadlane-provider.workspace = true

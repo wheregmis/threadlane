@@ -8,6 +8,7 @@ description = "Skill directory scanning, YAML frontmatter parsing, and load_skil
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
+threadlane-project.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

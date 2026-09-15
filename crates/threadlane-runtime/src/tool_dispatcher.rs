@@ -6,7 +6,7 @@
 use crate::error::AgentError;
 use crate::events::AgentEvent;
 use crate::harness::{HookContext, HookRegistry};
-use crate::loop_engine::AbortOnDrop;
+use crate::utils::AbortOnDrop;
 use crate::tool_executor::{builtin_tool_executor, ToolExecutor};
 use crate::types::{
     AgentToolCall, AgentToolDefinition, AgentToolResult, ImageAttachment, ToolExecutionMode,
