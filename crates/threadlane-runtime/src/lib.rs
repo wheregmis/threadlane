@@ -9,7 +9,6 @@ pub mod provider;
 pub mod rules;
 pub mod tool_dispatcher;
 pub mod tool_executor;
-pub mod subagent_settings;
 pub mod titles;
 pub(crate) mod turn_driver;
 pub mod types;

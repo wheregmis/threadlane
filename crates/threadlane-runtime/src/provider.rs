@@ -204,7 +204,6 @@ impl ProviderRouter {
     }
 
     /// Returns the first adapter whose format matches the given format.
-    #[allow(dead_code)]
     fn select(&self, format: PayloadFormat) -> Arc<dyn ProviderAdapter> {
         self.adapters
             .iter()
@@ -228,7 +227,6 @@ impl ProviderRouter {
     }
 }
 
-#[allow(dead_code)]
 fn default_adapter_for(format: PayloadFormat) -> Arc<dyn ProviderAdapter> {
     match format {
         PayloadFormat::ChatCompletions => Arc::new(ChatCompletionsAdapter),

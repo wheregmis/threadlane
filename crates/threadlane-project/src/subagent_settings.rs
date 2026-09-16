@@ -1,4 +1,9 @@
 //! Project-scoped subagent configuration shared by session and UI clients.
+//!
+//! Moved verbatim from `threadlane-runtime`: it persists
+//! `<project>/.threadlane/subagents.json` and depends only on `serde` and
+//! `threadlane-protocol` contracts, so it belongs with the other
+//! project-scoped stores rather than the execution engine.
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;

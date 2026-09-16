@@ -8510,6 +8510,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
+ "threadlane-protocol",
 ]
 
 [[package]]
@@ -8751,6 +8752,7 @@ dependencies = [
  "rfd",
  "threadlane-acp",
  "threadlane-auth",
+ "threadlane-project",
  "threadlane-protocol",
  "threadlane-provider",
  "threadlane-runtime",

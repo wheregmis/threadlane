@@ -3,9 +3,11 @@
 //! Moved verbatim from `threadlane-session::project_registry` so session,
 //! daemon, and GPUI consumers share one registry without depending on the
 //! session crate. The only dependencies are `serde`/`serde_json` for the
-//! file format, `sha2` for stable project ids, and `directories` for home
-//! resolution — no runtime, wasi, or GPUI coupling.
+//! file format, `sha2` for stable project ids, `directories` for home
+//! resolution, and `threadlane-protocol` for shared model/effort contracts
+//! — no runtime, wasi, or GPUI coupling.
 
+pub mod subagent_settings;
 pub mod watcher;
 
 use serde::{Deserialize, Serialize};

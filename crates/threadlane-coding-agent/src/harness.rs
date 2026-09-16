@@ -210,20 +210,6 @@ impl CodingSessionHarness {
             .map_err(|error| error.to_string())
     }
 
-    #[allow(dead_code)]
-    fn append_record_to_path(path: &Path, record: HarnessRecord) -> Result<(), String> {
-        Self::with_path(path, |journal| {
-            journal
-                .store
-                .append_record_gated(record)
-                .map_err(|error| error.to_string())?;
-            journal
-                .store
-                .drive_to_completion()
-                .map_err(|error| error.to_string())
-        })
-    }
-
     /// Append a durable fact through the canonical session harness adapter.
     pub fn append_fact_to_path(
         path: &Path,
@@ -2301,7 +2287,7 @@ impl CodingSessionHarness {
     /// occurrence.  It must not apply the legacy last-entry content check,
     /// because two consecutive provider messages can legitimately have the
     /// same serialized value.
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn append_synced_message(&mut self, message: AgentMessage) -> Result<String, String> {
         self.append_message_inner(message, false, false)
     }

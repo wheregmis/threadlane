@@ -10,6 +10,7 @@ gpui-component.workspace = true
 rfd.workspace = true
 threadlane-acp.workspace = true
 threadlane-auth.workspace = true
+threadlane-project.workspace = true
 threadlane-protocol.workspace = true
 threadlane-provider.workspace = true
 threadlane-skills.workspace = true
