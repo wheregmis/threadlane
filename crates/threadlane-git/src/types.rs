@@ -249,7 +249,7 @@ pub struct GitFile {
 }
 
 impl GitFile {
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn status_for_section(&self, staged_section: bool) -> char {
         if staged_section {
             self.index_status

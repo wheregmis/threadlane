@@ -196,12 +196,6 @@ impl Clone for ProviderRouter {
 }
 
 impl ProviderRouter {
-    /// Creates a router with the default adapters (Chat Completions + Codex).
-    #[allow(dead_code)]
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
     /// Registers a custom adapter. Later registrations take priority over
     /// earlier ones when selecting by model.
     pub fn register(&mut self, adapter: Arc<dyn ProviderAdapter>) {

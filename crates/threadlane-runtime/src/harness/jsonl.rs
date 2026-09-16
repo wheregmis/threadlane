@@ -109,7 +109,6 @@ fn writer_claim(path: &Path) -> io::Result<Arc<WriterClaim>> {
     Ok(claim)
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 enum KnownSessionRecord {

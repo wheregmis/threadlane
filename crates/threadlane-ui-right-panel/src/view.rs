@@ -4709,8 +4709,8 @@ fn convert_node_to_tree_item(node: FileNode, expanded_paths: &HashSet<String>) -
 /// The first refresh selects everything so an unreviewed tree starts fully
 /// checked; later refreshes only drop selected paths that disappeared, so an
 /// explicit empty selection is preserved rather than re-defaulted.
-/// (Only exercised by `tests.rs`; allowed dead in normal builds.)
-#[cfg_attr(not(test), allow(dead_code))]
+/// (Only exercised by `tests.rs`.)
+#[cfg(test)]
 pub fn retain_review_selection(
     selected: &mut HashSet<String>,
     available: HashSet<String>,

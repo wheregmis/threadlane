@@ -12,14 +12,10 @@ use threadlane_runtime::{AgentMessage, AgentToolDefinition, ToolExecutor};
 use super::durable::sha256_hex;
 use super::harness::CodingSessionHarness;
 
-#[allow(dead_code)]
 pub const MAX_CONTEXT_LIST_RESULTS: usize = 20;
-#[allow(dead_code)]
 pub const MAX_SUBAGENT_CONTEXT_REFS: usize = 16;
-#[allow(dead_code)]
 pub const MAX_SUBAGENT_CONTEXT_CHARS: usize = 32_000;
 
-#[allow(dead_code)]
 pub struct ResolvedContextSnapshot {
     pub snapshot: ContextSnapshot,
     pub content: String,

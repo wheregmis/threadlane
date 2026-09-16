@@ -18,9 +18,7 @@ use gpui_component::tab::{Tab, TabBar};
 use gpui_component::tag::Tag;
 use gpui_component::text::{TextView, TextViewState};
 use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable};
-use threadlane_git::{
-    GitHubIssueDetail, GitHubIssueRef, GitHubIssueSummary, GitHubPrInfo, GitHubRepository,
-};
+use threadlane_git::{GitHubIssueDetail, GitHubIssueRef, GitHubPrInfo, GitHubRepository};
 
 use threadlane_ui_state::actions::AppAction;
 use threadlane_ui_state::controller;
@@ -84,10 +82,10 @@ fn github_empty_message(tab: GitHubTab, state: GitHubStateFilter, query: &str) -
     }
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn selected_issue_after_refresh(
     selected: Option<u64>,
-    issues: &[GitHubIssueSummary],
+    issues: &[threadlane_git::GitHubIssueSummary],
 ) -> Option<u64> {
     selected
         .filter(|selected| issues.iter().any(|issue| issue.issue.number == *selected))
@@ -270,16 +268,7 @@ fn linked_session_fingerprint(session: &SessionInfo, pr: Option<&GitHubPrInfo>) 
     hasher.finish()
 }
 
-#[allow(dead_code)]
-fn selected_number_after_refresh<T>(
-    selected: Option<u64>,
-    rows: &[T],
-    number: impl Fn(&T) -> u64,
-) -> Option<u64> {
-    selected
-        .filter(|selected| rows.iter().any(|row| number(row) == *selected))
-        .or_else(|| rows.first().map(number))
-}
+
 
 /// Days since 1970-01-01 for a civil date (Howard Hinnant's algorithm).
 fn days_since_epoch(year: i64, month: i64, day: i64) -> i64 {
@@ -695,15 +684,7 @@ impl GitHubView {
         cx.notify();
     }
 
-    #[allow(dead_code)]
-    fn switch_project(&mut self, work_dir: Option<PathBuf>, cx: &mut Context<Self>) {
-        self.project_work_dir = work_dir.clone();
-        let scope = match work_dir {
-            Some(work_dir) => GitHubScope::Project(work_dir),
-            None => GitHubScope::All,
-        };
-        self.select_scope(scope, cx);
-    }
+
 
     fn schedule_query(&mut self, _query: String, cx: &mut Context<Self>) {
         self.debounce_task.take();
@@ -1082,13 +1063,7 @@ impl GitHubView {
         }
     }
 
-    #[allow(dead_code)]
-    fn selected_number(&self) -> Option<u64> {
-        match self.tab {
-            GitHubTab::Issues => self.selected_issue.as_ref().map(|key| key.number),
-            GitHubTab::PullRequests => self.selected_pr.as_ref().map(|key| key.number),
-        }
-    }
+
 
     fn selected_key(&self) -> Option<GitHubItemKey> {
         match self.tab {

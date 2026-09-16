@@ -572,7 +572,7 @@ impl SidebarView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search tasks…"));
+        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search sessions…"));
 
         let sub1 = cx.observe(&model, |this, model, cx| {
             let fingerprint = sidebar_fingerprint(model.read(cx), now_unix_secs());
@@ -615,7 +615,7 @@ impl SidebarView {
         div()
             .flex()
             .flex_col()
-            .gap_0p5()
+            .gap_2()
             .px_3()
             .pt(threadlane_ui_theme::WINDOW_CONTROLS_CLEARANCE)
             .pb_1()

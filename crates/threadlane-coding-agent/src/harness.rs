@@ -126,7 +126,6 @@ pub enum InterruptedSubagentRecoveryState {
 /// registry, cancellation state, and a subscription for event projection.
 /// Every foreground operation enters the harness through this adapter;
 /// there is no second persistence path.
-#[allow(dead_code)]
 pub struct CodingSessionHarness {
     pub store: AgentHarness<JsonlStore>,
     pub session_path: PathBuf,
@@ -154,7 +153,6 @@ fn boundary_result(
         provider_request_id: Some(provider_request_id),
     }
 }
-#[allow(dead_code)]
 impl CodingSessionHarness {
     // ── Construction ──────────────────────────────────────────────────
 
@@ -209,6 +207,7 @@ impl CodingSessionHarness {
             .map_err(|error| error.to_string())
     }
 
+    #[allow(dead_code)]
     fn append_record_to_path(path: &Path, record: HarnessRecord) -> Result<(), String> {
         Self::with_path(path, |journal| {
             journal
@@ -2282,6 +2281,7 @@ impl CodingSessionHarness {
     /// occurrence.  It must not apply the legacy last-entry content check,
     /// because two consecutive provider messages can legitimately have the
     /// same serialized value.
+    #[allow(dead_code)]
     fn append_synced_message(&mut self, message: AgentMessage) -> Result<String, String> {
         self.append_message_inner(message, false, false)
     }

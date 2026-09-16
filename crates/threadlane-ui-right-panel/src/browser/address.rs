@@ -82,15 +82,6 @@ pub fn search_url(query: &str) -> String {
     format!("https://www.google.com/search?q={encoded}")
 }
 
-/// The address bar hides `https://` the way Safari does; everything else —
-/// including `http://` — stays visible because it is information.
-///
-/// Kept for the upcoming address-echo + agent-tool wiring; not yet called.
-#[allow(dead_code)]
-pub fn display_url(url: &str) -> &str {
-    url.strip_prefix("https://").unwrap_or(url)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,12 +132,5 @@ mod tests {
         );
     }
 
-    #[test]
-    fn display_hides_https_only() {
-        assert_eq!(display_url("https://example.com"), "example.com");
-        assert_eq!(
-            display_url("http://localhost:3000"),
-            "http://localhost:3000"
-        );
-    }
+
 }

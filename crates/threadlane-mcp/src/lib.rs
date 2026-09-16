@@ -79,10 +79,7 @@ struct McpSettingsFile {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct McpSettings {
-    #[allow(dead_code)]
-    servers: Vec<McpServerConfig>,
-}
+pub struct McpSettings;
 
 impl McpSettings {
     fn load_global(global_dir: Option<&Path>) -> Vec<McpServerConfig> {

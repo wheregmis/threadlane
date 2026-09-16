@@ -7,9 +7,6 @@ description = "WASI capability broker smoke extension"
 [lib]
 crate-type = ["cdylib"]
 
-[features]
-agent-only = []
-
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true

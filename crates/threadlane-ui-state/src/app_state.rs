@@ -898,17 +898,7 @@ impl AppState {
         Ok(())
     }
 
-    #[allow(dead_code)]
-    pub fn update_model_roles(&mut self, roles: threadlane_session::ModelRoles) {
-        self.model_roles = roles.clone();
-        for runtime in self.session_runtimes.values() {
-            let runtime = runtime.clone();
-            let roles = roles.clone();
-            tokio::spawn(async move {
-                runtime.set_model_roles(roles).await;
-            });
-        }
-    }
+
 
     pub fn ensure_session_runtime(
         &mut self,
