@@ -38,10 +38,15 @@ threadlane-tools = { version = "0.1.0", path = "crates/threadlane-tools" }
 threadlane-ui-catalog = { version = "0.1.0", path = "crates/threadlane-ui-catalog" }
 threadlane-ui-chat = { version = "0.1.0", path = "crates/threadlane-ui-chat" }
 threadlane-ui-editor = { version = "0.1.0", path = "crates/threadlane-ui-editor" }
+threadlane-ui-github = { version = "0.1.0", path = "crates/threadlane-ui-github" }
 threadlane-ui-mirror = { version = "0.1.0", path = "crates/threadlane-ui-mirror" }
+threadlane-ui-right-panel = { version = "0.1.0", path = "crates/threadlane-ui-right-panel" }
+threadlane-ui-settings = { version = "0.1.0", path = "crates/threadlane-ui-settings" }
+threadlane-ui-sidebar = { version = "0.1.0", path = "crates/threadlane-ui-sidebar" }
 threadlane-ui-state = { version = "0.1.0", path = "crates/threadlane-ui-state" }
 threadlane-ui-terminal = { version = "0.1.0", path = "crates/threadlane-ui-terminal" }
 threadlane-ui-theme = { version = "0.1.0", path = "crates/threadlane-ui-theme" }
+threadlane-ui-workspace = { version = "0.1.0", path = "crates/threadlane-ui-workspace" }
 threadlane-updater = { version = ">=0.1.0, <1.0.0", path = "crates/threadlane-updater" }
 threadlane-wasi = { version = "0.1.0", path = "crates/threadlane-wasi" }
 

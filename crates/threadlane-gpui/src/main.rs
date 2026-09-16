@@ -1,8 +1,8 @@
 use gpui::*;
 use gpui_component::Root;
-use threadlane_gpui::assets::Assets;
-use threadlane_gpui::screens::workspace::WorkspaceView;
-use threadlane_gpui::theme;
+use threadlane_ui_chat::init as init_chat;
+use threadlane_ui_theme::{init as init_theme, Assets};
+use threadlane_ui_workspace::{init as init_workspace, WorkspaceView};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[hotpath::main]
@@ -38,9 +38,9 @@ fn main() {
 
     app.run(move |cx| {
         gpui_component::init(cx);
-        threadlane_gpui::screens::chat::init(cx);
-        threadlane_gpui::screens::workspace::init(cx);
-        theme::init(cx);
+        init_chat(cx);
+        init_workspace(cx);
+        init_theme(cx);
 
         cx.on_window_closed(|cx, _window_id| {
             if cx.windows().is_empty() {

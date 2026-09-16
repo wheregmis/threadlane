@@ -12,6 +12,7 @@ mod app_state;
 pub mod chat;
 pub mod controller;
 mod discovery;
+pub mod events;
 mod projection;
 pub mod provider_auth;
 pub mod settings;
@@ -25,6 +26,7 @@ mod test_support;
 pub use agent_events::{adapt_agent_event, ChatAgentUpdate};
 pub use app_state::AppState;
 pub use discovery::effective_session_work_dir;
+pub use events::next_event_batch;
 pub use projection::{
     coding_agent_options, compute_full_session_projection, compute_session_messages,
     runtime_status_text,

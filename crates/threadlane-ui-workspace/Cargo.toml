@@ -1,0 +1,23 @@
+[package]
+name = "threadlane-ui-workspace"
+version = "0.1.0"
+edition = "2021"
+description = "Workspace shell for the Threadlane desktop app: window root composing chat, sidebar, panels, terminal, and GitHub"
+
+[dependencies]
+gpui.workspace = true
+gpui-component.workspace = true
+rfd.workspace = true
+threadlane-git.workspace = true
+threadlane-session.workspace = true
+threadlane-ui-catalog.workspace = true
+threadlane-ui-chat.workspace = true
+threadlane-ui-editor.workspace = true
+threadlane-ui-github.workspace = true
+threadlane-ui-right-panel.workspace = true
+threadlane-ui-settings.workspace = true
+threadlane-ui-sidebar.workspace = true
+threadlane-ui-state.workspace = true
+threadlane-ui-terminal.workspace = true
+threadlane-updater.workspace = true
+tokio = { workspace = true, features = ["full"] }

@@ -2,7 +2,7 @@
 name = "threadlane-gpui"
 version.workspace = true
 edition.workspace = true
-description = "GPUI Desktop application for Threadlane using GPUI Kit"
+description = "GPUI Desktop application binary for Threadlane (thin shell over the threadlane-ui-* crates)"
 
 [features]
 gpui-profiler = ["gpui/profiler"]
@@ -10,59 +10,18 @@ hotpath = ["hotpath/hotpath"]
 hotpath-alloc = ["hotpath/hotpath-alloc"]
 
 [dependencies]
-gpui-kit.workspace = true
-gpui-component = { workspace = true, features = ["tree-sitter-rust", "tree-sitter-python", "tree-sitter-javascript", "tree-sitter-typescript", "tree-sitter-html", "tree-sitter-css", "tree-sitter-bash", "tree-sitter-toml", "tree-sitter-yaml", "tree-sitter-markdown", "tree-sitter-diff"] }
-gpui-kit-assets.workspace = true
 gpui.workspace = true
+gpui-component.workspace = true
 gpui_platform.workspace = true
-threadlane-runtime.workspace = true
 threadlane-session.workspace = true
-threadlane-project.workspace = true
-threadlane-protocol.workspace = true
-threadlane-provider.workspace = true
-threadlane-context.workspace = true
-threadlane-auth.workspace = true
-threadlane-tools.workspace = true
-threadlane-git.workspace = true
-threadlane-ui-catalog.workspace = true
 threadlane-ui-chat.workspace = true
-threadlane-ui-editor.workspace = true
-threadlane-ui-mirror.workspace = true
-threadlane-ui-state.workspace = true
-threadlane-ui-terminal.workspace = true
 threadlane-ui-theme.workspace = true
-threadlane-updater.workspace = true
-tokio = { workspace = true, features = ["full"] }
-serde.workspace = true
-serde_json.workspace = true
-rfd.workspace = true
-robius-open.workspace = true
-base64.workspace = true
+threadlane-ui-workspace.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-portable-pty.workspace = true
-vt100.workspace = true
-# Live computer-use frames are uploaded as gpui `RenderImage`s, built from
-# `image::Frame`; pin to the same major as gpui-pre.
-image.workspace = true
 hotpath.workspace = true
-
-[target.'cfg(target_os = "macos")'.dependencies]
-gpui-wry = { git = "https://github.com/longbridge/gpui-kit" }
-wry = { version = "0.53.3", package = "lb-wry" }
-raw-window-handle = "0.6"
-objc2 = { version = "0.6", features = ["std"] }
-block2 = "0.6"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # GPUI does not select a Linux window-system backend by default. Enable both
 # native backends so a single Linux build works under Wayland and X11.
 gpui_platform = { package = "gpui-pre-platform", version = "0.3.3", features = ["font-kit", "wayland", "x11"] }
-
-[dev-dependencies]
-async-trait.workspace = true
-gpui = { workspace = true, features = ["test-support"] }
-tempfile.workspace = true
-threadlane-skills.workspace = true
-threadlane-protocol.workspace = true
-threadlane-session = { workspace = true, features = ["test-support"] }

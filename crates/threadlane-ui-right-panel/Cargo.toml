@@ -1,0 +1,26 @@
+[package]
+name = "threadlane-ui-right-panel"
+version = "0.1.0"
+edition = "2021"
+description = "Right-side panel for the Threadlane desktop app: git review, draft PRs, browser, and file surfaces"
+
+[dependencies]
+base64.workspace = true
+gpui.workspace = true
+gpui-component.workspace = true
+rfd.workspace = true
+serde_json.workspace = true
+threadlane-git.workspace = true
+threadlane-protocol.workspace = true
+threadlane-provider.workspace = true
+threadlane-session.workspace = true
+threadlane-ui-state.workspace = true
+threadlane-ui-theme.workspace = true
+tokio = { workspace = true, features = ["full"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+gpui-wry = { git = "https://github.com/longbridge/gpui-kit" }
+wry = { version = "0.53.3", package = "lb-wry" }
+raw-window-handle = "0.6"
+objc2 = { version = "0.6", features = ["std"] }
+block2 = "0.6"

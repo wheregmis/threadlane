@@ -1,23 +1,24 @@
 # Threadlane GPUI
 
-The GPUI frontend is organized as a layered application:
+This crate is the desktop application's binary shell: `main.rs` (window
+setup, logging, `--dump-config`) composing the focused `threadlane-ui-*`
+leaf crates. It holds no product code.
 
-- `app/` — user actions and application coordination
-- `state/` — in-memory UI/application state
-- `screens/` — workspace, sidebar, chat, and settings views
-- `components/` — reusable presentation primitives
-- `services/` — boundaries around sessions, projects, and agent execution
-- `adapters/` — backend event and model translation
-- `persistence/` — project registry and local preferences
+- `threadlane-ui-workspace` — window root composing every screen
+- `threadlane-ui-chat`, `threadlane-ui-sidebar`, `threadlane-ui-settings`, `threadlane-ui-github`, `threadlane-ui-right-panel` — screens
+- `threadlane-ui-editor`, `threadlane-ui-mirror`, `threadlane-ui-terminal` — embedded views
+- `threadlane-ui-state` — durable UI state (`AppState`), app intent, background services
+- `threadlane-ui-catalog` — picker-facing model catalog
+- `threadlane-ui-theme` — visual language, bundled theme, icon assets
 
-Views should dispatch `app::actions::AppAction` values rather than embedding
-backend orchestration. Backend crates remain independent of GPUI. Prefer
-Prefer controls from `gpui-component` over hand-built interactive `div` elements. Use `ActiveTheme` and `cx.theme().colors` for surfaces, borders, text, and interaction states; do not introduce one-off UI color literals.
+Views should dispatch `threadlane_ui_state::actions::AppAction` values rather
+than embedding backend orchestration. Backend crates remain independent of
+GPUI. Prefer controls from `gpui-component` over hand-built interactive `div` elements. Use `ActiveTheme` and `cx.theme().colors` for surfaces, borders, text, and interaction states; do not introduce one-off UI color literals.
 
 ## Themes
 
 Threadlane uses the standard `gpui-component` `ThemeRegistry` and `ThemeConfig` flow.
-The bundled theme lives in `themes/threadlane.json`; additional theme-set JSON files
+The bundled theme lives in `threadlane-ui-theme/themes/threadlane.json`; additional theme-set JSON files
 can be placed in `~/.threadlane/themes/` and are watched at runtime. The selected
 theme is persisted in `~/.threadlane/gui/preferences.json` and can be changed from
 Settings. UI code must use semantic values from `cx.theme().colors` so switching a
@@ -27,8 +28,15 @@ theme repaints the entire application.
 
 ```bash
 cargo check -p threadlane-gpui
-cargo test -p threadlane-gpui
 ```
+
+(`cargo test -p threadlane-gpui` no longer exists as a suite: the crate holds
+no test code. The `threadlane-ui-*` leaves own their tests next to the code;
+run them per crate, e.g. `cargo test -p threadlane-ui-right-panel --lib`.
+Stay out of the heavyweight suites — whole-workspace, `threadlane-gpui`,
+and `threadlane-session` test runs hang. Known exclusions: `threadlane-ui-mirror`
+tests do not compile (macro-expansion blowup, see AGENTS.md), and two
+`threadlane-ui-catalog` tests fail without live credentials.)
 
 ## Releases
 
