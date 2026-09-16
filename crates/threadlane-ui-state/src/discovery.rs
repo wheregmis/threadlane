@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use threadlane_session::harness::{JsonlStore, SessionStore};
+use threadlane_runtime::harness::{JsonlStore, SessionStore};
 
 use crate::projection::extract_session_title;
 use crate::types::{SessionDiscoveryCache, SessionDiscoveryCacheEntry, SessionHealth, SessionInfo};

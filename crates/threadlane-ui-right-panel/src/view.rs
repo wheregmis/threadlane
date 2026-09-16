@@ -779,7 +779,7 @@ impl RightPanelView {
             cx.notify();
             return;
         }
-        let (api_key, account_id) = threadlane_session::provider_credentials(&model);
+        let (api_key, account_id) = threadlane_coding_agent::credentials::provider_credentials(&model);
         let tx = self.event_tx.clone();
         let Ok(executor) = threadlane_ui_state::chat::executor() else {
             self.git_feedback = Some("Unable to start the model runtime.".into());
@@ -813,7 +813,7 @@ impl RightPanelView {
                 } else {
                     diff
                 };
-                let raw = threadlane_session::provider_client_for(api_key, account_id)
+                let raw = threadlane_coding_agent::credentials::provider_client_for(api_key, account_id)
                     .generate_commit_message(&model, &diff)
                     .await?;
                 let message = normalize_generated_commit_message(&raw);

@@ -6,9 +6,7 @@
 //! depend only on `threadlane-protocol` contracts, the
 //! `threadlane-computer` approval trait, and local persistence — never on
 //! the session or engine. Trace vocabulary is shared with the harness via
-//! `threadlane-protocol::interaction`. Re-exported through
-//! `threadlane_session::permission` for compatibility; new code should
-//! import `threadlane_permission` directly.
+//! `threadlane-protocol::interaction`. Import `threadlane_permission` directly.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

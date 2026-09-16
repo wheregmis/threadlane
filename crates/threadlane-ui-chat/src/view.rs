@@ -150,8 +150,8 @@ fn render_chat_error(id: &str, error: &str, model: &Entity<AppState>, cx: &App) 
             ),
     )
 }
-use threadlane_session::commands::{available_slash_commands, SlashCommandInfo};
-use threadlane_session::{ImageAttachment, PlanItemStatus, SessionPlan};
+use threadlane_coding_agent::commands::{available_slash_commands, SlashCommandInfo};
+use threadlane_protocol::{ImageAttachment, PlanItemStatus, SessionPlan};
 
 actions!(
     threadlane_composer,
@@ -389,7 +389,7 @@ impl ChatListView {
                             || (!is_generating && !this.pasted_images.is_empty())
                         {
                             if is_generating && *secondary
-                                && threadlane_session::is_acp_model(&model_clone.read(cx).selected_model)
+                                && threadlane_acp_engine::is_acp_model(&model_clone.read(cx).selected_model)
                             {
                                 model_clone.update(cx, |state, cx| {
                                     state.session_status = Some("This agent does not support live steering. Use Queue to send your message after this turn.".into());
@@ -437,7 +437,7 @@ impl ChatListView {
             // profiled without a model turn or an approval prompt. Nothing
             // reaches a model through this path.
             if std::env::var_os("THREADLANE_MIRROR_DEBUG").is_some() {
-                threadlane_session::computer::watch_display_for_debug();
+                threadlane_computer::watch_display_for_debug();
                 let _ = this.update(cx, |view, cx| view.open_mirror(cx));
             }
             while let Some(events) = next_chat_stream_batch(&mut stream_rx).await {
@@ -3259,7 +3259,7 @@ impl ChatListView {
     fn resolve_pending_permission(
         &mut self,
         request_id: &str,
-        decision: threadlane_session::PermissionDecision,
+        decision: threadlane_permission::PermissionDecision,
         cx: &mut Context<Self>,
     ) {
         self.permission_details_open = false;
@@ -3314,7 +3314,7 @@ impl ChatListView {
                     .map(|input| input.read(cx).value().to_string())
                     .map(|text| text.trim().to_string())
                     .filter(|text| !text.is_empty());
-                threadlane_session::QuestionItemAnswer {
+                threadlane_protocol::QuestionItemAnswer {
                     question_id: item.id.clone(),
                     selected: self
                         .question_selections
@@ -3325,7 +3325,7 @@ impl ChatListView {
                 }
             })
             .collect::<Vec<_>>();
-        let answer = threadlane_session::QuestionAnswer {
+        let answer = threadlane_protocol::QuestionAnswer {
             request_id: request.id.clone(),
             answers,
             dismissed: false,
@@ -3498,9 +3498,9 @@ impl ChatListView {
             };
             if let Some(request) = request {
                 let decision = match key {
-                    "y" | "Y" | "enter" => Some(threadlane_session::PermissionDecision::AllowOnce),
-                    "a" | "A" => Some(threadlane_session::PermissionDecision::AllowAlways),
-                    "n" | "N" => Some(threadlane_session::PermissionDecision::Deny),
+                    "y" | "Y" | "enter" => Some(threadlane_permission::PermissionDecision::AllowOnce),
+                    "a" | "A" => Some(threadlane_permission::PermissionDecision::AllowAlways),
+                    "n" | "N" => Some(threadlane_permission::PermissionDecision::Deny),
                     _ => None,
                 };
                 if let Some(decision) = decision {
@@ -3576,7 +3576,7 @@ impl ChatListView {
 
         let action_button = |id: &'static str,
                              label: &'static str,
-                             decision: threadlane_session::PermissionDecision,
+                             decision: threadlane_permission::PermissionDecision,
                              primary: bool,
                              danger: bool| {
             let request_id = request.id.clone();
@@ -3692,21 +3692,21 @@ impl ChatListView {
                                         .child(action_button(
                                             "details-deny",
                                             "Deny [N]",
-                                            threadlane_session::PermissionDecision::Deny,
+                                            threadlane_permission::PermissionDecision::Deny,
                                             false,
                                             true,
                                         ))
                                         .child(action_button(
                                             "details-allow-once",
                                             "Allow once [Y]",
-                                            threadlane_session::PermissionDecision::AllowOnce,
+                                            threadlane_permission::PermissionDecision::AllowOnce,
                                             true,
                                             false,
                                         ))
                                         .child(action_button(
                                             "details-allow-always",
                                             "Always [A]",
-                                            threadlane_session::PermissionDecision::AllowAlways,
+                                            threadlane_permission::PermissionDecision::AllowAlways,
                                             false,
                                             false,
                                         )),
@@ -3725,7 +3725,7 @@ impl ChatListView {
 
         let action_button = |id: &'static str,
                              label: &'static str,
-                             decision: threadlane_session::PermissionDecision,
+                             decision: threadlane_permission::PermissionDecision,
                              primary: bool,
                              danger: bool| {
             let request_id = request.id.clone();
@@ -3804,21 +3804,21 @@ impl ChatListView {
                         .child(action_button(
                             "permission-deny",
                             "Deny [N]",
-                            threadlane_session::PermissionDecision::Deny,
+                            threadlane_permission::PermissionDecision::Deny,
                             false,
                             true,
                         ))
                         .child(action_button(
                             "permission-allow-once",
                             "Allow once [Y]",
-                            threadlane_session::PermissionDecision::AllowOnce,
+                            threadlane_permission::PermissionDecision::AllowOnce,
                             true,
                             false,
                         ))
                         .child(action_button(
                             "permission-allow-always",
                             "Always [A]",
-                            threadlane_session::PermissionDecision::AllowAlways,
+                            threadlane_permission::PermissionDecision::AllowAlways,
                             false,
                             false,
                         )),
@@ -4594,7 +4594,7 @@ impl ChatListView {
             (state.active_session_metrics(), context_window)
         };
         let subagent_count = self.model.read(cx).active_subagents().len();
-        let supports_live_steering = !threadlane_session::is_acp_model(&selected_model);
+        let supports_live_steering = !threadlane_acp_engine::is_acp_model(&selected_model);
         let steer_tooltip = if supports_live_steering {
             "Steer current turn immediately (Cmd+Enter)"
         } else {
@@ -4630,14 +4630,14 @@ impl ChatListView {
         // Per-agent model settings behind each "External agents" row: live
         // options for the selected agent, launch-time cache for the rest, so
         // every agent's models are visible before it is picked.
-        let acp_model_sections: HashMap<String, Vec<threadlane_session::AcpConfigOption>> = {
+        let acp_model_sections: HashMap<String, Vec<threadlane_acp::AcpConfigOption>> = {
             let state = self.model.read(cx);
             let mut sections = HashMap::new();
             for option in &model_options {
                 if option.provider != threadlane_ui_catalog::ModelProvider::Acp {
                     continue;
                 }
-                let Some(agent_id) = threadlane_session::acp_agent_id(&option.id) else {
+                let Some(agent_id) = threadlane_acp_engine::acp_agent_id(&option.id) else {
                     continue;
                 };
                 let options = if option.id == selected_model {
@@ -5085,16 +5085,16 @@ impl ChatListView {
                     // shared launch-time cache until this session's engine
                     // connects. Picking one selects the agent and applies the
                     // model in a single gesture — no hover, no pre-select.
-                    let agent_key = threadlane_session::acp_agent_id(&option.id)
+                    let agent_key = threadlane_acp_engine::acp_agent_id(&option.id)
                         .unwrap_or_default()
                         .to_string();
                     let agent_options = acp_model_sections
                         .get(&agent_key)
                         .cloned()
                         .unwrap_or_default();
-                    let agent_setting = threadlane_session::config_option_for(
+                    let agent_setting = threadlane_acp::config_option_for(
                         &agent_options,
-                        threadlane_session::ACP_CONFIG_CATEGORY_MODEL,
+                        threadlane_acp::ACP_CONFIG_CATEGORY_MODEL,
                     )
                     .cloned();
                     let is_current = option.id == selected_model_for_picker;
@@ -5380,7 +5380,7 @@ impl ChatListView {
                 output_tokens: metrics.output_tokens,
                 cache_hit_percent: metrics.cache_hit_percent(),
             },
-            !threadlane_session::is_acp_model(&selected_model),
+            !threadlane_acp_engine::is_acp_model(&selected_model),
         );
         let displayed_percent = meter.percent.unwrap_or_default();
         let meter_color = if meter.percent.is_none() || displayed_percent == 0.0 {
@@ -6116,12 +6116,7 @@ impl ChatListView {
                 state.mirror_open = true;
                 cx.notify();
             }
-            threadlane_session::computer::global_previews_dir().or_else(|| {
-                state
-                    .active_work_dir
-                    .clone()
-                    .map(|work_dir| work_dir.join(".threadlane").join("previews"))
-            })
+            threadlane_computer::resolve_previews_dir(state.active_work_dir.as_deref())
         });
         if self.mirror.is_none() {
             let Some(previews_dir) = previews_dir else {

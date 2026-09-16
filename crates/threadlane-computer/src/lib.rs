@@ -10,9 +10,9 @@ pub mod computer;
 mod stream;
 
 pub use computer::{
-    global_previews_dir, watch_display_for_debug, ComputerAct, ComputerToolExecutor, TargetedAct,
-    COMPUTER_ACT_TOOL, COMPUTER_SCREENSHOT_TOOL, COMPUTER_STATUS_TOOL, COMPUTER_UNAVAILABLE,
-    COMPUTER_WINDOWS_TOOL,
+    global_previews_dir, resolve_previews_dir, watch_display_for_debug, ComputerAct,
+    ComputerToolExecutor, TargetedAct, COMPUTER_ACT_TOOL, COMPUTER_SCREENSHOT_TOOL,
+    COMPUTER_STATUS_TOOL, COMPUTER_UNAVAILABLE, COMPUTER_WINDOWS_TOOL,
 };
 
 /// User decision for a computer-use approval prompt.

@@ -27,9 +27,10 @@ use threadlane_protocol::ProviderPort;
 use threadlane_provider::openai::fetch_available_models;
 use threadlane_runtime::harness::{OperationOutcome, Reducer, SessionStore, Snapshot};
 use threadlane_runtime::ToolPolicy;
-use threadlane_runtime::{
-    AgentEvent, AgentMessage, AgentRuntime, ImageAttachment, ReasoningEffort, TokenUsage,
+use threadlane_protocol::{
+    AgentEvent, AgentMessage, ImageAttachment, ReasoningEffort, TokenUsage,
 };
+use threadlane_runtime::AgentRuntime;
 use threadlane_skills::{SkillManager, SkillRegistry};
 use threadlane_wasi::{WasiExtensionManager, WasiLegacyEffect};
 use tokio::sync::broadcast;
@@ -176,10 +177,6 @@ impl CodingAgent {
 
     pub fn set_model_roles(&mut self, roles: threadlane_runtime::ModelRoles) {
         self.agent.set_model_roles(roles);
-    }
-
-    pub fn set_needle_enabled(&mut self, enabled: bool) {
-        self.agent.set_needle_enabled(enabled);
     }
 
     pub fn model_roles(&self) -> &threadlane_runtime::ModelRoles {
@@ -407,7 +404,7 @@ impl CodingAgent {
         let github_issue_work = harness
             .as_ref()
             .is_some_and(|harness| harness.store.facts().contains_key("github_issue"));
-        let mut initial_plan = threadlane_runtime::SessionPlan::default();
+        let mut initial_plan = threadlane_protocol::SessionPlan::default();
         if let Some(h) = harness.as_ref() {
             if let Some(model) = h.store.facts().get("model") {
                 effective_model = model.clone();
@@ -421,7 +418,7 @@ impl CodingAgent {
                 effective_reasoning_effort = effort;
             }
             if let Some(plan_json) = h.store.facts().get("session_plan") {
-                if let Ok(plan) = serde_json::from_str::<threadlane_runtime::SessionPlan>(plan_json)
+                if let Ok(plan) = serde_json::from_str::<threadlane_protocol::SessionPlan>(plan_json)
                 {
                     initial_plan = plan;
                 }
@@ -767,7 +764,7 @@ impl CodingAgent {
         }
 
         let manager_clone = mcp_manager.clone();
-        threadlane_runtime::get_runtime().spawn(async move {
+        threadlane_provider::exec::get_runtime().spawn(async move {
             manager_clone.discover_and_connect().await;
         });
         agent.work_dir = Some(options.work_dir.clone());
@@ -1003,7 +1000,7 @@ impl CodingAgent {
                     })
                     .and_then(|_| {
                         let mut result = tool.result.unwrap_or_else(|| {
-                            threadlane_runtime::types::AgentToolResult::external(
+                            threadlane_protocol::AgentToolResult::external(
                                 tool.tool_call_id,
                                 tool.name.clone(),
                                 "ACP tool call ended without a terminal update",
@@ -1921,12 +1918,13 @@ mod compaction_sync_tests {
         DeferredResponse, ProviderPort, RuntimeRequest, RuntimeStreamEvent, RuntimeToolCall,
         RuntimeToolCallFunction, RuntimeUsage,
     };
+    use threadlane_protocol::{AgentMessage, AgentToolResult};
     use threadlane_runtime::{
         harness::{
             read_transcript_page, CompactionReason, JsonlStore, OperationOutcome, SessionStore,
             TranscriptItem,
         },
-        AgentMessage, AgentToolResult, Record,
+        Record,
     };
 
     fn summary() -> AgentMessage {
@@ -2157,10 +2155,10 @@ mod compaction_sync_tests {
             .unwrap()
             .messages()
             .into_iter()
-            .find(|message| threadlane_runtime::compaction_summary_text(message).is_some())
+            .find(|message| threadlane_compaction::compaction_summary_text(message).is_some())
             .unwrap();
         assert_eq!(
-            threadlane_runtime::compaction_summary_text(&checkpoint),
+            threadlane_compaction::compaction_summary_text(&checkpoint),
             Some(summary)
         );
         let AgentMessage::Custom { payload, .. } = checkpoint else {
@@ -2373,7 +2371,7 @@ mod compaction_sync_tests {
         ) {
             let messages: Vec<AgentMessage> =
                 serde_json::from_value(request.messages.clone()).unwrap();
-            let (instructions, _) = threadlane_runtime::convert_to_codex_llm(&messages);
+            let (instructions, _) = threadlane_provider::convert_to_codex_llm(&messages);
             assert!(
                 instructions.contains("You are an expert coding assistant"),
                 "every outgoing request, including after compaction, must retain system instructions"

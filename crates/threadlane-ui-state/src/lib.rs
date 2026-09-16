@@ -32,8 +32,8 @@ pub use projection::{
     runtime_status_text,
 };
 pub use types::{
-    ChatMessageInfo, ChatStreamEvent, MessageRole, RequestedEditorTarget, SessionAttention,
-    SessionHealth, SessionHydrationRequest, SessionInfo, SubagentActivityInfo,
+    hash_session_identity, ChatMessageInfo, ChatStreamEvent, MessageRole, RequestedEditorTarget,
+    SessionAttention, SessionHealth, SessionHydrationRequest, SessionInfo, SubagentActivityInfo,
     SubagentActivityStatus, ToolActivityInfo, TrajectoryEntry, WorkMode, WorkspacePage,
 };
 

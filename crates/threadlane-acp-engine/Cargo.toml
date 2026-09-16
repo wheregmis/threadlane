@@ -9,6 +9,7 @@ async-trait.workspace = true
 threadlane-acp.workspace = true
 threadlane-permission.workspace = true
 threadlane-project.workspace = true
+threadlane-protocol.workspace = true
 threadlane-runtime.workspace = true
 threadlane-tools.workspace = true
 serde.workspace = true

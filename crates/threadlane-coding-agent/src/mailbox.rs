@@ -430,7 +430,7 @@ mod tests {
 
     #[tokio::test]
     async fn message_peer_sends_and_drains_inbox() {
-        use threadlane_runtime::ToolExecutor;
+        use threadlane_protocol::ToolExecutor;
         let hub = SubagentHub::new();
         let siblings = vec!["scout".to_string(), "worker".to_string()];
         let scout = MessagePeerToolExecutor::new(
@@ -471,7 +471,7 @@ mod tests {
 
     #[tokio::test]
     async fn hub_list_send_read_validate_targets() {
-        use threadlane_runtime::ToolExecutor;
+        use threadlane_protocol::ToolExecutor;
         let hub = SubagentHub::new();
         let executor = HubToolExecutor::new(hub.clone(), None);
         let empty = executor
@@ -516,7 +516,7 @@ mod tests {
 
     #[tokio::test]
     async fn hub_kill_flags_live_lane_and_rejects_settled() {
-        use threadlane_runtime::ToolExecutor;
+        use threadlane_protocol::ToolExecutor;
         let hub = SubagentHub::new();
         let executor = HubToolExecutor::new(hub.clone(), None);
         hub.register(
@@ -568,7 +568,7 @@ mod tests {
 
     #[tokio::test]
     async fn hub_wait_returns_settled_or_times_out() {
-        use threadlane_runtime::ToolExecutor;
+        use threadlane_protocol::ToolExecutor;
         let hub = SubagentHub::new();
         let executor = HubToolExecutor::new(hub.clone(), None);
         // Nothing live: immediate no-op.
@@ -619,7 +619,7 @@ mod tests {
     #[tokio::test]
     async fn hub_revive_validates_liveness_and_delegates_to_hook() {
         use std::sync::{Arc, Mutex as StdMutex};
-        use threadlane_runtime::ToolExecutor;
+        use threadlane_protocol::ToolExecutor;
         let hub = SubagentHub::new();
         let without_hook = HubToolExecutor::new(hub.clone(), None);
         hub.register(
@@ -731,13 +731,13 @@ impl MessagePeerToolExecutor {
 }
 
 #[async_trait::async_trait]
-impl threadlane_runtime::ToolExecutor for MessagePeerToolExecutor {
+impl threadlane_protocol::ToolExecutor for MessagePeerToolExecutor {
     fn executor_id(&self) -> &str {
         "threadlane.host.message_peer"
     }
 
-    fn tool_definitions(&self) -> Arc<[threadlane_runtime::AgentToolDefinition]> {
-        vec![threadlane_runtime::AgentToolDefinition {
+    fn tool_definitions(&self) -> Arc<[threadlane_protocol::AgentToolDefinition]> {
+        vec![threadlane_protocol::AgentToolDefinition {
             name: MESSAGE_PEER_TOOL_NAME.into(),
             description: Some(
                 "Send a live message to a sibling subagent (lane name, agent role, or `all`) and receive pending inbox messages. One call both sends and drains your inbox.".into(),
@@ -864,7 +864,7 @@ impl HubToolExecutor {
             .iter()
             .rev()
             .filter_map(|entry| match &entry.message {
-                threadlane_runtime::AgentMessage::Assistant {
+                threadlane_protocol::AgentMessage::Assistant {
                     content: Some(content),
                     ..
                 } if !content.trim().is_empty() => Some(content.clone()),
@@ -879,7 +879,7 @@ impl HubToolExecutor {
             .rev()
             .map(|entry| {
                 let summary = match &entry.message {
-                    threadlane_runtime::AgentMessage::Assistant {
+                    threadlane_protocol::AgentMessage::Assistant {
                         content,
                         tool_calls,
                         ..
@@ -900,7 +900,7 @@ impl HubToolExecutor {
                             .unwrap_or_default();
                         format!("assistant: {text}{tools}")
                     }
-                    threadlane_runtime::AgentMessage::Tool {
+                    threadlane_protocol::AgentMessage::Tool {
                         name,
                         content,
                         is_error,
@@ -909,7 +909,7 @@ impl HubToolExecutor {
                         let text: String = content.chars().take(240).collect();
                         format!("tool {name} (error={is_error}): {text}")
                     }
-                    threadlane_runtime::AgentMessage::User { content } => {
+                    threadlane_protocol::AgentMessage::User { content } => {
                         let text: String = content.chars().take(240).collect();
                         format!("user: {text}")
                     }
@@ -1070,13 +1070,13 @@ impl HubToolExecutor {
 }
 
 #[async_trait::async_trait]
-impl threadlane_runtime::ToolExecutor for HubToolExecutor {
+impl threadlane_protocol::ToolExecutor for HubToolExecutor {
     fn executor_id(&self) -> &str {
         "threadlane.host.hub"
     }
 
-    fn tool_definitions(&self) -> Arc<[threadlane_runtime::AgentToolDefinition]> {
-        vec![threadlane_runtime::AgentToolDefinition {
+    fn tool_definitions(&self) -> Arc<[threadlane_protocol::AgentToolDefinition]> {
+        vec![threadlane_protocol::AgentToolDefinition {
             name: HUB_TOOL_NAME.into(),
             description: Some(
                 "Supervise subagent lanes: `list` the roster, `send` a steering message to a live lane, `read` a lane's latest output and recent activity, `revive` a settled lane with a follow-up prompt, `kill` a live lane, or `wait` for lanes to settle.".into(),

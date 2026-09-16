@@ -1,7 +1,7 @@
 use super::store::SessionStore;
 use super::types::{Entry, OperationIntent, OperationOutcome, Record, ReduceError, ReducedState};
 
-use crate::types::TokenUsage;
+use threadlane_protocol::TokenUsage;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -75,7 +75,7 @@ pub fn interrupted_subagent_lanes(
     records: &[Record],
 ) -> Vec<super::types::InterruptedSubagentLane> {
     use crate::harness::ToolReplaySafety;
-    use crate::types::AgentMessage;
+    use threadlane_protocol::AgentMessage;
 
     struct Occurrence {
         lane: String,
@@ -303,7 +303,7 @@ pub enum EventPayload {
     RecordCommitted(Record),
     Fault(String),
     Streaming(Option<StreamingState>),
-    Agent(crate::events::AgentEvent),
+    Agent(threadlane_protocol::AgentEvent),
 }
 
 impl EventPayload {
@@ -394,23 +394,23 @@ impl DurableEvent {
     }
 
     /// Project this durable event into an [`AgentEvent`] compatibility lifecycle event.
-    fn project_agent_event(&self) -> Option<crate::events::AgentEvent> {
+    fn project_agent_event(&self) -> Option<threadlane_protocol::AgentEvent> {
         match &self.payload {
-            DurablePayload::Entry(entry) => Some(crate::events::AgentEvent::MessageEnd {
+            DurablePayload::Entry(entry) => Some(threadlane_protocol::AgentEvent::MessageEnd {
                 message: entry.message.clone(),
             }),
             DurablePayload::Record(record) => match record {
                 Record::OperationStarted { intent, .. } if *intent == OperationIntent::Run => {
-                    Some(crate::events::AgentEvent::AgentStart)
+                    Some(threadlane_protocol::AgentEvent::AgentStart)
                 }
                 Record::OperationFinished { outcome, error, .. }
                     if self.operation_intent == Some(OperationIntent::Run) =>
                 {
                     match outcome {
-                        OperationOutcome::Completed => Some(crate::events::AgentEvent::AgentEnd {
+                        OperationOutcome::Completed => Some(threadlane_protocol::AgentEvent::AgentEnd {
                             usage: TokenUsage::default(),
                         }),
-                        _ => Some(crate::events::AgentEvent::AgentError {
+                        _ => Some(threadlane_protocol::AgentEvent::AgentError {
                             error: error.clone().unwrap_or_else(|| match outcome {
                                 OperationOutcome::Failed => "operation failed".to_string(),
                                 OperationOutcome::Aborted => "operation aborted".to_string(),
@@ -420,7 +420,7 @@ impl DurableEvent {
                         }),
                     }
                 }
-                Record::StepAttempt { attempt, .. } => Some(crate::events::AgentEvent::TurnStart {
+                Record::StepAttempt { attempt, .. } => Some(threadlane_protocol::AgentEvent::TurnStart {
                     turn_number: *attempt as usize,
                 }),
                 Record::ToolStarted {
@@ -428,7 +428,7 @@ impl DurableEvent {
                     tool_name,
                     effective_args,
                     ..
-                } => Some(crate::events::AgentEvent::ToolExecutionStart {
+                } => Some(threadlane_protocol::AgentEvent::ToolExecutionStart {
                     tool_call_id: tool_call_id.clone(),
                     name: tool_name.clone(),
                     arguments: serde_json::to_string(effective_args).unwrap_or_default(),
@@ -484,7 +484,7 @@ pub struct ProjectedAgentEvent {
     turn: Option<u32>,
     /// The recovery identifier from the originating [`HarnessEvent`].
     recovery_id: Option<String>,
-    event: crate::events::AgentEvent,
+    event: threadlane_protocol::AgentEvent,
 }
 
 impl HarnessEvent {
@@ -526,7 +526,7 @@ impl HarnessEvent {
     /// | `RecordCommitted::StepAttempt` | `TurnStart` with `attempt` |
     /// | `RecordCommitted::ToolStarted` | `ToolExecutionStart` with JSON-serialized `effective_args` |
     /// | Everything else | `None` |
-    pub fn project_agent_event(&self) -> Option<crate::events::AgentEvent> {
+    pub fn project_agent_event(&self) -> Option<threadlane_protocol::AgentEvent> {
         self.as_durable().and_then(|d| d.project_agent_event())
     }
 
@@ -644,7 +644,7 @@ impl HarnessEventHub {
         self.publish_identified(payload, None, None, None)
     }
 
-    pub(crate) fn publish_agent_event(&self, event: crate::events::AgentEvent) -> HarnessEvent {
+    pub(crate) fn publish_agent_event(&self, event: threadlane_protocol::AgentEvent) -> HarnessEvent {
         self.publish(EventPayload::Agent(event))
     }
 
@@ -882,7 +882,7 @@ impl HarnessEventHub {
 mod tests {
     use super::*;
     use crate::harness::{MemoryStore, SurfaceOperation};
-    use crate::types::AgentMessage;
+    use threadlane_protocol::AgentMessage;
 
     #[tokio::test]
     async fn subscription_waits_for_publication_without_polling() {
@@ -893,7 +893,7 @@ mod tests {
 
         tokio::spawn(async move {
             tokio::task::yield_now().await;
-            publisher.publish_agent_event(crate::events::AgentEvent::AgentStart);
+            publisher.publish_agent_event(threadlane_protocol::AgentEvent::AgentStart);
         });
 
         let events = tokio::time::timeout(
@@ -944,7 +944,7 @@ mod tests {
         assert_eq!(projected.run_id.as_deref(), Some("run-1"));
         assert!(matches!(
             projected.event,
-            crate::events::AgentEvent::MessageEnd { .. }
+            threadlane_protocol::AgentEvent::MessageEnd { .. }
         ));
 
         let step_record = Record::StepAttempt {
@@ -973,7 +973,7 @@ mod tests {
         assert_eq!(durable_step.seq(), 2);
         assert_eq!(
             durable_step.project_agent_event(),
-            Some(crate::events::AgentEvent::TurnStart { turn_number: 2 })
+            Some(threadlane_protocol::AgentEvent::TurnStart { turn_number: 2 })
         );
     }
 
@@ -984,7 +984,7 @@ mod tests {
         let mut sub = hub.subscribe(&store).unwrap();
 
         // Publish live events
-        hub.publish_agent_event(crate::events::AgentEvent::AgentStart);
+        hub.publish_agent_event(threadlane_protocol::AgentEvent::AgentStart);
         hub.publish_streaming(Some(StreamingState {
             lane: "main".into(),
             run_id: Some("run-1".into()),

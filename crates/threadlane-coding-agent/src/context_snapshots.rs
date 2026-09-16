@@ -7,7 +7,7 @@ use serde_json::Value;
 use threadlane_runtime::harness::{
     ContextSnapshot, ContextSnapshotLoadOutcome, JsonlStore, Record, Reducer, TraceString,
 };
-use threadlane_runtime::{AgentMessage, AgentToolDefinition, ToolExecutor};
+use threadlane_protocol::{AgentMessage, AgentToolDefinition, ToolExecutor};
 
 use super::durable::sha256_hex;
 use super::harness::CodingSessionHarness;
@@ -208,7 +208,7 @@ pub fn compacted_context_snapshot_index_for_sources(
                 .rev()
                 .filter(|snapshot| !prioritized.contains(snapshot.source_entry_id.as_str())),
         )
-        .take(threadlane_runtime::compaction::MAX_CONTEXT_SNAPSHOT_INDEX_ENTRIES)
+        .take(threadlane_compaction::MAX_CONTEXT_SNAPSHOT_INDEX_ENTRIES)
     {
         index.push(serde_json::json!({
             "context_id": snapshot.context_id,
@@ -218,7 +218,7 @@ pub fn compacted_context_snapshot_index_for_sources(
             "file_sha256": snapshot.file_sha256.as_str(),
         }));
         if serde_json::to_string(&index).map_or(usize::MAX, |value| value.chars().count())
-            > threadlane_runtime::compaction::MAX_CONTEXT_SNAPSHOT_INDEX_CHARS
+            > threadlane_compaction::MAX_CONTEXT_SNAPSHOT_INDEX_CHARS
         {
             index.pop();
             break;
@@ -453,7 +453,7 @@ mod tests {
     };
     use crate::harness::CodingSessionHarness;
     use threadlane_runtime::harness::SessionStore;
-    use threadlane_runtime::{AgentMessage, ToolExecutor};
+    use threadlane_protocol::{AgentMessage, ToolExecutor};
 
     async fn snapshot_session() -> (tempfile::TempDir, std::path::PathBuf, String) {
         let dir = tempfile::tempdir().unwrap();

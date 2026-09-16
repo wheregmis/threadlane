@@ -57,7 +57,7 @@ impl EntryFacts {
             seq: entry.seq,
             parent_id: entry.parent_id.clone(),
             assistant_calls: match &entry.message {
-                crate::types::AgentMessage::Assistant { tool_calls, .. } => {
+                threadlane_protocol::AgentMessage::Assistant { tool_calls, .. } => {
                     Some(tool_calls.as_ref().map(|calls| {
                         calls
                             .iter()
@@ -68,7 +68,7 @@ impl EntryFacts {
                 _ => None,
             },
             tool_info: match &entry.message {
-                crate::types::AgentMessage::Tool {
+                threadlane_protocol::AgentMessage::Tool {
                     tool_call_id, name, ..
                 } => Some((tool_call_id.clone(), name.clone())),
                 _ => None,
@@ -81,11 +81,11 @@ impl EntryFacts {
 
 fn deferred_kind_of(entry: &Entry) -> DeferredKind {
     match &entry.message {
-        crate::types::AgentMessage::Assistant {
+        threadlane_protocol::AgentMessage::Assistant {
             deferred_handle: Some(_),
             ..
         } => DeferredKind::AssistantDeferred,
-        crate::types::AgentMessage::Assistant {
+        threadlane_protocol::AgentMessage::Assistant {
             deferred_handle: None,
             ..
         } => DeferredKind::AssistantPlain,

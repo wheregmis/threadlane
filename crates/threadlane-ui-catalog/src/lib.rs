@@ -165,7 +165,7 @@ static DISCOVERED_OPENAI: std::sync::OnceLock<
     std::sync::Mutex<(
         std::time::Instant,
         Vec<ModelOption>,
-        Vec<threadlane_runtime::model_registry::ModelInfo>,
+        Vec<threadlane_provider::model_registry::ModelInfo>,
     )>,
 > = std::sync::OnceLock::new();
 
@@ -186,7 +186,7 @@ pub async fn refresh_openai_models() {
     // Same precedence as session credential resolution: stored API key,
     // ChatGPT login, environment. A Codex-subscription token 401s on
     // `/v1/models`; subscription models arrive via the ChatGPT backend below.
-    let (api_key, account_id) = threadlane_session::provider_credentials("gpt-4o");
+    let (api_key, account_id) = threadlane_coding_agent::credentials::provider_credentials("gpt-4o");
     if api_key.trim().is_empty() {
         return;
     }
@@ -226,7 +226,7 @@ pub async fn refresh_openai_models() {
             .collect();
     }
     if let Some(subscription) = subscription {
-        threadlane_runtime::model_registry::update_discovered_models(
+        threadlane_provider::model_registry::update_discovered_models(
             "openai",
             subscription.clone(),
         );
@@ -295,7 +295,7 @@ pub async fn refresh_antigravity_models() {
     let ids = live.iter().map(|model| model.id.clone()).collect();
     let mut models = models_for_credentials(true, false);
     models.extend(
-        threadlane_runtime::model_registry::registry_for_project(None)
+        threadlane_provider::model_registry::registry_for_project(None)
             .into_iter()
             .filter(|model| model.id.starts_with("antigravity/"))
             .map(|model| ModelOption {
@@ -305,7 +305,7 @@ pub async fn refresh_antigravity_models() {
             }),
     );
     synthesize_live_antigravity_models(&mut models, &ids);
-    threadlane_runtime::model_registry::update_discovered_models(
+    threadlane_provider::model_registry::update_discovered_models(
         "antigravity",
         antigravity_capabilities(&models, &live),
     );
@@ -330,7 +330,7 @@ pub async fn refresh_antigravity_models() {
 /// network access or global-cache seeding.
 fn antigravity_entry_available(
     model_id: &str,
-    efforts: &[threadlane_runtime::ReasoningEffort],
+    efforts: &[threadlane_protocol::ReasoningEffort],
     available: &HashSet<String>,
 ) -> bool {
     efforts.iter().any(|effort| {
@@ -354,7 +354,7 @@ fn retain_available_antigravity_models(
             && threadlane_provider::router::is_antigravity_model(&model.id)
         {
             let efforts =
-                threadlane_runtime::model_registry::supported_efforts_for(&model.id, project_root);
+                threadlane_provider::model_registry::supported_efforts_for(&model.id, project_root);
             antigravity_entry_available(&model.id, &efforts, &available)
         } else {
             true
@@ -382,7 +382,7 @@ fn synthesize_live_antigravity_models(models: &mut Vec<ModelOption>, available: 
     });
     for runtime_id in runtime_ids {
         if models.iter().any(|model| {
-            threadlane_runtime::model_registry::supported_efforts_for(&model.id, None)
+            threadlane_provider::model_registry::supported_efforts_for(&model.id, None)
                 .iter()
                 .any(|effort| {
                     threadlane_provider::antigravity::runtime_model_for(
@@ -401,7 +401,7 @@ fn synthesize_live_antigravity_models(models: &mut Vec<ModelOption>, available: 
         if models.iter().any(|model| model.id == logical_id) {
             continue;
         }
-        let label = threadlane_runtime::model_registry::find_model(&logical_id, None)
+        let label = threadlane_provider::model_registry::find_model(&logical_id, None)
             .map(|model| model.label)
             .unwrap_or_else(|| threadlane_provider::pretty_model_label(base));
         models.push(ModelOption {
@@ -415,13 +415,13 @@ fn synthesize_live_antigravity_models(models: &mut Vec<ModelOption>, available: 
 fn antigravity_capabilities(
     models: &[ModelOption],
     live: &[threadlane_provider::antigravity::AntigravityModelInfo],
-) -> Vec<threadlane_runtime::model_registry::ModelInfo> {
+) -> Vec<threadlane_provider::model_registry::ModelInfo> {
     models
         .iter()
         .filter_map(|model| {
             let mut supported_efforts = Vec::new();
             let mut display_name = None;
-            for effort in threadlane_runtime::ReasoningEffort::known_levels() {
+            for effort in threadlane_protocol::ReasoningEffort::known_levels() {
                 let label = effort.label().to_ascii_lowercase();
                 let runtime =
                     threadlane_provider::antigravity::runtime_model_for(&model.id, &label);
@@ -437,7 +437,7 @@ fn antigravity_capabilities(
             if supported_efforts.is_empty() {
                 return None;
             }
-            Some(threadlane_runtime::model_registry::ModelInfo {
+            Some(threadlane_provider::model_registry::ModelInfo {
                 id: model.id.clone(),
                 label: display_name.unwrap_or_else(|| model.label.clone()),
                 provider: Some("antigravity".into()),
@@ -463,7 +463,7 @@ fn antigravity_capabilities(
 pub struct CachedAcpAgentModels {
     pub agent_id: String,
     pub agent_name: String,
-    pub options: Vec<threadlane_session::AcpConfigOption>,
+    pub options: Vec<threadlane_acp::AcpConfigOption>,
     pub error: Option<String>,
 }
 
@@ -482,7 +482,7 @@ pub async fn refresh_acp_models(project_root: Option<std::path::PathBuf>) {
     if fresh {
         return;
     }
-    let manager = threadlane_session::AcpManager::new(
+    let manager = threadlane_acp::AcpManager::new(
         threadlane_project::default_global_threadlane_dir(),
         project_root,
     );
@@ -490,7 +490,7 @@ pub async fn refresh_acp_models(project_root: Option<std::path::PathBuf>) {
     // Tokio reactor. GPUI background tasks run on GPUI's own executor, so
     // hop onto the shared runtime and await the join handle back here.
     // A join failure leaves the previous cache (and its timestamp) alone.
-    let preloaded = match threadlane_runtime::get_runtime()
+    let preloaded = match threadlane_provider::exec::get_runtime()
         .spawn(async move { manager.preload_models().await })
         .await
     {
@@ -524,7 +524,7 @@ pub async fn refresh_acp_models(project_root: Option<std::path::PathBuf>) {
 /// Cached settings for one external agent, if a launch-time (or later)
 /// background refresh has seen it. Served even while a fresh validation is
 /// failing: the picker must not lose models it already showed.
-pub fn cached_acp_config_options(agent_id: &str) -> Vec<threadlane_session::AcpConfigOption> {
+pub fn cached_acp_config_options(agent_id: &str) -> Vec<threadlane_acp::AcpConfigOption> {
     CACHED_ACP_MODELS
         .get()
         .and_then(|cache| cache.lock().ok())
@@ -583,7 +583,7 @@ fn credentials_allow(provider: ModelProvider) -> bool {
 
 /// Merges `models.json` metadata over the discovered catalog.
 fn merge_registry_models(models: &mut Vec<ModelOption>, project_root: Option<&std::path::Path>) {
-    for info in threadlane_runtime::model_registry::registry_for_project(project_root) {
+    for info in threadlane_provider::model_registry::registry_for_project(project_root) {
         if let Some(existing) = models.iter_mut().find(|model| model.id == info.id) {
             if !info.label.trim().is_empty() {
                 existing.label = info.label.clone();
@@ -618,8 +618,8 @@ fn merge_registry_models(models: &mut Vec<ModelOption>, project_root: Option<&st
 pub fn efforts_for_model(
     model_id: &str,
     project_root: Option<&std::path::Path>,
-) -> Vec<threadlane_runtime::ReasoningEffort> {
-    threadlane_runtime::model_registry::supported_efforts_for(model_id, project_root)
+) -> Vec<threadlane_protocol::ReasoningEffort> {
+    threadlane_provider::model_registry::supported_efforts_for(model_id, project_root)
 }
 
 /// Whether the reasoning-effort control applies to a model. ACP agents run
@@ -635,8 +635,8 @@ pub fn supports_reasoning(model_id: &str, project_root: Option<&std::path::Path>
     if model_id.starts_with("acp/") {
         return false;
     }
-    threadlane_runtime::model_registry::supported_efforts_for(model_id, project_root)
-        != vec![threadlane_runtime::ReasoningEffort::Off]
+    threadlane_provider::model_registry::supported_efforts_for(model_id, project_root)
+        != vec![threadlane_protocol::ReasoningEffort::Off]
 }
 
 fn models_for_credentials(has_antigravity: bool, has_opencode: bool) -> Vec<ModelOption> {
@@ -654,7 +654,7 @@ fn models_for_credentials(has_antigravity: bool, has_opencode: bool) -> Vec<Mode
 }
 
 fn append_acp_models(models: &mut Vec<ModelOption>, project_root: Option<&std::path::Path>) {
-    let manager = threadlane_session::AcpManager::new(
+    let manager = threadlane_acp::AcpManager::new(
         threadlane_project::default_global_threadlane_dir(),
         project_root.map(std::path::Path::to_path_buf),
     );
@@ -664,7 +664,7 @@ fn append_acp_models(models: &mut Vec<ModelOption>, project_root: Option<&std::p
         .filter(|config| config.enabled)
     {
         models.push(ModelOption {
-            id: threadlane_session::acp_model_id(&config.id),
+            id: threadlane_acp_engine::acp_model_id(&config.id),
             label: config.name,
             provider: ModelProvider::Acp,
         });
@@ -806,7 +806,7 @@ mod tests {
         let metadata = antigravity_capabilities(&models, &live);
         assert_eq!(metadata[0].supported_efforts, ["medium"]);
         assert_eq!(metadata[1].supported_efforts, ["off"]);
-        threadlane_runtime::model_registry::update_discovered_models(
+        threadlane_provider::model_registry::update_discovered_models(
             "antigravity",
             vec![metadata[1].clone()],
         );
@@ -815,7 +815,7 @@ mod tests {
 
     #[test]
     fn antigravity_availability_follows_live_runtime_ids() {
-        use threadlane_runtime::ReasoningEffort;
+        use threadlane_protocol::ReasoningEffort;
         let available: HashSet<String> = ["gemini-3.7-flash-tiered".to_string()]
             .into_iter()
             .collect();

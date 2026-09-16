@@ -4,7 +4,7 @@
 //! to render chat transcripts, tool activity, and reasoning blocks without
 //! performing domain-level message reductions.
 
-use crate::types::AgentMessage;
+use threadlane_protocol::AgentMessage;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

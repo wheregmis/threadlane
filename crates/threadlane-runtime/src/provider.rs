@@ -9,7 +9,8 @@
 //! `threadlane_provider::convert` and are re-exported from the crate root
 //! for backward compatibility.
 
-use crate::types::{AgentMessage, AgentToolDefinition, AgentToolResult, TokenUsage, TurnState};
+use crate::types::TurnState;
+use threadlane_protocol::{AgentMessage, AgentToolDefinition, AgentToolResult, TokenUsage};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::fmt;
@@ -97,7 +98,7 @@ impl ProviderAdapter for ChatCompletionsAdapter {
         if let Some(key) = prompt_cache_key {
             chat_payload["prompt_cache_key"] = key.into();
         }
-        if let Some(effort) = crate::model_registry::effective_api_effort(
+        if let Some(effort) = threadlane_provider::model_registry::effective_api_effort(
             &state.model,
             state.reasoning_effort,
             state.project_root.as_deref(),
@@ -151,7 +152,7 @@ impl ProviderAdapter for CodexResponsesAdapter {
         if let Some(key) = prompt_cache_key {
             codex_payload["prompt_cache_key"] = key.into();
         }
-        if let Some(effort) = crate::model_registry::effective_api_effort(
+        if let Some(effort) = threadlane_provider::model_registry::effective_api_effort(
             &state.model,
             state.reasoning_effort,
             state.project_root.as_deref(),
@@ -390,7 +391,7 @@ pub type ModelContextRefresh = Arc<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ReasoningEffort;
+    use threadlane_protocol::ReasoningEffort;
 
     #[test]
     fn default_router_has_both_formats() {
@@ -436,7 +437,7 @@ mod tests {
 
     #[test]
     fn adapters_enforce_discovered_reasoning_capabilities() {
-        use crate::model_registry::{update_discovered_models, ModelInfo};
+        use threadlane_provider::model_registry::{update_discovered_models, ModelInfo};
         let id = "test-dynamic-capabilities";
         let mut info = ModelInfo {
             id: id.into(),
@@ -766,7 +767,7 @@ mod normalize_tool_arguments_tests {
 
     #[test]
     fn tool_images_translate_to_provider_parts() {
-        use crate::types::ImageAttachment;
+        use threadlane_protocol::ImageAttachment;
         let messages = vec![AgentMessage::Tool {
             tool_call_id: "call-1".into(),
             name: "computer_screenshot".into(),

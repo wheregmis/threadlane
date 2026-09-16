@@ -12,7 +12,8 @@ use crate::{
 };
 use threadlane_permission::{PermissionDecision, PermissionHandle};
 use threadlane_question::QuestionHandle;
-use threadlane_runtime::{ModelRoles, ReasoningEffort};
+use threadlane_protocol::ReasoningEffort;
+use threadlane_runtime::ModelRoles;
 
 /// Execution mode configured for a session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -179,7 +180,7 @@ impl SessionController {
     pub fn resolve_question(
         &self,
         request_id: &str,
-        answer: threadlane_runtime::QuestionAnswer,
+        answer: threadlane_protocol::QuestionAnswer,
     ) -> bool {
         self.question_handle.resolve(request_id, answer)
     }
@@ -191,14 +192,6 @@ impl SessionController {
     pub async fn set_model_roles(&self, roles: ModelRoles) {
         let mut agent = self.agent.lock().await;
         agent.set_model_roles(roles);
-    }
-
-    pub fn try_set_needle_enabled(&self, enabled: bool) -> bool {
-        let Ok(mut agent) = self.agent.try_lock() else {
-            return false;
-        };
-        agent.set_needle_enabled(enabled);
-        true
     }
 
     pub async fn reload_extensions(&self) -> Result<usize, String> {

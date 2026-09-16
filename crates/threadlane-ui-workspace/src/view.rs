@@ -38,7 +38,8 @@ use threadlane_ui_right_panel::RightPanelView;
 use threadlane_ui_settings::SettingsView;
 use threadlane_ui_sidebar::SidebarView;
 use threadlane_ui_terminal::TerminalView;
-use threadlane_session::{spawn_session_runtime_construction, ExecutionMode};
+use threadlane_coding_agent::controller::ExecutionMode;
+use threadlane_session::spawn_session_runtime_construction;
 use threadlane_ui_state::updater::{self, UpdaterEvent};
 use threadlane_ui_state::{
     coding_agent_options, compute_full_session_projection, compute_session_messages,

@@ -10,8 +10,13 @@ gpui.workspace = true
 gpui-component = { workspace = true, features = ["tree-sitter-rust", "tree-sitter-python", "tree-sitter-javascript", "tree-sitter-typescript", "tree-sitter-html", "tree-sitter-css", "tree-sitter-bash", "tree-sitter-toml", "tree-sitter-yaml", "tree-sitter-markdown", "tree-sitter-diff"] }
 rfd.workspace = true
 serde_json.workspace = true
+threadlane-acp.workspace = true
+threadlane-acp-engine.workspace = true
+threadlane-coding-agent.workspace = true
+threadlane-computer.workspace = true
 threadlane-git.workspace = true
-threadlane-session.workspace = true
+threadlane-permission.workspace = true
+threadlane-protocol.workspace = true
 threadlane-ui-catalog.workspace = true
 threadlane-ui-editor.workspace = true
 threadlane-ui-mirror.workspace = true

@@ -96,8 +96,8 @@ impl threadlane_protocol::ProviderPort for ReportedShapeProvider {
 
 pub async fn generated_reported_session_path() -> PathBuf {
     use threadlane_runtime::AgentConfig;
-    use threadlane_session::coding_agent::CodingAgentOptions;
-    use threadlane_session::SystemPromptConfig;
+    use threadlane_coding_agent::CodingAgentOptions;
+    use threadlane_prompt::SystemPromptConfig;
 
     let root = tempfile::tempdir().unwrap().keep();
     let skill_dir = root.join(".agents/skills/reported-shape");

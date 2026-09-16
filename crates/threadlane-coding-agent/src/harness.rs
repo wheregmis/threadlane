@@ -12,8 +12,9 @@ use super::context_snapshots::{
     compacted_context_snapshot_index_for_sources, is_local_path, read_file_request,
 };
 use threadlane_permission::PermissionTraceEvent;
-use threadlane_runtime::compaction::{
-    compact_for_budget, estimate_request_tokens, PreparedCompaction,
+use threadlane_compaction::{
+    build_checkpoint_omitting_tool_outputs, compact_for_budget, estimate_request_tokens,
+    CompactionParams, PreparedCompaction,
 };
 pub use threadlane_runtime::harness::Record as HarnessRecord;
 use threadlane_runtime::harness::{
@@ -26,10 +27,12 @@ use threadlane_runtime::harness::{
     ToolReplaySafety as HarnessToolReplaySafety, ToolResult as HarnessToolResult, ToolSpec,
     TraceString,
 };
-use threadlane_runtime::model_metadata::{context_budget, ContextBudget};
+use threadlane_context::{context_budget, BudgetConfig, ContextBudget};
+use threadlane_protocol::{
+    AgentMessage, AgentToolResult, ImageAttachment, ReasoningEffort, TokenUsage,
+};
 use threadlane_runtime::{
-    AgentConfig, AgentMessage, AgentToolResult, ImageAttachment, ProviderBoundaryRequest,
-    ProviderBoundaryResult, ProviderTraceEvent, ReasoningEffort, TokenUsage,
+    AgentConfig, ProviderBoundaryRequest, ProviderBoundaryResult, ProviderTraceEvent,
     ToolExecutionTraceEvent,
 };
 
@@ -508,7 +511,7 @@ impl CodingSessionHarness {
         if self.cancellation.load(Ordering::SeqCst) {
             return Err("context preparation cancelled".into());
         }
-        let budget = context_budget(&request.model, config);
+        let budget = context_budget(&request.model, &BudgetConfig::from(config));
         let provider_attempt = self
             .store
             .store()
@@ -543,7 +546,11 @@ impl CodingSessionHarness {
         };
         let mut current = with_system(self.model_context("main")?.messages());
         let pre_tokens =
-            estimate_request_tokens(&current, request.tool_schema_json.as_deref(), config);
+            estimate_request_tokens(
+                &current,
+                request.tool_schema_json.as_deref(),
+                &CompactionParams::from(config),
+            );
         if pre_tokens < budget.trigger_tokens && !request.overflow_recovery {
             return Ok(boundary_result(
                 current,
@@ -568,7 +575,7 @@ impl CodingSessionHarness {
                 &current,
                 request.tool_schema_json.as_deref(),
                 target,
-                config,
+                &CompactionParams::from(config),
             ) else {
                 return Err("context preparation could not drop historical messages".into());
             };
@@ -583,7 +590,11 @@ impl CodingSessionHarness {
             )?;
             current = with_system(self.model_context("main")?.messages());
             let post_tokens =
-                estimate_request_tokens(&current, request.tool_schema_json.as_deref(), config);
+                estimate_request_tokens(
+                &current,
+                request.tool_schema_json.as_deref(),
+                &CompactionParams::from(config),
+            );
             if post_tokens < budget.trigger_tokens {
                 return Ok(boundary_result(
                     current,
@@ -641,13 +652,17 @@ impl CodingSessionHarness {
             .filter(|entry| !matches!(entry.message, AgentMessage::System { .. }))
             .take(compacted_messages)
             .collect::<Vec<_>>();
-        Ok(
-            threadlane_runtime::compaction::build_checkpoint_omitting_tool_outputs(
-                &dropped,
-                &omitted_source_entry_ids,
-                config,
-            ),
-        )
+        let params = CompactionParams::from(config);
+        let pairs: Vec<(&AgentMessage, bool)> = dropped
+            .iter()
+            .map(|entry| {
+                (
+                    &entry.message,
+                    omitted_source_entry_ids.contains(&entry.id),
+                )
+            })
+            .collect();
+        Ok(build_checkpoint_omitting_tool_outputs(&pairs, &params))
     }
 
     pub fn context_snapshot_index_for_compaction(
@@ -706,7 +721,7 @@ impl CodingSessionHarness {
             let summary = prepared
                 .messages
                 .iter()
-                .find_map(threadlane_runtime::compaction_summary_text)
+                .find_map(threadlane_compaction::compaction_summary_text)
                 .ok_or_else(|| "context preparation produced no durable summary".to_string())?;
             let summary = self.compaction_summary_without_indexed_tool_outputs(
                 summary,
@@ -718,7 +733,7 @@ impl CodingSessionHarness {
             let mut messages = prepared.messages.clone();
             let Some(AgentMessage::Custom { payload, .. }) = messages
                 .iter_mut()
-                .find(|message| threadlane_runtime::compaction_summary_text(message).is_some())
+                .find(|message| threadlane_compaction::compaction_summary_text(message).is_some())
             else {
                 return Err("context preparation produced no durable summary".into());
             };
@@ -763,7 +778,11 @@ impl CodingSessionHarness {
                 parent_id = id;
             }
 
-            let post_tokens = estimate_request_tokens(&messages, tool_schema_json, config);
+            let post_tokens = estimate_request_tokens(
+                &messages,
+                tool_schema_json,
+                &CompactionParams::from(config),
+            );
             let generation = self.compaction_generation().saturating_add(1);
             let record = HarnessRecord::ContextCompacted {
                 id: format!("context-compacted-{parent_run_id}-{generation}"),
@@ -805,9 +824,10 @@ impl CodingSessionHarness {
         compacted_messages: usize,
     ) -> Result<(), String> {
         self.ensure_fresh()?;
-        let budget = context_budget(model, config);
+        let budget = context_budget(model, &BudgetConfig::from(config));
         let messages = self.model_context("main")?.messages();
-        let post_tokens = estimate_request_tokens(&messages, None, config);
+        let post_tokens =
+            estimate_request_tokens(&messages, None, &CompactionParams::from(config));
         let generation = self.compaction_generation().saturating_add(1);
         let record = HarnessRecord::ContextCompacted {
             id: format!("context-compacted-{run_id}-{generation}"),
@@ -3627,7 +3647,11 @@ mod tests {
             assert!(!prepared.messages.iter().any(|message| {
                 matches!(message, AgentMessage::User { content } if content == "stale runtime history")
             }));
-            let actual = estimate_request_tokens(&prepared.messages, None, &config);
+            let actual = estimate_request_tokens(
+                &prepared.messages,
+                None,
+                &CompactionParams::from(&config),
+            );
             assert!(actual < prepared.context_limit);
             assert_eq!(prepared.provisional_estimated_tokens, Some(actual));
             drop(harness);
@@ -3944,7 +3968,7 @@ mod tests {
                 "unknown/test-model",
                 None,
                 &AgentConfig::default(),
-                context_budget("unknown/test-model", &AgentConfig::default()),
+                context_budget("unknown/test-model", &BudgetConfig::from(&AgentConfig::default())),
                 CompactionReason::AdaptiveBudget,
                 PreparedCompaction {
                     messages: vec![summary, repeated.clone(), repeated.clone()],
@@ -3960,7 +3984,7 @@ mod tests {
         let context = harness.model_context("main").unwrap().messages();
         assert_eq!(context.len(), 3);
         assert_eq!(
-            threadlane_runtime::compaction_summary_text(&context[0]),
+            threadlane_compaction::compaction_summary_text(&context[0]),
             Some(summary_text)
         );
         assert_eq!(context[1], repeated);
@@ -4010,19 +4034,24 @@ mod tests {
             })
             .unwrap();
         let before = harness.model_context("main").unwrap().messages();
-        let pre_tokens = estimate_request_tokens(&before, None, &config);
+        let pre_tokens =
+            estimate_request_tokens(&before, None, &CompactionParams::from(&config));
         let compacted_messages = 2;
         harness
             .checkpoint_open_run_compaction("run", "durable summary", CompactionReason::Manual)
             .unwrap();
         let tail = AgentMessage::user("tail", vec![]);
         let retained_tail_tokens =
-            estimate_request_tokens(std::slice::from_ref(&tail), None, &config);
+            estimate_request_tokens(
+                std::slice::from_ref(&tail),
+                None,
+                &CompactionParams::from(&config),
+            );
         harness.append_message_occurrence(tail).unwrap();
         let expected_post = estimate_request_tokens(
             &harness.model_context("main").unwrap().messages(),
             None,
-            &config,
+            &CompactionParams::from(&config),
         );
         harness
             .record_manual_compaction(
@@ -5192,14 +5221,15 @@ mod tests {
             .unwrap();
         let config = AgentConfig::default();
         let before = harness.model_context("main").unwrap().messages();
-        let prepared = compact_for_budget(&before, None, 1, &config).unwrap();
+        let prepared =
+            compact_for_budget(&before, None, 1, &CompactionParams::from(&config)).unwrap();
         harness
             .commit_prepared_compaction(
                 &run_id,
                 "unknown/test-model",
                 None,
                 &config,
-                context_budget("unknown/test-model", &config),
+                context_budget("unknown/test-model", &BudgetConfig::from(&config)),
                 CompactionReason::AdaptiveBudget,
                 prepared,
             )
@@ -5208,9 +5238,9 @@ mod tests {
         let compacted_messages = harness.model_context("main").unwrap().messages();
         let checkpoint_message = compacted_messages
             .iter()
-            .find(|message| threadlane_runtime::compaction_summary_text(message).is_some())
+            .find(|message| threadlane_compaction::compaction_summary_text(message).is_some())
             .unwrap();
-        let checkpoint = threadlane_runtime::compaction_summary_text(checkpoint_message).unwrap();
+        let checkpoint = threadlane_compaction::compaction_summary_text(checkpoint_message).unwrap();
         assert!(!checkpoint.contains(&context_id));
         assert!(!checkpoint.contains("README.md:1-1 sha256="));
         assert!(!checkpoint.contains("snapshot body"));
@@ -5224,7 +5254,7 @@ mod tests {
         assert_eq!(index.len(), 1);
         assert_eq!(index[0]["context_id"], context_id);
         let provider_checkpoint =
-            threadlane_runtime::convert_to_llm(std::slice::from_ref(checkpoint_message))[0]
+            threadlane_provider::convert_to_llm(std::slice::from_ref(checkpoint_message))[0]
                 ["content"]
                 .as_str()
                 .unwrap()
@@ -5251,7 +5281,11 @@ mod tests {
             .content,
             read_output
         );
-        let post_tokens = estimate_request_tokens(&compacted_messages, None, &config);
+        let post_tokens = estimate_request_tokens(
+            &compacted_messages,
+            None,
+            &CompactionParams::from(&config),
+        );
         assert_eq!(
             harness
                 .store
@@ -5269,14 +5303,16 @@ mod tests {
             .unwrap();
         let second_config = AgentConfig::builder().max_checkpoint_chars(100_000).build();
         let before = harness.model_context("main").unwrap().messages();
-        let prepared = compact_for_budget(&before, None, 1, &second_config).unwrap();
+        let prepared =
+            compact_for_budget(&before, None, 1, &CompactionParams::from(&second_config))
+                .unwrap();
         harness
             .commit_prepared_compaction(
                 &run_id,
                 "unknown/test-model",
                 None,
                 &second_config,
-                context_budget("unknown/test-model", &second_config),
+                context_budget("unknown/test-model", &BudgetConfig::from(&second_config)),
                 CompactionReason::AdaptiveBudget,
                 prepared,
             )
@@ -5286,9 +5322,9 @@ mod tests {
             .unwrap()
             .messages()
             .into_iter()
-            .find(|message| threadlane_runtime::compaction_summary_text(message).is_some())
+            .find(|message| threadlane_compaction::compaction_summary_text(message).is_some())
             .unwrap();
-        let checkpoint = threadlane_runtime::compaction_summary_text(&checkpoint_message).unwrap();
+        let checkpoint = threadlane_compaction::compaction_summary_text(&checkpoint_message).unwrap();
         assert!(!checkpoint.contains(&context_id), "{checkpoint}");
         let AgentMessage::Custom { payload, .. } = &checkpoint_message else {
             unreachable!();
@@ -5300,7 +5336,7 @@ mod tests {
                 .len(),
             1
         );
-        let provider_checkpoint = threadlane_runtime::convert_to_llm(&[checkpoint_message])[0]
+        let provider_checkpoint = threadlane_provider::convert_to_llm(&[checkpoint_message])[0]
             ["content"]
             .as_str()
             .unwrap()

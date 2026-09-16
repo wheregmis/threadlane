@@ -4,12 +4,13 @@
 //! Independently testable.
 
 use crate::error::AgentError;
-use crate::events::AgentEvent;
+use threadlane_protocol::AgentEvent;
 use crate::harness::{HookContext, HookRegistry};
-use crate::tool_executor::{builtin_tool_executor, ToolExecutor};
-use crate::types::{
-    AgentToolCall, AgentToolDefinition, AgentToolResult, ImageAttachment, ToolExecutionMode,
-    ToolOutput,
+use crate::tool_executor::builtin_tool_executor;
+use threadlane_protocol::ToolExecutor;
+use crate::types::ToolExecutionMode;
+use threadlane_protocol::{
+    AgentToolCall, AgentToolDefinition, AgentToolResult, ImageAttachment, ToolOutput,
 };
 use crate::utils::AbortOnDrop;
 use serde_json::Value;

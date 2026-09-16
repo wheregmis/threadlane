@@ -11,10 +11,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
-use threadlane_session::mcp::{
-    McpManager, McpScope, McpServerConfig, McpSettings, McpToolExecutor, McpTransport,
-};
-use threadlane_session::ToolExecutor;
+use threadlane_coding_agent::mcp::McpToolExecutor;
+use threadlane_mcp::{McpManager, McpScope, McpServerConfig, McpSettings, McpTransport};
+use threadlane_protocol::ToolExecutor;
 
 fn stub_server_script(dir: &std::path::Path) -> PathBuf {
     let path = dir.join("stub_mcp.sh");

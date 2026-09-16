@@ -14,6 +14,13 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
 
+/// Default tripwire thresholds, shared by the live [`LoopDetector`], the
+/// runtime config defaults, and the durable trajectory anomaly pass so the
+/// three definitions of "loop" cannot drift apart.
+pub const DEFAULT_IDENTICAL_LIMIT: usize = 5;
+pub const DEFAULT_PINGPONG_ROUNDS: usize = 3;
+pub const DEFAULT_ERROR_LIMIT: usize = 3;
+
 /// What tripped the breaker, with a human-readable terminal message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoopTrip {
@@ -188,7 +195,12 @@ mod tests {
     use super::*;
 
     fn detector() -> LoopDetector {
-        LoopDetector::new(true, 5, 3, 3)
+        LoopDetector::new(
+            true,
+            DEFAULT_IDENTICAL_LIMIT,
+            DEFAULT_PINGPONG_ROUNDS,
+            DEFAULT_ERROR_LIMIT,
+        )
     }
 
     #[test]
@@ -316,7 +328,12 @@ mod tests {
 
     #[test]
     fn disabled_detector_never_trips() {
-        let mut detector = LoopDetector::new(false, 5, 3, 3);
+        let mut detector = LoopDetector::new(
+            false,
+            DEFAULT_IDENTICAL_LIMIT,
+            DEFAULT_PINGPONG_ROUNDS,
+            DEFAULT_ERROR_LIMIT,
+        );
         for _ in 0..10 {
             assert_eq!(detector.observe("read_file", "{}", "same", false), None);
         }

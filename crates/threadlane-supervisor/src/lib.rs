@@ -20,7 +20,7 @@ use threadlane_runtime::harness::{
     DurableEvent, HarnessEvent, LaneStatus as HarnessLaneStatus, OperationOutcome,
     Record as HarnessRecord, SubagentLifecyclePhase,
 };
-use threadlane_runtime::{AgentEvent, AgentMessage, TokenUsage};
+use threadlane_protocol::{AgentEvent, AgentMessage, TokenUsage};
 use threadlane_wasi::packages::ExtensionScope;
 use tokio::sync::broadcast;
 
@@ -197,7 +197,7 @@ pub struct HarnessSupervisor {
     tasks: Arc<Mutex<HashMap<String, TaskRecord>>>,
     runtimes: Arc<Mutex<HashMap<String, TaskRuntime>>>,
     lanes: Arc<Mutex<HashMap<String, Lane>>>,
-    metrics: Arc<Mutex<threadlane_runtime::HarnessMetrics>>,
+    metrics: Arc<Mutex<threadlane_protocol::HarnessMetrics>>,
     output_cache: Arc<Mutex<ToolOutputCache>>,
     event_tx: broadcast::Sender<TaskAgentEvent>,
 }
@@ -212,7 +212,7 @@ impl HarnessSupervisor {
             tasks: Arc::new(Mutex::new(HashMap::new())),
             runtimes: Arc::new(Mutex::new(HashMap::new())),
             lanes: Arc::new(Mutex::new(HashMap::new())),
-            metrics: Arc::new(Mutex::new(threadlane_runtime::HarnessMetrics::default())),
+            metrics: Arc::new(Mutex::new(threadlane_protocol::HarnessMetrics::default())),
             output_cache: Arc::new(Mutex::new(ToolOutputCache::default())),
             event_tx,
         };
@@ -251,7 +251,7 @@ impl HarnessSupervisor {
         total
     }
 
-    fn metrics(&self) -> threadlane_runtime::HarnessMetrics {
+    fn metrics(&self) -> threadlane_protocol::HarnessMetrics {
         let mut m = self.metrics.lock().unwrap().clone();
         m.active_lanes = self.lanes.lock().unwrap().len();
         m
@@ -957,7 +957,7 @@ impl HarnessSupervisor {
                 let completion_session_file = session_file.to_path_buf();
                 let completion_run_id = run_id_for_run.clone();
                 agent.set_tool_completion_recorder(Some(Arc::new(
-                    move |result: &threadlane_runtime::AgentToolResult| {
+                    move |result: &threadlane_protocol::AgentToolResult| {
                         let completion_session_file = completion_session_file.clone();
                         let completion_run_id = completion_run_id.clone();
                         let result = result.clone();
@@ -1338,7 +1338,7 @@ mod tests {
         OperationIntent, OperationOutcome, QueueKind as HarnessQueueKind, Record as HarnessRecord,
         SessionStore,
     };
-    use threadlane_runtime::TokenUsage;
+    use threadlane_protocol::TokenUsage;
 
     // ── Helper: open a CodingSessionHarness for test setup ────────────
     fn open_test_harness(path: &Path) -> CodingSessionHarness {

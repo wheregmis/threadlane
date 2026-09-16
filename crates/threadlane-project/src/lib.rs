@@ -184,26 +184,6 @@ pub fn global_threadlane_dir() -> PathBuf {
     default_global_threadlane_dir().unwrap_or_else(|| PathBuf::from(".threadlane"))
 }
 
-pub fn load_needle_enabled() -> bool {
-    default_global_threadlane_dir()
-        .map(|dir| dir.join("gui").join("needle.json"))
-        .and_then(|path| fs::read(path).ok())
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or(false)
-}
-
-pub fn save_needle_enabled(enabled: bool) -> Result<(), String> {
-    let path = default_global_threadlane_dir()
-        .map(|dir| dir.join("gui").join("needle.json"))
-        .ok_or_else(|| "Global settings directory is unavailable.".to_string())?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| "Needle settings path has no parent.".to_string())?;
-    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    let bytes = serde_json::to_vec(&enabled).map_err(|error| error.to_string())?;
-    fs::write(path, bytes).map_err(|error| error.to_string())
-}
-
 fn save_project_registry_to(global_dir: &Path, projects: &[ProjectRecord]) -> Result<(), String> {
     fs::create_dir_all(global_dir).map_err(|error| error.to_string())?;
     let path = global_dir.join("projects.json");

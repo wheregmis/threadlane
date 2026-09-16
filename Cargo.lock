@@ -4925,22 +4925,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "needle-core"
-version = "0.2.1"
-source = "git+https://github.com/Geekgineer/needle-rs#7ce949851bacd8f5d701d9c50823d6b930f4bd99"
-dependencies = [
- "libm",
-]
-
-[[package]]
-name = "needle-infer"
-version = "0.2.1"
-source = "git+https://github.com/Geekgineer/needle-rs#7ce949851bacd8f5d701d9c50823d6b930f4bd99"
-dependencies = [
- "needle-core",
-]
-
-[[package]]
 name = "new_debug_unreachable"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8316,6 +8300,7 @@ dependencies = [
  "threadlane-acp",
  "threadlane-permission",
  "threadlane-project",
+ "threadlane-protocol",
  "threadlane-runtime",
  "threadlane-tools",
  "tokio",
@@ -8377,7 +8362,9 @@ dependencies = [
  "threadlane-acp-engine",
  "threadlane-auth",
  "threadlane-browser",
+ "threadlane-compaction",
  "threadlane-computer",
+ "threadlane-context",
  "threadlane-git",
  "threadlane-mcp",
  "threadlane-orchestrator",
@@ -8450,6 +8437,7 @@ dependencies = [
  "gpui-pre",
  "gpui-pre-platform",
  "hotpath",
+ "tempfile",
  "threadlane-coding-agent",
  "threadlane-ui-chat",
  "threadlane-ui-theme",
@@ -8581,7 +8569,6 @@ dependencies = [
  "directories",
  "futures",
  "libsqlite3-sys",
- "needle-infer",
  "regex",
  "serde",
  "serde_json",
@@ -8592,7 +8579,6 @@ dependencies = [
  "threadlane-context",
  "threadlane-loop",
  "threadlane-plan",
- "threadlane-project",
  "threadlane-protocol",
  "threadlane-provider",
  "threadlane-tools",
@@ -8604,36 +8590,16 @@ dependencies = [
 name = "threadlane-session"
 version = "0.1.0"
 dependencies = [
- "async-trait",
- "base64",
- "directories",
- "futures",
- "log",
- "reqwest",
- "serde",
  "serde_json",
- "sha2 0.10.9",
  "tempfile",
- "thiserror 2.0.20",
  "threadlane-acp",
  "threadlane-acp-engine",
- "threadlane-auth",
- "threadlane-browser",
  "threadlane-coding-agent",
- "threadlane-computer",
- "threadlane-git",
  "threadlane-mcp",
  "threadlane-permission",
- "threadlane-project",
- "threadlane-prompt",
  "threadlane-protocol",
  "threadlane-provider",
- "threadlane-question",
  "threadlane-runtime",
- "threadlane-skills",
- "threadlane-supervisor",
- "threadlane-tools",
- "threadlane-wasi",
  "tokio",
 ]
 
@@ -8680,11 +8646,13 @@ dependencies = [
 name = "threadlane-ui-catalog"
 version = "0.1.0"
 dependencies = [
+ "threadlane-acp",
+ "threadlane-acp-engine",
  "threadlane-auth",
+ "threadlane-coding-agent",
  "threadlane-project",
+ "threadlane-protocol",
  "threadlane-provider",
- "threadlane-runtime",
- "threadlane-session",
  "tracing",
 ]
 
@@ -8698,8 +8666,13 @@ dependencies = [
  "rfd",
  "serde_json",
  "tempfile",
+ "threadlane-acp",
+ "threadlane-acp-engine",
+ "threadlane-coding-agent",
+ "threadlane-computer",
  "threadlane-git",
- "threadlane-session",
+ "threadlane-permission",
+ "threadlane-protocol",
  "threadlane-ui-catalog",
  "threadlane-ui-editor",
  "threadlane-ui-mirror",
@@ -8760,10 +8733,10 @@ dependencies = [
  "raw-window-handle",
  "rfd",
  "serde_json",
+ "threadlane-coding-agent",
  "threadlane-git",
  "threadlane-protocol",
  "threadlane-provider",
- "threadlane-session",
  "threadlane-ui-state",
  "threadlane-ui-theme",
  "tokio",
@@ -8776,13 +8749,17 @@ dependencies = [
  "gpui-component",
  "gpui-pre",
  "rfd",
+ "threadlane-acp",
  "threadlane-auth",
+ "threadlane-protocol",
+ "threadlane-provider",
  "threadlane-runtime",
- "threadlane-session",
+ "threadlane-skills",
  "threadlane-ui-catalog",
  "threadlane-ui-state",
  "threadlane-ui-theme",
  "threadlane-updater",
+ "threadlane-wasi",
  "tokio",
 ]
 
@@ -8810,10 +8787,15 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "threadlane-acp",
+ "threadlane-acp-engine",
  "threadlane-auth",
+ "threadlane-coding-agent",
  "threadlane-context",
  "threadlane-git",
+ "threadlane-permission",
  "threadlane-project",
+ "threadlane-prompt",
  "threadlane-protocol",
  "threadlane-provider",
  "threadlane-runtime",
@@ -8859,9 +8841,9 @@ dependencies = [
  "gpui-component",
  "gpui-pre",
  "rfd",
+ "threadlane-coding-agent",
  "threadlane-git",
  "threadlane-session",
- "threadlane-ui-catalog",
  "threadlane-ui-chat",
  "threadlane-ui-editor",
  "threadlane-ui-github",

@@ -6,7 +6,7 @@ use super::store::SessionStore;
 use super::types::{ProvisionedEntry, QueueKind, ReduceError};
 use super::{EffectsError, ProcedureError, Snapshot, Subscription};
 
-use crate::AgentMessage;
+use threadlane_protocol::AgentMessage;
 
 // ---------------------------------------------------------------------------
 // LaneHandle

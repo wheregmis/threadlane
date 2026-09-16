@@ -16,7 +16,7 @@ pub use threadlane_mcp::*;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use threadlane_runtime::{AgentToolDefinition, ToolExecutor};
+use threadlane_protocol::{AgentToolDefinition, ToolExecutor};
 
 /// Session-owned [`ToolExecutor`] over an [`McpManager`].
 ///

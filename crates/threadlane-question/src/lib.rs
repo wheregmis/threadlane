@@ -4,9 +4,8 @@
 //!
 //! The question manager, handle, and tool executor depend only on
 //! `threadlane-protocol` contracts (`AgentEvent`, interaction types,
-//! `ToolExecutor`) — never on the execution engine. Re-exported through
-//! `threadlane_runtime::question` and `threadlane_session::question` for
-//! compatibility; new code should import `threadlane_question` directly.
+//! `ToolExecutor`) — never on the execution engine. Import
+//! `threadlane_question` directly.
 //!
 //! The `ask_question` tool gives the model a structured way to ask the user
 //! for decisions instead of guessing. It mirrors the existing permission

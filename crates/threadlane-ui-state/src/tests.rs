@@ -5,8 +5,8 @@ use crate::test_support::{
 use threadlane_session::SessionRuntimeStatus;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
-use threadlane_session::coding_agent::harness::CodingSessionHarness;
-use threadlane_session::harness::{
+use threadlane_coding_agent::harness::CodingSessionHarness;
+use threadlane_runtime::harness::{
     OperationIntent, OperationOutcome, ProviderOutcome, Record, SessionStore, TraceString,
 };
 
@@ -18,7 +18,7 @@ fn filesystem_root_is_not_an_attachable_project() {
 
 #[test]
 fn model_selection_resets_unsupported_reasoning_and_rejects_hidden_efforts() {
-    use threadlane_runtime::ReasoningEffort;
+    use threadlane_protocol::ReasoningEffort;
     let mut state = AppState::load_from_registry(Vec::new());
     state.available_models = vec![threadlane_ui_catalog::ModelOption {
         id: "gpt-4o".into(),
@@ -177,7 +177,7 @@ async fn model_and_reasoning_pickers_persist_before_rebuild_and_next_request() {
     for has_runtime in [false, true] {
         let temp = tempfile::tempdir().unwrap();
         let session_file = temp.path().join("session.jsonl");
-        let options = || threadlane_session::CodingAgentOptions {
+        let options = || threadlane_coding_agent::CodingAgentOptions {
             api_key: "test-key".into(),
             account_id: None,
             model: "gpt-4o".into(),
@@ -188,7 +188,7 @@ async fn model_and_reasoning_pickers_persist_before_rebuild_and_next_request() {
             coding_config: None,
             browser: threadlane_protocol::browser::BrowserBridge::unavailable(),
         };
-        let mut original = threadlane_session::CodingAgent::new(options());
+        let mut original = threadlane_coding_agent::CodingAgent::new(options());
         original.set_fact("model", "gpt-4o").unwrap();
         drop(original);
         let mut state = AppState::load_from_registry(Vec::new());
@@ -384,20 +384,20 @@ fn model_picker_ignores_acp_replies_from_replaced_or_inactive_runtimes() {
     assert!(state.active_acp_model_label().is_none());
 }
 
-fn permission_request(id: &str) -> threadlane_session::PermissionRequest {
-    threadlane_session::PermissionRequest {
+fn permission_request(id: &str) -> threadlane_protocol::PermissionRequest {
+    threadlane_protocol::PermissionRequest {
         id: id.into(),
         capability: "network".into(),
         title: "Connect to api.example.test".into(),
         detail: "https://api.example.test".into(),
-        scopes: vec![threadlane_session::PermissionScope::Once],
+        scopes: vec![threadlane_protocol::PermissionScope::Once],
     }
 }
 
-fn question_request(id: &str) -> threadlane_session::QuestionRequest {
-    threadlane_session::QuestionRequest {
+fn question_request(id: &str) -> threadlane_protocol::QuestionRequest {
+    threadlane_protocol::QuestionRequest {
         id: id.into(),
-        questions: vec![threadlane_session::QuestionItem {
+        questions: vec![threadlane_protocol::QuestionItem {
             id: "q1".into(),
             header: "Scope".into(),
             question: "Which scope should be used?".into(),
@@ -1074,14 +1074,14 @@ fn github_issue_survives_worktree_transcript_discovery() {
 
     let mut transcript = JsonlStore::open(&worktree_session_file).unwrap();
     transcript
-        .append_entry(threadlane_session::harness::Entry {
+        .append_entry(threadlane_runtime::harness::Entry {
             id: "message-1".into(),
             parent_id: None,
             lane: "main".into(),
             seq: transcript.next_sequence(),
             timestamp: 1,
             message: AgentMessage::user("Persisted history", Vec::new()),
-            surface_op: threadlane_session::harness::SurfaceOperation::Append,
+            surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
             terminate: false,
         })
         .unwrap();
@@ -1457,7 +1457,7 @@ async fn reported_session_shape_keeps_total_processed_separate() {
     assert!(!projected_context.context_limit_is_estimate);
 
     // Inspect the production journal again, independently of the GPUI projection above.
-    use threadlane_session::harness::{read_transcript_page, CompactionReason, TranscriptItem};
+    use threadlane_runtime::harness::{read_transcript_page, CompactionReason, TranscriptItem};
 
     let store = JsonlStore::open(&path).unwrap();
     let records = store.records();
@@ -1623,7 +1623,7 @@ async fn reported_session_shape_keeps_total_processed_separate() {
 
 #[tokio::test]
 async fn durable_projections_and_hydration_are_scoped_by_session_file() {
-    use threadlane_session::harness::UsageCause;
+    use threadlane_runtime::harness::UsageCause;
 
     let root = std::env::temp_dir().join(format!(
         "threadlane-same-session-projects-{}-{}",
@@ -1724,7 +1724,7 @@ async fn durable_projections_and_hydration_are_scoped_by_session_file() {
 
 #[tokio::test]
 async fn newer_provisional_compaction_clears_manifest_estimation() {
-    use threadlane_session::harness::CompactionReason;
+    use threadlane_runtime::harness::CompactionReason;
 
     let path = generated_reported_session_path().await;
     let mut store = JsonlStore::open(&path).unwrap();
@@ -2018,16 +2018,16 @@ fn startup_restores_the_most_recent_project_and_its_sessions() {
     std::fs::create_dir_all(&first_project).unwrap();
     let session_file = recent_project.join(".threadlane/sessions/recent-session.jsonl");
     std::fs::create_dir_all(session_file.parent().unwrap()).unwrap();
-    let mut store = threadlane_session::harness::JsonlStore::open(&session_file).unwrap();
+    let mut store = threadlane_runtime::harness::JsonlStore::open(&session_file).unwrap();
     store
-        .append_entry(threadlane_session::harness::Entry {
+        .append_entry(threadlane_runtime::harness::Entry {
             id: "node_1".into(),
             parent_id: None,
             lane: "main".into(),
             seq: 1,
             timestamp: 1,
             message: AgentMessage::user("recent prompt", Vec::new()),
-            surface_op: threadlane_session::harness::SurfaceOperation::Append,
+            surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
             terminate: false,
         })
         .unwrap();
@@ -2127,7 +2127,7 @@ fn startup_seeds_session_rows_without_reducing_every_journal() {
 #[test]
 fn app_state_startup_defers_messages_and_full_projection() {
     use threadlane_provider::openai::{ToolCall, ToolCallFunction};
-    use threadlane_session::harness::{
+    use threadlane_runtime::harness::{
         CapabilitySnapshot, OperationIntent, PromptSnapshot, ProviderOutcome, Record, SessionStore,
         TraceString, UsageCause,
     };
@@ -2152,9 +2152,9 @@ fn app_state_startup_defers_messages_and_full_projection() {
         cache_write_tokens: 2,
         total_tokens: 32,
     };
-    let mut store = threadlane_session::harness::JsonlStore::open(&session_file).unwrap();
+    let mut store = threadlane_runtime::harness::JsonlStore::open(&session_file).unwrap();
     store
-        .append_entry(threadlane_session::harness::Entry {
+        .append_entry(threadlane_runtime::harness::Entry {
             id: "node_1".into(),
             parent_id: None,
             lane: "main".into(),
@@ -2163,12 +2163,12 @@ fn app_state_startup_defers_messages_and_full_projection() {
             message: AgentMessage::User {
                 content: "Inspect the project".into(),
             },
-            surface_op: threadlane_session::harness::SurfaceOperation::Append,
+            surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
             terminate: false,
         })
         .unwrap();
     store
-        .append_entry(threadlane_session::harness::Entry {
+        .append_entry(threadlane_runtime::harness::Entry {
             id: "node_2".into(),
             parent_id: Some("node_1".into()),
             lane: "main".into(),
@@ -2178,12 +2178,12 @@ fn app_state_startup_defers_messages_and_full_projection() {
                 custom_type: "thinking".into(),
                 payload: serde_json::json!({"text": "Reading the relevant files"}),
             },
-            surface_op: threadlane_session::harness::SurfaceOperation::Append,
+            surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
             terminate: false,
         })
         .unwrap();
     store
-        .append_entry(threadlane_session::harness::Entry {
+        .append_entry(threadlane_runtime::harness::Entry {
             id: "assistant-1".into(),
             parent_id: Some("node_2".into()),
             lane: "main".into(),
@@ -2203,12 +2203,12 @@ fn app_state_startup_defers_messages_and_full_projection() {
                 stop_reason: None,
                 deferred_handle: None,
             },
-            surface_op: threadlane_session::harness::SurfaceOperation::Append,
+            surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
             terminate: false,
         })
         .unwrap();
     store
-        .append_entry(threadlane_session::harness::Entry {
+        .append_entry(threadlane_runtime::harness::Entry {
             id: "node_4".into(),
             parent_id: Some("assistant-1".into()),
             lane: "main".into(),
@@ -2222,7 +2222,7 @@ fn app_state_startup_defers_messages_and_full_projection() {
                 terminate: false,
                 images: Vec::new(),
             },
-            surface_op: threadlane_session::harness::SurfaceOperation::Append,
+            surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
             terminate: false,
         })
         .unwrap();
@@ -2398,7 +2398,7 @@ fn app_state_startup_defers_messages_and_full_projection() {
 #[test]
 fn durable_projection_restores_ordered_tool_lifecycle_and_exact_usage() {
     use threadlane_provider::openai::{ToolCall, ToolCallFunction};
-    use threadlane_session::harness::{
+    use threadlane_runtime::harness::{
         Entry, OperationIntent, OperationOutcome, Record, SessionStore, ToolReplaySafety,
         UsageCause,
     };
@@ -2406,7 +2406,7 @@ fn durable_projection_restores_ordered_tool_lifecycle_and_exact_usage() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("session.jsonl");
     std::fs::write(&path, "").unwrap();
-    let mut store = threadlane_session::harness::JsonlStore::open(&path).unwrap();
+    let mut store = threadlane_runtime::harness::JsonlStore::open(&path).unwrap();
     store
         .append_record(Record::OperationStarted {
             id: "run-1".into(),
@@ -2425,7 +2425,7 @@ fn durable_projection_restores_ordered_tool_lifecycle_and_exact_usage() {
             seq: 2,
             timestamp: 2,
             message: AgentMessage::user("inspect", vec![]),
-            surface_op: threadlane_session::harness::SurfaceOperation::Append,
+            surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
             terminate: false,
         })
         .unwrap();
@@ -2462,7 +2462,7 @@ fn durable_projection_restores_ordered_tool_lifecycle_and_exact_usage() {
                 stop_reason: None,
                 deferred_handle: None,
             },
-            surface_op: threadlane_session::harness::SurfaceOperation::Append,
+            surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
             terminate: false,
         })
         .unwrap();
@@ -2497,7 +2497,7 @@ fn durable_projection_restores_ordered_tool_lifecycle_and_exact_usage() {
                 terminate: false,
                 images: Vec::new(),
             },
-            surface_op: threadlane_session::harness::SurfaceOperation::Append,
+            surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
             terminate: false,
         })
         .unwrap();
@@ -2588,7 +2588,7 @@ fn durable_projection_restores_ordered_tool_lifecycle_and_exact_usage() {
                 stop_reason: None,
                 deferred_handle: None,
             },
-            surface_op: threadlane_session::harness::SurfaceOperation::Append,
+            surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
             terminate: false,
         })
         .unwrap();
@@ -2623,7 +2623,7 @@ fn durable_projection_restores_ordered_tool_lifecycle_and_exact_usage() {
                 terminate: false,
                 images: Vec::new(),
             },
-            surface_op: threadlane_session::harness::SurfaceOperation::Append,
+            surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
             terminate: false,
         })
         .unwrap();
@@ -2699,7 +2699,7 @@ fn durable_projection_restores_ordered_tool_lifecycle_and_exact_usage() {
 
 #[test]
 fn durable_subagent_projection_ignores_unrelated_named_lanes() {
-    use threadlane_session::harness::{Entry, SurfaceOperation};
+    use threadlane_runtime::harness::{Entry, SurfaceOperation};
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("session.jsonl");
@@ -2846,9 +2846,9 @@ fn session_switch_preserves_live_trajectory_and_applies_deferred_events() {
         .join(format!("{session_id}.jsonl"));
     std::fs::create_dir_all(session_file.parent().unwrap()).unwrap();
     std::fs::write(&session_file, "").unwrap();
-    let mut store = threadlane_session::harness::JsonlStore::open(&session_file).unwrap();
+    let mut store = threadlane_runtime::harness::JsonlStore::open(&session_file).unwrap();
     store
-        .append_entry(threadlane_session::harness::Entry {
+        .append_entry(threadlane_runtime::harness::Entry {
             id: "call-1-assistant".into(),
             parent_id: None,
             lane: "main".into(),
@@ -2868,12 +2868,12 @@ fn session_switch_preserves_live_trajectory_and_applies_deferred_events() {
                 stop_reason: None,
                 deferred_handle: None,
             },
-            surface_op: threadlane_session::harness::SurfaceOperation::Append,
+            surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
             terminate: false,
         })
         .unwrap();
     store
-        .append_entry(threadlane_session::harness::Entry {
+        .append_entry(threadlane_runtime::harness::Entry {
             id: "call-1-tool".into(),
             parent_id: Some("call-1-assistant".into()),
             lane: "main".into(),
@@ -2887,7 +2887,7 @@ fn session_switch_preserves_live_trajectory_and_applies_deferred_events() {
                 terminate: false,
                 images: Vec::new(),
             },
-            surface_op: threadlane_session::harness::SurfaceOperation::Append,
+            surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
             terminate: false,
         })
         .unwrap();
@@ -3063,13 +3063,13 @@ fn trajectory_epoch_changes_only_when_entries_are_replaced() {
 
 #[test]
 fn durable_trajectory_hydrates_after_session_switch() {
-    use threadlane_session::harness::SessionStore;
+    use threadlane_runtime::harness::SessionStore;
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("session.jsonl");
     std::fs::write(&path, "").unwrap();
-    let store = threadlane_session::harness::JsonlStore::open(&path).unwrap();
-    let mut harness = threadlane_session::harness::AgentHarness::new(store);
+    let store = threadlane_runtime::harness::JsonlStore::open(&path).unwrap();
+    let mut harness = threadlane_runtime::harness::AgentHarness::new(store);
     harness
         .accept_prompt("run-1", AgentMessage::user("old prompt", vec![]))
         .unwrap();
@@ -3078,7 +3078,7 @@ fn durable_trajectory_hydrates_after_session_switch() {
     let seq = harness.store().next_sequence();
     harness
         .store_mut()
-        .append_entry(threadlane_session::harness::Entry {
+        .append_entry(threadlane_runtime::harness::Entry {
             id: "legacy-tool-result".into(),
             parent_id: Some(parent_id),
             lane: "main".into(),
@@ -3092,7 +3092,7 @@ fn durable_trajectory_hydrates_after_session_switch() {
                 terminate: false,
                 images: Vec::new(),
             },
-            surface_op: threadlane_session::harness::SurfaceOperation::Append,
+            surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
             terminate: false,
         })
         .unwrap();
@@ -3278,12 +3278,12 @@ fn session_messages_include_complete_durable_history_beyond_legacy_page() {
     ));
     let path = root.join("session.jsonl");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let mut store = threadlane_session::harness::JsonlStore::open(&path).unwrap();
+    let mut store = threadlane_runtime::harness::JsonlStore::open(&path).unwrap();
     let mut parent_id = None;
     for index in 0..MESSAGE_COUNT {
         let id = format!("node_{index}");
         store
-            .append_entry(threadlane_session::harness::Entry {
+            .append_entry(threadlane_runtime::harness::Entry {
                 id: id.clone(),
                 parent_id,
                 lane: "main".into(),
@@ -3292,7 +3292,7 @@ fn session_messages_include_complete_durable_history_beyond_legacy_page() {
                 message: AgentMessage::User {
                     content: format!("message-{index}"),
                 },
-                surface_op: threadlane_session::harness::SurfaceOperation::Append,
+                surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
                 terminate: false,
             })
             .unwrap();
@@ -3303,7 +3303,7 @@ fn session_messages_include_complete_durable_history_beyond_legacy_page() {
     // Keep the fixture tied to the regression: the former GPUI helper loaded
     // only this newest page, omitting the first five durable messages.
     let legacy_page =
-        threadlane_session::harness::read_transcript_page(&path, None, LEGACY_PAGE_SIZE).unwrap();
+        threadlane_runtime::harness::read_transcript_page(&path, None, LEGACY_PAGE_SIZE).unwrap();
     assert_eq!(legacy_page.items.len(), LEGACY_PAGE_SIZE);
     assert!(legacy_page.has_older);
 
@@ -3331,9 +3331,9 @@ fn startup_hydration_from_project_registry_populates_all_views() {
     std::fs::create_dir_all(&sessions_dir).unwrap();
 
     let session_file = sessions_dir.join("session_1001.jsonl");
-    let mut store = threadlane_session::harness::JsonlStore::open(&session_file).unwrap();
+    let mut store = threadlane_runtime::harness::JsonlStore::open(&session_file).unwrap();
     store
-        .append_entry(threadlane_session::harness::Entry {
+        .append_entry(threadlane_runtime::harness::Entry {
             id: "node_1".into(),
             parent_id: None,
             lane: "main".into(),
@@ -3342,12 +3342,12 @@ fn startup_hydration_from_project_registry_populates_all_views() {
             message: AgentMessage::User {
                 content: "Hello on startup".into(),
             },
-            surface_op: threadlane_session::harness::SurfaceOperation::Append,
+            surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
             terminate: false,
         })
         .unwrap();
     store
-        .append_entry(threadlane_session::harness::Entry {
+        .append_entry(threadlane_runtime::harness::Entry {
             id: "node_2".into(),
             parent_id: Some("node_1".into()),
             lane: "main".into(),
@@ -3359,7 +3359,7 @@ fn startup_hydration_from_project_registry_populates_all_views() {
                 stop_reason: None,
                 deferred_handle: None,
             },
-            surface_op: threadlane_session::harness::SurfaceOperation::Append,
+            surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
             terminate: false,
         })
         .unwrap();
@@ -3451,9 +3451,9 @@ fn branch_consistency_trajectory_is_session_wide_audit_log_while_chat_is_active_
     let path = root.join("session.jsonl");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
 
-    let mut store = threadlane_session::harness::JsonlStore::open(&path).unwrap();
+    let mut store = threadlane_runtime::harness::JsonlStore::open(&path).unwrap();
     store
-        .append_entry(threadlane_session::harness::Entry {
+        .append_entry(threadlane_runtime::harness::Entry {
             id: "msg-root".into(),
             parent_id: None,
             lane: "main".into(),
@@ -3462,12 +3462,12 @@ fn branch_consistency_trajectory_is_session_wide_audit_log_while_chat_is_active_
             message: AgentMessage::User {
                 content: "Root question".into(),
             },
-            surface_op: threadlane_session::harness::SurfaceOperation::Append,
+            surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
             terminate: false,
         })
         .unwrap();
     store
-        .append_entry(threadlane_session::harness::Entry {
+        .append_entry(threadlane_runtime::harness::Entry {
             id: "msg-branch-a".into(),
             parent_id: Some("msg-root".into()),
             lane: "main".into(),
@@ -3479,12 +3479,12 @@ fn branch_consistency_trajectory_is_session_wide_audit_log_while_chat_is_active_
                 stop_reason: None,
                 deferred_handle: None,
             },
-            surface_op: threadlane_session::harness::SurfaceOperation::Append,
+            surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
             terminate: false,
         })
         .unwrap();
     store
-        .append_entry(threadlane_session::harness::Entry {
+        .append_entry(threadlane_runtime::harness::Entry {
             id: "msg-branch-b".into(),
             parent_id: Some("msg-root".into()),
             lane: "main".into(),
@@ -3496,7 +3496,7 @@ fn branch_consistency_trajectory_is_session_wide_audit_log_while_chat_is_active_
                 stop_reason: None,
                 deferred_handle: None,
             },
-            surface_op: threadlane_session::harness::SurfaceOperation::Append,
+            surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
             terminate: false,
         })
         .unwrap();
@@ -3683,13 +3683,13 @@ fn hydration_merge_subagents_by_identity() {
     );
 }
 
-fn computer_permission_request(id: &str) -> threadlane_session::PermissionRequest {
-    threadlane_session::PermissionRequest {
+fn computer_permission_request(id: &str) -> threadlane_protocol::PermissionRequest {
+    threadlane_protocol::PermissionRequest {
         id: id.into(),
         capability: "computer".into(),
         title: "Click at (1, 1)".into(),
         detail: "click".into(),
-        scopes: vec![threadlane_session::PermissionScope::Once],
+        scopes: vec![threadlane_protocol::PermissionScope::Once],
     }
 }
 

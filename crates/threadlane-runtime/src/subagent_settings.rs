@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use crate::{OrchestratorMode, ReasoningEffort};
+use threadlane_protocol::{OrchestratorMode, ReasoningEffort};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubagentSettings {

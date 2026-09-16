@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use threadlane_runtime::AgentEvent;
+use threadlane_protocol::AgentEvent;
 use threadlane_runtime::ToolPolicy;
 use threadlane_wasi::WasiExtensionManager;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};

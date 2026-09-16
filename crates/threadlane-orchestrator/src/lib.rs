@@ -2,9 +2,7 @@
 //!
 //! The prewalk state machine and its prompt directives sit next to the
 //! `OrchestratorMode` turn-driving config they interpret (both contract
-//! types live in `threadlane-protocol`). Re-exported through
-//! `threadlane_runtime::orchestrator` and `threadlane_session::orchestrator`
-//! for compatibility; new code should import `threadlane_orchestrator`
+//! types live in `threadlane-protocol`). Import `threadlane_orchestrator`
 //! directly.
 //!
 //! Prewalk is off by default. When armed (explicit `/prewalk` or

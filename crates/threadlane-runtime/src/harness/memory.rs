@@ -2,7 +2,7 @@ use super::reducer::{validate_candidate_entry, validate_candidate_record};
 use super::store::SessionStore;
 use super::types::{Entry, Record, ReduceError};
 #[cfg(test)]
-use crate::types::AgentMessage;
+use threadlane_protocol::AgentMessage;
 use std::collections::HashSet;
 
 #[derive(Debug, Clone)]

@@ -3,7 +3,7 @@
 //! These types were previously in `crate::op_log`; they are moved here
 //! because they belong with the harness queue infrastructure.
 
-use crate::types::AgentMessage;
+use threadlane_protocol::AgentMessage;
 use serde::{Deserialize, Serialize};
 use std::collections::{BinaryHeap, VecDeque};
 
@@ -165,7 +165,7 @@ impl LaneQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::AgentMessage;
+    use threadlane_protocol::AgentMessage;
 
     #[test]
     fn priority_steer_queue_ordering() {

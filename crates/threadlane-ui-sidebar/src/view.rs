@@ -416,13 +416,10 @@ fn sidebar_session_fingerprint(session: &SessionInfo, attention: SessionAttentio
     use std::hash::{Hash, Hasher};
 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    session.id.hash(&mut hasher);
-    session.title.hash(&mut hasher);
+    threadlane_ui_state::hash_session_identity(&mut hasher, session);
     session.work_dir.hash(&mut hasher);
     session.session_file.hash(&mut hasher);
     session.updated_at.hash(&mut hasher);
-    session.health.hash(&mut hasher);
-    session.git_branch.hash(&mut hasher);
     match session.github_issue.as_ref() {
         Some(issue) => {
             true.hash(&mut hasher);

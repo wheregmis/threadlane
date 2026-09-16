@@ -15,9 +15,9 @@ use threadlane_ui_state::next_event_batch;
 use threadlane_ui_state::provider_auth::{self, ProviderAuthEvent};
 use threadlane_ui_state::settings::{self, SettingsEvent};
 use threadlane_ui_state::AppState;
-use threadlane_session::{
-    AcpAgentRecord, AcpScope, ExtensionRecord, ExtensionScope, SkillMetadata,
-};
+use threadlane_acp::{AcpAgentRecord, AcpScope};
+use threadlane_skills::SkillMetadata;
+use threadlane_wasi::packages::{ExtensionRecord, ExtensionScope};
 use threadlane_updater::UpdateStatus;
 
 /// Fixed palette for the Appearance page's miniature theme previews. These
@@ -642,7 +642,7 @@ impl SettingsView {
             .or(preferences.fast_model.as_deref())
             .unwrap_or(&state.selected_model);
         let selected_reasoning = preferences.reasoning_effort.map(|effort| {
-            threadlane_runtime::model_registry::effective_effort(
+            threadlane_provider::model_registry::effective_effort(
                 reasoning_model,
                 effort,
                 Some(&project),
@@ -737,7 +737,7 @@ impl SettingsView {
             .dropdown_menu(move |menu, _, _| {
                 let entity = reasoning_entity.clone();
                 let project = project_for_reasoning.clone();
-                let mut options: Vec<Option<threadlane_runtime::ReasoningEffort>> = vec![None];
+                let mut options: Vec<Option<threadlane_protocol::ReasoningEffort>> = vec![None];
                 options.extend(
                     threadlane_ui_catalog::efforts_for_model(
                         &reasoning_for_model_cloned,
@@ -841,7 +841,7 @@ impl SettingsView {
                 )
             });
         let selected_fast_reasoning = preferences.fast_reasoning_effort.map(|effort| {
-            threadlane_runtime::model_registry::effective_effort(
+            threadlane_provider::model_registry::effective_effort(
                 preferences.fast_model.as_deref().unwrap_or_default(),
                 effort,
                 Some(&project),
@@ -861,7 +861,7 @@ impl SettingsView {
             .dropdown_menu(move |menu, _, _| {
                 let entity = fast_reasoning_entity.clone();
                 let project = project_for_fast_reasoning.clone();
-                let mut options: Vec<Option<threadlane_runtime::ReasoningEffort>> = vec![None];
+                let mut options: Vec<Option<threadlane_protocol::ReasoningEffort>> = vec![None];
                 options.extend(
                     threadlane_ui_catalog::efforts_for_model(&fast_for_model, Some(&project))
                         .into_iter()
@@ -902,8 +902,8 @@ impl SettingsView {
                 let entity = orchestrator_entity.clone();
                 let project = project_for_orchestrator.clone();
                 [
-                    threadlane_runtime::OrchestratorMode::Always,
-                    threadlane_runtime::OrchestratorMode::Off,
+                    threadlane_protocol::OrchestratorMode::Always,
+                    threadlane_protocol::OrchestratorMode::Off,
                 ]
                 .into_iter()
                 .fold(menu, |menu, mode| {
@@ -993,9 +993,7 @@ impl SettingsView {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "No active project".to_string());
         let project_count = state.projects.len();
-        let needle_enabled = state.needle_enabled;
         let auto_address_pr_reviews_enabled = state.auto_address_pr_reviews_enabled;
-        let toggle_view_needle = cx.entity().downgrade();
         let toggle_view_auto_address = cx.entity().downgrade();
         let update_status_label = match &state.update_status {
             UpdateStatus::Checking => "Checking for updates...",
@@ -1145,72 +1143,6 @@ impl SettingsView {
                                     .text_color(theme.muted_foreground)
                                     .child("Signed native desktop application release channel."),
                             ),
-                    ),
-            )
-            .child(
-                div()
-                    .rounded_xl()
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.title_bar)
-                    .p_4()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(theme.foreground)
-                                            .child("Local Needle Indexing"),
-                                    )
-                                    .child(
-                                        Tag::new()
-                                            .child(if needle_enabled { "Enabled" } else { "Disabled" })
-                                            .with_variant(if needle_enabled {
-                                                TagVariant::Success
-                                            } else {
-                                                TagVariant::Secondary
-                                            })
-                                            .small(),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .mt_1()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child("Accelerate file search and symbol extraction using the native local index."),
-                            ),
-                    )
-                    .child(
-                        Switch::new("general-needle-switch")
-                            .checked(needle_enabled)
-                            .tooltip(if needle_enabled {
-                                "Disable Needle routing"
-                            } else {
-                                "Enable Needle routing"
-                            })
-                            .on_click(move |checked, _window, cx| {
-                                let _ = toggle_view_needle.update(cx, |this, cx| {
-                                    let result = this.model.update(cx, |state, _cx| {
-                                        state.set_needle_enabled(*checked)
-                                    });
-                                    if let Err(error) = result {
-                                        this.capability_status = Some(error);
-                                    }
-                                    cx.notify();
-                                });
-                            }),
                     ),
             )
             .child(

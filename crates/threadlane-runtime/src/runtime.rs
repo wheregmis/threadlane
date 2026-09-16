@@ -5,18 +5,21 @@
 //! It replaces the previous split between [`UnifiedAgent`] and
 //! [`ProviderRunExecutor`].
 
-use crate::compaction::{compact_messages_to_token_budget, should_auto_compact};
+use threadlane_compaction::{
+    compact_messages, compact_messages_to_token_budget, should_auto_compact, CompactionOptions,
+    CompactionParams,
+};
 use crate::config::AgentConfig;
 use crate::error::AgentError;
-use crate::events::AgentEvent;
+use threadlane_protocol::AgentEvent;
 use crate::harness::{
     AgentHarness, HarnessEventHub, HookRegistry, JsonlStore, ProcedureError, ProvisionedEntry,
     QueueKind, Reducer, SessionStore,
 };
 use crate::tool_dispatcher::ToolDispatcher;
-use crate::types::{
+use crate::types::{ToolExecutionMode, TurnState};
+use threadlane_protocol::{
     AgentMessage, AgentToolDefinition, AgentToolResult, ImageAttachment, TokenUsage,
-    ToolExecutionMode, TurnState,
 };
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -434,10 +437,6 @@ impl AgentRuntime {
         self.config.model_roles = roles;
     }
 
-    pub fn set_needle_enabled(&mut self, enabled: bool) {
-        self.config.needle_enabled = enabled;
-    }
-
     pub fn model_roles(&self) -> &crate::types::ModelRoles {
         &self.config.model_roles
     }
@@ -471,7 +470,7 @@ impl AgentRuntime {
     }
 
     /// Returns the current reasoning effort.
-    pub fn reasoning_effort(&self) -> crate::types::ReasoningEffort {
+    pub fn reasoning_effort(&self) -> threadlane_protocol::ReasoningEffort {
         self.turn
             .try_lock()
             .map(|t| t.reasoning_effort)
@@ -485,7 +484,7 @@ impl AgentRuntime {
 
     pub fn register_tool_executor(
         &mut self,
-        executor: Arc<dyn crate::tool_executor::ToolExecutor>,
+        executor: Arc<dyn threadlane_protocol::ToolExecutor>,
     ) -> Result<(), AgentError> {
         self.tool_dispatcher.register_tool_executor(executor)
     }
@@ -510,7 +509,7 @@ impl AgentRuntime {
         self.tool_dispatcher.tool_executor_count()
     }
 
-    pub async fn set_reasoning_effort(&self, effort: crate::types::ReasoningEffort) {
+    pub async fn set_reasoning_effort(&self, effort: threadlane_protocol::ReasoningEffort) {
         self.turn.lock().await.reasoning_effort = effort;
     }
 
@@ -529,21 +528,18 @@ impl AgentRuntime {
     /// callers commit this projection before installing it in memory.
     pub async fn preview_compact_history(
         &self,
-        options: Option<crate::compaction::CompactionOptions>,
+        options: Option<CompactionOptions>,
     ) -> Vec<AgentMessage> {
         let turn = self.turn.lock().await;
         match options {
-            Some(opts) => crate::compaction::compact_messages(&turn.messages, &opts),
+            Some(opts) => compact_messages(&turn.messages, &opts),
             None => {
                 let by_tokens = compact_messages_to_token_budget(
                     &turn.messages,
                     self.config.auto_compaction_keep_recent_tokens,
                 );
                 if by_tokens.len() == turn.messages.len() {
-                    crate::compaction::compact_messages(
-                        &turn.messages,
-                        &crate::compaction::CompactionOptions::default(),
-                    )
+                    compact_messages(&turn.messages, &CompactionOptions::default())
                 } else {
                     by_tokens
                 }
@@ -553,7 +549,7 @@ impl AgentRuntime {
 
     pub async fn compact_history(
         &self,
-        options: Option<crate::compaction::CompactionOptions>,
+        options: Option<CompactionOptions>,
     ) -> bool {
         let compacted = self.preview_compact_history(options).await;
         let mut turn = self.turn.lock().await;
@@ -564,7 +560,7 @@ impl AgentRuntime {
 
     pub async fn auto_compact_history(&self) -> bool {
         let mut turn = self.turn.lock().await;
-        if !should_auto_compact(&turn.messages, &self.config) {
+        if !should_auto_compact(&turn.messages, &CompactionParams::from(&self.config)) {
             return false;
         }
         let compacted = compact_messages_to_token_budget(
@@ -778,6 +774,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use sha2::Digest;
+    use threadlane_compaction::{estimate_message_tokens, provider_normalized_message};
     use threadlane_protocol::{
         RuntimeRequest, RuntimeStreamEvent, RuntimeToolCall as ToolCall,
         RuntimeToolCallFunction as ToolCallFunction, RuntimeUsage,
@@ -1081,7 +1078,7 @@ mod tests {
             },
             AgentMessage::UserWithImages {
                 content: "inspect".into(),
-                images: vec![crate::types::ImageAttachment {
+                images: vec![threadlane_protocol::ImageAttachment {
                     display_name: "screen.png".into(),
                     data_url: "data:image/png;base64,AA==".into(),
                 }],
@@ -1120,7 +1117,7 @@ mod tests {
                         .collect::<Vec<_>>();
                     assert_eq!(message_items.len(), expected.len());
                     for (item, message) in message_items.iter().zip(&expected) {
-                        let normalized = crate::compaction::provider_normalized_message(message);
+                        let normalized = provider_normalized_message(message);
                         let accounted = normalized.as_ref().unwrap_or(message);
                         let serialized = serde_json::to_vec(accounted).unwrap();
                         assert_eq!(
@@ -1138,7 +1135,10 @@ mod tests {
                         assert_eq!(
                             item.token_estimate as usize,
                             normalized.as_ref().map_or(0, |message| {
-                                crate::compaction::estimate_message_tokens(message, &config)
+                                estimate_message_tokens(
+                                    message,
+                                    &CompactionParams::from(&config)
+                                )
                             })
                         );
                     }
@@ -1335,8 +1335,10 @@ mod tests {
             let preparer_models = preparer_models.clone();
             Box::pin(async move {
                 preparer_models.lock().unwrap().push(request.model.clone());
-                let budget =
-                    crate::model_metadata::context_budget(&request.model, &AgentConfig::default());
+                let budget = threadlane_context::context_budget(
+                    &request.model,
+                    &threadlane_context::BudgetConfig::from(&AgentConfig::default()),
+                );
                 Ok(ProviderBoundaryResult {
                     messages: request.messages,
                     context_limit: budget.limit,

@@ -11,10 +11,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use threadlane_session::mcp::{
-    McpManager, McpScope, McpServerConfig, McpSettings, McpToolExecutor, McpTransport,
-};
-use threadlane_session::ToolExecutor;
+use threadlane_coding_agent::mcp::McpToolExecutor;
+use threadlane_mcp::{McpManager, McpScope, McpServerConfig, McpSettings, McpTransport};
+use threadlane_protocol::ToolExecutor;
 
 /// Writes a stub server that appends one line to `spawn_log` each time it starts.
 fn stub_server(dir: &Path, spawn_log: &Path) -> PathBuf {

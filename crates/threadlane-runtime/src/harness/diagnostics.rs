@@ -59,7 +59,7 @@ pub struct ModelContextDiagnostic {
     pub id: String,
     pub lane: String,
     role: String,
-    pub message: crate::types::AgentMessage,
+    pub message: threadlane_protocol::AgentMessage,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,7 +196,7 @@ pub fn project_recovery(state: &ReducedState) -> Vec<LaneRecoveryDiagnostic> {
 mod tests {
     use super::*;
     use crate::harness::{LaneState, QueuedEntry, SteerPriority, ToolState};
-    use crate::types::{AgentMessage, TokenUsage};
+    use threadlane_protocol::{AgentMessage, TokenUsage};
     use std::collections::BTreeMap;
 
     fn lane(status: LaneStatus) -> LaneState {

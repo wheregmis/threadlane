@@ -248,12 +248,7 @@ fn github_link_fingerprint(state: &AppState) -> u64 {
 
 fn linked_session_fingerprint(session: &SessionInfo, pr: Option<&GitHubPrInfo>) -> u64 {
     let mut hasher = DefaultHasher::new();
-    session.id.hash(&mut hasher);
-    session.title.hash(&mut hasher);
-    session.health.hash(&mut hasher);
-    session.worktree_available.hash(&mut hasher);
-    session.is_worktree.hash(&mut hasher);
-    session.git_branch.hash(&mut hasher);
+    threadlane_ui_state::hash_session_identity(&mut hasher, session);
     match pr {
         Some(pr) => {
             true.hash(&mut hasher);

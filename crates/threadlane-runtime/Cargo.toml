@@ -9,7 +9,6 @@ threadlane-compaction.workspace = true
 threadlane-context.workspace = true
 threadlane-loop.workspace = true
 threadlane-plan.workspace = true
-threadlane-project.workspace = true
 threadlane-protocol.workspace = true
 threadlane-provider.workspace = true
 threadlane-tools.workspace = true
@@ -24,14 +23,6 @@ directories.workspace = true
 tracing.workspace = true
 sha2.workspace = true
 libsqlite3-sys.workspace = true
-
-[features]
-default = []
-needle = ["dep:needle-infer"]
-
-[dependencies.needle-infer]
-git = "https://github.com/Geekgineer/needle-rs"
-optional = true
 
 [dev-dependencies]
 tempfile.workspace = true

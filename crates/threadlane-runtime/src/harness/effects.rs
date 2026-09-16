@@ -461,7 +461,7 @@ fn publish_committed(hub: &HarnessEventHub, action: &EffectAction) {
 mod tests {
     use super::*;
     use crate::harness::MemoryStore;
-    use crate::types::AgentMessage;
+    use threadlane_protocol::AgentMessage;
 
     fn message(text: &str) -> AgentMessage {
         AgentMessage::user(text, Vec::new())

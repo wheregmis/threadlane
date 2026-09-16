@@ -26,7 +26,7 @@ use std::sync::Arc;
 use threadlane_runtime::harness::{HookContext, HookEffect, HookHandler, HookKind};
 use threadlane_runtime::Capability;
 use threadlane_runtime::ToolPolicy;
-use threadlane_runtime::{AgentEvent, AgentToolCall, AgentToolDefinition, ToolExecutor};
+use threadlane_protocol::{AgentEvent, AgentToolCall, AgentToolDefinition, ToolExecutor};
 use threadlane_skills::{LoadSkillToolExecutor as SkillLoader, SkillRegistry};
 use threadlane_wasi::WasiExtensionManager;
 use tokio::sync::broadcast;

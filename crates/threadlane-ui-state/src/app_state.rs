@@ -3,14 +3,16 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use threadlane_session::harness::{JsonlStore, SessionStore};
-use threadlane_session::{
-    AcpConfigOption, AgentEvent, AgentMessage, ImageAttachment, ReasoningEffort, SessionPlan,
+use threadlane_runtime::harness::{JsonlStore, SessionStore};
+use threadlane_protocol::{
+    AgentEvent, AgentMessage, ImageAttachment, ReasoningEffort, SessionPlan,
     SubagentProgressUpdate, TokenUsage,
 };
+use threadlane_acp::AcpConfigOption;
 
 use crate::agent_events::{adapt_agent_event, ChatAgentUpdate};
-use threadlane_session::{ExecutionMode, SessionRuntime};
+use threadlane_coding_agent::controller::ExecutionMode;
+use threadlane_session::SessionRuntime;
 use threadlane_project::load_project_registry;
 
 use crate::discovery::*;
@@ -40,7 +42,7 @@ pub struct AppState {
     trajectory_epoch: u64,
     diagnostics_revision: u64,
     diagnostics_by_session:
-        HashMap<SessionProjectionKey, threadlane_session::harness::SessionDiagnostics>,
+        HashMap<SessionProjectionKey, threadlane_runtime::harness::SessionDiagnostics>,
     session_metrics: HashMap<SessionProjectionKey, SessionMetricsInfo>,
     context_windows: HashMap<SessionProjectionKey, ContextWindowInfo>,
     /// Settings each ACP session's agent exposes, keyed by session id.
@@ -57,8 +59,8 @@ pub struct AppState {
     /// next runtime before its first turn.
     pending_acp_config: HashMap<String, HashMap<String, String>>,
     stashed_prompts: HashMap<String, String>,
-    pub pending_permissions: HashMap<String, threadlane_session::PermissionRequest>,
-    pub pending_questions: HashMap<String, threadlane_session::QuestionRequest>,
+    pub pending_permissions: HashMap<String, threadlane_protocol::PermissionRequest>,
+    pub pending_questions: HashMap<String, threadlane_protocol::QuestionRequest>,
     pub pending_hydrations: Vec<SessionHydrationRequest>,
     pub git_statuses: HashMap<PathBuf, threadlane_git::GitStatus>,
     pub git_prs: HashMap<(PathBuf, String), Option<threadlane_git::GitHubPrInfo>>,
@@ -68,12 +70,11 @@ pub struct AppState {
         HashMap<PathBuf, threadlane_git::PrReviewTrackingStore>,
 
     pub selected_model: String,
-    model_roles: threadlane_session::ModelRoles,
+    model_roles: threadlane_runtime::ModelRoles,
     pub reasoning_effort: ReasoningEffort,
     pub workspace_page: WorkspacePage,
     pub openai_key: String,
     pub opencode_key: String,
-    pub needle_enabled: bool,
     pub auth_status_msg: Option<String>,
     pub update_status: threadlane_updater::UpdateStatus,
     pub update_notice_dismissed: bool,
@@ -239,7 +240,7 @@ impl AppState {
             threadlane_ui_catalog::default_model_for_project(active_work_dir.as_deref())
                 .unwrap_or_default();
 
-        let model_roles = threadlane_session::ModelRoles::default();
+        let model_roles = threadlane_runtime::ModelRoles::default();
         let session_runtimes = HashMap::new();
         let session_status = active_session_id
             .as_ref()
@@ -285,7 +286,6 @@ impl AppState {
             workspace_page: WorkspacePage::Chat,
             openai_key,
             opencode_key,
-            needle_enabled: threadlane_project::load_needle_enabled(),
             auth_status_msg: None,
             update_status: threadlane_updater::UpdateStatus::Idle,
             update_notice_dismissed: false,
@@ -352,15 +352,6 @@ impl AppState {
                 .unwrap_or_default();
         }
         self.set_reasoning_effort(self.reasoning_effort);
-    }
-
-    pub fn set_needle_enabled(&mut self, enabled: bool) -> Result<(), String> {
-        threadlane_project::save_needle_enabled(enabled)?;
-        self.needle_enabled = enabled;
-        for runtime in self.session_runtimes.values() {
-            let _ = runtime.try_set_needle_enabled(enabled);
-        }
-        Ok(())
     }
 
     pub fn set_auto_address_pr_reviews_enabled(
@@ -512,7 +503,7 @@ impl AppState {
     }
 
     pub fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {
-        let effort = threadlane_runtime::model_registry::effective_effort(
+        let effort = threadlane_provider::model_registry::effective_effort(
             &self.selected_model,
             effort,
             self.active_work_dir.as_deref(),
@@ -925,7 +916,7 @@ impl AppState {
     pub fn resolve_active_permission(
         &mut self,
         request_id: &str,
-        decision: threadlane_session::PermissionDecision,
+        decision: threadlane_permission::PermissionDecision,
     ) -> bool {
         let Some(session_id) = self.active_session_id.clone() else {
             return false;
@@ -957,7 +948,7 @@ impl AppState {
             return false;
         };
         let session_file = self.session_file(&work_dir, &session_id);
-        let answer = threadlane_session::QuestionAnswer::dismissed(request_id);
+        let answer = threadlane_protocol::QuestionAnswer::dismissed(request_id);
         let resolved = self
             .session_runtimes
             .get(&session_file)
@@ -973,7 +964,7 @@ impl AppState {
     pub fn resolve_active_question_answer(
         &mut self,
         request_id: &str,
-        answer: threadlane_session::QuestionAnswer,
+        answer: threadlane_protocol::QuestionAnswer,
     ) -> bool {
         let Some(session_id) = self.active_session_id.clone() else {
             return false;
@@ -1220,11 +1211,11 @@ impl AppState {
         } else {
             let model = runtime.model().to_owned();
             let reasoning_effort = runtime.reasoning_effort();
-            let (api_key, _) = threadlane_session::provider_credentials(&model);
-            if api_key.is_empty() && !threadlane_session::is_acp_model(&model) {
+            let (api_key, _) = threadlane_coding_agent::credentials::provider_credentials(&model);
+            if api_key.is_empty() && !threadlane_acp_engine::is_acp_model(&model) {
                 return None;
             }
-            let pending_acp = threadlane_session::acp_agent_id(&model)
+            let pending_acp = threadlane_acp_engine::acp_agent_id(&model)
                 .map(|agent_id| self.take_pending_acp_config(agent_id))
                 .unwrap_or_default();
             if crate::chat::execute_prompt(
@@ -1291,8 +1282,8 @@ impl AppState {
             return Err("Couldn't select the linked task for this pull request.".into());
         }
         let model = self.selected_model.clone();
-        let (api_key, _) = threadlane_session::provider_credentials(&model);
-        if api_key.is_empty() && !threadlane_session::is_acp_model(&model) {
+        let (api_key, _) = threadlane_coding_agent::credentials::provider_credentials(&model);
+        if api_key.is_empty() && !threadlane_acp_engine::is_acp_model(&model) {
             return Err(format!(
                 "No API key configured for model `{model}`. Open Settings and save the provider credential."
             ));
@@ -1457,7 +1448,7 @@ impl AppState {
                     ("worktree_path", worktree_dir.to_string_lossy().to_string()),
                     ("git_branch", branch.clone()),
                 ] {
-                    if let Err(error) = threadlane_session::coding_agent::harness::CodingSessionHarness::append_fact_to_path(
+                    if let Err(error) = threadlane_coding_agent::harness::CodingSessionHarness::append_fact_to_path(
                         &session_file,
                         "main",
                         key,
@@ -1471,7 +1462,7 @@ impl AppState {
             }
         }
 
-        threadlane_session::coding_agent::harness::CodingSessionHarness::append_fact_to_path(
+        threadlane_coding_agent::harness::CodingSessionHarness::append_fact_to_path(
             &session_file,
             "main",
             "reasoning_effort",
@@ -1585,7 +1576,7 @@ impl AppState {
             ("name", format!("#{} {title}", issue.number)),
         ] {
             if let Err(error) =
-                threadlane_session::coding_agent::harness::CodingSessionHarness::append_fact_to_path(
+                threadlane_coding_agent::harness::CodingSessionHarness::append_fact_to_path(
                     &session_file,
                     "main",
                     key,
@@ -1676,10 +1667,10 @@ impl AppState {
             .records()
             .iter()
             .filter_map(|record| match record {
-                threadlane_session::harness::Record::Usage {
+                threadlane_runtime::harness::Record::Usage {
                     run_id: Some(run_id),
                     attempt: Some(attempt),
-                    cause: threadlane_session::harness::UsageCause::Provider,
+                    cause: threadlane_runtime::harness::UsageCause::Provider,
                     ..
                 } => Some((run_id.clone(), *attempt)),
                 _ => None,
@@ -1687,7 +1678,7 @@ impl AppState {
             .collect::<HashSet<_>>();
 
         for record in store.records() {
-            use threadlane_session::harness::Record;
+            use threadlane_runtime::harness::Record;
             let entry = match record {
                 Record::OperationStarted {
                     seq,
@@ -1811,7 +1802,7 @@ impl AppState {
                     usage,
                     ..
                 } => {
-                    if *cause == threadlane_session::harness::UsageCause::Provider {
+                    if *cause == threadlane_runtime::harness::UsageCause::Provider {
                         metrics.accumulate_usage(usage);
                         durable_usage.accumulate(usage);
                     }
@@ -1849,14 +1840,14 @@ impl AppState {
                     ..
                 } => {
                     let prompt_text = match system_prompt {
-                        threadlane_session::harness::PromptSnapshot::Full { sha256, content } => {
+                        threadlane_runtime::harness::PromptSnapshot::Full { sha256, content } => {
                             format!(
                                 "### System Prompt (SHA256 `{}`)\n\n```markdown\n{}\n```",
                                 sha256.as_str(),
                                 content.as_str()
                             )
                         }
-                        threadlane_session::harness::PromptSnapshot::Redacted {
+                        threadlane_runtime::harness::PromptSnapshot::Redacted {
                             sha256,
                             byte_len,
                             reason,
@@ -2469,7 +2460,7 @@ impl AppState {
         }
 
         // Anomaly items from typed trajectory pass
-        let typed_traj = threadlane_session::harness::project_trajectory(store);
+        let typed_traj = threadlane_runtime::harness::project_trajectory(store);
         for anomaly in typed_traj.anomalies {
             trajectory.push(TrajectoryEntry {
                 seq: anomaly.related_refs.first().map(|r| r.seq),
@@ -2506,7 +2497,7 @@ impl AppState {
     }
 
     fn project_context_window(store: &JsonlStore) -> Option<ContextWindowInfo> {
-        use threadlane_session::harness::Record;
+        use threadlane_runtime::harness::Record;
         let manifest = store
             .records()
             .iter()
@@ -3182,12 +3173,12 @@ impl AppState {
             .iter()
             .map(|event| {
                 let (category, summary, detail) = match &event.kind {
-                    threadlane_session::harness::DurableEventKind::Entry { role, parent_id } => (
+                    threadlane_runtime::harness::DurableEventKind::Entry { role, parent_id } => (
                         "Entry",
                         format!("{} · {role}", event.id),
                         format!("parent={parent_id:?}"),
                     ),
-                    threadlane_session::harness::DurableEventKind::Record => (
+                    threadlane_runtime::harness::DurableEventKind::Record => (
                         "Record",
                         format!("{} · durable record", event.id),
                         format!(
@@ -3281,7 +3272,7 @@ impl AppState {
     ///
     /// A no-op for a provider model, which has no agent to ask.
     fn request_acp_config_options(&mut self) {
-        if !threadlane_session::is_acp_model(&self.selected_model) {
+        if !threadlane_acp_engine::is_acp_model(&self.selected_model) {
             return;
         }
         let Some((runtime, session_id)) = self.active_session_runtime() else {
@@ -3307,7 +3298,7 @@ impl AppState {
             // silently keeps the agent's default (e.g. DeepSeek) no matter
             // what the user clicks.
             let Some(agent_id) =
-                threadlane_session::acp_agent_id(&self.selected_model).map(str::to_string)
+                threadlane_acp_engine::acp_agent_id(&self.selected_model).map(str::to_string)
             else {
                 self.session_status = Some("Open a session before changing agent settings".into());
                 return;
@@ -3352,7 +3343,7 @@ impl AppState {
         }
         // A live session now owns the setting; drop any New-task pending for
         // the same agent so a later draft does not re-apply a stale choice.
-        if let Some(agent_id) = threadlane_session::acp_agent_id(&self.selected_model) {
+        if let Some(agent_id) = threadlane_acp_engine::acp_agent_id(&self.selected_model) {
             if let Some(pending) = self.pending_acp_config.get_mut(agent_id) {
                 pending.remove(&config_id);
                 if pending.is_empty() {
@@ -3394,7 +3385,7 @@ impl AppState {
     /// Pending New-task selections override the cached current value so the
     /// picker and status bar show what will run, not the agent default.
     pub fn active_acp_config_options(&self) -> Vec<AcpConfigOption> {
-        if !threadlane_session::is_acp_model(&self.selected_model) {
+        if !threadlane_acp_engine::is_acp_model(&self.selected_model) {
             return Vec::new();
         }
         if let Some(options) = self
@@ -3403,12 +3394,12 @@ impl AppState {
         {
             return options.clone();
         }
-        let agent_id = threadlane_session::acp_agent_id(&self.selected_model);
+        let agent_id = threadlane_acp_engine::acp_agent_id(&self.selected_model);
         let cached = agent_id
             .map(threadlane_ui_catalog::cached_acp_config_options)
             .unwrap_or_default();
         match agent_id.and_then(|id| self.pending_acp_config.get(id)) {
-            Some(pending) => threadlane_session::apply_pending_config_values(cached, pending),
+            Some(pending) => threadlane_acp::apply_pending_config_values(cached, pending),
             None => cached,
         }
     }
@@ -3418,9 +3409,9 @@ impl AppState {
     /// Derived from the same settings the picker shows, so the status bar and
     /// the picker can never disagree about what is running.
     pub fn active_acp_model_label(&self) -> Option<String> {
-        threadlane_session::config_option_for(
+        threadlane_acp::config_option_for(
             &self.active_acp_config_options(),
-            threadlane_session::ACP_CONFIG_CATEGORY_MODEL,
+            threadlane_acp::ACP_CONFIG_CATEGORY_MODEL,
         )
         .and_then(AcpConfigOption::current_detail_label)
     }
@@ -3744,7 +3735,7 @@ impl AppState {
                     if let Some(error) = error {
                         if let (Some((config_id, value)), Some(agent_id)) = (
                             failed_config,
-                            threadlane_session::acp_agent_id(&self.selected_model),
+                            threadlane_acp_engine::acp_agent_id(&self.selected_model),
                         ) {
                             self.pending_acp_config
                                 .entry(agent_id.to_string())
@@ -3961,12 +3952,12 @@ impl AppState {
 
         // Resolve credentials using the same provider routing as the runtime and title task.
         let model = self.selected_model.clone();
-        let (api_key, account_id) = threadlane_session::provider_credentials(&model);
+        let (api_key, account_id) = threadlane_coding_agent::credentials::provider_credentials(&model);
 
         // An external ACP agent authenticates itself — Claude Code uses its own
         // CLI login — so it has no Threadlane provider credential to check, and
         // gating it on one blocks every ACP turn before it starts.
-        if api_key.is_empty() && !threadlane_session::is_acp_model(&model) {
+        if api_key.is_empty() && !threadlane_acp_engine::is_acp_model(&model) {
             self.messages_mut().push(ChatMessageInfo {
                 id: format!("credential-error-{session_id}"),
                 role: MessageRole::Error,
@@ -3985,7 +3976,7 @@ impl AppState {
         // New-task ACP picks have no session to apply to yet; they wait here
         // and are applied inside the turn task before generation starts, so
         // the first turn runs the model the picker shows.
-        let pending_acp = threadlane_session::acp_agent_id(&model)
+        let pending_acp = threadlane_acp_engine::acp_agent_id(&model)
             .map(|agent_id| self.take_pending_acp_config(agent_id))
             .unwrap_or_default();
         crate::chat::execute_prompt(
@@ -4075,25 +4066,25 @@ impl AppState {
 }
 
 fn project_recovery_diagnostics(
-    lanes: &[threadlane_session::harness::LaneRecoveryDiagnostic],
+    lanes: &[threadlane_runtime::harness::LaneRecoveryDiagnostic],
 ) -> Vec<TrajectoryEntry> {
     let mut rows = Vec::new();
     for lane in lanes {
         let decision = match lane.decision {
-            threadlane_session::harness::RecoveryDecision::None => "No recovery required",
-            threadlane_session::harness::RecoveryDecision::ResumeFromLeaf => {
+            threadlane_runtime::harness::RecoveryDecision::None => "No recovery required",
+            threadlane_runtime::harness::RecoveryDecision::ResumeFromLeaf => {
                 "Resume interrupted operation from durable leaf"
             }
-            threadlane_session::harness::RecoveryDecision::ReplaySafeToolsThenResume => {
+            threadlane_runtime::harness::RecoveryDecision::ReplaySafeToolsThenResume => {
                 "Replay safe interrupted tools, then resume"
             }
-            threadlane_session::harness::RecoveryDecision::AbortUnsafeTool => {
+            threadlane_runtime::harness::RecoveryDecision::AbortUnsafeTool => {
                 "Abort interrupted run; unsafe tool cannot be replayed"
             }
-            threadlane_session::harness::RecoveryDecision::WaitForDeferredResult => {
+            threadlane_runtime::harness::RecoveryDecision::WaitForDeferredResult => {
                 "Wait for deferred provider result"
             }
-            threadlane_session::harness::RecoveryDecision::ExplicitRetryRequired => {
+            threadlane_runtime::harness::RecoveryDecision::ExplicitRetryRequired => {
                 "Keep failed; require explicit retry"
             }
         };

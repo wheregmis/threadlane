@@ -7,7 +7,7 @@ use std::sync::Arc;
 use threadlane_runtime::harness::{
     JsonlStore, OperationOutcome, ProvisionedEntry, Record as HarnessRecord, Reducer,
 };
-use threadlane_runtime::{AgentEvent, AgentMessage};
+use threadlane_protocol::{AgentEvent, AgentMessage};
 use tokio::sync::broadcast;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

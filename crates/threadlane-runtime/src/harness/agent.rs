@@ -5,7 +5,7 @@ use super::{
     PromptProcedure, ProvisionedEntry, QueueKind, QueueProcedure, ReduceError, SessionStore,
     Snapshot, TelemetrySink, ToolBatchProcedure, ToolRecovery, ToolResult, ToolSpec,
 };
-use crate::types::{AgentMessage, TokenUsage};
+use threadlane_protocol::{AgentMessage, TokenUsage};
 use std::sync::Arc;
 
 pub struct AgentHarness<S: SessionStore> {
@@ -1118,7 +1118,7 @@ impl<S: SessionStore> SessionStore for AgentHarness<S> {
 mod accepted_run_proof_tests {
     use super::AgentHarness;
     use crate::harness::MemoryStore;
-    use crate::types::AgentMessage;
+    use threadlane_protocol::AgentMessage;
 
     #[test]
     fn accepted_run_rejects_malformed_assistant_cross_run_and_forged_prefix() {

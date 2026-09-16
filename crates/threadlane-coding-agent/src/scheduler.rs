@@ -7,9 +7,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use threadlane_runtime::harness::QueueKind;
-use threadlane_runtime::{AgentMessage, AgentRuntime, ImageAttachment};
+use threadlane_protocol::{AgentMessage, ImageAttachment};
+use threadlane_runtime::AgentRuntime;
 #[cfg(test)]
-use threadlane_runtime::{AgentToolDefinition, ToolExecutor};
+use threadlane_protocol::{AgentToolDefinition, ToolExecutor};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentWork {

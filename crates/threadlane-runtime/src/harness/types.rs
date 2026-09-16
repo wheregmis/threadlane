@@ -1,5 +1,5 @@
 use super::queue::SteerPriority;
-use crate::types::{AgentMessage, ImageAttachment, ReasoningEffort, TokenUsage};
+use threadlane_protocol::{AgentMessage, ImageAttachment, ReasoningEffort, TokenUsage};
 // Durable permission-trace vocabulary lives in `threadlane-protocol` so the
 // permission manager and trajectory analysis share it without depending on
 // the harness. Re-exported here so existing `harness::…` paths keep working.

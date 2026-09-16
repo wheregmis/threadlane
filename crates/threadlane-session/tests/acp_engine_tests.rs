@@ -11,10 +11,10 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use threadlane_session::acp::{AcpAgentConfig, AcpScope, AcpSettings};
-use threadlane_session::acp_runtime::{generate_title, AcpEngine};
+use threadlane_acp::{AcpAgentConfig, AcpScope, AcpSettings};
+use threadlane_acp_engine::{generate_title, AcpEngine};
 use threadlane_permission::{PermissionDecision, PermissionHandle};
-use threadlane_session::{AgentEvent, ImageAttachment, ReasoningEffort};
+use threadlane_protocol::{AgentEvent, ImageAttachment, ReasoningEffort};
 use tokio::sync::broadcast;
 
 const STUB: &str = env!("CARGO_BIN_EXE_acp_stub_agent");
@@ -550,12 +550,12 @@ fn configure_project_stub(work_dir: &Path, mode: &str) {
 
 #[tokio::test]
 async fn an_acp_turn_is_journaled_so_the_transcript_survives_a_reload() {
-    use threadlane_session::harness::{
+    use threadlane_runtime::harness::{
         read_transcript_page, JsonlStore, SessionStore, TranscriptItem,
     };
-    use threadlane_session::{
-        AgentMessage, BrowserBridge, CodingAgent, CodingAgentOptions, PlanItemStatus,
-    };
+    use threadlane_coding_agent::{CodingAgent, CodingAgentOptions};
+    use threadlane_protocol::browser::BrowserBridge;
+    use threadlane_protocol::{AgentMessage, PlanItemStatus};
 
     let temp = tempfile::tempdir().unwrap();
     let work = work_dir(&temp);
@@ -645,7 +645,7 @@ async fn an_acp_turn_is_journaled_so_the_transcript_survives_a_reload() {
 
 #[tokio::test]
 async fn queued_acp_prompts_reuse_the_conversation_and_survive_reload() {
-    use threadlane_session::harness::{JsonlStore, Reducer};
+    use threadlane_runtime::harness::{JsonlStore, Reducer};
 
     let temp = tempfile::tempdir().unwrap();
     let work = work_dir(&temp);
@@ -712,7 +712,7 @@ async fn stopping_again_while_acp_cancels_retains_the_new_prompt() {
 }
 
 async fn assert_acp_permission_cancellation(stop_again: bool) {
-    use threadlane_session::harness::{JsonlStore, PermissionTraceDecision, Record, Reducer};
+    use threadlane_runtime::harness::{JsonlStore, PermissionTraceDecision, Record, Reducer};
 
     let temp = tempfile::tempdir().unwrap();
     let work = work_dir(&temp);
@@ -774,7 +774,7 @@ async fn assert_acp_permission_cancellation(stop_again: bool) {
             loop {
                 let store = JsonlStore::open_read_only(&controller.session_file).unwrap();
                 if Reducer::reduce(&store).unwrap().lanes[0].queued.iter().any(|queued|
-                    matches!(&queued.target.message, threadlane_session::AgentMessage::User { content } if content == "resume")
+                    matches!(&queued.target.message, threadlane_protocol::AgentMessage::User { content } if content == "resume")
                 ) {
                     break;
                 }
@@ -860,7 +860,7 @@ async fn stopping_acp_preserves_queued_input_across_restart() {
 }
 
 async fn assert_stopping_acp_preserves_queued_input(reopen: bool) {
-    use threadlane_session::harness::{JsonlStore, QueueKind, Reducer};
+    use threadlane_runtime::harness::{JsonlStore, QueueKind, Reducer};
 
     let temp = tempfile::tempdir().unwrap();
     let work = work_dir(&temp);
@@ -938,8 +938,10 @@ async fn assert_stopping_acp_preserves_queued_input(reopen: bool) {
     assert!(Reducer::reduce(&store).unwrap().lanes[0].queued.is_empty());
 }
 
-fn queued_controller(work: &Path) -> std::sync::Arc<threadlane_session::SessionController> {
-    use threadlane_session::{BrowserBridge, CodingAgentOptions, ExecutionMode, SessionController};
+fn queued_controller(work: &Path) -> std::sync::Arc<threadlane_coding_agent::controller::SessionController> {
+    use threadlane_coding_agent::controller::{ExecutionMode, SessionController};
+    use threadlane_coding_agent::CodingAgentOptions;
+    use threadlane_protocol::browser::BrowserBridge;
     let session_file = work.join(".threadlane/sessions/session_queue.jsonl");
     std::fs::create_dir_all(session_file.parent().unwrap()).unwrap();
     SessionController::new(
@@ -959,8 +961,8 @@ fn queued_controller(work: &Path) -> std::sync::Arc<threadlane_session::SessionC
 }
 
 fn queued_transcript(path: &Path) -> Vec<String> {
-    use threadlane_session::harness::{read_transcript_page, TranscriptItem};
-    use threadlane_session::AgentMessage;
+    use threadlane_runtime::harness::{read_transcript_page, TranscriptItem};
+    use threadlane_protocol::AgentMessage;
     read_transcript_page(path, None, 100)
         .unwrap()
         .items
@@ -1055,7 +1057,7 @@ async fn an_agent_without_an_effort_setting_still_runs() {
 
 #[tokio::test]
 async fn the_picker_lists_the_agents_settings_without_running_a_turn() {
-    use threadlane_session::{config_option_for, ACP_CONFIG_CATEGORY_MODEL};
+    use threadlane_acp::{config_option_for, ACP_CONFIG_CATEGORY_MODEL};
 
     let (_temp, mut engine) = setup("config");
     let (tx, _rx) = broadcast::channel(64);
@@ -1080,7 +1082,7 @@ async fn the_picker_lists_the_agents_settings_without_running_a_turn() {
 
 #[tokio::test]
 async fn the_effort_setting_is_hidden_from_the_picker() {
-    use threadlane_session::{config_option_for, ACP_CONFIG_CATEGORY_EFFORT};
+    use threadlane_acp::{config_option_for, ACP_CONFIG_CATEGORY_EFFORT};
 
     let (_temp, mut engine) = setup("config");
     let (tx, _rx) = broadcast::channel(64);
@@ -1105,7 +1107,7 @@ async fn the_effort_setting_is_hidden_from_the_picker() {
 
 #[tokio::test]
 async fn picking_a_setting_applies_it_on_the_agent() {
-    use threadlane_session::{config_option_for, ACP_CONFIG_CATEGORY_MODEL};
+    use threadlane_acp::{config_option_for, ACP_CONFIG_CATEGORY_MODEL};
 
     let (_temp, mut engine) = setup("config");
     let (tx, mut rx) = broadcast::channel(64);
@@ -1184,7 +1186,7 @@ async fn a_value_the_agent_does_not_offer_is_refused_rather_than_sent() {
 
 #[tokio::test]
 async fn a_control_label_is_the_option_name_not_its_description() {
-    use threadlane_session::{config_option_for, ACP_CONFIG_CATEGORY_MODE};
+    use threadlane_acp::{config_option_for, ACP_CONFIG_CATEGORY_MODE};
 
     let (_temp, mut engine) = setup("config");
     let (tx, _rx) = broadcast::channel(64);

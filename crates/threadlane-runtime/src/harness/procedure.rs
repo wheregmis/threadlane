@@ -4,7 +4,7 @@ use super::types::{
     CompactionReason, Entry, OperationIntent, OperationOutcome, ProvisionedEntry, QueueKind,
     Record, ToolResult, ToolSpec, UsageCause,
 };
-use crate::types::{AgentMessage, DeferredHandle, TokenUsage};
+use threadlane_protocol::{AgentMessage, DeferredHandle, TokenUsage};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProcedureError {

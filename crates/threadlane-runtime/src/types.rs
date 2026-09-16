@@ -1,14 +1,9 @@
 use serde::{Deserialize, Serialize};
+use threadlane_protocol::{AgentMessage, ReasoningEffort};
 
 // Message, plan, usage, and tool-result contract types live in
 // `threadlane-protocol` so provider, session, and UI layers share them
-// without depending on the runtime. They are re-exported here so existing
-// `threadlane_runtime::` and `crate::types::` paths keep working.
-pub use threadlane_protocol::{
-    AgentMessage, AgentToolCall, AgentToolDefinition, AgentToolResult, DeferredHandle,
-    ImageAttachment, OrchestratorMode, PlanItem, PlanItemStatus, ReasoningEffort, SessionPlan,
-    TokenUsage, ToolExecutor, ToolOutput,
-};
+// without depending on the runtime; import them from there directly.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
@@ -40,7 +35,7 @@ pub struct SubagentUsageSummary {
 /// Rich tool output: text plus optional model-visible images.
 /// Canonical in `threadlane_protocol::ToolOutput`; re-exported via the
 /// `threadlane_protocol::{... ToolOutput}` import above so existing
-/// `crate::types::ToolOutput` paths keep working.
+/// `threadlane_protocol::ToolOutput` paths keep working.
 ///
 /// `AgentToolResult` (the executed-outcome twin) is likewise canonical in
 /// `threadlane_protocol::messages` and re-exported above.
@@ -79,7 +74,7 @@ impl ModelRoles {
 /// Orchestration mode governing explicit /prewalk engagement.
 /// Canonical in `threadlane_protocol::OrchestratorMode`; re-exported via the
 /// `threadlane_protocol::{... OrchestratorMode}` import above so existing
-/// `crate::types::OrchestratorMode` paths keep working.
+/// `threadlane_protocol::OrchestratorMode` paths keep working.
 
 #[cfg(test)]
 mod model_role_tests {

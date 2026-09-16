@@ -2,15 +2,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender as Sender;
 
-use threadlane_session::harness::{JsonlStore, SessionStore};
-use threadlane_session::provider_client_for;
-use threadlane_session::{AgentEvent, ImageAttachment, ReasoningEffort};
+use threadlane_runtime::harness::{JsonlStore, SessionStore};
+use threadlane_coding_agent::credentials::provider_client_for;
+use threadlane_protocol::{AgentEvent, ImageAttachment, ReasoningEffort};
 
 use threadlane_session::SessionRuntime;
 use crate::ChatStreamEvent;
 
 pub fn executor() -> Result<&'static tokio::runtime::Runtime, String> {
-    Ok(threadlane_runtime::get_runtime())
+    Ok(threadlane_provider::exec::get_runtime())
 }
 
 struct RunCleanup {
@@ -256,7 +256,7 @@ fn spawn_acp_config_task<F, Fut>(
 ) -> Result<(), String>
 where
     F: FnOnce(Arc<SessionRuntime>) -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = Result<Vec<threadlane_session::AcpConfigOption>, String>>
+    Fut: std::future::Future<Output = Result<Vec<threadlane_acp::AcpConfigOption>, String>>
         + Send,
 {
     if runtime.is_generating() {
@@ -326,9 +326,9 @@ pub fn maybe_generate_session_title(
             // Title generation follows the selected model. Routing an ACP
             // model through ProviderClient would fall through to OpenAI and
             // fail with a 401, because an ACP agent has no provider key.
-            let raw = match threadlane_session::acp_agent_id(&model) {
+            let raw = match threadlane_acp_engine::acp_agent_id(&model) {
                 Some(agent_id) => {
-                    threadlane_session::acp_runtime::generate_title(
+                    threadlane_acp_engine::generate_title(
                         threadlane_project::default_global_threadlane_dir(),
                         work_dir,
                         agent_id,

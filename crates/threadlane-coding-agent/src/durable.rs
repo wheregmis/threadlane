@@ -8,6 +8,8 @@ use super::subagents::{
     run_subagent_task, subagent_workspace, SubagentLaneStatus, SubagentRunContext,
     NEXT_SUBAGENT_UI_RUN_ID,
 };
+use threadlane_compaction::CompactionParams;
+use threadlane_context::{context_budget, BudgetConfig};
 use threadlane_skills::agents::AgentDefinition;
 use crate::commands::{execute_slash_command, parse_slash_command};
 use log::warn;
@@ -21,7 +23,7 @@ use threadlane_runtime::harness::{
     HookContext, HookKind, JsonlStore, OperationOutcome, PromptSnapshot, Record as HarnessRecord,
     Reducer, SessionStore,
 };
-use threadlane_runtime::{AgentEvent, AgentMessage, AgentToolResult, SubagentRecoveryStatus};
+use threadlane_protocol::{AgentEvent, AgentMessage, AgentToolResult, SubagentRecoveryStatus};
 use tokio::sync::broadcast;
 
 pub const MAX_PERSISTED_SYSTEM_PROMPT_BYTES: usize = 256 * 1024;
@@ -115,14 +117,14 @@ pub fn requires_harness_compaction_reset(
 ) -> bool {
     state_messages
         .iter()
-        .any(|message| threadlane_runtime::compaction_summary_text(message).is_some())
+        .any(|message| threadlane_compaction::compaction_summary_text(message).is_some())
         && !state_messages.starts_with(durable_messages)
 }
 
 pub fn compaction_retained_tail(messages: &[AgentMessage]) -> Vec<AgentMessage> {
     let Some(summary_index) = messages
         .iter()
-        .rposition(|message| threadlane_runtime::compaction_summary_text(message).is_some())
+        .rposition(|message| threadlane_compaction::compaction_summary_text(message).is_some())
     else {
         return Vec::new();
     };
@@ -295,7 +297,7 @@ impl CodingAgent {
                                     &state.target_model,
                                     state.target_reasoning,
                                 ) {
-                                let _ = event_tx.send(threadlane_runtime::AgentEvent::PrewalkCompleted {
+                                let _ = event_tx.send(threadlane_protocol::AgentEvent::PrewalkCompleted {
                                     model: state.target_model.clone(),
                                     message: format!(
                                         "Prewalk: target `{}` already matches the active model and reasoning; nothing to switch.",
@@ -346,7 +348,7 @@ impl CodingAgent {
                     let effort_info = target_effort
                         .map(|e| format!(" with reasoning effort `{}`", e.label()))
                         .unwrap_or_default();
-                    let _ = event_tx.send(threadlane_runtime::AgentEvent::PrewalkCompleted {
+                    let _ = event_tx.send(threadlane_protocol::AgentEvent::PrewalkCompleted {
                         model: target_model.clone(),
                         message: format!(
                             "Prewalk complete: first `{action_name}` landed behind an opened todo gate. Switched model to `{target_model}`{effort_info}."
@@ -559,7 +561,7 @@ impl CodingAgent {
             .unwrap_or_default();
         let system_prompt = durable_prompt_snapshot(&self.agent.system_prompt());
         let context_window_limit = Some(
-            threadlane_runtime::model_metadata::context_budget(&model, self.agent.config()).limit,
+            context_budget(&model, &BudgetConfig::from(self.agent.config())).limit,
         );
         let work_dir = self.work_dir.to_string_lossy().into_owned();
         let Some(journal) = self.harness.as_mut() else {
@@ -713,8 +715,7 @@ impl CodingAgent {
                 })
                 .unwrap_or_default();
             let context_window_limit = Some(
-                threadlane_runtime::model_metadata::context_budget(&model, self.agent.config())
-                    .limit,
+                context_budget(&model, &BudgetConfig::from(self.agent.config())).limit,
             );
             journal.capture_run_context(
                 run_id,
@@ -831,13 +832,17 @@ impl CodingAgent {
         let summary = compacted
             .iter()
             .rev()
-            .find_map(threadlane_runtime::compaction_summary_text)
+            .find_map(threadlane_compaction::compaction_summary_text)
             .ok_or_else(|| "compaction produced no durable summary".to_string())?
             .to_owned();
         let retained_tail = compaction_retained_tail(&compacted);
         let config = self.agent.config().clone();
         let pre_tokens =
-            threadlane_runtime::compaction::estimate_request_tokens(&before, None, &config);
+            threadlane_compaction::estimate_request_tokens(
+                &before,
+                None,
+                &CompactionParams::from(&config),
+            );
         let compacted_messages = before
             .len()
             .saturating_sub(compacted.len().saturating_sub(1));
@@ -872,7 +877,11 @@ impl CodingAgent {
     ) -> Result<(), String> {
         let config = self.agent.config().clone();
         let retained_tail_tokens =
-            threadlane_runtime::compaction::estimate_request_tokens(retained_tail, None, &config);
+            threadlane_compaction::estimate_request_tokens(
+                retained_tail,
+                None,
+                &CompactionParams::from(&config),
+            );
         let model = self.agent.model().to_string();
         if let Some(journal) = self.harness.as_mut() {
             journal.ensure_fresh()?;
@@ -979,15 +988,15 @@ impl CodingAgent {
             if requires_harness_compaction_reset(&durable_messages, &state_messages) {
                 let summary = state_messages
                     .iter()
-                    .find_map(threadlane_runtime::compaction_summary_text)
+                    .find_map(threadlane_compaction::compaction_summary_text)
                     .expect("compaction reset requires a summary")
                     .to_owned();
                 let retained_tail = compaction_retained_tail(&state_messages);
                 let config = self.agent.config().clone();
-                let pre_tokens = threadlane_runtime::compaction::estimate_request_tokens(
+                let pre_tokens = threadlane_compaction::estimate_request_tokens(
                     &durable_messages,
                     None,
-                    &config,
+                    &CompactionParams::from(&config),
                 );
                 let compacted_messages = durable_messages
                     .len()

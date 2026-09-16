@@ -27,9 +27,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use threadlane_runtime::harness::HookKind;
 use threadlane_runtime::ToolPolicy;
-use threadlane_runtime::{
-    AgentEvent, AgentMessage, AgentRuntime, SubagentProgressUpdate, TurnState,
-};
+use threadlane_protocol::{AgentEvent, AgentMessage, SubagentProgressUpdate};
+use threadlane_runtime::{AgentRuntime, TurnState};
 use threadlane_wasi::WasiExtensionManager;
 use tokio::sync::broadcast;
 use tokio::time::{timeout, Duration};
@@ -125,7 +124,7 @@ pub struct SubagentRunContext {
     pub api_key: String,
     pub account_id: Option<String>,
     pub child_model: String,
-    pub child_reasoning_effort: threadlane_runtime::ReasoningEffort,
+    pub child_reasoning_effort: threadlane_protocol::ReasoningEffort,
     pub parent_session_id: String,
     pub work_dir: PathBuf,
     pub extensions: Arc<WasiExtensionManager>,
@@ -537,7 +536,7 @@ pub async fn run_subagents_with_context(
                         .ok()
                         .and_then(|workspace| workspace.as_ref())
                         .map(
-                            |(workspace, branch)| threadlane_runtime::SubagentIsolation {
+                            |(workspace, branch)| threadlane_protocol::SubagentIsolation {
                                 workspace: workspace.clone(),
                                 branch: branch.clone(),
                             },
@@ -1457,7 +1456,7 @@ mod result_tests {
             api_key: String::new(),
             account_id: None,
             child_model: "test-model".into(),
-            child_reasoning_effort: threadlane_runtime::ReasoningEffort::Medium,
+            child_reasoning_effort: threadlane_protocol::ReasoningEffort::Medium,
             parent_session_id: "parent".into(),
             work_dir,
             extensions: Arc::new(WasiExtensionManager::new()),
@@ -1977,7 +1976,7 @@ mod result_tests {
     fn subagent_ui_event_forwards_final_usage() {
         let event = subagent_ui_event(
             AgentEvent::AgentEnd {
-                usage: threadlane_runtime::TokenUsage {
+                usage: threadlane_protocol::TokenUsage {
                     input_tokens: 100,
                     output_tokens: 25,
                     total_tokens: 125,

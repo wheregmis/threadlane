@@ -1,5 +1,5 @@
 use gpui::SharedString;
-use threadlane_session::ImageAttachment;
+use threadlane_protocol::ImageAttachment;
 
 pub const INPUT_KEY_CONTEXT: &str = "Input";
 pub const SLASH_COMMAND_KEY_CONTEXT: &str = "SlashCommandMenu";
