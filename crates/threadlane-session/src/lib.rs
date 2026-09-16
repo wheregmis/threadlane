@@ -10,8 +10,6 @@ pub mod browser;
 pub mod commands;
 pub mod computer;
 pub mod config;
-pub mod config_dump;
-pub mod discovery;
 /// Project context discovery, canonical in `threadlane-prompt`.
 /// Re-exported here so existing `threadlane_session::context` paths keep
 /// working; new code should import `threadlane_prompt` directly.
@@ -25,10 +23,6 @@ pub mod mcp;
 /// working; new code should import `threadlane_orchestrator` directly.
 pub use threadlane_runtime::orchestrator;
 pub mod permission;
-pub mod process_environment;
-pub mod settings;
-pub mod subagent_settings;
-pub mod titles;
 /// Attached-project registry, canonical in `threadlane-project`.
 /// Re-exported here so existing `threadlane_session::project_registry` and
 /// `threadlane_session::ProjectRecord` paths keep working; new code should
@@ -125,6 +119,11 @@ pub use threadlane_skills::*;
 pub use threadlane_wasi::broker::*;
 pub use threadlane_wasi::packages::*;
 pub use threadlane_wasi::*;
+/// Legacy `settings` path: the extension/skill discovery helpers moved to
+/// `threadlane_wasi::settings` and `threadlane_skills::settings`. The plain
+/// path keeps resolving to the extension half; the explicit item wins over
+/// the two glob re-exports above.
+pub use threadlane_wasi::settings;
 
 /// Narrow adapters for cross-crate integration tests.
 #[cfg(feature = "test-support")]

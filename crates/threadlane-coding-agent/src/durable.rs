@@ -8,7 +8,7 @@ use super::subagents::{
     run_subagent_task, subagent_workspace, SubagentLaneStatus, SubagentRunContext,
     NEXT_SUBAGENT_UI_RUN_ID,
 };
-use crate::agents::AgentDefinition;
+use threadlane_skills::agents::AgentDefinition;
 use crate::commands::{execute_slash_command, parse_slash_command};
 use log::warn;
 use serde_json::Value;
@@ -24,9 +24,9 @@ use threadlane_runtime::harness::{
 use threadlane_runtime::{AgentEvent, AgentMessage, AgentToolResult, SubagentRecoveryStatus};
 use tokio::sync::broadcast;
 
-pub(crate) const MAX_PERSISTED_SYSTEM_PROMPT_BYTES: usize = 256 * 1024;
+pub const MAX_PERSISTED_SYSTEM_PROMPT_BYTES: usize = 256 * 1024;
 
-pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+pub fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
@@ -54,7 +54,7 @@ mod prewalk_tests {
     }
 }
 
-pub(crate) fn durable_prompt_snapshot(content: &str) -> PromptSnapshot {
+pub fn durable_prompt_snapshot(content: &str) -> PromptSnapshot {
     let sha256 = threadlane_runtime::harness::TraceString::new(sha256_hex(content.as_bytes()))
         .expect("sha256 digest is bounded");
     let explicitly_redacted = std::env::var("THREADLANE_REDACT_SYSTEM_PROMPTS")
@@ -80,7 +80,7 @@ pub(crate) fn durable_prompt_snapshot(content: &str) -> PromptSnapshot {
     }
 }
 
-pub(crate) fn is_retryable_generation_error(error: &str) -> bool {
+pub fn is_retryable_generation_error(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
     [
         "timeout",
@@ -98,7 +98,7 @@ pub(crate) fn is_retryable_generation_error(error: &str) -> bool {
     .any(|marker| error.contains(marker))
 }
 
-pub(crate) fn generation_event_drain_error(
+pub fn generation_event_drain_error(
     error: broadcast::error::TryRecvError,
 ) -> Option<&'static str> {
     match error {
@@ -109,7 +109,7 @@ pub(crate) fn generation_event_drain_error(
     }
 }
 
-pub(crate) fn requires_harness_compaction_reset(
+pub fn requires_harness_compaction_reset(
     durable_messages: &[AgentMessage],
     state_messages: &[AgentMessage],
 ) -> bool {
@@ -119,7 +119,7 @@ pub(crate) fn requires_harness_compaction_reset(
         && !state_messages.starts_with(durable_messages)
 }
 
-pub(crate) fn compaction_retained_tail(messages: &[AgentMessage]) -> Vec<AgentMessage> {
+pub fn compaction_retained_tail(messages: &[AgentMessage]) -> Vec<AgentMessage> {
     let Some(summary_index) = messages
         .iter()
         .rposition(|message| threadlane_runtime::compaction_summary_text(message).is_some())
@@ -374,7 +374,7 @@ impl CodingAgent {
         Ok(())
     }
 
-    pub(crate) async fn execute_accepted_run(
+    pub async fn execute_accepted_run(
         &mut self,
         accepted: &threadlane_runtime::harness::AcceptedRun,
     ) -> Result<(), String> {
@@ -479,14 +479,14 @@ impl CodingAgent {
         Ok(())
     }
 
-    pub(crate) async fn begin_harness_run(
+    pub async fn begin_harness_run(
         &mut self,
         prompt: AgentMessage,
     ) -> Result<Option<threadlane_runtime::harness::AcceptedRun>, String> {
         self.begin_harness_run_with_queue(prompt, None).await
     }
 
-    pub(crate) async fn begin_harness_run_with_queue(
+    pub async fn begin_harness_run_with_queue(
         &mut self,
         prompt: AgentMessage,
         queued: Option<(threadlane_runtime::harness::QueueKind, &str)>,
@@ -504,7 +504,7 @@ impl CodingAgent {
         let model = self.agent.model().to_string();
         // The router has no ACP branch and would label an ACP run as an
         // OpenAI one, which makes the trajectory misreport what actually ran.
-        let provider = if crate::acp_bridge::is_acp_model(&model) {
+        let provider = if threadlane_acp_engine::is_acp_model(&model) {
             "acp".to_string()
         } else {
             self.agent
@@ -618,7 +618,7 @@ impl CodingAgent {
         Ok(Some(accepted))
     }
 
-    pub(crate) fn adopt_harness_run(
+    pub fn adopt_harness_run(
         &mut self,
         accepted: &threadlane_runtime::harness::AcceptedRun,
     ) -> Result<(), String> {
@@ -744,7 +744,7 @@ impl CodingAgent {
         Ok(())
     }
 
-    pub(crate) async fn finish_harness_run(
+    pub async fn finish_harness_run(
         &mut self,
         run_id: Option<&str>,
         outcome: OperationOutcome,
@@ -804,14 +804,14 @@ impl CodingAgent {
         result
     }
 
-    pub(crate) fn append_command_message(&mut self, message: AgentMessage) -> Result<(), String> {
+    pub fn append_command_message(&mut self, message: AgentMessage) -> Result<(), String> {
         if let Some(journal) = self.harness.as_mut() {
             journal.append_message(message)?;
         }
         Ok(())
     }
 
-    pub(crate) fn prompt_parent_leaf(
+    pub fn prompt_parent_leaf(
         &mut self,
         _message: AgentMessage,
         _harness_persisted: bool,
@@ -822,7 +822,7 @@ impl CodingAgent {
         })
     }
 
-    pub(crate) async fn compact_history_with_harness(&mut self) -> Result<bool, String> {
+    pub async fn compact_history_with_harness(&mut self) -> Result<bool, String> {
         let before = self.agent.messages().await;
         let compacted = self.agent.preview_compact_history(None).await;
         if compacted == before {
@@ -863,7 +863,7 @@ impl CodingAgent {
         Ok(true)
     }
 
-    pub(crate) fn persist_harness_compaction(
+    pub fn persist_harness_compaction(
         &mut self,
         summary: &str,
         retained_tail: &[AgentMessage],
@@ -902,7 +902,7 @@ impl CodingAgent {
         Ok(())
     }
 
-    pub(crate) async fn sync_turn_from_model_context(&self) -> Result<(), String> {
+    pub async fn sync_turn_from_model_context(&self) -> Result<(), String> {
         let Some(harness) = self.harness.as_ref() else {
             return Ok(());
         };
@@ -917,7 +917,7 @@ impl CodingAgent {
         Ok(())
     }
 
-    pub(crate) async fn sync_session_history(&mut self) {
+    pub async fn sync_session_history(&mut self) {
         if self.harness.is_some() {
             if let Err(error) = self.sync_turn_from_model_context().await {
                 warn!("Failed to project canonical model context: {error}");
@@ -925,7 +925,7 @@ impl CodingAgent {
         }
     }
 
-    pub(crate) async fn dispatch_assistant_hook(&self, message: &AgentMessage) {
+    pub async fn dispatch_assistant_hook(&self, message: &AgentMessage) {
         let AgentMessage::Assistant {
             content,
             tool_calls,
@@ -959,7 +959,7 @@ impl CodingAgent {
         .await;
     }
 
-    pub(crate) async fn sync_harness_and_dispatch_assistant_hooks(&mut self) {
+    pub async fn sync_harness_and_dispatch_assistant_hooks(&mut self) {
         let messages = self.agent.messages().await;
         let state_messages: Vec<AgentMessage> = messages
             .into_iter()
@@ -1027,7 +1027,7 @@ impl CodingAgent {
         }
     }
 
-    pub(crate) fn commit_completed_subagent_lanes(&mut self) -> Result<(), String> {
+    pub fn commit_completed_subagent_lanes(&mut self) -> Result<(), String> {
         let lanes = {
             let mut completed = self
                 .completed_subagent_lanes
@@ -1090,7 +1090,7 @@ impl CodingAgent {
         Ok(())
     }
 
-    pub(crate) async fn recover_interrupted_subagent_lanes(&mut self) -> Result<usize, String> {
+    pub async fn recover_interrupted_subagent_lanes(&mut self) -> Result<usize, String> {
         match &self.interrupted_subagent_recovery {
             InterruptedSubagentRecoveryState::Complete => return Ok(0),
             InterruptedSubagentRecoveryState::Pending => {}
@@ -1381,7 +1381,7 @@ impl CodingAgent {
                     model: None,
                     system_prompt: "Resume the interrupted child task from its durable checkpoint."
                         .into(),
-                    source: crate::agents::AgentSource::Project,
+                    source: threadlane_skills::agents::AgentSource::Project,
                     file_path: self.work_dir.clone(),
                 },
                 lane.task.clone(),
@@ -1471,7 +1471,7 @@ impl CodingAgent {
         Ok(recovered)
     }
 
-    pub(crate) async fn replay_safe_tools(
+    pub async fn replay_safe_tools(
         &self,
         records: &[threadlane_runtime::Record],
     ) -> Vec<AgentToolResult> {

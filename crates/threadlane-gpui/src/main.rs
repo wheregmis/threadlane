@@ -1,16 +1,19 @@
 use gpui::*;
 use gpui_component::Root;
+use threadlane_coding_agent::config_dump::dump_config;
 use threadlane_ui_chat::init as init_chat;
 use threadlane_ui_theme::{init as init_theme, Assets};
 use threadlane_ui_workspace::{init as init_workspace, WorkspaceView};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+mod process_environment;
+
 #[hotpath::main]
 fn main() {
     let args = std::env::args().collect::<Vec<_>>();
-    threadlane_session::process_environment::initialize_child_process_path();
+    process_environment::initialize_child_process_path();
     if args.iter().any(|arg| arg == "--dump-config") {
-        if let Err(error) = threadlane_session::config_dump::dump_config(&args) {
+        if let Err(error) = dump_config(&args) {
             eprintln!("--dump-config: {error}");
             std::process::exit(2);
         }

@@ -12,7 +12,7 @@ use threadlane_runtime::{AgentMessage, AgentRuntime, ImageAttachment};
 use threadlane_runtime::{AgentToolDefinition, ToolExecutor};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum AgentWork {
+pub enum AgentWork {
     DurableQueueWake {
         queue: QueueKind,
         entry_id: String,
@@ -28,11 +28,11 @@ pub(crate) enum AgentWork {
 }
 
 #[cfg(test)]
-pub(crate) type AgentWorkObserver = Arc<std::sync::Mutex<Vec<AgentWork>>>;
+pub type AgentWorkObserver = Arc<std::sync::Mutex<Vec<AgentWork>>>;
 #[cfg(test)]
-pub(crate) type SubagentObserverState = Arc<std::sync::Mutex<Option<AgentWorkObserver>>>;
+pub type SubagentObserverState = Arc<std::sync::Mutex<Option<AgentWorkObserver>>>;
 #[cfg(test)]
-pub(crate) type SubagentBoundaryObserver = Arc<dyn Fn() + Send + Sync>;
+pub type SubagentBoundaryObserver = Arc<dyn Fn() + Send + Sync>;
 
 fn enqueue_harness_queue(
     session_file: &Path,
@@ -44,7 +44,7 @@ fn enqueue_harness_queue(
     harness.enqueue_unbound_with_images(queue, content, images)
 }
 
-pub(crate) fn enqueue_harness_follow_up(
+pub fn enqueue_harness_follow_up(
     session_file: &Path,
     content: String,
     images: Vec<ImageAttachment>,
@@ -53,7 +53,7 @@ pub(crate) fn enqueue_harness_follow_up(
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct AgentWorkScheduler {
+pub struct AgentWorkScheduler {
     pending: Arc<std::sync::Mutex<VecDeque<AgentWork>>>,
     acp_model: Arc<AtomicBool>,
     #[cfg(test)]
@@ -61,7 +61,7 @@ pub(crate) struct AgentWorkScheduler {
 }
 
 impl AgentWorkScheduler {
-    pub(crate) fn schedule(&self, work: AgentWork) {
+    pub fn schedule(&self, work: AgentWork) {
         if let Ok(mut pending) = self.pending.lock() {
             pending.push_back(work);
         }
@@ -74,28 +74,28 @@ impl AgentWorkScheduler {
             .unwrap_or_default()
     }
 
-    pub(crate) fn set_acp_model(&self, is_acp: bool) {
+    pub fn set_acp_model(&self, is_acp: bool) {
         self.acp_model.store(is_acp, Ordering::SeqCst);
     }
 
-    pub(crate) fn next(&self) -> Option<AgentWork> {
+    pub fn next(&self) -> Option<AgentWork> {
         self.pending.lock().ok()?.front().cloned()
     }
 
-    pub(crate) fn finish_next(&self) {
+    pub fn finish_next(&self) {
         if let Ok(mut pending) = self.pending.lock() {
             pending.pop_front();
         }
     }
 
     #[cfg(test)]
-    pub(crate) fn set_test_observer(&self, observer: Arc<std::sync::Mutex<Vec<AgentWork>>>) {
+    pub fn set_test_observer(&self, observer: Arc<std::sync::Mutex<Vec<AgentWork>>>) {
         if let Ok(mut current) = self.test_observer.lock() {
             *current = Some(observer);
         }
     }
 
-    pub(crate) async fn run_executor(
+    pub async fn run_executor(
         &self,
         agent: &mut AgentRuntime,
         session_file: Option<&Path>,
@@ -138,8 +138,8 @@ impl AgentWorkScheduler {
 }
 
 #[cfg(test)]
-pub(crate) struct DeterministicSubagentToolExecutor {
-    pub(crate) observed: Arc<AtomicBool>,
+pub struct DeterministicSubagentToolExecutor {
+    pub observed: Arc<AtomicBool>,
 }
 
 #[cfg(test)]
@@ -174,7 +174,7 @@ pub struct CodingAgentWorkHandle {
 }
 
 impl CodingAgentWorkHandle {
-    pub(crate) fn new(scheduler: AgentWorkScheduler, session_file: Option<PathBuf>) -> Self {
+    pub fn new(scheduler: AgentWorkScheduler, session_file: Option<PathBuf>) -> Self {
         Self {
             scheduler,
             session_file,

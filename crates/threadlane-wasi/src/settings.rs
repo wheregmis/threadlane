@@ -1,15 +1,22 @@
-use crate::{
-    default_global_threadlane_dir, ExtensionManager, ExtensionRecord, ExtensionScope, SkillManager,
-    SkillMetadata, SkillSettings,
-};
+//! Extension inventory settings for host applications.
+//!
+//! Thin wrappers over [`ExtensionManager`] scoping every operation to an
+//! optional project root: global `~/.threadlane` state plus the project's
+//! own `.threadlane` overlay.
+
 use std::path::{Path, PathBuf};
+
+use crate::packages::{ExtensionManager, ExtensionRecord, ExtensionScope};
+use threadlane_project::default_global_threadlane_dir;
 
 fn extension_manager(project_root: Option<PathBuf>) -> ExtensionManager {
     ExtensionManager::new(default_global_threadlane_dir(), project_root)
 }
+
 pub fn discover_extensions(project_root: Option<PathBuf>) -> Vec<ExtensionRecord> {
     extension_manager(project_root).discover()
 }
+
 pub fn install_extension(
     project_root: Option<PathBuf>,
     source: &Path,
@@ -22,6 +29,7 @@ pub fn install_extension(
         record.version()
     ))
 }
+
 pub fn set_extension_enabled(
     project_root: Option<PathBuf>,
     target: &ExtensionRecord,
@@ -39,6 +47,7 @@ pub fn set_extension_enabled(
         .ok_or_else(|| "Extension inventory changed. Please try again.".to_string())?;
     manager.set_enabled(&current, enabled)
 }
+
 pub fn remove_extension(
     project_root: Option<PathBuf>,
     target: &ExtensionRecord,
@@ -54,19 +63,4 @@ pub fn remove_extension(
         })
         .ok_or_else(|| "Extension inventory changed. Please try again.".to_string())?;
     manager.remove(&current)
-}
-pub fn discover_skills(project_root: Option<&Path>) -> Vec<SkillMetadata> {
-    let mut manager = SkillManager::new();
-    manager.discover_skills(project_root);
-    manager.list_skills()
-}
-pub fn set_skill_enabled(project_root: &Path, skill_id: &str, enabled: bool) -> Result<(), String> {
-    SkillSettings::load(project_root).set_enabled(project_root, skill_id, enabled)
-}
-pub fn disable_all_skills(
-    project_root: &Path,
-    skill_ids: impl IntoIterator<Item = String>,
-) -> Result<(), String> {
-    let mut settings = SkillSettings::load(project_root);
-    settings.disable_all(project_root, skill_ids)
 }

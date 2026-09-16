@@ -634,7 +634,7 @@ impl SettingsView {
         let Some(project) = state.active_work_dir.clone() else {
             return Self::empty_state("Attach a project to configure subagents.", theme);
         };
-        let preferences = threadlane_session::subagent_settings::load(&project);
+        let preferences = threadlane_runtime::subagent_settings::load(&project);
         let available = threadlane_ui_catalog::available_models_for_project(Some(&project));
         let selected_model = preferences.model.clone();
         let reasoning_model = selected_model
@@ -683,9 +683,9 @@ impl SettingsView {
                             .checked(selected_model.is_none())
                             .on_click(move |_, _, cx| {
                                 let mut settings =
-                                    threadlane_session::subagent_settings::load(&project_for_parent);
+                                    threadlane_runtime::subagent_settings::load(&project_for_parent);
                                 settings.model = None;
-                                if threadlane_session::subagent_settings::save(
+                                if threadlane_runtime::subagent_settings::save(
                                     &project_for_parent,
                                     &settings,
                                 )
@@ -713,9 +713,9 @@ impl SettingsView {
                                 .checked(is_current)
                                 .on_click(move |_, _, cx| {
                                     let mut settings =
-                                        threadlane_session::subagent_settings::load(&project);
+                                        threadlane_runtime::subagent_settings::load(&project);
                                     settings.model = Some(option.id.clone());
-                                    if threadlane_session::subagent_settings::save(&project, &settings)
+                                    if threadlane_runtime::subagent_settings::save(&project, &settings)
                                         .is_ok()
                                     {
                                         model_entity.update(cx, |state, cx| {
@@ -757,9 +757,9 @@ impl SettingsView {
                         )
                         .checked(selected_reasoning == effort)
                         .on_click(move |_, _, cx| {
-                            let mut settings = threadlane_session::subagent_settings::load(&project);
+                            let mut settings = threadlane_runtime::subagent_settings::load(&project);
                             settings.reasoning_effort = effort;
-                            if threadlane_session::subagent_settings::save(&project, &settings).is_ok()
+                            if threadlane_runtime::subagent_settings::save(&project, &settings).is_ok()
                             {
                                 entity.update(cx, |state, cx| {
                                     state.invalidate_capability_runtimes();
@@ -795,9 +795,9 @@ impl SettingsView {
                             .checked(selected_fast_model.is_none())
                             .on_click(move |_, _, cx| {
                                 let mut settings =
-                                    threadlane_session::subagent_settings::load(&project_for_parent);
+                                    threadlane_runtime::subagent_settings::load(&project_for_parent);
                                 settings.fast_model = None;
-                                if threadlane_session::subagent_settings::save(
+                                if threadlane_runtime::subagent_settings::save(
                                     &project_for_parent,
                                     &settings,
                                 )
@@ -825,9 +825,9 @@ impl SettingsView {
                                 .checked(is_current)
                                 .on_click(move |_, _, cx| {
                                     let mut settings =
-                                        threadlane_session::subagent_settings::load(&project);
+                                        threadlane_runtime::subagent_settings::load(&project);
                                     settings.fast_model = Some(option.id.clone());
-                                    if threadlane_session::subagent_settings::save(&project, &settings)
+                                    if threadlane_runtime::subagent_settings::save(&project, &settings)
                                         .is_ok()
                                     {
                                         model_entity.update(cx, |state, cx| {
@@ -878,9 +878,9 @@ impl SettingsView {
                         )
                         .checked(selected_fast_reasoning == effort)
                         .on_click(move |_, _, cx| {
-                            let mut settings = threadlane_session::subagent_settings::load(&project);
+                            let mut settings = threadlane_runtime::subagent_settings::load(&project);
                             settings.fast_reasoning_effort = effort;
-                            if threadlane_session::subagent_settings::save(&project, &settings).is_ok()
+                            if threadlane_runtime::subagent_settings::save(&project, &settings).is_ok()
                             {
                                 entity.update(cx, |state, cx| {
                                     state.invalidate_capability_runtimes();
@@ -910,9 +910,9 @@ impl SettingsView {
                     let entity = entity.clone();
                     let project = project.clone();
                     menu.item(PopupMenuItem::new(mode.label()).on_click(move |_, _, cx| {
-                        let mut settings = threadlane_session::subagent_settings::load(&project);
+                        let mut settings = threadlane_runtime::subagent_settings::load(&project);
                         settings.orchestrator_mode = mode;
-                        if threadlane_session::subagent_settings::save(&project, &settings).is_ok() {
+                        if threadlane_runtime::subagent_settings::save(&project, &settings).is_ok() {
                             entity.update(cx, |state, cx| {
                                 state.invalidate_capability_runtimes();
                                 cx.notify();

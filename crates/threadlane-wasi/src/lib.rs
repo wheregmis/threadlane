@@ -1,5 +1,6 @@
 pub mod broker;
 pub mod packages;
+pub mod settings;
 
 pub use broker::*;
 pub(crate) use packages::validate_extension_id;

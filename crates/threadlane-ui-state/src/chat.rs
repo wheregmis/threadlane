@@ -372,7 +372,7 @@ pub fn maybe_generate_session_title(
     });
 }
 
-use threadlane_session::titles::normalize_session_title;
+    use threadlane_runtime::titles::normalize_session_title;
 
 pub fn cancel_prompt(
     runtime: Arc<SessionRuntime>,
@@ -396,7 +396,7 @@ pub fn cancel_prompt(
 
 #[cfg(test)]
 mod tests {
-    use threadlane_session::titles::normalize_session_title;
+use threadlane_runtime::titles::normalize_session_title;
 
     #[test]
     fn title_normalization_matches_native_behavior() {

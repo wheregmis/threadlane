@@ -8248,6 +8248,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "threadlane-acp-engine"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "threadlane-acp",
+ "threadlane-permission",
+ "threadlane-project",
+ "threadlane-runtime",
+ "threadlane-tools",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "threadlane-auth"
 version = "0.1.0"
 dependencies = [
@@ -8284,6 +8300,39 @@ dependencies = [
  "serde_json",
  "threadlane-protocol",
  "tokio",
+]
+
+[[package]]
+name = "threadlane-coding-agent"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "log",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "threadlane-acp",
+ "threadlane-acp-engine",
+ "threadlane-auth",
+ "threadlane-browser",
+ "threadlane-computer",
+ "threadlane-git",
+ "threadlane-mcp",
+ "threadlane-permission",
+ "threadlane-project",
+ "threadlane-prompt",
+ "threadlane-protocol",
+ "threadlane-provider",
+ "threadlane-question",
+ "threadlane-runtime",
+ "threadlane-skills",
+ "threadlane-tools",
+ "threadlane-wasi",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -8340,7 +8389,7 @@ dependencies = [
  "gpui-pre",
  "gpui-pre-platform",
  "hotpath",
- "threadlane-session",
+ "threadlane-coding-agent",
  "threadlane-ui-chat",
  "threadlane-ui-theme",
  "threadlane-ui-workspace",
@@ -8509,8 +8558,10 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "threadlane-acp",
+ "threadlane-acp-engine",
  "threadlane-auth",
  "threadlane-browser",
+ "threadlane-coding-agent",
  "threadlane-computer",
  "threadlane-git",
  "threadlane-mcp",
@@ -8522,6 +8573,7 @@ dependencies = [
  "threadlane-question",
  "threadlane-runtime",
  "threadlane-skills",
+ "threadlane-supervisor",
  "threadlane-tools",
  "threadlane-wasi",
  "tokio",
@@ -8536,6 +8588,23 @@ dependencies = [
  "serde_yaml",
  "tempfile",
  "threadlane-project",
+]
+
+[[package]]
+name = "threadlane-supervisor"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "threadlane-coding-agent",
+ "threadlane-project",
+ "threadlane-protocol",
+ "threadlane-provider",
+ "threadlane-runtime",
+ "threadlane-wasi",
+ "tokio",
 ]
 
 [[package]]
@@ -8695,6 +8764,7 @@ dependencies = [
  "threadlane-tools",
  "threadlane-ui-catalog",
  "threadlane-updater",
+ "threadlane-wasi",
  "tokio",
  "tracing",
 ]

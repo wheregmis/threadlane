@@ -1,5 +1,5 @@
-use crate::browser::BrowserBridge;
-use crate::system_prompt::SystemPromptConfig;
+use threadlane_protocol::browser::BrowserBridge;
+use threadlane_prompt::SystemPromptConfig;
 use serde::Serialize;
 use std::path::PathBuf;
 use threadlane_skills::SkillRegistry;
@@ -16,7 +16,7 @@ pub struct CodingAgentOptions {
     /// Agent-level configuration (compaction, stream rules, etc.).
     pub agent_config: Option<threadlane_runtime::AgentConfig>,
     /// Coding-agent-specific configuration (subagents, WASI, etc.).
-    pub coding_config: Option<crate::config::CodingAgentConfig>,
+    pub coding_config: Option<threadlane_runtime::config::CodingAgentConfig>,
     /// Handle to the embedded browser panel. Unavailable in headless/test
     /// contexts; the browser tools then report a helpful error.
     pub browser: BrowserBridge,

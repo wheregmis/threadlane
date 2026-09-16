@@ -8,7 +8,7 @@ use crate::types::{
 };
 use crate::AppState;
 
-pub use threadlane_session::titles::extract_session_title;
+pub use threadlane_runtime::titles::extract_session_title;
 
 #[cfg(test)]
 pub fn load_session_messages(session_file: &Path) -> Vec<ChatMessageInfo> {
@@ -279,7 +279,7 @@ pub fn coding_agent_options(
     let (api_key, account_id) = threadlane_session::provider_credentials(&model);
     let mut agent_config = threadlane_session::AgentConfig::default();
     agent_config.model_roles = model_roles;
-    let subagent_settings = threadlane_session::subagent_settings::load(&work_dir);
+    let subagent_settings = threadlane_runtime::subagent_settings::load(&work_dir);
     agent_config.subagent_model = subagent_settings.model;
     agent_config.subagent_reasoning_effort = subagent_settings.reasoning_effort;
     if agent_config.model_roles.fast.is_none() {

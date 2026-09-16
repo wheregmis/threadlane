@@ -2,9 +2,11 @@ use std::path::PathBuf;
 use tokio::sync::mpsc::UnboundedSender as Sender;
 
 use threadlane_project::default_global_threadlane_dir;
-pub use threadlane_session::settings::{
-    disable_all_skills, discover_extensions, discover_skills, install_extension, remove_extension,
-    set_extension_enabled, set_skill_enabled,
+pub use threadlane_skills::settings::{
+    disable_all_skills, discover_skills, set_skill_enabled,
+};
+pub use threadlane_wasi::settings::{
+    discover_extensions, install_extension, remove_extension, set_extension_enabled,
 };
 pub use threadlane_session::ACP_PRESETS;
 pub use threadlane_session::{

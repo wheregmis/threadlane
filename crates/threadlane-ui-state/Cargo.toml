@@ -20,16 +20,16 @@ threadlane-protocol.workspace = true
 threadlane-provider.workspace = true
 threadlane-runtime.workspace = true
 threadlane-session.workspace = true
-threadlane-skills = { workspace = true, optional = true }
+threadlane-skills.workspace = true
 threadlane-tools.workspace = true
 threadlane-ui-catalog.workspace = true
 threadlane-updater.workspace = true
+threadlane-wasi.workspace = true
 
 [features]
 test-support = [
     "dep:async-trait",
     "dep:tempfile",
-    "dep:threadlane-skills",
     "threadlane-session/test-support",
 ]
 

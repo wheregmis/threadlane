@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use super::context_snapshots::{
     compacted_context_snapshot_index_for_sources, is_local_path, read_file_request,
 };
-use crate::permission::PermissionTraceEvent;
+use threadlane_permission::PermissionTraceEvent;
 use threadlane_runtime::compaction::{
     compact_for_budget, estimate_request_tokens, PreparedCompaction,
 };
@@ -55,7 +55,7 @@ impl HarnessWatch {
         &self.subscription.snapshot
     }
 
-    pub(crate) async fn wait(&mut self) -> Result<Vec<HarnessEvent>, EventError> {
+    pub async fn wait(&mut self) -> Result<Vec<HarnessEvent>, EventError> {
         self.hub.wait(&mut self.subscription).await
     }
 }
@@ -90,31 +90,31 @@ fn harness_hook_registry(path: &Path) -> HookRegistry {
     harness_session_entry(path).hooks
 }
 
-pub(crate) fn harness_cancellation_state(path: &Path) -> Arc<AtomicBool> {
+pub fn harness_cancellation_state(path: &Path) -> Arc<AtomicBool> {
     harness_session_entry(path).cancellation
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SubagentLaneIdentity {
-    pub(crate) lane_name: String,
-    pub(crate) run_id: String,
-    pub(crate) source_leaf_id: Option<String>,
-    pub(crate) started_seq: u64,
+pub struct SubagentLaneIdentity {
+    pub lane_name: String,
+    pub run_id: String,
+    pub source_leaf_id: Option<String>,
+    pub started_seq: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct StartedSubagentLane {
-    pub(crate) identity: SubagentLaneIdentity,
+pub struct StartedSubagentLane {
+    pub identity: SubagentLaneIdentity,
     accepted: AcceptedRun,
 }
 
 #[derive(Debug)]
-pub(crate) struct SubagentStartError {
-    pub(crate) identity: Option<SubagentLaneIdentity>,
-    pub(crate) error: String,
+pub struct SubagentStartError {
+    pub identity: Option<SubagentLaneIdentity>,
+    pub error: String,
 }
 
-pub(crate) use threadlane_runtime::AcceptedRun;
+pub use threadlane_runtime::AcceptedRun;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InterruptedSubagentRecoveryState {
@@ -128,12 +128,12 @@ pub enum InterruptedSubagentRecoveryState {
 /// there is no second persistence path.
 #[allow(dead_code)]
 pub struct CodingSessionHarness {
-    pub(crate) store: AgentHarness<JsonlStore>,
-    pub(crate) session_path: PathBuf,
-    pub(crate) main_lane_name: String,
-    pub(crate) events: HarnessEventHub,
-    pub(crate) hooks: HookRegistry,
-    pub(crate) cancellation: Arc<AtomicBool>,
+    pub store: AgentHarness<JsonlStore>,
+    pub session_path: PathBuf,
+    pub main_lane_name: String,
+    pub events: HarnessEventHub,
+    pub hooks: HookRegistry,
+    pub cancellation: Arc<AtomicBool>,
 }
 
 fn boundary_result(
@@ -160,7 +160,7 @@ impl CodingSessionHarness {
 
     /// Open or create the JSONL session at `path` and build a canonical
     /// harness adapter.
-    pub(crate) fn open(path: &Path) -> Result<Self, String> {
+    pub fn open(path: &Path) -> Result<Self, String> {
         if !path.exists() {
             fs::OpenOptions::new()
                 .create(true)
@@ -202,7 +202,7 @@ impl CodingSessionHarness {
 
     /// Reloads the durable store only when another writer has appended
     /// (cheap file-length probe), instead of unconditionally reparsing.
-    pub(crate) fn ensure_fresh(&mut self) -> Result<(), String> {
+    pub fn ensure_fresh(&mut self) -> Result<(), String> {
         self.store
             .store_mut()
             .ensure_fresh()
@@ -239,11 +239,11 @@ impl CodingSessionHarness {
         })
     }
 
-    pub(crate) fn append_message_to_path(path: &Path, message: AgentMessage) -> Result<(), String> {
+    pub fn append_message_to_path(path: &Path, message: AgentMessage) -> Result<(), String> {
         Self::with_path(path, |journal| journal.append_message(message).map(|_| ()))
     }
 
-    pub(crate) fn index_read_snapshot(
+    pub fn index_read_snapshot(
         &mut self,
         run_id: &str,
         work_dir: &Path,
@@ -360,7 +360,7 @@ impl CodingSessionHarness {
         Ok(Some(context_id))
     }
 
-    pub(crate) fn context_snapshots(
+    pub fn context_snapshots(
         &self,
         lane: &str,
     ) -> Vec<threadlane_runtime::harness::ContextSnapshot> {
@@ -370,7 +370,7 @@ impl CodingSessionHarness {
             .unwrap_or_default()
     }
 
-    pub(crate) async fn record_context_snapshot_load_to_path(
+    pub async fn record_context_snapshot_load_to_path(
         path: &Path,
         context_id: &str,
         source_lane: &str,
@@ -422,7 +422,7 @@ impl CodingSessionHarness {
         .map_err(|error| error.to_string())?
     }
 
-    pub(crate) fn capture_run_context(
+    pub fn capture_run_context(
         &mut self,
         run_id: &str,
         lane: &str,
@@ -621,7 +621,7 @@ impl CodingSessionHarness {
             .unwrap_or(0)
     }
 
-    pub(crate) fn compaction_summary_without_indexed_tool_outputs(
+    pub fn compaction_summary_without_indexed_tool_outputs(
         &self,
         summary: &str,
         compacted_messages: usize,
@@ -651,7 +651,7 @@ impl CodingSessionHarness {
         )
     }
 
-    pub(crate) fn context_snapshot_index_for_compaction(
+    pub fn context_snapshot_index_for_compaction(
         &self,
         compacted_messages: usize,
     ) -> Result<Vec<Value>, String> {
@@ -669,7 +669,7 @@ impl CodingSessionHarness {
         ))
     }
 
-    pub(crate) fn checkpoint_open_run_compaction(
+    pub fn checkpoint_open_run_compaction(
         &mut self,
         run_id: &str,
         summary: &str,
@@ -796,7 +796,7 @@ impl CodingSessionHarness {
         result
     }
 
-    pub(crate) fn record_manual_compaction(
+    pub fn record_manual_compaction(
         &mut self,
         run_id: &str,
         model: &str,
@@ -838,7 +838,7 @@ impl CodingSessionHarness {
         self.store.store().transcript(lane)
     }
 
-    pub(crate) fn record_provider_trace_to_path(
+    pub fn record_provider_trace_to_path(
         path: &Path,
         run_id: &str,
         event: ProviderTraceEvent,
@@ -846,7 +846,7 @@ impl CodingSessionHarness {
         Self::with_path(path, |journal| journal.record_provider_trace(run_id, event))
     }
 
-    pub(crate) fn record_provider_trace(
+    pub fn record_provider_trace(
         &mut self,
         run_id: &str,
         event: ProviderTraceEvent,
@@ -1023,7 +1023,7 @@ impl CodingSessionHarness {
             .map_err(|error| error.to_string())
     }
 
-    pub(crate) fn record_permission_trace_to_path(
+    pub fn record_permission_trace_to_path(
         path: &Path,
         run_id: Option<&str>,
         event: PermissionTraceEvent,
@@ -1033,7 +1033,7 @@ impl CodingSessionHarness {
         })
     }
 
-    pub(crate) fn record_permission_trace(
+    pub fn record_permission_trace(
         &mut self,
         run_id: Option<&str>,
         event: PermissionTraceEvent,
@@ -1093,7 +1093,7 @@ impl CodingSessionHarness {
             .map_err(|error| error.to_string())
     }
 
-    pub(crate) async fn record_tool_execution_to_path(
+    pub async fn record_tool_execution_to_path(
         path: &Path,
         run_id: &str,
         event: ToolExecutionTraceEvent,
@@ -1102,7 +1102,7 @@ impl CodingSessionHarness {
         journal.record_tool_execution(run_id, event).await
     }
 
-    pub(crate) async fn record_tool_execution(
+    pub async fn record_tool_execution(
         &mut self,
         run_id: &str,
         event: ToolExecutionTraceEvent,
@@ -1211,7 +1211,7 @@ impl CodingSessionHarness {
             .map_err(|error| error.to_string())
     }
 
-    pub(crate) async fn append_tool_intent_to_path(
+    pub async fn append_tool_intent_to_path(
         path: &Path,
         run_id: &str,
         tool_call_id: &str,
@@ -1224,7 +1224,7 @@ impl CodingSessionHarness {
             .await
     }
 
-    pub(crate) async fn record_tool_result_to_path(
+    pub async fn record_tool_result_to_path(
         path: &Path,
         run_id: &str,
         result: &AgentToolResult,
@@ -1241,7 +1241,7 @@ impl CodingSessionHarness {
         .map_err(|error| error.to_string())?
     }
 
-    pub(crate) fn record_tool_result(
+    pub fn record_tool_result(
         &mut self,
         run_id: &str,
         result: &AgentToolResult,
@@ -1249,7 +1249,7 @@ impl CodingSessionHarness {
         self.finish_tool_result(run_id, result)
     }
 
-    pub(crate) fn start_subagent_lane(
+    pub fn start_subagent_lane(
         &mut self,
         lane_hint: &str,
         task: &str,
@@ -1473,7 +1473,7 @@ impl CodingSessionHarness {
         Ok(StartedSubagentLane { identity, accepted })
     }
 
-    pub(crate) fn accepted_subagent_run(
+    pub fn accepted_subagent_run(
         &self,
         identity: &SubagentLaneIdentity,
     ) -> Result<AcceptedRun, String> {
@@ -1504,7 +1504,7 @@ impl CodingSessionHarness {
     /// The lane keeps its history: the child syncs the lane context, so the
     /// revived run continues where the previous turn left off. Fails when
     /// the lane is missing or still has an open operation (use `hub send`).
-    pub(crate) fn resume_subagent_lane(
+    pub fn resume_subagent_lane(
         &mut self,
         lane: &str,
         prompt: &str,
@@ -1579,7 +1579,7 @@ impl CodingSessionHarness {
         Ok((identity, accepted))
     }
 
-    pub(crate) fn append_subagent_context(
+    pub fn append_subagent_context(
         &mut self,
         lane: &str,
         run_id: &str,
@@ -1612,7 +1612,7 @@ impl CodingSessionHarness {
             .map_err(|error| error.to_string())
     }
 
-    pub(crate) fn finish_subagent_lane(
+    pub fn finish_subagent_lane(
         &mut self,
         lane: &str,
         run_id: &str,
@@ -1717,7 +1717,7 @@ impl CodingSessionHarness {
             .map_err(|error| error.to_string())
     }
 
-    pub(crate) fn checkpoint(
+    pub fn checkpoint(
         &mut self,
         lane: &str,
         run_id: &str,
@@ -1739,7 +1739,7 @@ impl CodingSessionHarness {
     ///
     /// Returns `Ok(AcceptedRun)` after `accept_prompt` is driven to completion
     /// (committed to the JSONL store).
-    pub(crate) fn begin_run(
+    pub fn begin_run(
         &mut self,
         run_id: &str,
         prompt: AgentMessage,
@@ -1750,7 +1750,7 @@ impl CodingSessionHarness {
             .map_err(|error| error.to_string())
     }
 
-    pub(crate) fn begin_run_text(&mut self, prompt: &str) -> Result<AcceptedRun, String> {
+    pub fn begin_run_text(&mut self, prompt: &str) -> Result<AcceptedRun, String> {
         let run_id = format!(
             "run-{}",
             SystemTime::now()
@@ -1761,7 +1761,7 @@ impl CodingSessionHarness {
         self.begin_run(&run_id, AgentMessage::user(prompt.to_string(), Vec::new()))
     }
 
-    pub(crate) fn enqueue_unbound_with_images(
+    pub fn enqueue_unbound_with_images(
         &mut self,
         queue: QueueKind,
         content: String,
@@ -1785,7 +1785,7 @@ impl CodingSessionHarness {
         Ok(id)
     }
 
-    pub(crate) fn enqueue_unbound_on_lane_with_priority(
+    pub fn enqueue_unbound_on_lane_with_priority(
         &mut self,
         lane: &str,
         queue: QueueKind,
@@ -1834,7 +1834,7 @@ impl CodingSessionHarness {
         Ok(id)
     }
 
-    pub(crate) fn consume_first_unbound_queue(&mut self, queue: QueueKind) -> Result<(), String> {
+    pub fn consume_first_unbound_queue(&mut self, queue: QueueKind) -> Result<(), String> {
         self.ensure_fresh()?;
         let state = Reducer::reduce(self.store.store())
             .map_err(|error| format!("reduce failed: {error:?}"))?;
@@ -1858,7 +1858,7 @@ impl CodingSessionHarness {
         Ok(())
     }
 
-    pub(crate) fn consume_unbound_queue_entry(
+    pub fn consume_unbound_queue_entry(
         &mut self,
         queue: QueueKind,
         entry_id: &str,
@@ -1875,7 +1875,7 @@ impl CodingSessionHarness {
         Ok(Some(message))
     }
 
-    pub(crate) fn unbound_queue_message(
+    pub fn unbound_queue_message(
         &mut self,
         queue: QueueKind,
         entry_id: &str,
@@ -1893,7 +1893,7 @@ impl CodingSessionHarness {
             .map(|queued| queued.target.message.clone()))
     }
 
-    pub(crate) fn cancel_queued_unbound(&mut self, entry_id: &str) -> Result<(), String> {
+    pub fn cancel_queued_unbound(&mut self, entry_id: &str) -> Result<(), String> {
         self.ensure_fresh()?;
         self.store
             .cancel_unbound(entry_id)
@@ -1904,14 +1904,14 @@ impl CodingSessionHarness {
     }
 
     /// Validate an accepted run token against the session journal and reduced state.
-    pub(crate) fn validate_accepted_run(&self, accepted: &AcceptedRun) -> Result<(), String> {
+    pub fn validate_accepted_run(&self, accepted: &AcceptedRun) -> Result<(), String> {
         self.store
             .validate_accepted_run(accepted)
             .map_err(|error| error.to_string())
     }
 
     /// Append a tool intent.
-    pub(crate) async fn append_tool_intent(
+    pub async fn append_tool_intent(
         &mut self,
         run_id: &str,
         tool_call_id: &str,
@@ -1934,7 +1934,7 @@ impl CodingSessionHarness {
             .await
     }
 
-    pub(crate) async fn run_before_tool_hook(
+    pub async fn run_before_tool_hook(
         &self,
         run_id: &str,
         tool_call_id: &str,
@@ -1970,7 +1970,7 @@ impl CodingSessionHarness {
     }
 
     /// Start a foreground operation with an optional prompt.
-    pub(crate) fn start(
+    pub fn start(
         &mut self,
         run_id: &str,
         prompt: Option<AgentMessage>,
@@ -1990,7 +1990,7 @@ impl CodingSessionHarness {
     }
 
     /// Finish an operation with the given outcome and optional error.
-    pub(crate) fn finish(
+    pub fn finish(
         &mut self,
         run_id: &str,
         outcome: OperationOutcome,
@@ -2000,7 +2000,7 @@ impl CodingSessionHarness {
     }
 
     /// Finish an operation with the given outcome and optional error.
-    pub(crate) fn finish_run(
+    pub fn finish_run(
         &mut self,
         run_id: &str,
         outcome: OperationOutcome,
@@ -2015,7 +2015,7 @@ impl CodingSessionHarness {
     }
 
     /// Generate a unique run identifier scoped to this session.
-    pub(crate) fn unique_run_id(&mut self, prefix: &str) -> Result<String, String> {
+    pub fn unique_run_id(&mut self, prefix: &str) -> Result<String, String> {
         self.ensure_fresh()?;
         let used_ids = self
             .store
@@ -2036,7 +2036,7 @@ impl CodingSessionHarness {
 
     /// Request abort for all open lanes and return the main lane's run id,
     /// if any.
-    pub(crate) fn request_abort(&mut self) -> Result<Option<String>, String> {
+    pub fn request_abort(&mut self) -> Result<Option<String>, String> {
         self.cancellation.store(true, Ordering::SeqCst);
         self.ensure_fresh()?;
         let state = Reducer::reduce(&self.store).map_err(|error| error.to_string())?;
@@ -2065,7 +2065,7 @@ impl CodingSessionHarness {
         Ok(main_run_id)
     }
 
-    pub(crate) fn observe_abort_signal(
+    pub fn observe_abort_signal(
         &mut self,
         run_id: &str,
         acknowledged: bool,
@@ -2151,7 +2151,7 @@ impl CodingSessionHarness {
     /// Reconcile an aborted operation: insert abort entry, record, and
     /// finish with `Aborted` outcome.  Returns `true` if recovery produced
     /// a terminal state.
-    pub(crate) fn recover_abort(&mut self) -> Result<bool, String> {
+    pub fn recover_abort(&mut self) -> Result<bool, String> {
         self.ensure_fresh()?;
         let state = Reducer::reduce(&self.store).map_err(|error| error.to_string())?;
         let Some(lane) = state.lane("main") else {
@@ -2272,7 +2272,7 @@ impl CodingSessionHarness {
     /// Consecutive identical messages are legitimate (e.g. two `"hello"`
     /// user turns), so no last-entry content dedup is applied. Idempotency
     /// for tool results is handled by deterministic entry ids below.
-    pub(crate) fn append_message(&mut self, message: AgentMessage) -> Result<String, String> {
+    pub fn append_message(&mut self, message: AgentMessage) -> Result<String, String> {
         self.append_message_inner(message, false, false)
     }
 
@@ -2291,7 +2291,7 @@ impl CodingSessionHarness {
     /// A replacement with an empty range changes no prior context entries. Its
     /// non-append surface metadata identifies this as context restoration rather
     /// than a second human-visible transcript occurrence.
-    pub(crate) fn append_message_occurrence(
+    pub fn append_message_occurrence(
         &mut self,
         message: AgentMessage,
     ) -> Result<String, String> {
@@ -2395,7 +2395,7 @@ impl CodingSessionHarness {
     }
 
     /// Append a message to a named lane (used for subagent results).
-    pub(crate) fn append_message_to_lane(
+    pub fn append_message_to_lane(
         &mut self,
         lane: &str,
         run_id: &str,
@@ -2511,7 +2511,7 @@ impl CodingSessionHarness {
 
     /// Prepare an assistant attempt record for the given run.  Returns
     /// the result entry id that the assistant message should carry.
-    pub(crate) fn prepare_assistant_attempt(&mut self, run_id: &str) -> Result<String, String> {
+    pub fn prepare_assistant_attempt(&mut self, run_id: &str) -> Result<String, String> {
         self.ensure_fresh()?;
         let state = Reducer::reduce(&self.store).map_err(|error| error.to_string())?;
         let lane = state
@@ -2562,7 +2562,7 @@ impl CodingSessionHarness {
 
     /// Record a completed assistant attempt after the assistant message
     /// has been appended.
-    pub(crate) fn record_assistant_attempt(
+    pub fn record_assistant_attempt(
         &mut self,
         run_id: &str,
         usage: TokenUsage,
@@ -2598,7 +2598,7 @@ impl CodingSessionHarness {
     // ── Tools ─────────────────────────────────────────────────────────
 
     /// Record a tool intent (after hooks have run).
-    pub(crate) async fn append_tool_intent_after_hook(
+    pub async fn append_tool_intent_after_hook(
         &mut self,
         run_id: &str,
         tool_call_id: &str,
@@ -2664,7 +2664,7 @@ impl CodingSessionHarness {
     }
 
     /// Record tool-started on a specific lane (subagent support).
-    pub(crate) fn tool_started_on_lane(
+    pub fn tool_started_on_lane(
         &mut self,
         lane: &str,
         run_id: &str,
@@ -2787,7 +2787,7 @@ impl CodingSessionHarness {
     }
 
     /// Finish a tool message: record ToolFinished and drive effects.
-    pub(crate) fn finish_tool_message(
+    pub fn finish_tool_message(
         &mut self,
         run_id: &str,
         message: &AgentMessage,
@@ -2823,7 +2823,7 @@ impl CodingSessionHarness {
     }
 
     /// Finish a freshly executed tool result: record the tool result Entry, ToolFinished, and drive effects.
-    pub(crate) fn finish_tool_result(
+    pub fn finish_tool_result(
         &mut self,
         run_id: &str,
         result: &AgentToolResult,
@@ -2849,7 +2849,7 @@ impl CodingSessionHarness {
     }
 
     /// Finish a replayed tool result.
-    pub(crate) fn finish_replayed_tool(
+    pub fn finish_replayed_tool(
         &mut self,
         run_id: &str,
         result: &AgentToolResult,
@@ -2874,7 +2874,7 @@ impl CodingSessionHarness {
     }
 
     /// Record tool completions with termination flags.
-    pub(crate) fn record_completed_tools_with_termination(
+    pub fn record_completed_tools_with_termination(
         &mut self,
         run_id: &str,
         termination: &HashMap<String, bool>,
@@ -3005,7 +3005,7 @@ impl CodingSessionHarness {
     // ── Usage ─────────────────────────────────────────────────────────
 
     /// Record provider token usage for a run.
-    pub(crate) fn record_provider_usage(
+    pub fn record_provider_usage(
         &mut self,
         run_id: &str,
         usage: TokenUsage,
@@ -3020,7 +3020,7 @@ impl CodingSessionHarness {
     }
 
     /// Record discarded (non-terminal) token usage.
-    pub(crate) fn record_discarded_usage(
+    pub fn record_discarded_usage(
         &mut self,
         run_id: &str,
         usage: TokenUsage,
@@ -3037,7 +3037,7 @@ impl CodingSessionHarness {
     // ── Retry ─────────────────────────────────────────────────────────
 
     /// Schedule a retry for a failed run.
-    pub(crate) fn schedule_retry(&mut self, run_id: &str, reason: &str) -> Result<u32, String> {
+    pub fn schedule_retry(&mut self, run_id: &str, reason: &str) -> Result<u32, String> {
         self.ensure_fresh()?;
         let attempt = self
             .store
@@ -3058,7 +3058,7 @@ impl CodingSessionHarness {
     }
 
     /// Begin a previously scheduled retry attempt.
-    pub(crate) fn begin_retry(&mut self, run_id: &str) -> Result<u32, String> {
+    pub fn begin_retry(&mut self, run_id: &str) -> Result<u32, String> {
         self.ensure_fresh()?;
         let attempt = self
             .store
@@ -3073,7 +3073,7 @@ impl CodingSessionHarness {
     // ── Deferred ──────────────────────────────────────────────────────
 
     /// Redeem a deferred operation and optionally finish the run.
-    pub(crate) fn redeem_deferred(
+    pub fn redeem_deferred(
         &mut self,
         run_id: &str,
         resolution: DeferredResolution,
@@ -3095,7 +3095,7 @@ impl CodingSessionHarness {
     // ── Compaction ────────────────────────────────────────────────────
 
     /// Accept a compaction summary.
-    pub(crate) fn accept_compaction(&mut self, run_id: &str, summary: &str) -> Result<(), String> {
+    pub fn accept_compaction(&mut self, run_id: &str, summary: &str) -> Result<(), String> {
         self.ensure_fresh()?;
         self.store
             .accept_compaction(run_id, summary, &[])
@@ -3108,7 +3108,7 @@ impl CodingSessionHarness {
     // ── Facts ─────────────────────────────────────────────────────────
 
     /// Set a session-level fact.
-    pub(crate) fn set_fact(&mut self, lane: &str, key: &str, value: String) -> Result<(), String> {
+    pub fn set_fact(&mut self, lane: &str, key: &str, value: String) -> Result<(), String> {
         self.ensure_fresh()?;
         self.store
             .set_fact(lane, key, value, None)
@@ -3121,7 +3121,7 @@ impl CodingSessionHarness {
     // ── Replay & navigation ───────────────────────────────────────────
 
     /// Append a replayed tool entry to the store.
-    pub(crate) fn append_replayed_tool_entry(
+    pub fn append_replayed_tool_entry(
         &mut self,
         run_id: &str,
         assistant_entry_id: &str,
@@ -3181,7 +3181,7 @@ impl CodingSessionHarness {
     }
 
     /// Claim safe tool replays for recovery.
-    pub(crate) fn claim_safe_replays(
+    pub fn claim_safe_replays(
         &mut self,
         tools: &[HarnessRecord],
     ) -> Result<Vec<HarnessRecord>, String> {
@@ -3246,7 +3246,7 @@ impl CodingSessionHarness {
     }
 
     /// Materialize a session branch path as harness entries.
-    pub(crate) fn navigate_branch(
+    pub fn navigate_branch(
         &mut self,
         branch_ids: &[String],
     ) -> Result<Option<String>, String> {
@@ -3273,13 +3273,13 @@ impl CodingSessionHarness {
     // ── Observation ───────────────────────────────────────────────────
 
     /// Take a point-in-time snapshot of the session.
-    pub(crate) fn snapshot(&mut self) -> Result<Snapshot, String> {
+    pub fn snapshot(&mut self) -> Result<Snapshot, String> {
         self.ensure_fresh()?;
         self.store.snapshot().map_err(|error| error.to_string())
     }
 
     /// Subscribe to session-scoped events.
-    pub(crate) fn watch(&mut self) -> Result<HarnessWatch, String> {
+    pub fn watch(&mut self) -> Result<HarnessWatch, String> {
         self.ensure_fresh()?;
         let subscription = self
             .store
@@ -3292,7 +3292,7 @@ impl CodingSessionHarness {
     }
 
     /// Drive all pending effects to completion.
-    pub(crate) fn drive_to_completion(&mut self) -> Result<(), String> {
+    pub fn drive_to_completion(&mut self) -> Result<(), String> {
         self.store
             .drive_to_completion()
             .map_err(|error| error.to_string())
@@ -3301,7 +3301,7 @@ impl CodingSessionHarness {
     // ── Internal ──────────────────────────────────────────────────────
 
     /// Re-read the store from disk to pick up external writes.
-    pub(crate) fn refresh(&mut self) -> Result<(), String> {
+    pub fn refresh(&mut self) -> Result<(), String> {
         self.ensure_fresh()
     }
 
@@ -3315,7 +3315,7 @@ impl CodingSessionHarness {
     /// run-scoped recorders before the next request; it must not reconcile a
     /// complete mutable provider transcript after the fact.
     #[cfg(test)]
-    pub(crate) fn sync_messages(&mut self, messages: &[AgentMessage]) -> Result<(), String> {
+    pub fn sync_messages(&mut self, messages: &[AgentMessage]) -> Result<(), String> {
         self.ensure_fresh()?;
         // The provider gives us the complete conversation, not stable entry
         // IDs.  Track occurrences rather than using a set: two turns can
@@ -3377,7 +3377,7 @@ impl CodingSessionHarness {
         }
         Ok(())
     }
-    pub(crate) fn assert_model_visible(&mut self, messages: &[AgentMessage]) -> Result<(), String> {
+    pub fn assert_model_visible(&mut self, messages: &[AgentMessage]) -> Result<(), String> {
         self.ensure_fresh()?;
         let logged = self
             .store
@@ -3404,7 +3404,7 @@ impl CodingSessionHarness {
         ))
     }
 
-    pub(crate) fn commit_assistant_message(
+    pub fn commit_assistant_message(
         &mut self,
         lane: &str,
         run_id: &str,
@@ -3423,7 +3423,7 @@ impl CodingSessionHarness {
         )
     }
 
-    pub(crate) fn commit_thinking(
+    pub fn commit_thinking(
         &mut self,
         lane: &str,
         run_id: &str,
@@ -3439,7 +3439,7 @@ impl CodingSessionHarness {
         )
     }
 
-    pub(crate) fn commit_tool_calls(
+    pub fn commit_tool_calls(
         &mut self,
         lane: &str,
         run_id: &str,
@@ -3457,7 +3457,7 @@ impl CodingSessionHarness {
         )
     }
 
-    pub(crate) fn commit_tool_results(
+    pub fn commit_tool_results(
         &mut self,
         lane: &str,
         run_id: &str,
@@ -3480,7 +3480,7 @@ impl CodingSessionHarness {
         Ok(committed)
     }
 
-    pub(crate) fn commit_follow_up(
+    pub fn commit_follow_up(
         &mut self,
         lane: &str,
         run_id: &str,
@@ -3489,7 +3489,7 @@ impl CodingSessionHarness {
         self.append_message_to_lane(lane, run_id, message)
     }
 
-    pub(crate) fn commit_provider_failure(
+    pub fn commit_provider_failure(
         &mut self,
         _lane: &str,
         run_id: &str,
@@ -3498,7 +3498,7 @@ impl CodingSessionHarness {
         self.finish_run(run_id, OperationOutcome::Failed, Some(error))
     }
 
-    pub(crate) fn plan_recovery(
+    pub fn plan_recovery(
         &mut self,
         lane: &str,
     ) -> Result<threadlane_runtime::harness::RecoveryPlan, String> {
@@ -3514,7 +3514,7 @@ impl CodingSessionHarness {
     }
 
     /// Run hooks of the given kind for the main lane.
-    pub(crate) async fn run_hooks(&self, kind: HookKind, context: &HookContext) {
+    pub async fn run_hooks(&self, kind: HookKind, context: &HookContext) {
         for failure in self.store.hooks().run(kind, context).await {
             eprintln!(
                 "hook {} ({:?}) failed: {}",

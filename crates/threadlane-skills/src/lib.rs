@@ -1,6 +1,7 @@
 pub mod agents;
 pub mod frontmatter;
 pub mod prompts;
+pub mod settings;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

@@ -12,16 +12,16 @@ use tokio::sync::broadcast;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentRunTask {
-    pub(crate) agent: String,
-    pub(crate) task: String,
-    pub(crate) instructions: Option<String>,
-    pub(crate) tools: Option<Vec<String>>,
-    pub(crate) model: Option<String>,
+    pub agent: String,
+    pub task: String,
+    pub instructions: Option<String>,
+    pub tools: Option<Vec<String>>,
+    pub model: Option<String>,
     #[serde(default)]
-    pub(crate) context_refs: Vec<String>,
+    pub context_refs: Vec<String>,
 }
 
-pub(crate) fn recover_v2_subagent_records(
+pub fn recover_v2_subagent_records(
     session_file: &Path,
 ) -> Result<Vec<HarnessRecord>, String> {
     let store = JsonlStore::open(session_file).map_err(|error| error.to_string())?;
@@ -130,7 +130,7 @@ pub struct CodingAgentCancellation {
 }
 
 impl CodingAgentCancellation {
-    pub(crate) fn new(
+    pub fn new(
         harness_session_file: Option<PathBuf>,
         event_tx: broadcast::Sender<AgentEvent>,
     ) -> Self {
@@ -160,7 +160,7 @@ impl CodingAgentCancellation {
         }
     }
 
-    pub(crate) fn clear_cancellation_guard(&self) {
+    pub fn clear_cancellation_guard(&self) {
         if let Ok(mut state) = self.state.lock() {
             state.cancellation_guard = None;
         }
@@ -169,7 +169,7 @@ impl CodingAgentCancellation {
         }
     }
 
-    pub(crate) fn cancel(&self) -> Result<(), String> {
+    pub fn cancel(&self) -> Result<(), String> {
         let durable_run_id = if let Some(path) = self.harness_session_file.as_deref() {
             CodingSessionHarness::open(path).and_then(|mut journal| journal.request_abort())
         } else {
