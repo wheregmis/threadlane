@@ -10,13 +10,13 @@
 //! for backward compatibility.
 
 use crate::types::{AgentMessage, AgentToolDefinition, AgentToolResult, TokenUsage, TurnState};
-use threadlane_provider::convert::{convert_to_codex_llm, convert_to_llm};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use threadlane_provider::convert::{convert_to_codex_llm, convert_to_llm};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PayloadFormat {
     ChatCompletions,
@@ -97,13 +97,11 @@ impl ProviderAdapter for ChatCompletionsAdapter {
         if let Some(key) = prompt_cache_key {
             chat_payload["prompt_cache_key"] = key.into();
         }
-        if let Some(effort) =
-            crate::model_registry::effective_api_effort(
-                &state.model,
-                state.reasoning_effort,
-                state.project_root.as_deref(),
-            )
-        {
+        if let Some(effort) = crate::model_registry::effective_api_effort(
+            &state.model,
+            state.reasoning_effort,
+            state.project_root.as_deref(),
+        ) {
             chat_payload["reasoning_effort"] = effort.into();
         }
         chat_payload
@@ -153,13 +151,11 @@ impl ProviderAdapter for CodexResponsesAdapter {
         if let Some(key) = prompt_cache_key {
             codex_payload["prompt_cache_key"] = key.into();
         }
-        if let Some(effort) =
-            crate::model_registry::effective_api_effort(
-                &state.model,
-                state.reasoning_effort,
-                state.project_root.as_deref(),
-            )
-        {
+        if let Some(effort) = crate::model_registry::effective_api_effort(
+            &state.model,
+            state.reasoning_effort,
+            state.project_root.as_deref(),
+        ) {
             codex_payload["reasoning"] = serde_json::json!({
                 "effort": effort,
                 "summary": "auto"
@@ -446,7 +442,7 @@ mod tests {
 
     #[test]
     fn adapters_enforce_discovered_reasoning_capabilities() {
-        use crate::model_registry::{ModelInfo, update_discovered_models};
+        use crate::model_registry::{update_discovered_models, ModelInfo};
         let id = "test-dynamic-capabilities";
         let mut info = ModelInfo {
             id: id.into(),
@@ -470,18 +466,14 @@ mod tests {
         );
         info.supported_efforts = vec!["off".into()];
         update_discovered_models("test", vec![info.clone()]);
-        assert!(
-            ChatCompletionsAdapter
-                .build_payload(&state, &[], None)
-                .get("reasoning_effort")
-                .is_none()
-        );
-        assert!(
-            CodexResponsesAdapter
-                .build_payload(&state, &[], None)
-                .get("reasoning")
-                .is_none()
-        );
+        assert!(ChatCompletionsAdapter
+            .build_payload(&state, &[], None)
+            .get("reasoning_effort")
+            .is_none());
+        assert!(CodexResponsesAdapter
+            .build_payload(&state, &[], None)
+            .get("reasoning")
+            .is_none());
         info.supported_efforts = vec!["none".into()];
         update_discovered_models("test", vec![info]);
         assert_eq!(
@@ -507,12 +499,10 @@ mod tests {
             project_root: Some(dir.path().into()),
         };
 
-        assert!(
-            ChatCompletionsAdapter
-                .build_payload(&state, &[], None)
-                .get("reasoning_effort")
-                .is_none()
-        );
+        assert!(ChatCompletionsAdapter
+            .build_payload(&state, &[], None)
+            .get("reasoning_effort")
+            .is_none());
     }
 
     #[test]

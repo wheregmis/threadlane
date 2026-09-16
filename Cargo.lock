@@ -8248,6 +8248,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "threadlane-acp-engine"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "threadlane-acp",
+ "threadlane-permission",
+ "threadlane-project",
+ "threadlane-runtime",
+ "threadlane-tools",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "threadlane-auth"
 version = "0.1.0"
 dependencies = [
@@ -8277,6 +8293,60 @@ dependencies = [
 ]
 
 [[package]]
+name = "threadlane-browser"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde_json",
+ "threadlane-protocol",
+ "tokio",
+]
+
+[[package]]
+name = "threadlane-coding-agent"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "log",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "threadlane-acp",
+ "threadlane-acp-engine",
+ "threadlane-auth",
+ "threadlane-browser",
+ "threadlane-computer",
+ "threadlane-git",
+ "threadlane-mcp",
+ "threadlane-permission",
+ "threadlane-project",
+ "threadlane-prompt",
+ "threadlane-protocol",
+ "threadlane-provider",
+ "threadlane-question",
+ "threadlane-runtime",
+ "threadlane-skills",
+ "threadlane-tools",
+ "threadlane-wasi",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "threadlane-compaction"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "threadlane-context",
+ "threadlane-protocol",
+ "threadlane-provider",
+]
+
+[[package]]
 name = "threadlane-computer"
 version = "0.1.0"
 dependencies = [
@@ -8288,10 +8358,16 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "threadlane-project",
  "threadlane-protocol",
- "threadlane-runtime",
- "threadlane-wasi",
  "tokio",
+]
+
+[[package]]
+name = "threadlane-context"
+version = "0.1.0"
+dependencies = [
+ "threadlane-provider",
 ]
 
 [[package]]
@@ -8309,42 +8385,16 @@ dependencies = [
 name = "threadlane-gpui"
 version = "0.1.16"
 dependencies = [
- "async-trait",
- "base64",
- "block2 0.6.2",
  "gpui-component",
- "gpui-kit",
- "gpui-kit-assets",
  "gpui-pre",
  "gpui-pre-platform",
- "gpui-wry",
  "hotpath",
- "image",
- "lb-wry",
- "notify",
- "objc2 0.6.4",
- "portable-pty",
- "raw-window-handle",
- "rfd",
- "robius-open",
- "serde",
- "serde_json",
- "tempfile",
- "threadlane-auth",
- "threadlane-git",
- "threadlane-project",
- "threadlane-protocol",
- "threadlane-provider",
- "threadlane-runtime",
- "threadlane-session",
- "threadlane-skills",
- "threadlane-tools",
- "threadlane-updater",
- "threadlane-wasi",
- "tokio",
+ "threadlane-coding-agent",
+ "threadlane-ui-chat",
+ "threadlane-ui-theme",
+ "threadlane-ui-workspace",
  "tracing",
  "tracing-subscriber",
- "vt100",
 ]
 
 [[package]]
@@ -8353,6 +8403,10 @@ version = "0.1.0"
 dependencies = [
  "serde",
 ]
+
+[[package]]
+name = "threadlane-loop"
+version = "0.1.0"
 
 [[package]]
 name = "threadlane-mcp"
@@ -8366,10 +8420,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "threadlane-orchestrator"
+version = "0.1.0"
+dependencies = [
+ "threadlane-protocol",
+]
+
+[[package]]
+name = "threadlane-permission"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "threadlane-computer",
+ "threadlane-protocol",
+ "tokio",
+]
+
+[[package]]
+name = "threadlane-plan"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "threadlane-protocol",
+ "tokio",
+]
+
+[[package]]
 name = "threadlane-project"
 version = "0.1.0"
 dependencies = [
  "directories",
+ "notify",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -8415,6 +8502,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "threadlane-question"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "threadlane-protocol",
+ "tokio",
+]
+
+[[package]]
 name = "threadlane-runtime"
 version = "0.1.0"
 dependencies = [
@@ -8429,8 +8527,16 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.20",
+ "threadlane-browser",
+ "threadlane-compaction",
+ "threadlane-context",
+ "threadlane-loop",
+ "threadlane-orchestrator",
+ "threadlane-plan",
+ "threadlane-project",
  "threadlane-protocol",
  "threadlane-provider",
+ "threadlane-question",
  "threadlane-tools",
  "tokio",
  "tracing",
@@ -8452,16 +8558,22 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "threadlane-acp",
+ "threadlane-acp-engine",
  "threadlane-auth",
+ "threadlane-browser",
+ "threadlane-coding-agent",
  "threadlane-computer",
  "threadlane-git",
  "threadlane-mcp",
+ "threadlane-permission",
  "threadlane-project",
  "threadlane-prompt",
  "threadlane-protocol",
  "threadlane-provider",
+ "threadlane-question",
  "threadlane-runtime",
  "threadlane-skills",
+ "threadlane-supervisor",
  "threadlane-tools",
  "threadlane-wasi",
  "tokio",
@@ -8475,6 +8587,24 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "tempfile",
+ "threadlane-project",
+]
+
+[[package]]
+name = "threadlane-supervisor"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "threadlane-coding-agent",
+ "threadlane-project",
+ "threadlane-protocol",
+ "threadlane-provider",
+ "threadlane-runtime",
+ "threadlane-wasi",
+ "tokio",
 ]
 
 [[package]]
@@ -8485,6 +8615,205 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "threadlane-hashline",
+ "threadlane-project",
+]
+
+[[package]]
+name = "threadlane-ui-catalog"
+version = "0.1.0"
+dependencies = [
+ "threadlane-auth",
+ "threadlane-project",
+ "threadlane-provider",
+ "threadlane-runtime",
+ "threadlane-session",
+ "tracing",
+]
+
+[[package]]
+name = "threadlane-ui-chat"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "gpui-component",
+ "gpui-pre",
+ "rfd",
+ "serde_json",
+ "tempfile",
+ "threadlane-git",
+ "threadlane-session",
+ "threadlane-ui-catalog",
+ "threadlane-ui-editor",
+ "threadlane-ui-mirror",
+ "threadlane-ui-state",
+ "threadlane-ui-theme",
+ "tokio",
+]
+
+[[package]]
+name = "threadlane-ui-editor"
+version = "0.1.0"
+dependencies = [
+ "gpui-component",
+ "gpui-pre",
+ "rfd",
+ "threadlane-ui-state",
+ "tracing",
+]
+
+[[package]]
+name = "threadlane-ui-github"
+version = "0.1.0"
+dependencies = [
+ "gpui-component",
+ "gpui-kit",
+ "gpui-pre",
+ "rfd",
+ "serde_json",
+ "threadlane-git",
+ "threadlane-ui-state",
+]
+
+[[package]]
+name = "threadlane-ui-mirror"
+version = "0.1.0"
+dependencies = [
+ "gpui-component",
+ "gpui-pre",
+ "image",
+ "serde_json",
+ "tempfile",
+ "threadlane-protocol",
+ "threadlane-ui-state",
+ "tokio",
+]
+
+[[package]]
+name = "threadlane-ui-right-panel"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "block2 0.6.2",
+ "gpui-component",
+ "gpui-pre",
+ "gpui-wry",
+ "lb-wry",
+ "objc2 0.6.4",
+ "raw-window-handle",
+ "rfd",
+ "serde_json",
+ "threadlane-git",
+ "threadlane-protocol",
+ "threadlane-provider",
+ "threadlane-session",
+ "threadlane-ui-state",
+ "threadlane-ui-theme",
+ "tokio",
+]
+
+[[package]]
+name = "threadlane-ui-settings"
+version = "0.1.0"
+dependencies = [
+ "gpui-component",
+ "gpui-pre",
+ "rfd",
+ "threadlane-auth",
+ "threadlane-runtime",
+ "threadlane-session",
+ "threadlane-ui-catalog",
+ "threadlane-ui-state",
+ "threadlane-ui-theme",
+ "threadlane-updater",
+ "tokio",
+]
+
+[[package]]
+name = "threadlane-ui-sidebar"
+version = "0.1.0"
+dependencies = [
+ "gpui-component",
+ "gpui-pre",
+ "rfd",
+ "serde_json",
+ "tempfile",
+ "threadlane-git",
+ "threadlane-session",
+ "threadlane-ui-state",
+ "threadlane-ui-theme",
+]
+
+[[package]]
+name = "threadlane-ui-state"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "robius-open",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "threadlane-auth",
+ "threadlane-context",
+ "threadlane-git",
+ "threadlane-project",
+ "threadlane-protocol",
+ "threadlane-provider",
+ "threadlane-runtime",
+ "threadlane-session",
+ "threadlane-skills",
+ "threadlane-tools",
+ "threadlane-ui-catalog",
+ "threadlane-updater",
+ "threadlane-wasi",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "threadlane-ui-terminal"
+version = "0.1.0"
+dependencies = [
+ "gpui-component",
+ "gpui-pre",
+ "portable-pty",
+ "tokio",
+ "tracing",
+ "vt100",
+]
+
+[[package]]
+name = "threadlane-ui-theme"
+version = "0.1.0"
+dependencies = [
+ "gpui-component",
+ "gpui-kit-assets",
+ "gpui-pre",
+ "serde",
+ "serde_json",
+ "threadlane-project",
+ "tracing",
+]
+
+[[package]]
+name = "threadlane-ui-workspace"
+version = "0.1.0"
+dependencies = [
+ "gpui-component",
+ "gpui-pre",
+ "rfd",
+ "threadlane-git",
+ "threadlane-session",
+ "threadlane-ui-catalog",
+ "threadlane-ui-chat",
+ "threadlane-ui-editor",
+ "threadlane-ui-github",
+ "threadlane-ui-right-panel",
+ "threadlane-ui-settings",
+ "threadlane-ui-sidebar",
+ "threadlane-ui-state",
+ "threadlane-ui-terminal",
+ "threadlane-updater",
+ "tokio",
 ]
 
 [[package]]
@@ -8502,7 +8831,8 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "threadlane-runtime",
+ "threadlane-project",
+ "threadlane-protocol",
  "wasmi",
 ]
 

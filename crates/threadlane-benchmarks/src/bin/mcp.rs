@@ -4,9 +4,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use threadlane_mcp::{
-    McpManager, McpScope, McpServerConfig, McpSettings, McpTransport,
-};
+use threadlane_mcp::{McpManager, McpScope, McpServerConfig, McpSettings, McpTransport};
 
 const SAMPLES: usize = 10;
 

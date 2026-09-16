@@ -141,10 +141,8 @@ mod tests {
     #[test]
     fn injected_store_isolates_credential_round_trips() {
         let _guard = crate::test_env_guard_lock();
-        let root = std::env::temp_dir().join(format!(
-            "threadlane-auth-store-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("threadlane-auth-store-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let locations = CredentialStore::isolated(root.clone());
 

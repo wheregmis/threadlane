@@ -424,11 +424,7 @@ pub fn github_path(root: &Path, reference: &str) -> String {
 }
 
 #[allow(dead_code)]
-pub fn github_path_with(
-    root: &Path,
-    reference: &str,
-    credentials: &RemoteCredentials,
-) -> String {
+pub fn github_path_with(root: &Path, reference: &str, credentials: &RemoteCredentials) -> String {
     try_remote_ref_path_with(root, reference, credentials).unwrap_or_else(|error| error)
 }
 
@@ -690,7 +686,7 @@ pub fn format_gitlab_markdown(kind: &str, number: &str, raw_json: &str) -> Strin
 }
 
 fn dirs_home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    threadlane_project::dirs_home()
 }
 
 pub fn try_skill(root: &Path, name: &str) -> Result<String, String> {

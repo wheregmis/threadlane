@@ -77,3 +77,35 @@ impl QuestionAnswer {
         }
     }
 }
+
+/// Durable trace vocabulary for permission prompts.
+///
+/// Moved from `threadlane-runtime::harness::types` (body verbatim): these
+/// enums are recorded on the session JSONL by the harness, emitted by the
+/// permission manager, and read by trajectory analysis and tests, so they
+/// live with the other interaction contracts. `threadlane-runtime` re-exports
+/// them for compatibility. Note this is distinct from [`PermissionScope`]
+/// (the grant scopes offered on a live prompt): the trace records which scope
+/// a resolved decision carried, including session-only grants.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PermissionTraceScope {
+    Once,
+    Session,
+    Project,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PermissionTraceDecision {
+    Allowed,
+    Denied,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PermissionTraceSource {
+    User,
+    Policy,
+    PersistedGrant,
+    UnattendedDefault,
+    System,
+}

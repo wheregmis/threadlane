@@ -1,0 +1,26 @@
+[package]
+name = "threadlane-ui-chat"
+version = "0.1.0"
+edition = "2021"
+description = "Chat surface for the Threadlane desktop app: composer, transcript, trajectory, and context meter"
+
+[dependencies]
+base64.workspace = true
+gpui.workspace = true
+gpui-component = { workspace = true, features = ["tree-sitter-rust", "tree-sitter-python", "tree-sitter-javascript", "tree-sitter-typescript", "tree-sitter-html", "tree-sitter-css", "tree-sitter-bash", "tree-sitter-toml", "tree-sitter-yaml", "tree-sitter-markdown", "tree-sitter-diff"] }
+rfd.workspace = true
+serde_json.workspace = true
+threadlane-git.workspace = true
+threadlane-session.workspace = true
+threadlane-ui-catalog.workspace = true
+threadlane-ui-editor.workspace = true
+threadlane-ui-mirror.workspace = true
+threadlane-ui-state.workspace = true
+threadlane-ui-theme.workspace = true
+tokio = { workspace = true, features = ["full"] }
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true
+threadlane-ui-state = { workspace = true, features = ["test-support"] }
+tokio = { workspace = true, features = ["full"] }

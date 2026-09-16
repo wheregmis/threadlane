@@ -167,9 +167,13 @@ pub struct McpToolDescription {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum McpContentItem {
-    Text { text: String },
+    Text {
+        text: String,
+    },
     #[serde(untagged)]
-    Other { raw: Value },
+    Other {
+        raw: Value,
+    },
 }
 
 /// Structured result of an MCP `tools/call`.
@@ -510,10 +514,11 @@ impl McpManager {
         if let Some(previous) = previous {
             previous.lock().await.kill().await;
         }
-        let mut session = match McpSession::connect(config, &self.client_name, &self.client_version).await {
-            Ok(session) => session,
-            Err(_error) => return Vec::new(),
-        };
+        let mut session =
+            match McpSession::connect(config, &self.client_name, &self.client_version).await {
+                Ok(session) => session,
+                Err(_error) => return Vec::new(),
+            };
 
         let listed = session.request("tools/list", json!({})).await;
         let response = match listed {

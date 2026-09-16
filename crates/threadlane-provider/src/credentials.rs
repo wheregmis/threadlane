@@ -75,8 +75,10 @@ pub struct NoopAntigravityCredentials;
 #[async_trait::async_trait]
 impl AntigravityCredentialSource for NoopAntigravityCredentials {
     async fn valid_token(&self) -> Result<String, String> {
-        Err("No stored Google Antigravity credentials found. Please run /login antigravity"
-            .to_string())
+        Err(
+            "No stored Google Antigravity credentials found. Please run /login antigravity"
+                .to_string(),
+        )
     }
 
     fn stored_snapshot(&self) -> Option<AntigravityCredentialSnapshot> {

@@ -15,10 +15,14 @@ path = "src/bin/acp_stub_agent.rs"
 required-features = ["test-support"]
 
 [features]
-test-support = []
+test-support = ["threadlane-permission/test-support"]
 
 [dependencies]
 threadlane-acp.workspace = true
+threadlane-acp-engine.workspace = true
+threadlane-coding-agent.workspace = true
+threadlane-supervisor.workspace = true
+threadlane-browser.workspace = true
 threadlane-runtime.workspace = true
 threadlane-protocol.workspace = true
 threadlane-auth.workspace = true
@@ -26,8 +30,10 @@ threadlane-computer.workspace = true
 threadlane-tools.workspace = true
 threadlane-provider.workspace = true
 threadlane-mcp.workspace = true
+threadlane-permission.workspace = true
 threadlane-project.workspace = true
 threadlane-prompt.workspace = true
+threadlane-question.workspace = true
 threadlane-skills.workspace = true
 threadlane-wasi.workspace = true
 threadlane-git.workspace = true

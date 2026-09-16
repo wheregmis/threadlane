@@ -1,0 +1,18 @@
+[package]
+name = "threadlane-ui-github"
+version = "0.1.0"
+edition = "2021"
+description = "GitHub screen for the Threadlane desktop app: issues, pull requests, diffs, and review timelines"
+
+[dependencies]
+gpui.workspace = true
+gpui-kit.workspace = true
+gpui-component.workspace = true
+rfd.workspace = true
+serde_json.workspace = true
+threadlane-git.workspace = true
+threadlane-ui-state.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+threadlane-ui-state = { workspace = true, features = ["test-support"] }

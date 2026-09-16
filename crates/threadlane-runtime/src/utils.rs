@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A `JoinHandle` wrapper that aborts the spawned task on drop.
@@ -31,12 +30,11 @@ impl<T> Drop for AbortOnDrop<T> {
     }
 }
 
-/// Consolidates home directory resolution across crates.
-pub fn dirs_home() -> Option<PathBuf> {
-    directories::UserDirs::new()
-        .map(|u| u.home_dir().to_path_buf())
-        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
-}
+/// Home directory resolution, canonical in `threadlane-project`.
+/// Re-exported here so existing `threadlane_runtime::utils::dirs_home` and
+/// `threadlane_runtime::dirs_home` paths keep working; new code should
+/// import `threadlane_project::dirs_home` directly.
+pub use threadlane_project::dirs_home;
 
 /// Returns the current Unix timestamp in milliseconds.
 pub fn now_timestamp_ms() -> u64 {

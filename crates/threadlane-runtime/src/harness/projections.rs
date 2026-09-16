@@ -33,7 +33,7 @@ pub struct UiChatMessage {
     pub reasoning_content: Option<String>,
 }
 
-fn tool_activity_summary(name: &str, arguments: &str) -> String {
+pub fn tool_activity_summary(name: &str, arguments: &str) -> String {
     let display_name = name.replace('_', " ");
     let Ok(args_val) = serde_json::from_str::<serde_json::Value>(arguments) else {
         return display_name;
@@ -72,6 +72,18 @@ fn tool_activity_summary(name: &str, arguments: &str) -> String {
         }
     }
     display_name
+}
+
+pub fn tool_activity_display_summary(summary: &str) -> String {
+    let first_line = summary.lines().next().unwrap_or(summary).trim();
+    if summary.lines().nth(1).is_some()
+        && !first_line.ends_with('…')
+        && !first_line.ends_with("...")
+    {
+        format!("{first_line} …")
+    } else {
+        first_line.to_string()
+    }
 }
 
 /// Projects a sequence of [`AgentMessage`]s into canonical [`UiChatMessage`]s.

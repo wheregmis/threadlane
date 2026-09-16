@@ -1,0 +1,12 @@
+[package]
+name = "threadlane-question"
+version = "0.1.0"
+edition = "2021"
+description = "Model-initiated clarifying questions for Threadlane: ask_question tool executor, manager, and handle"
+
+[dependencies]
+threadlane-protocol.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["sync", "macros", "rt"] }

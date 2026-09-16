@@ -1,0 +1,20 @@
+[package]
+name = "threadlane-permission"
+version = "0.1.0"
+edition = "2021"
+description = "Session permission manager for Threadlane: approval flows, persisted grants, and trace events"
+
+[features]
+test-support = []
+
+[dependencies]
+threadlane-protocol.workspace = true
+threadlane-computer.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["sync", "macros", "rt"] }
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -10,8 +10,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
 use crate::GitHubPrInfo;
+use serde::{Deserialize, Serialize};
 
 /// Structured PR feedback item extracted from review comments or reviews.
 #[derive(Clone, Debug, PartialEq, Eq)]

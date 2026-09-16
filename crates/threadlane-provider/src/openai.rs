@@ -694,7 +694,10 @@ pub async fn try_fetch_available_models(
 }
 
 /// Codex model inventory and capabilities, not the general ChatGPT web picker.
-pub async fn fetch_subscription_models(access_token: &str, account_id: Option<&str>) -> Vec<ModelInfo> {
+pub async fn fetch_subscription_models(
+    access_token: &str,
+    account_id: Option<&str>,
+) -> Vec<ModelInfo> {
     try_fetch_subscription_models(access_token, account_id)
         .await
         .unwrap_or_default()
@@ -895,8 +898,8 @@ impl OpenAIClient {
                 Ok(guard) => guard,
                 Err(_) => return,
             };
-            let rotated = guard.account_id != account_id
-                || guard.codex_account_id != codex_account_id;
+            let rotated =
+                guard.account_id != account_id || guard.codex_account_id != codex_account_id;
             *guard = OpenAICredentials {
                 api_key,
                 account_id,
@@ -923,11 +926,7 @@ impl OpenAIClient {
     async fn access_token(&self) -> Result<String, String> {
         let credentials = self.credentials();
         match credentials.codex_account_id.as_deref() {
-            Some(id) => {
-                self.codex_accounts
-                    .valid_token_for_account(id)
-                    .await
-            }
+            Some(id) => self.codex_accounts.valid_token_for_account(id).await,
             None => Ok(credentials.api_key.clone()),
         }
     }

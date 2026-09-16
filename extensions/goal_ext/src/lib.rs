@@ -698,7 +698,9 @@ fn handle_hook_invocation(
                         ),
                     };
                     name == Some("update_goal")
-                        && (arguments.and_then(|a| a.get("status")).and_then(|s| s.as_str())
+                        && (arguments
+                            .and_then(|a| a.get("status"))
+                            .and_then(|s| s.as_str())
                             == Some("complete")
                             || arguments
                                 .and_then(|a| a.as_str())

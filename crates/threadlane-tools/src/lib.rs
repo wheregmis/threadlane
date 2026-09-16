@@ -17,7 +17,7 @@ pub use dispatch::{
     try_execute_tool_in_workspace, try_execute_tool_in_workspace_with,
 };
 pub use virtual_read::{
-    RemoteCredentials, remote_ref_path, try_remote_ref_path, try_remote_ref_path_with,
+    remote_ref_path, try_remote_ref_path, try_remote_ref_path_with, RemoteCredentials,
 };
 pub use workspace::validate_path_in_workspace;
 

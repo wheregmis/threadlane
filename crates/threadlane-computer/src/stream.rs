@@ -32,7 +32,9 @@ use std::time::Duration;
 
 use super::computer::{composite_target, pointer_location, CaptureResolution, SCREENSHOT_WIDTH};
 pub(crate) use threadlane_protocol::live::StreamTarget;
-use threadlane_protocol::live::{self as computer_live, LiveFrame, LiveStatus, LIVE_FRAME_MAX_WIDTH};
+use threadlane_protocol::live::{
+    self as computer_live, LiveFrame, LiveStatus, LIVE_FRAME_MAX_WIDTH,
+};
 
 /// Model tier cadence: refresh the in-memory best-resolution frame at most
 /// this often.

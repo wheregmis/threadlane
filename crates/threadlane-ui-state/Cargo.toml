@@ -1,0 +1,40 @@
+[package]
+name = "threadlane-ui-state"
+version = "0.1.0"
+edition = "2021"
+description = "Durable UI state for the Threadlane desktop app: AppState, session projections, chat turn services, and agent-event adapters. GPUI-free."
+
+[dependencies]
+async-trait = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+robius-open.workspace = true
+tempfile = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["full"] }
+tracing.workspace = true
+threadlane-auth.workspace = true
+threadlane-context.workspace = true
+threadlane-git.workspace = true
+threadlane-project.workspace = true
+threadlane-protocol.workspace = true
+threadlane-provider.workspace = true
+threadlane-runtime.workspace = true
+threadlane-session.workspace = true
+threadlane-skills.workspace = true
+threadlane-tools.workspace = true
+threadlane-ui-catalog.workspace = true
+threadlane-updater.workspace = true
+threadlane-wasi.workspace = true
+
+[features]
+test-support = [
+    "dep:async-trait",
+    "dep:tempfile",
+    "threadlane-session/test-support",
+]
+
+[dev-dependencies]
+async-trait.workspace = true
+tempfile.workspace = true
+threadlane-session = { workspace = true, features = ["test-support"] }
+threadlane-skills.workspace = true

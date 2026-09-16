@@ -1,0 +1,8 @@
+[package]
+name = "threadlane-orchestrator"
+version = "0.1.0"
+edition = "2021"
+description = "One-shot prewalk handoff state machine and prompt directives for Threadlane (oh-my-pi parity)"
+
+[dependencies]
+threadlane-protocol.workspace = true

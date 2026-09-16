@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use threadlane_runtime::{AgentToolDefinition, Capability, ToolExecutor, ToolOutput};
+use threadlane_protocol::{AgentToolDefinition, ImageAttachment, ToolExecutor, ToolOutput};
 
 use crate::{ComputerApproval, ComputerDecision};
 
@@ -610,11 +610,7 @@ mod mac {
         }
 
         /// Bounded JPEG for the model from the same composite.
-        pub fn jpeg(
-            &self,
-            max_width: u32,
-            quality: u8,
-        ) -> Result<(Vec<u8>, u32, u32), String> {
+        pub fn jpeg(&self, max_width: u32, quality: u8) -> Result<(Vec<u8>, u32, u32), String> {
             let (bgra, width, height) = self.bgra(max_width)?;
             let jpeg = crate::stream::encode_bgra_jpeg(&bgra, width, height, quality)?;
             Ok((jpeg, width, height))
@@ -1099,13 +1095,12 @@ impl ComputerToolExecutor {
         let scale = scale_target
             .and_then(crate::stream::served_scale)
             .unwrap_or(1.0);
-        let scale_note = if scale_target
-            .is_some_and(|target| crate::stream::served_scale(target).is_none())
-        {
-            " (no scale reference on file — screenshot the target first for precise clicks)"
-        } else {
-            ""
-        };
+        let scale_note =
+            if scale_target.is_some_and(|target| crate::stream::served_scale(target).is_none()) {
+                " (no scale reference on file — screenshot the target first for precise clicks)"
+            } else {
+                ""
+            };
         let mut intent = intent;
         match &mut intent {
             ComputerAct::Click { x, y, .. }
@@ -1135,9 +1130,7 @@ impl ComputerToolExecutor {
         // Keep the live mirror rolling through act sequences and show the
         // user where this one lands as it happens.
         let mirror_dir = global_previews_dir().unwrap_or_else(|| mac::previews_dir(work_dir));
-        crate::stream::touch_or_start(
-            scale_target.unwrap_or(crate::stream::StreamTarget::Display),
-        );
+        crate::stream::touch_or_start(scale_target.unwrap_or(crate::stream::StreamTarget::Display));
         publish_act_overlay(&targeted.intent, &title);
         let outcome =
             tokio::task::spawn_blocking(move || perform_act(&targeted.intent, targeted.pid))
@@ -1221,11 +1214,7 @@ fn attach_jpeg(
         };
     }
     if let Some(since_ms) = target.and_then(|target| {
-        crate::stream::frame_unchanged_since_with_scale(
-            target,
-            bytes,
-            Some(points_per_pixel),
-        )
+        crate::stream::frame_unchanged_since_with_scale(target, bytes, Some(points_per_pixel))
     }) {
         return ToolOutput {
             content: format!(
@@ -1242,7 +1231,7 @@ fn attach_jpeg(
     );
     ToolOutput {
         content,
-        images: vec![threadlane_runtime::ImageAttachment {
+        images: vec![ImageAttachment {
             display_name: path
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
@@ -1288,7 +1277,7 @@ pub fn watch_display_for_debug() {}
 /// here. Timestamped history files stay per-project.
 #[cfg(target_os = "macos")]
 pub fn global_previews_dir() -> Option<PathBuf> {
-    threadlane_wasi::packages::default_global_threadlane_dir().map(|dir| dir.join("previews"))
+    threadlane_project::default_global_threadlane_dir().map(|dir| dir.join("previews"))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1582,22 +1571,6 @@ fn perform_act(intent: &ComputerAct, pid: Option<i32>) -> Result<String, String>
             post(&up);
             Ok(format!("Pressed {key}.{}", background_note.unwrap_or("")))
         }
-    }
-}
-
-pub struct ComputerCapability {
-    pub permissions: Option<Arc<dyn ComputerApproval>>,
-}
-
-impl Capability for ComputerCapability {
-    fn id(&self) -> &str {
-        "computer"
-    }
-
-    fn tool_executors(&self) -> Vec<Arc<dyn ToolExecutor>> {
-        vec![Arc::new(ComputerToolExecutor::new(
-            self.permissions.clone(),
-        ))]
     }
 }
 
@@ -1913,8 +1886,7 @@ mod tests {
 
         // Let the poller warm up, then prove the stream serves frames.
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let frame =
-            crate::stream::fresh_frame(crate::stream::StreamTarget::Display);
+        let frame = crate::stream::fresh_frame(crate::stream::StreamTarget::Display);
         assert!(
             frame.is_some(),
             "stream poller should have produced a display frame"

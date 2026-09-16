@@ -7,6 +7,25 @@ use threadlane_protocol::ReasoningEffort;
 static DISCOVERED_MODELS: std::sync::OnceLock<std::sync::RwLock<HashMap<String, ModelInfo>>> =
     std::sync::OnceLock::new();
 
+pub fn pretty_model_label(id: &str) -> String {
+    let mut label = String::new();
+    for part in id.split(['-', '_', '/']).filter(|part| !part.is_empty()) {
+        if !label.is_empty() {
+            label.push(' ');
+        }
+        let mut chars = part.chars();
+        if let Some(first) = chars.next() {
+            label.extend(first.to_uppercase());
+            label.push_str(&chars.as_str().to_ascii_lowercase());
+        }
+    }
+    if label.is_empty() {
+        id.to_string()
+    } else {
+        label
+    }
+}
+
 /// Publish successful provider discovery for both selectors and request adapters.
 /// Failed/empty refreshes leave the last known capabilities intact.
 pub fn update_discovered_models(provider: &str, models: Vec<ModelInfo>) {

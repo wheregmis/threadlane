@@ -1,34 +1,14 @@
 use serde::{Deserialize, Serialize};
 
-// Message and tool-schema contract types live in `threadlane-protocol` so the
-// provider layer shares them without depending on the runtime. They are
-// re-exported here so existing `threadlane_runtime::` paths keep working.
+// Message, plan, usage, and tool-result contract types live in
+// `threadlane-protocol` so provider, session, and UI layers share them
+// without depending on the runtime. They are re-exported here so existing
+// `threadlane_runtime::` and `crate::types::` paths keep working.
 pub use threadlane_protocol::{
-    AgentMessage, AgentToolCall, AgentToolDefinition, DeferredHandle, ImageAttachment,
-    ReasoningEffort,
+    AgentMessage, AgentToolCall, AgentToolDefinition, AgentToolResult, DeferredHandle,
+    ImageAttachment, OrchestratorMode, PlanItem, PlanItemStatus, ReasoningEffort, SessionPlan,
+    TokenUsage, ToolExecutor, ToolOutput,
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PlanItemStatus {
-    Pending,
-    InProgress,
-    Completed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PlanItem {
-    pub step: String,
-    pub status: PlanItemStatus,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionPlan {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub explanation: Option<String>,
-    #[serde(default)]
-    pub items: Vec<PlanItem>,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
@@ -53,85 +33,17 @@ pub struct SubagentUsageSummary {
     total_subagents: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-pub struct TokenUsage {
-    pub input_tokens: u32,
-    pub output_tokens: u32,
-    pub cache_read_tokens: u32,
-    pub cache_write_tokens: u32,
-    pub total_tokens: u32,
-}
+/// `TokenUsage` (cumulative token accounting) and `AgentToolResult` (one
+/// executed tool outcome) are likewise canonical in
+/// `threadlane_protocol::messages` and re-exported above.
 
-impl TokenUsage {
-    pub fn accumulate(&mut self, usage: &Self) {
-        self.input_tokens = self.input_tokens.saturating_add(usage.input_tokens);
-        self.output_tokens = self.output_tokens.saturating_add(usage.output_tokens);
-        self.cache_read_tokens = self
-            .cache_read_tokens
-            .saturating_add(usage.cache_read_tokens);
-        self.cache_write_tokens = self
-            .cache_write_tokens
-            .saturating_add(usage.cache_write_tokens);
-        self.total_tokens = self.total_tokens.saturating_add(usage.total_tokens);
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AgentToolResult {
-    pub tool_call_id: String,
-    pub name: String,
-    pub content: String,
-    pub is_error: bool,
-    pub(crate) terminate: bool,
-    /// Model-visible images attached by the tool. Serialized inline so the
-    /// durable transcript reproduces the exact provider-visible context.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub images: Vec<ImageAttachment>,
-}
-
-/// Rich tool output: text plus optional model-visible images. Executors keep
-/// returning plain strings; only image-producing tools build this directly.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ToolOutput {
-    pub content: String,
-    pub images: Vec<ImageAttachment>,
-}
-
-impl From<String> for ToolOutput {
-    fn from(content: String) -> Self {
-        Self {
-            content,
-            images: Vec::new(),
-        }
-    }
-}
-
-impl AgentToolResult {
-    pub fn terminates(&self) -> bool {
-        self.terminate
-    }
-
-    /// Builds a tool result produced outside the built-in tool loop.
-    ///
-    /// External agents (ACP) report tool outcomes that need to reach the same
-    /// transcript rendering as native tool calls, but they never terminate the
-    /// loop, so `terminate` stays private and false.
-    pub fn external(
-        tool_call_id: impl Into<String>,
-        name: impl Into<String>,
-        content: impl Into<String>,
-        is_error: bool,
-    ) -> Self {
-        Self {
-            tool_call_id: tool_call_id.into(),
-            name: name.into(),
-            content: content.into(),
-            is_error,
-            terminate: false,
-            images: Vec::new(),
-        }
-    }
-}
+/// Rich tool output: text plus optional model-visible images.
+/// Canonical in `threadlane_protocol::ToolOutput`; re-exported via the
+/// `threadlane_protocol::{... ToolOutput}` import above so existing
+/// `crate::types::ToolOutput` paths keep working.
+///
+/// `AgentToolResult` (the executed-outcome twin) is likewise canonical in
+/// `threadlane_protocol::messages` and re-exported above.
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ModelRoles {
@@ -165,42 +77,9 @@ impl ModelRoles {
 }
 
 /// Orchestration mode governing explicit /prewalk engagement.
-///
-/// Prewalk is off by default (oh-my-pi parity): it is a one-shot handoff from
-/// the active model to a faster/cheaper model after planning reaches
-/// implementation. It is armed explicitly via `/prewalk` or `Always` mode;
-/// there is no LLM intent classifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum OrchestratorMode {
-    /// Deprecated: previously ran an LLM intent classifier. Now behaves as
-    /// `Off` (direct execution) to preserve deserialization of old configs
-    /// without paying classifier latency/cost.
-    #[serde(alias = "auto")]
-    Auto,
-    /// Arm prewalk on all incoming prompts.
-    Always,
-    /// Direct execution only (explicit /prewalk command required).
-    #[default]
-    Off,
-}
-
-impl OrchestratorMode {
-    pub fn label(&self) -> &'static str {
-        match self {
-            // Auto is retained only for backward compat; it no longer engages.
-            Self::Auto => "Off (Manual /prewalk)",
-            Self::Always => "Always",
-            Self::Off => "Off (Manual /prewalk)",
-        }
-    }
-
-    /// Whether this mode arms prewalk automatically. `Auto` is intentionally
-    /// inert (see variant docs).
-    pub fn arms_automatically(&self) -> bool {
-        matches!(self, Self::Always)
-    }
-}
+/// Canonical in `threadlane_protocol::OrchestratorMode`; re-exported via the
+/// `threadlane_protocol::{... OrchestratorMode}` import above so existing
+/// `crate::types::OrchestratorMode` paths keep working.
 
 #[cfg(test)]
 mod model_role_tests {

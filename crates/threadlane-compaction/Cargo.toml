@@ -1,0 +1,12 @@
+[package]
+name = "threadlane-compaction"
+version = "0.1.0"
+edition = "2021"
+description = "Token-budget compaction, checkpoint excerpts, and tool-output shaking for Threadlane"
+
+[dependencies]
+threadlane-protocol.workspace = true
+threadlane-context.workspace = true
+threadlane-provider.workspace = true
+serde.workspace = true
+serde_json.workspace = true

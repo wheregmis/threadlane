@@ -1,27 +1,18 @@
 //! Process-environment normalization for desktop launches.
 //!
-//! Finder and other macOS GUI launchers do not inherit shell startup files, so
-//! their `PATH` omits locations where user-installed developer tools live.
+//! GUI launchers on macOS do not inherit shell startup files, so their `PATH`
+//! can omit locations where user-installed developer tools live.
 
 #[cfg(target_os = "macos")]
 use std::env;
 #[cfg(target_os = "macos")]
 use std::path::{Path, PathBuf};
 
-/// Adds conventional, existing user-tool directories to `PATH` for processes
-/// started by this application.
-///
-/// This intentionally does not source shell configuration files. Those files
-/// are arbitrary, interactive shell programs and can prompt, hang, print into
-/// protocol streams, or have unrelated side effects. Users with nonstandard
-/// locations can continue to configure their login environment or provide an
-/// absolute executable path where supported.
-/// The directories macOS normally searches when a GUI-launched process has no
-/// inherited `PATH`. Keep these entries so bare commands such as `git` and
-/// `sh` continue to work in sanitized launch environments.
 #[cfg(target_os = "macos")]
 const MACOS_SYSTEM_PATH: &str = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 
+/// Adds conventional, existing user-tool directories to `PATH` for child
+/// processes started by the application.
 pub fn initialize_child_process_path() {
     #[cfg(target_os = "macos")]
     {
