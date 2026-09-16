@@ -8,7 +8,7 @@
 //! `threadlane_context` directly.
 
 pub use threadlane_context::{
-    BudgetConfig, ContextBudget, UNKNOWN_MODEL_CONTEXT_LIMIT, model_context_limit,
+    model_context_limit, BudgetConfig, ContextBudget, UNKNOWN_MODEL_CONTEXT_LIMIT,
 };
 
 use crate::config::AgentConfig;

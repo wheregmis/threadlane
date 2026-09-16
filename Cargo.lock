@@ -8348,7 +8348,6 @@ dependencies = [
  "hotpath",
  "image",
  "lb-wry",
- "notify",
  "objc2 0.6.4",
  "portable-pty",
  "raw-window-handle",
@@ -8358,6 +8357,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "threadlane-auth",
+ "threadlane-context",
  "threadlane-git",
  "threadlane-project",
  "threadlane-protocol",
@@ -8367,7 +8367,6 @@ dependencies = [
  "threadlane-skills",
  "threadlane-tools",
  "threadlane-updater",
- "threadlane-wasi",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -8433,6 +8432,7 @@ name = "threadlane-project"
 version = "0.1.0"
 dependencies = [
  "directories",
+ "notify",
  "serde",
  "serde_json",
  "sha2 0.10.9",

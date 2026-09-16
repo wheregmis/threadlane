@@ -779,7 +779,7 @@ impl RightPanelView {
             cx.notify();
             return;
         }
-        let (api_key, account_id) = crate::state::provider_credentials(&model);
+        let (api_key, account_id) = threadlane_session::provider_credentials(&model);
         let tx = self.event_tx.clone();
         let Ok(executor) = crate::services::chat::executor() else {
             self.git_feedback = Some("Unable to start the model runtime.".into());
@@ -1197,7 +1197,10 @@ impl RightPanelView {
         } else {
             theme.muted_foreground
         };
-        let file_context = self.document_title.clone().unwrap_or_else(|| "No active file".to_owned());
+        let file_context = self
+            .document_title
+            .clone()
+            .unwrap_or_else(|| "No active file".to_owned());
         div()
             .flex_none()
             .px_3()
@@ -1210,7 +1213,11 @@ impl RightPanelView {
                     .items_center()
                     .gap_2()
                     .child(div().font_weight(FontWeight::MEDIUM).child(repository))
-                    .child(div().text_color(theme.muted_foreground).child(format!("· {branch}")))
+                    .child(
+                        div()
+                            .text_color(theme.muted_foreground)
+                            .child(format!("· {branch}")),
+                    )
                     .child(div().text_color(git_color).child(git_state)),
             )
             .child(
@@ -1218,7 +1225,15 @@ impl RightPanelView {
                     .mt_0p5()
                     .text_color(theme.muted_foreground)
                     .truncate()
-                    .child(format!("{} · {}", if self.worktree_unavailable { "worktree unavailable" } else { "active worktree" }, file_context)),
+                    .child(format!(
+                        "{} · {}",
+                        if self.worktree_unavailable {
+                            "worktree unavailable"
+                        } else {
+                            "active worktree"
+                        },
+                        file_context
+                    )),
             )
     }
 
@@ -2340,8 +2355,7 @@ impl RightPanelView {
                             let total = panel_ref.review_files.len();
                             let unstaged =
                                 panel_ref.review_files.iter().filter(|f| f.unstaged).count();
-                            let staged =
-                                panel_ref.review_files.iter().any(|f| f.staged);
+                            let staged = panel_ref.review_files.iter().any(|f| f.staged);
                             (selected_paths, total, unstaged, staged)
                         };
                         let mut menu = menu;
@@ -2373,19 +2387,13 @@ impl RightPanelView {
                             );
                             if has_staged {
                                 let panel_unstage = panel.clone();
-                                menu = menu.item(
-                                    PopupMenuItem::new("Unstage All").on_click(
-                                        move |_event, window, cx| {
-                                            panel_unstage.update(cx, |this, cx| {
-                                                this.run_git_action(
-                                                    GitAction::UnstageAll,
-                                                    window,
-                                                    cx,
-                                                );
-                                            });
-                                        },
-                                    ),
-                                );
+                                menu = menu.item(PopupMenuItem::new("Unstage All").on_click(
+                                    move |_event, window, cx| {
+                                        panel_unstage.update(cx, |this, cx| {
+                                            this.run_git_action(GitAction::UnstageAll, window, cx);
+                                        });
+                                    },
+                                ));
                             }
                         }
                         menu

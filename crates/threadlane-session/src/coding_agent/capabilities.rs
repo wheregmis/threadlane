@@ -11,9 +11,9 @@ use crate::browser::{BrowserBridge, BrowserToolExecutor};
 use crate::extension_broker::{
     BrokerError, CapabilityDispatcher, HostBrokerRequest, BROKER_API_VERSION,
 };
+use crate::mcp::{McpManager, McpToolExecutor};
 use crate::permission::{PermissionHandle, PermissionManager};
 use crate::plan::{SessionPlanStore, UpdatePlanToolExecutor};
-use threadlane_runtime::ToolPolicy;
 use crate::question::{AskQuestionToolExecutor, QuestionHandle};
 use async_trait::async_trait;
 use log::warn;
@@ -21,9 +21,9 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use crate::mcp::{McpManager, McpToolExecutor};
 use threadlane_runtime::harness::{HookContext, HookEffect, HookHandler, HookKind};
 use threadlane_runtime::Capability;
+use threadlane_runtime::ToolPolicy;
 use threadlane_runtime::{AgentEvent, AgentToolCall, AgentToolDefinition, ToolExecutor};
 use threadlane_skills::{LoadSkillToolExecutor as SkillLoader, SkillRegistry};
 use threadlane_wasi::WasiExtensionManager;
@@ -631,10 +631,7 @@ impl SubagentToolExecutor {
             .get("parallel")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let wait = parsed
-            .get("wait")
-            .and_then(Value::as_bool)
-            .unwrap_or(true);
+        let wait = parsed.get("wait").and_then(Value::as_bool).unwrap_or(true);
 
         if !wait {
             // Persistent background workers: return immediately so the parent

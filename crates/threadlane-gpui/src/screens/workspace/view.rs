@@ -1,15 +1,15 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use gpui::*;
 use gpui::prelude::FluentBuilder;
+use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::command::{Command, CommandGroup, CommandItem, CommandState};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
-use gpui_component::resizable::{ResizableState, h_resizable, resizable_panel, v_resizable};
+use gpui_component::resizable::{h_resizable, resizable_panel, v_resizable, ResizableState};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::status_bar::StatusBar;
-use gpui_component::{ActiveTheme, Icon, IconName, Root, Selectable, Sizable, v_flex};
+use gpui_component::{v_flex, ActiveTheme, Icon, IconName, Root, Selectable, Sizable};
 
 actions!(
     threadlane_workspace,
@@ -37,11 +37,11 @@ use crate::screens::right_panel::RightPanelView;
 use crate::screens::settings::SettingsView;
 use crate::screens::sidebar::SidebarView;
 use crate::screens::terminal::TerminalView;
-use crate::services::sessions::{ExecutionMode, spawn_session_runtime_construction};
+use crate::services::sessions::{spawn_session_runtime_construction, ExecutionMode};
 use crate::services::updater::{self, UpdaterEvent};
 use crate::state::{
-    AppState, SessionHydrationRequest, SessionInfo, WorkspacePage, coding_agent_options,
-    compute_full_session_projection, compute_session_messages, runtime_status_text,
+    coding_agent_options, compute_full_session_projection, compute_session_messages,
+    runtime_status_text, AppState, SessionHydrationRequest, SessionInfo, WorkspacePage,
 };
 use threadlane_updater::UpdateStatus;
 
@@ -471,11 +471,8 @@ impl WorkspaceView {
             .detach();
             let antigravity_model = view.model.clone();
             cx.spawn(async move |_view, cx| {
-                crate::model_catalog::refresh_antigravity_models_and_update(
-                    antigravity_model,
-                    cx,
-                )
-                .await;
+                crate::model_catalog::refresh_antigravity_models_and_update(antigravity_model, cx)
+                    .await;
             })
             .detach();
             // Connect each external agent once in the background and cache
@@ -1335,8 +1332,9 @@ impl WorkspaceView {
 
         let mut recent_group = CommandGroup::new().label("Recently Used");
         for action_key in &self.recent_palette_actions {
-            if let Some((name, _, _, icon, keywords, _)) =
-                commands.iter().find(|(_, _, key, _, _, _)| key == action_key)
+            if let Some((name, _, _, icon, keywords, _)) = commands
+                .iter()
+                .find(|(_, _, key, _, _, _)| key == action_key)
             {
                 recent_group = recent_group.item(
                     CommandItem::new()
@@ -1427,19 +1425,31 @@ impl WorkspaceView {
                                 let _ = view.update(cx, |this, cx| {
                                     this.command_palette_open = false;
                                     if index.section == 0 {
-                                        if let Some(action_key) = this.recent_palette_actions.get(index.row) {
+                                        if let Some(action_key) =
+                                            this.recent_palette_actions.get(index.row)
+                                        {
                                             this.execute_palette_action(action_key, window, cx);
                                         }
                                     } else if index.section == 1 {
-                                        if let Some((_, _, action_key, _, _, _)) = commands.get(index.row) {
+                                        if let Some((_, _, action_key, _, _, _)) =
+                                            commands.get(index.row)
+                                        {
                                             this.execute_palette_action(action_key, window, cx);
                                         }
                                     } else if index.section == 2 {
-                                        if let Some((work_dir, session_id)) = session_entries.get(index.row) {
+                                        if let Some((work_dir, session_id)) =
+                                            session_entries.get(index.row)
+                                        {
                                             let work_dir = work_dir.clone();
                                             let session_id = session_id.clone();
                                             this.model.update(cx, |state, cx| {
-                                                controller::dispatch(state, AppAction::SelectSession { work_dir, session_id });
+                                                controller::dispatch(
+                                                    state,
+                                                    AppAction::SelectSession {
+                                                        work_dir,
+                                                        session_id,
+                                                    },
+                                                );
                                                 cx.notify();
                                             });
                                         }
@@ -1770,8 +1780,13 @@ impl WorkspaceView {
 
 impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if let Some((work_dir, number)) = self.model.update(cx, |state, _cx| state.requested_github_issue.take()) {
-            self.github.update(cx, |github, cx| github.open_linked_task(work_dir, number, cx));
+        if let Some((work_dir, number)) = self
+            .model
+            .update(cx, |state, _cx| state.requested_github_issue.take())
+        {
+            self.github.update(cx, |github, cx| {
+                github.open_linked_task(work_dir, number, cx)
+            });
         }
         let workspace_page = self.model.read(cx).workspace_page;
         let terminal_project = self.model.read(cx).active_work_dir.clone();
@@ -2181,9 +2196,9 @@ impl Render for WorkspaceView {
 #[cfg(test)]
 mod tests {
     use super::{
-        GitEvent, WorkspacePumpEvent, active_project_git_status, git_result_matches_active,
-        next_workspace_event, open_github_from_palette, session_pr_refresh_delay,
-        session_pr_target_is_active,
+        active_project_git_status, git_result_matches_active, next_workspace_event,
+        open_github_from_palette, session_pr_refresh_delay, session_pr_target_is_active, GitEvent,
+        WorkspacePumpEvent,
     };
     use crate::services::updater::UpdaterEvent;
     use crate::state::{AppState, SessionInfo, WorkspacePage};
@@ -2255,19 +2270,17 @@ mod tests {
             tokio::sync::mpsc::unbounded_channel::<(PathBuf, Vec<SessionInfo>)>();
         let (model_tx, mut model_rx) = tokio::sync::mpsc::unbounded_channel();
 
-        assert!(
-            tokio::time::timeout(
-                std::time::Duration::from_millis(10),
-                next_workspace_event(
-                    &mut git_rx,
-                    &mut updater_rx,
-                    &mut sessions_rx,
-                    &mut model_rx,
-                ),
-            )
-            .await
-            .is_err()
-        );
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            next_workspace_event(
+                &mut git_rx,
+                &mut updater_rx,
+                &mut sessions_rx,
+                &mut model_rx,
+            ),
+        )
+        .await
+        .is_err());
         model_tx.send(()).unwrap();
         assert!(matches!(
             next_workspace_event(

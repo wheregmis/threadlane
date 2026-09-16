@@ -8,13 +8,13 @@
 //! re-exported below for compatibility. New code should import from those
 //! crates directly.
 
-pub use threadlane_protocol::browser::{
-    ActTarget, BrowserBridge, BrowserCommand, BrowserRequest, BROWSER_ACT_TOOL,
-    BROWSER_BACK_TOOL, BROWSER_CONSOLE_LOGS_TOOL, BROWSER_CURRENT_URL_TOOL,
-    BROWSER_EVALUATE_TOOL, BROWSER_NAVIGATE_TOOL, BROWSER_RELOAD_TOOL, BROWSER_SCREENSHOT_TOOL,
-    BROWSER_SNAPSHOT_TOOL, BROWSER_UNAVAILABLE, BROWSER_WAIT_TOOL,
-};
 pub use threadlane_browser::BrowserToolExecutor;
+pub use threadlane_protocol::browser::{
+    ActTarget, BrowserBridge, BrowserCommand, BrowserRequest, BROWSER_ACT_TOOL, BROWSER_BACK_TOOL,
+    BROWSER_CONSOLE_LOGS_TOOL, BROWSER_CURRENT_URL_TOOL, BROWSER_EVALUATE_TOOL,
+    BROWSER_NAVIGATE_TOOL, BROWSER_RELOAD_TOOL, BROWSER_SCREENSHOT_TOOL, BROWSER_SNAPSHOT_TOOL,
+    BROWSER_UNAVAILABLE, BROWSER_WAIT_TOOL,
+};
 
 #[cfg(test)]
 mod tests {

@@ -29,10 +29,7 @@ pub fn uses_openai_credentials(model: &str) -> bool {
 /// constructed provider client. Resolves through [`provider_credentials`];
 /// no-ops when nothing usable resolves or the model never signs with this
 /// pair. Idempotent: safe to call on every switch and handoff.
-pub(crate) fn refresh_provider_for_model(
-    provider: &std::sync::Arc<dyn ProviderPort>,
-    model: &str,
-) {
+pub(crate) fn refresh_provider_for_model(provider: &std::sync::Arc<dyn ProviderPort>, model: &str) {
     if !uses_openai_credentials(model) {
         return;
     }
@@ -74,10 +71,7 @@ pub fn provider_credentials(model: &str) -> (String, Option<String>) {
     {
         return (credentials.access_token, credentials.account_id);
     }
-    (
-        std::env::var("OPENAI_API_KEY").unwrap_or_default(),
-        None,
-    )
+    (std::env::var("OPENAI_API_KEY").unwrap_or_default(), None)
 }
 
 /// Host bridge from the provider credential traits to `threadlane-auth`.

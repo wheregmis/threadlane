@@ -16,14 +16,14 @@ pub use convert::{
 };
 pub use credentials::{
     AntigravityCredentialSnapshot, AntigravityCredentialSource, CodexAccountResolver,
-    CodexBackupAccount, NoopAntigravityCredentials, NoopCodexResolver, SharedAntigravityCredentials,
-    SharedCodexResolver,
+    CodexBackupAccount, NoopAntigravityCredentials, NoopCodexResolver,
+    SharedAntigravityCredentials, SharedCodexResolver,
 };
 pub use exec::get_runtime;
 pub use model_registry::{
     builtin_models, context_window_for, effective_api_effort, effective_effort, find_model,
-    load_models_from_file, merge_models, registry_for_project, supported_efforts_for,
-    update_discovered_models, ModelInfo,
+    load_models_from_file, merge_models, pretty_model_label, registry_for_project,
+    supported_efforts_for, update_discovered_models, ModelInfo,
 };
 pub use router::{
     is_antigravity_model, is_opencode_model, normalize_commit_message, ProviderClient,

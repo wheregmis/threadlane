@@ -1,6 +1,5 @@
 use crate::extension_broker::{BrokerError, BrokerRequest, CapabilityHandler};
 use crate::permission::{PermissionDecision, PermissionManager};
-use threadlane_runtime::ToolPolicy;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -10,6 +9,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use threadlane_runtime::AgentEvent;
+use threadlane_runtime::ToolPolicy;
 use threadlane_wasi::WasiExtensionManager;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::time::{timeout, Duration};

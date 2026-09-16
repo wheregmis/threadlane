@@ -214,7 +214,10 @@ mod tests {
 
     #[test]
     fn implementation_action_gate_matches_only_mutating_writes() {
-        assert!(is_prewalk_implementation_action("edit_file_hashline", false));
+        assert!(is_prewalk_implementation_action(
+            "edit_file_hashline",
+            false
+        ));
         assert!(is_prewalk_implementation_action(
             "edit_files_hashline",
             false
@@ -242,7 +245,12 @@ mod tests {
 
     #[test]
     fn noop_detection_covers_model_and_effort() {
-        assert!(prewalk_would_be_noop("m", Some(ReasoningEffort::Low), "m", Some(ReasoningEffort::Low)));
+        assert!(prewalk_would_be_noop(
+            "m",
+            Some(ReasoningEffort::Low),
+            "m",
+            Some(ReasoningEffort::Low)
+        ));
         assert!(prewalk_would_be_noop("m", None, "m", None));
         assert!(!prewalk_would_be_noop("a", None, "b", None));
         assert!(!prewalk_would_be_noop(
@@ -251,7 +259,12 @@ mod tests {
             "m",
             Some(ReasoningEffort::High)
         ));
-        assert!(!prewalk_would_be_noop("m", None, "m", Some(ReasoningEffort::Low)));
+        assert!(!prewalk_would_be_noop(
+            "m",
+            None,
+            "m",
+            Some(ReasoningEffort::Low)
+        ));
     }
 
     #[test]
@@ -288,15 +301,36 @@ mod tests {
         assert_eq!(OrchestratorMode::default(), OrchestratorMode::Off);
         // Deprecated Auto never arms, even for actionable tasks.
         assert_eq!(
-            Orchestrator::evaluate("fix the bug in lib.rs", OrchestratorMode::Auto, "pro", "flash", None, true),
+            Orchestrator::evaluate(
+                "fix the bug in lib.rs",
+                OrchestratorMode::Auto,
+                "pro",
+                "flash",
+                None,
+                true
+            ),
             OrchestratorDecision::DirectExecution
         );
         assert_eq!(
-            Orchestrator::evaluate("fix the bug", OrchestratorMode::Off, "pro", "flash", None, true),
+            Orchestrator::evaluate(
+                "fix the bug",
+                OrchestratorMode::Off,
+                "pro",
+                "flash",
+                None,
+                true
+            ),
             OrchestratorDecision::DirectExecution
         );
         assert_eq!(
-            Orchestrator::evaluate("fix the bug", OrchestratorMode::Always, "same", "same", None, true),
+            Orchestrator::evaluate(
+                "fix the bug",
+                OrchestratorMode::Always,
+                "same",
+                "same",
+                None,
+                true
+            ),
             OrchestratorDecision::DirectExecution
         );
         assert_eq!(

@@ -1,4 +1,5 @@
 use std::path::Path;
+use threadlane_project::default_global_threadlane_dir;
 use threadlane_runtime::AgentRuntime;
 use threadlane_wasi::packages::{ExtensionManager, ExtensionRecord};
 
@@ -12,13 +13,10 @@ struct CapabilityCatalog {
 
 impl CapabilityCatalog {
     fn discover(project_root: Option<&Path>) -> Self {
-        let global_threadlane_dir =
-            threadlane_wasi::packages::default_global_threadlane_dir();
-        let extensions = ExtensionManager::new(
-            global_threadlane_dir,
-            project_root.map(Path::to_path_buf),
-        )
-        .discover();
+        let global_threadlane_dir = default_global_threadlane_dir();
+        let extensions =
+            ExtensionManager::new(global_threadlane_dir, project_root.map(Path::to_path_buf))
+                .discover();
         Self { extensions }
     }
 

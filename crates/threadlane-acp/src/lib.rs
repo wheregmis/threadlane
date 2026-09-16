@@ -941,9 +941,7 @@ pub type AcpPermissionResponder = Arc<
 /// [`AcpWorkspaceClient::with_path_validator`] so path policy stays in one
 /// place; the default ([`default_path_validator`]) canonicalizes the nearest
 /// existing ancestor before comparing against the root.
-pub type AcpPathValidator = Arc<
-    dyn Fn(&str, &Path) -> Result<PathBuf, String> + Send + Sync,
->;
+pub type AcpPathValidator = Arc<dyn Fn(&str, &Path) -> Result<PathBuf, String> + Send + Sync>;
 
 /// Default workspace path validator: joins the request onto the workspace
 /// root when relative (absolute requests must already be inside the root),
@@ -974,16 +972,12 @@ pub fn default_path_validator(requested: &str, workspace_root: &Path) -> Result<
                 match ancestor.parent() {
                     Some(parent) => ancestor = parent,
                     None => {
-                        return Err(format!(
-                            "Path '{requested}' escapes the workspace"
-                        ));
+                        return Err(format!("Path '{requested}' escapes the workspace"));
                     }
                 }
             }
             None => {
-                return Err(format!(
-                    "Path '{requested}' escapes the workspace"
-                ));
+                return Err(format!("Path '{requested}' escapes the workspace"));
             }
         }
     }
@@ -1026,10 +1020,7 @@ impl AcpWorkspaceClient {
 
     /// Injects the host application's workspace path guard so agent filesystem
     /// access follows the same policy as the rest of the host.
-    pub fn with_path_validator(
-        mut self,
-        validator: AcpPathValidator,
-    ) -> Self {
+    pub fn with_path_validator(mut self, validator: AcpPathValidator) -> Self {
         self.path_validator = validator;
         self
     }
@@ -1668,11 +1659,7 @@ impl AcpSession {
     /// A value the agent does not offer is refused here rather than sent: an
     /// agent is free to reject it however it likes, including by failing the
     /// call, and a rejected setting must not look applied.
-    pub async fn set_config_option(
-        &self,
-        category: &str,
-        value: &str,
-    ) -> Result<(), String> {
+    pub async fn set_config_option(&self, category: &str, value: &str) -> Result<(), String> {
         let config_id = {
             let options = self.config_options();
             let Some(option) = config_option_for(&options, category) else {
@@ -1732,10 +1719,7 @@ impl AcpSession {
             .await
     }
 
-    pub async fn prompt(
-        &self,
-        blocks: Vec<AcpContentBlock>,
-    ) -> Result<AcpStopReason, String> {
+    pub async fn prompt(&self, blocks: Vec<AcpContentBlock>) -> Result<AcpStopReason, String> {
         self.connection.prompt(&self.session_id, blocks).await
     }
 
@@ -1985,10 +1969,8 @@ mod tests {
 
     #[test]
     fn default_path_validator_allows_new_files_and_rejects_escape() {
-        let dir = std::env::temp_dir().join(format!(
-            "threadlane-acp-validator-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("threadlane-acp-validator-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("fixture dir");
         let root = dir.canonicalize().expect("canonical root");
 

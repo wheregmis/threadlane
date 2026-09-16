@@ -108,12 +108,7 @@ pub fn build_checkpoint_omitting_tool_outputs(
     let params = CompactionParams::from(config);
     let pairs: Vec<(&AgentMessage, bool)> = entries
         .iter()
-        .map(|entry| {
-            (
-                &entry.message,
-                omitted_source_entry_ids.contains(&entry.id),
-            )
-        })
+        .map(|entry| (&entry.message, omitted_source_entry_ids.contains(&entry.id)))
         .collect();
     threadlane_compaction::build_checkpoint_omitting_tool_outputs(&pairs, &params)
 }

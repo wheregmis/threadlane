@@ -7,15 +7,15 @@ use crate::browser::BrowserBridge;
 use crate::coding_agent::harness::CodingSessionHarness;
 use crate::coding_agent::{CodingAgentOptions, SubagentCancellationGuard};
 use crate::controller::{ExecutionMode, SessionController};
-use threadlane_project::{
-    load_project_registry_from, merge_and_save_project_registry_to, ProjectRecord,
-};
 use log::error;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use threadlane_project::{
+    load_project_registry_from, merge_and_save_project_registry_to, ProjectRecord,
+};
 use threadlane_runtime::harness::{
     DurableEvent, HarnessEvent, LaneStatus as HarnessLaneStatus, OperationOutcome,
     Record as HarnessRecord, SubagentLifecyclePhase,

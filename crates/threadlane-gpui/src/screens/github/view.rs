@@ -76,7 +76,9 @@ fn github_server_query(query: &str) -> Option<&str> {
 fn github_empty_message(tab: GitHubTab, state: GitHubStateFilter, query: &str) -> String {
     let items = tab.label().to_lowercase();
     if github_server_query(query).is_some() {
-        format!("No matching {items} in the attached repository. Try another search or state filter.")
+        format!(
+            "No matching {items} in the attached repository. Try another search or state filter."
+        )
     } else {
         format!("No {} {items} in the attached repository.", state.value())
     }
@@ -627,13 +629,21 @@ impl GitHubView {
         self.scope.projects(&self.attached_projects(cx))
     }
 
-    pub(crate) fn open_linked_task(&mut self, work_dir: PathBuf, number: u64, cx: &mut Context<Self>) {
+    pub(crate) fn open_linked_task(
+        &mut self,
+        work_dir: PathBuf,
+        number: u64,
+        cx: &mut Context<Self>,
+    ) {
         self.tab = GitHubTab::Issues;
         self.project_work_dir = Some(work_dir.clone());
         self.scope = GitHubScope::Project(work_dir.clone());
         self.scope_initialized = true;
         self.reset_list_state(cx);
-        self.selected_issue = Some(GitHubItemKey { project: work_dir, number });
+        self.selected_issue = Some(GitHubItemKey {
+            project: work_dir,
+            number,
+        });
         self.fetch_list(cx);
     }
 
@@ -2440,14 +2450,20 @@ impl GitHubView {
                             .on_click(move |_, _, cx| {
                                 let model = model.clone();
                                 cx.spawn(async move |cx| {
-                                    let Some(folder) = rfd::AsyncFileDialog::new().pick_folder().await else {
+                                    let Some(folder) =
+                                        rfd::AsyncFileDialog::new().pick_folder().await
+                                    else {
                                         return;
                                     };
                                     let _ = model.update(cx, |state, cx| {
-                                        controller::dispatch(state, AppAction::AttachProject(folder.path().to_path_buf()));
+                                        controller::dispatch(
+                                            state,
+                                            AppAction::AttachProject(folder.path().to_path_buf()),
+                                        );
                                         cx.notify();
                                     });
-                                }).detach();
+                                })
+                                .detach();
                             }),
                     )
                     .child(

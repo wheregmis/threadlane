@@ -122,9 +122,7 @@ impl SubagentHub {
     pub(crate) fn set_outcome(&self, lane_name: &str, outcome: impl Into<String>) {
         {
             if let Ok(mut inner) = self.inner.lock() {
-                inner
-                    .outcomes
-                    .insert(lane_name.to_string(), outcome.into());
+                inner.outcomes.insert(lane_name.to_string(), outcome.into());
             }
         }
         self.wake.notify_waiters();
@@ -158,8 +156,7 @@ impl SubagentHub {
 
     pub(crate) fn is_killed(&self, lane_name: &str, agent: &str) -> bool {
         self.inner.lock().is_ok_and(|inner| {
-            inner.killed.contains(lane_name)
-                || (!agent.is_empty() && inner.killed.contains(agent))
+            inner.killed.contains(lane_name) || (!agent.is_empty() && inner.killed.contains(agent))
         })
     }
 
@@ -381,8 +378,20 @@ mod tests {
     #[test]
     fn peer_send_drain_and_alias_resolution() {
         let hub = SubagentHub::new();
-        hub.register("lane-a".into(), "run-a".into(), "scout".into(), "t".into(), "m".into());
-        hub.register("lane-b".into(), "run-b".into(), "worker".into(), "t".into(), "m".into());
+        hub.register(
+            "lane-a".into(),
+            "run-a".into(),
+            "scout".into(),
+            "t".into(),
+            "m".into(),
+        );
+        hub.register(
+            "lane-b".into(),
+            "run-b".into(),
+            "worker".into(),
+            "t".into(),
+            "m".into(),
+        );
         let targets = hub.send("lane-a", "worker", "hello".into()).unwrap();
         assert_eq!(targets, vec!["lane-b".to_string()]);
         let inbox = hub.drain("lane-b");
@@ -395,8 +404,20 @@ mod tests {
     #[test]
     fn broadcast_skips_sender_and_queues_unknown() {
         let hub = SubagentHub::new();
-        hub.register("lane-a".into(), "run-a".into(), "a".into(), "t".into(), "m".into());
-        hub.register("lane-b".into(), "run-b".into(), "b".into(), "t".into(), "m".into());
+        hub.register(
+            "lane-a".into(),
+            "run-a".into(),
+            "a".into(),
+            "t".into(),
+            "m".into(),
+        );
+        hub.register(
+            "lane-b".into(),
+            "run-b".into(),
+            "b".into(),
+            "t".into(),
+            "m".into(),
+        );
         hub.send("lane-a", "all", "hi all".into()).unwrap();
         assert!(hub.drain("lane-a").is_empty());
         assert_eq!(hub.drain("lane-b").len(), 1);
@@ -432,7 +453,10 @@ mod tests {
             .unwrap_err();
         assert!(error.contains("unknown message target"));
         let sent = scout
-            .execute_tool("message_peer", r#"{"to":"worker","message":"schema moved"}"#)
+            .execute_tool(
+                "message_peer",
+                r#"{"to":"worker","message":"schema moved"}"#,
+            )
             .await
             .unwrap()
             .unwrap();
@@ -470,13 +494,19 @@ mod tests {
             .unwrap();
         assert!(list.contains("lane-a"));
         let unknown = executor
-            .execute_tool("hub", r#"{"action":"send","target":"ghost","message":"hi"}"#)
+            .execute_tool(
+                "hub",
+                r#"{"action":"send","target":"ghost","message":"hi"}"#,
+            )
             .await
             .unwrap()
             .unwrap_err();
         assert!(unknown.contains("unknown hub target"));
         let sent = executor
-            .execute_tool("hub", r#"{"action":"send","target":"scout","message":"steer"}"#)
+            .execute_tool(
+                "hub",
+                r#"{"action":"send","target":"scout","message":"steer"}"#,
+            )
             .await
             .unwrap()
             .unwrap();
@@ -588,8 +618,8 @@ mod tests {
 
     #[tokio::test]
     async fn hub_revive_validates_liveness_and_delegates_to_hook() {
-        use threadlane_runtime::ToolExecutor;
         use std::sync::{Arc, Mutex as StdMutex};
+        use threadlane_runtime::ToolExecutor;
         let hub = SubagentHub::new();
         let without_hook = HubToolExecutor::new(hub.clone(), None);
         hub.register(
@@ -653,7 +683,11 @@ pub(crate) const MESSAGE_PEER_TOOL_NAME: &str = "message_peer";
 /// Drain both the lane-name inbox and the agent-role inbox. Lanes address
 /// each other by role (stable before journal identities resolve); the parent
 /// addresses by lane name from `hub list`.
-pub(crate) fn drain_lane_inbox(hub: &SubagentHub, lane_name: &str, agent: &str) -> Vec<QueuedMessage> {
+pub(crate) fn drain_lane_inbox(
+    hub: &SubagentHub,
+    lane_name: &str,
+    agent: &str,
+) -> Vec<QueuedMessage> {
     let mut messages = hub.drain(lane_name);
     if agent != lane_name {
         messages.extend(hub.drain(agent));
@@ -666,9 +700,7 @@ pub(crate) fn format_inbox(messages: &[QueuedMessage]) -> serde_json::Value {
     serde_json::Value::Array(
         messages
             .iter()
-            .map(|message| {
-                serde_json::json!({"from": message.from, "message": message.body})
-            })
+            .map(|message| serde_json::json!({"from": message.from, "message": message.body}))
             .collect(),
     )
 }
@@ -689,7 +721,12 @@ impl MessagePeerToolExecutor {
         agent: String,
         siblings: Vec<String>,
     ) -> Self {
-        Self { hub, lane_name, agent, siblings }
+        Self {
+            hub,
+            lane_name,
+            agent,
+            siblings,
+        }
     }
 }
 
@@ -737,7 +774,9 @@ impl threadlane_runtime::ToolExecutor for MessagePeerToolExecutor {
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
         if to.is_empty() || message.trim().is_empty() {
-            return Some(Err("`message_peer` requires non-empty `to` and `message`".into()));
+            return Some(Err(
+                "`message_peer` requires non-empty `to` and `message`".into()
+            ));
         }
         let known = to == "all"
             || self.siblings.iter().any(|sibling| sibling == to)
@@ -776,7 +815,11 @@ pub(crate) struct HubToolExecutor {
 
 impl HubToolExecutor {
     pub(crate) fn new(hub: SubagentHub, session_file: Option<PathBuf>) -> Self {
-        Self { hub, session_file, revive_hook: None }
+        Self {
+            hub,
+            session_file,
+            revive_hook: None,
+        }
     }
 
     pub(crate) fn with_revive_hook(mut self, hook: ReviveHook) -> Self {
@@ -794,7 +837,10 @@ impl HubToolExecutor {
                     .iter()
                     .map(|lane| format!("{} ({})", lane.lane_name, lane.agent))
                     .collect();
-                format!("unknown hub target: {target}. Live lanes: {}", known.join(", "))
+                format!(
+                    "unknown hub target: {target}. Live lanes: {}",
+                    known.join(", ")
+                )
             })?;
         let Some(path) = self.session_file.as_deref() else {
             return Ok(serde_json::json!({
@@ -818,11 +864,10 @@ impl HubToolExecutor {
             .iter()
             .rev()
             .filter_map(|entry| match &entry.message {
-                threadlane_runtime::AgentMessage::Assistant { content: Some(content), .. }
-                    if !content.trim().is_empty() =>
-                {
-                    Some(content.clone())
-                }
+                threadlane_runtime::AgentMessage::Assistant {
+                    content: Some(content),
+                    ..
+                } if !content.trim().is_empty() => Some(content.clone()),
                 _ => None,
             })
             .next()
@@ -834,7 +879,11 @@ impl HubToolExecutor {
             .rev()
             .map(|entry| {
                 let summary = match &entry.message {
-                    threadlane_runtime::AgentMessage::Assistant { content, tool_calls, .. } => {
+                    threadlane_runtime::AgentMessage::Assistant {
+                        content,
+                        tool_calls,
+                        ..
+                    } => {
                         let text = content.as_deref().unwrap_or_default();
                         let text: String = text.chars().take(240).collect();
                         let tools = tool_calls
@@ -851,7 +900,12 @@ impl HubToolExecutor {
                             .unwrap_or_default();
                         format!("assistant: {text}{tools}")
                     }
-                    threadlane_runtime::AgentMessage::Tool { name, content, is_error, .. } => {
+                    threadlane_runtime::AgentMessage::Tool {
+                        name,
+                        content,
+                        is_error,
+                        ..
+                    } => {
                         let text: String = content.chars().take(240).collect();
                         format!("tool {name} (error={is_error}): {text}")
                     }
@@ -1079,7 +1133,13 @@ impl threadlane_runtime::ToolExecutor for HubToolExecutor {
                         let task: String = lane.task.chars().take(120).collect();
                         format!(
                             "- {} [{}] agent={} model={} unread={} run={} task={}",
-                            lane.lane_name, status, lane.agent, lane.model, lane.unread, lane.run_id, task
+                            lane.lane_name,
+                            status,
+                            lane.agent,
+                            lane.model,
+                            lane.unread,
+                            lane.run_id,
+                            task
                         )
                     })
                     .collect();
@@ -1096,14 +1156,16 @@ impl threadlane_runtime::ToolExecutor for HubToolExecutor {
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or_default();
                 if target.is_empty() || message.trim().is_empty() {
-                    return Some(Err("`hub send` requires non-empty `target` and `message`".into()));
+                    return Some(Err(
+                        "`hub send` requires non-empty `target` and `message`".into()
+                    ));
                 }
                 // Validate against the roster so parent typos error instead of
                 // queueing to a phantom inbox.
                 let roster = self.hub.roster();
-                let resolved = roster.iter().find(|lane| {
-                    lane.lane_name == target || lane.agent == target
-                });
+                let resolved = roster
+                    .iter()
+                    .find(|lane| lane.lane_name == target || lane.agent == target);
                 let Some(lane) = resolved else {
                     let known: Vec<_> = roster
                         .iter()

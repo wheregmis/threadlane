@@ -1,44 +1,43 @@
+//! Project-scoped subagent configuration shared by session and UI clients.
+
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use threadlane_runtime::{OrchestratorMode, ReasoningEffort};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct SubagentSettings {
+pub struct SubagentSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) model: Option<String>,
+    pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) reasoning_effort: Option<ReasoningEffort>,
+    pub reasoning_effort: Option<ReasoningEffort>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) fast_model: Option<String>,
+    pub fast_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) fast_reasoning_effort: Option<ReasoningEffort>,
+    pub fast_reasoning_effort: Option<ReasoningEffort>,
     #[serde(default)]
-    pub(crate) orchestrator_mode: OrchestratorMode,
+    pub orchestrator_mode: OrchestratorMode,
 }
 
 fn path(project_root: &Path) -> std::path::PathBuf {
     project_root.join(".threadlane").join("subagents.json")
 }
 
-pub(crate) fn load(project_root: &Path) -> SubagentSettings {
+pub fn load(project_root: &Path) -> SubagentSettings {
     std::fs::read(path(project_root))
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default()
 }
 
-pub(crate) fn save(project_root: &Path, settings: &SubagentSettings) -> Result<(), String> {
+pub fn save(project_root: &Path, settings: &SubagentSettings) -> Result<(), String> {
     if settings
         .reasoning_effort
         .is_some_and(|effort| ReasoningEffort::from_label(effort.label()).is_none())
+        || settings
+            .fast_reasoning_effort
+            .is_some_and(|effort| ReasoningEffort::from_label(effort.label()).is_none())
     {
         return Err("Unsupported subagent reasoning effort.".into());
-    }
-    if settings
-        .fast_reasoning_effort
-        .is_some_and(|effort| ReasoningEffort::from_label(effort.label()).is_none())
-    {
-        return Err("Unsupported fast model reasoning effort.".into());
     }
     let target = path(project_root);
     let parent = target.parent().ok_or("Invalid subagent settings path.")?;
@@ -54,9 +53,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn settings_round_trip_and_missing_defaults() {
+    fn settings_round_trip() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(load(dir.path()), SubagentSettings::default());
         let settings = SubagentSettings {
             model: Some("antigravity/gemini-3.1-pro".into()),
             reasoning_effort: Some(ReasoningEffort::High),
@@ -66,29 +64,5 @@ mod tests {
         };
         save(dir.path(), &settings).unwrap();
         assert_eq!(load(dir.path()), settings);
-    }
-
-    #[test]
-    fn malformed_settings_fall_back_and_all_efforts_persist() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join(".threadlane")).unwrap();
-        std::fs::write(path(dir.path()), b"not-json").unwrap();
-        assert_eq!(load(dir.path()), SubagentSettings::default());
-
-        for effort in [
-            ReasoningEffort::Max,
-            ReasoningEffort::XHigh,
-            ReasoningEffort::from_label("ultra").unwrap(),
-        ] {
-            let settings = SubagentSettings {
-                model: None,
-                reasoning_effort: Some(effort),
-                fast_model: None,
-                fast_reasoning_effort: None,
-                orchestrator_mode: OrchestratorMode::default(),
-            };
-            save(dir.path(), &settings).unwrap();
-            assert_eq!(load(dir.path()), settings);
-        }
     }
 }

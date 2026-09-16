@@ -501,11 +501,15 @@ mod tests {
             result.content
         );
         assert!(
-            result.content.contains("What would you like to work on today?"),
+            result
+                .content
+                .contains("What would you like to work on today?"),
             "questions must stay visible: {}",
             result.content
         );
-        assert!(result.content.contains("Explore a codebase / Build something new"));
+        assert!(result
+            .content
+            .contains("Explore a codebase / Build something new"));
         assert!(
             result.content.contains("plain text"),
             "model must be steered to text: {}",

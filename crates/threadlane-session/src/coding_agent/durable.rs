@@ -1,12 +1,12 @@
-use super::cancellation::{AgentRunTask, recover_v2_subagent_records};
+use super::cancellation::{recover_v2_subagent_records, AgentRunTask};
 use super::capabilities::dispatch_hook_requests;
 use super::harness::{
     CodingSessionHarness, InterruptedSubagentRecoveryState, SubagentLaneIdentity,
 };
 use super::runtime::CodingAgent;
 use super::subagents::{
-    NEXT_SUBAGENT_UI_RUN_ID, SubagentLaneStatus, SubagentRunContext, run_subagent_task,
-    subagent_workspace,
+    run_subagent_task, subagent_workspace, SubagentLaneStatus, SubagentRunContext,
+    NEXT_SUBAGENT_UI_RUN_ID,
 };
 use crate::agents::AgentDefinition;
 use crate::commands::{execute_slash_command, parse_slash_command};
@@ -15,8 +15,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use threadlane_runtime::harness::{
     HookContext, HookKind, JsonlStore, OperationOutcome, PromptSnapshot, Record as HarnessRecord,
     Reducer, SessionStore,
@@ -41,7 +41,10 @@ mod prewalk_tests {
         // Implementation actions alone do not complete prewalk; the todo
         // gate must open first and the handoff is automatic.
         assert!(is_prewalk_implementation_action("write_file", false));
-        assert!(is_prewalk_implementation_action("edit_file_hashline", false));
+        assert!(is_prewalk_implementation_action(
+            "edit_file_hashline",
+            false
+        ));
         assert!(!is_prewalk_implementation_action("read_file", false));
         assert!(!is_prewalk_implementation_action("run_command", false));
         assert!(!is_prewalk_implementation_action("update_plan", false));
@@ -331,17 +334,15 @@ impl CodingAgent {
                             .system_prompt
                             .contains(threadlane_runtime::orchestrator::PREWALK_CHECKLIST_HEADER)
                         {
-                            turn.system_prompt
-                                .push_str(&threadlane_runtime::orchestrator::build_checklist_directive());
+                            turn.system_prompt.push_str(
+                                &threadlane_runtime::orchestrator::build_checklist_directive(),
+                            );
                         }
                     }
                     // The handoff crosses providers mid-turn: re-resolve the
                     // signing credential for the fast model now, or its first
                     // request fails with the frontier provider's key (401).
-                    crate::credentials::refresh_provider_for_model(
-                        &provider,
-                        &target_model,
-                    );
+                    crate::credentials::refresh_provider_for_model(&provider, &target_model);
                     let effort_info = target_effort
                         .map(|e| format!(" with reasoning effort `{}`", e.label()))
                         .unwrap_or_default();
@@ -1360,11 +1361,7 @@ impl CodingAgent {
                 .map(|root| subagent_workspace(&root, &lane.run_id).0)
                 .filter(|worktree| worktree.is_dir())
                 .unwrap_or_else(|| self.work_dir.clone());
-            let child_model = self
-                .agent_config
-                .subagent_model
-                .clone()
-                .unwrap_or(model);
+            let child_model = self.agent_config.subagent_model.clone().unwrap_or(model);
             // Resolve live: the parent may have switched providers since the
             // session (or the interrupted child) started. Falls back to the
             // session key when nothing is stored.

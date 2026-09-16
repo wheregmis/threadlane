@@ -3,12 +3,12 @@ use crate::openai::{ProviderUsage, StreamEvent, ToolCall, ToolCallFunction};
 use futures_util::StreamExt;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::{Mutex, OnceCell, mpsc};
+use tokio::sync::{mpsc, Mutex, OnceCell};
 
 const PROD_BASE_URL: &str = "https://cloudcode-pa.googleapis.com";
 /// Daily host the official client uses for control- and data-plane traffic.
@@ -227,9 +227,7 @@ impl AntigravityClient {
 
     /// Injects the host's Antigravity credential source. Without one,
     /// requests fail fast instead of reading the host's credential store.
-    pub fn new_with_credentials(
-    credentials: SharedAntigravityCredentials,
-    ) -> Self {
+    pub fn new_with_credentials(credentials: SharedAntigravityCredentials) -> Self {
         Self {
             client: reqwest::Client::new(),
             project_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -749,10 +747,8 @@ pub async fn fetch_available_models(access_token: &str) -> Vec<AntigravityModelI
     if tokio::runtime::Handle::try_current().is_ok() {
         fetch_available_models_inner(&access_token).await
     } else {
-        let handle =
-            crate::exec::get_runtime().spawn(async move {
-                fetch_available_models_inner(&access_token).await
-            });
+        let handle = crate::exec::get_runtime()
+            .spawn(async move { fetch_available_models_inner(&access_token).await });
         handle.await.unwrap_or_default()
     }
 }

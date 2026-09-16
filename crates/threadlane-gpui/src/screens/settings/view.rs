@@ -85,8 +85,9 @@ impl ProvidersStatusSnapshot {
                 .collect(),
             active_codex_account_id: threadlane_auth::openai_auth::get_active_codex_account()
                 .map(|account| account.id),
-            antigravity_connected:
-                threadlane_auth::antigravity_auth::load_antigravity_credentials().is_some(),
+            antigravity_connected: threadlane_auth::antigravity_auth::load_antigravity_credentials(
+            )
+            .is_some(),
         }
     }
 }
@@ -252,11 +253,8 @@ impl SettingsView {
                     // The key just changed, so re-pull the live OpenAI list.
                     let openai_refresh = openai_model.clone();
                     cx.spawn(async move |_this, cx| {
-                        crate::model_catalog::refresh_openai_models_and_update(
-                            openai_refresh,
-                            cx,
-                        )
-                        .await;
+                        crate::model_catalog::refresh_openai_models_and_update(openai_refresh, cx)
+                            .await;
                     })
                     .detach();
                 }
@@ -665,10 +663,8 @@ impl SettingsView {
         // Reasoning controls hide for models without thinking (ACP agents,
         // off-only registry entries) instead of offering dead options. An
         // unset model inherits the parent, so the control stays visible.
-        let show_reasoning = crate::model_catalog::supports_reasoning(
-            &reasoning_for_model,
-            Some(&project),
-        );
+        let show_reasoning =
+            crate::model_catalog::supports_reasoning(&reasoning_for_model, Some(&project));
         let model_picker = Button::new("subagent-model-picker")
             .label(model_label)
             .dropdown_caret(true)
@@ -857,10 +853,8 @@ impl SettingsView {
         let fast_reasoning_entity = self.model.clone();
         let project_for_fast_reasoning = project.clone();
         let fast_for_model = preferences.fast_model.clone().unwrap_or_default();
-        let show_fast_reasoning = crate::model_catalog::supports_reasoning(
-            &fast_for_model,
-            Some(&project),
-        );
+        let show_fast_reasoning =
+            crate::model_catalog::supports_reasoning(&fast_for_model, Some(&project));
         let fast_reasoning_picker = Button::new("fast-reasoning-picker")
             .label(fast_reasoning_label)
             .dropdown_caret(true)

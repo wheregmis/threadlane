@@ -165,10 +165,7 @@ mod tests {
         let task = tokio::spawn(async move { bridge.round_trip(BrowserCommand::Back).await });
         let request = rx.recv().await.expect("command sent");
         assert!(matches!(request.command, BrowserCommand::Back));
-        request
-            .reply
-            .send(Ok("went back".into()))
-            .expect("reply");
+        request.reply.send(Ok("went back".into())).expect("reply");
         assert_eq!(task.await.expect("task").expect("ok"), "went back");
     }
 

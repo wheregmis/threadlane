@@ -5,7 +5,7 @@ use gpui::{px, App, Hsla, Pixels, SharedString};
 use gpui_component::{ActiveTheme, Theme, ThemeConfig, ThemeMode, ThemeRegistry};
 use serde::{Deserialize, Serialize};
 
-use crate::persistence::global_threadlane_dir;
+use threadlane_project::global_threadlane_dir;
 
 const DEFAULT_THEME_NAME: &str = "Threadlane Dark";
 const BUNDLED_THEMES: &str = include_str!("../themes/threadlane.json");

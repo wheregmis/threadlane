@@ -6,6 +6,8 @@
 //! file format, `sha2` for stable project ids, and `directories` for home
 //! resolution — no runtime, wasi, or GPUI coupling.
 
+pub mod watcher;
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
@@ -174,6 +176,32 @@ pub fn dirs_home() -> Option<PathBuf> {
 /// registry has no wasi/runtime dependency.
 pub fn default_global_threadlane_dir() -> Option<PathBuf> {
     dirs_home().map(|home| home.join(".threadlane"))
+}
+
+/// Global Threadlane directory with a stable local fallback for callers that
+/// must construct paths even when home-directory discovery is unavailable.
+pub fn global_threadlane_dir() -> PathBuf {
+    default_global_threadlane_dir().unwrap_or_else(|| PathBuf::from(".threadlane"))
+}
+
+pub fn load_needle_enabled() -> bool {
+    default_global_threadlane_dir()
+        .map(|dir| dir.join("gui").join("needle.json"))
+        .and_then(|path| fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or(false)
+}
+
+pub fn save_needle_enabled(enabled: bool) -> Result<(), String> {
+    let path = default_global_threadlane_dir()
+        .map(|dir| dir.join("gui").join("needle.json"))
+        .ok_or_else(|| "Global settings directory is unavailable.".to_string())?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Needle settings path has no parent.".to_string())?;
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let bytes = serde_json::to_vec(&enabled).map_err(|error| error.to_string())?;
+    fs::write(path, bytes).map_err(|error| error.to_string())
 }
 
 fn save_project_registry_to(global_dir: &Path, projects: &[ProjectRecord]) -> Result<(), String> {

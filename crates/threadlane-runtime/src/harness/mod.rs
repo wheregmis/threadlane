@@ -41,7 +41,10 @@ pub use procedure::{
     DeferredResolution, NavigationProcedure, NoToolRun, OperationProcedure, ProcedureError,
     PromptProcedure, QueueProcedure, RetryPolicy, RetryProcedure, ToolBatchProcedure, ToolRecovery,
 };
-pub use projections::{project_chat_messages, UiChatMessage, UiMessageRole, UiToolActivity};
+pub use projections::{
+    project_chat_messages, tool_activity_display_summary, tool_activity_summary, UiChatMessage,
+    UiMessageRole, UiToolActivity,
+};
 pub use queue::{LaneQueue, SteerItem, SteerPriority};
 pub use reducer::Reducer;
 pub use session::{LaneHandle, SessionAgent};

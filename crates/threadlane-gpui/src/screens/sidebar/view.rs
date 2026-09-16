@@ -831,13 +831,18 @@ impl SidebarView {
                     ),
             )
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .children([
-                        (SessionAttention::NeedsYou, attention_counts[0], theme.warning),
-                        (SessionAttention::Working, attention_counts[1], theme.primary),
+                div().flex().items_center().gap_1().children(
+                    [
+                        (
+                            SessionAttention::NeedsYou,
+                            attention_counts[0],
+                            theme.warning,
+                        ),
+                        (
+                            SessionAttention::Working,
+                            attention_counts[1],
+                            theme.primary,
+                        ),
                         (SessionAttention::Ready, attention_counts[2], theme.success),
                     ]
                     .into_iter()
@@ -850,14 +855,16 @@ impl SidebarView {
                             .selected(selected)
                             .text_color(color)
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.attention_filter = if this.attention_filter == Some(attention) {
+                                this.attention_filter = if this.attention_filter == Some(attention)
+                                {
                                     None
                                 } else {
                                     Some(attention)
                                 };
                                 cx.notify();
                             }))
-                    })),
+                    }),
+                ),
             )
     }
 
@@ -1351,7 +1358,8 @@ impl SidebarView {
                                                         controller::dispatch(
                                                             state,
                                                             AppAction::SettleSession {
-                                                                work_dir: quick_settle_work_dir.clone(),
+                                                                work_dir: quick_settle_work_dir
+                                                                    .clone(),
                                                                 session_id: quick_settle_session_id
                                                                     .clone(),
                                                                 delete_worktree: false,
@@ -1633,7 +1641,10 @@ impl SidebarView {
                 continue;
             }
             let attention = state.session_attention(session);
-            if self.attention_filter.is_some_and(|filter| filter != attention) {
+            if self
+                .attention_filter
+                .is_some_and(|filter| filter != attention)
+            {
                 continue;
             }
             sessions.push((session.clone(), attention));

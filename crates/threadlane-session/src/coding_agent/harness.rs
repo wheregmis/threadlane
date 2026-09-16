@@ -1518,7 +1518,9 @@ impl CodingSessionHarness {
             .lane(lane)
             .ok_or_else(|| format!("unknown subagent lane: {lane}"))?;
         if lane_state.open_operation.is_some() {
-            return Err(format!("lane {lane} is still live; use `hub send` to steer it"));
+            return Err(format!(
+                "lane {lane} is still live; use `hub send` to steer it"
+            ));
         }
         let run_id = self.unique_run_id("subagent-run")?;
         let source_leaf_id = lane_state.leaf_id.clone();

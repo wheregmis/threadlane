@@ -424,11 +424,7 @@ pub fn github_path(root: &Path, reference: &str) -> String {
 }
 
 #[allow(dead_code)]
-pub fn github_path_with(
-    root: &Path,
-    reference: &str,
-    credentials: &RemoteCredentials,
-) -> String {
+pub fn github_path_with(root: &Path, reference: &str, credentials: &RemoteCredentials) -> String {
     try_remote_ref_path_with(root, reference, credentials).unwrap_or_else(|error| error)
 }
 

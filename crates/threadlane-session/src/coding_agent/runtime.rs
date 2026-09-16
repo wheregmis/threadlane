@@ -7,8 +7,8 @@ use super::subagents::*;
 use super::broker::ManagedProcessRegistry;
 use super::capabilities::{
     build_broker_dispatcher, render_agent_catalog, restored_tool_policy, BrowserCapability,
-    ContextCapability, GitHubCapability, McpCapability, PlanCapability,
-    QuestionCapability, SkillCapability, SubagentCapability, WasiCapability, WorktreeCapability,
+    ContextCapability, GitHubCapability, McpCapability, PlanCapability, QuestionCapability,
+    SkillCapability, SubagentCapability, WasiCapability, WorktreeCapability,
 };
 use super::harness::{CodingSessionHarness, HarnessWatch, InterruptedSubagentRecoveryState};
 use crate::commands::{execute_slash_command, parse_slash_command, CommandAction};
@@ -16,21 +16,21 @@ use crate::computer::ComputerCapability;
 use crate::context::ProjectContext;
 use crate::extension_broker::CapabilityDispatcher;
 use crate::plan::session_plan_store;
-use threadlane_runtime::ToolPolicy;
 use crate::question::QuestionManager;
 use crate::system_prompt::{build_system_prompt, SystemPromptBuildOptions};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use threadlane_mcp::McpManager;
+use threadlane_project::default_global_threadlane_dir;
 use threadlane_protocol::ProviderPort;
 use threadlane_provider::openai::fetch_available_models;
 use threadlane_runtime::harness::{OperationOutcome, Reducer, SessionStore, Snapshot};
+use threadlane_runtime::ToolPolicy;
 use threadlane_runtime::{
     AgentEvent, AgentMessage, AgentRuntime, ImageAttachment, ReasoningEffort, TokenUsage,
 };
 use threadlane_skills::{SkillManager, SkillRegistry};
-use threadlane_wasi::packages::default_global_threadlane_dir;
 use threadlane_wasi::{WasiExtensionManager, WasiLegacyEffect};
 use tokio::sync::broadcast;
 
@@ -56,7 +56,8 @@ pub struct CodingAgent {
     pub(crate) harness: Option<CodingSessionHarness>,
     pub(crate) harness_journal_error: Option<String>,
     pub(crate) harness_run_id: Arc<std::sync::Mutex<Option<String>>>,
-    pub(crate) prewalk: Arc<std::sync::Mutex<Option<threadlane_runtime::orchestrator::PrewalkState>>>,
+    pub(crate) prewalk:
+        Arc<std::sync::Mutex<Option<threadlane_runtime::orchestrator::PrewalkState>>>,
     /// Live agent-to-agent mailbox shared by sibling `message_peer` and the
     /// parent `hub` tool (oh-my-pi hub/IRC parity).
     pub(crate) hub: super::mailbox::SubagentHub,
@@ -570,8 +571,7 @@ impl CodingAgent {
                 // construction (slash `/model`, prewalk handoff). Falls back
                 // to the construction key when nothing is stored.
                 let (api_key, account_id) = {
-                    let (key, account) =
-                        crate::credentials::provider_credentials(&child_model);
+                    let (key, account) = crate::credentials::provider_credentials(&child_model);
                     if key.trim().is_empty() {
                         (api_key, account_id)
                     } else {
@@ -622,79 +622,80 @@ impl CodingAgent {
         });
         // `hub revive` spawner: reuses the subagent ingredients above to open
         // a follow-up operation on the settled lane (same history).
-        let revive_hook: super::mailbox::ReviveHook = Arc::new(move |req: super::mailbox::ReviveRequest| {
-            let api_key = revive_api_key.clone();
-            let account_id = revive_account_id.clone();
-            let state = revive_state.clone();
-            let runner_config = revive_config.clone();
-            let work_dir = revive_work_dir.clone();
-            let extensions = revive_extensions.clone();
-            let event_tx = revive_event_tx.clone();
-            let session_file = revive_session_file.clone();
-            let semaphore = revive_semaphore.clone();
-            let hub = revive_hub.clone();
-            let parent_leaf = revive_parent_leaf.clone();
-            let completed_lanes = revive_completed_lanes.clone();
-            let parent_session_id = revive_parent_session_id.clone();
-            Box::pin(async move {
-                let parent_reasoning_effort = {
-                    let state = state.lock().await;
-                    state.reasoning_effort()
-                };
-                let child_reasoning_effort = runner_config
-                    .subagent_reasoning_effort
-                    .unwrap_or(parent_reasoning_effort);
-                let parent_leaf_id = parent_leaf.lock().ok().and_then(|leaf| leaf.clone());
-                // The revived run keeps the lane's original model so history
-                // and behavior stay continuous.
-                let child_model = req.model.clone();
-                // Resolve live (see the foreground runner above).
-                let (api_key, account_id) = {
-                    let (key, account) =
-                        crate::credentials::provider_credentials(&child_model);
-                    if key.trim().is_empty() {
-                        (api_key, account_id)
-                    } else {
-                        (key, account)
-                    }
-                };
-                revive_subagent_lane(
-                    ReviveLaneRequest {
-                        lane_name: req.lane_name,
-                        agent: req.agent,
-                        task: req.task,
-                        model: req.model,
-                        message: req.message,
-                    },
-                    SubagentRunContext {
-                        api_key,
-                        account_id,
-                        child_model,
-                        child_reasoning_effort,
-                        parent_session_id: parent_session_id.clone(),
-                        work_dir,
-                        extensions,
-                        parent_event_tx: event_tx,
-                        parent_leaf_id,
-                        session_file,
-                        completed_lanes,
-                        hub,
-                        #[cfg(test)]
-                        scheduler_observer: None,
-                        #[cfg(test)]
-                        child_work_observer: None,
-                        #[cfg(test)]
-                        child_tool_observer: None,
-                        #[cfg(test)]
-                        child_run_override: None,
-                        semaphore,
-                    },
-                )
-                .await
-            })
-        });
+        let revive_hook: super::mailbox::ReviveHook =
+            Arc::new(move |req: super::mailbox::ReviveRequest| {
+                let api_key = revive_api_key.clone();
+                let account_id = revive_account_id.clone();
+                let state = revive_state.clone();
+                let runner_config = revive_config.clone();
+                let work_dir = revive_work_dir.clone();
+                let extensions = revive_extensions.clone();
+                let event_tx = revive_event_tx.clone();
+                let session_file = revive_session_file.clone();
+                let semaphore = revive_semaphore.clone();
+                let hub = revive_hub.clone();
+                let parent_leaf = revive_parent_leaf.clone();
+                let completed_lanes = revive_completed_lanes.clone();
+                let parent_session_id = revive_parent_session_id.clone();
+                Box::pin(async move {
+                    let parent_reasoning_effort = {
+                        let state = state.lock().await;
+                        state.reasoning_effort()
+                    };
+                    let child_reasoning_effort = runner_config
+                        .subagent_reasoning_effort
+                        .unwrap_or(parent_reasoning_effort);
+                    let parent_leaf_id = parent_leaf.lock().ok().and_then(|leaf| leaf.clone());
+                    // The revived run keeps the lane's original model so history
+                    // and behavior stay continuous.
+                    let child_model = req.model.clone();
+                    // Resolve live (see the foreground runner above).
+                    let (api_key, account_id) = {
+                        let (key, account) = crate::credentials::provider_credentials(&child_model);
+                        if key.trim().is_empty() {
+                            (api_key, account_id)
+                        } else {
+                            (key, account)
+                        }
+                    };
+                    revive_subagent_lane(
+                        ReviveLaneRequest {
+                            lane_name: req.lane_name,
+                            agent: req.agent,
+                            task: req.task,
+                            model: req.model,
+                            message: req.message,
+                        },
+                        SubagentRunContext {
+                            api_key,
+                            account_id,
+                            child_model,
+                            child_reasoning_effort,
+                            parent_session_id: parent_session_id.clone(),
+                            work_dir,
+                            extensions,
+                            parent_event_tx: event_tx,
+                            parent_leaf_id,
+                            session_file,
+                            completed_lanes,
+                            hub,
+                            #[cfg(test)]
+                            scheduler_observer: None,
+                            #[cfg(test)]
+                            child_work_observer: None,
+                            #[cfg(test)]
+                            child_tool_observer: None,
+                            #[cfg(test)]
+                            child_run_override: None,
+                            semaphore,
+                        },
+                    )
+                    .await
+                })
+            });
         let (broker_dispatcher, managed_processes, permission_handle, permissions) =
-            build_broker_dispatcher(                tool_policy.clone(),
+            build_broker_dispatcher(
+                tool_policy.clone(),
                 wasi_extensions.clone(),
                 true,
                 options.work_dir.clone(),
@@ -770,8 +771,11 @@ impl CodingAgent {
             manager_clone.discover_and_connect().await;
         });
         agent.work_dir = Some(options.work_dir.clone());
-        agent.turn.try_lock().expect("new runtime turn is unlocked").project_root =
-            Some(options.work_dir.clone());
+        agent
+            .turn
+            .try_lock()
+            .expect("new runtime turn is unlocked")
+            .project_root = Some(options.work_dir.clone());
 
         let mut system_prompt_config = options.system_prompt.clone();
         if initial_tool_policy == ToolPolicy::ReadOnly {
@@ -1572,16 +1576,16 @@ impl CodingAgent {
                         });
                         effective_input = task_prompt.to_string();
                     } else {
-                        let requires_todo = self
-                            .agent
-                            .configured_tool_definitions()
-                            .iter()
-                            .any(|tool| tool.name == threadlane_runtime::orchestrator::PREWALK_TODO_TOOL);
-                        *self.prewalk.lock().unwrap() = Some(threadlane_runtime::orchestrator::PrewalkState::new(
-                            fast_model.clone(),
-                            fast_reasoning,
-                            requires_todo,
-                        ));
+                        let requires_todo =
+                            self.agent.configured_tool_definitions().iter().any(|tool| {
+                                tool.name == threadlane_runtime::orchestrator::PREWALK_TODO_TOOL
+                            });
+                        *self.prewalk.lock().unwrap() =
+                            Some(threadlane_runtime::orchestrator::PrewalkState::new(
+                                fast_model.clone(),
+                                fast_reasoning,
+                                requires_todo,
+                            ));
 
                         let _ = self.agent.event_tx.send(AgentEvent::PrewalkCompleted {
                             model: active_model.clone(),
@@ -1590,7 +1594,10 @@ impl CodingAgent {
 
                         effective_input = task_prompt.to_string();
                         architect_directive =
-                            Some(threadlane_runtime::orchestrator::build_architect_directive(&fast_model, requires_todo));
+                            Some(threadlane_runtime::orchestrator::build_architect_directive(
+                                &fast_model,
+                                requires_todo,
+                            ));
                     }
                 } else {
                     let output = execute_slash_command(cmd_action, &mut self.agent).await;
@@ -1649,11 +1656,12 @@ impl CodingAgent {
                         message: format!("Prewalk: target `{target_fast}` already matches the active model and reasoning; nothing to switch."),
                     });
                 } else {
-                    *self.prewalk.lock().unwrap() = Some(threadlane_runtime::orchestrator::PrewalkState::new(
-                        target_fast.clone(),
-                        target_effort,
-                        requires_todo,
-                    ));
+                    *self.prewalk.lock().unwrap() =
+                        Some(threadlane_runtime::orchestrator::PrewalkState::new(
+                            target_fast.clone(),
+                            target_effort,
+                            requires_todo,
+                        ));
 
                     let _ = self.agent.event_tx.send(AgentEvent::PrewalkCompleted {
                         model: active_model.clone(),
@@ -1783,15 +1791,22 @@ impl CodingAgent {
             if fire_reminder {
                 let text_only = {
                     let turn = self.agent.turn.lock().await;
-                    turn.messages.iter().rev().find_map(|message| match message {
-                        AgentMessage::Assistant { content, tool_calls, .. } => Some(
-                            tool_calls.as_ref().is_none_or(|calls| calls.is_empty())
-                                && content.as_ref().is_some_and(|text| !text.trim().is_empty()),
-                        ),
-                        AgentMessage::Tool { .. } => Some(false),
-                        _ => None,
-                    })
-                    .unwrap_or(false)
+                    turn.messages
+                        .iter()
+                        .rev()
+                        .find_map(|message| match message {
+                            AgentMessage::Assistant {
+                                content,
+                                tool_calls,
+                                ..
+                            } => Some(
+                                tool_calls.as_ref().is_none_or(|calls| calls.is_empty())
+                                    && content.as_ref().is_some_and(|text| !text.trim().is_empty()),
+                            ),
+                            AgentMessage::Tool { .. } => Some(false),
+                            _ => None,
+                        })
+                        .unwrap_or(false)
                 };
                 // Only remind when the turn truly ended text-only with no
                 // handoff. If tools ran (todo opened, edits attempted), the
@@ -1988,8 +2003,7 @@ mod compaction_sync_tests {
             },
             provider,
         );
-        let (openai_key, openai_account) =
-            crate::credentials::provider_credentials("gpt-4o");
+        let (openai_key, openai_account) = crate::credentials::provider_credentials("gpt-4o");
         agent.set_model("gpt-4o".into()).await.unwrap();
         if openai_key.trim().is_empty() {
             // Credential-less contexts keep legacy behavior: untouched.
@@ -2004,8 +2018,7 @@ mod compaction_sync_tests {
         }
         // Switching to a non-OpenAI model never touches the shared cell.
         let before = refreshed.lock().unwrap().len();
-        let (ag_key, _) =
-            crate::credentials::provider_credentials("antigravity/gemini-3.1-pro");
+        let (ag_key, _) = crate::credentials::provider_credentials("antigravity/gemini-3.1-pro");
         agent
             .set_model("antigravity/gemini-3.1-pro".into())
             .await

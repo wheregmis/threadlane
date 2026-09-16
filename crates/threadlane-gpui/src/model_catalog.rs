@@ -98,28 +98,6 @@ static DISCOVERED_OPENCODE: std::sync::OnceLock<
     std::sync::Mutex<(std::time::Instant, Vec<ModelOption>)>,
 > = std::sync::OnceLock::new();
 
-fn pretty_bare_label(bare_id: &str) -> String {
-    let mut label = String::new();
-    for part in bare_id.split(['-', '_', '/']) {
-        if part.is_empty() {
-            continue;
-        }
-        if !label.is_empty() {
-            label.push(' ');
-        }
-        let mut chars = part.chars();
-        if let Some(first) = chars.next() {
-            label.extend(first.to_uppercase());
-            label.push_str(&chars.as_str().to_ascii_lowercase());
-        }
-    }
-    if label.is_empty() {
-        bare_id.to_string()
-    } else {
-        label
-    }
-}
-
 /// Fetches the live Zen model list and caches it for the picker. Skips the
 /// network when there is no OpenCode key or the cache is still fresh.
 pub async fn refresh_discovered_models() {
@@ -136,14 +114,14 @@ pub async fn refresh_discovered_models() {
     let mut discovered: Vec<ModelOption> = threadlane_provider::opencode::fetch_available_models(
         &threadlane_auth::opencode_auth::load_opencode_api_key().unwrap_or_default(),
     )
-        .await
-        .into_iter()
-        .map(|bare_id| ModelOption {
-            id: format!("opencode-go/{bare_id}"),
-            label: pretty_bare_label(&bare_id),
-            provider: ModelProvider::OpenCode,
-        })
-        .collect();
+    .await
+    .into_iter()
+    .map(|bare_id| ModelOption {
+        id: format!("opencode-go/{bare_id}"),
+        label: threadlane_provider::pretty_model_label(&bare_id),
+        provider: ModelProvider::OpenCode,
+    })
+    .collect();
     discovered.sort_by(|a, b| a.id.cmp(&b.id));
     if let Some(cache) = DISCOVERED_OPENCODE
         .get_or_init(|| std::sync::Mutex::new((std::time::Instant::now(), Vec::new())))
@@ -216,7 +194,7 @@ pub async fn refresh_openai_models() {
     // Same precedence as session credential resolution: stored API key,
     // ChatGPT login, environment. A Codex-subscription token 401s on
     // `/v1/models`; subscription models arrive via the ChatGPT backend below.
-    let (api_key, account_id) = crate::state::provider_credentials("gpt-4o");
+    let (api_key, account_id) = threadlane_session::provider_credentials("gpt-4o");
     if api_key.trim().is_empty() {
         return;
     }
@@ -250,7 +228,7 @@ pub async fn refresh_openai_models() {
             .into_iter()
             .map(|bare_id| ModelOption {
                 id: bare_id.clone(),
-                label: pretty_bare_label(&bare_id),
+                label: threadlane_provider::pretty_model_label(&bare_id),
                 provider: ModelProvider::OpenAi,
             })
             .collect();
@@ -462,7 +440,7 @@ fn synthesize_live_antigravity_models(models: &mut Vec<ModelOption>, available: 
         }
         let label = threadlane_runtime::model_registry::find_model(&logical_id, None)
             .map(|model| model.label)
-            .unwrap_or_else(|| pretty_bare_label(base));
+            .unwrap_or_else(|| threadlane_provider::pretty_model_label(base));
         models.push(ModelOption {
             id: logical_id,
             label,
@@ -774,7 +752,7 @@ pub(crate) fn selection_label(model_id: &str, available: &[ModelOption]) -> Stri
         .find(|model| model.id == model_id)
         .map(|model| model.label.clone())
         .or_else(|| label_for(model_id))
-        .unwrap_or_else(|| pretty_bare_label(model_id))
+        .unwrap_or_else(|| threadlane_provider::pretty_model_label(model_id))
 }
 
 pub fn available_option(model_id: &str) -> Option<ModelOption> {
@@ -806,12 +784,6 @@ fn has_openai_credentials() -> bool {
     has_chatgpt_login
         || threadlane_auth::openai_auth::load_openai_api_key().is_some()
         || std::env::var("OPENAI_API_KEY").is_ok_and(|key| !key.trim().is_empty())
-}
-
-pub(crate) fn model_context_window(model: &str) -> u32 {
-    threadlane_runtime::model_metadata::model_context_limit(model)
-        .unwrap_or(threadlane_runtime::model_metadata::UNKNOWN_MODEL_CONTEXT_LIMIT)
-        .min(u32::MAX as usize) as u32
 }
 
 pub(crate) fn format_tokens(tokens: u32) -> String {
@@ -1107,16 +1079,12 @@ mod tests {
 
     #[test]
     fn providers_only_expose_their_own_models() {
-        assert!(
-            models_for_credentials(true, false)
-                .iter()
-                .all(|model| model.provider == ModelProvider::Antigravity)
-        );
-        assert!(
-            models_for_credentials(false, true)
-                .iter()
-                .all(|model| model.provider == ModelProvider::OpenCode)
-        );
+        assert!(models_for_credentials(true, false)
+            .iter()
+            .all(|model| model.provider == ModelProvider::Antigravity));
+        assert!(models_for_credentials(false, true)
+            .iter()
+            .all(|model| model.provider == ModelProvider::OpenCode));
     }
 
     #[test]
@@ -1126,19 +1094,7 @@ mod tests {
     }
 
     #[test]
-    fn context_window_and_token_formatting() {
-        assert_eq!(
-            model_context_window("antigravity/gemini-3.7-flash"),
-            1_000_000
-        );
-        assert_eq!(
-            model_context_window("unknown/model"),
-            threadlane_runtime::model_metadata::UNKNOWN_MODEL_CONTEXT_LIMIT as u32,
-        );
-        assert_eq!(
-            model_context_window("antigravity/gemini-3.1-pro"),
-            2_000_000
-        );
+    fn token_formatting() {
         assert_eq!(format_tokens(850), "850");
         assert_eq!(format_tokens(24_500), "24.5k");
         assert_eq!(format_tokens(1_000_000), "1.0M");
@@ -1146,8 +1102,11 @@ mod tests {
 
     #[test]
     fn discovered_opencode_models_merge_without_duplicates() {
-        assert_eq!(pretty_bare_label("deepseek-v4-flash"), "Deepseek V4 Flash");
-        assert_eq!(pretty_bare_label("hy3"), "Hy3");
+        assert_eq!(
+            threadlane_provider::pretty_model_label("deepseek-v4-flash"),
+            "Deepseek V4 Flash"
+        );
+        assert_eq!(threadlane_provider::pretty_model_label("hy3"), "Hy3");
         let mut models = provider_models(OPENCODE_MODELS, ModelProvider::OpenCode);
         let before = models.len();
         // Seed entries already present must not be duplicated by discovery.
@@ -1173,26 +1132,20 @@ mod tests {
         }
         merge_discovered_opencode_models(&mut models);
         assert_eq!(models.len(), before + 1);
-        assert!(
-            models
-                .iter()
-                .any(|model| model.id == "opencode-go/kimi-k2.6")
-        );
+        assert!(models
+            .iter()
+            .any(|model| model.id == "opencode-go/kimi-k2.6"));
     }
 
     #[test]
     fn combined_catalog_preserves_provider_order() {
         let models = models_for_credentials(true, true);
-        assert!(
-            models[..ANTIGRAVITY_MODELS.len()]
-                .iter()
-                .all(|model| model.provider == ModelProvider::Antigravity)
-        );
-        assert!(
-            models[ANTIGRAVITY_MODELS.len()..]
-                .iter()
-                .all(|model| model.provider == ModelProvider::OpenCode)
-        );
+        assert!(models[..ANTIGRAVITY_MODELS.len()]
+            .iter()
+            .all(|model| model.provider == ModelProvider::Antigravity));
+        assert!(models[ANTIGRAVITY_MODELS.len()..]
+            .iter()
+            .all(|model| model.provider == ModelProvider::OpenCode));
     }
 
     #[test]

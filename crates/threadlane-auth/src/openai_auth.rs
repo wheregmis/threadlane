@@ -327,10 +327,7 @@ fn save_credentials(tokens: &OAuthTokens) -> Result<(), String> {
     save_credentials_in(tokens, &CredentialStore::default())
 }
 
-fn save_credentials_in(
-    tokens: &OAuthTokens,
-    locations: &CredentialStore,
-) -> Result<(), String> {
+fn save_credentials_in(tokens: &OAuthTokens, locations: &CredentialStore) -> Result<(), String> {
     add_or_update_account_in(tokens, locations).map(|_| ())
 }
 
@@ -612,7 +609,9 @@ pub fn get_active_codex_account() -> Option<CodexAccount> {
 
 /// Returns the active account from the injected store's location.
 pub fn get_active_codex_account_in(locations: &CredentialStore) -> Option<CodexAccount> {
-    load_credentials_store_in(locations).active_account().cloned()
+    load_credentials_store_in(locations)
+        .active_account()
+        .cloned()
 }
 
 /// Find the Threadlane account behind a token, including a token another
@@ -1142,8 +1141,7 @@ pub async fn poll_device_token_in(
     config: &CodexOAuthConfig,
     locations: &CredentialStore,
 ) -> Result<OAuthTokens, String> {
-    let tokens =
-        poll_device_token_without_saving(device_auth_id, user_code, config).await?;
+    let tokens = poll_device_token_without_saving(device_auth_id, user_code, config).await?;
     save_credentials_in(&tokens, locations)?;
     Ok(tokens)
 }
@@ -1762,7 +1760,9 @@ mod tests {
             expires_at: Some(u64::MAX),
             ..original.clone()
         };
-        let refreshed = commit_codex_account_refresh(&original, refreshed, &CredentialStore::default()).unwrap();
+        let refreshed =
+            commit_codex_account_refresh(&original, refreshed, &CredentialStore::default())
+                .unwrap();
         assert_eq!(get_active_codex_account().unwrap(), refreshed);
 
         let new_sign_in = add_or_update_account(&OAuthTokens {
@@ -1774,13 +1774,17 @@ mod tests {
         })
         .unwrap();
         assert_eq!(
-            commit_codex_account_refresh(&original, refreshed.clone(), &CredentialStore::default()).unwrap(),
+            commit_codex_account_refresh(&original, refreshed.clone(), &CredentialStore::default())
+                .unwrap(),
             new_sign_in
         );
         assert_eq!(get_active_codex_account().unwrap(), new_sign_in);
 
         remove_codex_account("work").unwrap();
-        assert!(commit_codex_account_refresh(&original, refreshed, &CredentialStore::default()).is_err());
+        assert!(
+            commit_codex_account_refresh(&original, refreshed, &CredentialStore::default())
+                .is_err()
+        );
         assert!(!get_credentials_path().exists());
     }
 
@@ -1825,12 +1829,7 @@ mod tests {
                 token_url: caller_endpoint,
                 ..CodexOAuthConfig::default()
             };
-            get_valid_codex_account_token_at(
-                &caller_id,
-                &config,
-                CredentialStore::default(),
-            )
-            .await
+            get_valid_codex_account_token_at(&caller_id, &config, CredentialStore::default()).await
         });
         started_rx.await.unwrap();
         caller.abort();

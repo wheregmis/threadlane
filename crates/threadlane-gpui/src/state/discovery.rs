@@ -1,61 +1,12 @@
-use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::path::Path;
 use threadlane_session::harness::{JsonlStore, SessionStore};
 
 use super::projection::extract_session_title;
 use super::types::{SessionDiscoveryCache, SessionDiscoveryCacheEntry, SessionHealth, SessionInfo};
 
-pub(crate) fn file_mtime(path: &Path) -> u64 {
-    std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
-pub(crate) fn effective_session_work_dir(
-    canonical_work_dir: &Path,
-    id: &str,
-    facts: &std::collections::BTreeMap<String, String>,
-) -> PathBuf {
-    if !facts
-        .get("is_worktree")
-        .is_some_and(|value| value == "true")
-    {
-        return canonical_work_dir.to_path_buf();
-    }
-
-    let inferred = canonical_work_dir.join(".threadlane/worktrees").join(id);
-    let candidate = facts
-        .get("worktree_path")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| inferred.clone());
-    let valid_worktree = std::fs::canonicalize(&candidate).ok().filter(|candidate| {
-        std::fs::canonicalize(&inferred).is_ok_and(|inferred| *candidate == inferred)
-            && candidate.starts_with(canonical_work_dir)
-    });
-
-    // Preserve the expected worktree path when validation fails so callers mark
-    // the session unavailable instead of falling back to the attached project.
-    valid_worktree.unwrap_or(inferred)
-}
-
-pub(crate) fn resolve_session_transcript_file(
-    stub_file: &Path,
-    runtime_work_dir: &Path,
-    session_id: &str,
-    is_worktree: bool,
-) -> PathBuf {
-    let worktree_file = runtime_work_dir
-        .join(".threadlane/sessions")
-        .join(format!("{session_id}.jsonl"));
-    if is_worktree && worktree_file.is_file() {
-        worktree_file
-    } else {
-        stub_file.to_path_buf()
-    }
-}
+pub(crate) use threadlane_session::discovery::{
+    effective_session_work_dir, file_mtime, resolve_session_transcript_file,
+};
 
 fn effective_session_git_branch(
     runtime_work_dir: &Path,

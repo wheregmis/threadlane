@@ -8,8 +8,8 @@ use super::draft_pr::{
     DraftPrRemoteResult,
 };
 use super::types::{
-    can_create_pull_request, can_publish_branch, discard_options, message_generated_matches_active_project,
-    selection_bar_discard_options, DiscardOption,
+    can_create_pull_request, can_publish_branch, discard_options,
+    message_generated_matches_active_project, selection_bar_discard_options, DiscardOption,
 };
 use super::view::{retain_review_selection, scan_project_tree};
 
@@ -74,7 +74,9 @@ fn generated_commit_messages_follow_conventional_commits() {
         "fix: branch picker"
     );
     assert_eq!(
-        super::types::normalize_generated_commit_message("feat: add generated commit messages\nDetails"),
+        super::types::normalize_generated_commit_message(
+            "feat: add generated commit messages\nDetails"
+        ),
         "feat: add generated commit messages"
     );
 }

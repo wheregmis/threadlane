@@ -3,11 +3,11 @@ use crate::types::{AgentMessage, ImageAttachment, ReasoningEffort, TokenUsage};
 // Durable permission-trace vocabulary lives in `threadlane-protocol` so the
 // permission manager and trajectory analysis share it without depending on
 // the harness. Re-exported here so existing `harness::…` paths keep working.
+use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
+use serde_json::Value;
 pub use threadlane_protocol::interaction::{
     PermissionTraceDecision, PermissionTraceScope, PermissionTraceSource,
 };
-use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
-use serde_json::Value;
 
 /// A bounded, non-secret trace label or identifier.
 ///

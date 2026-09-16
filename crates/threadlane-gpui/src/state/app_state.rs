@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::mpsc::{self, Sender};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use threadlane_session::harness::{JsonlStore, SessionStore};
 use threadlane_session::{
@@ -9,9 +9,9 @@ use threadlane_session::{
     SubagentProgressUpdate, TokenUsage,
 };
 
-use crate::adapters::agent_events::{ChatAgentUpdate, adapt_agent_event};
-use crate::persistence::load_project_registry;
+use crate::adapters::agent_events::{adapt_agent_event, ChatAgentUpdate};
 use crate::services::sessions::{ExecutionMode, SessionRuntime};
+use threadlane_project::load_project_registry;
 
 use super::discovery::*;
 use super::projection::*;
@@ -285,7 +285,7 @@ impl AppState {
             workspace_page: WorkspacePage::Chat,
             openai_key,
             opencode_key,
-            needle_enabled: crate::services::settings::load_needle_enabled(),
+            needle_enabled: threadlane_project::load_needle_enabled(),
             auth_status_msg: None,
             update_status: threadlane_updater::UpdateStatus::Idle,
             update_notice_dismissed: false,
@@ -355,7 +355,7 @@ impl AppState {
     }
 
     pub(crate) fn set_needle_enabled(&mut self, enabled: bool) -> Result<(), String> {
-        crate::services::settings::save_needle_enabled(enabled)?;
+        threadlane_project::save_needle_enabled(enabled)?;
         self.needle_enabled = enabled;
         for runtime in self.session_runtimes.values() {
             let _ = runtime.try_set_needle_enabled(enabled);
@@ -1056,7 +1056,10 @@ impl AppState {
         let stub = Self::canonical_session_file(work_dir, session_id);
         let store = JsonlStore::open_read_only(&stub).ok()?;
         let facts = store.facts();
-        if facts.get("is_worktree").is_some_and(|value| value == "true") {
+        if facts
+            .get("is_worktree")
+            .is_some_and(|value| value == "true")
+        {
             let canonical_work_dir =
                 std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
             Some(crate::state::effective_session_work_dir(
@@ -1227,7 +1230,7 @@ impl AppState {
         } else {
             let model = runtime.model().to_owned();
             let reasoning_effort = runtime.reasoning_effort();
-            let (api_key, _) = provider_credentials(&model);
+            let (api_key, _) = threadlane_session::provider_credentials(&model);
             if api_key.is_empty() && !threadlane_session::is_acp_model(&model) {
                 return None;
             }
@@ -1298,7 +1301,7 @@ impl AppState {
             return Err("Couldn't select the linked task for this pull request.".into());
         }
         let model = self.selected_model.clone();
-        let (api_key, _) = provider_credentials(&model);
+        let (api_key, _) = threadlane_session::provider_credentials(&model);
         if api_key.is_empty() && !threadlane_session::is_acp_model(&model) {
             return Err(format!(
                 "No API key configured for model `{model}`. Open Settings and save the provider credential."
@@ -1320,11 +1323,14 @@ impl AppState {
         let runtime_status = runtime.map(|runtime| runtime.status());
         let is_active = self.active_work_dir.as_ref() == Some(&session.work_dir)
             && self.active_session_id.as_deref() == Some(session.id.as_str());
-        let git_status = self.git_statuses.get(&session.runtime_work_dir).or_else(|| {
-            (!session.is_worktree)
-                .then(|| self.git_statuses.get(&session.work_dir))
-                .flatten()
-        });
+        let git_status = self
+            .git_statuses
+            .get(&session.runtime_work_dir)
+            .or_else(|| {
+                (!session.is_worktree)
+                    .then(|| self.git_statuses.get(&session.work_dir))
+                    .flatten()
+            });
         let linked_pr = session
             .git_branch
             .as_ref()
@@ -1353,8 +1359,7 @@ impl AppState {
             .is_some_and(|status| status.has_changes || status.ahead > 0 || status.pr_ready);
         let branch_is_actionable = session.git_branch.is_some()
             && (linked_pr_is_active || (linked_pr.is_none() && actionable_git_work));
-        let ready_work = branch_is_actionable
-            || (linked_pr.is_none() && actionable_git_work);
+        let ready_work = branch_is_actionable || (linked_pr.is_none() && actionable_git_work);
         derive_session_attention(
             self.pending_permissions.contains_key(&session.id)
                 || self.pending_questions.contains_key(&session.id),
@@ -2619,7 +2624,7 @@ impl AppState {
             context_limit: persisted_limit
                 .map(|value| value.min(u64::MAX as usize) as u64)
                 .unwrap_or_else(|| {
-                    u64::from(crate::model_catalog::model_context_window(&effective_model))
+                    u64::from(threadlane_context::model_context_window(&effective_model))
                 }),
             context_limit_is_estimate: persisted_limit.is_none() || persisted_limit_estimate,
             effective_model,
@@ -3311,11 +3316,10 @@ impl AppState {
             // next runtime before its first turn. Without this the picker
             // silently keeps the agent's default (e.g. DeepSeek) no matter
             // what the user clicks.
-            let Some(agent_id) = threadlane_session::acp_agent_id(&self.selected_model)
-                .map(str::to_string)
+            let Some(agent_id) =
+                threadlane_session::acp_agent_id(&self.selected_model).map(str::to_string)
             else {
-                self.session_status =
-                    Some("Open a session before changing agent settings".into());
+                self.session_status = Some("Open a session before changing agent settings".into());
                 return;
             };
             // Refuse values the agent does not offer when the cache knows
@@ -3327,8 +3331,7 @@ impl AppState {
                     .find(|option| option.id == config_id)
                     .is_some_and(|option| option.has_choice(&value));
                 if !known {
-                    self.session_status =
-                        Some(format!("This agent does not offer '{value}'"));
+                    self.session_status = Some(format!("This agent does not offer '{value}'"));
                     return;
                 }
             }
@@ -3371,10 +3374,7 @@ impl AppState {
 
     /// Takes pending ACP `config_id -> value` selections for `agent_id`,
     /// clearing them so they apply exactly once to the next runtime.
-    pub(crate) fn take_pending_acp_config(
-        &mut self,
-        agent_id: &str,
-    ) -> Vec<(String, String)> {
+    pub(crate) fn take_pending_acp_config(&mut self, agent_id: &str) -> Vec<(String, String)> {
         self.pending_acp_config
             .remove(agent_id)
             .map(|map| map.into_iter().collect())
@@ -3418,9 +3418,7 @@ impl AppState {
             .map(crate::model_catalog::cached_acp_config_options)
             .unwrap_or_default();
         match agent_id.and_then(|id| self.pending_acp_config.get(id)) {
-            Some(pending) => {
-                threadlane_session::apply_pending_config_values(cached, pending)
-            }
+            Some(pending) => threadlane_session::apply_pending_config_values(cached, pending),
             None => cached,
         }
     }
@@ -3973,7 +3971,7 @@ impl AppState {
 
         // Resolve credentials using the same provider routing as the runtime and title task.
         let model = self.selected_model.clone();
-        let (api_key, account_id) = provider_credentials(&model);
+        let (api_key, account_id) = threadlane_session::provider_credentials(&model);
 
         // An external ACP agent authenticates itself — Claude Code uses its own
         // CLI login — so it has no Threadlane provider credential to check, and

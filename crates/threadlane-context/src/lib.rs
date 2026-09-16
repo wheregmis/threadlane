@@ -59,6 +59,13 @@ pub fn model_context_limit(model: &str) -> Option<usize> {
     }
 }
 
+/// Context limit exposed in the UI's compact integer representation.
+pub fn model_context_window(model: &str) -> u32 {
+    model_context_limit(model)
+        .unwrap_or(UNKNOWN_MODEL_CONTEXT_LIMIT)
+        .min(u32::MAX as usize) as u32
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ContextBudget {
     pub limit: usize,

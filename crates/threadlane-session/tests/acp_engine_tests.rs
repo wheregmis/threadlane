@@ -337,7 +337,8 @@ async fn a_dismissed_acp_question_is_surfaced_and_remembered() {
 }
 
 #[tokio::test]
-async fn without_a_ui_a_permission_request_is_refused() {    let (_temp, mut engine) = setup("permission");
+async fn without_a_ui_a_permission_request_is_refused() {
+    let (_temp, mut engine) = setup("permission");
     let (tx, mut rx) = broadcast::channel(64);
     // Non-interactive: nobody can consent, so nothing may be granted.
     let permissions = responding_handle(None, &tx);

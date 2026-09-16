@@ -211,7 +211,6 @@ pub fn is_context_overflow_error(error: &str) -> bool {
         || error.contains("too many tokens")
 }
 
-
 pub fn compact_messages(
     messages: &[AgentMessage],
     options: &CompactionOptions,
@@ -529,7 +528,9 @@ pub fn build_checkpoint_omitting_tool_outputs(
 ) -> String {
     build_checkpoint_from_entries(
         messages.len(),
-        messages.iter().map(|(message, omitted)| (*message, *omitted)),
+        messages
+            .iter()
+            .map(|(message, omitted)| (*message, *omitted)),
         config,
     )
 }
@@ -731,8 +732,8 @@ fn extract_session_insights(messages: &[AgentMessage]) -> (Vec<String>, Vec<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use threadlane_protocol::ImageAttachment;
     use std::collections::HashSet;
+    use threadlane_protocol::ImageAttachment;
     use threadlane_protocol::{
         RuntimeToolCall as ToolCall, RuntimeToolCallFunction as ToolCallFunction,
     };
@@ -801,7 +802,10 @@ mod tests {
 
     #[test]
     fn request_estimator_includes_serialized_messages_tool_schema_and_configured_images() {
-        let config = CompactionParams { estimated_image_tokens: 77, ..CompactionParams::default() };
+        let config = CompactionParams {
+            estimated_image_tokens: 77,
+            ..CompactionParams::default()
+        };
         let messages = vec![AgentMessage::UserWithImages {
             content: "x".repeat(400),
             images: vec![ImageAttachment {
@@ -934,7 +938,8 @@ mod tests {
     #[test]
     fn budget_compaction_retains_complete_tool_exchange() {
         let messages = tool_exchange_fixture(12_000);
-        let result = compact_for_budget(&messages, None, 1_000, &CompactionParams::default()).unwrap();
+        let result =
+            compact_for_budget(&messages, None, 1_000, &CompactionParams::default()).unwrap();
         assert!(compaction_summary_text(&result.messages[1]).is_some());
         assert_valid_tool_pairs(&result.messages);
         assert!(result.post_tokens < result.pre_tokens);

@@ -55,7 +55,10 @@ pub enum AppAction {
         value: String,
     },
     OpenGitHub,
-    OpenGitHubIssue { work_dir: PathBuf, number: u64 },
+    OpenGitHubIssue {
+        work_dir: PathBuf,
+        number: u64,
+    },
     CloseGitHub,
     OpenSettings,
     CloseSettings,

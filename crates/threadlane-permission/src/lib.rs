@@ -19,10 +19,10 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use threadlane_protocol::{AgentEvent, PermissionRequest, PermissionScope};
 use threadlane_protocol::interaction::{
     PermissionTraceDecision, PermissionTraceScope, PermissionTraceSource,
 };
+use threadlane_protocol::{AgentEvent, PermissionRequest, PermissionScope};
 use tokio::sync::oneshot;
 
 const PERMISSIONS_FILE: &str = ".threadlane/permissions.json";
@@ -188,10 +188,7 @@ impl PermissionManager {
         let requested = PermissionTraceEvent::Requested {
             request_id: id.clone(),
             capability: "network".into(),
-            scopes: vec![
-                PermissionTraceScope::Once,
-                PermissionTraceScope::Project,
-            ],
+            scopes: vec![PermissionTraceScope::Once, PermissionTraceScope::Project],
             detail_sha256: format!("{:x}", Sha256::digest(url.as_bytes())),
             source: if interactive {
                 PermissionTraceSource::User
@@ -259,10 +256,7 @@ impl PermissionManager {
                 PermissionTraceDecision::Allowed,
                 Some(PermissionTraceScope::Project),
             ),
-            PermissionDecision::Deny => (
-                PermissionTraceDecision::Denied,
-                None,
-            ),
+            PermissionDecision::Deny => (PermissionTraceDecision::Denied, None),
         };
         if self
             .record_trace(PermissionTraceEvent::Resolved {
@@ -308,10 +302,7 @@ impl PermissionManager {
         let requested = PermissionTraceEvent::Requested {
             request_id: id.clone(),
             capability: "computer".into(),
-            scopes: vec![
-                PermissionTraceScope::Once,
-                PermissionTraceScope::Project,
-            ],
+            scopes: vec![PermissionTraceScope::Once, PermissionTraceScope::Project],
             detail_sha256: format!("{:x}", Sha256::digest(detail.as_bytes())),
             source: source.clone(),
         };
@@ -387,10 +378,7 @@ impl PermissionManager {
                 PermissionTraceDecision::Allowed,
                 Some(PermissionTraceScope::Project),
             ),
-            PermissionDecision::Deny => (
-                PermissionTraceDecision::Denied,
-                None,
-            ),
+            PermissionDecision::Deny => (PermissionTraceDecision::Denied, None),
         };
         let _ = self
             .record_trace(PermissionTraceEvent::Resolved {
@@ -516,9 +504,7 @@ impl PermissionHandle {
         let trace_scopes = scopes
             .iter()
             .map(|scope| match scope {
-                PermissionScope::Always => {
-                    PermissionTraceScope::Project
-                }
+                PermissionScope::Always => PermissionTraceScope::Project,
                 _ => PermissionTraceScope::Once,
             })
             .collect();
@@ -575,18 +561,12 @@ impl PermissionHandle {
                 request_id: id,
                 decision: match decision {
                     None => PermissionTraceDecision::Cancelled,
-                    Some(PermissionDecision::Deny) => {
-                        PermissionTraceDecision::Denied
-                    }
+                    Some(PermissionDecision::Deny) => PermissionTraceDecision::Denied,
                     _ => PermissionTraceDecision::Allowed,
                 },
                 scope: match decision {
-                    Some(PermissionDecision::AllowAlways) => {
-                        Some(PermissionTraceScope::Project)
-                    }
-                    Some(PermissionDecision::AllowOnce) => {
-                        Some(PermissionTraceScope::Once)
-                    }
+                    Some(PermissionDecision::AllowAlways) => Some(PermissionTraceScope::Project),
+                    Some(PermissionDecision::AllowOnce) => Some(PermissionTraceScope::Once),
                     _ => None,
                 },
                 source: if decision.is_none() {

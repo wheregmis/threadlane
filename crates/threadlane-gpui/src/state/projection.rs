@@ -1,53 +1,14 @@
 use std::path::{Path, PathBuf};
-use threadlane_session::AgentMessage;
 use threadlane_session::harness::{JsonlStore, SessionStore};
+use threadlane_session::AgentMessage;
 
-use super::AppState;
 use super::types::{
     ChatMessageInfo, MessageRole, SessionProjectionResult, SubagentActivityInfo,
     SubagentActivityStatus, ToolActivityInfo,
 };
-use crate::services::sessions::SessionRuntimeStatus;
+use super::AppState;
 
-pub(crate) fn extract_session_title(store: &impl SessionStore, fallback_id: &str) -> String {
-    if let Some(name) = store.name() {
-        if !name.trim().is_empty() {
-            return name;
-        }
-    }
-    let messages = {
-        let active = store.active_branch_messages("main");
-        if active.is_empty() {
-            store.get_persisted_messages()
-        } else {
-            active
-        }
-    };
-
-    for msg in &messages {
-        match msg {
-            AgentMessage::User { content } | AgentMessage::UserWithImages { content, .. } => {
-                let trimmed = content.trim();
-                if !trimmed.is_empty() {
-                    let first_line = trimmed.lines().next().unwrap_or(trimmed);
-                    let mut char_count = 0;
-                    let mut result = String::new();
-                    for ch in first_line.chars() {
-                        if char_count >= 40 {
-                            result.push('…');
-                            break;
-                        }
-                        result.push(ch);
-                        char_count += 1;
-                    }
-                    return result;
-                }
-            }
-            _ => {}
-        }
-    }
-    fallback_id.to_string()
-}
+pub(crate) use threadlane_session::titles::extract_session_title;
 
 #[cfg(test)]
 pub(crate) fn load_session_messages(session_file: &Path) -> Vec<ChatMessageInfo> {
@@ -57,7 +18,7 @@ pub(crate) fn load_session_messages(session_file: &Path) -> Vec<ChatMessageInfo>
 pub(crate) fn compute_session_messages(
     session_file: &Path,
 ) -> Result<Vec<ChatMessageInfo>, String> {
-    use threadlane_session::harness::{TranscriptItem, read_transcript_page};
+    use threadlane_session::harness::{read_transcript_page, TranscriptItem};
 
     // The durable pager is the single transcript source, but exhaust it here:
     // GPUI state continues to expose complete chronological history.
@@ -263,58 +224,9 @@ pub(crate) fn project_subagents_from_store(store: &impl SessionStore) -> Vec<Sub
     rows
 }
 
-pub(crate) fn tool_activity_summary(name: &str, arguments: &str) -> String {
-    let display_name = name.replace('_', " ");
-    let Ok(arguments) = serde_json::from_str::<serde_json::Value>(arguments) else {
-        return display_name;
-    };
-    let context = [
-        "path",
-        "file_path",
-        "FilePath",
-        "TargetFile",
-        "command",
-        "CommandLine",
-        "query",
-        "Query",
-        "regex",
-        "glob",
-        "pattern",
-        "Pattern",
-        "prompt",
-        "Prompt",
-        "description",
-        "Description",
-    ]
-    .iter()
-    .find_map(|key| arguments.get(key).and_then(|value| value.as_str()));
+pub(crate) use threadlane_runtime::harness::tool_activity_summary;
 
-    if let Some(value) = context {
-        let trimmed = value.trim();
-        if !trimmed.is_empty() {
-            let first_line = trimmed.lines().next().unwrap_or(trimmed).trim();
-            let has_more_lines = trimmed.lines().nth(1).is_some();
-            let mut summary_ctx = first_line.to_string();
-            if has_more_lines && !summary_ctx.ends_with('…') && !summary_ctx.ends_with("...") {
-                summary_ctx.push_str(" …");
-            }
-            return format!("{display_name} {summary_ctx}");
-        }
-    }
-    display_name
-}
-
-pub(crate) fn tool_activity_display_summary(summary: &str) -> String {
-    let first_line = summary.lines().next().unwrap_or(summary).trim();
-    if summary.lines().nth(1).is_some()
-        && !first_line.ends_with('…')
-        && !first_line.ends_with("...")
-    {
-        format!("{first_line} …")
-    } else {
-        first_line.to_string()
-    }
-}
+pub(crate) use threadlane_runtime::harness::tool_activity_display_summary;
 
 pub(crate) fn format_context_marker_tokens(tokens: usize) -> String {
     let formatted = crate::model_catalog::format_tokens(tokens.min(u32::MAX as usize) as u32);
@@ -355,20 +267,7 @@ pub(crate) fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<C
         .collect()
 }
 
-pub(crate) fn runtime_status_text(status: SessionRuntimeStatus) -> Option<String> {
-    match status {
-        SessionRuntimeStatus::Ready => None,
-        SessionRuntimeStatus::Working => Some("Working…".into()),
-        SessionRuntimeStatus::Interrupted => {
-            Some("Turn interrupted · Safe replay checkpoints available".into())
-        }
-        SessionRuntimeStatus::Error(error) => Some(error),
-    }
-}
-
-pub(crate) fn provider_credentials(model: &str) -> (String, Option<String>) {
-    threadlane_session::provider_credentials(model)
-}
+pub(crate) use threadlane_session::runtime_status_text;
 
 pub(crate) fn coding_agent_options(
     work_dir: PathBuf,
@@ -377,7 +276,7 @@ pub(crate) fn coding_agent_options(
     model_roles: threadlane_session::ModelRoles,
     browser: threadlane_protocol::browser::BrowserBridge,
 ) -> threadlane_session::CodingAgentOptions {
-    let (api_key, account_id) = provider_credentials(&model);
+    let (api_key, account_id) = threadlane_session::provider_credentials(&model);
     let mut agent_config = threadlane_session::AgentConfig::default();
     agent_config.model_roles = model_roles;
     let subagent_settings = crate::services::subagent_settings::load(&work_dir);
@@ -388,7 +287,7 @@ pub(crate) fn coding_agent_options(
     }
     agent_config.fast_reasoning_effort = subagent_settings.fast_reasoning_effort;
     agent_config.orchestrator_mode = subagent_settings.orchestrator_mode;
-    agent_config.needle_enabled = crate::services::settings::load_needle_enabled();
+    agent_config.needle_enabled = threadlane_project::load_needle_enabled();
 
     threadlane_session::CodingAgentOptions {
         api_key,

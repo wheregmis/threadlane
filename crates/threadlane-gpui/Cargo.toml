@@ -20,12 +20,11 @@ threadlane-session.workspace = true
 threadlane-project.workspace = true
 threadlane-protocol.workspace = true
 threadlane-provider.workspace = true
+threadlane-context.workspace = true
 threadlane-auth.workspace = true
 threadlane-tools.workspace = true
 threadlane-git.workspace = true
 threadlane-updater.workspace = true
-threadlane-skills.workspace = true
-threadlane-wasi.workspace = true
 tokio = { workspace = true, features = ["full"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -36,7 +35,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 portable-pty.workspace = true
 vt100.workspace = true
-notify.workspace = true
 # Live computer-use frames are uploaded as gpui `RenderImage`s, built from
 # `image::Frame`; pin to the same major as gpui-pre.
 image.workspace = true
@@ -58,5 +56,6 @@ gpui_platform = { package = "gpui-pre-platform", version = "0.3.3", features = [
 async-trait.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
+threadlane-skills.workspace = true
 threadlane-protocol.workspace = true
 threadlane-session = { workspace = true, features = ["test-support"] }

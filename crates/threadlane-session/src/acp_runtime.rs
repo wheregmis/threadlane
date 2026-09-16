@@ -30,8 +30,7 @@ use crate::acp::{
     config_option_for, AcpClientHandler, AcpConfigOption, AcpContentBlock, AcpManager,
     AcpPermissionOptionKind, AcpPermissionOutcome, AcpPermissionRequest, AcpReadTextFileRequest,
     AcpSession, AcpSessionNotification, AcpSessionUpdate, AcpStopReason, AcpToolCall,
-    AcpWriteTextFileRequest, ACP_CONFIG_CATEGORY_EFFORT,
-    ACP_CONFIG_CATEGORY_MODEL,
+    AcpWriteTextFileRequest, ACP_CONFIG_CATEGORY_EFFORT, ACP_CONFIG_CATEGORY_MODEL,
 };
 use crate::acp_bridge::agent_events_for;
 use crate::permission::{PermissionDecision, PermissionHandle};

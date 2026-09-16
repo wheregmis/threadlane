@@ -144,16 +144,10 @@ fn runtime_request_payload_source(request: &RuntimeRequest) -> PayloadSource {
                         .as_array()
                         .into_iter()
                         .flatten()
-                        .filter_map(|tool| {
-                            AgentToolDefinition::from_provider_schema(
-                                tool,
-                            )
-                            .ok()
-                        })
+                        .filter_map(|tool| AgentToolDefinition::from_provider_schema(tool).ok())
                         .map(|tool| tool.to_codex_responses_tool())
                         .collect::<Vec<_>>();
-                    let (instructions, input) =
-                        convert_to_codex_llm(&agent_messages);
+                    let (instructions, input) = convert_to_codex_llm(&agent_messages);
                     let mut payload = serde_json::json!({
                         "model": model,
                         "instructions": instructions,
@@ -266,9 +260,7 @@ impl ProviderClient {
         Self {
             openai: OpenAIClient::new_with_resolver(api_key, account_id, codex_accounts.clone()),
             openai_fallbacks,
-            antigravity: AntigravityClient::new_with_credentials(
-                antigravity_credentials.clone(),
-            ),
+            antigravity: AntigravityClient::new_with_credentials(antigravity_credentials.clone()),
             opencode,
             opencode_api_key,
             antigravity_credentials,
@@ -277,7 +269,10 @@ impl ProviderClient {
 
     /// Attaches the host's Codex account resolver, rebuilding the OpenAI
     /// clients (primary plus fallbacks) so stored logins resolve again.
-    pub fn with_codex_resolver(self, codex_accounts: crate::credentials::SharedCodexResolver) -> Self {
+    pub fn with_codex_resolver(
+        self,
+        codex_accounts: crate::credentials::SharedCodexResolver,
+    ) -> Self {
         let (api_key, account_id) = self.openai.credentials_pair();
         Self::new_with_resolver(
             api_key,
@@ -1005,9 +1000,12 @@ fn infer_conventional_commit(line: &str) -> (&'static str, String) {
         return ("docs", desc);
     }
 
-    let has_test_word = trimmed
-        .split(|c: char| !c.is_alphanumeric())
-        .any(|w| matches!(w.to_ascii_lowercase().as_str(), "test" | "tests" | "testing"));
+    let has_test_word = trimmed.split(|c: char| !c.is_alphanumeric()).any(|w| {
+        matches!(
+            w.to_ascii_lowercase().as_str(),
+            "test" | "tests" | "testing"
+        )
+    });
     if has_test_word {
         let desc = normalize_description(trimmed);
         return ("test", desc);
@@ -1015,10 +1013,32 @@ fn infer_conventional_commit(line: &str) -> (&'static str, String) {
 
     if matches!(
         lower_first.as_str(),
-        "fix" | "fixes" | "fixed" | "fixing" | "resolve" | "resolves" | "resolved"
-            | "resolving" | "prevent" | "prevents" | "prevented" | "preventing" | "handle"
-            | "handles" | "handled" | "handling" | "correct" | "corrects" | "corrected"
-            | "correcting" | "patch" | "patches" | "patched" | "avoid" | "avoids" | "avoided"
+        "fix"
+            | "fixes"
+            | "fixed"
+            | "fixing"
+            | "resolve"
+            | "resolves"
+            | "resolved"
+            | "resolving"
+            | "prevent"
+            | "prevents"
+            | "prevented"
+            | "preventing"
+            | "handle"
+            | "handles"
+            | "handled"
+            | "handling"
+            | "correct"
+            | "corrects"
+            | "corrected"
+            | "correcting"
+            | "patch"
+            | "patches"
+            | "patched"
+            | "avoid"
+            | "avoids"
+            | "avoided"
     ) {
         let desc = if matches!(lower_first.as_str(), "fix" | "fixes" | "fixed" | "fixing") {
             let rest = trimmed[leading_token.len()..].trim();
@@ -1027,8 +1047,10 @@ fn infer_conventional_commit(line: &str) -> (&'static str, String) {
                 .next()
                 .unwrap_or_default()
                 .to_ascii_lowercase();
-            if matches!(next_word.as_str(), "and" | "or" | "for" | "to" | "in" | "on" | "with")
-                || rest.is_empty()
+            if matches!(
+                next_word.as_str(),
+                "and" | "or" | "for" | "to" | "in" | "on" | "with"
+            ) || rest.is_empty()
             {
                 normalize_description(trimmed)
             } else {
@@ -1042,12 +1064,41 @@ fn infer_conventional_commit(line: &str) -> (&'static str, String) {
 
     if matches!(
         lower_first.as_str(),
-        "add" | "adds" | "added" | "adding" | "create" | "creates" | "created" | "creating"
-            | "implement" | "implements" | "implemented" | "implementing" | "introduce"
-            | "introduces" | "introduced" | "introducing" | "support" | "supports"
-            | "supported" | "supporting" | "allow" | "allows" | "allowed" | "allowing"
-            | "enable" | "enables" | "enabled" | "enabling" | "provide" | "provides"
-            | "provided" | "providing" | "feat" | "feature" | "features"
+        "add"
+            | "adds"
+            | "added"
+            | "adding"
+            | "create"
+            | "creates"
+            | "created"
+            | "creating"
+            | "implement"
+            | "implements"
+            | "implemented"
+            | "implementing"
+            | "introduce"
+            | "introduces"
+            | "introduced"
+            | "introducing"
+            | "support"
+            | "supports"
+            | "supported"
+            | "supporting"
+            | "allow"
+            | "allows"
+            | "allowed"
+            | "allowing"
+            | "enable"
+            | "enables"
+            | "enabled"
+            | "enabling"
+            | "provide"
+            | "provides"
+            | "provided"
+            | "providing"
+            | "feat"
+            | "feature"
+            | "features"
     ) {
         let desc = normalize_description(trimmed);
         return ("feat", desc);
@@ -1055,11 +1106,31 @@ fn infer_conventional_commit(line: &str) -> (&'static str, String) {
 
     if matches!(
         lower_first.as_str(),
-        "refactor" | "refactors" | "refactored" | "refactoring" | "restructure"
-            | "restructures" | "restructured" | "restructuring" | "reorganize"
-            | "reorganizes" | "reorganized" | "reorganizing" | "simplify" | "simplifies"
-            | "simplified" | "simplifying" | "rewrite" | "rewrites" | "rewrote" | "rewriting"
-            | "cleanup" | "clean" | "cleans" | "cleaned" | "cleaning"
+        "refactor"
+            | "refactors"
+            | "refactored"
+            | "refactoring"
+            | "restructure"
+            | "restructures"
+            | "restructured"
+            | "restructuring"
+            | "reorganize"
+            | "reorganizes"
+            | "reorganized"
+            | "reorganizing"
+            | "simplify"
+            | "simplifies"
+            | "simplified"
+            | "simplifying"
+            | "rewrite"
+            | "rewrites"
+            | "rewrote"
+            | "rewriting"
+            | "cleanup"
+            | "clean"
+            | "cleans"
+            | "cleaned"
+            | "cleaning"
     ) {
         let desc = if matches!(
             lower_first.as_str(),
@@ -1077,21 +1148,19 @@ fn infer_conventional_commit(line: &str) -> (&'static str, String) {
         return ("refactor", desc);
     }
 
-    let has_perf_word = trimmed
-        .split(|c: char| !c.is_alphanumeric())
-        .any(|w| {
-            matches!(
-                w.to_ascii_lowercase().as_str(),
-                "perf"
-                    | "performance"
-                    | "speedup"
-                    | "optimize"
-                    | "optimizes"
-                    | "optimized"
-                    | "optimizing"
-                    | "optimization"
-            )
-        });
+    let has_perf_word = trimmed.split(|c: char| !c.is_alphanumeric()).any(|w| {
+        matches!(
+            w.to_ascii_lowercase().as_str(),
+            "perf"
+                | "performance"
+                | "speedup"
+                | "optimize"
+                | "optimizes"
+                | "optimized"
+                | "optimizing"
+                | "optimization"
+        )
+    });
     if has_perf_word {
         let desc = normalize_description(trimmed);
         return ("perf", desc);
@@ -1099,8 +1168,18 @@ fn infer_conventional_commit(line: &str) -> (&'static str, String) {
 
     if matches!(
         lower_first.as_str(),
-        "style" | "styles" | "format" | "formats" | "formatted" | "formatting" | "lint"
-            | "lints" | "linted" | "linting" | "rustfmt" | "prettier"
+        "style"
+            | "styles"
+            | "format"
+            | "formats"
+            | "formatted"
+            | "formatting"
+            | "lint"
+            | "lints"
+            | "linted"
+            | "linting"
+            | "rustfmt"
+            | "prettier"
     ) {
         let desc = normalize_description(trimmed);
         return ("style", desc);
@@ -1132,9 +1211,25 @@ fn infer_conventional_commit(line: &str) -> (&'static str, String) {
 
     if matches!(
         lower_first.as_str(),
-        "update" | "updates" | "updated" | "updating" | "bump" | "bumps" | "bumped"
-            | "bumping" | "upgrade" | "upgrades" | "upgraded" | "upgrading" | "deps"
-            | "dependencies" | "dependency" | "release" | "releases" | "released" | "chore"
+        "update"
+            | "updates"
+            | "updated"
+            | "updating"
+            | "bump"
+            | "bumps"
+            | "bumped"
+            | "bumping"
+            | "upgrade"
+            | "upgrades"
+            | "upgraded"
+            | "upgrading"
+            | "deps"
+            | "dependencies"
+            | "dependency"
+            | "release"
+            | "releases"
+            | "released"
+            | "chore"
             | "chores"
     ) {
         let desc = normalize_description(trimmed);
@@ -1539,10 +1634,7 @@ mod tests {
             normalize_commit_message("fix:handle missing branch"),
             "fix: handle missing branch"
         );
-        assert_eq!(
-            normalize_commit_message("feat: ."),
-            "feat: update"
-        );
+        assert_eq!(normalize_commit_message("feat: ."), "feat: update");
         assert_eq!(
             normalize_commit_message("feat(auth): \"\""),
             "feat(auth): update"
@@ -1664,7 +1756,8 @@ mod tests {
         let long = "feat: implement comprehensive support for nested workspace directory scanning in right panel review tab";
         let normalized = normalize_commit_message(long);
         assert!(normalized.chars().count() <= 72);
-        assert!(normalized.starts_with("feat: implement comprehensive support for nested workspace directory"));
+        assert!(normalized
+            .starts_with("feat: implement comprehensive support for nested workspace directory"));
         assert!(!normalized.ends_with('.'));
 
         let scoped_long = "feat(this-is-a-long-scope-name-that-is-about-sixty-chars-long): add x";
