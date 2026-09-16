@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use threadlane_runtime::harness::{JsonlStore, SessionStore};
 
-use crate::projection::extract_session_title;
+use threadlane_runtime::titles::extract_session_title;
 use crate::types::{SessionDiscoveryCache, SessionDiscoveryCacheEntry, SessionHealth, SessionInfo};
 
 pub fn file_mtime(path: &Path) -> u64 {

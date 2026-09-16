@@ -1,4 +1,5 @@
 use super::*;
+use crate::projection::{compute_full_session_projection, compute_session_messages};
 use crate::test_support::{
     activate_test_session, generated_reported_session_path, reported_session_shape_state,
 };

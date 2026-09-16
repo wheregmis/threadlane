@@ -8751,6 +8751,7 @@ dependencies = [
  "gpui-pre",
  "rfd",
  "threadlane-acp",
+ "threadlane-acp-engine",
  "threadlane-auth",
  "threadlane-project",
  "threadlane-protocol",
@@ -8806,7 +8807,6 @@ dependencies = [
  "threadlane-tools",
  "threadlane-ui-catalog",
  "threadlane-updater",
- "threadlane-wasi",
  "tokio",
  "tracing",
 ]

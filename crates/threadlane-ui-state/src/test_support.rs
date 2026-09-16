@@ -5,7 +5,7 @@ use std::sync::{
 };
 
 use crate::types::{ProjectInfo, SessionHealth, SessionInfo};
-use crate::{compute_full_session_projection, AppState};
+use crate::{projection::compute_full_session_projection, AppState};
 
 struct ReportedShapeProvider {
     attempts: AtomicUsize,

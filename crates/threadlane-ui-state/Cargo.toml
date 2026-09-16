@@ -29,7 +29,6 @@ threadlane-skills.workspace = true
 threadlane-tools.workspace = true
 threadlane-ui-catalog.workspace = true
 threadlane-updater.workspace = true
-threadlane-wasi.workspace = true
 
 [features]
 test-support = [

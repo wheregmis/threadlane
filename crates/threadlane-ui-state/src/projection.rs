@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
-use threadlane_runtime::harness::{JsonlStore, SessionStore};
+use threadlane_runtime::harness::{
+    tool_activity_display_summary, JsonlStore, SessionStore,
+};
 use threadlane_protocol::AgentMessage;
 
 use crate::types::{
@@ -7,8 +9,6 @@ use crate::types::{
     SubagentActivityStatus, ToolActivityInfo,
 };
 use crate::AppState;
-
-pub use threadlane_runtime::titles::extract_session_title;
 
 #[cfg(test)]
 pub fn load_session_messages(session_file: &Path) -> Vec<ChatMessageInfo> {
@@ -224,10 +224,6 @@ pub fn project_subagents_from_store(store: &impl SessionStore) -> Vec<SubagentAc
     rows
 }
 
-pub use threadlane_runtime::harness::tool_activity_summary;
-
-pub use threadlane_runtime::harness::tool_activity_display_summary;
-
 pub fn format_context_marker_tokens(tokens: usize) -> String {
     let formatted = threadlane_ui_catalog::format_tokens(tokens.min(u32::MAX as usize) as u32);
     formatted.replace(".0k", "k").replace(".0M", "M")
@@ -266,8 +262,6 @@ pub fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMess
         })
         .collect()
 }
-
-pub use threadlane_session::runtime_status_text;
 
 pub fn coding_agent_options(
     work_dir: PathBuf,

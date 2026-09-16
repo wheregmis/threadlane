@@ -41,9 +41,12 @@ use threadlane_ui_terminal::TerminalView;
 use threadlane_coding_agent::controller::ExecutionMode;
 use threadlane_session::spawn_session_runtime_construction;
 use threadlane_ui_state::updater::{self, UpdaterEvent};
+use threadlane_session::runtime_status_text;
 use threadlane_ui_state::{
+    AppState, SessionHydrationRequest, SessionInfo, WorkspacePage,
+};
+use threadlane_ui_state::projection::{
     coding_agent_options, compute_full_session_projection, compute_session_messages,
-    runtime_status_text, AppState, SessionHydrationRequest, SessionInfo, WorkspacePage,
 };
 use threadlane_updater::UpdateStatus;
 

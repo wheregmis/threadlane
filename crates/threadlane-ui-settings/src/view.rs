@@ -13,7 +13,7 @@ use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Selectable, Sizab
 use threadlane_ui_state::{actions::AppAction, controller};
 use threadlane_ui_state::next_event_batch;
 use threadlane_ui_state::provider_auth::{self, ProviderAuthEvent};
-use threadlane_ui_state::settings::{self, SettingsEvent};
+use threadlane_ui_state::settings::SettingsEvent;
 use threadlane_ui_state::AppState;
 use threadlane_acp::{AcpAgentRecord, AcpScope};
 use threadlane_skills::SkillMetadata;
@@ -341,12 +341,12 @@ impl SettingsView {
     }
 
     fn refresh_extensions(&mut self, cx: &mut Context<Self>) {
-        self.extension_rows = settings::discover_extensions(self.active_project(cx));
+        self.extension_rows = threadlane_wasi::settings::discover_extensions(self.active_project(cx));
     }
 
     fn refresh_skills(&mut self, cx: &mut Context<Self>) {
         let project = self.active_project(cx);
-        self.skill_rows = settings::discover_skills(project.as_deref());
+        self.skill_rows = threadlane_skills::settings::discover_skills(project.as_deref());
     }
 
     fn refresh_providers_snapshot(&mut self) {
@@ -355,15 +355,15 @@ impl SettingsView {
 
     fn refresh_acp(&mut self, cx: &mut Context<Self>) {
         let project = self.active_project(cx);
-        if let Err(error) = settings::upgrade_acp_presets(project.as_deref()) {
+        if let Err(error) = threadlane_acp_engine::upgrade_acp_presets(project.as_deref()) {
             self.capability_status = Some(error);
         }
-        self.acp_rows = settings::configured_acp_agents(project.clone());
+        self.acp_rows = threadlane_acp_engine::configured_acp_agents(project.clone());
         self.model.update(cx, |state, cx| {
             state.reconcile_selected_model();
             cx.notify();
         });
-        if let Err(error) = settings::probe_acp_agents(project, self.settings_tx.clone()) {
+        if let Err(error) = threadlane_ui_state::settings::probe_acp_agents(project, self.settings_tx.clone()) {
             self.capability_status = Some(error);
         }
         // Keep the shared model cache warm while the status probe runs: the
@@ -2491,7 +2491,7 @@ impl SettingsView {
                                             };
                                             let project = this.active_project(cx);
                                             this.capability_status = Some(
-                                                settings::install_extension(project, &path, scope)
+                                                threadlane_wasi::settings::install_extension(project, &path, scope)
                                                     .unwrap_or_else(|error| error),
                                             );
                                             this.refresh_extensions(cx);
@@ -2596,7 +2596,7 @@ impl SettingsView {
                         .on_click(move |checked, _window, cx| {
                             let checked = *checked;
                             let _ = toggle_view.update(cx, |this, cx| {
-                                let result = settings::set_extension_enabled(
+                                let result = threadlane_wasi::settings::set_extension_enabled(
                                     this.active_project(cx),
                                     &toggle_record,
                                     checked,
@@ -2623,7 +2623,7 @@ impl SettingsView {
                         .h(px(32.0))
                         .on_click(move |_event, _window, cx| {
                             let _ = remove_view.update(cx, |this, cx| {
-                                let result = settings::remove_extension(
+                                let result = threadlane_wasi::settings::remove_extension(
                                     this.active_project(cx),
                                     &remove_record,
                                 );
@@ -2682,7 +2682,7 @@ impl SettingsView {
                                     return;
                                 };
                                 this.capability_status =
-                                    settings::disable_all_skills(&project, skill_ids.clone()).err();
+                                    threadlane_skills::settings::disable_all_skills(&project, skill_ids.clone()).err();
                                 this.refresh_skills(cx);
                                 this.model.update(cx, |state, cx| {
                                     state.invalidate_capability_runtimes();
@@ -2798,7 +2798,7 @@ impl SettingsView {
                                         return;
                                     };
                                     this.capability_status =
-                                        settings::set_skill_enabled(&project, &skill_id, checked)
+                                        threadlane_skills::settings::set_skill_enabled(&project, &skill_id, checked)
                                             .err();
                                     this.refresh_skills(cx);
                                     this.model.update(cx, |state, cx| {
@@ -2849,7 +2849,7 @@ impl SettingsView {
                             .font_weight(FontWeight::MEDIUM)
                             .child("Quick setup"),
                     )
-                    .children(settings::ACP_PRESETS.iter().map(|preset| {
+                    .children(threadlane_acp_engine::ACP_PRESETS.iter().map(|preset| {
                         let preset_view = cx.entity().downgrade();
                         let configured = rows.iter().find(|record| {
                             preset.matches_agent(&record.config)
@@ -2925,7 +2925,7 @@ impl SettingsView {
                                         let _ = preset_view.update(cx, |this, cx| {
                                             let project = this.active_project(cx);
                                             this.capability_status =
-                                                settings::set_acp_preset_enabled(
+                                                threadlane_acp_engine::set_acp_preset_enabled(
                                                     project.as_deref(),
                                                     selected_scope,
                                                     preset,
@@ -2989,7 +2989,7 @@ impl SettingsView {
                                                 AcpScope::Project
                                             };
                                             let project = this.active_project(cx);
-                                            this.capability_status = settings::add_acp_agent(
+                                            this.capability_status = threadlane_acp_engine::add_acp_agent(
                                                 project.as_deref(),
                                                 scope,
                                                 &name,
@@ -3004,7 +3004,7 @@ impl SettingsView {
                     ),
             )
             .children(rows.into_iter().filter_map(|record| {
-                if settings::ACP_PRESETS
+                if threadlane_acp_engine::ACP_PRESETS
                     .iter()
                     .any(|preset| preset.matches_agent(&record.config))
                 {
@@ -3105,7 +3105,7 @@ impl SettingsView {
                                 let checked = *checked;
                                 let _ = toggle_view.update(cx, |this, cx| {
                                     let project = this.active_project(cx);
-                                    this.capability_status = settings::set_acp_enabled(
+                                    this.capability_status = threadlane_acp_engine::set_acp_enabled(
                                         project.as_deref(),
                                         scope,
                                         &toggle_id,
@@ -3127,7 +3127,7 @@ impl SettingsView {
                             .on_click(move |_event, _window, cx| {
                                 let _ = remove_view.update(cx, |this, cx| {
                                     let project = this.active_project(cx);
-                                    this.capability_status = settings::remove_acp_agent(
+                                    this.capability_status = threadlane_acp_engine::remove_acp_agent(
                                         project.as_deref(),
                                         scope,
                                         &remove_id,

@@ -17,6 +17,7 @@ use threadlane_project::load_project_registry;
 
 use crate::discovery::*;
 use crate::projection::*;
+use threadlane_runtime::harness::{tool_activity_display_summary, tool_activity_summary};
 pub use crate::types::*;
 
 pub struct AppState {
@@ -1043,7 +1044,7 @@ impl AppState {
         {
             let canonical_work_dir =
                 std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
-            Some(crate::effective_session_work_dir(
+            Some(crate::discovery::effective_session_work_dir(
                 &canonical_work_dir,
                 session_id,
                 &facts,
@@ -2632,7 +2633,7 @@ impl AppState {
     pub fn session_status_for_file(&self, session_file: &Path) -> Option<String> {
         self.session_runtimes
             .get(session_file)
-            .and_then(|runtime| runtime_status_text(runtime.status()))
+            .and_then(|runtime| threadlane_session::runtime_status_text(runtime.status()))
     }
 
     pub fn apply_session_messages(

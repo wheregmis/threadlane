@@ -4,8 +4,7 @@
 //! external agents, and the theme. It also hosts the four
 //! `refresh_*_and_update` model-catalog wrappers: they need
 //! `Entity<AppState>`, so they live here (rather than in GPUI-free
-//! `threadlane-ui-catalog`) and `threadlane-gpui` re-exports them for the
-//! workspace shell's startup refresh.
+//! `threadlane-ui-catalog`); the workspace shell imports them directly.
 
 mod view;
 
