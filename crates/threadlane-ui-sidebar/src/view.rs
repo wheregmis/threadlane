@@ -767,6 +767,26 @@ impl SidebarView {
             .bg(theme.title_bar)
     }
 
+    fn has_history_filters(&self, state: &AppState) -> bool {
+        !state.search_query.trim().is_empty()
+            || state.sidebar_project_filter.is_some()
+            || self.attention_filter.is_some()
+    }
+
+    fn clear_history_filters(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.attention_filter = None;
+        self.search_input.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+            input.focus(window, cx);
+        });
+        self.model.update(cx, |state, cx| {
+            state.search_query.clear();
+            controller::dispatch(state, AppAction::SetSidebarProjectFilter(None));
+            cx.notify();
+        });
+        cx.notify();
+    }
+
     fn render_history_header(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
         let state = self.model.read(cx);
@@ -800,72 +820,78 @@ impl SidebarView {
             }
         }
 
+        let selected_filter = self.attention_filter;
+        let sidebar = cx.entity().downgrade();
+        let has_filters = self.has_history_filters(state);
+
         div()
             .flex()
-            .items_center()
-            .justify_between()
+            .flex_col()
+            .gap_1()
             .px_3()
             .pt_2()
             .pb_1()
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
-                    .gap_2()
+                    .justify_between()
+                    .gap_1()
                     .child(
                         div()
                             .text_xs()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.muted_foreground)
-                            .child("RECENT"),
+                            .child(format!("Sessions · {session_count}")),
                     )
                     .child(
-                        div()
-                            .px_1p5()
-                            .py_0p5()
-                            .rounded_full()
-                            .bg(theme.secondary)
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(session_count.to_string()),
+                        Button::new("sidebar-status-filter")
+                            .debug_selector(|| "sidebar-status-filter".into())
+                            .label(selected_filter.map_or("All statuses", SessionAttention::label))
+                            .accessibility_label("Filter sessions by status")
+                            .tooltip("Filter sessions by status")
+                            .small()
+                            .ghost()
+                            .dropdown_caret(true)
+                            .selected(selected_filter.is_some())
+                            .dropdown_menu(move |menu, _window, _cx| {
+                                let mut menu = menu;
+                                for (filter, label) in [
+                                    (None, format!("All statuses · {session_count}")),
+                                    (Some(SessionAttention::NeedsYou), format!("Needs you · {}", attention_counts[0])),
+                                    (Some(SessionAttention::Working), format!("Working · {}", attention_counts[1])),
+                                    (Some(SessionAttention::Ready), format!("Ready · {}", attention_counts[2])),
+                                ] {
+                                    let sidebar = sidebar.clone();
+                                    menu = menu.item(
+                                        PopupMenuItem::new(label)
+                                            .checked(selected_filter == filter)
+                                            .on_click(move |_, _, cx| {
+                                                let _ = sidebar.update(cx, |this, cx| {
+                                                    this.attention_filter = filter;
+                                                    cx.notify();
+                                                });
+                                            }),
+                                    );
+                                }
+                                menu
+                            }),
                     ),
             )
-            .child(
-                div().flex().items_center().gap_1().children(
-                    [
-                        (
-                            SessionAttention::NeedsYou,
-                            attention_counts[0],
-                            theme.warning,
-                        ),
-                        (
-                            SessionAttention::Working,
-                            attention_counts[1],
-                            theme.primary,
-                        ),
-                        (SessionAttention::Ready, attention_counts[2], theme.success),
-                    ]
-                    .into_iter()
-                    .map(|(attention, count, color)| {
-                        let selected = self.attention_filter == Some(attention);
-                        Button::new(format!("sidebar-filter-{}", attention.label()))
-                            .label(format!("{} {}", count, attention.label()))
-                            .xsmall()
-                            .ghost()
-                            .selected(selected)
-                            .text_color(color)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.attention_filter = if this.attention_filter == Some(attention)
-                                {
-                                    None
-                                } else {
-                                    Some(attention)
-                                };
-                                cx.notify();
-                            }))
-                    }),
-                ),
-            )
+            .when(has_filters, |this| {
+                this.child(
+                    Button::new("sidebar-clear-filters")
+                        .debug_selector(|| "sidebar-clear-filters".into())
+                        .label("Clear filters")
+                        .tooltip("Clear search, project, and status filters")
+                        .small()
+                        .ghost()
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.clear_history_filters(window, cx);
+                        })),
+                )
+            })
     }
 
     fn render_session_card(
@@ -1696,6 +1722,7 @@ impl SidebarView {
         let theme = cx.theme().colors;
         let state = self.model.read(cx);
         let query = state.search_query.trim().to_lowercase();
+        let has_filters = self.has_history_filters(state);
         let now = now_unix_secs();
 
         let mut fingerprint = sidebar_fingerprint(state, now);
@@ -1739,15 +1766,28 @@ impl SidebarView {
                 .py_6()
                 .text_sm()
                 .text_color(theme.muted_foreground)
-                .child(if query.is_empty() {
-                    "No tasks yet. Start your first task."
+                .child(if has_filters {
+                    "No matching sessions"
                 } else {
-                    "No matching tasks."
+                    "No sessions yet"
                 })
-                .children(query.is_empty().then(|| {
+                .when(has_filters, |this| {
+                    this.child(
+                        Button::new("empty-history-clear-filters")
+                            .debug_selector(|| "empty-history-clear-filters".into())
+                            .label("Clear filters")
+                            .tooltip("Clear search, project, and status filters")
+                            .outline()
+                            .small()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.clear_history_filters(window, cx);
+                            })),
+                    )
+                })
+                .children((!has_filters).then(|| {
                     Button::new("empty-history-new-task")
                         .icon(IconName::Plus)
-                        .label("New Task")
+                        .label("New session")
                         .ghost()
                         .small()
                         .on_click(move |_event, window, cx| {

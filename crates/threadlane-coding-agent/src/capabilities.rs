@@ -15,7 +15,7 @@ use threadlane_wasi::broker::{
 use threadlane_mcp::McpManager;
 use crate::mcp::McpToolExecutor;
 use threadlane_permission::{PermissionHandle, PermissionManager};
-use threadlane_runtime::plan::{SessionPlanStore, UpdatePlanToolExecutor};
+use threadlane_plan::{SessionPlanStore, UpdatePlanToolExecutor};
 use threadlane_question::{AskQuestionToolExecutor, QuestionHandle};
 use async_trait::async_trait;
 use log::warn;
@@ -38,7 +38,7 @@ const CREATE_DRAFT_PR_TOOL_NAME: &str = "create_draft_pull_request";
 // channel shared by parent `hub` and child `message_peer`).
 // NOTE: oh-my-pi parity removed the explicit `complete_prewalk` handoff tool.
 // The handoff is automatic at the first qualifying edit/write behind an
-// opened `update_plan` todo gate (see `threadlane_runtime::orchestrator`).
+// opened `update_plan` todo gate (see `threadlane_orchestrator`).
 
 // ── Capability implementations ─────────────────────────────────────────
 // Each wraps a subsystem and implements [`threadlane_runtime::Capability`]

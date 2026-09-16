@@ -18,10 +18,6 @@ pub mod controller;
 pub mod credentials;
 pub mod extension_broker;
 pub mod mcp;
-/// Prewalk orchestration, canonical in `threadlane_orchestrator`.
-/// Re-exported here so existing `threadlane_session::orchestrator` paths keep
-/// working; new code should import `threadlane_orchestrator` directly.
-pub use threadlane_runtime::orchestrator;
 pub mod permission;
 /// Attached-project registry, canonical in `threadlane-project`.
 /// Re-exported here so existing `threadlane_session::project_registry` and
@@ -42,7 +38,6 @@ pub use threadlane_runtime::ToolPolicy;
 /// Re-exported here so existing `threadlane_session::prompt_templates` paths
 /// keep working; new code should import `threadlane_skills::prompts` directly.
 pub use threadlane_skills::prompts as prompt_templates;
-pub mod question;
 pub mod supervisor;
 /// System-prompt builder, canonical in `threadlane-prompt`.
 /// Re-exported here so existing `threadlane_session::system_prompt` paths
@@ -104,7 +99,6 @@ pub use credentials::{
     opencode_api_key, provider_client_for, provider_credentials, AuthCredentialBridge,
 };
 pub use permission::{PermissionDecision, PermissionHandle};
-pub use question::QuestionHandle;
 pub use system_prompt::SystemPromptConfig;
 pub use threadlane_project::{
     load_project_registry, register_project, save_project_registry, select_project, ProjectRecord,

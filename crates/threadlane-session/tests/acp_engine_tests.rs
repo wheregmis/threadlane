@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use threadlane_session::acp::{AcpAgentConfig, AcpScope, AcpSettings};
 use threadlane_session::acp_runtime::{generate_title, AcpEngine};
-use threadlane_session::permission::{PermissionDecision, PermissionHandle};
+use threadlane_permission::{PermissionDecision, PermissionHandle};
 use threadlane_session::{AgentEvent, ImageAttachment, ReasoningEffort};
 use tokio::sync::broadcast;
 

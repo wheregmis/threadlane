@@ -32,7 +32,7 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod prewalk_tests {
-    use threadlane_runtime::orchestrator::{
+    use threadlane_orchestrator::{
         is_prewalk_implementation_action, is_prewalk_todo_gate_opener, prewalk_would_be_noop,
     };
 
@@ -260,7 +260,7 @@ impl CodingAgent {
                     match guard.as_mut() {
                         None => None,
                         Some(state)
-                            if threadlane_runtime::orchestrator::is_prewalk_todo_gate_opener(
+                            if threadlane_orchestrator::is_prewalk_todo_gate_opener(
                                 &result.name,
                                 result.is_error,
                             ) =>
@@ -272,7 +272,7 @@ impl CodingAgent {
                         }
                         Some(state)
                             if state.todo_gate_open()
-                                && threadlane_runtime::orchestrator::is_prewalk_implementation_action(
+                                && threadlane_orchestrator::is_prewalk_implementation_action(
                                     &result.name,
                                     result.is_error,
                                 ) =>
@@ -289,7 +289,7 @@ impl CodingAgent {
                                 }
                             };
                             if !active_model.is_empty()
-                                && threadlane_runtime::orchestrator::prewalk_would_be_noop(
+                                && threadlane_orchestrator::prewalk_would_be_noop(
                                     &active_model,
                                     active_effort,
                                     &state.target_model,
@@ -325,17 +325,17 @@ impl CodingAgent {
                         // post-handoff verification checklist.
                         if let Some(pos) = turn
                             .system_prompt
-                            .find(threadlane_runtime::orchestrator::ARCHITECT_PROTOCOL_HEADER)
+                            .find(threadlane_orchestrator::ARCHITECT_PROTOCOL_HEADER)
                         {
                             turn.system_prompt.truncate(pos);
                             turn.system_prompt = turn.system_prompt.trim_end().to_string();
                         }
                         if !turn
                             .system_prompt
-                            .contains(threadlane_runtime::orchestrator::PREWALK_CHECKLIST_HEADER)
+                            .contains(threadlane_orchestrator::PREWALK_CHECKLIST_HEADER)
                         {
                             turn.system_prompt.push_str(
-                                &threadlane_runtime::orchestrator::build_checklist_directive(),
+                                &threadlane_orchestrator::build_checklist_directive(),
                             );
                         }
                     }

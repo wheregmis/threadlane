@@ -12,7 +12,7 @@ use crate::harness::{
     ContextItemSource, ContextItemStatus, ContextManifestItem, ErrorCategory, ProviderErrorSummary,
     ProviderOutcome, TraceString,
 };
-use crate::loop_detector::LoopDetector;
+use threadlane_loop::LoopDetector;
 use crate::provider::{
     ProviderBoundaryPreparer, ProviderBoundaryRequest, ProviderBoundaryResult, ProviderTraceEvent,
     ProviderTraceRecorder,

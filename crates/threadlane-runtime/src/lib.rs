@@ -1,9 +1,3 @@
-/// Embedded-browser tool executor, canonical in `threadlane-browser`.
-/// Re-exported here so existing `threadlane_runtime::browser::…` paths keep
-/// working; new code should import `threadlane_browser` directly.
-pub mod browser {
-    pub use threadlane_browser::*;
-}
 pub mod capability;
 pub mod compaction;
 pub mod config;
@@ -11,27 +5,9 @@ pub mod error;
 pub mod events;
 pub mod harness;
 pub mod local_tool_router;
-/// Turn-level loop circuit breaker, canonical in `threadlane-loop`.
-/// Re-exported here so existing `crate::loop_detector::…` and
-/// `threadlane_runtime::{LoopDetector, LoopTrip}` paths keep working.
-pub mod loop_detector {
-    pub use threadlane_loop::*;
-}
 pub mod model_metadata;
-/// One-shot prewalk handoff, canonical in `threadlane-orchestrator`.
-/// Re-exported here so existing `threadlane_runtime::orchestrator::…` paths
-/// keep working; new code should import `threadlane_orchestrator` directly.
-pub mod orchestrator {
-    pub use threadlane_orchestrator::*;
-}
 pub mod plan;
 pub mod provider;
-/// Model-initiated clarifying questions, canonical in `threadlane-question`.
-/// Re-exported here so existing `threadlane_runtime::question::…` paths keep
-/// working; new code should import `threadlane_question` directly.
-pub mod question {
-    pub use threadlane_question::*;
-}
 pub mod rules;
 pub mod tool_dispatcher;
 pub mod tool_executor;
@@ -66,7 +42,6 @@ pub use harness::{
     InterruptedSubagentLane, LaneQueue, OperationOutcome, QueueKind, Record, RecoveryResult,
     SteerItem, SteerPriority, ToolReplaySafety,
 };
-pub use loop_detector::{LoopDetector, LoopTrip};
 // Turn-repair helper lives in `threadlane-provider::convert`, next to the
 // id normalization it relies on; re-exported here so existing paths work.
 pub use provider::{

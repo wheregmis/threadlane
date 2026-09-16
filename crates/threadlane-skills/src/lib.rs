@@ -201,7 +201,7 @@ impl Default for SkillDiscoveryOptions {
     fn default() -> Self {
         Self {
             project_root: None,
-            home_dir: dirs_home(),
+            home_dir: threadlane_project::dirs_home(),
             include_pi_compatibility: true,
             max_skill_bytes: DEFAULT_MAX_SKILL_BYTES,
             max_frontmatter_bytes: DEFAULT_MAX_FRONTMATTER_BYTES,
@@ -385,7 +385,7 @@ impl SkillManager {
     }
 
     pub fn discover_skills(&mut self, project_root: Option<&Path>) {
-        self.discover_skills_with_home(project_root, dirs_home().as_deref());
+        self.discover_skills_with_home(project_root, threadlane_project::dirs_home().as_deref());
     }
 
     fn discover_skills_with_home(&mut self, project_root: Option<&Path>, home_dir: Option<&Path>) {
@@ -1556,12 +1556,6 @@ fn valid_package_component(component: &str) -> bool {
         && component != ".."
         && !component.contains('\\')
         && !component.chars().any(char::is_control)
-}
-
-/// Home directory resolution, canonical in `threadlane-project`; new code
-/// should import `threadlane_project::dirs_home` directly.
-pub(crate) fn dirs_home() -> Option<PathBuf> {
-    threadlane_project::dirs_home()
 }
 
 #[cfg(test)]

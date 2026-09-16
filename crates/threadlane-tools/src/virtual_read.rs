@@ -1,6 +1,6 @@
 use serde_json::Value;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 /// Credentials for remote forge reads (`pr://`, `mr://`, `issue://`, and
@@ -619,10 +619,6 @@ pub fn format_gitlab_markdown(kind: &str, number: &str, raw_json: &str) -> Strin
     out
 }
 
-fn dirs_home() -> Option<PathBuf> {
-    threadlane_project::dirs_home()
-}
-
 pub fn try_skill(root: &Path, name: &str) -> Result<String, String> {
     let clean_name = name.trim_matches('/');
     if clean_name.is_empty() {
@@ -635,7 +631,7 @@ pub fn try_skill(root: &Path, name: &str) -> Result<String, String> {
         root.join(".pi/skills"),
     ];
 
-    if let Some(home) = dirs_home() {
+    if let Some(home) = threadlane_project::dirs_home() {
         search_dirs.push(home.join(".threadlane/skills"));
         search_dirs.push(home.join(".agents/skills"));
         search_dirs.push(home.join(".pi/agent/skills"));
@@ -671,7 +667,7 @@ pub fn try_agent(root: &Path, name: &str) -> Result<String, String> {
 
     let mut search_dirs = vec![root.join(".threadlane/agents"), root.join(".agents/agents")];
 
-    if let Some(home) = dirs_home() {
+    if let Some(home) = threadlane_project::dirs_home() {
         search_dirs.push(home.join(".threadlane/agents"));
         search_dirs.push(home.join(".agents/agents"));
     }

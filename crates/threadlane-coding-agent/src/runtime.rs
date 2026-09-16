@@ -57,7 +57,7 @@ pub struct CodingAgent {
     pub harness_journal_error: Option<String>,
     pub harness_run_id: Arc<std::sync::Mutex<Option<String>>>,
     pub prewalk:
-        Arc<std::sync::Mutex<Option<threadlane_runtime::orchestrator::PrewalkState>>>,
+        Arc<std::sync::Mutex<Option<threadlane_orchestrator::PrewalkState>>>,
     /// Live agent-to-agent mailbox shared by sibling `message_peer` and the
     /// parent `hub` tool (oh-my-pi hub/IRC parity).
     pub hub: super::mailbox::SubagentHub,
@@ -1564,7 +1564,7 @@ impl CodingAgent {
                         .resolve_fast(&active_model)
                         .to_string();
                     let fast_reasoning = self.agent.config().fast_reasoning_effort;
-                    if threadlane_runtime::orchestrator::prewalk_would_be_noop(
+                    if threadlane_orchestrator::prewalk_would_be_noop(
                         &active_model,
                         active_effort,
                         &fast_model,
@@ -1578,10 +1578,10 @@ impl CodingAgent {
                     } else {
                         let requires_todo =
                             self.agent.configured_tool_definitions().iter().any(|tool| {
-                                tool.name == threadlane_runtime::orchestrator::PREWALK_TODO_TOOL
+                                tool.name == threadlane_orchestrator::PREWALK_TODO_TOOL
                             });
                         *self.prewalk.lock().unwrap() =
-                            Some(threadlane_runtime::orchestrator::PrewalkState::new(
+                            Some(threadlane_orchestrator::PrewalkState::new(
                                 fast_model.clone(),
                                 fast_reasoning,
                                 requires_todo,
@@ -1594,7 +1594,7 @@ impl CodingAgent {
 
                         effective_input = task_prompt.to_string();
                         architect_directive =
-                            Some(threadlane_runtime::orchestrator::build_architect_directive(
+                            Some(threadlane_orchestrator::build_architect_directive(
                                 &fast_model,
                                 requires_todo,
                             ));
@@ -1628,9 +1628,9 @@ impl CodingAgent {
                 .agent
                 .configured_tool_definitions()
                 .iter()
-                .any(|tool| tool.name == threadlane_runtime::orchestrator::PREWALK_TODO_TOOL);
+                .any(|tool| tool.name == threadlane_orchestrator::PREWALK_TODO_TOOL);
 
-            let decision = threadlane_runtime::orchestrator::Orchestrator::evaluate(
+            let decision = threadlane_orchestrator::Orchestrator::evaluate(
                 &effective_input,
                 orchestrator_mode,
                 &active_model,
@@ -1639,13 +1639,13 @@ impl CodingAgent {
                 requires_todo,
             );
 
-            if let threadlane_runtime::orchestrator::OrchestratorDecision::EngagePrewalk {
+            if let threadlane_orchestrator::OrchestratorDecision::EngagePrewalk {
                 fast_model: target_fast,
                 fast_reasoning: target_effort,
                 architect_system_directive,
             } = decision
             {
-                if threadlane_runtime::orchestrator::prewalk_would_be_noop(
+                if threadlane_orchestrator::prewalk_would_be_noop(
                     &active_model,
                     active_effort,
                     &target_fast,
@@ -1657,7 +1657,7 @@ impl CodingAgent {
                     });
                 } else {
                     *self.prewalk.lock().unwrap() =
-                        Some(threadlane_runtime::orchestrator::PrewalkState::new(
+                        Some(threadlane_orchestrator::PrewalkState::new(
                             target_fast.clone(),
                             target_effort,
                             requires_todo,
@@ -1679,7 +1679,7 @@ impl CodingAgent {
             let mut turn = self.agent.turn.lock().await;
             if !turn
                 .system_prompt
-                .contains(threadlane_runtime::orchestrator::ARCHITECT_PROTOCOL_HEADER)
+                .contains(threadlane_orchestrator::ARCHITECT_PROTOCOL_HEADER)
             {
                 turn.system_prompt.push_str(&directive);
             }
@@ -1816,7 +1816,7 @@ impl CodingAgent {
                         model: self.agent.model(),
                         message: format!(
                             "Prewalk: plan received but no todo/edits yet. {}",
-                            threadlane_runtime::orchestrator::PREWALK_CONTINUE_PROMPT
+                            threadlane_orchestrator::PREWALK_CONTINUE_PROMPT
                         ),
                     });
                 }

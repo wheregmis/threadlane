@@ -191,9 +191,8 @@ fn env_models() -> Vec<ModelInfo> {
 }
 
 fn global_models_file() -> Vec<ModelInfo> {
-    directories::BaseDirs::new()
-        .map(|base| base.home_dir().join(".threadlane").join("models.json"))
-        .map(|path| load_models_from_file(&path))
+    threadlane_project::default_global_threadlane_dir()
+        .map(|dir| load_models_from_file(&dir.join("models.json")))
         .unwrap_or_default()
 }
 
