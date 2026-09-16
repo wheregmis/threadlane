@@ -143,9 +143,16 @@ fn merge_discovered_opencode_models(models: &mut Vec<ModelOption>) {
         .and_then(|cache| cache.lock().ok())
         .map(|guard| guard.1.clone())
         .unwrap_or_default();
+    merge_opencode_options(models, &discovered);
+}
+
+/// Adds live-discovered options the static seeds do not already contain.
+/// Pure so the dedup rule is pinned without credentials or global-cache
+/// seeding (the cache write itself stays in the refresh path).
+fn merge_opencode_options(models: &mut Vec<ModelOption>, discovered: &[ModelOption]) {
     for option in discovered {
         if !models.iter().any(|model| model.id == option.id) {
-            models.push(option);
+            models.push(option.clone());
         }
     }
 }
@@ -691,7 +698,16 @@ pub fn selection_label(model_id: &str, available: &[ModelOption]) -> String {
         .find(|model| model.id == model_id)
         .map(|model| model.label.clone())
         .or_else(|| label_for(model_id))
-        .unwrap_or_else(|| threadlane_provider::pretty_model_label(model_id))
+        .unwrap_or_else(|| {
+            // External-agent ids are opaque configured slugs: prettifying a
+            // removed agent would fabricate a friendly name for something
+            // that no longer exists, so surface the id verbatim instead.
+            if model_id.starts_with("acp/") {
+                model_id.to_string()
+            } else {
+                threadlane_provider::pretty_model_label(model_id)
+            }
+        })
 }
 
 pub fn available_option(model_id: &str) -> Option<ModelOption> {
@@ -1049,14 +1065,11 @@ mod tests {
         let mut models = provider_models(OPENCODE_MODELS, ModelProvider::OpenCode);
         let before = models.len();
         // Seed entries already present must not be duplicated by discovery.
-        if let Some(cache) = DISCOVERED_OPENCODE
-            .get_or_init(|| std::sync::Mutex::new((std::time::Instant::now(), Vec::new())))
-            .lock()
-            .ok()
-        {
-            let mut guard = cache;
-            guard.0 = std::time::Instant::now();
-            guard.1 = vec![
+        // The pure core takes fixture data directly so the test needs no
+        // stored OpenCode credential and never touches the global cache.
+        merge_opencode_options(
+            &mut models,
+            &[
                 ModelOption {
                     id: "opencode-go/minimax-m2.7".into(),
                     label: "Minimax M2.7".into(),
@@ -1067,9 +1080,8 @@ mod tests {
                     label: "Kimi K2.6".into(),
                     provider: ModelProvider::OpenCode,
                 },
-            ];
-        }
-        merge_discovered_opencode_models(&mut models);
+            ],
+        );
         assert_eq!(models.len(), before + 1);
         assert!(models
             .iter()

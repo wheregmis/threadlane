@@ -4,8 +4,6 @@
 //! input lands. It displays; it never drives anything itself. The chat
 //! surface owns the entity while `AppState::mirror_open` is set.
 
-#![recursion_limit = "2048"]
-
 mod view;
 
 pub use view::MirrorView;

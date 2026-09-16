@@ -1132,8 +1132,18 @@ impl Render for MirrorView {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use threadlane_protocol::live::StreamTarget;
+    use std::sync::Arc;
+
+    use gpui::{Bounds, DevicePixels, Pixels, point, px, size};
+    use threadlane_protocol::live::{
+        LiveFrame, LiveOverlay, LiveOverlayKind, StreamTarget,
+    };
+
+    use super::{
+        circle, file_mtime_ms, fit_contain, fitted_panel, markers, moved_panel,
+        newest_capture, place, render_image, resized_panel, OVERLAY_MS, PANEL_MARGIN,
+        PANEL_MIN_HEIGHT, PANEL_MIN_WIDTH,
+    };
 
     fn frame(width: u32, height: u32) -> LiveFrame {
         LiveFrame {

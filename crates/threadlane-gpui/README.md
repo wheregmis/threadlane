@@ -34,9 +34,7 @@ cargo check -p threadlane-gpui
 no test code. The `threadlane-ui-*` leaves own their tests next to the code;
 run them per crate, e.g. `cargo test -p threadlane-ui-right-panel --lib`.
 Stay out of the heavyweight suites — whole-workspace, `threadlane-gpui`,
-and `threadlane-session` test runs hang. Known exclusions: `threadlane-ui-mirror`
-tests do not compile (macro-expansion blowup, see AGENTS.md), and two
-`threadlane-ui-catalog` tests fail without live credentials.)
+and `threadlane-session` test runs hang.)
 
 ## Releases
 
