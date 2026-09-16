@@ -1,10 +1,10 @@
 use std::path::Path;
 use threadlane_session::harness::{JsonlStore, SessionStore};
 
-use super::projection::extract_session_title;
-use super::types::{SessionDiscoveryCache, SessionDiscoveryCacheEntry, SessionHealth, SessionInfo};
+use crate::projection::extract_session_title;
+use crate::types::{SessionDiscoveryCache, SessionDiscoveryCacheEntry, SessionHealth, SessionInfo};
 
-pub(crate) use threadlane_session::discovery::{
+pub use threadlane_session::discovery::{
     effective_session_work_dir, file_mtime, resolve_session_transcript_file,
 };
 
@@ -23,7 +23,7 @@ fn effective_session_git_branch(
     }
 }
 
-pub(crate) fn discover_session_stubs_in_project(work_dir: &Path) -> Vec<SessionInfo> {
+pub fn discover_session_stubs_in_project(work_dir: &Path) -> Vec<SessionInfo> {
     let Ok(entries) = std::fs::read_dir(work_dir.join(".threadlane/sessions")) else {
         return Vec::new();
     };
@@ -92,7 +92,7 @@ pub fn discover_sessions_in_project(work_dir: &Path) -> Vec<SessionInfo> {
     discover_sessions_in_project_cached(work_dir, &mut cache)
 }
 
-pub(crate) fn discover_sessions_in_project_cached(
+pub fn discover_sessions_in_project_cached(
     work_dir: &Path,
     cache: &mut SessionDiscoveryCache,
 ) -> Vec<SessionInfo> {

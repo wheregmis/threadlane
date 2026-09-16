@@ -1,15 +1,15 @@
 use std::ops::Range;
 
-use crate::state::{ChatMessageInfo, MessageRole, ToolActivityInfo};
+use threadlane_ui_state::{ChatMessageInfo, MessageRole, ToolActivityInfo};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum TranscriptRow {
+pub enum TranscriptRow {
     Message(usize),
     Activities(Range<usize>),
     Working,
 }
 
-pub(crate) fn is_activity_only(message: &ChatMessageInfo) -> bool {
+pub fn is_activity_only(message: &ChatMessageInfo) -> bool {
     message.role == MessageRole::Assistant
         && message.content.is_empty()
         && message.reasoning_content.is_none()
@@ -19,7 +19,7 @@ pub(crate) fn is_activity_only(message: &ChatMessageInfo) -> bool {
             .any(|activity| activity.title != "update_plan")
 }
 
-pub(crate) fn build_transcript_rows(
+pub fn build_transcript_rows(
     messages: &[ChatMessageInfo],
     generating: bool,
 ) -> Vec<TranscriptRow> {
@@ -44,7 +44,7 @@ pub(crate) fn build_transcript_rows(
     rows
 }
 
-pub(crate) fn grouped_tool_activities(
+pub fn grouped_tool_activities(
     messages: &[ChatMessageInfo],
 ) -> impl Iterator<Item = &ToolActivityInfo> + Clone {
     messages

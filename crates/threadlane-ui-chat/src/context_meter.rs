@@ -2,7 +2,7 @@ use gpui::*;
 use gpui_component::button::Toggle;
 use gpui_component::Selectable;
 
-use crate::state::SubagentActivityStatus;
+use threadlane_ui_state::SubagentActivityStatus;
 
 pub const CONTEXT_METER_WARN_PCT: f64 = 80.0;
 pub const CONTEXT_METER_DANGER_PCT: f64 = 95.0;

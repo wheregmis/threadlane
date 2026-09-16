@@ -9,7 +9,7 @@ use gpui_component::scroll::ScrollableElement;
 use gpui_component::text::{TextView, TextViewState};
 use gpui_component::{ActiveTheme, Disableable, IconName, Sizable};
 
-use crate::state::AppState;
+use threadlane_ui_state::AppState;
 
 actions!(editor, [SaveFile]);
 
@@ -111,7 +111,7 @@ pub struct EditorView {
 }
 
 impl EditorView {
-    pub(crate) fn new(
+    pub fn new(
         model: Entity<AppState>,
         _window: &mut Window,
         cx: &mut Context<Self>,
@@ -135,7 +135,7 @@ impl EditorView {
         !self.tabs.is_empty()
     }
 
-    pub(crate) fn tab_count(&self) -> usize {
+    pub fn tab_count(&self) -> usize {
         self.tabs.len()
     }
 
@@ -167,7 +167,7 @@ impl EditorView {
         }
     }
 
-    pub(crate) fn open_file(
+    pub fn open_file(
         &mut self,
         project: PathBuf,
         relative_path: &str,
@@ -180,7 +180,7 @@ impl EditorView {
         cx.notify();
     }
 
-    pub(crate) fn open_diff(&mut self, relative_path: &str, content: &str, cx: &mut Context<Self>) {
+    pub fn open_diff(&mut self, relative_path: &str, content: &str, cx: &mut Context<Self>) {
         self.pending_open = Some(PendingOpen::Diff {
             path: relative_path.to_string(),
             content: content.to_string(),

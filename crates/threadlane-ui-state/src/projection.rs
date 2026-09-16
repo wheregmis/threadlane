@@ -2,20 +2,20 @@ use std::path::{Path, PathBuf};
 use threadlane_session::harness::{JsonlStore, SessionStore};
 use threadlane_session::AgentMessage;
 
-use super::types::{
+use crate::types::{
     ChatMessageInfo, MessageRole, SessionProjectionResult, SubagentActivityInfo,
     SubagentActivityStatus, ToolActivityInfo,
 };
-use super::AppState;
+use crate::AppState;
 
-pub(crate) use threadlane_session::titles::extract_session_title;
+pub use threadlane_session::titles::extract_session_title;
 
 #[cfg(test)]
-pub(crate) fn load_session_messages(session_file: &Path) -> Vec<ChatMessageInfo> {
+pub fn load_session_messages(session_file: &Path) -> Vec<ChatMessageInfo> {
     compute_session_messages(session_file).unwrap_or_default()
 }
 
-pub(crate) fn compute_session_messages(
+pub fn compute_session_messages(
     session_file: &Path,
 ) -> Result<Vec<ChatMessageInfo>, String> {
     use threadlane_session::harness::{read_transcript_page, TranscriptItem};
@@ -79,7 +79,7 @@ pub(crate) fn compute_session_messages(
 }
 
 /// Opens a session JSONL once and builds every UI projection required after hydration.
-pub(crate) fn compute_full_session_projection(
+pub fn compute_full_session_projection(
     session_file: &Path,
 ) -> Result<SessionProjectionResult, String> {
     let store = JsonlStore::open_read_only(session_file).map_err(|error| error.to_string())?;
@@ -99,7 +99,7 @@ pub(crate) fn compute_full_session_projection(
     })
 }
 
-pub(crate) fn project_subagents_from_store(store: &impl SessionStore) -> Vec<SubagentActivityInfo> {
+pub fn project_subagents_from_store(store: &impl SessionStore) -> Vec<SubagentActivityInfo> {
     use threadlane_session::harness::{Record, SubagentLifecyclePhase};
 
     let mut rows = Vec::new();
@@ -224,16 +224,16 @@ pub(crate) fn project_subagents_from_store(store: &impl SessionStore) -> Vec<Sub
     rows
 }
 
-pub(crate) use threadlane_runtime::harness::tool_activity_summary;
+pub use threadlane_runtime::harness::tool_activity_summary;
 
-pub(crate) use threadlane_runtime::harness::tool_activity_display_summary;
+pub use threadlane_runtime::harness::tool_activity_display_summary;
 
-pub(crate) fn format_context_marker_tokens(tokens: usize) -> String {
-    let formatted = crate::model_catalog::format_tokens(tokens.min(u32::MAX as usize) as u32);
+pub fn format_context_marker_tokens(tokens: usize) -> String {
+    let formatted = threadlane_ui_catalog::format_tokens(tokens.min(u32::MAX as usize) as u32);
     formatted.replace(".0k", "k").replace(".0M", "M")
 }
 
-pub(crate) fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageInfo> {
+pub fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageInfo> {
     threadlane_session::harness::project_chat_messages(&agent_messages)
         .into_iter()
         .map(|msg| ChatMessageInfo {
@@ -267,9 +267,9 @@ pub(crate) fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<C
         .collect()
 }
 
-pub(crate) use threadlane_session::runtime_status_text;
+pub use threadlane_session::runtime_status_text;
 
-pub(crate) fn coding_agent_options(
+pub fn coding_agent_options(
     work_dir: PathBuf,
     session_file: PathBuf,
     model: String,
@@ -279,7 +279,7 @@ pub(crate) fn coding_agent_options(
     let (api_key, account_id) = threadlane_session::provider_credentials(&model);
     let mut agent_config = threadlane_session::AgentConfig::default();
     agent_config.model_roles = model_roles;
-    let subagent_settings = crate::services::subagent_settings::load(&work_dir);
+    let subagent_settings = threadlane_session::subagent_settings::load(&work_dir);
     agent_config.subagent_model = subagent_settings.model;
     agent_config.subagent_reasoning_effort = subagent_settings.reasoning_effort;
     if agent_config.model_roles.fast.is_none() {

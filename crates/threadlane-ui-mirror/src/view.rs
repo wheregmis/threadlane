@@ -34,7 +34,7 @@ use threadlane_protocol::live::{
     self as computer_live, LiveFrame, LiveOverlay, LiveOverlayKind, LiveStatus,
 };
 
-use crate::state::AppState;
+use threadlane_ui_state::AppState;
 
 /// How long a pointer overlay stays visible.
 const OVERLAY_MS: u128 = 1_100;
@@ -121,7 +121,7 @@ pub struct MirrorView {
 }
 
 impl MirrorView {
-    pub(crate) fn new(
+    pub fn new(
         model: Entity<AppState>,
         previews_dir: PathBuf,
         cx: &mut Context<Self>,

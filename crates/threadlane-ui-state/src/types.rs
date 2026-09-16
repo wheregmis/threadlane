@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use threadlane_session::{AcpConfigOption, AgentEvent, ImageAttachment, SessionPlan, TokenUsage};
 
-use super::AppState;
-use crate::services::sessions::{SessionRuntime, SessionRuntimeStatus};
+use crate::AppState;
+use threadlane_session::{SessionRuntime, SessionRuntimeStatus};
 
 pub type AttachedProject = threadlane_project::ProjectRecord;
 
@@ -17,7 +17,7 @@ pub enum SessionHealth {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum SessionAttention {
+pub enum SessionAttention {
     NeedsYou,
     Working,
     Ready,
@@ -25,7 +25,7 @@ pub(crate) enum SessionAttention {
 }
 
 impl SessionAttention {
-    pub(crate) fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Self::NeedsYou => "Needs you",
             Self::Working => "Working",
@@ -35,7 +35,7 @@ impl SessionAttention {
     }
 }
 
-pub(crate) fn derive_session_attention(
+pub fn derive_session_attention(
     has_blocking_request: bool,
     health: &SessionHealth,
     runtime_status: Option<&SessionRuntimeStatus>,
@@ -80,27 +80,27 @@ impl WorkMode {
 
 #[derive(Clone, Debug)]
 pub struct SessionInfo {
-    pub(crate) id: String,
-    pub(crate) title: String,
+    pub id: String,
+    pub title: String,
     /// Canonical attached project that owns this session file.
-    pub(crate) work_dir: PathBuf,
+    pub work_dir: PathBuf,
     /// Effective directory used for agent execution.
-    pub(crate) runtime_work_dir: PathBuf,
-    pub(crate) session_file: PathBuf,
-    pub(crate) updated_at: u64,
-    pub(crate) health: SessionHealth,
-    pub(crate) git_branch: Option<String>,
-    pub(crate) github_issue: Option<threadlane_git::GitHubIssueRef>,
-    pub(crate) is_worktree: bool,
-    pub(crate) worktree_available: bool,
+    pub runtime_work_dir: PathBuf,
+    pub session_file: PathBuf,
+    pub updated_at: u64,
+    pub health: SessionHealth,
+    pub git_branch: Option<String>,
+    pub github_issue: Option<threadlane_git::GitHubIssueRef>,
+    pub is_worktree: bool,
+    pub worktree_available: bool,
 }
 
 #[derive(Clone, Debug)]
 pub struct ProjectInfo {
-    pub(crate) name: String,
-    pub(crate) work_dir: PathBuf,
-    pub(crate) sessions: Vec<SessionInfo>,
-    pub(crate) is_expanded: bool,
+    pub name: String,
+    pub work_dir: PathBuf,
+    pub sessions: Vec<SessionInfo>,
+    pub is_expanded: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -114,67 +114,67 @@ pub enum MessageRole {
 
 #[derive(Clone, Debug)]
 pub struct ToolActivityInfo {
-    pub(crate) id: String,
-    pub(crate) category: String,
-    pub(crate) title: String,
-    pub(crate) display_summary: String,
-    pub(crate) detail: String,
-    pub(crate) is_expanded: bool,
+    pub id: String,
+    pub category: String,
+    pub title: String,
+    pub display_summary: String,
+    pub detail: String,
+    pub is_expanded: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct TrajectoryDiagnostics {
-    pub(crate) status: Option<String>,
-    pub(crate) duration_ms: Option<u64>,
-    pub(crate) model_visible: bool,
-    pub(crate) source: Option<String>,
-    pub(crate) raw: Option<String>,
-    pub(crate) parent_id: Option<String>,
-    pub(crate) result_id: Option<String>,
-    pub(crate) exit_code: Option<i32>,
-    pub(crate) output_bytes: Option<u64>,
-    pub(crate) files_mutated: Vec<String>,
-    pub(crate) commands_executed: Vec<String>,
-    pub(crate) error_summary: Option<String>,
-    pub(crate) items_count: Option<usize>,
-    pub(crate) token_estimate: Option<u32>,
-    pub(crate) is_anomaly: bool,
+    pub status: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub model_visible: bool,
+    pub source: Option<String>,
+    pub raw: Option<String>,
+    pub parent_id: Option<String>,
+    pub result_id: Option<String>,
+    pub exit_code: Option<i32>,
+    pub output_bytes: Option<u64>,
+    pub files_mutated: Vec<String>,
+    pub commands_executed: Vec<String>,
+    pub error_summary: Option<String>,
+    pub items_count: Option<usize>,
+    pub token_estimate: Option<u32>,
+    pub is_anomaly: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct TrajectoryEntry {
-    pub(crate) seq: Option<u64>,
-    pub(crate) run_id: Option<String>,
-    pub(crate) turn: Option<u32>,
+    pub seq: Option<u64>,
+    pub run_id: Option<String>,
+    pub turn: Option<u32>,
     /// The user-facing request this entry belongs to, when it can be inferred
     /// from the canonical transcript. Runtime records inherit the active request.
-    pub(crate) request: Option<u32>,
-    pub(crate) category: String,
-    pub(crate) summary: String,
-    pub(crate) detail: String,
-    pub(crate) lane: Option<String>,
-    pub(crate) correlation_id: Option<String>,
-    pub(crate) diagnostics: TrajectoryDiagnostics,
+    pub request: Option<u32>,
+    pub category: String,
+    pub summary: String,
+    pub detail: String,
+    pub lane: Option<String>,
+    pub correlation_id: Option<String>,
+    pub diagnostics: TrajectoryDiagnostics,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct SessionMetricsInfo {
-    pub(crate) turns: usize,
-    pub(crate) tool_calls: usize,
-    pub(crate) input_tokens: u64,
-    pub(crate) output_tokens: u64,
-    pub(crate) cache_read_tokens: u64,
-    pub(crate) cache_write_tokens: u64,
+    pub turns: usize,
+    pub tool_calls: usize,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
 }
 
 impl SessionMetricsInfo {
-    pub(crate) fn billed_input_tokens(&self) -> u64 {
+    pub fn billed_input_tokens(&self) -> u64 {
         self.input_tokens
             .saturating_add(self.cache_read_tokens)
             .saturating_add(self.cache_write_tokens)
     }
 
-    pub(crate) fn cache_hit_percent(&self) -> Option<u64> {
+    pub fn cache_hit_percent(&self) -> Option<u64> {
         let billed_input = self.billed_input_tokens();
         (billed_input > 0).then(|| {
             (((self.cache_read_tokens as u128) * 100 + (billed_input as u128) / 2)
@@ -182,7 +182,7 @@ impl SessionMetricsInfo {
         })
     }
 
-    pub(crate) fn accumulate_usage(&mut self, usage: &TokenUsage) {
+    pub fn accumulate_usage(&mut self, usage: &TokenUsage) {
         self.input_tokens = self
             .input_tokens
             .saturating_add(u64::from(usage.input_tokens));
@@ -199,32 +199,32 @@ impl SessionMetricsInfo {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ContextWindowInfo {
-    pub(crate) current_tokens: u64,
-    pub(crate) context_limit: u64,
-    pub(crate) context_limit_is_estimate: bool,
-    pub(crate) effective_model: String,
-    pub(crate) compaction_generation: u64,
-    pub(crate) last_compaction_seq: Option<u64>,
-    pub(crate) provisional: bool,
-    pub(crate) estimating: bool,
+pub struct ContextWindowInfo {
+    pub current_tokens: u64,
+    pub context_limit: u64,
+    pub context_limit_is_estimate: bool,
+    pub effective_model: String,
+    pub compaction_generation: u64,
+    pub last_compaction_seq: Option<u64>,
+    pub provisional: bool,
+    pub estimating: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct SessionProjectionKey {
-    pub(crate) session_id: String,
-    pub(crate) session_file: PathBuf,
+pub struct SessionProjectionKey {
+    pub session_id: String,
+    pub session_file: PathBuf,
 }
 
 #[derive(Clone, Debug)]
 pub struct ChatMessageInfo {
-    pub(crate) id: String,
-    pub(crate) role: MessageRole,
-    pub(crate) content: String,
-    pub(crate) tool_activities: Vec<ToolActivityInfo>,
-    pub(crate) streaming: bool,
-    pub(crate) reasoning_content: Option<String>,
-    pub(crate) reasoning_expanded: bool,
+    pub id: String,
+    pub role: MessageRole,
+    pub content: String,
+    pub tool_activities: Vec<ToolActivityInfo>,
+    pub streaming: bool,
+    pub reasoning_content: Option<String>,
+    pub reasoning_expanded: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -238,17 +238,17 @@ pub enum SubagentActivityStatus {
 
 #[derive(Clone, Debug)]
 pub struct SubagentActivityInfo {
-    pub(crate) batch_run_id: u64,
-    pub(crate) task_index: usize,
-    pub(crate) journal_run_id: Option<String>,
-    pub(crate) lane: Option<String>,
-    pub(crate) agent: String,
-    pub(crate) task: String,
-    pub(crate) model: Option<String>,
-    pub(crate) status: SubagentActivityStatus,
-    pub(crate) messages: Vec<ChatMessageInfo>,
-    pub(crate) isolation: Option<threadlane_runtime::SubagentIsolation>,
-    pub(crate) error: Option<String>,
+    pub batch_run_id: u64,
+    pub task_index: usize,
+    pub journal_run_id: Option<String>,
+    pub lane: Option<String>,
+    pub agent: String,
+    pub task: String,
+    pub model: Option<String>,
+    pub status: SubagentActivityStatus,
+    pub messages: Vec<ChatMessageInfo>,
+    pub isolation: Option<threadlane_runtime::SubagentIsolation>,
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -294,9 +294,9 @@ pub enum RequestedEditorTarget {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct PendingComposerMessage {
-    pub(crate) text: String,
-    pub(crate) images: Vec<ImageAttachment>,
+pub struct PendingComposerMessage {
+    pub text: String,
+    pub images: Vec<ImageAttachment>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -309,12 +309,12 @@ pub enum WorkspacePage {
 
 /// A session whose durable UI projections need to be computed off the UI thread.
 #[derive(Clone)]
-pub(crate) struct SessionHydrationRequest {
-    pub(crate) session_id: String,
-    pub(crate) session_file: PathBuf,
-    pub(crate) reload_messages: bool,
+pub struct SessionHydrationRequest {
+    pub session_id: String,
+    pub session_file: PathBuf,
+    pub reload_messages: bool,
     /// The first tuple item is the effective worktree directory for agent execution.
-    pub(crate) runtime_options: Option<(
+    pub runtime_options: Option<(
         PathBuf,
         String,
         threadlane_session::ModelRoles,
@@ -323,44 +323,44 @@ pub(crate) struct SessionHydrationRequest {
 }
 
 /// The complete durable UI projection built from one JSONL store parse.
-pub(crate) struct SessionProjectionResult {
-    pub(crate) plan: SessionPlan,
-    pub(crate) trajectory: Vec<TrajectoryEntry>,
-    pub(crate) subagents: Vec<SubagentActivityInfo>,
-    pub(crate) diagnostics: threadlane_session::harness::SessionDiagnostics,
-    pub(crate) metrics: SessionMetricsInfo,
-    pub(crate) token_usage: TokenUsage,
-    pub(crate) context_window: Option<ContextWindowInfo>,
+pub struct SessionProjectionResult {
+    pub plan: SessionPlan,
+    pub trajectory: Vec<TrajectoryEntry>,
+    pub subagents: Vec<SubagentActivityInfo>,
+    pub diagnostics: threadlane_session::harness::SessionDiagnostics,
+    pub metrics: SessionMetricsInfo,
+    pub token_usage: TokenUsage,
+    pub context_window: Option<ContextWindowInfo>,
 }
 
 #[derive(Default)]
-pub(crate) struct SessionDiscoveryCache {
-    pub(crate) entries: HashMap<PathBuf, SessionDiscoveryCacheEntry>,
+pub struct SessionDiscoveryCache {
+    pub entries: HashMap<PathBuf, SessionDiscoveryCacheEntry>,
 }
 
-pub(crate) struct SessionDiscoveryCacheEntry {
-    pub(crate) len: u64,
-    pub(crate) modified: Option<SystemTime>,
-    pub(crate) info: SessionInfo,
+pub struct SessionDiscoveryCacheEntry {
+    pub len: u64,
+    pub modified: Option<SystemTime>,
+    pub info: SessionInfo,
 }
 
 #[derive(Clone)]
-pub(crate) struct IssueWorkSelection {
-    pub(crate) active_work_dir: Option<PathBuf>,
-    pub(crate) active_session_id: Option<String>,
-    pub(crate) is_new_task: bool,
-    pub(crate) draft_work_mode: WorkMode,
-    pub(crate) workspace_page: WorkspacePage,
-    pub(crate) messages: Arc<Vec<ChatMessageInfo>>,
-    pub(crate) active_plan: SessionPlan,
-    pub(crate) is_generating: bool,
-    pub(crate) session_status: Option<String>,
-    pub(crate) pending_hydrations: Vec<SessionHydrationRequest>,
-    pub(crate) available_models: Vec<crate::model_catalog::ModelOption>,
+pub struct IssueWorkSelection {
+    pub active_work_dir: Option<PathBuf>,
+    pub active_session_id: Option<String>,
+    pub is_new_task: bool,
+    pub draft_work_mode: WorkMode,
+    pub workspace_page: WorkspacePage,
+    pub messages: Arc<Vec<ChatMessageInfo>>,
+    pub active_plan: SessionPlan,
+    pub is_generating: bool,
+    pub session_status: Option<String>,
+    pub pending_hydrations: Vec<SessionHydrationRequest>,
+    pub available_models: Vec<threadlane_ui_catalog::ModelOption>,
 }
 
 impl IssueWorkSelection {
-    pub(crate) fn capture(state: &AppState) -> Self {
+    pub fn capture(state: &AppState) -> Self {
         Self {
             active_work_dir: state.active_work_dir.clone(),
             active_session_id: state.active_session_id.clone(),
@@ -376,7 +376,7 @@ impl IssueWorkSelection {
         }
     }
 
-    pub(crate) fn restore(self, state: &mut AppState) {
+    pub fn restore(self, state: &mut AppState) {
         state.active_work_dir = self.active_work_dir;
         state.active_session_id = self.active_session_id;
         state.is_new_task = self.is_new_task;

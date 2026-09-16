@@ -1,12 +1,4 @@
-mod composer;
-mod context_meter;
-mod markdown;
-mod trajectory;
-mod transcript;
-mod view;
-
-pub use composer::*;
-pub use context_meter::*;
-pub use markdown::*;
-pub use trajectory::*;
-pub use view::{init, CentralTab, ChatListView};
+//! Compatibility shim: the chat surface now lives in
+//! `threadlane-ui-chat`. This module re-exports it so existing
+//! `crate::screens::chat::...` paths keep working during the split.
+pub use threadlane_ui_chat::*;

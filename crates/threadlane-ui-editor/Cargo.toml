@@ -1,0 +1,12 @@
+[package]
+name = "threadlane-ui-editor"
+version = "0.1.0"
+edition = "2021"
+description = "File editor view for the Threadlane desktop app: multi-tab editing with save/open status"
+
+[dependencies]
+gpui.workspace = true
+gpui-component = { workspace = true, features = ["tree-sitter-rust", "tree-sitter-python", "tree-sitter-javascript", "tree-sitter-typescript", "tree-sitter-html", "tree-sitter-css", "tree-sitter-bash", "tree-sitter-toml", "tree-sitter-yaml", "tree-sitter-markdown", "tree-sitter-diff"] }
+rfd.workspace = true
+threadlane-ui-state.workspace = true
+tracing.workspace = true

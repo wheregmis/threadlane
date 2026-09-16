@@ -9,29 +9,29 @@ use threadlane_session::{
     SubagentProgressUpdate, TokenUsage,
 };
 
-use crate::adapters::agent_events::{adapt_agent_event, ChatAgentUpdate};
-use crate::services::sessions::{ExecutionMode, SessionRuntime};
+use crate::agent_events::{adapt_agent_event, ChatAgentUpdate};
+use threadlane_session::{ExecutionMode, SessionRuntime};
 use threadlane_project::load_project_registry;
 
-use super::discovery::*;
-use super::projection::*;
-pub(crate) use super::types::*;
+use crate::discovery::*;
+use crate::projection::*;
+pub use crate::types::*;
 
 pub struct AppState {
-    pub(crate) projects: Vec<ProjectInfo>,
-    pub(crate) active_work_dir: Option<PathBuf>,
-    pub(crate) active_session_id: Option<String>,
-    pub(crate) is_new_task: bool,
-    pub(crate) draft_work_mode: WorkMode,
+    pub projects: Vec<ProjectInfo>,
+    pub active_work_dir: Option<PathBuf>,
+    pub active_session_id: Option<String>,
+    pub is_new_task: bool,
+    pub draft_work_mode: WorkMode,
     /// Presentation-only sidebar filter. `None` keeps the flat list scoped to all projects.
-    pub(crate) sidebar_project_filter: Option<PathBuf>,
-    pub(crate) search_query: String,
-    pub(crate) messages: Arc<Vec<ChatMessageInfo>>,
-    pub(crate) available_models: Vec<crate::model_catalog::ModelOption>,
-    pub(crate) active_plan: SessionPlan,
-    pub(crate) is_generating: bool,
+    pub sidebar_project_filter: Option<PathBuf>,
+    pub search_query: String,
+    pub messages: Arc<Vec<ChatMessageInfo>>,
+    pub available_models: Vec<threadlane_ui_catalog::ModelOption>,
+    pub active_plan: SessionPlan,
+    pub is_generating: bool,
     composer_text: String,
-    pub(crate) session_status: Option<String>,
+    pub session_status: Option<String>,
     pending_composer_messages: HashMap<String, PendingComposerMessage>,
     session_token_usage: HashMap<SessionProjectionKey, TokenUsage>,
     trajectory_by_session: HashMap<SessionProjectionKey, Vec<TrajectoryEntry>>,
@@ -57,45 +57,45 @@ pub struct AppState {
     /// next runtime before its first turn.
     pending_acp_config: HashMap<String, HashMap<String, String>>,
     stashed_prompts: HashMap<String, String>,
-    pub(crate) pending_permissions: HashMap<String, threadlane_session::PermissionRequest>,
-    pub(crate) pending_questions: HashMap<String, threadlane_session::QuestionRequest>,
-    pub(crate) pending_hydrations: Vec<SessionHydrationRequest>,
-    pub(crate) git_statuses: HashMap<PathBuf, threadlane_git::GitStatus>,
-    pub(crate) git_prs: HashMap<(PathBuf, String), Option<threadlane_git::GitHubPrInfo>>,
-    pub(crate) auto_address_pr_reviews_enabled: bool,
+    pub pending_permissions: HashMap<String, threadlane_session::PermissionRequest>,
+    pub pending_questions: HashMap<String, threadlane_session::QuestionRequest>,
+    pub pending_hydrations: Vec<SessionHydrationRequest>,
+    pub git_statuses: HashMap<PathBuf, threadlane_git::GitStatus>,
+    pub git_prs: HashMap<(PathBuf, String), Option<threadlane_git::GitHubPrInfo>>,
+    pub auto_address_pr_reviews_enabled: bool,
     /// Persistent PR review tracking per project, loaded on demand and cached.
-    pub(crate) pr_review_tracking:
-        HashMap<PathBuf, crate::services::pr_review::PrReviewTrackingStore>,
+    pub pr_review_tracking:
+        HashMap<PathBuf, threadlane_git::PrReviewTrackingStore>,
 
-    pub(crate) selected_model: String,
+    pub selected_model: String,
     model_roles: threadlane_session::ModelRoles,
-    pub(crate) reasoning_effort: ReasoningEffort,
-    pub(crate) workspace_page: WorkspacePage,
-    pub(crate) openai_key: String,
-    pub(crate) opencode_key: String,
-    pub(crate) needle_enabled: bool,
-    pub(crate) auth_status_msg: Option<String>,
-    pub(crate) update_status: threadlane_updater::UpdateStatus,
-    pub(crate) update_notice_dismissed: bool,
-    pub(crate) requested_editor_target: Option<RequestedEditorTarget>,
-    pub(crate) requested_github_issue: Option<(PathBuf, u64)>,
-    pub(crate) requested_composer_prompt: Option<String>,
-    pub(crate) requested_terminal_command: Option<String>,
-    pub(crate) requested_terminal_work_dir: Option<PathBuf>,
+    pub reasoning_effort: ReasoningEffort,
+    pub workspace_page: WorkspacePage,
+    pub openai_key: String,
+    pub opencode_key: String,
+    pub needle_enabled: bool,
+    pub auth_status_msg: Option<String>,
+    pub update_status: threadlane_updater::UpdateStatus,
+    pub update_notice_dismissed: bool,
+    pub requested_editor_target: Option<RequestedEditorTarget>,
+    pub requested_github_issue: Option<(PathBuf, u64)>,
+    pub requested_composer_prompt: Option<String>,
+    pub requested_terminal_command: Option<String>,
+    pub requested_terminal_work_dir: Option<PathBuf>,
     stream_tx: tokio::sync::mpsc::UnboundedSender<ChatStreamEvent>,
-    pub(crate) stream_rx: Option<tokio::sync::mpsc::UnboundedReceiver<ChatStreamEvent>>,
+    pub stream_rx: Option<tokio::sync::mpsc::UnboundedReceiver<ChatStreamEvent>>,
     session_refresh_tx: Sender<PathBuf>,
-    pub(crate) session_refresh_rx:
+    pub session_refresh_rx:
         Option<tokio::sync::mpsc::UnboundedReceiver<(PathBuf, Vec<SessionInfo>)>>,
-    pub(crate) session_runtimes: HashMap<PathBuf, Arc<SessionRuntime>>,
+    pub session_runtimes: HashMap<PathBuf, Arc<SessionRuntime>>,
     deferred_stream_events: HashMap<String, Vec<ChatStreamEvent>>,
     /// Bridge to the embedded browser panel. The channel is created with the
     /// app; the first constructed right panel claims the receiver and pumps
     /// agent browser commands into the live view.
-    pub(crate) browser_bridge: threadlane_protocol::browser::BrowserBridge,
+    pub browser_bridge: threadlane_protocol::browser::BrowserBridge,
     /// Whether the computer-use mirror popup is currently open. Set when the
     /// popup opens and cleared by its close button; guards duplicate popups.
-    pub(crate) mirror_open: bool,
+    pub mirror_open: bool,
     /// Seen computer trigger ids (permission requests and tool activities)
     /// so the mirror opens once per new activity, not per pump tick.
     mirror_seen: HashSet<String>,
@@ -108,7 +108,7 @@ impl Default for AppState {
 }
 
 impl AppState {
-    pub(crate) fn issue_branch_name(number: u64, title: &str, suffix: &str) -> String {
+    pub fn issue_branch_name(number: u64, title: &str, suffix: &str) -> String {
         let slug = title
             .chars()
             .flat_map(char::to_lowercase)
@@ -128,11 +128,11 @@ impl AppState {
         )
     }
 
-    pub(crate) fn load() -> Self {
+    pub fn load() -> Self {
         Self::load_from_registry(load_project_registry())
     }
 
-    pub(crate) fn active_git_work_dir(&self) -> Option<PathBuf> {
+    pub fn active_git_work_dir(&self) -> Option<PathBuf> {
         let work_dir = self.active_work_dir.as_ref()?;
         let Some(session_id) = self.active_session_id.as_ref() else {
             return Some(work_dir.clone());
@@ -155,7 +155,7 @@ impl AppState {
         }
     }
 
-    fn load_from_registry(registry_projects: Vec<AttachedProject>) -> Self {
+    pub(crate) fn load_from_registry(registry_projects: Vec<AttachedProject>) -> Self {
         #[cfg(not(test))]
         let mut registry_projects = registry_projects;
         #[cfg(not(test))]
@@ -236,7 +236,7 @@ impl AppState {
             let _ = session_refresh_tx.send(project.work_dir.clone());
         }
         let selected_model =
-            crate::model_catalog::default_model_for_project(active_work_dir.as_deref())
+            threadlane_ui_catalog::default_model_for_project(active_work_dir.as_deref())
                 .unwrap_or_default();
 
         let model_roles = threadlane_session::ModelRoles::default();
@@ -250,7 +250,7 @@ impl AppState {
         };
 
         let available_models =
-            crate::model_catalog::available_models_for_project(active_work_dir.as_deref());
+            threadlane_ui_catalog::available_models_for_project(active_work_dir.as_deref());
 
         let mut state = Self {
             projects: project_infos,
@@ -309,7 +309,7 @@ impl AppState {
             git_statuses: HashMap::new(),
             git_prs: HashMap::new(),
             auto_address_pr_reviews_enabled:
-                crate::services::pr_review::load_auto_address_pr_reviews_enabled(),
+                threadlane_git::load_auto_address_pr_reviews_enabled(),
             pr_review_tracking: HashMap::new(),
         };
         if let (Some(session_id), Some(session_file)) = (
@@ -333,17 +333,17 @@ impl AppState {
         state
     }
 
-    pub(crate) fn messages_mut(&mut self) -> &mut Vec<ChatMessageInfo> {
+    pub fn messages_mut(&mut self) -> &mut Vec<ChatMessageInfo> {
         Arc::make_mut(&mut self.messages)
     }
 
-    pub(crate) fn available_models(&self) -> &[crate::model_catalog::ModelOption] {
+    pub fn available_models(&self) -> &[threadlane_ui_catalog::ModelOption] {
         &self.available_models
     }
 
-    pub(crate) fn refresh_available_models(&mut self) {
+    pub fn refresh_available_models(&mut self) {
         self.available_models =
-            crate::model_catalog::available_models_for_project(self.active_work_dir.as_deref());
+            threadlane_ui_catalog::available_models_for_project(self.active_work_dir.as_deref());
         if self.selected_model.is_empty() {
             self.selected_model = self
                 .available_models
@@ -354,7 +354,7 @@ impl AppState {
         self.set_reasoning_effort(self.reasoning_effort);
     }
 
-    pub(crate) fn set_needle_enabled(&mut self, enabled: bool) -> Result<(), String> {
+    pub fn set_needle_enabled(&mut self, enabled: bool) -> Result<(), String> {
         threadlane_project::save_needle_enabled(enabled)?;
         self.needle_enabled = enabled;
         for runtime in self.session_runtimes.values() {
@@ -363,11 +363,11 @@ impl AppState {
         Ok(())
     }
 
-    pub(crate) fn set_auto_address_pr_reviews_enabled(
+    pub fn set_auto_address_pr_reviews_enabled(
         &mut self,
         enabled: bool,
     ) -> Result<(), String> {
-        crate::services::pr_review::save_auto_address_pr_reviews_enabled(enabled)?;
+        threadlane_git::save_auto_address_pr_reviews_enabled(enabled)?;
         self.auto_address_pr_reviews_enabled = enabled;
         Ok(())
     }
@@ -388,21 +388,21 @@ impl AppState {
         }
     }
 
-    pub(crate) fn stash_prompt(&mut self, session_id: &str, text: String) {
+    pub fn stash_prompt(&mut self, session_id: &str, text: String) {
         if !text.trim().is_empty() {
             self.stashed_prompts.insert(session_id.to_string(), text);
         }
     }
 
-    pub(crate) fn pop_stashed_prompt(&mut self, session_id: &str) -> Option<String> {
+    pub fn pop_stashed_prompt(&mut self, session_id: &str) -> Option<String> {
         self.stashed_prompts.remove(session_id)
     }
 
-    pub(crate) fn get_stashed_prompt(&self, session_id: &str) -> Option<&String> {
+    pub fn get_stashed_prompt(&self, session_id: &str) -> Option<&String> {
         self.stashed_prompts.get(session_id)
     }
 
-    pub(crate) fn clear_stashed_prompt(&mut self, session_id: &str) {
+    pub fn clear_stashed_prompt(&mut self, session_id: &str) {
         self.stashed_prompts.remove(session_id);
     }
 
@@ -411,11 +411,11 @@ impl AppState {
             .retain(|_, runtime| runtime.is_generating());
     }
 
-    pub(crate) fn invalidate_capability_runtimes(&mut self) {
+    pub fn invalidate_capability_runtimes(&mut self) {
         self.invalidate_idle_runtimes();
     }
 
-    pub(crate) fn save_openai_key(&mut self, key: String) -> Result<(), String> {
+    pub fn save_openai_key(&mut self, key: String) -> Result<(), String> {
         let key = key.trim().to_string();
         if !key.is_empty() {
             threadlane_auth::openai_auth::save_openai_api_key(&key)?;
@@ -431,7 +431,7 @@ impl AppState {
         Ok(())
     }
 
-    pub(crate) fn save_opencode_key(&mut self, key: String) -> Result<(), String> {
+    pub fn save_opencode_key(&mut self, key: String) -> Result<(), String> {
         let key = key.trim().to_string();
         if !key.is_empty() {
             threadlane_auth::opencode_auth::save_opencode_api_key(&key)?;
@@ -447,7 +447,7 @@ impl AppState {
         Ok(())
     }
 
-    pub(crate) fn reconcile_selected_model(&mut self) {
+    pub fn reconcile_selected_model(&mut self) {
         self.refresh_available_models();
         if !self
             .available_models
@@ -464,7 +464,7 @@ impl AppState {
         self.invalidate_idle_runtimes();
     }
 
-    pub(crate) fn set_selected_model(&mut self, model: String) {
+    pub fn set_selected_model(&mut self, model: String) {
         if !self.available_models.iter().any(|m| m.id == model) {
             return;
         }
@@ -511,7 +511,7 @@ impl AppState {
         self.request_acp_config_options();
     }
 
-    pub(crate) fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {
+    pub fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {
         let effort = threadlane_runtime::model_registry::effective_effort(
             &self.selected_model,
             effort,
@@ -543,25 +543,25 @@ impl AppState {
         self.active_session_runtime();
     }
 
-    pub(crate) fn open_settings(&mut self) {
+    pub fn open_settings(&mut self) {
         self.workspace_page = WorkspacePage::Settings;
         self.auth_status_msg = None;
     }
 
-    pub(crate) fn open_github(&mut self) {
+    pub fn open_github(&mut self) {
         self.workspace_page = WorkspacePage::GitHub;
     }
 
-    pub(crate) fn open_github_issue(&mut self, work_dir: PathBuf, number: u64) {
+    pub fn open_github_issue(&mut self, work_dir: PathBuf, number: u64) {
         self.workspace_page = WorkspacePage::GitHub;
         self.requested_github_issue = Some((work_dir, number));
     }
 
-    pub(crate) fn close_github(&mut self) {
+    pub fn close_github(&mut self) {
         self.workspace_page = WorkspacePage::Chat;
     }
 
-    pub(crate) fn close_settings(&mut self) {
+    pub fn close_settings(&mut self) {
         self.workspace_page = WorkspacePage::Chat;
         self.auth_status_msg = None;
     }
@@ -570,7 +570,7 @@ impl AppState {
         let _ = self.session_refresh_tx.send(work_dir.to_path_buf());
     }
 
-    pub(crate) fn apply_session_refresh(
+    pub fn apply_session_refresh(
         &mut self,
         work_dir: PathBuf,
         sessions: Vec<SessionInfo>,
@@ -608,7 +608,7 @@ impl AppState {
         }
     }
 
-    pub(crate) fn begin_new_task(&mut self) {
+    pub fn begin_new_task(&mut self) {
         self.workspace_page = WorkspacePage::Chat;
         if let Some(project_work_dir) = self.active_session_id.as_ref().and_then(|session_id| {
             self.projects.iter().find_map(|project| {
@@ -636,11 +636,11 @@ impl AppState {
         }
     }
 
-    pub(crate) fn set_work_mode(&mut self, mode: WorkMode) {
+    pub fn set_work_mode(&mut self, mode: WorkMode) {
         self.draft_work_mode = mode;
     }
 
-    pub(crate) fn set_sidebar_project_filter(&mut self, work_dir: Option<PathBuf>) {
+    pub fn set_sidebar_project_filter(&mut self, work_dir: Option<PathBuf>) {
         self.sidebar_project_filter = work_dir.filter(|candidate| {
             self.projects
                 .iter()
@@ -654,7 +654,7 @@ impl AppState {
         }
     }
 
-    pub(crate) fn select_draft_project(&mut self, work_dir: PathBuf) {
+    pub fn select_draft_project(&mut self, work_dir: PathBuf) {
         if self
             .projects
             .iter()
@@ -674,7 +674,7 @@ impl AppState {
         }
     }
 
-    pub(crate) fn request_open_file(&mut self, relative_path: String) {
+    pub fn request_open_file(&mut self, relative_path: String) {
         let Some(root) = self.active_git_work_dir() else {
             return;
         };
@@ -705,7 +705,7 @@ impl AppState {
         });
     }
 
-    pub(crate) fn request_open_diff(
+    pub fn request_open_diff(
         &mut self,
         project: PathBuf,
         relative_path: String,
@@ -718,19 +718,19 @@ impl AppState {
         });
     }
 
-    pub(crate) fn request_composer_prompt(&mut self, prompt: String) {
+    pub fn request_composer_prompt(&mut self, prompt: String) {
         self.requested_composer_prompt = Some(prompt);
     }
 
-    pub(crate) fn request_run_terminal_command(&mut self, command: String) {
+    pub fn request_run_terminal_command(&mut self, command: String) {
         self.requested_terminal_command = Some(command);
     }
 
-    pub(crate) fn request_open_terminal(&mut self, work_dir: PathBuf) {
+    pub fn request_open_terminal(&mut self, work_dir: PathBuf) {
         self.requested_terminal_work_dir = Some(work_dir);
     }
 
-    pub(crate) fn select_session(
+    pub fn select_session(
         &mut self,
         work_dir: PathBuf,
         session_id: String,
@@ -808,7 +808,7 @@ impl AppState {
         request
     }
 
-    pub(crate) fn settle_session(
+    pub fn settle_session(
         &mut self,
         work_dir: PathBuf,
         session_id: String,
@@ -866,7 +866,7 @@ impl AppState {
         Ok(())
     }
 
-    pub(crate) fn remove_session(
+    pub fn remove_session(
         &mut self,
         work_dir: PathBuf,
         session_id: String,
@@ -899,7 +899,7 @@ impl AppState {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn update_model_roles(&mut self, roles: threadlane_session::ModelRoles) {
+    pub fn update_model_roles(&mut self, roles: threadlane_session::ModelRoles) {
         self.model_roles = roles.clone();
         for runtime in self.session_runtimes.values() {
             let runtime = runtime.clone();
@@ -910,7 +910,7 @@ impl AppState {
         }
     }
 
-    pub(crate) fn ensure_session_runtime(
+    pub fn ensure_session_runtime(
         &mut self,
         work_dir: PathBuf,
         session_file: PathBuf,
@@ -932,7 +932,7 @@ impl AppState {
         runtime
     }
 
-    pub(crate) fn resolve_active_permission(
+    pub fn resolve_active_permission(
         &mut self,
         request_id: &str,
         decision: threadlane_session::PermissionDecision,
@@ -959,7 +959,7 @@ impl AppState {
     /// Explicit dismiss path for the question card's Dismiss button. The
     /// request stays pending until the user answers or dismisses, so the
     /// turn blocks waiting instead of silently continuing on a guess.
-    pub(crate) fn resolve_active_question(&mut self, request_id: &str) -> bool {
+    pub fn resolve_active_question(&mut self, request_id: &str) -> bool {
         let Some(session_id) = self.active_session_id.clone() else {
             return false;
         };
@@ -980,7 +980,7 @@ impl AppState {
 
     /// Resolves a pending `ask_question` request with the user's answers.
     /// Returns false when no runtime holds the request (stale UI).
-    pub(crate) fn resolve_active_question_answer(
+    pub fn resolve_active_question_answer(
         &mut self,
         request_id: &str,
         answer: threadlane_session::QuestionAnswer,
@@ -1062,7 +1062,7 @@ impl AppState {
         {
             let canonical_work_dir =
                 std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
-            Some(crate::state::effective_session_work_dir(
+            Some(crate::effective_session_work_dir(
                 &canonical_work_dir,
                 session_id,
                 &facts,
@@ -1097,7 +1097,7 @@ impl AppState {
         Some(self.session_projection_key(work_dir, session_id))
     }
 
-    pub(crate) fn active_session_matches(&self, session_id: &str, session_file: &Path) -> bool {
+    pub fn active_session_matches(&self, session_id: &str, session_file: &Path) -> bool {
         self.active_session_projection_key()
             .is_some_and(|active| active == Self::projection_key(session_id, session_file))
     }
@@ -1142,7 +1142,7 @@ impl AppState {
         }
     }
 
-    pub(crate) fn session_is_generating(&self, session_file: &Path) -> bool {
+    pub fn session_is_generating(&self, session_file: &Path) -> bool {
         self.session_runtimes
             .get(session_file)
             .is_some_and(|runtime| runtime.is_generating())
@@ -1154,7 +1154,7 @@ impl AppState {
     /// live under `.threadlane/sessions/archive/` and are excluded from
     /// discovery, so `sync_session_prs` never polls them. Returns the queued
     /// prompt when a new agent turn was started.
-    pub(crate) fn auto_address_pr_reviews(
+    pub fn auto_address_pr_reviews(
         &mut self,
         work_dir: PathBuf,
         branch: String,
@@ -1193,7 +1193,7 @@ impl AppState {
             }
         }
 
-        let feedback_items = crate::services::pr_review::collect_actionable_pr_feedback(pr);
+        let feedback_items = threadlane_git::collect_actionable_pr_feedback(pr);
         if feedback_items.is_empty() {
             return None;
         }
@@ -1201,21 +1201,21 @@ impl AppState {
         let current_store = self
             .pr_review_tracking
             .entry(work_dir.clone())
-            .or_insert_with(|| crate::services::pr_review::load_pr_review_tracking(&work_dir))
+            .or_insert_with(|| threadlane_git::load_pr_review_tracking(&work_dir))
             .clone();
         let mut candidate_store = current_store;
 
-        let new_items = match crate::services::pr_review::check_and_record_fresh_feedback(
+        let new_items = match threadlane_git::check_and_record_fresh_feedback(
             &mut candidate_store,
             &branch,
             &feedback_items,
         ) {
-            crate::services::pr_review::FeedbackSyncResult::UpToDate => return None,
-            crate::services::pr_review::FeedbackSyncResult::NewFeedback(items) => items,
+            threadlane_git::FeedbackSyncResult::UpToDate => return None,
+            threadlane_git::FeedbackSyncResult::NewFeedback(items) => items,
         };
 
         let prompt =
-            crate::services::pr_review::build_auto_address_prompt(pr.number, &branch, &new_items);
+            threadlane_git::build_auto_address_prompt(pr.number, &branch, &new_items);
         let runtime = self.ensure_session_runtime(runtime_work_dir.clone(), session_file);
         if runtime.is_generating() {
             // An active turn will pick the queued follow-up up via
@@ -1237,7 +1237,7 @@ impl AppState {
             let pending_acp = threadlane_session::acp_agent_id(&model)
                 .map(|agent_id| self.take_pending_acp_config(agent_id))
                 .unwrap_or_default();
-            if crate::services::chat::execute_prompt(
+            if crate::chat::execute_prompt(
                 runtime,
                 runtime_work_dir,
                 session_id.clone(),
@@ -1259,7 +1259,7 @@ impl AppState {
         self.pr_review_tracking
             .insert(work_dir.clone(), candidate_store);
         if let Some(store) = self.pr_review_tracking.get(&work_dir) {
-            let _ = crate::services::pr_review::save_pr_review_tracking(&work_dir, store);
+            let _ = threadlane_git::save_pr_review_tracking(&work_dir, store);
         }
         self.push_optimistic_follow_up(&session_id, prompt.clone(), "pr-review");
         Some(prompt)
@@ -1269,18 +1269,18 @@ impl AppState {
     ///
     /// Unlike auto-addressing, this processes all current actionable review comments,
     /// starts the linked session immediately, and marks feedback seen only after dispatch succeeds.
-    pub(crate) fn address_pr_reviews_manual(
+    pub fn address_pr_reviews_manual(
         &mut self,
         work_dir: PathBuf,
         branch: String,
         pr: &threadlane_git::GitHubPrInfo,
     ) -> Result<String, String> {
-        let feedback_items = crate::services::pr_review::collect_actionable_pr_feedback(pr);
+        let feedback_items = threadlane_git::collect_actionable_pr_feedback(pr);
         if feedback_items.is_empty() {
             return Err("No actionable review feedback found on this PR.".into());
         }
 
-        let prompt = crate::services::pr_review::build_auto_address_prompt(
+        let prompt = threadlane_git::build_auto_address_prompt(
             pr.number,
             &branch,
             &feedback_items,
@@ -1312,13 +1312,13 @@ impl AppState {
         let store = self
             .pr_review_tracking
             .entry(work_dir.clone())
-            .or_insert_with(|| crate::services::pr_review::load_pr_review_tracking(&work_dir));
-        crate::services::pr_review::mark_feedback_seen(store, &branch, &feedback_items);
-        let _ = crate::services::pr_review::save_pr_review_tracking(&work_dir, store);
+            .or_insert_with(|| threadlane_git::load_pr_review_tracking(&work_dir));
+        threadlane_git::mark_feedback_seen(store, &branch, &feedback_items);
+        let _ = threadlane_git::save_pr_review_tracking(&work_dir, store);
         Ok(prompt)
     }
 
-    pub(crate) fn session_attention(&self, session: &SessionInfo) -> SessionAttention {
+    pub fn session_attention(&self, session: &SessionInfo) -> SessionAttention {
         let runtime = self.session_runtimes.get(&session.session_file);
         let runtime_status = runtime.map(|runtime| runtime.status());
         let is_active = self.active_work_dir.as_ref() == Some(&session.work_dir)
@@ -1371,13 +1371,13 @@ impl AppState {
         )
     }
 
-    pub(crate) fn toggle_project_expanded(&mut self, work_dir: &Path) {
+    pub fn toggle_project_expanded(&mut self, work_dir: &Path) {
         if let Some(proj) = self.projects.iter_mut().find(|p| p.work_dir == work_dir) {
             proj.is_expanded = !proj.is_expanded;
         }
     }
 
-    pub(crate) fn toggle_tool_activity(&mut self, tool_call_id: &str) {
+    pub fn toggle_tool_activity(&mut self, tool_call_id: &str) {
         if let Some(activity) = self
             .messages_mut()
             .iter_mut()
@@ -1388,7 +1388,7 @@ impl AppState {
         }
     }
 
-    pub(crate) fn attach_project(&mut self, raw_path: PathBuf) -> Result<(), String> {
+    pub fn attach_project(&mut self, raw_path: PathBuf) -> Result<(), String> {
         let canonical = std::fs::canonicalize(&raw_path).map_err(|e| e.to_string())?;
         if !canonical.is_dir() {
             return Err("Selected path is not a directory".into());
@@ -1502,7 +1502,7 @@ impl AppState {
         Ok(session_id)
     }
 
-    pub(crate) fn start_issue_work(
+    pub fn start_issue_work(
         &mut self,
         work_dir: PathBuf,
         issue: threadlane_git::GitHubIssueRef,
@@ -1667,7 +1667,7 @@ impl AppState {
     }
 
     /// Projects trajectory entries, token usage, and metrics from an already-open store.
-    pub(crate) fn project_trajectory_from_store(
+    pub fn project_trajectory_from_store(
         store: &JsonlStore,
     ) -> (
         Vec<TrajectoryEntry>,
@@ -2648,13 +2648,13 @@ impl AppState {
     }
 
     /// Applies a completed background projection if its session remains active.
-    pub(crate) fn session_status_for_file(&self, session_file: &Path) -> Option<String> {
+    pub fn session_status_for_file(&self, session_file: &Path) -> Option<String> {
         self.session_runtimes
             .get(session_file)
             .and_then(|runtime| runtime_status_text(runtime.status()))
     }
 
-    pub(crate) fn apply_session_messages(
+    pub fn apply_session_messages(
         &mut self,
         session_id: &str,
         session_file: &Path,
@@ -2695,7 +2695,7 @@ pub(super) fn is_attachable_project_root(path: &Path) -> bool {
 /// numbers. Tool entries deduplicate on `correlation_id` (the tool call id
 /// both sides record); other live entries deduplicate on category+summary.
 /// Surviving live entries ran after the snapshot, so they append at the end.
-pub(crate) fn merge_live_trajectory(
+pub fn merge_live_trajectory(
     fresh: Vec<TrajectoryEntry>,
     live: &[TrajectoryEntry],
 ) -> Vec<TrajectoryEntry> {
@@ -2727,7 +2727,7 @@ pub(crate) fn merge_live_trajectory(
 /// not retain the runtime batch identity, so prefer the durable child run id
 /// when both sides have one and fall back to (batch run id, task index) only
 /// for purely live rows.
-pub(crate) fn merge_live_subagents(
+pub fn merge_live_subagents(
     fresh: Vec<SubagentActivityInfo>,
     live: &[SubagentActivityInfo],
 ) -> Vec<SubagentActivityInfo> {
@@ -2753,7 +2753,7 @@ pub(crate) fn merge_live_subagents(
 }
 
 impl AppState {
-    pub(crate) fn apply_session_hydration(
+    pub fn apply_session_hydration(
         &mut self,
         session_id: &str,
         session_file: &Path,
@@ -3140,7 +3140,7 @@ impl AppState {
         }
     }
 
-    pub(crate) fn active_model_context_diagnostics(&self) -> Vec<TrajectoryEntry> {
+    pub fn active_model_context_diagnostics(&self) -> Vec<TrajectoryEntry> {
         let Some(projection) = self
             .active_session_projection_key()
             .and_then(|key| self.diagnostics_by_session.get(&key))
@@ -3180,7 +3180,7 @@ impl AppState {
             .collect()
     }
 
-    pub(crate) fn active_durable_event_diagnostics(&self) -> Vec<TrajectoryEntry> {
+    pub fn active_durable_event_diagnostics(&self) -> Vec<TrajectoryEntry> {
         let Some(projection) = self
             .active_session_projection_key()
             .and_then(|key| self.diagnostics_by_session.get(&key))
@@ -3228,7 +3228,7 @@ impl AppState {
             .collect()
     }
 
-    pub(crate) fn active_recovery_diagnostics(&self) -> Vec<TrajectoryEntry> {
+    pub fn active_recovery_diagnostics(&self) -> Vec<TrajectoryEntry> {
         let Some(projection) = self
             .active_session_projection_key()
             .and_then(|key| self.diagnostics_by_session.get(&key))
@@ -3238,26 +3238,26 @@ impl AppState {
         project_recovery_diagnostics(&projection.recovery)
     }
 
-    pub(crate) fn active_trajectory(&self) -> &[TrajectoryEntry] {
+    pub fn active_trajectory(&self) -> &[TrajectoryEntry] {
         self.active_session_projection_key()
             .and_then(|key| self.trajectory_by_session.get(&key))
             .map(Vec::as_slice)
             .unwrap_or(&[])
     }
 
-    pub(crate) fn trajectory_revision(&self) -> u64 {
+    pub fn trajectory_revision(&self) -> u64 {
         self.trajectory_revision
     }
 
-    pub(crate) fn trajectory_epoch(&self) -> u64 {
+    pub fn trajectory_epoch(&self) -> u64 {
         self.trajectory_epoch
     }
 
-    pub(crate) fn diagnostics_revision(&self) -> u64 {
+    pub fn diagnostics_revision(&self) -> u64 {
         self.diagnostics_revision
     }
 
-    pub(crate) fn session_trajectory(&self, session_id: &str) -> &[TrajectoryEntry] {
+    pub fn session_trajectory(&self, session_id: &str) -> &[TrajectoryEntry] {
         let key = self
             .active_work_dir
             .as_deref()
@@ -3268,7 +3268,7 @@ impl AppState {
             .unwrap_or(&[])
     }
 
-    pub(crate) fn active_subagents(&self) -> &[SubagentActivityInfo] {
+    pub fn active_subagents(&self) -> &[SubagentActivityInfo] {
         self.active_session_projection_key()
             .and_then(|key| self.subagents_by_session.get(&key))
             .map(Vec::as_slice)
@@ -3280,7 +3280,7 @@ impl AppState {
         Some(self.subagents_by_session.entry(key).or_default())
     }
 
-    pub(crate) fn active_session_metrics(&self) -> SessionMetricsInfo {
+    pub fn active_session_metrics(&self) -> SessionMetricsInfo {
         self.active_session_projection_key()
             .and_then(|key| self.session_metrics.get(&key))
             .cloned()
@@ -3299,7 +3299,7 @@ impl AppState {
         };
         // A refusal here is not worth interrupting the user: this is a
         // background question, and the picker simply stays as it was.
-        if let Err(error) = crate::services::chat::load_acp_config_options(
+        if let Err(error) = crate::chat::load_acp_config_options(
             runtime,
             session_id,
             self.stream_tx.clone(),
@@ -3309,7 +3309,7 @@ impl AppState {
     }
 
     /// Applies one of the selected external agent's settings.
-    pub(crate) fn set_acp_config_option(&mut self, config_id: String, value: String) {
+    pub fn set_acp_config_option(&mut self, config_id: String, value: String) {
         let Some((runtime, session_id)) = self.active_session_runtime() else {
             // No session yet (New task): remember the choice, show it
             // optimistically via the launch-time cache, and apply it to the
@@ -3324,7 +3324,7 @@ impl AppState {
             };
             // Refuse values the agent does not offer when the cache knows
             // them; an unknown cache (empty) still stores optimistically.
-            let cached = crate::model_catalog::cached_acp_config_options(&agent_id);
+            let cached = threadlane_ui_catalog::cached_acp_config_options(&agent_id);
             if !cached.is_empty() {
                 let known = cached
                     .iter()
@@ -3350,7 +3350,7 @@ impl AppState {
         };
         // A refusal here *is* worth surfacing: the user picked something and
         // it did not take effect.
-        if let Err(error) = crate::services::chat::set_acp_config_option(
+        if let Err(error) = crate::chat::set_acp_config_option(
             runtime,
             session_id,
             config_id.clone(),
@@ -3374,7 +3374,7 @@ impl AppState {
 
     /// Takes pending ACP `config_id -> value` selections for `agent_id`,
     /// clearing them so they apply exactly once to the next runtime.
-    pub(crate) fn take_pending_acp_config(&mut self, agent_id: &str) -> Vec<(String, String)> {
+    pub fn take_pending_acp_config(&mut self, agent_id: &str) -> Vec<(String, String)> {
         self.pending_acp_config
             .remove(agent_id)
             .map(|map| map.into_iter().collect())
@@ -3403,7 +3403,7 @@ impl AppState {
     /// only "never asked" falls back, never "asked and empty".
     /// Pending New-task selections override the cached current value so the
     /// picker and status bar show what will run, not the agent default.
-    pub(crate) fn active_acp_config_options(&self) -> Vec<AcpConfigOption> {
+    pub fn active_acp_config_options(&self) -> Vec<AcpConfigOption> {
         if !threadlane_session::is_acp_model(&self.selected_model) {
             return Vec::new();
         }
@@ -3415,7 +3415,7 @@ impl AppState {
         }
         let agent_id = threadlane_session::acp_agent_id(&self.selected_model);
         let cached = agent_id
-            .map(crate::model_catalog::cached_acp_config_options)
+            .map(threadlane_ui_catalog::cached_acp_config_options)
             .unwrap_or_default();
         match agent_id.and_then(|id| self.pending_acp_config.get(id)) {
             Some(pending) => threadlane_session::apply_pending_config_values(cached, pending),
@@ -3427,7 +3427,7 @@ impl AppState {
     ///
     /// Derived from the same settings the picker shows, so the status bar and
     /// the picker can never disagree about what is running.
-    pub(crate) fn active_acp_model_label(&self) -> Option<String> {
+    pub fn active_acp_model_label(&self) -> Option<String> {
         threadlane_session::config_option_for(
             &self.active_acp_config_options(),
             threadlane_session::ACP_CONFIG_CATEGORY_MODEL,
@@ -3435,12 +3435,12 @@ impl AppState {
         .and_then(AcpConfigOption::current_detail_label)
     }
 
-    pub(crate) fn active_context_window(&self) -> Option<&ContextWindowInfo> {
+    pub fn active_context_window(&self) -> Option<&ContextWindowInfo> {
         self.active_session_projection_key()
             .and_then(|key| self.context_windows.get(&key))
     }
 
-    pub(crate) fn drain_chat_stream(&mut self, events: Vec<ChatStreamEvent>) -> bool {
+    pub fn drain_chat_stream(&mut self, events: Vec<ChatStreamEvent>) -> bool {
         let active_session_id = self.active_session_id.clone();
         let deferred = active_session_id
             .as_ref()
@@ -3819,7 +3819,7 @@ impl AppState {
     /// approval request, or fresh `computer_*` tool activity in the visible
     /// transcript. The chat pump uses this to open the mirror popup exactly
     /// once per new activity instead of once per pump tick.
-    pub(crate) fn take_computer_mirror_trigger(&mut self) -> bool {
+    pub fn take_computer_mirror_trigger(&mut self) -> bool {
         for (id, request) in &self.pending_permissions {
             if request.capability == "computer"
                 && self.mirror_seen.insert(format!("permission:{id}"))
@@ -3840,14 +3840,14 @@ impl AppState {
         fresh
     }
 
-    pub(crate) fn active_pending_composer_message(&self) -> Option<&str> {
+    pub fn active_pending_composer_message(&self) -> Option<&str> {
         self.active_session_id
             .as_ref()
             .and_then(|session_id| self.pending_composer_messages.get(session_id))
             .map(|message| message.text.as_str())
     }
 
-    pub(crate) fn stage_busy_message(
+    pub fn stage_busy_message(
         &mut self,
         text: String,
         images: Vec<ImageAttachment>,
@@ -3868,7 +3868,7 @@ impl AppState {
         Ok(())
     }
 
-    pub(crate) fn queue_pending_message(&mut self) -> Result<(), String> {
+    pub fn queue_pending_message(&mut self) -> Result<(), String> {
         let (runtime, session_id, text, images) = self.pending_runtime_message()?;
         runtime
             .work_handle
@@ -3879,7 +3879,7 @@ impl AppState {
         Ok(())
     }
 
-    pub(crate) fn steer_pending_message(&mut self) -> Result<(), String> {
+    pub fn steer_pending_message(&mut self) -> Result<(), String> {
         let (runtime, session_id, text, images) = self.pending_runtime_message()?;
         runtime
             .work_handle
@@ -3890,7 +3890,7 @@ impl AppState {
         Ok(())
     }
 
-    pub(crate) fn dismiss_pending_message(&mut self) {
+    pub fn dismiss_pending_message(&mut self) {
         if let Some(session_id) = self.active_session_id.as_ref() {
             self.pending_composer_messages.remove(session_id);
         }
@@ -3936,11 +3936,11 @@ impl AppState {
         }
     }
 
-    pub(crate) fn send_prompt(&mut self, text: String) -> Result<(), String> {
+    pub fn send_prompt(&mut self, text: String) -> Result<(), String> {
         self.send_prompt_with_images(text, Vec::new())
     }
 
-    pub(crate) fn send_prompt_with_images(
+    pub fn send_prompt_with_images(
         &mut self,
         text: String,
         images: Vec<ImageAttachment>,
@@ -3998,7 +3998,7 @@ impl AppState {
         let pending_acp = threadlane_session::acp_agent_id(&model)
             .map(|agent_id| self.take_pending_acp_config(agent_id))
             .unwrap_or_default();
-        crate::services::chat::execute_prompt(
+        crate::chat::execute_prompt(
             runtime,
             runtime_work_dir,
             session_id.clone(),
@@ -4032,7 +4032,7 @@ impl AppState {
             });
         self.trajectory_revision = self.trajectory_revision.wrapping_add(1);
         if !threadlane_provider::router::is_antigravity_model(&model) {
-            crate::services::chat::maybe_generate_session_title(
+            crate::chat::maybe_generate_session_title(
                 session_file,
                 session_id.clone(),
                 text.clone(),
@@ -4066,7 +4066,7 @@ impl AppState {
         Ok(())
     }
 
-    pub(crate) fn cancel_generation(&mut self) -> Result<(), String> {
+    pub fn cancel_generation(&mut self) -> Result<(), String> {
         let (Some(work_dir), Some(session_id)) = (
             self.active_work_dir.as_ref(),
             self.active_session_id.as_ref(),
@@ -4077,7 +4077,7 @@ impl AppState {
         let Some(runtime) = self.session_runtimes.get(&session_file).cloned() else {
             return Ok(());
         };
-        crate::services::chat::cancel_prompt(runtime, session_id.clone(), self.stream_tx.clone())?;
+        crate::chat::cancel_prompt(runtime, session_id.clone(), self.stream_tx.clone())?;
         self.is_generating = false;
         self.session_status = Some("Generation cancelled".into());
         Ok(())
@@ -4163,6 +4163,3 @@ fn project_recovery_diagnostics(
 #[path = "tests.rs"]
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-pub(crate) use tests::reported_session_shape_state;

@@ -1,0 +1,13 @@
+[package]
+name = "threadlane-ui-catalog"
+version = "0.1.0"
+edition = "2021"
+description = "Picker-facing model catalog for Threadlane: provider inventory, live discovery caches, and effort metadata"
+
+[dependencies]
+threadlane-auth.workspace = true
+threadlane-project.workspace = true
+threadlane-provider.workspace = true
+threadlane-runtime.workspace = true
+threadlane-session.workspace = true
+tracing.workspace = true

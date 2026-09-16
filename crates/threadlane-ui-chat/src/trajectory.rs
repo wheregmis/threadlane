@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use gpui::SharedString;
 
-use crate::state::TrajectoryEntry;
+use threadlane_ui_state::TrajectoryEntry;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TrajectoryMode {

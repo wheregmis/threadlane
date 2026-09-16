@@ -1,0 +1,13 @@
+[package]
+name = "threadlane-ui-terminal"
+version = "0.1.0"
+edition = "2021"
+description = "PTY terminal view for the Threadlane desktop app: portable-pty session, vt-style parsing, and GPUI rendering"
+
+[dependencies]
+gpui.workspace = true
+gpui-component.workspace = true
+portable-pty.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tracing.workspace = true
+vt100.workspace = true

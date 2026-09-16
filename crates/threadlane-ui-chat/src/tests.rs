@@ -4,7 +4,7 @@ fn unsupported_acp_steer_keeps_the_composer_text_and_images(cx: &mut gpui::TestA
 
     cx.update(gpui_component::init);
     let model = cx.new(|_| {
-        let mut state = crate::state::AppState::default();
+        let mut state = threadlane_ui_state::AppState::default();
         state.selected_model = "acp/test".into();
         state.is_generating = true;
         state
@@ -49,7 +49,7 @@ fn unsent_composer_drafts_and_images_follow_their_task(cx: &mut gpui::TestAppCon
 
     cx.update(gpui_component::init);
     let model = cx.new(|_| {
-        let mut state = crate::state::AppState::default();
+        let mut state = threadlane_ui_state::AppState::default();
         state.active_work_dir = Some("/projects/one".into());
         state.active_session_id = Some("first".into());
         state
@@ -139,7 +139,7 @@ fn chat_errors_are_bounded_deduplicated_and_keep_recovery_details(cx: &mut gpui:
     use gpui::AppContext as _;
 
     struct ErrorHarness {
-        model: gpui::Entity<crate::state::AppState>,
+        model: gpui::Entity<threadlane_ui_state::AppState>,
         error: String,
     }
 
@@ -174,9 +174,9 @@ fn chat_errors_are_bounded_deduplicated_and_keep_recovery_details(cx: &mut gpui:
         "Network failed"
     );
 
-    let mut message = crate::state::ChatMessageInfo {
+    let mut message = threadlane_ui_state::ChatMessageInfo {
         id: "error".into(),
-        role: crate::state::MessageRole::Error,
+        role: threadlane_ui_state::MessageRole::Error,
         content: error.clone(),
         tool_activities: Vec::new(),
         streaming: false,
@@ -188,14 +188,14 @@ fn chat_errors_are_bounded_deduplicated_and_keep_recovery_details(cx: &mut gpui:
         super::visible_session_status(Some("Message queued…"), Some(&message)),
         Some("Message queued…")
     );
-    message.role = crate::state::MessageRole::Assistant;
+    message.role = threadlane_ui_state::MessageRole::Assistant;
     assert_eq!(
         super::visible_session_status(Some(&error), Some(&message)),
         Some(error.as_str())
     );
 
     cx.update(gpui_component::init);
-    let model = cx.new(|_| crate::state::AppState::default());
+    let model = cx.new(|_| threadlane_ui_state::AppState::default());
     let expected_error = error.clone();
     let retained_model = model.clone();
     let (_, cx) = cx.add_window_view(move |window, cx| {
@@ -214,7 +214,7 @@ fn chat_errors_are_bounded_deduplicated_and_keep_recovery_details(cx: &mut gpui:
     cx.simulate_click(settings.center(), gpui::Modifiers::default());
     assert_eq!(
         retained_model.read_with(cx, |model, _| model.workspace_page),
-        crate::state::WorkspacePage::Settings
+        threadlane_ui_state::WorkspacePage::Settings
     );
 }
 
@@ -233,7 +233,7 @@ fn editor_targets_only_open_for_the_active_git_checkout() {
     ));
     assert!(!editor_target_matches_active_work_dir(worktree, None));
 }
-use crate::state::{
+use threadlane_ui_state::{
     reported_session_shape_state, ChatMessageInfo, ChatStreamEvent, MessageRole,
     SubagentActivityStatus, ToolActivityInfo, TrajectoryDiagnostics, TrajectoryEntry,
 };

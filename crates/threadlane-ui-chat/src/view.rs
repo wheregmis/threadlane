@@ -21,10 +21,10 @@ use gpui_component::text::{TextView, TextViewState};
 use gpui_component::theme::ActiveTheme;
 use gpui_component::{Disableable, Icon, IconName, Selectable, Sizable, WindowExt};
 
-use crate::app::{actions::AppAction, controller};
-use crate::screens::computer_mirror::MirrorView;
-use crate::screens::editor::EditorView;
-use crate::state::{
+use threadlane_ui_state::{actions::AppAction, controller};
+use threadlane_ui_mirror::MirrorView;
+use threadlane_ui_editor::EditorView;
+use threadlane_ui_state::{
     AppState, ChatMessageInfo, ChatStreamEvent, MessageRole, SessionAttention,
     SubagentActivityInfo, SubagentActivityStatus, ToolActivityInfo, WorkMode,
 };
@@ -204,8 +204,8 @@ pub fn init(cx: &mut App) {
 
 pub struct ChatListView {
     model: Entity<AppState>,
-    pub(crate) input_state: Entity<TextareaState>,
-    pub(crate) header_left_padding: Pixels,
+    pub input_state: Entity<TextareaState>,
+    pub header_left_padding: Pixels,
     transcript_list_state: ListState,
     transcript_messages: Arc<Vec<ChatMessageInfo>>,
     transcript_rows: Vec<TranscriptRow>,
@@ -273,7 +273,7 @@ async fn next_chat_stream_batch(
 }
 
 impl ChatListView {
-    pub(crate) fn new(
+    pub fn new(
         model: Entity<AppState>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -303,7 +303,7 @@ impl ChatListView {
                 model.update(cx, |state, _cx| state.requested_editor_target.take())
             {
                 match target {
-                    crate::state::RequestedEditorTarget::File { project, path } => {
+                    threadlane_ui_state::RequestedEditorTarget::File { project, path } => {
                         let is_active = {
                             let state = model.read(cx);
                             editor_target_matches_active_work_dir(
@@ -318,7 +318,7 @@ impl ChatListView {
                             });
                         }
                     }
-                    crate::state::RequestedEditorTarget::Diff {
+                    threadlane_ui_state::RequestedEditorTarget::Diff {
                         project,
                         path,
                         content,
@@ -595,12 +595,12 @@ impl ChatListView {
         }
     }
 
-    pub(crate) fn set_tab(&mut self, tab: CentralTab, cx: &mut Context<Self>) {
+    pub fn set_tab(&mut self, tab: CentralTab, cx: &mut Context<Self>) {
         self.current_tab = tab;
         cx.notify();
     }
 
-    pub(crate) fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.current_tab = CentralTab::Chat;
         self.input_state.update(cx, |input, cx| {
             input.focus(window, cx);
@@ -3595,7 +3595,7 @@ impl ChatListView {
                 .id("permission-details-backdrop")
                 .absolute()
                 .inset_0()
-                .bg(crate::theme::overlay_scrim())
+                .bg(threadlane_ui_theme::overlay_scrim())
                 .flex()
                 .items_center()
                 .justify_center()
@@ -4186,7 +4186,7 @@ impl ChatListView {
                                     .text_xs()
                                     .text_color(theme.muted_foreground)
                                     .child(
-                                        crate::model_catalog::label_for(model)
+                                        threadlane_ui_catalog::label_for(model)
                                             .unwrap_or_else(|| model.clone()),
                                     )
                             }))
@@ -4515,7 +4515,7 @@ impl ChatListView {
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.muted_foreground)
                                 .child(
-                                    crate::model_catalog::label_for(model)
+                                    threadlane_ui_catalog::label_for(model)
                                         .unwrap_or_else(|| model.clone()),
                                 ),
                         )
@@ -4634,7 +4634,7 @@ impl ChatListView {
             let state = self.model.read(cx);
             let mut sections = HashMap::new();
             for option in &model_options {
-                if option.provider != crate::model_catalog::ModelProvider::Acp {
+                if option.provider != threadlane_ui_catalog::ModelProvider::Acp {
                     continue;
                 }
                 let Some(agent_id) = threadlane_session::acp_agent_id(&option.id) else {
@@ -4643,7 +4643,7 @@ impl ChatListView {
                 let options = if option.id == selected_model {
                     state.active_acp_config_options()
                 } else {
-                    crate::model_catalog::cached_acp_config_options(agent_id)
+                    threadlane_ui_catalog::cached_acp_config_options(agent_id)
                 };
                 sections.insert(agent_id.to_string(), options);
             }
@@ -5058,7 +5058,7 @@ impl ChatListView {
                         previous_provider = Some(option.provider);
                         menu.item(PopupMenuItem::label(option.provider.label()))
                     };
-                    if option.provider != crate::model_catalog::ModelProvider::Acp {
+                    if option.provider != threadlane_ui_catalog::ModelProvider::Acp {
                         let model = model_for_picker.clone();
                         let is_current = option.id == selected_model_for_picker;
                         let label = if is_current {
@@ -5159,7 +5159,7 @@ impl ChatListView {
                             })
                         }
                         None => {
-                            let reason = crate::model_catalog::cached_acp_error(&agent_key)
+                            let reason = threadlane_ui_catalog::cached_acp_error(&agent_key)
                                 .map(|error| {
                                     let short: String = error.chars().take(120).collect();
                                     if error.chars().count() > 120 {
@@ -5189,11 +5189,11 @@ impl ChatListView {
 
         let effort_model = self.model.clone();
         let effort_options =
-            crate::model_catalog::efforts_for_model(&selected_model, project_root.as_deref());
+            threadlane_ui_catalog::efforts_for_model(&selected_model, project_root.as_deref());
         // Models without thinking (ACP agents, off-only registry entries)
         // offer no effort control instead of dead options.
         let show_effort_picker =
-            crate::model_catalog::supports_reasoning(&selected_model, project_root.as_deref());
+            threadlane_ui_catalog::supports_reasoning(&selected_model, project_root.as_deref());
         let effort_picker = Button::new("composer-reasoning-effort-picker")
             .icon(Icon::default().path("icons/effort.svg"))
             .label(reasoning_effort.label())
@@ -5886,10 +5886,10 @@ impl ChatListView {
                         "{} turns · {} tool calls{cache_hit} · {} input / {} output tokens · {} subagents",
                         metrics.turns,
                         metrics.tool_calls,
-                        crate::model_catalog::format_tokens(
+                        threadlane_ui_catalog::format_tokens(
                             billed_input_tokens.min(u64::from(u32::MAX)) as u32
                         ),
-                        crate::model_catalog::format_tokens(
+                        threadlane_ui_catalog::format_tokens(
                             metrics.output_tokens.min(u64::from(u32::MAX)) as u32
                         ),
                         subagent_count,
@@ -6110,7 +6110,7 @@ impl ChatListView {
     /// entity is created on first open; repeated triggers only raise the
     /// flag. The mirror is global (one panel, many project sessions) and the
     /// session tools write `latest.json` into the global previews dir.
-    pub(crate) fn open_mirror(&mut self, cx: &mut Context<Self>) {
+    pub fn open_mirror(&mut self, cx: &mut Context<Self>) {
         let previews_dir = self.model.update(cx, |state, cx| {
             if !state.mirror_open {
                 state.mirror_open = true;
