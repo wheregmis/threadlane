@@ -1693,8 +1693,10 @@ impl SidebarView {
                     Button::new("empty-history-new-task")
                         .icon(IconName::Plus)
                         .label("New task")
-                        .ghost()
+                        .outline()
                         .small()
+                        .accessibility_label("Start a new task")
+                        .tooltip("Start a new task (⌘N)")
                         .on_click(move |_event, window, cx| {
                             window.dispatch_action(
                                 Box::new(crate::BeginNewTask),

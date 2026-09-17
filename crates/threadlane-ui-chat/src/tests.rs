@@ -1251,7 +1251,8 @@ fn reasoning_disclosure_supports_keyboard_and_pauses_following(cx: &mut gpui::Te
     cx.update(|window, cx| {
         window.blur(cx);
         window.focus_next(cx); // Chat
-        window.focus_next(cx); // Tools
+        window.focus_next(cx); // Trajectory
+        window.focus_next(cx); // Editor
         window.focus_next(cx); // Reasoning
         window.draw(cx).clear(cx);
     });

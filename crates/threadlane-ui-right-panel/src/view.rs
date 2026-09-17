@@ -13,6 +13,8 @@ use gpui_component::notification::Notification;
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::separator::Separator;
 use gpui_component::spinner::Spinner;
+use gpui_component::radio::{Radio, RadioGroup};
+use gpui_component::tab::{Tab, TabBar};
 use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::text::{TextView, TextViewState};
 use gpui_component::tree::{Tree, TreeEvent, TreeItem, TreeState};
@@ -71,6 +73,7 @@ pub struct RightPanelView {
     switch_target_branch: Option<String>,
     switch_stash_mode: bool,
     stash_expanded: bool,
+    pr_expanded: bool,
     stash_files: Option<(usize, Vec<GitFile>)>,
     loading_stash_index: Option<usize>,
     last_fetched_time: Option<std::time::Instant>,
@@ -301,6 +304,7 @@ impl RightPanelView {
             switch_target_branch: None,
             switch_stash_mode: true,
             stash_expanded: false,
+            pr_expanded: true,
             stash_files: None,
             loading_stash_index: None,
             last_fetched_time: None,
@@ -1273,7 +1277,11 @@ impl RightPanelView {
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
-        let active = self.active_surface;
+        let surfaces = Surface::all();
+        let selected_surface = self.active_surface.and_then(|active| {
+            surfaces.iter().position(|surface| *surface == active)
+        });
+        let selected_index = selected_surface.unwrap_or(0);
         div()
             .flex_none()
             .pt(threadlane_ui_theme::WINDOW_CONTROLS_CLEARANCE)
@@ -1286,22 +1294,22 @@ impl RightPanelView {
                     .flex()
                     .items_center()
                     .gap_1()
-                    .children(Surface::all().into_iter().map(|surface| {
-                        Button::new(SharedString::from(format!(
-                            "right-panel-tab-{}",
-                            surface.label().to_lowercase()
-                        )))
-                        .icon(surface.icon())
-                        .label(surface.label())
-                        .ghost()
-                        .selected(active == Some(surface))
-                        .small()
-                        .on_click(cx.listener(
-                            move |this, _event, _window, cx| {
-                                this.open_surface(surface, cx);
-                            },
-                        ))
-                    }))
+                    .child(
+                        TabBar::new("right-panel-surface-tabs")
+                            .underline()
+                            .small()
+                            .selected_index(selected_index)
+                            .children(surfaces.iter().map(|surface| {
+                                Tab::new()
+                                    .label(surface.label())
+                                    .aria_label(format!("{} panel", surface.label()))
+                            }))
+                            .on_click(cx.listener(move |this, ix, _window, cx| {
+                                if let Some(surface) = Surface::all().get(*ix).copied() {
+                                    this.open_surface(surface, cx);
+                                }
+                            })),
+                    )
                     .child(div().flex_1())
                     .child(
                         Button::new("right-panel-refresh")
@@ -1330,7 +1338,7 @@ impl RightPanelView {
             .child(
                 div()
                     .w_full()
-                    .max_w(px(420.0))
+                    .max_w(rems(26.0))
                     .flex()
                     .flex_col()
                     .items_center()
@@ -1398,7 +1406,7 @@ impl RightPanelView {
                 .flex_col()
                 .child(
                     div()
-                        .h(px(38.0))
+                        .h(rems(2.375))
                         .px_2()
                         .flex()
                         .items_center()
@@ -1412,7 +1420,10 @@ impl RightPanelView {
                                 .flex_1()
                                 .child(
                                     Button::new("right-panel-document-back")
-                        .accessibility_label("Back to file list")
+                                        .accessibility_label(match self.active_surface {
+                                            Some(Surface::Review) => "Back to changed files",
+                                            _ => "Back to project files",
+                                        })
                                         .icon(IconName::ArrowLeft)
                                         .tooltip(match self.active_surface {
                                             Some(Surface::Review) => "Back to changed files",
@@ -1519,7 +1530,7 @@ impl RightPanelView {
                             .rounded_md()
                             .px_1p5()
                             .py_1()
-                            .pl(px(6.0 + depth as f32 * 12.0))
+                            .pl(rems(0.375 + depth as f32 * 0.75))
                             .selected(is_selected)
                             .child(
                                 div()
@@ -1892,8 +1903,8 @@ impl RightPanelView {
         }
         let panel_entity = cx.entity().clone();
         let theme = cx.theme().colors;
-        if let Some(error) = &self.review_error {
-            return self.render_empty("Review unavailable", error, cx);
+        if let Some(error) = self.review_error.clone() {
+            return self.render_review_error(&error, cx);
         }
         let total_files = self.review_files.len();
         let selected_count = self.selected_files.len();
@@ -1950,7 +1961,6 @@ impl RightPanelView {
             Button::new("git-sync-action-btn")
                 .icon(IconName::ArrowUp)
                 .label("Publish Branch")
-                .primary()
                 .small()
                 .tooltip("Publish this branch to origin")
                 .on_click(cx.listener(|this, _event, window, cx| {
@@ -1960,7 +1970,6 @@ impl RightPanelView {
             Button::new("git-sync-action-btn")
                 .icon(IconName::ArrowDown)
                 .label(format!("Pull ({behind})"))
-                .primary()
                 .small()
                 .tooltip("Pull latest changes from origin")
                 .on_click(cx.listener(|this, _event, window, cx| {
@@ -1970,7 +1979,6 @@ impl RightPanelView {
             Button::new("git-sync-action-btn")
                 .icon(IconName::ArrowUp)
                 .label(format!("Push ({ahead})"))
-                .primary()
                 .small()
                 .tooltip("Push local commits to origin")
                 .on_click(cx.listener(|this, _event, window, cx| {
@@ -2070,6 +2078,7 @@ impl RightPanelView {
             )
             .child(sync_actions);
 
+        let pr_expanded = self.pr_expanded;
         let pr_card = self.git_status.as_ref().and_then(|s| s.pr.as_ref()).map(|pr| {
             let comments_pr = pr.clone();
             let pr_url = pr.url.clone();
@@ -2112,6 +2121,22 @@ impl RightPanelView {
                 .border_color(theme.border)
                 .bg(theme.muted.opacity(0.2))
                 .child(
+                    Button::new("pr-card-toggle")
+                        .accessibility_label(if pr_expanded {
+                            "Collapse pull request details"
+                        } else {
+                            "Expand pull request details"
+                        })
+                        .ghost()
+                        .h_auto()
+                        .w_full()
+                        .p_0()
+                        .tooltip(if pr_expanded { "Collapse" } else { "Expand" })
+                        .on_click(cx.listener(|this, _event, _window, cx| {
+                            this.pr_expanded = !this.pr_expanded;
+                            cx.notify();
+                        }))
+                        .child(
                     div()
                         .flex()
                         .items_center()
@@ -2121,9 +2146,22 @@ impl RightPanelView {
                             div()
                                 .flex()
                                 .items_center()
-                                .gap_2()
+                                .gap_1p5()
                                 .min_w_0()
                                 .flex_1()
+                                .child(
+                                    div()
+                                        .size(px(14.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .text_color(theme.muted_foreground)
+                                        .child(if pr_expanded {
+                                            IconName::ChevronDown
+                                        } else {
+                                            IconName::ChevronRight
+                                        }),
+                                )
                                 .child(
                                     div()
                                         .size(px(16.0))
@@ -2156,8 +2194,10 @@ impl RightPanelView {
                                     }),
                             )
                         }),
+                        ),
                 )
-                .child(
+                .when(pr_expanded, |card| {
+                    card.child(
                     div()
                         .flex()
                         .items_center()
@@ -2218,7 +2258,7 @@ impl RightPanelView {
                             let fix_failed_summary = failed_summary.clone();
                             Button::new("fix-ci-btn")
                                 .label("Fix CI")
-                                .danger()
+                                .outline()
                                 .xsmall()
                                 .tooltip("Ask AI to fix failing CI checks")
                                 .on_click(cx.listener(move |this, _event, _window, cx| {
@@ -2301,6 +2341,7 @@ impl RightPanelView {
                                     })),
                             ),
                     )
+                })
                 })
         });
 
@@ -2414,16 +2455,10 @@ impl RightPanelView {
                         .items_center()
                         .gap_1p5()
                         .child(
-                            Tag::new()
-                                .child(format!("+{selected_additions}"))
-                                .with_variant(TagVariant::Success)
-                                .small(),
-                        )
-                        .child(
-                            Tag::new()
-                                .child(format!("−{selected_deletions}"))
-                                .with_variant(TagVariant::Danger)
-                                .small(),
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(format!("+{selected_additions} −{selected_deletions}")),
                         )
                         .child(
                             Button::new("git-stage-all-btn")
@@ -2902,8 +2937,9 @@ impl RightPanelView {
                             .child(
                                 Button::new("discard-stash-btn")
                                     .label("Discard")
-                                    .ghost()
+                                    .danger()
                                     .xsmall()
+                                    .tooltip("Discard the stashed changes")
                                     .disabled(self.git_busy)
                                     .on_click(cx.listener(move |this, _event, window, cx| {
                                         this.run_git_action(
@@ -2916,8 +2952,9 @@ impl RightPanelView {
                             .child(
                                 Button::new("restore-stash-btn")
                                     .label("Restore Stash")
-                                    .primary()
+                                    .outline()
                                     .xsmall()
+                                    .tooltip("Restore the stashed changes")
                                     .disabled(self.git_busy)
                                     .on_click(cx.listener(move |this, _event, window, cx| {
                                         this.run_git_action(
@@ -2931,127 +2968,45 @@ impl RightPanelView {
             });
 
         let changes_active = self.review_tab == ReviewTab::Changes;
-        let history_active = self.review_tab == ReviewTab::History;
         let total_changes = self.review_files.len();
 
         let staged_in_tab = self.review_files.iter().filter(|f| f.staged).count();
+        let changes_label = if total_changes > 0 {
+            if staged_in_tab > 0 {
+                format!("Changes ({total_changes}, {staged_in_tab} staged)")
+            } else {
+                format!("Changes ({total_changes})")
+            }
+        } else {
+            "Changes".to_string()
+        };
         let review_sub_tabs = div()
-            .flex()
-            .items_center()
+            .flex_none()
             .border_b_1()
             .border_color(theme.border)
             .bg(theme.title_bar)
+            .px_3()
             .child(
-                Button::new("review-tab-changes")
-                    .accessibility_label("Changes")
-                    .ghost()
+                TabBar::new("review-sub-tabs")
+                    .underline()
                     .small()
-                    .selected(changes_active)
-                    .flex_1()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .gap_1p5()
-                    .border_b_2()
-                    .border_color(if changes_active {
-                        theme.primary
-                    } else {
-                        gpui::transparent_black()
-                    })
-                    .on_click(cx.listener(|this, _event, _window, cx| {
-                        this.review_tab = ReviewTab::Changes;
+                    .selected_index(if changes_active { 0 } else { 1 })
+                    .children(vec![
+                        Tab::new()
+                            .label(changes_label.clone())
+                            .aria_label(format!("Changes, {} files, {} staged", total_changes, staged_in_tab)),
+                        Tab::new()
+                            .label("History")
+                            .aria_label("History"),
+                    ])
+                    .on_click(cx.listener(|this, ix, _window, cx| {
+                        this.review_tab = if *ix == 0 {
+                            ReviewTab::Changes
+                        } else {
+                            ReviewTab::History
+                        };
                         cx.notify();
-                    }))
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_weight(if changes_active {
-                                FontWeight::BOLD
-                            } else {
-                                FontWeight::NORMAL
-                            })
-                            .text_color(if changes_active {
-                                theme.foreground
-                            } else {
-                                theme.muted_foreground
-                            })
-                            .child("Changes"),
-                    )
-                    .children((total_changes > 0).then(|| {
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .px_1p5()
-                                    .py_0p5()
-                                    .rounded_full()
-                                    .bg(if changes_active {
-                                        theme.muted
-                                    } else {
-                                        theme.muted.opacity(0.5)
-                                    })
-                                    .text_xs()
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(if changes_active {
-                                        theme.foreground
-                                    } else {
-                                        theme.muted_foreground
-                                    })
-                                    .child(format!("{total_changes}")),
-                            )
-                            .when(staged_in_tab > 0, |badge| {
-                                badge.child(
-                                    div()
-                                        .px_1p5()
-                                        .py_0p5()
-                                        .rounded_full()
-                                        .bg(theme.success.opacity(0.15))
-                                        .text_xs()
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_color(theme.success)
-                                        .child(format!("{staged_in_tab} staged")),
-                                )
-                            })
                     })),
-            )
-            .child(
-                Button::new("review-tab-history")
-                    .accessibility_label("History")
-                    .ghost()
-                    .small()
-                    .selected(history_active)
-                    .flex_1()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .gap_1p5()
-                    .border_b_2()
-                    .border_color(if history_active {
-                        theme.primary
-                    } else {
-                        gpui::transparent_black()
-                    })
-                    .on_click(cx.listener(|this, _event, _window, cx| {
-                        this.review_tab = ReviewTab::History;
-                        cx.notify();
-                    }))
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_weight(if history_active {
-                                FontWeight::BOLD
-                            } else {
-                                FontWeight::NORMAL
-                            })
-                            .text_color(if history_active {
-                                theme.foreground
-                            } else {
-                                theme.muted_foreground
-                            })
-                            .child("History"),
-                    ),
             );
 
         let review_body = if self.branch_popover_open {
@@ -3566,10 +3521,10 @@ impl RightPanelView {
                     .child(
                         Button::new("open-new-branch-modal-btn")
                             .icon(IconName::Plus)
-                            .label("New Branch")
+                            .label("New Branch…")
                             .outline()
                             .small()
-                            .tooltip("Create a new branch")
+                            .tooltip("Create a new branch…")
                             .on_click(cx.listener(|this, _event, _window, cx| {
                                 this.new_branch_dialog_open = true;
                                 cx.notify();
@@ -3999,7 +3954,7 @@ impl RightPanelView {
         div()
             .id("merge-branch-dialog")
             .w_full()
-            .max_h(px(520.0))
+            .max_h(rems(32.5))
             .flex()
             .flex_col()
             .gap_3()
@@ -4039,7 +3994,7 @@ impl RightPanelView {
                 div()
                     .flex()
                     .flex_col()
-                    .max_h(px(240.0))
+                    .max_h(rems(15.0))
                     .overflow_y_scrollbar()
                     .gap_1()
                     .children(branches.into_iter().map(|b| {
@@ -4199,118 +4154,34 @@ impl RightPanelView {
                             .child(format!("You have uncommitted changes on {current_branch}. What would you like to do with them?")),
                     )
                     .child(
-                        Button::new("switch-opt-stash")
-                            .accessibility_label("Leave changes on this branch using a stash")
-                            .toggled(is_stash)
-                            .ghost().h_auto().w_full().p_0()
-                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                this.switch_stash_mode = true;
-                                cx.notify();
-                            }))
-                            .child(div().w_full().whitespace_normal()
-                            .flex()
-                            .items_start()
-                            .gap_2p5()
-                            .p_3()
-                            .rounded_lg()
-                            .border_1()
-                            .border_color(if is_stash { theme.primary } else { theme.border })
-                            .bg(if is_stash { theme.muted.opacity(0.8) } else { theme.background })
+                        RadioGroup::vertical("switch-stash-mode")
+                            .selected_index(Some(if is_stash { 0 } else { 1 }))
                             .child(
-                                div()
-                                    .size(px(16.0))
-                                    .mt(px(2.0))
-                                    .rounded_full()
-                                    .border_2()
-                                    .border_color(if is_stash { theme.primary } else { theme.muted_foreground })
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .children(is_stash.then(|| {
-                                        div()
-                                            .size(px(8.0))
-                                            .rounded_full()
-                                            .bg(theme.primary)
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_0p5()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(theme.foreground)
-                                            .child(format!("Leave my changes on {current_branch} (Stash)")),
-                                    )
+                                Radio::new("switch-opt-stash")
+                                    .label(format!("Leave my changes on {current_branch} (Stash)"))
+                                    .accessibility_label("Leave changes on this branch using a stash")
                                     .child(
                                         div()
                                             .text_xs()
                                             .text_color(theme.muted_foreground)
                                             .child("Your in-progress changes will be stashed and restored when you switch back."),
                                     ),
-                            )),
-                    )
-                    .child(
-                        Button::new("switch-opt-carry")
-                            .accessibility_label("Carry changes to the selected branch")
-                            .toggled(!is_stash)
-                            .ghost().h_auto().w_full().p_0()
-                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                this.switch_stash_mode = false;
-                                cx.notify();
-                            }))
-                            .child(div().w_full().whitespace_normal()
-                            .flex()
-                            .items_start()
-                            .gap_2p5()
-                            .p_3()
-                            .rounded_lg()
-                            .border_1()
-                            .border_color(if !is_stash { theme.primary } else { theme.border })
-                            .bg(if !is_stash { theme.muted.opacity(0.8) } else { theme.background })
-                            .child(
-                                div()
-                                    .size(px(16.0))
-                                    .mt(px(2.0))
-                                    .rounded_full()
-                                    .border_2()
-                                    .border_color(if !is_stash { theme.primary } else { theme.muted_foreground })
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .children((!is_stash).then(|| {
-                                        div()
-                                            .size(px(8.0))
-                                            .rounded_full()
-                                            .bg(theme.primary)
-                                    })),
                             )
                             .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_0p5()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(theme.foreground)
-                                            .child(format!("Bring my changes to {target_branch}")),
-                                    )
+                                Radio::new("switch-opt-carry")
+                                    .label(format!("Bring my changes to {target_branch}"))
+                                    .accessibility_label("Carry changes to the selected branch")
                                     .child(
                                         div()
                                             .text_xs()
                                             .text_color(theme.muted_foreground)
                                             .child(format!("Your in-progress changes will be carried over to {target_branch}.")),
                                     ),
-                            )),
+                            )
+                            .on_click(cx.listener(|this, selected: &usize, _window, cx| {
+                                this.switch_stash_mode = *selected == 0;
+                                cx.notify();
+                            })),
                     )
                     .child(
                         div()
@@ -4347,6 +4218,65 @@ impl RightPanelView {
                                     })),
                             ),
                     )
+    }
+
+    fn render_review_error(&self, error: &str, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().colors;
+        let details = error.to_owned();
+        div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .p_6()
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.foreground)
+                    .child("Couldn't load Git status."),
+            )
+            .child(
+                div()
+                    .max_w(rems(24.0))
+                    .text_center()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(error.to_owned()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Button::new("review-error-retry")
+                            .label("Retry")
+                            .small()
+                            .tooltip("Reload Git status")
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.refresh_active_surface();
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("review-error-copy")
+                            .label("Copy details")
+                            .ghost()
+                            .small()
+                            .tooltip("Copy full error to clipboard")
+                            .on_click(move |_event, window, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(details.clone()));
+                                window.push_notification(
+                                    Notification::info("Copied error details"),
+                                    cx,
+                                );
+                            }),
+                    ),
+            )
+            .into_any_element()
     }
 
     fn render_empty(&self, title: &str, description: &str, cx: &mut Context<Self>) -> AnyElement {

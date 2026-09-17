@@ -764,49 +764,43 @@ impl ChatListView {
                     })),
             )
             .child(
-                Button::new("trajectory-tab-chat")
-                    .icon(Icon::default().path("icons/tabs/chat.svg"))
+                Button::new("central-tab-chat")
                     .label("Chat")
                     .tooltip("Chat (⌘1)")
+                    .accessibility_label("Chat (⌘1)")
                     .ghost()
                     .small()
                     .selected(self.current_tab == CentralTab::Chat)
                     .on_click(cx.listener(|this, _, _, cx| this.set_tab(CentralTab::Chat, cx))),
             )
             .child(
-                Button::new("chat-tools")
-                    .label(match self.current_tab {
-                        CentralTab::Chat => "Tools".to_string(),
-                        CentralTab::Editor => editor_label.clone(),
-                        CentralTab::Trajectory => "Trajectory".to_string(),
-                    })
-                    .dropdown_caret(true)
-                    .tooltip("Editor and execution details")
+                Button::new("central-tab-trajectory")
+                    .label("Trajectory")
+                    .tooltip("Trajectory (⌘2)")
+                    .accessibility_label("Trajectory (⌘2)")
                     .ghost()
                     .small()
-                    .selected(self.current_tab != CentralTab::Chat)
-                    .dropdown_menu({
-                        let view = cx.entity();
-                        let selected = self.current_tab;
-                        move |menu, _, _| {
-                            let editor = view.clone();
-                            let trajectory = view.clone();
-                            menu.item(
-                                PopupMenuItem::new(editor_label.clone())
-                                    .checked(selected == CentralTab::Editor)
-                                    .on_click(move |_, _, cx| {
-                                        editor.update(cx, |this, cx| this.set_tab(CentralTab::Editor, cx));
-                                    }),
-                            )
-                            .item(
-                                PopupMenuItem::new("Trajectory")
-                                    .checked(selected == CentralTab::Trajectory)
-                                    .on_click(move |_, _, cx| {
-                                        trajectory.update(cx, |this, cx| this.set_tab(CentralTab::Trajectory, cx));
-                                    }),
-                            )
+                    .selected(self.current_tab == CentralTab::Trajectory)
+                    .on_click(
+                        cx.listener(|this, _, _, cx| this.set_tab(CentralTab::Trajectory, cx)),
+                    ),
+            )
+            .child(
+                Button::new("central-tab-editor")
+                    .label(editor_label.clone())
+                    .tooltip("Editor (⌘3)")
+                    .accessibility_label(format!(
+                        "Editor (⌘3){}",
+                        if editor_tab_count > 0 {
+                            format!(", {} tabs", editor_tab_count)
+                        } else {
+                            String::new()
                         }
-                    }),
+                    ))
+                    .ghost()
+                    .small()
+                    .selected(self.current_tab == CentralTab::Editor)
+                    .on_click(cx.listener(|this, _, _, cx| this.set_tab(CentralTab::Editor, cx))),
             )
     }
 
@@ -1056,6 +1050,7 @@ impl ChatListView {
                         .label("Review")
                         .ghost()
                         .small()
+                        .accessibility_label("Review uncommitted changes")
                         .tooltip("Review all uncommitted changes in this workspace")
                         .on_click(|_, window, cx| {
                             window.dispatch_action(Box::new(crate::OpenWorkspaceReview), cx)
@@ -1835,11 +1830,19 @@ impl ChatListView {
             return div()
                 .flex_1()
                 .flex()
+                .flex_col()
                 .items_center()
                 .justify_center()
+                .gap_1()
                 .text_sm()
                 .text_color(theme.muted_foreground)
-                .child("No canonical trajectory events have been observed in this session yet.")
+                .child("No trajectory events yet.")
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child("Run the session or clear search and filters to see turns, tools, and results."),
+                )
                 .into_any_element();
         }
         let selected_entry = selected_index
@@ -3407,7 +3410,7 @@ impl ChatListView {
 
                 let model = model.clone();
                 menu.separator()
-                    .item(PopupMenuItem::new("New project...").on_click(
+                    .item(PopupMenuItem::new("New project…").on_click(
                         move |_event, _window, cx| {
                             let model = model.clone();
                             cx.spawn(async move |cx| {
@@ -3437,6 +3440,8 @@ impl ChatListView {
             .pb(px(64.0))
             .child(
                 div()
+                    .id("new-task-mark")
+                    .aria_label("Threadlane")
                     .text_2xl()
                     .text_color(theme.primary)
                     .child(IconName::Asterisk),
@@ -3445,13 +3450,12 @@ impl ChatListView {
                 div()
                     .flex()
                     .items_center()
-                    .gap_1()
+                    .gap_2()
                     .text_lg()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.foreground)
                     .child("What should we build in")
-                    .child(project_picker)
-                    .child("?"),
+                    .child(project_picker),
             )
             .into_any_element()
     }
@@ -3830,6 +3834,9 @@ impl ChatListView {
                 .bg(theme.background)
                 .child(
                     div()
+                        .id("permission-prompt-card")
+                        .role(Role::Alert)
+                        .aria_label("Permission request")
                         .w_full()
                         .max_w(rems(CHAT_CONTENT_MAX_WIDTH))
                         .mx_auto()
@@ -3882,7 +3889,7 @@ impl ChatListView {
                             "Deny",
                             threadlane_permission::PermissionDecision::Deny,
                             false,
-                            true,
+                            false,
                         ))
                         .child(action_button(
                             "permission-allow-once",
@@ -3957,9 +3964,13 @@ impl ChatListView {
                         )))
                         .label(option_label.clone())
                         .small()
-                        .when(is_selected, |button| button.primary())
-                        .when(!is_selected, |button| button.ghost())
-                        .tooltip("Toggle this answer")
+                        .ghost()
+                        .selected(is_selected)
+                        .tooltip(if is_selected {
+                            "Selected — activate to remove"
+                        } else {
+                            "Toggle this answer"
+                        })
                         .on_click(cx.listener(
                             move |this, _event, _window, cx| {
                                 this.toggle_question_option(
@@ -4059,7 +4070,7 @@ impl ChatListView {
                                     Button::new("question-dismiss")
                                         .label("Dismiss")
                                         .ghost()
-                                        .xsmall()
+                                        .small()
                                         .tooltip("Dismiss without answering")
                                         .on_click(cx.listener(|this, _event, _window, cx| {
                                             this.dismiss_active_question(cx);
@@ -4930,7 +4941,7 @@ impl ChatListView {
 
                 let model = project_chip_model.clone();
                 menu.separator()
-                    .item(PopupMenuItem::new("New project...").on_click(
+                    .item(PopupMenuItem::new("New project…").on_click(
                         move |_event, _window, cx| {
                             let model = model.clone();
                             cx.spawn(async move |cx| {
@@ -5369,7 +5380,7 @@ impl ChatListView {
                                     .items_center()
                                     .gap_2()
                                     .child(
-                                        div().font_weight(FontWeight::SEMIBOLD).child("COMMANDS"),
+                                        div().font_weight(FontWeight::SEMIBOLD).child("Commands"),
                                     )
                                     .child(
                                         div()
@@ -5478,6 +5489,7 @@ impl ChatListView {
             !threadlane_acp_engine::is_acp_model(&selected_model),
         );
         let displayed_percent = meter.percent.unwrap_or_default();
+        let context_percent_label = meter.percent.map(|percent| format!("{percent:.0}%"));
         let meter_color = if meter.percent.is_none() || displayed_percent == 0.0 {
             theme.muted_foreground
         } else if displayed_percent >= CONTEXT_METER_DANGER_PCT {
@@ -5509,6 +5521,7 @@ impl ChatListView {
                     .ghost()
                     .rounded_full()
                     .size(px(32.0))
+                    .text_color(theme.muted_foreground)
                     .tooltip(meter.detail_label.clone())
                     .when_some(meter.percent, |toggle, percent| toggle.child(
                         ProgressCircle::new("context-meter-circle")
@@ -5842,14 +5855,33 @@ impl ChatListView {
                         div()
                             .flex()
                             .items_center()
-                            .gap_1()
+                            .gap_2()
                             .flex_wrap()
-                            .child(model_picker)
-                            .children(show_effort_picker.then_some(effort_picker))
-                            .child(div().flex_1())
-                            .child(stash_button)
-                            .children(subagent_popover)
-                            .child(context_meter)
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .min_w_0()
+                                    .child(model_picker)
+                                    .children(show_effort_picker.then_some(effort_picker)),
+                            )
+                            .child(div().flex_1().min_w_2())
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .flex_wrap()
+                                    .child(stash_button)
+                                    .children(subagent_popover)
+                                    .children(context_percent_label.map(|label| {
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(label)
+                                    }))
+                                    .child(context_meter)
                             .children(if is_generating {
                                     vec![
                                         Button::new("composer-queue-btn")
@@ -5956,6 +5988,7 @@ impl ChatListView {
                                         .into_any_element(),
                                 ]
                             }),
+                            ),
                     ),
             )
     }
@@ -6012,18 +6045,17 @@ impl ChatListView {
         let mut container = div()
             .id("chat-progress-summary")
             .flex_none()
-            .mx_4()
-            .mt_2()
-            .mb_1()
-            .px_3()
-            .py_2()
+            .w_full()
+            .max_w(rems(CHAT_CONTENT_MAX_WIDTH))
+            .mx_auto()
+            .px_4()
+            .py_1p5()
             .flex()
             .flex_col()
-            .gap_1p5()
-            .rounded_lg()
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.muted.opacity(0.35));
+            .gap_1()
+            .border_t_1()
+            .border_color(theme.border.opacity(0.6))
+            .bg(theme.background);
 
         let header_row = div()
             .flex()
@@ -6399,6 +6431,8 @@ impl Render for ChatListView {
                                     Button::new("jump-to-latest").debug_selector(|| "jump-to-latest".into())
                                         .label("Jump to latest")
                                         .small()
+                                        .accessibility_label("Jump to latest message")
+                                        .tooltip("Scroll to the latest message")
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.transcript_list_state.scroll_to_end();
                                             cx.notify();
