@@ -8616,23 +8616,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "threadlane-supervisor"
-version = "0.1.0"
-dependencies = [
- "log",
- "serde",
- "serde_json",
- "tempfile",
- "threadlane-coding-agent",
- "threadlane-project",
- "threadlane-protocol",
- "threadlane-provider",
- "threadlane-runtime",
- "threadlane-wasi",
- "tokio",
-]
-
-[[package]]
 name = "threadlane-tools"
 version = "0.1.0"
 dependencies = [

@@ -21,7 +21,7 @@ use threadlane_runtime::ModelRoles;
 pub enum ExecutionMode {
     /// Interactive desktop/user session (enables interactive permission prompts).
     Interactive,
-    /// Headless or background autonomous execution (e.g. supervisor /task).
+    /// Headless or background autonomous execution (e.g. /task).
     Background,
 }
 
