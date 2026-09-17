@@ -831,7 +831,7 @@ impl AppState {
                 std::fs::copy(&session_file, &archive_file).map_err(|error| error.to_string())?;
                 if let Err(error) = threadlane_git::remove_worktree(&work_dir, &worktree_dir, false)
                 {
-                    let _ = std::fs::remove_file(&archive_file);
+                    let _ = Self::remove_file_if_present(&archive_file);
                     return Err(error.to_string());
                 }
                 let stub = canonical_session_file(&work_dir, &session_id);
@@ -842,7 +842,7 @@ impl AppState {
                     if std::fs::rename(&session_file, &archive_file).is_err() {
                         std::fs::copy(&session_file, &archive_file)
                             .map_err(|error| error.to_string())?;
-                        let _ = std::fs::remove_file(&session_file);
+                        let _ = Self::remove_file_if_present(&session_file);
                     }
                 }
                 let stub = canonical_session_file(&work_dir, &session_id);
@@ -1539,7 +1539,7 @@ impl AppState {
         let cleanup = |work_dir: &Path, worktree_dir: &Path, session_file: &Path| {
             let _ = threadlane_git::remove_worktree(work_dir, worktree_dir, true);
             let _ = std::fs::remove_dir_all(worktree_dir);
-            let _ = std::fs::remove_file(session_file);
+            let _ = Self::remove_file_if_present(session_file);
         };
         if let Err(error) = threadlane_git::create_worktree(&work_dir, &worktree_dir, &branch) {
             cleanup(&work_dir, &worktree_dir, &session_file);

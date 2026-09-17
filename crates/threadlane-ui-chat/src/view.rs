@@ -259,17 +259,14 @@ pub struct ChatListView {
     segment_cache: HashMap<String, (String, Vec<MarkdownSegment>)>,
     _subscriptions: Vec<Subscription>,
 }
+/// Maximum chat-stream events per pump tick: bounds one redraw's work so a
+/// hot turn cannot starve the UI; leftovers stay queued for the next tick.
+const CHAT_STREAM_BATCH_LIMIT: usize = 128;
+
 async fn next_chat_stream_batch(
     receiver: &mut tokio::sync::mpsc::UnboundedReceiver<ChatStreamEvent>,
 ) -> Option<Vec<ChatStreamEvent>> {
-    let mut events = vec![receiver.recv().await?];
-    while events.len() < 128 {
-        let Ok(event) = receiver.try_recv() else {
-            break;
-        };
-        events.push(event);
-    }
-    Some(events)
+    threadlane_ui_state::next_event_batch_capped(receiver, CHAT_STREAM_BATCH_LIMIT).await
 }
 
 impl ChatListView {

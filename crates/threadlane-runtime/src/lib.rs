@@ -29,13 +29,15 @@ pub use harness::{
 // Turn-repair helper lives in `threadlane-provider::convert`, next to the
 // id normalization it relies on; re-exported here so existing paths work.
 pub use provider::{
-    AssistantMessageRecorder, ChatCompletionsAdapter, CodexResponsesAdapter, ProviderAdapter,
+    AssistantMessageRecorder,
     ProviderBoundaryPreparer, ProviderBoundaryRequest, ProviderBoundaryResult,
-    ProviderDiscardedUsageRecorder, ProviderHookRecorder, ProviderMessages, ProviderRouter,
+    ProviderDiscardedUsageRecorder, ProviderHookRecorder,
     ProviderTraceEvent, ProviderTraceRecorder, ProviderUsageRecorder, StreamingStateRecorder,
     ToolCompletionRecorder, ToolExecutionTraceEvent, ToolExecutionTraceRecorder,
     ToolIntentRecorder,
 };
+#[cfg(test)]
+pub use provider::{ProviderAdapter, ProviderMessages, ProviderRouter};
 // Message translation, model registry, and the shared reactor live in
 // `threadlane-provider` (the dependency arrow points runtime → provider);
 // import them from there directly.

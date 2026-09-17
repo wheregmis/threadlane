@@ -1,24 +1,27 @@
-//! Provider adapter abstraction.
+//! Provider adapter abstraction (test-only scaffolding).
 //!
-//! Each LLM provider (OpenAI Chat Completions, OpenAI Codex Responses, etc.)
-//! has its own message format and API payload shape. The [`ProviderAdapter`]
-//! trait encapsulates these differences so the agent runtime can remain
-//! provider-agnostic.
-//!
-//! The free functions `convert_to_llm` and `convert_to_codex_llm` live in
-//! `threadlane_provider::convert` and are re-exported from the crate root
-//! for backward compatibility.
+//! Production code routes through the provider clients in
+//! `threadlane-provider`; the adapter trait, formats, and router below exist
+//! to pin payload-rendering behavior in unit tests. Message conversion itself
+//! lives in `threadlane_provider::convert`; import it from there directly.
 
 use crate::types::TurnState;
-use threadlane_protocol::{AgentMessage, AgentToolDefinition, AgentToolResult, TokenUsage};
-use async_trait::async_trait;
-use serde_json::Value;
-use std::fmt;
+use threadlane_protocol::{AgentMessage, AgentToolResult, TokenUsage};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+#[cfg(test)]
+use threadlane_protocol::AgentToolDefinition;
+#[cfg(test)]
+use async_trait::async_trait;
+#[cfg(test)]
+use serde_json::Value;
+#[cfg(test)]
+use std::fmt;
+#[cfg(test)]
 use threadlane_provider::convert::{convert_to_codex_llm, convert_to_llm};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(test)]
 pub enum PayloadFormat {
     ChatCompletions,
     Codex,
@@ -29,6 +32,7 @@ pub enum PayloadFormat {
 /// Chat Completions providers receive `Vec<Value>` (array of message objects).
 /// Codex Responses providers receive `(String, Vec<Value>)` (instructions + input items).
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub enum ProviderMessages {
     ChatMessages(Vec<Value>),
     CodexMessages {
@@ -42,6 +46,7 @@ pub enum ProviderMessages {
 /// Implementations encapsulate:
 /// - Message format conversion (`AgentMessage` → provider messages)
 /// - API payload structure (model, tools, streaming, reasoning, cache keys)
+#[cfg(test)]
 #[async_trait]
 pub trait ProviderAdapter: fmt::Debug + Send + Sync {
     /// The [`PayloadFormat`] this adapter targets.
@@ -64,9 +69,12 @@ pub trait ProviderAdapter: fmt::Debug + Send + Sync {
 }
 
 /// Chat Completions adapter (OpenAI, Antigravity, OpenCode).
+/// Test-only: production code routes through the provider clients.
 #[derive(Debug, Clone, Default)]
+#[cfg(test)]
 pub struct ChatCompletionsAdapter;
 
+#[cfg(test)]
 #[async_trait]
 impl ProviderAdapter for ChatCompletionsAdapter {
     fn format(&self) -> PayloadFormat {
@@ -110,9 +118,12 @@ impl ProviderAdapter for ChatCompletionsAdapter {
 }
 
 /// Codex Responses adapter.
+/// Test-only: production code routes through the provider clients.
 #[derive(Debug, Clone, Default)]
+#[cfg(test)]
 pub struct CodexResponsesAdapter;
 
+#[cfg(test)]
 #[async_trait]
 impl ProviderAdapter for CodexResponsesAdapter {
     fn format(&self) -> PayloadFormat {
@@ -172,11 +183,14 @@ impl ProviderAdapter for CodexResponsesAdapter {
 /// Test-only scaffolding around the adapter implementations: production code
 /// routes through the provider clients. Selection and payload helpers below
 /// are `#[cfg(test)]` for the same reason.
+/// Test-only: production code routes through the provider clients.
 #[derive(Default)]
+#[cfg(test)]
 pub struct ProviderRouter {
     adapters: Vec<Arc<dyn ProviderAdapter>>,
 }
 
+#[cfg(test)]
 impl fmt::Debug for ProviderRouter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ProviderRouter")
@@ -185,6 +199,7 @@ impl fmt::Debug for ProviderRouter {
     }
 }
 
+#[cfg(test)]
 impl Clone for ProviderRouter {
     fn clone(&self) -> Self {
         Self {
@@ -193,6 +208,7 @@ impl Clone for ProviderRouter {
     }
 }
 
+#[cfg(test)]
 impl ProviderRouter {
     /// Registers a custom adapter. Later registrations take priority over
     /// earlier ones when selecting by model.

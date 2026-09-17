@@ -6,8 +6,21 @@
 pub async fn next_event_batch<T>(
     receiver: &mut tokio::sync::mpsc::UnboundedReceiver<T>,
 ) -> Option<Vec<T>> {
+    next_event_batch_capped(receiver, usize::MAX).await
+}
+
+/// Like [`next_event_batch`], but stops draining after `limit` ready events
+/// so a hot stream (chat turns) cannot starve rendering in one pump tick.
+/// Leftovers stay queued for the next tick.
+pub async fn next_event_batch_capped<T>(
+    receiver: &mut tokio::sync::mpsc::UnboundedReceiver<T>,
+    limit: usize,
+) -> Option<Vec<T>> {
     let mut events = vec![receiver.recv().await?];
-    while let Ok(event) = receiver.try_recv() {
+    while events.len() < limit.max(1) {
+        let Ok(event) = receiver.try_recv() else {
+            break;
+        };
         events.push(event);
     }
     Some(events)

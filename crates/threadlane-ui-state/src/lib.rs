@@ -23,7 +23,7 @@ pub mod updater;
 mod test_support;
 
 pub use app_state::AppState;
-pub use events::next_event_batch;
+pub use events::{next_event_batch, next_event_batch_capped};
 pub use types::{
     hash_session_identity, ChatMessageInfo, ChatStreamEvent, MessageRole, RequestedEditorTarget,
     SessionAttention, SessionHealth, SessionHydrationRequest, SessionInfo, SubagentActivityInfo,
