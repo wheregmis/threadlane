@@ -42,23 +42,12 @@ struct WasiExtensionManifest {
 }
 
 #[derive(Debug, Deserialize, Default)]
-#[allow(dead_code)]
 struct Invocation {
     name: String,
     #[serde(default)]
     arguments: serde_json::Value,
     #[serde(default)]
     state: serde_json::Value,
-    #[serde(default)]
-    events: Vec<ExtensionEvent>,
-}
-
-#[derive(Debug, Deserialize, Default)]
-#[allow(dead_code)]
-struct ExtensionEvent {
-    topic: String,
-    #[serde(default)]
-    payload: serde_json::Value,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]

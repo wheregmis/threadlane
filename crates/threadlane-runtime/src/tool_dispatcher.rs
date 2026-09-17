@@ -340,7 +340,7 @@ const CORE_TOOL_NAMES: &[&str] = &[
     "write_file",
     "run_command",
     "subagent",
-    // Embedded browser panel (threadlane-session/src/browser.rs). The tools
+    // Embedded browser panel (`threadlane-browser`). The tools
     // report a helpful error when no panel is attached, so they are safe to
     // advertise unconditionally.
     "browser_navigate",
@@ -353,9 +353,10 @@ const CORE_TOOL_NAMES: &[&str] = &[
     "browser_screenshot",
     "browser_console_logs",
     "browser_wait",
-    // Native computer use (threadlane-session/src/computer.rs). Every
-    // screenshot and input action re-prompts for approval, so the schemas
-    // are safe to advertise; unattended sessions deny at execution.
+    // Native computer use (`threadlane-computer`, approved through
+    // `threadlane-permission`). Every screenshot and input action
+    // re-prompts for approval, so the schemas are safe to advertise;
+    // unattended sessions deny at execution.
     "computer_status",
     "computer_windows",
     "computer_screenshot",

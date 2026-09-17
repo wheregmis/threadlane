@@ -98,12 +98,6 @@ pub struct GitHubItemKey {
     pub number: u64,
 }
 
-impl GitHubItemKey {
-    pub fn new(project: PathBuf, number: u64) -> Self {
-        Self { project, number }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScopedIssue {
     pub project: PathBuf,
@@ -199,22 +193,6 @@ pub struct GitHubRequest {
     pub item: Option<GitHubItemKey>,
 }
 
-impl GitHubRequest {
-    pub fn new(
-        scope: GitHubScope,
-        tab: GitHubTab,
-        query_revision: u64,
-        item: Option<GitHubItemKey>,
-    ) -> Self {
-        Self {
-            scope,
-            tab,
-            query_revision,
-            item,
-        }
-    }
-}
-
 pub fn github_result_matches_request(result: &GitHubRequest, current: &GitHubRequest) -> bool {
     result == current
 }
@@ -270,12 +248,6 @@ impl PrDetailTab {
 pub struct PrWorkspaceKey {
     pub project: PathBuf,
     pub number: u64,
-}
-
-impl PrWorkspaceKey {
-    pub fn new(project: PathBuf, number: u64) -> Self {
-        Self { project, number }
-    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

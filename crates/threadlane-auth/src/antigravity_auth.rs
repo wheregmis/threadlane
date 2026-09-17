@@ -65,12 +65,6 @@ impl AntigravityOAuthConfig {
     }
 }
 
-/// Test helper: the default store (tests point `HOME` at a temp dir).
-#[cfg(test)]
-fn get_antigravity_credentials_path() -> std::path::PathBuf {
-    CredentialStore::default().antigravity_credentials_path()
-}
-
 pub fn load_antigravity_credentials() -> Option<AntigravityCredentials> {
     load_antigravity_credentials_in(&CredentialStore::default())
 }

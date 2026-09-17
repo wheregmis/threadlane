@@ -294,6 +294,14 @@ A normal `cargo run` may be unsuitable for testing installation: update installa
 - Keep command examples runnable from the repository root unless the text explicitly changes directories.
 - Explain limitations that matter to users, especially compile-time updater configuration and packaged-app-only installation.
 
+## Facade Teardown Playbook
+
+- Dissolve a compatibility shim in this order: migrate every caller to the canonical path, delete the shim module and its re-export lines, prune newly-unused dependencies from manifests, then verify. Skipping the dep prune leaves phantom edges in the build graph.
+- Grep for both import forms: plain-path searches (`session::Foo`) miss brace imports (`use session::{Bar, Foo}`). Always also search `use <crate>::` brace blocks, and let `cargo check --workspace --all-targets` (not just `-p`) catch stragglers in bins, tests, and integration targets.
+- Prefer `#[cfg(test)]` over `#[allow(dead_code)]` for helpers whose only callers are tests; prefer deleting outright when a private item has no callers at all. Keep suppressions only where cross-crate test use or tested public API requires them, with a comment saying so.
+- After import moves, follow-on type errors (`E0277`, `E0308`, `E0599`) are usually cascades of the first unresolved import, not new breakage — fix the import, then re-check before diagnosing further.
+- Prove a test failure pre-exists with `git stash` + re-run before attributing it to the change; worktree/filesystem tests flake under parallel load, so re-run loners in isolation.
+
 ## Keep This Guide Current
 
 - Treat `AGENTS.md` as living repository documentation.
