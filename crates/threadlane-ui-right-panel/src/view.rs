@@ -20,7 +20,7 @@ use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Selectable, Sizab
 use threadlane_git::{GitBranchInfo, GitCommitInfo, GitFile, GitStatus};
 
 use threadlane_ui_state::next_event_batch;
-use threadlane_ui_state::watcher::WorkspaceWatcher;
+use threadlane_project::watcher::WorkspaceWatcher;
 use threadlane_ui_state::AppState;
 
 use super::browser::BrowserView;

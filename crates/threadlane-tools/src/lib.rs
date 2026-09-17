@@ -1,6 +1,5 @@
 pub mod definitions;
 pub mod dispatch;
-pub mod hashline;
 pub mod memory;
 pub mod repo_map;
 pub mod search;

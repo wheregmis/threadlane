@@ -6,8 +6,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::definitions::tool_definitions;
-use crate::hashline;
 use crate::memory::{consolidate_memory_impl, read_memory_impl, save_memory_impl};
+use threadlane_hashline as hashline;
 use crate::repo_map::get_repo_map_impl;
 use crate::search;
 use crate::transaction::{commit_text_transaction, run_post_edit_diagnostics};

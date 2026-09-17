@@ -18,7 +18,6 @@ pub mod provider_auth;
 pub mod settings;
 mod types;
 pub mod updater;
-pub mod watcher;
 
 #[cfg(any(test, feature = "test-support"))]
 mod test_support;

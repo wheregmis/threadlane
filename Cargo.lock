@@ -8736,6 +8736,7 @@ dependencies = [
  "serde_json",
  "threadlane-coding-agent",
  "threadlane-git",
+ "threadlane-project",
  "threadlane-protocol",
  "threadlane-provider",
  "threadlane-ui-state",

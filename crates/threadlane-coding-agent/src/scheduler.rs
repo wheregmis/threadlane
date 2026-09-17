@@ -1,3 +1,14 @@
+//! Session work scheduler: durable intent plus an in-memory wake.
+//!
+//! Every queued input is persisted as a durable queue entry first
+//! (`QueueEnqueued`); the in-memory [`AgentWork`] wake only tells the turn
+//! loop something is pending. Consumption is always by exact
+//! `(queue, entry_id)` identity — never by message value, since consecutive
+//! identical messages are legitimate — and a wake is finished only after its
+//! own entry is consumed, so a steer or follow-up arriving mid-turn keeps its
+//! own scheduler wake. This is the only in-memory staging in the session;
+//! there is no second queue implementation.
+
 use super::harness::CodingSessionHarness;
 #[cfg(test)]
 use async_trait::async_trait;

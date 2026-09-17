@@ -2,8 +2,7 @@
 //!
 //! Provider model fetches must hop onto a reactor when the caller has none
 //! (GPUI background tasks run without one, so a direct request would panic).
-//! This process-wide runtime is that fallback; `threadlane-runtime`
-//! re-exports [`get_runtime`] for backward compatibility.
+//! This process-wide runtime is that fallback; import it from here directly.
 
 use std::sync::OnceLock;
 use tokio::runtime::Runtime;

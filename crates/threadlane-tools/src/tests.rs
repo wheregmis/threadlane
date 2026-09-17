@@ -1,5 +1,6 @@
 use super::*;
 use serde_json::json;
+use threadlane_hashline as hashline;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::tempdir;
