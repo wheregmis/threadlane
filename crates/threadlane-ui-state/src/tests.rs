@@ -773,10 +773,7 @@ fn removed_session_clears_live_and_deferred_attention() {
 #[test]
 fn removing_worktree_session_removes_checkout_and_metadata_stub() {
     let dir = tempfile::tempdir().unwrap();
-    let project = dir.path().canonicalize().unwrap();
-    run_git(&project, &["init", "-b", "main"]);
-    run_git(&project, &["config", "user.email", "test@example.com"]);
-    run_git(&project, &["config", "user.name", "Test"]);
+    let project = init_test_repo(&dir);
     std::fs::write(project.join("base.txt"), "base\n").unwrap();
     run_git(&project, &["add", "."]);
     run_git(&project, &["commit", "-qm", "initial"]);
@@ -822,10 +819,7 @@ fn removing_worktree_session_removes_checkout_and_metadata_stub() {
 #[test]
 fn removing_worktree_session_retains_checkout_when_requested() {
     let dir = tempfile::tempdir().unwrap();
-    let project = dir.path().canonicalize().unwrap();
-    run_git(&project, &["init", "-b", "main"]);
-    run_git(&project, &["config", "user.email", "test@example.com"]);
-    run_git(&project, &["config", "user.name", "Test"]);
+    let project = init_test_repo(&dir);
     std::fs::write(project.join("base.txt"), "base\n").unwrap();
     run_git(&project, &["add", "."]);
     run_git(&project, &["commit", "-qm", "initial"]);
@@ -871,19 +865,7 @@ fn removing_worktree_session_retains_checkout_when_requested() {
 #[test]
 fn settling_worktree_session_removes_checkout_when_requested() {
     let dir = tempfile::tempdir().unwrap();
-    let project = dir.path().canonicalize().unwrap();
-    run_git(&project, &["init", "-b", "main"]);
-    run_git(&project, &["config", "user.email", "test@example.com"]);
-    run_git(&project, &["config", "user.name", "Test"]);
-    // Neutralize host-global git hooks (e.g. tooling that auto-inits sidecar
-    // dirs on checkout): their untracked droppings are environment noise, not
-    // session state, and must not influence the archiving assertions below.
-    let empty_hooks = dir.path().join("empty-hooks");
-    std::fs::create_dir_all(&empty_hooks).unwrap();
-    run_git(
-        &project,
-        &["config", "core.hooksPath", empty_hooks.to_str().unwrap()],
-    );
+    let project = init_test_repo(&dir);
     std::fs::write(project.join("base.txt"), "base\n").unwrap();
     run_git(&project, &["add", "."]);
     run_git(&project, &["commit", "-qm", "initial"]);
@@ -933,10 +915,7 @@ fn settling_worktree_session_removes_checkout_when_requested() {
 #[test]
 fn settling_worktree_session_retains_checkout_when_requested() {
     let dir = tempfile::tempdir().unwrap();
-    let project = dir.path().canonicalize().unwrap();
-    run_git(&project, &["init", "-b", "main"]);
-    run_git(&project, &["config", "user.email", "test@example.com"]);
-    run_git(&project, &["config", "user.name", "Test"]);
+    let project = init_test_repo(&dir);
     std::fs::write(project.join("base.txt"), "base\n").unwrap();
     run_git(&project, &["add", "."]);
     run_git(&project, &["commit", "-qm", "initial"]);
@@ -1145,6 +1124,25 @@ fn run_git(work_dir: &Path, args: &[&str]) {
     );
 }
 
+/// Init a fixture repo with host-global git hooks neutralized: hooks that
+/// fire on checkout (e.g. tooling that auto-inits sidecar dirs) create
+/// untracked droppings that are environment noise, not session state, and
+/// race worktree setup/removal assertions. Every test that creates worktrees
+/// must build its repo through this helper.
+fn init_test_repo(dir: &tempfile::TempDir) -> PathBuf {
+    let project = dir.path().canonicalize().unwrap();
+    run_git(&project, &["init", "-b", "main"]);
+    run_git(&project, &["config", "user.email", "test@example.com"]);
+    run_git(&project, &["config", "user.name", "Test"]);
+    let empty_hooks = dir.path().join("empty-hooks");
+    std::fs::create_dir_all(&empty_hooks).unwrap();
+    run_git(
+        &project,
+        &["config", "core.hooksPath", empty_hooks.to_str().unwrap()],
+    );
+    project
+}
+
 fn issue_ref(number: u64) -> threadlane_git::GitHubIssueRef {
     threadlane_git::GitHubIssueRef {
         host: "github.com".into(),
@@ -1265,14 +1263,11 @@ fn issue_work_failure_never_selects_or_runs_in_canonical_checkout() {
 #[test]
 fn issue_work_prompt_failure_rolls_back_artifacts_and_selection() {
     let repo = tempfile::tempdir().unwrap();
-    run_git(repo.path(), &["init", "-b", "main"]);
-    run_git(repo.path(), &["config", "user.email", "test@example.com"]);
-    run_git(repo.path(), &["config", "user.name", "Test"]);
-    std::fs::write(repo.path().join("base.txt"), "base\n").unwrap();
-    run_git(repo.path(), &["add", "."]);
-    run_git(repo.path(), &["commit", "-m", "initial"]);
+    let work_dir = init_test_repo(&repo);
+    std::fs::write(work_dir.join("base.txt"), "base\n").unwrap();
+    run_git(&work_dir, &["add", "."]);
+    run_git(&work_dir, &["commit", "-m", "initial"]);
 
-    let work_dir = repo.path().canonicalize().unwrap();
     let prior_session_file = work_dir.join(".threadlane/sessions/prior.jsonl");
     std::fs::create_dir_all(prior_session_file.parent().unwrap()).unwrap();
     CodingSessionHarness::append_fact_to_path(
