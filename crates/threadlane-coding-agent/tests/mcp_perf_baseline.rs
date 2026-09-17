@@ -2,7 +2,7 @@
 //!
 //! Ignored by default: it spawns real subprocesses and reports timings rather
 //! than asserting behavior. Run with
-//! `cargo test -p threadlane-session --test mcp_perf_baseline -- --ignored --nocapture`.
+//! `cargo test -p threadlane-coding-agent --test mcp_perf_baseline -- --ignored --nocapture`.
 //!
 //! The stub server is a `/bin/sh` script, so this harness is Unix-only.
 #![cfg(unix)]

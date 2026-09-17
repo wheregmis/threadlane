@@ -39,9 +39,9 @@ use threadlane_ui_settings::SettingsView;
 use threadlane_ui_sidebar::SidebarView;
 use threadlane_ui_terminal::TerminalView;
 use threadlane_coding_agent::controller::ExecutionMode;
-use threadlane_session::spawn_session_runtime_construction;
+use threadlane_coding_agent::controller::spawn_session_runtime_construction;
 use threadlane_ui_state::updater::{self, UpdaterEvent};
-use threadlane_session::runtime_status_text;
+use threadlane_coding_agent::controller::runtime_status_text;
 use threadlane_ui_state::{
     AppState, SessionHydrationRequest, SessionInfo, WorkspacePage,
 };

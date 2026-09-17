@@ -16,7 +16,7 @@ pub(crate) mod utils;
 
 // ── AgentRuntime (sole runtime — replaces UnifiedAgent + ProviderRunExecutor) ──
 mod runtime;
-pub use runtime::{AgentRuntime, ModelContextProjector, ModelContextSource};
+pub use runtime::AgentRuntime;
 
 pub use capability::{Capability, CapabilityRegistry, ToolPolicy};
 pub use config::{AgentConfig, AgentConfigBuilder, CodingAgentConfig, CodingAgentConfigBuilder};

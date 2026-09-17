@@ -241,7 +241,7 @@ fn build_diagnostic_export(
     session_id: &str,
     title: &str,
     work_dir: &std::path::Path,
-    runtime: Option<&threadlane_session::SessionRuntime>,
+    runtime: Option<&threadlane_coding_agent::controller::SessionRuntime>,
     trajectory: Vec<TrajectoryEntry>,
     include_log: bool,
 ) -> Result<serde_json::Value, String> {

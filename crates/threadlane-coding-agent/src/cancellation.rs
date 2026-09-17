@@ -170,11 +170,34 @@ impl CodingAgentCancellation {
     }
 
     pub fn cancel(&self) -> Result<(), String> {
-        let durable_run_id = if let Some(path) = self.harness_session_file.as_deref() {
-            CodingSessionHarness::open(path).and_then(|mut journal| journal.request_abort())
-        } else {
-            Ok(None)
+        // Single harness open: request the abort intent and observe the
+        // signal on the same journal (ensure_fresh reloads across the abort).
+        // The open/request result is held back until after the task abort so
+        // persistence failure still aborts and clears the active run.
+        let open_result = self
+            .harness_session_file
+            .as_deref()
+            .map(CodingSessionHarness::open);
+        let mut journal = match open_result {
+            Some(Ok(journal)) => Some(journal),
+            Some(Err(error)) => {
+                let handle = {
+                    self.state
+                        .lock()
+                        .map(|mut state| state.active.take().map(|active| active.handle))
+                        .unwrap_or(None)
+                };
+                if let Some(handle) = handle {
+                    handle.abort();
+                }
+                return Err(error.to_string());
+            }
+            None => None,
         };
+        let durable_result = journal
+            .as_mut()
+            .map(|journal| journal.request_abort())
+            .transpose();
         let handle = {
             let mut state = self.state.lock().map_err(|error| error.to_string())?;
             state.active.take().map(|active| active.handle)
@@ -184,12 +207,9 @@ impl CodingAgentCancellation {
             handle.abort();
         }
         // Attempt durable intent first, but persistence failure must not leave generation running.
-        let durable_run_id = durable_run_id?;
-        if let (Some(path), Some(run_id)) = (
-            self.harness_session_file.as_deref(),
-            durable_run_id.as_deref(),
-        ) {
-            CodingSessionHarness::open(path)?.observe_abort_signal(run_id, acknowledged)?;
+        let durable_run_id = durable_result?.flatten();
+        if let (Some(journal), Some(run_id)) = (journal.as_mut(), durable_run_id.as_deref()) {
+            journal.observe_abort_signal(run_id, acknowledged)?;
         }
         let _ = self.event_tx.send(AgentEvent::AgentError {
             error: "Generation cancelled".into(),

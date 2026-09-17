@@ -6,7 +6,7 @@ use threadlane_protocol::{AgentEvent, ImageAttachment, SessionPlan, TokenUsage};
 use threadlane_acp::AcpConfigOption;
 
 use crate::AppState;
-use threadlane_session::{SessionRuntime, SessionRuntimeStatus};
+use threadlane_coding_agent::controller::{SessionRuntime, SessionRuntimeStatus};
 
 pub type AttachedProject = threadlane_project::ProjectRecord;
 

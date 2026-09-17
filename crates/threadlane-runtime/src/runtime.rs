@@ -27,27 +27,6 @@ use std::sync::Arc;
 use threadlane_protocol::{DeferredResponse, ProviderPort, RuntimeToolCall as ToolCall};
 use tokio::sync::{broadcast, Mutex};
 
-/// Unified source for model-visible context.
-///
-/// Durable callers should provide the canonical session projection. The
-/// legacy closure aliases below remain available for compatibility, but new
-/// integrations should use this single source instead of coordinating several
-/// precedence-based callbacks.
-pub trait ModelContextSource: Send + Sync {
-    fn project(&self) -> Result<Vec<AgentMessage>, String>;
-}
-
-impl<F> ModelContextSource for F
-where
-    F: Fn() -> Result<Vec<AgentMessage>, String> + Send + Sync,
-{
-    fn project(&self) -> Result<Vec<AgentMessage>, String> {
-        self()
-    }
-}
-
-pub type ModelContextProjector = Arc<dyn Fn() -> Vec<AgentMessage> + Send + Sync>;
-
 /// The single, unified agent runtime.
 ///
 /// Owns the harness (durable session store), provider routing, tool dispatch,
@@ -149,43 +128,6 @@ impl AgentRuntime {
             provider_boundary_preparer: None,
             message_recorder: None,
         }
-    }
-
-    /// Create a new runtime backed by the given session journal path.
-    ///
-    /// If `session_file` is provided, opens (or creates) a JSONL journal.
-    /// Otherwise, an in-memory store is used.
-    pub fn new(
-        _api_key: impl Into<String>,
-        _account_id: Option<String>,
-        _model: impl Into<String>,
-        session_file: Option<&Path>,
-        config: AgentConfig,
-    ) -> Result<Self, AgentError> {
-        let store = if let Some(path) = session_file {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).ok();
-            }
-            if !path.exists() {
-                std::fs::File::create(path)
-                    .map_err(|e| AgentError::Session(format!("create session file: {e}")))?;
-            }
-            JsonlStore::open(path)
-                .map_err(|e| AgentError::Session(format!("open session journal: {e}")))?
-        } else {
-            // Ephemeral store backed by a temp file.
-            let tmp =
-                std::env::temp_dir().join(format!("threadlane-ephemeral-{}", std::process::id()));
-            let _ = std::fs::create_dir_all(tmp.parent().unwrap());
-            JsonlStore::open(&tmp)
-                .map_err(|e| AgentError::Session(format!("open ephemeral journal: {e}")))?
-        };
-
-        let harness_event_hub = HarnessEventHub::new(config.event_channel_capacity);
-        let _harness = AgentHarness::with_events(store, harness_event_hub);
-        Err(AgentError::Session(
-            "AgentRuntime requires an injected ProviderPort; use new_with_provider".into(),
-        ))
     }
 
     pub fn new_with_provider(

@@ -8588,23 +8588,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "threadlane-session"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "tempfile",
- "threadlane-acp",
- "threadlane-acp-engine",
- "threadlane-coding-agent",
- "threadlane-mcp",
- "threadlane-permission",
- "threadlane-protocol",
- "threadlane-provider",
- "threadlane-runtime",
- "tokio",
-]
-
-[[package]]
 name = "threadlane-skills"
 version = "0.1.0"
 dependencies = [
@@ -8759,8 +8742,8 @@ dependencies = [
  "rfd",
  "serde_json",
  "tempfile",
+ "threadlane-coding-agent",
  "threadlane-git",
- "threadlane-session",
  "threadlane-ui-state",
  "threadlane-ui-theme",
 ]
@@ -8786,7 +8769,6 @@ dependencies = [
  "threadlane-protocol",
  "threadlane-provider",
  "threadlane-runtime",
- "threadlane-session",
  "threadlane-skills",
  "threadlane-tools",
  "threadlane-ui-catalog",
@@ -8829,7 +8811,6 @@ dependencies = [
  "rfd",
  "threadlane-coding-agent",
  "threadlane-git",
- "threadlane-session",
  "threadlane-ui-chat",
  "threadlane-ui-editor",
  "threadlane-ui-github",

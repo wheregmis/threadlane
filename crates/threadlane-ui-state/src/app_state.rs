@@ -12,7 +12,7 @@ use threadlane_acp::AcpConfigOption;
 
 use crate::agent_events::{adapt_agent_event, ChatAgentUpdate};
 use threadlane_coding_agent::controller::ExecutionMode;
-use threadlane_session::SessionRuntime;
+use threadlane_coding_agent::controller::SessionRuntime;
 use threadlane_project::load_project_registry;
 
 use crate::discovery::*;
@@ -895,16 +895,26 @@ impl AppState {
         if let Some(runtime) = self.session_runtimes.get(&session_file) {
             return runtime.clone();
         }
-        let runtime = SessionRuntime::new(
-            coding_agent_options(
-                work_dir,
-                session_file.clone(),
-                self.selected_model.clone(),
-                self.model_roles.clone(),
-                self.browser_bridge.clone(),
-            ),
-            ExecutionMode::Interactive,
+        // Build on a dedicated thread with a large stack: CodingAgent loads
+        // WASI extensions through wasmi, which needs more than GPUI's 512
+        // KiB GCD worker stacks provide. A plain spawn (not the Tokio
+        // runtime) keeps this lazy path safe whether or not the caller runs
+        // inside async context; the hydrated path in
+        // threadlane-ui-workspace awaits the same constructor asynchronously.
+        let options = coding_agent_options(
+            work_dir,
+            session_file.clone(),
+            self.selected_model.clone(),
+            self.model_roles.clone(),
+            self.browser_bridge.clone(),
         );
+        let runtime = std::thread::Builder::new()
+            .name("session-runtime-construct".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || SessionRuntime::new(options, ExecutionMode::Interactive))
+            .expect("failed to spawn session runtime constructor")
+            .join()
+            .expect("session runtime construction panicked");
         self.session_runtimes.insert(session_file, runtime.clone());
         runtime
     }
@@ -2620,7 +2630,7 @@ impl AppState {
     pub fn session_status_for_file(&self, session_file: &Path) -> Option<String> {
         self.session_runtimes
             .get(session_file)
-            .and_then(|runtime| threadlane_session::runtime_status_text(runtime.status()))
+            .and_then(|runtime| threadlane_coding_agent::controller::runtime_status_text(runtime.status()))
     }
 
     pub fn apply_session_messages(

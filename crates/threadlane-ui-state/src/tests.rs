@@ -3,7 +3,7 @@ use crate::projection::{compute_full_session_projection, compute_session_message
 use crate::test_support::{
     activate_test_session, generated_reported_session_path, reported_session_shape_state,
 };
-use threadlane_session::SessionRuntimeStatus;
+use threadlane_coding_agent::controller::SessionRuntimeStatus;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use threadlane_coding_agent::harness::CodingSessionHarness;
@@ -228,7 +228,7 @@ async fn model_and_reasoning_pickers_persist_before_rebuild_and_next_request() {
         // Reload with the old default, as startup does, then drive the real
         // CodingAgent/harness path with only the network transport replaced.
         let provider = Arc::new(ModelSelectionProvider::default());
-        let mut restored = threadlane_session::test_support::coding_agent_with_provider(
+        let mut restored = threadlane_coding_agent::controller::test_support::coding_agent_with_provider(
             options(),
             provider.clone(),
         );

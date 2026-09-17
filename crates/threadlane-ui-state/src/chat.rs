@@ -6,32 +6,11 @@ use threadlane_runtime::harness::{JsonlStore, SessionStore};
 use threadlane_coding_agent::credentials::provider_client_for;
 use threadlane_protocol::{AgentEvent, ImageAttachment, ReasoningEffort};
 
-use threadlane_session::SessionRuntime;
+use threadlane_coding_agent::controller::SessionRuntime;
 use crate::ChatStreamEvent;
 
 pub fn executor() -> Result<&'static tokio::runtime::Runtime, String> {
     Ok(threadlane_provider::exec::get_runtime())
-}
-
-struct RunCleanup {
-    runtime: Arc<SessionRuntime>,
-    registration_id: u64,
-    session_id: String,
-    stream_tx: Sender<ChatStreamEvent>,
-    error: Option<String>,
-}
-
-impl Drop for RunCleanup {
-    fn drop(&mut self) {
-        self.runtime
-            .cancellation
-            .finish_active_run(self.registration_id);
-        self.runtime.finish_generation(self.error.clone());
-        let _ = self.stream_tx.send(ChatStreamEvent::Finished {
-            session_id: self.session_id.clone(),
-            session_file: self.runtime.session_file.clone(),
-        });
-    }
 }
 
 pub fn execute_prompt(
@@ -44,175 +23,58 @@ pub fn execute_prompt(
     stream_tx: Sender<ChatStreamEvent>,
     pending_acp: Vec<(String, String)>,
 ) -> Result<(), String> {
-    runtime.begin_generation()?;
-    let executor = match executor() {
-        Ok(executor) => executor,
-        Err(error) => {
-            runtime.finish_generation(Some(error.clone()));
-            return Err(error);
-        }
+    // Turn-driving policy lives on the controller; this adapter only maps the
+    // engine sinks onto chat stream events.
+    let event_session_id = session_id.clone();
+    let event_tx = stream_tx.clone();
+    let on_agent_event = move |event| {
+        let _ = event_tx.send(ChatStreamEvent::Agent {
+            session_id: event_session_id.clone(),
+            event,
+        });
     };
-
-    let task_runtime = runtime.clone();
-    let task_session_id = session_id.clone();
-    let task_stream_tx = stream_tx.clone();
-    let (registration_tx, registration_rx) = tokio::sync::oneshot::channel();
-    let task = executor.spawn(async move {
-        let Ok(registration_id) = registration_rx.await else {
-            task_runtime.finish_generation(Some("Generation registration failed".into()));
-            return;
-        };
-
-        let mut cleanup = RunCleanup {
-            runtime: task_runtime.clone(),
-            registration_id,
-            session_id: task_session_id.clone(),
-            stream_tx: task_stream_tx.clone(),
-            error: None,
-        };
-
-        // Apply New-task ACP selections before the first turn. A failure must
-        // abort this turn: otherwise the prompt would run under the agent's
-        // default configuration rather than the picker selection.
-        for (config_id, value) in pending_acp {
-            let source = Arc::downgrade(&task_runtime);
-            match task_runtime.set_acp_config_option(&config_id, &value).await {
-                Ok(options) => {
-                    let _ = task_stream_tx.send(ChatStreamEvent::AcpConfigOptions {
-                        session_id: task_session_id.clone(),
-                        source,
-                        options,
-                        error: None,
-                        failed_config: None,
-                    });
-                }
-                Err(error) => {
-                    cleanup.error = Some(error.clone());
-                    let _ = task_stream_tx.send(ChatStreamEvent::AcpConfigOptions {
-                        session_id: task_session_id.clone(),
-                        source,
-                        options: Vec::new(),
-                        error: Some(error),
-                        failed_config: Some((config_id, value)),
-                    });
-                    return;
-                }
-            }
-        }
-
-        let turn_span = tracing::info_span!("chat.turn", session_id = %task_session_id);
-        tracing::info!(parent: &turn_span, "starting chat turn");
-        let git_branch =
-            tokio::task::spawn_blocking(move || threadlane_git::current_branch(&work_dir))
-                .await
-                .ok()
-                .and_then(Result::ok)
-                .flatten();
-        let mut agent = task_runtime.agent.lock().await;
-        if let Some(branch) = git_branch {
-            if let Err(error) = agent.set_fact("git_branch", &branch) {
-                cleanup.error = Some(error.clone());
-                let _ = task_stream_tx.send(ChatStreamEvent::Agent {
-                    session_id: task_session_id,
-                    event: AgentEvent::AgentError { error },
-                });
-                return;
-            }
-        }
-        agent.set_reasoning_effort(reasoning_effort).await;
-        let mut events = agent.subscribe();
-        let run_error = {
-            let run = agent.handle_input_with_images(&text, images);
-            tokio::pin!(run);
-            let mut run_error = None;
-            let mut saw_agent_error = false;
-
-            loop {
-                tokio::select! {
-                    result = &mut run => {
-                        match result {
-                            Some(Ok(output)) if !output.is_empty() => {
-                                let _ = task_stream_tx.send(ChatStreamEvent::Agent {
-                                    session_id: task_session_id.clone(),
-                                    event: AgentEvent::MessageUpdate {
-                                        text_delta: Some(output),
-                                        reasoning_delta: None,
-                                        tool_call_name: None,
-                                    },
-                                });
-                            }
-                            Some(Err(error)) => {
-                                tracing::error!(error = %error, "chat turn failed");
-                                run_error = Some(error);
-                            }
-                            _ => {}
-                        }
-                        while let Ok(event) = events.try_recv() {
-                            saw_agent_error |= matches!(event, AgentEvent::AgentError { .. });
-                            let _ = task_stream_tx.send(ChatStreamEvent::Agent {
-                                session_id: task_session_id.clone(),
-                                event,
-                            });
-                        }
-                        if let Some(error) = run_error.as_ref().filter(|_| !saw_agent_error) {
-                            let _ = task_stream_tx.send(ChatStreamEvent::Agent {
-                                session_id: task_session_id.clone(),
-                                event: AgentEvent::AgentError { error: error.clone() },
-                            });
-                        }
-                        break;
-                    }
-                    event = events.recv() => {
-                        match event {
-                            Ok(event) => {
-                                saw_agent_error |= matches!(event, AgentEvent::AgentError { .. });
-                                let _ = task_stream_tx.send(ChatStreamEvent::Agent {
-                                    session_id: task_session_id.clone(),
-                                    event,
-                                });
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                        }
-                    }
-                }
-            }
-            run_error
-        };
-
-        tracing::info!(error = ?run_error, "chat turn finished");
-        // Read after the turn because an external agent defines its own
-        // settings and only reports them once a session is open. This is the
-        // free path: the turn already connected, so nothing is started here.
-        let acp_options = agent.acp_user_config_options();
-        if !acp_options.is_empty() {
-            let _ = task_stream_tx.send(ChatStreamEvent::AcpConfigOptions {
-                session_id: task_session_id.clone(),
-                source: Arc::downgrade(&task_runtime),
-                options: acp_options,
-                error: None,
-                failed_config: None,
-            });
-        }
-        drop(agent);
-        cleanup.error = run_error;
-    });
-
-    let registration_id = match runtime.cancellation.track_active_run(task.abort_handle()) {
-        Ok(id) => id,
-        Err(error) => {
-            task.abort();
-            runtime.finish_generation(Some(error.clone()));
-            return Err(error);
-        }
+    let output_session_id = session_id.clone();
+    let output_tx = stream_tx.clone();
+    let on_output_text = move |output: String| {
+        let _ = output_tx.send(ChatStreamEvent::Agent {
+            session_id: output_session_id.clone(),
+            event: AgentEvent::MessageUpdate {
+                text_delta: Some(output),
+                reasoning_delta: None,
+                tool_call_name: None,
+            },
+        });
     };
-    if registration_tx.send(registration_id).is_err() {
-        runtime.cancellation.finish_active_run(registration_id);
-        let error = "Generation task stopped before registration".to_string();
-        runtime.finish_generation(Some(error.clone()));
-        return Err(error);
-    }
-    Ok(())
+    let acp_session_id = session_id.clone();
+    let acp_tx = stream_tx.clone();
+    let acp_source = Arc::downgrade(&runtime);
+    let on_acp_options = move |options, error, failed_config| {
+        let _ = acp_tx.send(ChatStreamEvent::AcpConfigOptions {
+            session_id: acp_session_id.clone(),
+            source: acp_source.clone(),
+            options,
+            error,
+            failed_config,
+        });
+    };
+    let finished_file = runtime.session_file.clone();
+    let on_finished = move || {
+        let _ = stream_tx.send(ChatStreamEvent::Finished {
+            session_id: session_id.clone(),
+            session_file: finished_file.clone(),
+        });
+    };
+    runtime.spawn_interactive_turn(
+        text,
+        images,
+        reasoning_effort,
+        work_dir,
+        pending_acp,
+        on_agent_event,
+        on_output_text,
+        on_acp_options,
+        on_finished,
+    )
 }
 
 /// Asks the session's external agent what settings it offers.

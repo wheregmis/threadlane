@@ -115,7 +115,7 @@ pub async fn generated_reported_session_path() -> PathBuf {
         attempts: AtomicUsize::new(0),
         previous_serialized_request: Mutex::new(None),
     });
-    let mut agent = threadlane_session::test_support::coding_agent_with_provider(
+    let mut agent = threadlane_coding_agent::controller::test_support::coding_agent_with_provider(
         CodingAgentOptions {
             api_key: "test-key".into(),
             account_id: None,
