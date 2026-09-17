@@ -6,7 +6,7 @@
 
 use crate::harness::{HookHandler, HookKind};
 use crate::tool_dispatcher::ToolDispatcher;
-use crate::tool_executor::ToolExecutor;
+use threadlane_protocol::ToolExecutor;
 use std::sync::Arc;
 
 /// A subsystem that contributes tools and/or hooks to the agent.

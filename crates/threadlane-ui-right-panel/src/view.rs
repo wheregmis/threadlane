@@ -13,6 +13,8 @@ use gpui_component::notification::Notification;
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::separator::Separator;
 use gpui_component::spinner::Spinner;
+use gpui_component::radio::{Radio, RadioGroup};
+use gpui_component::tab::{Tab, TabBar};
 use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::text::{TextView, TextViewState};
 use gpui_component::tree::{Tree, TreeEvent, TreeItem, TreeState};
@@ -20,7 +22,7 @@ use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Selectable, Sizab
 use threadlane_git::{GitBranchInfo, GitCommitInfo, GitFile, GitStatus};
 
 use threadlane_ui_state::next_event_batch;
-use threadlane_ui_state::watcher::WorkspaceWatcher;
+use threadlane_project::watcher::WorkspaceWatcher;
 use threadlane_ui_state::AppState;
 
 use super::browser::BrowserView;
@@ -47,6 +49,8 @@ pub struct RightPanelView {
     review_files: Vec<GitFile>,
     review_files_list_state: ListState,
     selected_files: HashSet<String>,
+    review_selection_initialized: bool,
+    review_diff_revision: u64,
     git_status: Option<GitStatus>,
     draft_pr_context_revision: u64,
     review_error: Option<String>,
@@ -55,11 +59,12 @@ pub struct RightPanelView {
     should_clear_commit_message: bool,
     git_busy: bool,
     git_message_pending: bool,
-    pub git_feedback: Option<String>,
+    pub(crate) git_feedback: Option<String>,
     pending_git_notifications: Vec<Notification>,
     branch_popover_open: bool,
     branch_filter_input: Entity<InputState>,
     new_branch_dialog_open: bool,
+    git_dialog_presented: bool,
     new_branch_name_input: Entity<InputState>,
     merge_dialog_open: bool,
     merge_filter_input: Entity<InputState>,
@@ -68,6 +73,7 @@ pub struct RightPanelView {
     switch_target_branch: Option<String>,
     switch_stash_mode: bool,
     stash_expanded: bool,
+    pr_expanded: bool,
     stash_files: Option<(usize, Vec<GitFile>)>,
     loading_stash_index: Option<usize>,
     last_fetched_time: Option<std::time::Instant>,
@@ -251,8 +257,12 @@ impl RightPanelView {
             );
         // Eager so agent browser commands always have a live view to act on,
         // even before the user opens the tab. Hidden until selected.
-        let browser = cx.new(|cx| BrowserView::new(window, cx));
-        browser.update(cx, |browser, cx| browser.set_visible(false, cx));
+        // GPUI test windows have no native handle for Wry; Git UI tests do not use the browser.
+        let browser = (!cfg!(test)).then(|| {
+            let browser = cx.new(|cx| BrowserView::new(window, cx));
+            browser.update(cx, |browser, cx| browser.set_visible(false, cx));
+            browser
+        });
 
         let mut panel = Self {
             model,
@@ -270,6 +280,8 @@ impl RightPanelView {
             review_files_list_state: ListState::new(0, ListAlignment::Top, px(160.0))
                 .with_uniform_item_height(px(32.0)),
             selected_files: HashSet::new(),
+            review_selection_initialized: false,
+            review_diff_revision: 0,
             git_status: None,
             draft_pr_context_revision: 0,
             review_error: None,
@@ -283,6 +295,7 @@ impl RightPanelView {
             branch_popover_open: false,
             branch_filter_input,
             new_branch_dialog_open: false,
+            git_dialog_presented: false,
             new_branch_name_input,
             merge_dialog_open: false,
             merge_filter_input,
@@ -291,6 +304,7 @@ impl RightPanelView {
             switch_target_branch: None,
             switch_stash_mode: true,
             stash_expanded: false,
+            pr_expanded: true,
             stash_files: None,
             loading_stash_index: None,
             last_fetched_time: None,
@@ -301,7 +315,7 @@ impl RightPanelView {
             saved_content: String::new(),
             is_dirty: false,
             pending_document: None,
-            browser: Some(browser),
+            browser,
             event_tx,
             _watcher: None,
             _subscriptions: vec![observe_model, tree_subscription],
@@ -330,6 +344,9 @@ impl RightPanelView {
         self.expanded_paths.clear();
         self.review_files.clear();
         self.selected_files.clear();
+        self.review_selection_initialized = false;
+        self.review_diff_revision = self.review_diff_revision.wrapping_add(1);
+        self.pending_document = None;
         self.git_status = None;
         self.review_error = None;
         self.git_feedback = None;
@@ -402,7 +419,7 @@ impl RightPanelView {
         self.git_status = status;
     }
 
-    pub fn draft_pr_checkout_key(&self) -> Option<DraftPrContextKey> {
+    pub(crate) fn draft_pr_checkout_key(&self) -> Option<DraftPrContextKey> {
         let project = self.project.clone()?;
         let status = self.git_status.as_ref()?;
         if self.worktree_unavailable || status.detached {
@@ -420,7 +437,7 @@ impl RightPanelView {
         })
     }
 
-    pub fn draft_pr_creation_key(&self) -> Option<DraftPrContextKey> {
+    pub(crate) fn draft_pr_creation_key(&self) -> Option<DraftPrContextKey> {
         can_create_pull_request(!self.worktree_unavailable, self.git_status.as_ref())
             .then(|| self.draft_pr_checkout_key())
             .flatten()
@@ -465,9 +482,7 @@ impl RightPanelView {
 
     pub fn open_surface(&mut self, surface: Surface, cx: &mut Context<Self>) {
         if self.active_surface != Some(surface) {
-            self.document_title = None;
-            self.document_state
-                .update(cx, |state, cx| state.set_text("", cx));
+            self.close_document(cx);
         }
         self.active_surface = Some(surface);
         self.refresh_surface(surface);
@@ -481,7 +496,7 @@ impl RightPanelView {
         }
     }
 
-    pub fn refresh_surface(&self, surface: Surface) {
+    pub(crate) fn refresh_surface(&self, surface: Surface) {
         let Some(project) = self.project.clone() else {
             return;
         };
@@ -515,7 +530,43 @@ impl RightPanelView {
         });
     }
 
+    fn open_file_diff(&mut self, path: String, cx: &mut Context<Self>) {
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        self.review_diff_revision = self.review_diff_revision.wrapping_add(1);
+        let revision = self.review_diff_revision;
+        let title = format!("Review · {path}");
+        self.document_title = Some(title.clone());
+        self.editor_state = None;
+        self.editor_subscription = None;
+        self.document_state
+            .update(cx, |state, cx| state.set_text("Loading diff…", cx));
+        cx.spawn(async move |this, cx| {
+            let work_dir = project.clone();
+            let content = cx
+                .background_executor()
+                .spawn(async move {
+                    threadlane_git::diff_file(&work_dir, &path)
+                        .unwrap_or_else(|error| format!("Could not load diff: {error}"))
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.project.as_ref() == Some(&project)
+                    && this.review_diff_revision == revision
+                    && this.document_title.as_ref() == Some(&title)
+                {
+                    this.pending_document = Some((title, content));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn close_document(&mut self, cx: &mut Context<Self>) {
+        self.review_diff_revision = self.review_diff_revision.wrapping_add(1);
         self.document_title = None;
         self.editor_state = None;
         self.editor_subscription = None;
@@ -630,23 +681,16 @@ impl RightPanelView {
                 }
                 self.replace_git_status(status);
                 let current_set: HashSet<String> = files.iter().map(|f| f.path.clone()).collect();
-                if self.selected_files.is_empty() {
-                    self.selected_files = current_set;
-                } else {
-                    let kept: HashSet<String> = self
-                        .selected_files
-                        .iter()
-                        .filter(|p| current_set.contains(*p))
-                        .cloned()
-                        .collect();
-                    if kept.is_empty() {
-                        self.selected_files = current_set;
-                    } else {
-                        self.selected_files = kept;
-                    }
-                }
+                retain_review_selection(
+                    &mut self.selected_files,
+                    current_set,
+                    &mut self.review_selection_initialized,
+                );
                 self.review_files = files;
                 self.review_error = error;
+                if let Some(path) = self.document_title.as_deref().and_then(|title| title.strip_prefix("Review · ")).map(str::to_owned) {
+                    self.open_file_diff(path, cx);
+                }
                 self.stash_files = None;
                 self.loading_stash_index = None;
             }
@@ -779,7 +823,7 @@ impl RightPanelView {
             cx.notify();
             return;
         }
-        let (api_key, account_id) = threadlane_session::provider_credentials(&model);
+        let (api_key, account_id) = threadlane_coding_agent::credentials::provider_credentials(&model);
         let tx = self.event_tx.clone();
         let Ok(executor) = threadlane_ui_state::chat::executor() else {
             self.git_feedback = Some("Unable to start the model runtime.".into());
@@ -813,7 +857,7 @@ impl RightPanelView {
                 } else {
                     diff
                 };
-                let raw = threadlane_session::provider_client_for(api_key, account_id)
+                let raw = threadlane_coding_agent::credentials::provider_client_for(api_key, account_id)
                     .generate_commit_message(&model, &diff)
                     .await?;
                 let message = normalize_generated_commit_message(&raw);
@@ -841,7 +885,7 @@ impl RightPanelView {
         self.execute_git_action(action, Some(window), cx);
     }
 
-    pub fn run_git_action_without_window(
+    pub(crate) fn run_git_action_without_window(
         &mut self,
         action: GitAction,
         cx: &mut Context<Self>,
@@ -1186,16 +1230,9 @@ impl RightPanelView {
             .unwrap_or("no branch")
             .to_owned();
         let git_state = match self.git_status.as_ref() {
-            Some(status) if status.has_changes => "dirty",
-            Some(_) => "clean",
-            None => "Git not initialized",
-        };
-        let git_color = if git_state == "dirty" {
-            theme.warning
-        } else if git_state == "clean" {
-            theme.success
-        } else {
-            theme.muted_foreground
+            Some(status) if status.has_changes => format!("{} files changed", status.files.len()),
+            Some(_) => "No changes".into(),
+            None => "Git status unavailable".into(),
         };
         let file_context = self
             .document_title
@@ -1211,6 +1248,7 @@ impl RightPanelView {
                 div()
                     .flex()
                     .items_center()
+                    .flex_wrap()
                     .gap_2()
                     .child(div().font_weight(FontWeight::MEDIUM).child(repository))
                     .child(
@@ -1218,7 +1256,7 @@ impl RightPanelView {
                             .text_color(theme.muted_foreground)
                             .child(format!("· {branch}")),
                     )
-                    .child(div().text_color(git_color).child(git_state)),
+                    .child(div().text_color(theme.muted_foreground).child(git_state)),
             )
             .child(
                 div()
@@ -1239,7 +1277,11 @@ impl RightPanelView {
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
-        let active = self.active_surface;
+        let surfaces = Surface::all();
+        let selected_surface = self.active_surface.and_then(|active| {
+            surfaces.iter().position(|surface| *surface == active)
+        });
+        let selected_index = selected_surface.unwrap_or(0);
         div()
             .flex_none()
             .pt(threadlane_ui_theme::WINDOW_CONTROLS_CLEARANCE)
@@ -1252,26 +1294,27 @@ impl RightPanelView {
                     .flex()
                     .items_center()
                     .gap_1()
-                    .children(Surface::all().into_iter().map(|surface| {
-                        Button::new(SharedString::from(format!(
-                            "right-panel-tab-{}",
-                            surface.label().to_lowercase()
-                        )))
-                        .icon(surface.icon())
-                        .label(surface.label())
-                        .ghost()
-                        .selected(active == Some(surface))
-                        .small()
-                        .on_click(cx.listener(
-                            move |this, _event, _window, cx| {
-                                this.open_surface(surface, cx);
-                            },
-                        ))
-                    }))
+                    .child(
+                        TabBar::new("right-panel-surface-tabs")
+                            .underline()
+                            .small()
+                            .selected_index(selected_index)
+                            .children(surfaces.iter().map(|surface| {
+                                Tab::new()
+                                    .label(surface.label())
+                                    .aria_label(format!("{} panel", surface.label()))
+                            }))
+                            .on_click(cx.listener(move |this, ix, _window, cx| {
+                                if let Some(surface) = Surface::all().get(*ix).copied() {
+                                    this.open_surface(surface, cx);
+                                }
+                            })),
+                    )
                     .child(div().flex_1())
                     .child(
                         Button::new("right-panel-refresh")
-                            .icon(IconName::Redo)
+                        .accessibility_label("Refresh surface")
+                            .icon(Icon::default().path("icons/refresh-cw.svg"))
                             .tooltip("Refresh surface")
                             .ghost()
                             .xsmall()
@@ -1295,7 +1338,7 @@ impl RightPanelView {
             .child(
                 div()
                     .w_full()
-                    .max_w(px(420.0))
+                    .max_w(rems(26.0))
                     .flex()
                     .flex_col()
                     .items_center()
@@ -1318,6 +1361,7 @@ impl RightPanelView {
                                 "right-panel-card-{}",
                                 surface.label().to_lowercase()
                             )))
+                            .accessibility_label(surface.label())
                             .child(
                                 div()
                                     .size_full()
@@ -1362,7 +1406,7 @@ impl RightPanelView {
                 .flex_col()
                 .child(
                     div()
-                        .h(px(38.0))
+                        .h(rems(2.375))
                         .px_2()
                         .flex()
                         .items_center()
@@ -1376,6 +1420,10 @@ impl RightPanelView {
                                 .flex_1()
                                 .child(
                                     Button::new("right-panel-document-back")
+                                        .accessibility_label(match self.active_surface {
+                                            Some(Surface::Review) => "Back to changed files",
+                                            _ => "Back to project files",
+                                        })
                                         .icon(IconName::ArrowLeft)
                                         .tooltip(match self.active_surface {
                                             Some(Surface::Review) => "Back to changed files",
@@ -1426,6 +1474,7 @@ impl RightPanelView {
                                 }))
                                 .child(
                                     Button::new("close-document")
+                        .accessibility_label("Close document")
                                         .small()
                                         .ghost()
                                         .icon(IconName::Close)
@@ -1481,7 +1530,7 @@ impl RightPanelView {
                             .rounded_md()
                             .px_1p5()
                             .py_1()
-                            .pl(px(6.0 + depth as f32 * 12.0))
+                            .pl(rems(0.375 + depth as f32 * 0.75))
                             .selected(is_selected)
                             .child(
                                 div()
@@ -1582,7 +1631,7 @@ impl RightPanelView {
             .into_any_element()
     }
 
-    pub fn handle_discard_option(
+    pub(crate) fn handle_discard_option(
         panel: Entity<RightPanelView>,
         opt: DiscardOption,
         window: &mut Window,
@@ -1636,11 +1685,6 @@ impl RightPanelView {
             .as_ref()
             .map(|root| root.join(&path).display().to_string());
         let status = file.status_char().to_string();
-        let (status_bg, status_color) = match file.status_char() {
-            'A' | '?' => (theme.success.opacity(0.15), theme.success),
-            'D' => (theme.danger.opacity(0.15), theme.danger),
-            _ => (theme.warning.opacity(0.15), theme.warning),
-        };
         let context_path = path.clone();
         div()
             .id(SharedString::from(format!("review-file-{path}")))
@@ -1666,6 +1710,7 @@ impl RightPanelView {
             .focus(|row| row.border_color(theme.primary))
             .child(
                 Checkbox::new(SharedString::from(format!("chk-{path}")))
+                    .accessibility_label(format!("Select {path} for Git actions"))
                     .checked(is_selected)
                     .small()
                     .on_click(cx.listener(move |this, checked, _window, cx| {
@@ -1678,84 +1723,21 @@ impl RightPanelView {
                     })),
             )
             .child(
-                div()
-                    .id(SharedString::from(format!("review-file-btn-{path}")))
+                Button::new(SharedString::from(format!("review-file-btn-{path}")))
+                    .label(path.clone())
+                    .icon(IconName::File)
+                    .tooltip(format!("Review {path} · {status} · +{} −{}", file.additions, file.deletions))
+                    .ghost()
+                    .small()
                     .flex_1()
                     .min_w_0()
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .cursor_pointer()
-                    .child(
-                        div()
-                            .size(px(14.0))
-                            .text_color(theme.muted_foreground)
-                            .child(IconName::File),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .truncate()
-                            .text_xs()
-                            .text_color(theme.foreground)
-                            .child(path.clone()),
-                    )
-                    .when(file.additions > 0, |row| {
-                        row.child(
-                            div()
-                                .text_xs()
-                                .text_color(theme.success)
-                                .child(format!("+{}", file.additions)),
-                        )
-                    })
-                    .when(file.deletions > 0, |row| {
-                        row.child(
-                            div()
-                                .text_xs()
-                                .text_color(theme.danger)
-                                .child(format!("-{}", file.deletions)),
-                        )
-                    })
-                    .child(
-                        div()
-                            .size(px(18.0))
-                            .rounded_sm()
-                            .border_1()
-                            .border_color(status_color.opacity(0.35))
-                            .bg(status_bg)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_xs()
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(status_color)
-                            .child(status),
-                    )
-                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                        let target_path = path.clone();
-                        let Some(project) = this.project.clone() else {
-                            return;
-                        };
-                        let diff_project = project.clone();
-                        let model = this.model.clone();
-                        cx.spawn(async move |_this, cx| {
-                            let diff_target = target_path.clone();
-                            let content = cx
-                                .background_executor()
-                                .spawn(async move {
-                                    threadlane_git::diff_file(&diff_project, &diff_target)
-                                        .unwrap_or_else(|error| error.to_string())
-                                })
-                                .await;
-                            let _ = model.update(cx, |state, cx| {
-                                state.request_open_diff(project, target_path, content);
-                                cx.notify();
-                            });
-                        })
-                        .detach();
+                    .overflow_hidden()
+                    .justify_start()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_file_diff(path.clone(), cx);
                     })),
             )
+            .child(div().text_xs().text_color(theme.muted_foreground).child(status))
             .context_menu({
                 let path = context_path.clone();
                 let absolute_path = absolute_path.clone();
@@ -1921,8 +1903,8 @@ impl RightPanelView {
         }
         let panel_entity = cx.entity().clone();
         let theme = cx.theme().colors;
-        if let Some(error) = &self.review_error {
-            return self.render_empty("Review unavailable", error, cx);
+        if let Some(error) = self.review_error.clone() {
+            return self.render_review_error(&error, cx);
         }
         let total_files = self.review_files.len();
         let selected_count = self.selected_files.len();
@@ -1979,7 +1961,6 @@ impl RightPanelView {
             Button::new("git-sync-action-btn")
                 .icon(IconName::ArrowUp)
                 .label("Publish Branch")
-                .primary()
                 .small()
                 .tooltip("Publish this branch to origin")
                 .on_click(cx.listener(|this, _event, window, cx| {
@@ -1989,7 +1970,6 @@ impl RightPanelView {
             Button::new("git-sync-action-btn")
                 .icon(IconName::ArrowDown)
                 .label(format!("Pull ({behind})"))
-                .primary()
                 .small()
                 .tooltip("Pull latest changes from origin")
                 .on_click(cx.listener(|this, _event, window, cx| {
@@ -1999,7 +1979,6 @@ impl RightPanelView {
             Button::new("git-sync-action-btn")
                 .icon(IconName::ArrowUp)
                 .label(format!("Push ({ahead})"))
-                .primary()
                 .small()
                 .tooltip("Push local commits to origin")
                 .on_click(cx.listener(|this, _event, window, cx| {
@@ -2007,7 +1986,7 @@ impl RightPanelView {
                 }))
         } else {
             Button::new("git-sync-action-btn")
-                .icon(IconName::Redo)
+                .icon(Icon::default().path("icons/download.svg"))
                 .label("Fetch")
                 .ghost()
                 .small()
@@ -2048,8 +2027,11 @@ impl RightPanelView {
             .border_color(theme.border)
             .bg(theme.muted.opacity(0.3))
             .child(
-                div()
-                    .id("git-branch-selector-btn")
+                Button::new("git-branch-selector-btn")
+                    .accessibility_label("Manage branches")
+                    .ghost()
+                    .small()
+                    .selected(self.branch_popover_open)
                     .flex()
                     .items_center()
                     .gap_2()
@@ -2058,8 +2040,6 @@ impl RightPanelView {
                     .px_2()
                     .py_1()
                     .rounded_md()
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.muted.opacity(0.6)))
                     .on_click(cx.listener(|this, _event, _window, cx| {
                         this.branch_popover_open = !this.branch_popover_open;
                         cx.notify();
@@ -2075,6 +2055,7 @@ impl RightPanelView {
                     )
                     .child(
                         div()
+                            .flex_1()
                             .truncate()
                             .text_xs()
                             .font_weight(FontWeight::SEMIBOLD)
@@ -2097,6 +2078,7 @@ impl RightPanelView {
             )
             .child(sync_actions);
 
+        let pr_expanded = self.pr_expanded;
         let pr_card = self.git_status.as_ref().and_then(|s| s.pr.as_ref()).map(|pr| {
             let comments_pr = pr.clone();
             let pr_url = pr.url.clone();
@@ -2139,6 +2121,22 @@ impl RightPanelView {
                 .border_color(theme.border)
                 .bg(theme.muted.opacity(0.2))
                 .child(
+                    Button::new("pr-card-toggle")
+                        .accessibility_label(if pr_expanded {
+                            "Collapse pull request details"
+                        } else {
+                            "Expand pull request details"
+                        })
+                        .ghost()
+                        .h_auto()
+                        .w_full()
+                        .p_0()
+                        .tooltip(if pr_expanded { "Collapse" } else { "Expand" })
+                        .on_click(cx.listener(|this, _event, _window, cx| {
+                            this.pr_expanded = !this.pr_expanded;
+                            cx.notify();
+                        }))
+                        .child(
                     div()
                         .flex()
                         .items_center()
@@ -2148,9 +2146,22 @@ impl RightPanelView {
                             div()
                                 .flex()
                                 .items_center()
-                                .gap_2()
+                                .gap_1p5()
                                 .min_w_0()
                                 .flex_1()
+                                .child(
+                                    div()
+                                        .size(px(14.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .text_color(theme.muted_foreground)
+                                        .child(if pr_expanded {
+                                            IconName::ChevronDown
+                                        } else {
+                                            IconName::ChevronRight
+                                        }),
+                                )
                                 .child(
                                     div()
                                         .size(px(16.0))
@@ -2173,6 +2184,7 @@ impl RightPanelView {
                             let target_url = pr_url.clone();
                             row.child(
                                 Button::new("pr-link-btn")
+                                    .accessibility_label("Open pull request in browser")
                                     .icon(IconName::ExternalLink)
                                     .ghost()
                                     .xsmall()
@@ -2182,8 +2194,10 @@ impl RightPanelView {
                                     }),
                             )
                         }),
+                        ),
                 )
-                .child(
+                .when(pr_expanded, |card| {
+                    card.child(
                     div()
                         .flex()
                         .items_center()
@@ -2244,7 +2258,7 @@ impl RightPanelView {
                             let fix_failed_summary = failed_summary.clone();
                             Button::new("fix-ci-btn")
                                 .label("Fix CI")
-                                .danger()
+                                .outline()
                                 .xsmall()
                                 .tooltip("Ask AI to fix failing CI checks")
                                 .on_click(cx.listener(move |this, _event, _window, cx| {
@@ -2328,6 +2342,7 @@ impl RightPanelView {
                             ),
                     )
                 })
+                })
         });
 
         let staged_count = self.review_files.iter().filter(|f| f.staged).count();
@@ -2406,6 +2421,7 @@ impl RightPanelView {
                         .gap_2()
                         .child(
                             Checkbox::new("select-all-files")
+                                .accessibility_label("Select all files for Git actions")
                                 .checked(all_selected)
                                 .small()
                                 .on_click(cx.listener(move |this, checked, _window, cx| {
@@ -2439,16 +2455,10 @@ impl RightPanelView {
                         .items_center()
                         .gap_1p5()
                         .child(
-                            Tag::new()
-                                .child(format!("+{selected_additions}"))
-                                .with_variant(TagVariant::Success)
-                                .small(),
-                        )
-                        .child(
-                            Tag::new()
-                                .child(format!("−{selected_deletions}"))
-                                .with_variant(TagVariant::Danger)
-                                .small(),
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(format!("+{selected_additions} −{selected_deletions}")),
                         )
                         .child(
                             Button::new("git-stage-all-btn")
@@ -2628,7 +2638,7 @@ impl RightPanelView {
                             })),
                     ),
             )
-            .child(Input::new(&self.commit_message_input).disabled(self.git_busy))
+            .child(Input::new(&self.commit_message_input).aria_label("Commit summary").disabled(self.git_busy))
             .child(
                 div()
                     .flex()
@@ -2669,6 +2679,7 @@ impl RightPanelView {
                     .when(can_push, |row| {
                         row.child(
                             Button::new("git-push-only")
+                                .accessibility_label("Push commits")
                                 .icon(Icon::default().path("icons/git/actions.svg"))
                                 .tooltip("Push commits")
                                 .ghost()
@@ -2735,13 +2746,9 @@ impl RightPanelView {
                     .flex_col()
                     .gap_1p5()
                     .child(
-                        div()
-                            .id("stash-header-toggle")
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap_2()
-                            .cursor_pointer()
+                        Button::new("stash-header-toggle")
+                            .accessibility_label("Show stashed changes")
+                            .ghost().h_auto().w_full().p_0()
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.stash_expanded = !this.stash_expanded;
                                 if this.stash_expanded
@@ -2767,6 +2774,11 @@ impl RightPanelView {
                                 }
                                 cx.notify();
                             }))
+                            .child(div().w_full().whitespace_normal()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
                             .child(
                                 div()
                                     .flex()
@@ -2794,7 +2806,7 @@ impl RightPanelView {
                                             .text_color(theme.muted_foreground)
                                             .child(format!("({count_label}{time_str})")),
                                     ),
-                            ),
+                            )),
                     )
                     .child(
                         div()
@@ -2828,17 +2840,9 @@ impl RightPanelView {
                                 let project_for_click = project.clone();
                                 let model_for_click = model.clone();
 
-                                div()
-                                    .id(SharedString::from(format!("stash-file-{path}")))
-                                    .h(px(26.0))
-                                    .px_2()
-                                    .rounded_sm()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .gap_2()
-                                    .cursor_pointer()
-                                    .hover(|row| row.bg(theme.muted))
+                                Button::new(SharedString::from(format!("stash-file-{path}")))
+                                    .accessibility_label(format!("Review stashed file {path}"))
+                                    .ghost().h_auto().w_full().p_0()
                                     .on_click(cx.listener(move |_this, _event, _window, cx| {
                                         let Some(proj) = project_for_click.clone() else {
                                             return;
@@ -2866,6 +2870,14 @@ impl RightPanelView {
                                         })
                                         .detach();
                                     }))
+                                    .child(div().w_full().whitespace_normal()
+                                    .h(px(26.0))
+                                    .px_2()
+                                    .rounded_sm()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_2()
                                     .child(
                                         div()
                                             .flex()
@@ -2904,7 +2916,7 @@ impl RightPanelView {
                                                     .text_color(theme.danger)
                                                     .child(format!("-{dels}")),
                                             ),
-                                    )
+                                    ))
                             }))
                             .when(is_loading, |container| {
                                 container.child(
@@ -2925,8 +2937,9 @@ impl RightPanelView {
                             .child(
                                 Button::new("discard-stash-btn")
                                     .label("Discard")
-                                    .ghost()
+                                    .danger()
                                     .xsmall()
+                                    .tooltip("Discard the stashed changes")
                                     .disabled(self.git_busy)
                                     .on_click(cx.listener(move |this, _event, window, cx| {
                                         this.run_git_action(
@@ -2939,8 +2952,9 @@ impl RightPanelView {
                             .child(
                                 Button::new("restore-stash-btn")
                                     .label("Restore Stash")
-                                    .primary()
+                                    .outline()
                                     .xsmall()
+                                    .tooltip("Restore the stashed changes")
                                     .disabled(self.git_busy)
                                     .on_click(cx.listener(move |this, _event, window, cx| {
                                         this.run_git_action(
@@ -2954,127 +2968,45 @@ impl RightPanelView {
             });
 
         let changes_active = self.review_tab == ReviewTab::Changes;
-        let history_active = self.review_tab == ReviewTab::History;
         let total_changes = self.review_files.len();
 
         let staged_in_tab = self.review_files.iter().filter(|f| f.staged).count();
+        let changes_label = if total_changes > 0 {
+            if staged_in_tab > 0 {
+                format!("Changes ({total_changes}, {staged_in_tab} staged)")
+            } else {
+                format!("Changes ({total_changes})")
+            }
+        } else {
+            "Changes".to_string()
+        };
         let review_sub_tabs = div()
-            .flex()
-            .items_center()
+            .flex_none()
             .border_b_1()
             .border_color(theme.border)
             .bg(theme.title_bar)
+            .px_3()
             .child(
-                div()
-                    .id("review-tab-changes")
-                    .flex_1()
-                    .py_2()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .gap_1p5()
-                    .cursor_pointer()
-                    .border_b_2()
-                    .border_color(if changes_active {
-                        theme.primary
-                    } else {
-                        gpui::transparent_black()
-                    })
-                    .hover(|s| s.bg(theme.muted.opacity(0.4)))
-                    .on_click(cx.listener(|this, _event, _window, cx| {
-                        this.review_tab = ReviewTab::Changes;
+                TabBar::new("review-sub-tabs")
+                    .underline()
+                    .small()
+                    .selected_index(if changes_active { 0 } else { 1 })
+                    .children(vec![
+                        Tab::new()
+                            .label(changes_label.clone())
+                            .aria_label(format!("Changes, {} files, {} staged", total_changes, staged_in_tab)),
+                        Tab::new()
+                            .label("History")
+                            .aria_label("History"),
+                    ])
+                    .on_click(cx.listener(|this, ix, _window, cx| {
+                        this.review_tab = if *ix == 0 {
+                            ReviewTab::Changes
+                        } else {
+                            ReviewTab::History
+                        };
                         cx.notify();
-                    }))
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_weight(if changes_active {
-                                FontWeight::BOLD
-                            } else {
-                                FontWeight::NORMAL
-                            })
-                            .text_color(if changes_active {
-                                theme.foreground
-                            } else {
-                                theme.muted_foreground
-                            })
-                            .child("Changes"),
-                    )
-                    .children((total_changes > 0).then(|| {
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .px_1p5()
-                                    .py_0p5()
-                                    .rounded_full()
-                                    .bg(if changes_active {
-                                        theme.muted
-                                    } else {
-                                        theme.muted.opacity(0.5)
-                                    })
-                                    .text_xs()
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(if changes_active {
-                                        theme.foreground
-                                    } else {
-                                        theme.muted_foreground
-                                    })
-                                    .child(format!("{total_changes}")),
-                            )
-                            .when(staged_in_tab > 0, |badge| {
-                                badge.child(
-                                    div()
-                                        .px_1p5()
-                                        .py_0p5()
-                                        .rounded_full()
-                                        .bg(theme.success.opacity(0.15))
-                                        .text_xs()
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_color(theme.success)
-                                        .child(format!("{staged_in_tab} staged")),
-                                )
-                            })
                     })),
-            )
-            .child(
-                div()
-                    .id("review-tab-history")
-                    .flex_1()
-                    .py_2()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .gap_1p5()
-                    .cursor_pointer()
-                    .border_b_2()
-                    .border_color(if history_active {
-                        theme.primary
-                    } else {
-                        gpui::transparent_black()
-                    })
-                    .hover(|s| s.bg(theme.muted.opacity(0.4)))
-                    .on_click(cx.listener(|this, _event, _window, cx| {
-                        this.review_tab = ReviewTab::History;
-                        cx.notify();
-                    }))
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_weight(if history_active {
-                                FontWeight::BOLD
-                            } else {
-                                FontWeight::NORMAL
-                            })
-                            .text_color(if history_active {
-                                theme.foreground
-                            } else {
-                                theme.muted_foreground
-                            })
-                            .child("History"),
-                    ),
             );
 
         let review_body = if self.branch_popover_open {
@@ -3206,14 +3138,9 @@ impl RightPanelView {
                             theme.title_bar.opacity(0.5)
                         })
                         .child(
-                            div()
-                                .id(SharedString::from(format!("commit-header-{sha}")))
-                                .p_2p5()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .cursor_pointer()
-                                .hover(|row| row.bg(theme.muted.opacity(0.6)))
+                            Button::new(SharedString::from(format!("commit-header-{sha}")))
+                                .accessibility_label(format!("Inspect commit {short_sha}: {summary}"))
+                                .ghost().h_auto().w_full().p_0()
                                 .on_click(cx.listener(move |this, _event, _window, cx| {
                                     if this.selected_commit_sha.as_deref() == Some(&click_sha) {
                                         this.selected_commit_sha = None;
@@ -3239,6 +3166,11 @@ impl RightPanelView {
                                     }
                                     cx.notify();
                                 }))
+                                .child(div().w_full().whitespace_normal()
+                                .p_2p5()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
                                 .child(
                                     div()
                                         .flex()
@@ -3284,7 +3216,7 @@ impl RightPanelView {
                                                 .child(IconName::User),
                                         )
                                         .child(format!("{author} • {rel_time}")),
-                                ),
+                                )),
                         )
                         .children(is_expanded.then(|| {
                             let commit_files = selected_files.clone();
@@ -3333,19 +3265,11 @@ impl RightPanelView {
                                     let diff_proj = proj_for_diff.clone();
                                     let m = model_ref.clone();
 
-                                    div()
-                                        .id(SharedString::from(format!(
+                                    Button::new(SharedString::from(format!(
                                             "commit-file-{commit_sha}-{path}"
                                         )))
-                                        .h(px(26.0))
-                                        .px_2()
-                                        .rounded_md()
-                                        .flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .gap_2()
-                                        .cursor_pointer()
-                                        .hover(|row| row.bg(theme.muted))
+                                        .accessibility_label(format!("Review {path} in commit {commit_sha}"))
+                                        .ghost().h_auto().w_full().p_0()
                                         .on_click(cx.listener(move |_this, _event, _window, cx| {
                                             let Some(proj) = diff_proj.clone() else {
                                                 return;
@@ -3372,6 +3296,14 @@ impl RightPanelView {
                                             })
                                             .detach();
                                         }))
+                                        .child(div().w_full().whitespace_normal()
+                                        .h(px(26.0))
+                                        .px_2()
+                                        .rounded_md()
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .gap_2()
                                         .child(
                                             div()
                                                 .flex_1()
@@ -3426,7 +3358,7 @@ impl RightPanelView {
                                                         .text_color(status_color)
                                                         .child(status),
                                                 ),
-                                        )
+                                        ))
                                 }))
                         }))
                 }))
@@ -3464,7 +3396,7 @@ impl RightPanelView {
                             )
                             .child(
                                 div().flex_1().child(
-                                    Input::new(&self.history_filter_input)
+                                    Input::new(&self.history_filter_input).aria_label("Filter commits")
                                         .appearance(false)
                                         .bordered(false),
                                 ),
@@ -3580,7 +3512,7 @@ impl RightPanelView {
                             )
                             .child(
                                 div().flex_1().child(
-                                    Input::new(&self.branch_filter_input)
+                                    Input::new(&self.branch_filter_input).aria_label("Filter branches")
                                         .appearance(false)
                                         .bordered(false),
                                 ),
@@ -3589,10 +3521,10 @@ impl RightPanelView {
                     .child(
                         Button::new("open-new-branch-modal-btn")
                             .icon(IconName::Plus)
-                            .label("New Branch")
+                            .label("New Branch…")
                             .outline()
                             .small()
-                            .tooltip("Create a new branch")
+                            .tooltip("Create a new branch…")
                             .on_click(cx.listener(|this, _event, _window, cx| {
                                 this.new_branch_dialog_open = true;
                                 cx.notify();
@@ -3600,6 +3532,7 @@ impl RightPanelView {
                     )
                     .child(
                         Button::new("close-branch-manager-btn")
+                                    .accessibility_label("Back to review")
                             .icon(IconName::Close)
                             .ghost()
                             .small()
@@ -3620,8 +3553,15 @@ impl RightPanelView {
                     .flex_col()
                     .gap_3()
                     .child(
-                        div()
-                            .id("quick-merge-banner")
+                        Button::new("quick-merge-banner")
+                            .accessibility_label("Merge a branch…")
+                            .ghost().h_auto().w_full().p_0()
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.merge_dialog_open = true;
+                                this.merge_selected_branch = None;
+                                cx.notify();
+                            }))
+                            .child(div().w_full().whitespace_normal()
                             .flex()
                             .items_center()
                             .justify_between()
@@ -3631,13 +3571,6 @@ impl RightPanelView {
                             .border_1()
                             .border_color(theme.border)
                             .bg(theme.muted.opacity(0.35))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(theme.muted.opacity(0.7)))
-                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                this.merge_dialog_open = true;
-                                this.merge_selected_branch = None;
-                                cx.notify();
-                            }))
                             .child(
                                 div()
                                     .flex()
@@ -3662,7 +3595,7 @@ impl RightPanelView {
                                     .size(px(14.0))
                                     .text_color(theme.muted_foreground)
                                     .child(IconName::ChevronRight),
-                            ),
+                            )),
                     )
                     .when(!default_branches.is_empty(), |el| {
                         el.child(self.render_branch_section("DEFAULT BRANCH", default_branches, cx))
@@ -3701,22 +3634,9 @@ impl RightPanelView {
                 let is_current = branch.is_current;
                 let rel_time = branch.relative_time.clone();
                 let branch_name_for_click = name.clone();
-                div()
-                    .id(SharedString::from(format!("branch-row-{}", name)))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .px_2p5()
-                    .py_2()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .bg(if is_current {
-                        theme.muted.opacity(0.7)
-                    } else {
-                        gpui::transparent_black()
-                    })
-                    .hover(|s| s.bg(theme.muted))
+                Button::new(SharedString::from(format!("branch-row-{}", name)))
+                    .accessibility_label(format!("Switch to branch {name}"))
+                    .ghost().h_auto().w_full().p_0()
                     .on_click(cx.listener(move |this, _event, window, cx| {
                         if !is_current {
                             let has_dirty = this
@@ -3738,6 +3658,19 @@ impl RightPanelView {
                             }
                         }
                     }))
+                    .child(div().w_full().whitespace_normal()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .px_2p5()
+                    .py_2()
+                    .rounded_md()
+                    .bg(if is_current {
+                        theme.muted.opacity(0.7)
+                    } else {
+                        gpui::transparent_black()
+                    })
                     .child(
                         div()
                             .flex()
@@ -3790,7 +3723,7 @@ impl RightPanelView {
                             .text_xs()
                             .text_color(theme.muted_foreground)
                             .child(rel_time)
-                    }))
+                    })))
             }))
     }
 
@@ -3802,7 +3735,54 @@ impl RightPanelView {
         self.switch_target_branch = None;
     }
 
-    pub fn render_git_dialog_layer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub fn sync_git_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let open = self.new_branch_dialog_open || self.merge_dialog_open || self.switch_dialog_open;
+        if open == self.git_dialog_presented {
+            return;
+        }
+        self.git_dialog_presented = open;
+        if !open {
+            window.close_dialog(cx);
+            return;
+        }
+        let panel = cx.entity().downgrade();
+        let width = if self.new_branch_dialog_open {
+            26.25
+        } else {
+            28.75
+        };
+        let title = if self.new_branch_dialog_open {
+            "Create a branch".to_string()
+        } else if self.merge_dialog_open {
+            "Merge branches".to_string()
+        } else {
+            format!(
+                "Switch to {}",
+                self.switch_target_branch.as_deref().unwrap_or("main")
+            )
+        };
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let close_panel = panel.clone();
+            let content = panel
+                .update(cx, |panel, cx| panel.render_git_dialog_layer(cx))
+                .ok()
+                .flatten();
+            dialog
+                .w(window.rem_size() * width)
+                .title(title.clone())
+                .children(content)
+                .on_ok(|_, _, _| false)
+                .on_close(move |_, _, cx| {
+                    let _ = close_panel.update(cx, |panel, cx| {
+                        panel.git_dialog_presented = false;
+                        panel.close_all_git_dialogs();
+                        cx.notify();
+                    });
+                })
+        });
+    }
+
+    fn render_git_dialog_layer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.new_branch_dialog_open {
             Some(self.render_new_branch_dialog(cx).into_any_element())
         } else if self.merge_dialog_open {
@@ -3831,138 +3811,88 @@ impl RightPanelView {
         let can_create = !name.is_empty() && !self.git_busy;
 
         div()
-            .id("new-branch-modal-backdrop")
-            .absolute()
-            .inset_0()
-            .bg(threadlane_ui_theme::overlay_scrim())
+            .id("new-branch-dialog")
+            .w_full()
             .flex()
-            .items_center()
-            .justify_center()
-            .p_4()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _event, _window, cx| {
-                    this.close_all_git_dialogs();
-                    cx.notify();
-                }),
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child("Based on")
+                    .child(
+                        Tag::new()
+                            .child(current_branch)
+                            .with_variant(TagVariant::Secondary)
+                            .small(),
+                    ),
             )
             .child(
                 div()
-                    .id("new-branch-dialog")
-                    .w(px(420.0))
-                    .p_5()
-                    .rounded_xl()
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.title_bar)
-                    .shadow_xl()
                     .flex()
                     .flex_col()
-                    .gap_3()
-                    .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
-                        cx.stop_propagation()
-                    })
+                    .gap_1()
                     .child(
                         div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(theme.foreground)
-                                    .child("Create a branch"),
-                            )
-                            .child(
-                                Button::new("close-new-branch-dialog-btn")
-                                    .icon(IconName::Close)
-                                    .ghost()
-                                    .xsmall()
-                                    .on_click(cx.listener(|this, _event, _window, cx| {
-                                        this.close_all_git_dialogs();
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1p5()
                             .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child("Based on")
-                            .child(
-                                Tag::new()
-                                    .child(current_branch)
-                                    .with_variant(TagVariant::Secondary)
-                                    .small(),
-                            ),
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.foreground)
+                            .child("Branch name"),
                     )
                     .child(
                         div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.background)
                             .child(
-                                div()
-                                    .text_xs()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(theme.foreground)
-                                    .child("Branch name"),
-                            )
-                            .child(
-                                div()
-                                    .px_2()
-                                    .py_1()
-                                    .rounded_md()
-                                    .border_1()
-                                    .border_color(theme.border)
-                                    .bg(theme.background)
-                                    .child(Input::new(&self.new_branch_name_input).bordered(false)),
+                                Input::new(&self.new_branch_name_input)
+                                    .aria_label("New branch name")
+                                    .bordered(false),
                             ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .gap_2()
+                    .pt_2()
+                    .child(
+                        Button::new("cancel-new-branch-btn")
+                            .label("Cancel")
+                            .ghost()
+                            .small()
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.close_all_git_dialogs();
+                                cx.notify();
+                            })),
                     )
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_end()
-                            .gap_2()
-                            .pt_2()
-                            .child(
-                                Button::new("cancel-new-branch-btn")
-                                    .label("Cancel")
-                                    .ghost()
-                                    .small()
-                                    .on_click(cx.listener(|this, _event, _window, cx| {
-                                        this.close_all_git_dialogs();
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("submit-new-branch-btn")
-                                    .label("Create Branch")
-                                    .primary()
-                                    .small()
-                                    .disabled(!can_create)
-                                    .on_click(cx.listener(move |this, _event, window, cx| {
-                                        let name = this
-                                            .new_branch_name_input
-                                            .read(cx)
-                                            .value()
-                                            .trim()
-                                            .to_string();
-                                        if !name.is_empty() {
-                                            this.run_git_action(
-                                                GitAction::CreateBranch(name),
-                                                window,
-                                                cx,
-                                            );
-                                            this.close_all_git_dialogs();
-                                        }
-                                    })),
-                            ),
+                        Button::new("submit-new-branch-btn")
+                            .label("Create Branch")
+                            .primary()
+                            .small()
+                            .disabled(!can_create)
+                            .on_click(cx.listener(move |this, _event, window, cx| {
+                                let name = this
+                                    .new_branch_name_input
+                                    .read(cx)
+                                    .value()
+                                    .trim()
+                                    .to_string();
+                                if !name.is_empty() {
+                                    this.run_git_action(GitAction::CreateBranch(name), window, cx);
+                                    this.close_all_git_dialogs();
+                                }
+                            })),
                     ),
             )
     }
@@ -4022,105 +3952,70 @@ impl RightPanelView {
         let can_merge = selected.is_some() && !self.git_busy;
 
         div()
-            .id("merge-branch-modal-backdrop")
-            .absolute()
-            .inset_0()
-            .bg(threadlane_ui_theme::overlay_scrim())
+            .id("merge-branch-dialog")
+            .w_full()
+            .max_h(rems(32.5))
             .flex()
-            .items_center()
-            .justify_center()
-            .p_4()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _event, _window, cx| {
-                    this.close_all_git_dialogs();
-                    cx.notify();
-                }),
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child("Select a branch to merge into your current working tree:"),
             )
             .child(
                 div()
-                    .id("merge-branch-dialog")
-                    .w(px(460.0))
-                    .max_h(px(520.0))
-                    .p_5()
-                    .rounded_xl()
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .px_2()
+                    .h(px(32.0))
+                    .rounded_md()
                     .border_1()
                     .border_color(theme.border)
-                    .bg(theme.title_bar)
-                    .shadow_xl()
+                    .bg(theme.background)
+                    .child(
+                        div()
+                            .size(px(14.0))
+                            .text_color(theme.muted_foreground)
+                            .child(IconName::Search),
+                    )
+                    .child(
+                        div().flex_1().child(
+                            Input::new(&self.merge_filter_input)
+                                .aria_label("Filter branches to merge")
+                                .appearance(false)
+                                .bordered(false),
+                        ),
+                    ),
+            )
+            .child(
+                div()
                     .flex()
                     .flex_col()
-                    .gap_3()
-                    .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
-                        cx.stop_propagation()
-                    })
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
+                    .max_h(rems(15.0))
+                    .overflow_y_scrollbar()
+                    .gap_1()
+                    .children(branches.into_iter().map(|b| {
+                        let name = b.name.clone();
+                        let is_selected = selected.as_deref() == Some(&name);
+                        let name_for_click = name.clone();
+                        Button::new(SharedString::from(format!("merge-select-{}", name)))
+                            .accessibility_label(format!("Select branch {name} to merge"))
+                            .toggled(is_selected)
+                            .ghost()
+                            .h_auto()
+                            .w_full()
+                            .p_0()
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.merge_selected_branch = Some(name_for_click.clone());
+                                cx.notify();
+                            }))
                             .child(
                                 div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(theme.foreground)
-                                    .child(format!("Merge into {current_branch}")),
-                            )
-                            .child(
-                                Button::new("close-merge-dialog-btn")
-                                    .icon(IconName::Close)
-                                    .ghost()
-                                    .xsmall()
-                                    .on_click(cx.listener(|this, _event, _window, cx| {
-                                        this.close_all_git_dialogs();
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child("Select a branch to merge into your current working tree:"),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1p5()
-                            .px_2()
-                            .h(px(32.0))
-                            .rounded_md()
-                            .border_1()
-                            .border_color(theme.border)
-                            .bg(theme.background)
-                            .child(
-                                div()
-                                    .size(px(14.0))
-                                    .text_color(theme.muted_foreground)
-                                    .child(IconName::Search),
-                            )
-                            .child(
-                                div().flex_1().child(
-                                    Input::new(&self.merge_filter_input)
-                                        .appearance(false)
-                                        .bordered(false),
-                                ),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .max_h(px(240.0))
-                            .overflow_y_scrollbar()
-                            .gap_1()
-                            .children(branches.into_iter().map(|b| {
-                                let name = b.name.clone();
-                                let is_selected = selected.as_deref() == Some(&name);
-                                let name_for_click = name.clone();
-                                div()
-                                    .id(SharedString::from(format!("merge-select-{}", name)))
+                                    .w_full()
+                                    .whitespace_normal()
                                     .flex()
                                     .items_center()
                                     .justify_between()
@@ -4128,7 +4023,6 @@ impl RightPanelView {
                                     .px_2p5()
                                     .py_2()
                                     .rounded_md()
-                                    .cursor_pointer()
                                     .border_1()
                                     .border_color(if is_selected {
                                         theme.primary
@@ -4140,11 +4034,6 @@ impl RightPanelView {
                                     } else {
                                         gpui::transparent_black()
                                     })
-                                    .hover(|s| s.bg(theme.muted))
-                                    .on_click(cx.listener(move |this, _event, _window, cx| {
-                                        this.merge_selected_branch = Some(name_for_click.clone());
-                                        cx.notify();
-                                    }))
                                     .child(
                                         div()
                                             .flex()
@@ -4183,51 +4072,49 @@ impl RightPanelView {
                                             .text_xs()
                                             .text_color(theme.muted_foreground)
                                             .child(b.relative_time)
-                                    }))
+                                    })),
+                            )
+                    })),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .gap_2()
+                    .pt_2()
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .child(
+                        Button::new("cancel-merge-btn")
+                            .label("Cancel")
+                            .ghost()
+                            .small()
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.close_all_git_dialogs();
+                                cx.notify();
                             })),
                     )
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_end()
-                            .gap_2()
-                            .pt_2()
-                            .border_t_1()
-                            .border_color(theme.border)
-                            .child(
-                                Button::new("cancel-merge-btn")
-                                    .label("Cancel")
-                                    .ghost()
-                                    .small()
-                                    .on_click(cx.listener(|this, _event, _window, cx| {
-                                        this.close_all_git_dialogs();
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("submit-merge-btn")
-                                    .label(if let Some(target) = &selected {
-                                        format!("Merge {target} into {current_branch}")
-                                    } else {
-                                        format!("Merge into {current_branch}")
-                                    })
-                                    .primary()
-                                    .small()
-                                    .disabled(!can_merge)
-                                    .on_click(cx.listener(move |this, _event, window, cx| {
-                                        if let Some(branch_to_merge) =
-                                            this.merge_selected_branch.clone()
-                                        {
-                                            this.run_git_action(
-                                                GitAction::Merge(branch_to_merge),
-                                                window,
-                                                cx,
-                                            );
-                                            this.close_all_git_dialogs();
-                                        }
-                                    })),
-                            ),
+                        Button::new("submit-merge-btn")
+                            .label(if let Some(target) = &selected {
+                                format!("Merge {target} into {current_branch}")
+                            } else {
+                                format!("Merge into {current_branch}")
+                            })
+                            .primary()
+                            .small()
+                            .disabled(!can_merge)
+                            .on_click(cx.listener(move |this, _event, window, cx| {
+                                if let Some(branch_to_merge) = this.merge_selected_branch.clone() {
+                                    this.run_git_action(
+                                        GitAction::Merge(branch_to_merge),
+                                        window,
+                                        cx,
+                                    );
+                                    this.close_all_git_dialogs();
+                                }
+                            })),
                     ),
             )
     }
@@ -4247,57 +4134,19 @@ impl RightPanelView {
         let is_stash = self.switch_stash_mode;
 
         div()
-            .id("switch-branch-modal-backdrop")
-            .absolute()
-            .inset_0()
-            .bg(threadlane_ui_theme::overlay_scrim())
-            .flex()
-            .items_center()
-            .justify_center()
-            .p_4()
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _event, _window, cx| {
-                this.close_all_git_dialogs();
-                cx.notify();
-            }))
-            .child(
-                div()
                     .id("switch-branch-dialog")
-                    .w(px(460.0))
-                    .p_5()
-                    .rounded_xl()
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.title_bar)
-                    .shadow_xl()
+                    .w_full()
+
+
+
+
+
+
                     .flex()
                     .flex_col()
                     .gap_3p5()
-                    .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
-                        cx.stop_propagation()
-                    })
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(theme.foreground)
-                                    .child("Switch Branch"),
-                            )
-                            .child(
-                                Button::new("close-switch-dialog-btn")
-                                    .icon(IconName::Close)
-                                    .ghost()
-                                    .xsmall()
-                                    .on_click(cx.listener(|this, _event, _window, cx| {
-                                        this.close_all_git_dialogs();
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
+
+
                     .child(
                         div()
                             .text_xs()
@@ -4305,116 +4154,34 @@ impl RightPanelView {
                             .child(format!("You have uncommitted changes on {current_branch}. What would you like to do with them?")),
                     )
                     .child(
-                        div()
-                            .id("switch-opt-stash")
-                            .flex()
-                            .items_start()
-                            .gap_2p5()
-                            .p_3()
-                            .rounded_lg()
-                            .border_1()
-                            .border_color(if is_stash { theme.primary } else { theme.border })
-                            .bg(if is_stash { theme.muted.opacity(0.8) } else { theme.background })
-                            .cursor_pointer()
-                            .hover(|s| s.bg(theme.muted))
-                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                this.switch_stash_mode = true;
-                                cx.notify();
-                            }))
+                        RadioGroup::vertical("switch-stash-mode")
+                            .selected_index(Some(if is_stash { 0 } else { 1 }))
                             .child(
-                                div()
-                                    .size(px(16.0))
-                                    .mt(px(2.0))
-                                    .rounded_full()
-                                    .border_2()
-                                    .border_color(if is_stash { theme.primary } else { theme.muted_foreground })
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .children(is_stash.then(|| {
-                                        div()
-                                            .size(px(8.0))
-                                            .rounded_full()
-                                            .bg(theme.primary)
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_0p5()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(theme.foreground)
-                                            .child(format!("Leave my changes on {current_branch} (Stash)")),
-                                    )
+                                Radio::new("switch-opt-stash")
+                                    .label(format!("Leave my changes on {current_branch} (Stash)"))
+                                    .accessibility_label("Leave changes on this branch using a stash")
                                     .child(
                                         div()
                                             .text_xs()
                                             .text_color(theme.muted_foreground)
                                             .child("Your in-progress changes will be stashed and restored when you switch back."),
                                     ),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("switch-opt-carry")
-                            .flex()
-                            .items_start()
-                            .gap_2p5()
-                            .p_3()
-                            .rounded_lg()
-                            .border_1()
-                            .border_color(if !is_stash { theme.primary } else { theme.border })
-                            .bg(if !is_stash { theme.muted.opacity(0.8) } else { theme.background })
-                            .cursor_pointer()
-                            .hover(|s| s.bg(theme.muted))
-                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                this.switch_stash_mode = false;
-                                cx.notify();
-                            }))
-                            .child(
-                                div()
-                                    .size(px(16.0))
-                                    .mt(px(2.0))
-                                    .rounded_full()
-                                    .border_2()
-                                    .border_color(if !is_stash { theme.primary } else { theme.muted_foreground })
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .children((!is_stash).then(|| {
-                                        div()
-                                            .size(px(8.0))
-                                            .rounded_full()
-                                            .bg(theme.primary)
-                                    })),
                             )
                             .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_0p5()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(theme.foreground)
-                                            .child(format!("Bring my changes to {target_branch}")),
-                                    )
+                                Radio::new("switch-opt-carry")
+                                    .label(format!("Bring my changes to {target_branch}"))
+                                    .accessibility_label("Carry changes to the selected branch")
                                     .child(
                                         div()
                                             .text_xs()
                                             .text_color(theme.muted_foreground)
                                             .child(format!("Your in-progress changes will be carried over to {target_branch}.")),
                                     ),
-                            ),
+                            )
+                            .on_click(cx.listener(|this, selected: &usize, _window, cx| {
+                                this.switch_stash_mode = *selected == 0;
+                                cx.notify();
+                            })),
                     )
                     .child(
                         div()
@@ -4450,8 +4217,66 @@ impl RightPanelView {
                                         this.branch_popover_open = false;
                                     })),
                             ),
+                    )
+    }
+
+    fn render_review_error(&self, error: &str, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().colors;
+        let details = error.to_owned();
+        div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .p_6()
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.foreground)
+                    .child("Couldn't load Git status."),
+            )
+            .child(
+                div()
+                    .max_w(rems(24.0))
+                    .text_center()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(error.to_owned()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Button::new("review-error-retry")
+                            .label("Retry")
+                            .small()
+                            .tooltip("Reload Git status")
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.refresh_active_surface();
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("review-error-copy")
+                            .label("Copy details")
+                            .ghost()
+                            .small()
+                            .tooltip("Copy full error to clipboard")
+                            .on_click(move |_event, window, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(details.clone()));
+                                window.push_notification(
+                                    Notification::info("Copied error details"),
+                                    cx,
+                                );
+                            }),
                     ),
             )
+            .into_any_element()
     }
 
     fn render_empty(&self, title: &str, description: &str, cx: &mut Context<Self>) -> AnyElement {
@@ -4517,6 +4342,7 @@ impl Render for RightPanelView {
         } else {
             match self.active_surface {
                 None => self.render_chooser(cx).into_any_element(),
+                Some(Surface::Review) if self.document_title.is_some() => self.render_files(cx),
                 Some(Surface::Review) => self.render_review(cx),
                 Some(Surface::Files) => self.render_files(cx),
                 Some(Surface::Browser) => self.render_browser(window, cx),
@@ -4709,9 +4535,7 @@ fn convert_node_to_tree_item(node: FileNode, expanded_paths: &HashSet<String>) -
 /// The first refresh selects everything so an unreviewed tree starts fully
 /// checked; later refreshes only drop selected paths that disappeared, so an
 /// explicit empty selection is preserved rather than re-defaulted.
-/// (Only exercised by `tests.rs`; allowed dead in normal builds.)
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn retain_review_selection(
+pub(crate) fn retain_review_selection(
     selected: &mut HashSet<String>,
     available: HashSet<String>,
     initialized: &mut bool,
@@ -4779,4 +4603,79 @@ pub fn scan_project_tree(root: &Path, limit: usize) -> Vec<FileNode> {    fn vis
 
     let mut count = 0;
     visit(root, Path::new(""), 0, limit, &mut count)
+}
+
+#[cfg(test)]
+mod dialog_keyboard_tests {
+    use super::RightPanelView;
+    use gpui::{AppContext, Context, Entity, FocusHandle, Render, Window, IntoElement, div,
+        InteractiveElement, StatefulInteractiveElement, ParentElement, Styled, Role, TestAppContext};
+    use gpui_component::{Root, WindowExt};
+    use threadlane_ui_state::AppState;
+
+    struct Host { panel: Entity<RightPanelView>, trigger: FocusHandle }
+    impl Render for Host {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.panel.update(cx, |panel, cx| panel.sync_git_dialog(window, cx));
+            div().id("dialog-host").track_focus(&self.trigger).role(Role::Application)
+                .tab_group().size_full()
+                .children(Root::render_dialog_layer(window, cx))
+        }
+    }
+
+    #[gpui::test]
+    fn git_dialogs_dismiss_with_escape_and_restore_focus(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let model = cx.new(|_| AppState::default());
+        let captured = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let capture = captured.clone();
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let panel = cx.new(|cx| RightPanelView::new(model, window, cx));
+            let trigger = cx.focus_handle();
+            trigger.focus(window, cx);
+            *capture.borrow_mut() = Some((panel.clone(), trigger.clone()));
+            Root::new(cx.new(|_| Host { panel, trigger }), window, cx)
+        });
+        let (panel, trigger) = captured.borrow_mut().take().unwrap();
+        for kind in 0..3 {
+            cx.update(|window, cx| panel.update(cx, |panel, cx| {
+                panel.new_branch_dialog_open = kind == 0;
+                panel.merge_dialog_open = kind == 1;
+                panel.switch_dialog_open = kind == 2;
+                panel.switch_target_branch = Some("test-target".into());
+                panel.sync_git_dialog(window, cx);
+            }));
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+                assert!(window.has_active_dialog(cx));
+            });
+            if kind == 2 {
+                cx.update(|window, cx| {
+                    window.focus_next(cx); // Stash
+                    window.focus_next(cx); // Carry
+                    window.draw(cx).clear(cx);
+                });
+                let keystroke = gpui::Keystroke::parse("space").unwrap();
+                cx.simulate_event(gpui::KeyDownEvent {
+                    keystroke: keystroke.clone(), is_held: false, prefer_character_input: false,
+                });
+                cx.simulate_event(gpui::KeyUpEvent { keystroke });
+                panel.read_with(cx, |panel, _| {
+                    assert!(!panel.switch_stash_mode, "Carry is keyboard selectable");
+                    assert!(!panel.git_busy, "choosing a mode does not switch branches");
+                });
+            }
+            cx.simulate_keystrokes("escape");
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                assert!(!window.has_active_dialog(cx));
+                assert!(trigger.is_focused(window));
+                let panel = panel.read(cx);
+                assert!(!panel.new_branch_dialog_open && !panel.merge_dialog_open && !panel.switch_dialog_open);
+                assert!(panel.switch_target_branch.is_none());
+                assert!(!panel.git_busy, "dismissing a dialog must not run Git");
+            });
+        }
+    }
 }

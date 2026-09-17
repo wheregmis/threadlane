@@ -157,14 +157,14 @@ pub(crate) fn parse_status(_work_dir: &Path, porcelain: &str) -> GitStatus {
 }
 
 #[cfg(test)]
-pub(crate) fn inspect_files(work_dir: &Path) -> Result<Vec<GitFile>, GitError> {
+fn inspect_files(work_dir: &Path) -> Result<Vec<GitFile>, GitError> {
     let porcelain = command(work_dir, &["status", "--porcelain=v1", "-b", "-z"])?;
     let mut status = parse_status(work_dir, &porcelain);
     apply_numstats(work_dir, &mut status);
     Ok(status.files)
 }
 
-pub(crate) fn apply_numstats(work_dir: &Path, status: &mut GitStatus) {
+fn apply_numstats(work_dir: &Path, status: &mut GitStatus) {
     let numstat_output = command(work_dir, &["diff", "HEAD", "--numstat"])
         .or_else(|_| command(work_dir, &["diff", "--numstat"]));
     let mut numstats = std::collections::HashMap::new();
@@ -1064,7 +1064,7 @@ pub fn unstage_all(work_dir: &Path) -> Result<(), GitError> {
     Ok(())
 }
 
-pub(crate) fn validate_diff_path(work_dir: &Path, path: &str) -> Result<(), GitError> {
+fn validate_diff_path(work_dir: &Path, path: &str) -> Result<(), GitError> {
     let invalid = || GitError::new(work_dir, format!("path is outside the workspace: {path}"));
     let relative = Path::new(path);
     if relative.is_absolute()

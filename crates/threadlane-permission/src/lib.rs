@@ -6,9 +6,7 @@
 //! depend only on `threadlane-protocol` contracts, the
 //! `threadlane-computer` approval trait, and local persistence — never on
 //! the session or engine. Trace vocabulary is shared with the harness via
-//! `threadlane-protocol::interaction`. Re-exported through
-//! `threadlane_session::permission` for compatibility; new code should
-//! import `threadlane_permission` directly.
+//! `threadlane-protocol::interaction`. Import `threadlane_permission` directly.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -288,7 +286,7 @@ impl PermissionManager {
     /// Ask the user to approve one computer-use action (screenshot or input).
     /// A remembered project grant skips the prompt; otherwise every action
     /// re-prompts with Once/Always scopes. Unattended sessions deny.
-    pub async fn request_computer(&self, title: &str, detail: &str) -> PermissionDecision {
+    pub(crate) async fn request_computer(&self, title: &str, detail: &str) -> PermissionDecision {
         let id = self.generate_request_id();
         let interactive = self.handle.inner.interactive.load(Ordering::SeqCst);
         let persisted = self.computer_is_approved();
@@ -392,7 +390,7 @@ impl PermissionManager {
         effective
     }
 
-    pub fn computer_is_approved(&self) -> bool {
+    pub(crate) fn computer_is_approved(&self) -> bool {
         self.handle
             .inner
             .persistent
@@ -820,6 +818,32 @@ mod tests {
         assert_ne!(id1, id3);
         assert!(id1.starts_with("permission-"));
         assert!(id3.starts_with("permission-"));
+    }
+
+    #[test]
+    fn save_permissions_round_trips_without_temporary_residue() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let mut permissions = PersistentPermissions::default();
+        permissions.network_hosts.insert("example.com".into());
+        permissions.computer_allowed = true;
+        save_permissions(root, &permissions).unwrap();
+
+        let reloaded = load_permissions(root);
+        assert!(reloaded.network_hosts.contains("example.com"));
+        assert!(reloaded.computer_allowed);
+
+        // The uniquely-named temporary file is renamed into place: no residue
+        // may remain alongside the committed permissions file.
+        let residue: Vec<_> = std::fs::read_dir(root.join(".threadlane"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| {
+                let name = name.to_string_lossy();
+                name.ends_with(".tmp") || name.contains(".tmp.")
+            })
+            .collect();
+        assert!(residue.is_empty(), "unexpected files: {residue:?}");
     }
 
     #[test]

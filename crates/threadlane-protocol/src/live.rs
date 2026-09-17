@@ -63,7 +63,7 @@ pub struct LiveFrame {
 
 impl LiveFrame {
     /// Frame pixels per display point.
-    pub fn pixels_per_point(&self) -> f64 {
+    pub(crate) fn pixels_per_point(&self) -> f64 {
         if self.points_width <= 0.0 {
             1.0
         } else {

@@ -1,4 +1,4 @@
-use threadlane_session::{AgentEvent, PermissionRequest, QuestionRequest, SessionPlan, TokenUsage};
+use threadlane_protocol::{AgentEvent, PermissionRequest, QuestionRequest, SessionPlan, TokenUsage};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChatAgentUpdate {
@@ -26,7 +26,7 @@ pub enum ChatAgentUpdate {
     Ignore,
 }
 
-pub fn adapt_agent_event(event: AgentEvent) -> ChatAgentUpdate {
+pub(crate) fn adapt_agent_event(event: AgentEvent) -> ChatAgentUpdate {
     match event {
         AgentEvent::AgentEnd { usage } => ChatAgentUpdate::Usage(usage),
         AgentEvent::MessageUpdate {
@@ -90,9 +90,9 @@ mod tests {
     fn plan_update_preserves_the_canonical_session_plan() {
         let plan = SessionPlan {
             explanation: Some("Ship incrementally".into()),
-            items: vec![threadlane_session::PlanItem {
+                items: vec![threadlane_protocol::PlanItem {
                 step: "Inspect the UI".into(),
-                status: threadlane_session::PlanItemStatus::InProgress,
+                status: threadlane_protocol::PlanItemStatus::InProgress,
             }],
         };
 

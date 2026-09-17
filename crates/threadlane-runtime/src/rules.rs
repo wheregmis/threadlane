@@ -19,11 +19,12 @@ pub struct StreamRule {
     reminder: String,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct RuleMatch {
     pub(crate) rule_id: String,
     pub(crate) rule_name: String,
+    // Only asserted in tests; production consumes the id, name, and reminder.
+    #[allow(dead_code)]
     pub(crate) matched_text: String,
     pub(crate) reminder: String,
 }

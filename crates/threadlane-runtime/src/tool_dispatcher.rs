@@ -4,12 +4,13 @@
 //! Independently testable.
 
 use crate::error::AgentError;
-use crate::events::AgentEvent;
+use threadlane_protocol::AgentEvent;
 use crate::harness::{HookContext, HookRegistry};
-use crate::tool_executor::{builtin_tool_executor, ToolExecutor};
-use crate::types::{
-    AgentToolCall, AgentToolDefinition, AgentToolResult, ImageAttachment, ToolExecutionMode,
-    ToolOutput,
+use crate::tool_executor::builtin_tool_executor;
+use threadlane_protocol::ToolExecutor;
+use crate::types::ToolExecutionMode;
+use threadlane_protocol::{
+    AgentToolCall, AgentToolDefinition, AgentToolResult, ImageAttachment, ToolOutput,
 };
 use crate::utils::AbortOnDrop;
 use serde_json::Value;
@@ -339,7 +340,7 @@ const CORE_TOOL_NAMES: &[&str] = &[
     "write_file",
     "run_command",
     "subagent",
-    // Embedded browser panel (threadlane-session/src/browser.rs). The tools
+    // Embedded browser panel (`threadlane-browser`). The tools
     // report a helpful error when no panel is attached, so they are safe to
     // advertise unconditionally.
     "browser_navigate",
@@ -352,9 +353,10 @@ const CORE_TOOL_NAMES: &[&str] = &[
     "browser_screenshot",
     "browser_console_logs",
     "browser_wait",
-    // Native computer use (threadlane-session/src/computer.rs). Every
-    // screenshot and input action re-prompts for approval, so the schemas
-    // are safe to advertise; unattended sessions deny at execution.
+    // Native computer use (`threadlane-computer`, approved through
+    // `threadlane-permission`). Every screenshot and input action
+    // re-prompts for approval, so the schemas are safe to advertise;
+    // unattended sessions deny at execution.
     "computer_status",
     "computer_windows",
     "computer_screenshot",
@@ -631,7 +633,7 @@ impl ToolDispatcher {
                 result
             }
             Err(_) => {
-                let result = AgentToolResult {
+                let mut result = AgentToolResult {
                     tool_call_id: tc.id.clone(),
                     name: tc.function.name.clone(),
                     content: format!(
@@ -643,6 +645,12 @@ impl ToolDispatcher {
                     terminate: false,
                     images: Vec::new(),
                 };
+                if let Some(recorder) = &self.tool_completion_recorder {
+                    if let Err(error) = recorder(&result).await {
+                        result.content = error;
+                        result.is_error = true;
+                    }
+                }
                 let _ = self.event_tx.send(AgentEvent::ToolExecutionEnd {
                     tool_call_id: tc.id.clone(),
                     name: tc.function.name.clone(),
@@ -733,7 +741,6 @@ impl ToolDispatcher {
                 session_id: context.session_id.clone(),
                 lane: "main".into(),
                 run_id: None,
-                resume_data: None,
                 tool_call_id: Some(tc.id.clone()),
                 tool_name: Some(tc.function.name.clone()),
                 tool_arguments: Some(arguments.clone()),
@@ -925,7 +932,6 @@ impl ToolDispatcher {
             session_id: context.session_id.clone(),
             lane: "main".into(),
             run_id: None,
-            resume_data: None,
             tool_call_id: Some(tc.id.clone()),
             tool_name: Some(tc.function.name.clone()),
             tool_arguments: Some(arguments.clone()),
@@ -1155,6 +1161,7 @@ mod tests {
     async fn sequential_tool_panic_records_completion() {
         let (event_tx, _) = broadcast::channel(8);
         let mut dispatcher = ToolDispatcher::new(event_tx, HookRegistry::default());
+        dispatcher.tool_execution_mode = ToolExecutionMode::Sequential;
         dispatcher
             .register_tool_executor(Arc::new(PanickingExecutor))
             .unwrap();

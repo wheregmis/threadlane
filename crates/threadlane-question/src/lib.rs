@@ -4,9 +4,8 @@
 //!
 //! The question manager, handle, and tool executor depend only on
 //! `threadlane-protocol` contracts (`AgentEvent`, interaction types,
-//! `ToolExecutor`) — never on the execution engine. Re-exported through
-//! `threadlane_runtime::question` and `threadlane_session::question` for
-//! compatibility; new code should import `threadlane_question` directly.
+//! `ToolExecutor`) — never on the execution engine. Import
+//! `threadlane_question` directly.
 //!
 //! The `ask_question` tool gives the model a structured way to ask the user
 //! for decisions instead of guessing. It mirrors the existing permission
@@ -30,7 +29,7 @@ use threadlane_protocol::{
 };
 use tokio::sync::{broadcast, oneshot};
 
-pub const ASK_QUESTION_TOOL_NAME: &str = "ask_question";
+pub(crate) const ASK_QUESTION_TOOL_NAME: &str = "ask_question";
 const MAX_QUESTIONS: usize = 4;
 const MAX_OPTIONS: usize = 6;
 const MAX_TEXT_CHARS: usize = 500;
@@ -90,7 +89,7 @@ impl QuestionHandle {
     }
 
     /// Publishes a [`QuestionRequest`] and waits for the user's answer.
-    pub async fn ask(
+    pub(crate) async fn ask(
         &self,
         event_tx: &broadcast::Sender<AgentEvent>,
         questions: Vec<QuestionItem>,

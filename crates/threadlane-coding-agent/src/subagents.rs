@@ -27,19 +27,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use threadlane_runtime::harness::HookKind;
 use threadlane_runtime::ToolPolicy;
-use threadlane_runtime::{
-    AgentEvent, AgentMessage, AgentRuntime, SubagentProgressUpdate, TurnState,
-};
+use threadlane_protocol::{AgentEvent, AgentMessage, SubagentProgressUpdate};
+use threadlane_runtime::{AgentRuntime, TurnState};
 use threadlane_wasi::WasiExtensionManager;
 use tokio::sync::broadcast;
 use tokio::time::{timeout, Duration};
 
-pub const MAX_SUBAGENT_TASKS: usize = 8;
-pub const MAX_SUBAGENT_TASK_CHARS: usize = 32_000;
+pub(crate) const MAX_SUBAGENT_TASKS: usize = 8;
+pub(crate) const MAX_SUBAGENT_TASK_CHARS: usize = 32_000;
 const SUBAGENT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const SUBAGENT_RECOVERY_PROMPT: &str =
     "Continue from the recovered checkpoint and finish the assigned task.";
-pub static NEXT_SUBAGENT_UI_RUN_ID: AtomicU64 = AtomicU64::new(1);
+pub(crate) static NEXT_SUBAGENT_UI_RUN_ID: AtomicU64 = AtomicU64::new(1);
 
 fn render_subagent_context(
     snapshots: Vec<(String, String, String)>,
@@ -110,42 +109,42 @@ pub enum SubagentLaneStatus {
 
 #[derive(Clone, Debug)]
 pub struct CompletedSubagentLane {
-    pub lane_name: String,
-    pub run_id: String,
-    pub task: String,
-    pub agent: String,
-    pub model: String,
-    pub status: SubagentLaneStatus,
-    pub messages: Vec<AgentMessage>,
-    pub error: Option<String>,
+    pub(crate) lane_name: String,
+    pub(crate) run_id: String,
+    pub(crate) task: String,
+    pub(crate) agent: String,
+    pub(crate) model: String,
+    pub(crate) status: SubagentLaneStatus,
+    pub(crate) messages: Vec<AgentMessage>,
+    pub(crate) error: Option<String>,
 }
 
 #[derive(Clone)]
 pub struct SubagentRunContext {
-    pub api_key: String,
-    pub account_id: Option<String>,
-    pub child_model: String,
-    pub child_reasoning_effort: threadlane_runtime::ReasoningEffort,
-    pub parent_session_id: String,
-    pub work_dir: PathBuf,
-    pub extensions: Arc<WasiExtensionManager>,
-    pub parent_event_tx: broadcast::Sender<AgentEvent>,
-    pub parent_leaf_id: Option<String>,
-    pub session_file: Option<PathBuf>,
-    pub completed_lanes: Arc<std::sync::Mutex<Vec<CompletedSubagentLane>>>,
+    pub(crate) api_key: String,
+    pub(crate) account_id: Option<String>,
+    pub(crate) child_model: String,
+    pub(crate) child_reasoning_effort: threadlane_protocol::ReasoningEffort,
+    pub(crate) parent_session_id: String,
+    pub(crate) work_dir: PathBuf,
+    pub(crate) extensions: Arc<WasiExtensionManager>,
+    pub(crate) parent_event_tx: broadcast::Sender<AgentEvent>,
+    pub(crate) parent_leaf_id: Option<String>,
+    pub(crate) session_file: Option<PathBuf>,
+    pub(crate) completed_lanes: Arc<std::sync::Mutex<Vec<CompletedSubagentLane>>>,
     /// Live agent-to-agent mailbox shared by sibling lanes and the parent
     /// `hub` tool. Inbox keys are agent role names (stable, known upfront)
     /// plus resolved lane names.
-    pub hub: super::mailbox::SubagentHub,
+    pub(crate) hub: super::mailbox::SubagentHub,
     #[cfg(test)]
-    pub scheduler_observer: Option<AgentWorkObserver>,
+    pub(crate) scheduler_observer: Option<AgentWorkObserver>,
     #[cfg(test)]
-    pub child_work_observer: Option<SubagentBoundaryObserver>,
+    pub(crate) child_work_observer: Option<SubagentBoundaryObserver>,
     #[cfg(test)]
-    pub child_tool_observer: Option<Arc<AtomicBool>>,
+    pub(crate) child_tool_observer: Option<Arc<AtomicBool>>,
     #[cfg(test)]
-    pub child_run_override: Option<(Duration, SubagentRunOverride)>,
-    pub semaphore: Arc<tokio::sync::Semaphore>,
+    pub(crate) child_run_override: Option<(Duration, SubagentRunOverride)>,
+    pub(crate) semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 #[cfg(test)]
@@ -159,8 +158,8 @@ pub type SubagentRunOverride = Arc<
 pub struct SubagentResult {
     output: String,
     thinking: Vec<AgentMessage>,
-    pub error: Option<String>,
-    pub messages: Vec<AgentMessage>,
+    pub(crate) error: Option<String>,
+    pub(crate) messages: Vec<AgentMessage>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -337,7 +336,7 @@ async fn checkpoint_subagent_final_snapshot(
         .await
 }
 
-pub fn accept_completed_subagent_lanes(
+pub(crate) fn accept_completed_subagent_lanes(
     completed_lanes: &Arc<std::sync::Mutex<Vec<CompletedSubagentLane>>>,
     lanes: Vec<CompletedSubagentLane>,
 ) -> Result<(), String> {
@@ -348,7 +347,7 @@ pub fn accept_completed_subagent_lanes(
     Ok(())
 }
 
-pub async fn run_subagents_with_context(
+pub(crate) async fn run_subagents_with_context(
     tasks: Vec<AgentRunTask>,
     parallel: bool,
     tool_call_id: Option<String>,
@@ -537,7 +536,7 @@ pub async fn run_subagents_with_context(
                         .ok()
                         .and_then(|workspace| workspace.as_ref())
                         .map(
-                            |(workspace, branch)| threadlane_runtime::SubagentIsolation {
+                            |(workspace, branch)| threadlane_protocol::SubagentIsolation {
                                 workspace: workspace.clone(),
                                 branch: branch.clone(),
                             },
@@ -723,12 +722,12 @@ pub async fn run_subagents_with_context(
 }
 
 /// Follow-up request for reviving a settled lane on its existing history.
-pub struct ReviveLaneRequest {
-    pub lane_name: String,
-    pub agent: String,
-    pub task: String,
-    pub model: String,
-    pub message: String,
+pub(crate) struct ReviveLaneRequest {
+    pub(crate) lane_name: String,
+    pub(crate) agent: String,
+    pub(crate) task: String,
+    pub(crate) model: String,
+    pub(crate) message: String,
 }
 
 /// Revive a settled lane (`hub revive` parity with oh-my-pi's parked-agent
@@ -739,7 +738,7 @@ pub struct ReviveLaneRequest {
 /// up front and folded into the follow-up prompt. The revived run executes
 /// in the parent workdir without worktree isolation; completion commits
 /// through the shared completed-lane sink on a later parent turn.
-pub async fn revive_subagent_lane(
+pub(crate) async fn revive_subagent_lane(
     req: ReviveLaneRequest,
     context: SubagentRunContext,
 ) -> Result<String, String> {
@@ -958,7 +957,7 @@ async fn isolated_subagent_workspace(
     .map_err(|error| format!("Failed to provision subagent worktree: {error}"))?
 }
 
-pub fn subagent_workspace(repo_root: &Path, journal_run_id: &str) -> (PathBuf, String) {
+pub(crate) fn subagent_workspace(repo_root: &Path, journal_run_id: &str) -> (PathBuf, String) {
     let lane = journal_run_id
         .chars()
         .map(|character| {
@@ -976,7 +975,7 @@ pub fn subagent_workspace(repo_root: &Path, journal_run_id: &str) -> (PathBuf, S
     )
 }
 
-pub async fn run_subagent_task(
+pub(crate) async fn run_subagent_task(
     mut config: AgentDefinition,
     task: String,
     context: SubagentRunContext,
@@ -1457,7 +1456,7 @@ mod result_tests {
             api_key: String::new(),
             account_id: None,
             child_model: "test-model".into(),
-            child_reasoning_effort: threadlane_runtime::ReasoningEffort::Medium,
+            child_reasoning_effort: threadlane_protocol::ReasoningEffort::Medium,
             parent_session_id: "parent".into(),
             work_dir,
             extensions: Arc::new(WasiExtensionManager::new()),
@@ -1977,7 +1976,7 @@ mod result_tests {
     fn subagent_ui_event_forwards_final_usage() {
         let event = subagent_ui_event(
             AgentEvent::AgentEnd {
-                usage: threadlane_runtime::TokenUsage {
+                usage: threadlane_protocol::TokenUsage {
                     input_tokens: 100,
                     output_tokens: 25,
                     total_tokens: 125,

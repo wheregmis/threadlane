@@ -1,7 +1,7 @@
 use super::reducer::ReductionContext;
 use super::store::SessionStore;
 use super::types::{Entry, Record, ReduceError};
-use crate::types::PlanItem;
+use threadlane_protocol::PlanItem;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use std::collections::HashSet as IdSet;
@@ -63,7 +63,7 @@ impl Drop for WriterClaim {
 /// parents) would split into independent gates and lock files. Canonicalize
 /// the parent directory (which must exist for the file to be openable) and
 /// join the file name instead.
-pub(crate) fn canonical_writer_key(path: &Path) -> PathBuf {
+fn canonical_writer_key(path: &Path) -> PathBuf {
     if let (Some(parent), Some(name)) = (
         path.parent().filter(|p| !p.as_os_str().is_empty()),
         path.file_name(),
@@ -109,7 +109,6 @@ fn writer_claim(path: &Path) -> io::Result<Arc<WriterClaim>> {
     Ok(claim)
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 enum KnownSessionRecord {
@@ -143,7 +142,7 @@ struct LegacySessionNode {
     timestamp: u64,
     #[serde(default)]
     seq: Option<u64>,
-    message: crate::types::AgentMessage,
+    message: threadlane_protocol::AgentMessage,
 }
 
 #[derive(Debug, serde::Serialize, Deserialize)]
@@ -192,7 +191,7 @@ pub struct ContextCompactedMarker {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TranscriptItem {
-    Message(crate::types::AgentMessage),
+    Message(threadlane_protocol::AgentMessage),
     ContextCompacted(ContextCompactedMarker),
 }
 
@@ -205,7 +204,7 @@ pub struct TranscriptPage {
 
 #[cfg(test)]
 impl TranscriptPage {
-    fn messages(&self) -> Vec<crate::types::AgentMessage> {
+    fn messages(&self) -> Vec<threadlane_protocol::AgentMessage> {
         self.items
             .iter()
             .filter_map(|item| match item {
@@ -384,7 +383,7 @@ fn transcript_items(path: &Path, offset: u64, bytes: &[u8]) -> io::Result<Vec<Tr
                         && matches!(entry.surface_op, super::types::SurfaceOperation::Append) =>
                 {
                     match entry.message {
-                        crate::types::AgentMessage::Custom {
+                        threadlane_protocol::AgentMessage::Custom {
                             ref custom_type, ..
                         } if custom_type == "compaction_summary" => None,
                         message => Some(TranscriptItem::Message(message)),
@@ -419,7 +418,7 @@ fn transcript_items(path: &Path, offset: u64, bytes: &[u8]) -> io::Result<Vec<Tr
                 && matches!(entry.surface_op, super::types::SurfaceOperation::Append) =>
         {
             match entry.message {
-                crate::types::AgentMessage::Custom {
+                threadlane_protocol::AgentMessage::Custom {
                     ref custom_type, ..
                 } if custom_type == "compaction_summary" => Vec::new(),
                 message => vec![TranscriptItem::Message(message)],
@@ -869,7 +868,7 @@ impl SessionStore for JsonlStore {
 }
 
 impl JsonlStore {
-    pub fn append_plan(&mut self, plan: &crate::SessionPlan) -> Result<(), ReduceError> {
+    pub(crate) fn append_plan(&mut self, plan: &threadlane_protocol::SessionPlan) -> Result<(), ReduceError> {
         let record = Record::FactSet {
             id: format!("fact-plan-{}", self.next_sequence()),
             seq: self.next_sequence(),
@@ -1058,7 +1057,6 @@ impl Record {
             | Self::WriteDeferred { .. }
             | Self::WriteApplied { .. }
             | Self::FactSet { .. }
-            | Self::HookResumeData { .. }
             | Self::Usage { .. }
             | Self::PermissionRequested { .. }
             | Self::PermissionResolved { .. }
@@ -1253,7 +1251,7 @@ fn classify_lines(
                     }
                 }
                 KnownSessionRecord::Plan { items, explanation } => {
-                    let plan = crate::types::SessionPlan { explanation, items };
+                    let plan = threadlane_protocol::SessionPlan { explanation, items };
                     if let Ok(plan_json) = serde_json::to_string(&plan) {
                         records.push(Record::FactSet {
                             id: format!("fact-plan-{}", index + 1),
@@ -1405,7 +1403,7 @@ mod tests {
         ContextSnapshot, ContextSnapshotLoadOutcome, HarnessEventHub, JsonlStore, Record, Reducer,
         SessionStore, TraceString,
     };
-    use crate::types::AgentMessage;
+    use threadlane_protocol::AgentMessage;
 
     fn user_entry(id: &str, lane: &str) -> crate::harness::Entry {
         crate::harness::Entry::new(

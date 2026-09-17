@@ -8,7 +8,7 @@ pub enum ProviderAuthEvent {
 }
 
 fn executor() -> Result<&'static tokio::runtime::Runtime, String> {
-    Ok(threadlane_runtime::get_runtime())
+    Ok(threadlane_provider::exec::get_runtime())
 }
 
 pub fn start_chatgpt_login(tx: Sender<ProviderAuthEvent>) -> Result<(), String> {

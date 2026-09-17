@@ -1,10 +1,9 @@
 //! Context-window budgeting, canonical in `threadlane-context`.
 //!
 //! The limit table, budget math, and `BudgetConfig` live in the leaf crate so
-//! the engine, session, and UI share one definition. This module keeps the
-//! historical `threadlane_runtime::model_metadata::…` paths working: types
-//! and `model_context_limit` are re-exported, and `context_budget` adapts
-//! the runtime `AgentConfig` into `BudgetConfig`. New code should import
+//! the engine, session, and UI share one definition. This module re-exports
+//! the leaf types and adapts the runtime `AgentConfig` into `BudgetConfig`
+//! (pinned by a default-drift test). New code should import
 //! `threadlane_context` directly.
 
 pub use threadlane_context::{
@@ -27,10 +26,6 @@ impl From<&AgentConfig> for BudgetConfig {
     }
 }
 
-pub fn context_budget(model: &str, config: &AgentConfig) -> ContextBudget {
-    threadlane_context::context_budget(model, &BudgetConfig::from(config))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -47,11 +42,12 @@ mod tests {
     #[test]
     fn adapter_matches_previous_agent_config_behavior() {
         let config = AgentConfig::default();
-        let large = context_budget("antigravity/gemini-3.7-flash", &config);
+        let params = BudgetConfig::from(&config);
+        let large = threadlane_context::context_budget("antigravity/gemini-3.7-flash", &params);
         assert_eq!(large.limit, 1_000_000);
         assert!(!large.limit_is_estimate);
 
-        let unknown = context_budget("unknown/model", &config);
+        let unknown = threadlane_context::context_budget("unknown/model", &params);
         assert_eq!(unknown.limit, 128_000);
         assert!(unknown.limit_is_estimate);
     }

@@ -7,10 +7,8 @@ mod jsonl;
 mod memory;
 mod procedure;
 mod projections;
-mod queue;
 mod reducer;
 mod session;
-mod sqlite;
 mod store;
 mod telemetry;
 mod trajectory;
@@ -24,8 +22,8 @@ pub use diagnostics::{
 };
 pub use effects::{EffectAction, EffectsError, GatedEffects};
 pub use events::{
-    has_open_subagent_lanes, interrupted_subagent_lanes, DurableEvent, DurablePayload, EventError,
-    EventPayload, HarnessEvent, HarnessEventHub, ProjectedAgentEvent, Snapshot, StreamingState,
+    has_open_subagent_lanes, interrupted_subagent_lanes, EventError,
+    EventPayload, HarnessEvent, HarnessEventHub, Snapshot, StreamingState,
     Subscription,
 };
 pub use hooks::{
@@ -38,17 +36,15 @@ pub use jsonl::{
 pub use memory::MemoryStore;
 pub use procedure::{
     AbortProcedure, AssistantAttemptProcedure, CompactionProcedure, DeferredProcedure,
-    DeferredResolution, NavigationProcedure, NoToolRun, OperationProcedure, ProcedureError,
-    PromptProcedure, QueueProcedure, RetryPolicy, RetryProcedure, ToolBatchProcedure, ToolRecovery,
+    DeferredResolution, NavigationProcedure, OperationProcedure, ProcedureError,
+    PromptProcedure, QueueProcedure, RetryPolicy, RetryProcedure, ToolBatchProcedure,
 };
 pub use projections::{
     project_chat_messages, tool_activity_display_summary, tool_activity_summary, UiChatMessage,
     UiMessageRole, UiToolActivity,
 };
-pub use queue::{LaneQueue, SteerItem, SteerPriority};
 pub use reducer::Reducer;
 pub use session::{LaneHandle, SessionAgent};
-pub use sqlite::SqliteStore;
 pub use store::{
     CompactionCheckpoint, ModelContextProjection, SessionIdGenerator, SessionStore,
     TranscriptProjection,
@@ -67,7 +63,7 @@ pub use types::{
     ErrorCategory, InterruptedSubagentLane, LaneState, LaneStatus, OperationIntent,
     OperationOutcome, PermissionTraceDecision, PermissionTraceScope, PermissionTraceSource,
     PromptSnapshot, ProviderErrorSummary, ProviderOutcome, ProvisionedEntry, QueueKind,
-    QueuedEntry, Record, RecoveryResult, ReduceError, ReducedState, RetryState,
-    StreamCheckpointKind, SubagentLifecyclePhase, SurfaceOperation, ToolExecutionOutcome,
+    QueuedEntry, Record, ReduceError,     ReducedState, RetryState,
+    SteerPriority, StreamCheckpointKind, SubagentLifecyclePhase, SurfaceOperation, ToolExecutionOutcome,
     ToolExecutionPhase, ToolReplaySafety, ToolResult, ToolSpec, ToolState, TraceString, UsageCause,
 };

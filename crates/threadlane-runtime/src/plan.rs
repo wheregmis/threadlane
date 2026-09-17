@@ -21,7 +21,7 @@ pub struct JsonlPlanJournal {
 }
 
 impl JsonlPlanJournal {
-    pub fn new(path: impl AsRef<Path>) -> Self {
+    pub(crate) fn new(path: impl AsRef<Path>) -> Self {
         Self {
             path: path.as_ref().to_path_buf(),
         }
@@ -54,7 +54,7 @@ pub fn session_plan_store(plan: SessionPlan, session_file: Option<PathBuf>) -> S
 mod tests {
     use super::*;
     use crate::harness::SessionStore;
-    use crate::{AgentEvent, ToolExecutor};
+    use threadlane_protocol::{AgentEvent, ToolExecutor};
     use std::time::Duration;
 
     #[tokio::test]

@@ -18,9 +18,7 @@ use gpui_component::tab::{Tab, TabBar};
 use gpui_component::tag::Tag;
 use gpui_component::text::{TextView, TextViewState};
 use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable};
-use threadlane_git::{
-    GitHubIssueDetail, GitHubIssueRef, GitHubIssueSummary, GitHubPrInfo, GitHubRepository,
-};
+use threadlane_git::{GitHubIssueDetail, GitHubIssueRef, GitHubPrInfo, GitHubRepository};
 
 use threadlane_ui_state::actions::AppAction;
 use threadlane_ui_state::controller;
@@ -68,6 +66,15 @@ fn pr_file_action_ix(current: Option<usize>, len: usize, action: PrFileAction) -
     })
 }
 
+fn pr_review_label(decision: &str) -> Option<&'static str> {
+    match decision {
+        "APPROVED" => Some("Approved"),
+        "CHANGES_REQUESTED" => Some("Changes requested"),
+        "REVIEW_REQUIRED" => Some("Review required"),
+        _ => None,
+    }
+}
+
 fn github_server_query(query: &str) -> Option<&str> {
     let query = query.trim();
     (!query.is_empty()).then_some(query)
@@ -77,17 +84,17 @@ fn github_empty_message(tab: GitHubTab, state: GitHubStateFilter, query: &str) -
     let items = tab.label().to_lowercase();
     if github_server_query(query).is_some() {
         format!(
-            "No matching {items} in the attached repository. Try another search or state filter."
+            "No matching {items} in this scope. Try another search or state filter."
         )
     } else {
-        format!("No {} {items} in the attached repository.", state.value())
+        format!("No {} {items} in this scope.", state.value())
     }
 }
 
-#[allow(dead_code)]
-pub fn selected_issue_after_refresh(
+#[cfg(test)]
+pub(crate) fn selected_issue_after_refresh(
     selected: Option<u64>,
-    issues: &[GitHubIssueSummary],
+    issues: &[threadlane_git::GitHubIssueSummary],
 ) -> Option<u64> {
     selected
         .filter(|selected| issues.iter().any(|issue| issue.issue.number == *selected))
@@ -102,7 +109,7 @@ fn same_issue(left: &GitHubIssueRef, right: &GitHubIssueRef) -> bool {
 }
 
 #[cfg(test)]
-pub fn linked_session_ids<'a>(
+pub(crate) fn linked_session_ids<'a>(
     sessions: &'a [SessionInfo],
     issue: &GitHubIssueRef,
 ) -> Vec<&'a str> {
@@ -152,7 +159,7 @@ fn linked_sessions_across_projects<'a>(
         .collect()
 }
 
-pub fn linked_session_status(
+pub(crate) fn linked_session_status(
     session: &SessionInfo,
     has_pending_permission: bool,
     is_generating: bool,
@@ -170,7 +177,7 @@ pub fn linked_session_status(
     }
 }
 
-pub fn list_count_splice(
+pub(crate) fn list_count_splice(
     old_count: usize,
     new_count: usize,
 ) -> Option<(Range<usize>, usize)> {
@@ -250,12 +257,7 @@ fn github_link_fingerprint(state: &AppState) -> u64 {
 
 fn linked_session_fingerprint(session: &SessionInfo, pr: Option<&GitHubPrInfo>) -> u64 {
     let mut hasher = DefaultHasher::new();
-    session.id.hash(&mut hasher);
-    session.title.hash(&mut hasher);
-    session.health.hash(&mut hasher);
-    session.worktree_available.hash(&mut hasher);
-    session.is_worktree.hash(&mut hasher);
-    session.git_branch.hash(&mut hasher);
+    threadlane_ui_state::hash_session_identity(&mut hasher, session);
     match pr {
         Some(pr) => {
             true.hash(&mut hasher);
@@ -270,16 +272,7 @@ fn linked_session_fingerprint(session: &SessionInfo, pr: Option<&GitHubPrInfo>) 
     hasher.finish()
 }
 
-#[allow(dead_code)]
-fn selected_number_after_refresh<T>(
-    selected: Option<u64>,
-    rows: &[T],
-    number: impl Fn(&T) -> u64,
-) -> Option<u64> {
-    selected
-        .filter(|selected| rows.iter().any(|row| number(row) == *selected))
-        .or_else(|| rows.first().map(number))
-}
+
 
 /// Days since 1970-01-01 for a civil date (Howard Hinnant's algorithm).
 fn days_since_epoch(year: i64, month: i64, day: i64) -> i64 {
@@ -695,15 +688,7 @@ impl GitHubView {
         cx.notify();
     }
 
-    #[allow(dead_code)]
-    fn switch_project(&mut self, work_dir: Option<PathBuf>, cx: &mut Context<Self>) {
-        self.project_work_dir = work_dir.clone();
-        let scope = match work_dir {
-            Some(work_dir) => GitHubScope::Project(work_dir),
-            None => GitHubScope::All,
-        };
-        self.select_scope(scope, cx);
-    }
+
 
     fn schedule_query(&mut self, _query: String, cx: &mut Context<Self>) {
         self.debounce_task.take();
@@ -1082,13 +1067,7 @@ impl GitHubView {
         }
     }
 
-    #[allow(dead_code)]
-    fn selected_number(&self) -> Option<u64> {
-        match self.tab {
-            GitHubTab::Issues => self.selected_issue.as_ref().map(|key| key.number),
-            GitHubTab::PullRequests => self.selected_pr.as_ref().map(|key| key.number),
-        }
-    }
+
 
     fn selected_key(&self) -> Option<GitHubItemKey> {
         match self.tab {
@@ -1655,9 +1634,6 @@ impl GitHubView {
     fn render_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().colors;
         let close_model = self.model.clone();
-        let projects = self.attached_projects(cx);
-        let scope_label = self.scope.label(&projects);
-
         div()
             .flex_none()
             .border_b_1()
@@ -1671,6 +1647,7 @@ impl GitHubView {
             .gap_3()
             .child(
                 Button::new("github-close")
+                    .accessibility_label("Back to chat")
                     .icon(IconName::Close)
                     .tooltip("Back to chat")
                     .ghost()
@@ -1688,7 +1665,21 @@ impl GitHubView {
                     .flex_1()
                     .text_sm()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(format!("GitHub · {scope_label}")),
+                    .truncate()
+                    .child("Issues & pull requests"),
+            )
+            .children(
+                (self.tab == GitHubTab::PullRequests && self.current_pr_tab() == PrDetailTab::Code)
+                    .then(|| {
+                        Button::new("github-back-to-pr-list")
+                            .debug_selector(|| "github-back-to-pr-list".into())
+                            .label("Back to list")
+                            .ghost()
+                            .small()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.select_pr_tab(PrDetailTab::Summary, cx)
+                            }))
+                    }),
             )
             .child(
                 Button::new("github-tab-issues")
@@ -1792,70 +1783,80 @@ impl GitHubView {
             .px_3()
             .py_2()
             .flex()
-            .items_center()
+            .flex_col()
             .gap_2()
-            .child(
-                Button::new("github-state-open")
-                    .label("Open")
-                    .ghost()
-                    .small()
-                    .selected(self.state_filter == GitHubStateFilter::Open)
-                    .on_click(
-                        cx.listener(|this, _, _, cx| {
-                            this.select_state(GitHubStateFilter::Open, cx)
-                        }),
-                    ),
-            )
-            .child(
-                Button::new("github-state-closed")
-                    .label("Closed")
-                    .ghost()
-                    .small()
-                    .selected(self.state_filter == GitHubStateFilter::Closed)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.select_state(GitHubStateFilter::Closed, cx)
-                    })),
-            )
-            .children((self.tab == GitHubTab::PullRequests).then(|| {
-                Button::new("github-state-merged")
-                    .label("Merged")
-                    .ghost()
-                    .small()
-                    .selected(self.state_filter == GitHubStateFilter::Merged)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.select_state(GitHubStateFilter::Merged, cx)
-                    }))
-            }))
             .child(
                 div()
                     .debug_selector(|| "github-search-field".into())
                     .min_w_0()
-                    .flex_1()
-                    .child(Input::new(&self.query_input).small()),
+                    .w_full()
+                    .flex_none()
+                    .child(
+                        Input::new(&self.query_input)
+                            .aria_label("Search issues and pull requests")
+                            .small(),
+                    ),
             )
             .child(
-                Button::new("github-refresh")
-                    .icon(IconName::Redo)
-                    .tooltip("Refresh GitHub")
-                    .ghost()
-                    .small()
-                    .disabled(self.scope_targets(cx).is_empty() || self.list_loading)
-                    .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
-            )
-            .children(self.list_loading.then(|| {
                 div()
                     .flex()
                     .items_center()
-                    .gap_1()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(Spinner::new().xsmall())
-                    .child(if self.issues.is_empty() && self.pull_requests.is_empty() {
-                        "Loading…"
-                    } else {
-                        "Refreshing…"
-                    })
-            }))
+                    .gap_2()
+                    .child(
+                        Button::new("github-state-open")
+                            .label("Open")
+                            .ghost()
+                            .small()
+                            .selected(self.state_filter == GitHubStateFilter::Open)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.select_state(GitHubStateFilter::Open, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("github-state-closed")
+                            .label("Closed")
+                            .ghost()
+                            .small()
+                            .selected(self.state_filter == GitHubStateFilter::Closed)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.select_state(GitHubStateFilter::Closed, cx)
+                            })),
+                    )
+                    .children((self.tab == GitHubTab::PullRequests).then(|| {
+                        Button::new("github-state-merged")
+                            .label("Merged")
+                            .ghost()
+                            .small()
+                            .selected(self.state_filter == GitHubStateFilter::Merged)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.select_state(GitHubStateFilter::Merged, cx)
+                            }))
+                    }))
+                    .child(
+                        Button::new("github-refresh")
+                            .accessibility_label("Refresh GitHub")
+                            .icon(Icon::default().path("icons/refresh-cw.svg"))
+                            .tooltip("Refresh GitHub")
+                            .ghost()
+                            .small()
+                            .disabled(self.scope_targets(cx).is_empty() || self.list_loading)
+                            .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
+                    )
+                    .children(self.list_loading.then(|| {
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(Spinner::new().xsmall())
+                            .child(if self.issues.is_empty() && self.pull_requests.is_empty() {
+                                "Loading…"
+                            } else {
+                                "Refreshing…"
+                            })
+                    })),
+            )
             .into_any_element()
     }
 
@@ -1867,171 +1868,124 @@ impl GitHubView {
             return div().into_any_element();
         };
         let issue = row.summary;
-        let row_project = row.project;
-        let row_project_name = row.project_name;
-        let selected = self.selected_issue.as_ref().is_some_and(|selected| {
-            selected.project == row_project && selected.number == issue.issue.number
-        });
-        let linked = self.linked_sessions(&issue.issue, cx);
-        let linked_count = linked.len();
-        let first_linked = linked.first().cloned();
         let number = issue.issue.number;
+        let selected = self
+            .selected_issue
+            .as_ref()
+            .is_some_and(|key| key.project == row.project && key.number == number);
+        let linked_count = self.linked_sessions(&issue.issue, cx).len();
         let theme = cx.theme().colors;
-        let now = github_now_unix();
-        let context_line =
-            scope_context_line(&issue.issue.owner, &issue.issue.repo, &row_project_name);
-        let assignees_label =
-            (!issue.assignees.is_empty()).then(|| format!(" · @{}", issue.assignees.join(" @")));
-        let start_model = self.model.clone();
-        let start_work_dir = row_project.clone();
-        let start_issue = issue.issue.clone();
-        let start_title = issue.title.clone();
-        let open_model = self.model.clone();
-        let row_action = if let Some(first) = first_linked {
-            let work_dir = first.session.work_dir.clone();
-            let session_id = first.session.id.clone();
-            Button::new(SharedString::from(format!(
-                "github-issue-open-{}-{number}",
-                row_project.display()
-            )))
-            .label("Open →")
-            .ghost()
-            .xsmall()
-            .tooltip(format!("Open linked task · {}", first.session.title))
-            .on_click(move |_, _, cx| {
-                open_model.update(cx, |state, cx| {
-                    controller::dispatch(
-                        state,
-                        AppAction::SelectSession {
-                            work_dir: work_dir.clone(),
-                            session_id: session_id.clone(),
-                        },
-                    );
-                    controller::dispatch(state, AppAction::CloseGitHub);
-                    cx.notify();
-                });
-            })
-            .into_any_element()
-        } else {
-            Button::new(SharedString::from(format!(
-                "github-issue-start-{}-{number}",
-                row_project.display()
-            )))
-            .label("Start →")
-            .ghost()
-            .xsmall()
-            .tooltip("Start a task for this issue")
-            .on_click(move |_, window, cx| {
-                open_issue_start_dialog(
-                    start_model.clone(),
-                    start_work_dir.clone(),
-                    start_issue.clone(),
-                    start_title.clone(),
-                    false,
-                    window,
-                    cx,
-                );
-            })
-            .into_any_element()
-        };
-        let row_project_for_click = row_project.clone();
-        div()
-            .id(SharedString::from(format!(
-                "github-issue-{}-{number}",
-                row_project.display()
-            )))
-            .px_3()
-            .py_2()
-            .border_b_1()
-            .border_color(theme.border.opacity(0.6))
-            .bg(if selected {
-                theme.list_active
-            } else {
-                theme.background
-            })
-            .hover(|style| style.bg(theme.list_hover))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.list_focus.focus(window, cx);
-                if let Some(ix) = this.issues.iter().position(|row| {
-                    row.project == row_project_for_click && row.summary.issue.number == number
-                }) {
-                    this.select_ix(ix, cx);
-                }
-            }))
-            .child(
-                div()
-                    .flex()
-                    .items_start()
-                    .gap_2()
-                    .child(
-                        Icon::new(if issue.state.eq_ignore_ascii_case("closed") {
-                            IconName::CircleCheck
-                        } else {
-                            IconName::Asterisk
-                        })
-                        .small()
-                        .text_color(
-                            if issue.state.eq_ignore_ascii_case("closed") {
-                                theme.muted_foreground
-                            } else {
-                                theme.success
-                            },
-                        ),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(issue.title.clone()),
-                            )
-                            .child(
-                                div()
-                                    .mt_0p5()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(context_line),
-                            )
-                            .child(
-                                div()
-                                    .mt_1()
-                                    .flex()
-                                    .flex_wrap()
-                                    .items_center()
-                                    .gap_1()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(div().min_w_0().flex_1().truncate().child(format!(
-                                        "#{number} · {} · {} · {} comments{}",
-                                        issue.author,
-                                        format_github_time(&issue.updated_at, now),
-                                        issue.comments_count,
-                                        assignees_label.unwrap_or_default()
-                                    )))
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .child(Tag::new().small().child(issue.state.clone())),
-                                    )
-                                    .children(
-                                        issue.labels.iter().take(3).map(|label| {
-                                            Tag::new().small().child(label.name.clone())
-                                        }),
-                                    )
-                                    .children((linked_count > 0).then(|| {
-                                        Tag::info().small().child(format!(
-                                            "{linked_count} linked task{}",
-                                            if linked_count == 1 { "" } else { "s" }
-                                        ))
-                                    })),
-                            ),
-                    )
-                    .child(div().flex_none().pt_0p5().child(row_action)),
-            )
-            .into_any_element()
+        let context = scope_context_line(&issue.issue.owner, &issue.issue.repo, &row.project_name);
+        let label = format!("{context} #{number}: {}", issue.title);
+        Button::new(SharedString::from(format!(
+            "github-issue-{}-{number}",
+            row.project.display()
+        )))
+        .accessibility_label(label.clone())
+        .tooltip(label)
+        .ghost()
+        .h_auto()
+        .w_full()
+        .p_0()
+        .selected(selected)
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.list_focus.focus(window, cx);
+            if let Some(ix) = this
+                .issues
+                .iter()
+                .position(|item| item.project == row.project && item.summary.issue.number == number)
+            {
+                this.select_ix(ix, cx);
+            }
+        }))
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .whitespace_normal()
+                .px_3()
+                .py_3()
+                .border_b_1()
+                .border_color(theme.border)
+                .flex()
+                .items_start()
+                .gap_2()
+                .child(
+                    Icon::new(if issue.state.eq_ignore_ascii_case("closed") {
+                        IconName::CircleCheck
+                    } else {
+                        IconName::Asterisk
+                    })
+                    .small()
+                    .text_color(theme.muted_foreground),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(issue.title),
+                        )
+                        .child(
+                            div()
+                                .mt_1()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .truncate()
+                                .child(format!("{context} · #{number}")),
+                        )
+                        .child(
+                            div()
+                                .mt_1()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(div().flex_1().min_w_0().truncate().child(format!(
+                                    "@{} · {}",
+                                    issue.author,
+                                    format_github_time(&issue.updated_at, github_now_unix())
+                                )))
+                                .children((issue.comments_count > 0).then(|| {
+                                    div()
+                                        .flex_none()
+                                        .child(format!("{} comments", issue.comments_count))
+                                })),
+                        )
+                        .children((!issue.labels.is_empty() || linked_count > 0).then(|| {
+                            div()
+                                .mt_1()
+                                .flex()
+                                .flex_wrap()
+                                .gap_2()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .children(
+                                    issue
+                                        .labels
+                                        .iter()
+                                        .take(2)
+                                        .map(|label| div().child(label.name.clone())),
+                                )
+                                .children(
+                                    (issue.labels.len() > 2).then(|| {
+                                        div().child(format!("+{}", issue.labels.len() - 2))
+                                    }),
+                                )
+                                .children((linked_count > 0).then(|| {
+                                    div().child(format!(
+                                        "{linked_count} linked task{}",
+                                        if linked_count == 1 { "" } else { "s" }
+                                    ))
+                                }))
+                        })),
+                ),
+        )
+        .into_any_element()
     }
 
     fn render_pr_row(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
@@ -2042,151 +1996,118 @@ impl GitHubView {
             return div().into_any_element();
         };
         let pr = row.summary;
-        let row_project = row.project;
-        let row_project_name = row.project_name;
-        let selected = self.selected_pr.as_ref().is_some_and(|selected| {
-            selected.project == row_project && selected.number == pr.number
-        });
         let number = pr.number;
-        let linked_task = self.linked_pr_task(&row_project, &pr.head_ref, cx);
-        let checks_label = pr_check_label(&pr.checks);
+        let selected = self
+            .selected_pr
+            .as_ref()
+            .is_some_and(|key| key.project == row.project && key.number == number);
+        let linked = self
+            .linked_pr_task(&row.project, &pr.head_ref, cx)
+            .is_some();
         let theme = cx.theme().colors;
-        let now = github_now_unix();
-        let context_line =
-            scope_context_line(&pr.repository.owner, &pr.repository.repo, &row_project_name);
-        let open_model = self.model.clone();
-        let row_action = linked_task.clone().map(|session| {
-            let work_dir = session.work_dir.clone();
-            let session_id = session.id.clone();
-            let title = session.title.clone();
-            Button::new(SharedString::from(format!(
-                "github-pr-open-{}-{number}",
-                row_project.display()
-            )))
-            .label("Open →")
-            .ghost()
-            .xsmall()
-            .tooltip(format!("Open linked task · {title}"))
-            .on_click(move |_, _, cx| {
-                open_model.update(cx, |state, cx| {
-                    controller::dispatch(
-                        state,
-                        AppAction::SelectSession {
-                            work_dir: work_dir.clone(),
-                            session_id: session_id.clone(),
-                        },
-                    );
-                    controller::dispatch(state, AppAction::CloseGitHub);
-                    cx.notify();
-                });
-            })
-            .into_any_element()
-        });
-        let row_project_for_click = row_project.clone();
-        div()
-            .id(SharedString::from(format!(
-                "github-pr-{}-{number}",
-                row_project.display()
-            )))
-            .px_3()
-            .py_2()
-            .border_b_1()
-            .border_color(theme.border.opacity(0.6))
-            .bg(if selected {
-                theme.list_active
-            } else {
-                theme.background
-            })
-            .hover(|style| style.bg(theme.list_hover))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.list_focus.focus(window, cx);
-                if let Some(ix) = this.pull_requests.iter().position(|row| {
-                    row.project == row_project_for_click && row.summary.number == number
-                }) {
-                    this.select_ix(ix, cx);
-                }
-            }))
-            .child(
-                div()
-                    .flex()
-                    .items_start()
-                    .gap_2()
-                    .child(
-                        Icon::new(if pr.state.eq_ignore_ascii_case("closed") {
-                            IconName::CircleCheck
-                        } else {
-                            IconName::Github
-                        })
+        let context =
+            scope_context_line(&pr.repository.owner, &pr.repository.repo, &row.project_name);
+        let label = format!("{context} #{number}: {}", pr.title);
+        let checks = pr_check_label(&pr.checks);
+        Button::new(SharedString::from(format!(
+            "github-pr-{}-{number}",
+            row.project.display()
+        )))
+        .accessibility_label(label.clone())
+        .tooltip(label)
+        .ghost()
+        .h_auto()
+        .w_full()
+        .p_0()
+        .selected(selected)
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.list_focus.focus(window, cx);
+            if let Some(ix) = this
+                .pull_requests
+                .iter()
+                .position(|item| item.project == row.project && item.summary.number == number)
+            {
+                this.select_ix(ix, cx);
+            }
+        }))
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .whitespace_normal()
+                .px_3()
+                .py_3()
+                .border_b_1()
+                .border_color(theme.border)
+                .flex()
+                .items_start()
+                .gap_2()
+                .child(
+                    Icon::new(IconName::Github)
                         .small()
-                        .text_color(
-                            if pr.state.eq_ignore_ascii_case("closed") {
-                                theme.muted_foreground
-                            } else {
-                                theme.success
-                            },
+                        .text_color(theme.muted_foreground),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(pr.title),
+                        )
+                        .child(
+                            div()
+                                .mt_1()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .truncate()
+                                .child(format!("{context} · #{number}")),
+                        )
+                        .child(
+                            div()
+                                .mt_1()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(div().flex_1().min_w_0().truncate().child(format!(
+                                    "@{} · {}",
+                                    pr.author,
+                                    format_github_time(&pr.updated_at, github_now_unix())
+                                )))
+                                .children(pr.is_draft.then(|| div().flex_none().child("Draft"))),
+                        )
+                        .child(
+                            div()
+                                .mt_1()
+                                .flex()
+                                .flex_wrap()
+                                .gap_2()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(
+                                    div()
+                                        .text_color(if checks.contains("failing") {
+                                            theme.danger
+                                        } else {
+                                            theme.muted_foreground
+                                        })
+                                        .child(checks),
+                                )
+                                .children(
+                                    pr.review_decision
+                                        .as_deref()
+                                        .and_then(pr_review_label)
+                                        .map(|label| div().child(label)),
+                                )
+                                .children(linked.then(|| div().child("Linked task"))),
                         ),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(pr.title),
-                            )
-                            .child(
-                                div()
-                                    .mt_0p5()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(context_line),
-                            )
-                            .child(
-                                div()
-                                    .mt_1()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(format!(
-                                        "#{number} · {} · {} · {} → {}",
-                                        pr.author,
-                                        format_github_time(&pr.updated_at, now),
-                                        pr.head_ref,
-                                        pr.base_ref,
-                                    )),
-                            )
-                            .child(
-                                div()
-                                    .mt_1()
-                                    .flex()
-                                    .flex_wrap()
-                                    .items_center()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .child(Tag::new().small().child(pr.state.clone())),
-                                    )
-                                    .children(
-                                        pr.is_draft.then(|| Tag::new().small().child("Draft")),
-                                    )
-                                    .child(Tag::new().small().child(checks_label))
-                                    .children(
-                                        pr.review_decision
-                                            .clone()
-                                            .map(|decision| Tag::new().small().child(decision)),
-                                    )
-                                    .children(linked_task.map(|session| {
-                                        Tag::info()
-                                            .small()
-                                            .child(format!("Task · {}", session.title))
-                                    })),
-                            ),
-                    )
-                    .children(row_action.map(|action| div().flex_none().pt_0p5().child(action))),
-            )
-            .into_any_element()
+                ),
+        )
+        .into_any_element()
     }
 
     fn render_load_more(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -2315,10 +2236,11 @@ impl GitHubView {
                     .flex_1()
                     .truncate()
                     .text_color(theme.foreground)
-                    .child(format!("Some projects couldn’t load: {error}")),
+                    .child("Some projects unavailable"),
             )
             .child(
                 Button::new("github-list-warning-retry")
+                    .debug_selector(|| "github-list-warning-retry".into())
                     .label("Retry")
                     .ghost()
                     .xsmall()
@@ -2327,6 +2249,7 @@ impl GitHubView {
             )
             .child(
                 Button::new("github-list-warning-copy")
+                    .debug_selector(|| "github-list-warning-copy".into())
                     .label("Copy")
                     .tooltip("Copy the complete GitHub error")
                     .ghost()
@@ -2844,6 +2767,7 @@ impl GitHubView {
                 div()
                     .flex()
                     .items_center()
+                    .flex_wrap()
                     .gap_2()
                     .text_xs()
                     .child(Tag::new().small().child(row.label()))
@@ -2855,7 +2779,7 @@ impl GitHubView {
                     .child(
                         div()
                             .text_color(theme.muted_foreground)
-                            .child(row.timestamp.clone()),
+                            .child(format_github_time(&row.timestamp, github_now_unix())),
                     )
                     .children(location.map(|location| Tag::new().small().child(location)))
                     .child(div().flex_1())
@@ -2935,6 +2859,12 @@ impl GitHubView {
         let theme = cx.theme().colors;
         div()
             .id(SharedString::from(format!("github-pr-file-{}", file.path)))
+            .role(Role::ListItem)
+            .aria_label(format!(
+                "{}: +{} −{}",
+                file.path, file.additions, file.deletions
+            ))
+            .aria_selected(selected)
             .px_3()
             .py_2()
             .border_b_1()
@@ -2974,178 +2904,179 @@ impl GitHubView {
         };
         let detail = detail.clone();
         let theme = cx.theme().colors;
-        let linked = selected
-            .as_ref()
-            .and_then(|selected| self.linked_pr_task(&selected.project, &detail.head_ref, cx));
+        div()
+            .size_full()
+            .overflow_y_scrollbar()
+            .child(
+                div()
+                    .w_full()
+                    .max_w(rems(52.))
+                    .mx_auto()
+                    .px_5()
+                    .py_4()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .children(detail.is_draft.then(|| Tag::new().small().child("Draft")))
+                            .child(Tag::new().small().child(detail.state.clone()))
+                            .children(
+                                detail
+                                    .review_decision
+                                    .clone()
+                                    .as_deref()
+                                    .and_then(pr_review_label)
+                                    .map(|decision| Tag::new().small().child(decision)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .mt_5()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Description"),
+                    )
+                    .child(
+                        div()
+                            .mt_2()
+                            .text_sm()
+                            .child(if detail.body.trim().is_empty() {
+                                div()
+                                    .text_color(theme.muted_foreground)
+                                    .child("No description provided.")
+                                    .into_any_element()
+                            } else {
+                                TextView::new(&self.detail_body)
+                                    .selectable(true)
+                                    .into_any_element()
+                            }),
+                    )
+                    .child(
+                        div()
+                            .mt_3()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Checks"),
+                    )
+                    .child(
+                        div()
+                            .mt_2()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(if detail.total_checks == 0 {
+                                "No checks reported".to_owned()
+                            } else {
+                                format!(
+                                    "{} passing · {} pending · {} failing",
+                                    detail.passing_checks,
+                                    detail.pending_checks,
+                                    detail.failing_checks
+                                )
+                            }),
+                    )
+                    .children(detail.checks.iter().map(|check| {
+                        div()
+                            .debug_selector({
+                                let name = check.name.clone();
+                                move || format!("github-pr-check-{name}")
+                            })
+                            .mt_2()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .text_sm()
+                            .child(div().min_w_0().flex_1().child(check.name.clone()))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .debug_selector({
+                                        let name = check.name.clone();
+                                        move || format!("github-pr-check-status-{name}")
+                                    })
+                                    .text_color(theme.muted_foreground)
+                                    .child(pr_check_status_label(check)),
+                            )
+                            .child(
+                                div().w_20().flex_none().children(
+                                    check
+                                        .details_url
+                                        .as_deref()
+                                        .map(str::trim)
+                                        .filter(|url| {
+                                            url.starts_with("https://")
+                                                || url.starts_with("http://")
+                                        })
+                                        .map(|url| {
+                                            gpui_kit::base::Link::new(SharedString::from(format!(
+                                                "github-pr-check-log-{}-{}-{url}",
+                                                detail.number, check.name
+                                            )))
+                                            .href(url.to_owned())
+                                            .open_with(|url, _, _, cx| cx.open_url(url))
+                                            .accessibility_label(format!(
+                                                "View logs for {}",
+                                                check.name
+                                            ))
+                                            .flex_none()
+                                            .text_color(theme.link)
+                                            .underline()
+                                            .cursor_pointer()
+                                            .border_1()
+                                            .border_color(cx.theme().transparent)
+                                            .rounded(cx.theme().radius)
+                                            .px_1()
+                                            .py_1()
+                                            .hover(|style| style.bg(theme.list_hover))
+                                            .focus_visible(|style| {
+                                                style.border_color(theme.primary)
+                                            })
+                                            .debug_selector({
+                                                let name = check.name.clone();
+                                                move || format!("github-pr-check-log-{name}")
+                                            })
+                                            .child("View logs")
+                                        }),
+                                ),
+                            )
+                    })),
+            )
+            .into_any_element()
+    }
+
+    fn render_pr_conversation(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().colors;
         let comments = (0..self.pr_timeline_rows.len())
             .map(|ix| self.render_pr_timeline_row(ix, cx))
             .collect::<Vec<_>>();
         div()
             .size_full()
             .overflow_y_scrollbar()
-            .px_5()
-            .py_4()
             .child(
                 div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .children(detail.is_draft.then(|| Tag::new().small().child("Draft")))
-                    .child(Tag::new().small().child(detail.state.clone()))
-                    .children(
-                        detail
-                            .review_decision
-                            .clone()
-                            .map(|decision| Tag::new().small().child(decision)),
-                    ),
-            )
-            .child(
-                div()
-                    .mt_3()
-                    .text_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("Checks"),
-            )
-            .child(
-                div()
-                    .mt_2()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child(if detail.total_checks == 0 {
-                        "No checks reported".to_owned()
-                    } else {
-                        format!(
-                            "{} passing · {} pending · {} failing",
-                            detail.passing_checks, detail.pending_checks, detail.failing_checks
-                        )
-                    }),
-            )
-            .children(detail.checks.iter().map(|check| {
-                div()
-                    .debug_selector({
-                        let name = check.name.clone();
-                        move || format!("github-pr-check-{name}")
-                    })
-                    .mt_2()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .text_sm()
-                    .child(div().min_w_0().flex_1().child(check.name.clone()))
+                    .w_full()
+                    .max_w(rems(52.))
+                    .mx_auto()
+                    .px_5()
+                    .py_4()
                     .child(
                         div()
-                            .flex_none()
-                            .debug_selector({
-                                let name = check.name.clone();
-                                move || format!("github-pr-check-status-{name}")
-                            })
-                            .text_color(theme.muted_foreground)
-                            .child(pr_check_status_label(check)),
+                            .debug_selector(|| "github-pr-conversation-comments".into())
+                            .mt_4()
+                            .children(self.pr_timeline_rows.is_empty().then(|| {
+                                div()
+                                    .py_6()
+                                    .w_full()
+                                    .flex()
+                                    .justify_center()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .child("No comments yet.")
+                            }))
+                            .children(comments),
                     )
-                    .child(
-                        div().w_20().flex_none().children(
-                            check
-                                .details_url
-                                .as_deref()
-                                .map(str::trim)
-                                .filter(|url| {
-                                    url.starts_with("https://") || url.starts_with("http://")
-                                })
-                                .map(|url| {
-                                    gpui_kit::base::Link::new(SharedString::from(format!(
-                                        "github-pr-check-log-{}-{}-{url}",
-                                        detail.number, check.name
-                                    )))
-                                    .href(url.to_owned())
-                                    .open_with(|url, _, _, cx| cx.open_url(url))
-                                    .accessibility_label(format!("View logs for {}", check.name))
-                                    .flex_none()
-                                    .text_color(theme.link)
-                                    .underline()
-                                    .cursor_pointer()
-                                    .border_1()
-                                    .border_color(cx.theme().transparent)
-                                    .rounded(cx.theme().radius)
-                                    .px_1()
-                                    .py_1()
-                                    .hover(|style| style.bg(theme.list_hover))
-                                    .focus_visible(|style| style.border_color(theme.primary))
-                                    .debug_selector({
-                                        let name = check.name.clone();
-                                        move || format!("github-pr-check-log-{name}")
-                                    })
-                                    .child("View logs")
-                                }),
-                        ),
-                    )
-            }))
-            .child(
-                div()
-                    .mt_5()
-                    .text_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("Description"),
-            )
-            .child(
-                div()
-                    .mt_2()
-                    .text_sm()
-                    .child(TextView::new(&self.detail_body).selectable(true)),
-            )
-            .children(linked.map(|session| {
-                let model = self.model.clone();
-                let work_dir = session.work_dir.clone();
-                let session_id = session.id.clone();
-                div()
-                    .mt_5()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("Linked task"),
-                    )
-                    .child(Tag::info().small().child(session.title))
-                    .child(
-                        Button::new("github-open-linked-pr-task")
-                            .label("Open task")
-                            .ghost()
-                            .xsmall()
-                            .on_click(move |_, _, cx| {
-                                model.update(cx, |state, cx| {
-                                    controller::dispatch(
-                                        state,
-                                        AppAction::SelectSession {
-                                            work_dir: work_dir.clone(),
-                                            session_id: session_id.clone(),
-                                        },
-                                    );
-                                    controller::dispatch(state, AppAction::CloseGitHub);
-                                    cx.notify();
-                                });
-                            }),
-                    )
-                    .into_any_element()
-            }))
-            .child(self.render_pr_comment_editor(cx))
-            .children(self.render_pr_reply_editor(cx))
-            .child(
-                div()
-                    .debug_selector(|| "github-pr-summary-comments".into())
-                    .mt_4()
-                    .children(self.pr_timeline_rows.is_empty().then(|| {
-                        div()
-                            .py_6()
-                            .w_full()
-                            .flex()
-                            .justify_center()
-                            .text_sm()
-                            .text_color(theme.muted_foreground)
-                            .child("No comments yet.")
-                    }))
-                    .children(comments),
+                    .child(self.render_pr_comment_editor(cx))
+                    .children(self.render_pr_reply_editor(cx)),
             )
             .into_any_element()
     }
@@ -3361,6 +3292,25 @@ impl GitHubView {
                 detail.updated_at.clone(),
             )
         };
+        let repository_label = self
+            .selected_pr
+            .as_ref()
+            .and_then(|selected| {
+                self.pull_requests.iter().find(|row| {
+                    row.project == selected.project && row.summary.number == selected.number
+                })
+            })
+            .map(|row| {
+                format!(
+                    "{}/{}",
+                    row.summary.repository.owner, row.summary.repository.repo
+                )
+            })
+            .unwrap_or_default();
+        let linked = self
+            .selected_pr
+            .as_ref()
+            .and_then(|selected| self.linked_pr_task(&selected.project, &head_ref, cx));
         let has_actionable_reviews = self.pr_detail.as_ref().is_some_and(|pr| {
             pr.state.eq_ignore_ascii_case("open")
                 && !threadlane_git::collect_actionable_pr_feedback(pr).is_empty()
@@ -3404,26 +3354,53 @@ impl GitHubView {
                             .text_xs()
                             .text_color(theme.muted_foreground)
                             .child(format!(
-                                "#{} · {} · {} · {} → {} · {}",
+                                "{} · #{} · {} · @{} · {}",
+                                repository_label,
                                 number,
                                 state,
                                 author,
-                                head_ref,
-                                base_ref,
                                 format_github_time(&updated_at, github_now_unix())
                             )),
+                    )
+                    .child(
+                        div()
+                            .mt_1()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(format!("{head_ref} → {base_ref}")),
                     )
                     .child(
                         div()
                             .mt_3()
                             .flex()
                             .items_center()
-                            .gap_2()
+                            .gap_3()
+                            .flex_wrap()
                             .child(
                                 Link::new("github-open-pr-browser")
                                     .href(url)
                                     .child("Open on GitHub"),
                             )
+                            .children(linked.map(|session| {
+                                let model = self.model.clone();
+                                Button::new("github-open-linked-pr-task")
+                                    .label("Open task")
+                                    .tooltip(session.title)
+                                    .small()
+                                    .on_click(move |_, _, cx| {
+                                        model.update(cx, |state, cx| {
+                                            controller::dispatch(
+                                                state,
+                                                AppAction::SelectSession {
+                                                    work_dir: session.work_dir.clone(),
+                                                    session_id: session.id.clone(),
+                                                },
+                                            );
+                                            controller::dispatch(state, AppAction::CloseGitHub);
+                                            cx.notify();
+                                        });
+                                    })
+                            }))
                             .children(has_actionable_reviews.then(|| {
                                 Button::new("github-address-pr-reviews")
                                     .label("Address reviews")
@@ -3432,22 +3409,25 @@ impl GitHubView {
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.address_all_pr_reviews(cx);
                                     }))
-                            }))
-                            .child(
-                                div()
-                                    .id("github-pr-detail-tabs-focus")
-                                    .role(Role::TabList)
-                                    .track_focus(&self.pr_tabs_focus)
-                                    .key_context(GITHUB_PR_TABS_CONTEXT)
-                                    .on_action(cx.listener(Self::select_previous_pr_tab))
-                                    .on_action(cx.listener(Self::select_next_pr_tab))
-                                    .child(tabs),
-                            ),
+                            })),
+                    )
+                    .child(
+                        div()
+                            .mt_3()
+                            .w_full()
+                            .id("github-pr-detail-tabs-focus")
+                            .role(Role::TabList)
+                            .track_focus(&self.pr_tabs_focus)
+                            .key_context(GITHUB_PR_TABS_CONTEXT)
+                            .on_action(cx.listener(Self::select_previous_pr_tab))
+                            .on_action(cx.listener(Self::select_next_pr_tab))
+                            .child(tabs),
                     )
                     .child(div().mt_3().border_b_1().border_color(theme.border)),
             )
             .child(div().flex_1().min_h_0().child(match tab {
                 PrDetailTab::Summary => self.render_pr_summary(cx),
+                PrDetailTab::Conversation => self.render_pr_conversation(cx),
                 PrDetailTab::Timeline => self.render_pr_timeline(cx),
                 PrDetailTab::Code => self.render_pr_code(cx),
             }))
@@ -3478,7 +3458,9 @@ impl GitHubView {
                 (
                     detail.summary.title.clone(),
                     format!(
-                        "#{} · {} · {} · {}",
+                        "{}/{} · #{} · {} · @{} · {}",
+                        detail.summary.issue.owner,
+                        detail.summary.issue.repo,
                         detail.summary.issue.number,
                         detail.summary.state,
                         detail.summary.author,
@@ -3525,12 +3507,13 @@ impl GitHubView {
         let start_title = title.clone();
         let start_has_linked_task = !linked_sessions.is_empty();
 
-        div()
-            .size_full()
-            .min_h_0()
-            .overflow_y_scrollbar()
+        let header = div()
+            .debug_selector(|| "github-issue-detail-header".into())
+            .flex_none()
             .px_5()
             .py_4()
+            .border_b_1()
+            .border_color(theme.border)
             .child(
                 div()
                     .text_lg()
@@ -3549,7 +3532,8 @@ impl GitHubView {
                     .mt_3()
                     .flex()
                     .items_center()
-                    .gap_2()
+                    .flex_wrap()
+                    .gap_3()
                     .child(
                         Link::new("github-open-browser").href(url).child(
                             div()
@@ -3564,9 +3548,9 @@ impl GitHubView {
                         Button::new("github-start-agent-task")
                             .icon(IconName::Play)
                             .label(if start_has_linked_task {
-                                "Start another"
+                                "Start another…"
                             } else {
-                                "Start task"
+                                "Start task…"
                             })
                             .small()
                             .on_click(move |_, window, cx| {
@@ -3584,126 +3568,186 @@ impl GitHubView {
                                 );
                             })
                     })),
-            )
+            );
+        div()
+            .size_full()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(header)
             .child(
-                div()
-                    .mt_5()
-                    .text_sm()
-                    .child(TextView::new(&self.detail_body).selectable(true)),
-            )
-            .children((!linked_sessions.is_empty()).then(|| {
-                div()
-                    .mt_5()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("Linked tasks"),
-                    )
-                    .children(linked_sessions.into_iter().map(|linked| {
-                        let open_model = self.model.clone();
-                        let open_work_dir = linked.session.work_dir.clone();
-                        let open_session_id = linked.session.id.clone();
-                        div()
-                            .mt_2()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .text_sm()
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .truncate()
-                                    .child(linked.session.title),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(linked.project_name),
-                            )
-                            .child(Tag::new().small().child(linked.status))
-                            .children(
-                                linked
-                                    .session
-                                    .is_worktree
-                                    .then(|| Tag::new().small().child("Worktree")),
-                            )
-                            .children(linked.branch.map(|branch| Tag::new().small().child(branch)))
-                            .children(
-                                linked.pr_number.map(|number| {
-                                    Tag::new().small().child(format!("PR #{number}"))
-                                }),
-                            )
-                            .child(
-                                Button::new(SharedString::from(format!(
-                                    "open-linked-task-{}",
-                                    open_session_id
-                                )))
-                                .label("Open task")
-                                .ghost()
-                                .xsmall()
-                                .on_click(move |_, _, cx| {
-                                    open_model.update(cx, |state, cx| {
-                                        controller::dispatch(
-                                            state,
-                                            AppAction::SelectSession {
-                                                work_dir: open_work_dir.clone(),
-                                                session_id: open_session_id.clone(),
+                div().flex_1().min_h_0().overflow_y_scrollbar().child(
+                    div()
+                        .w_full()
+                        .max_w(rems(52.))
+                        .mx_auto()
+                        .px_5()
+                        .pb_5()
+                        .children(
+                            self.issue_detail
+                                .as_ref()
+                                .filter(|detail| {
+                                    !detail.summary.labels.is_empty()
+                                        || !detail.summary.assignees.is_empty()
+                                })
+                                .map(|detail| {
+                                    div()
+                                        .mt_4()
+                                        .flex()
+                                        .flex_wrap()
+                                        .gap_2()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .children(detail.summary.labels.iter().map(|label| {
+                                            Tag::new().small().child(label.name.clone())
+                                        }))
+                                        .children((!detail.summary.assignees.is_empty()).then(
+                                            || {
+                                                div().child(format!(
+                                                    "Assigned to @{}",
+                                                    detail.summary.assignees.join(" @")
+                                                ))
                                             },
-                                        );
-                                        cx.notify();
-                                    });
+                                        ))
                                 }),
-                            )
-                            .into_any_element()
-                    }))
-            }))
-            .children((!self.comment_rows.is_empty()).then(|| {
-                div()
-                    .mt_5()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(format!("Conversation ({})", self.comment_rows.len())),
-                    )
-                    .child(
-                        div()
-                            .relative()
-                            .mt_2()
-                            .h_64()
-                            .border_1()
-                            .border_color(theme.border)
-                            .rounded(cx.theme().radius)
-                            .child(
-                                list(
-                                    self.comment_list_state.clone(),
-                                    cx.processor(Self::render_comment_row),
-                                )
-                                .size_full()
-                                .with_sizing_behavior(ListSizingBehavior::Infer),
-                            )
-                            .child(
-                                div()
-                                    .absolute()
-                                    .inset_0()
-                                    .child(Scrollbar::vertical(&self.comment_list_state)),
+                        )
+                        .child(
+                            div().mt_5().text_sm().child(
+                                if self
+                                    .issue_detail
+                                    .as_ref()
+                                    .is_some_and(|detail| detail.body.trim().is_empty())
+                                {
+                                    div()
+                                        .text_color(theme.muted_foreground)
+                                        .child("No description provided.")
+                                        .into_any_element()
+                                } else {
+                                    TextView::new(&self.detail_body)
+                                        .selectable(true)
+                                        .into_any_element()
+                                },
                             ),
-                    )
-            }))
-            .children(self.detail_loading.then(|| {
-                div()
-                    .mt_3()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(Spinner::new().xsmall())
-                    .child("Refreshing details…")
-            }))
+                        )
+                        .children((!linked_sessions.is_empty()).then(|| {
+                            div()
+                                .mt_5()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .child("Linked tasks"),
+                                )
+                                .children(linked_sessions.into_iter().map(|linked| {
+                                    let open_model = self.model.clone();
+                                    let open_work_dir = linked.session.work_dir.clone();
+                                    let open_session_id = linked.session.id.clone();
+                                    div()
+                                        .mt_2()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .text_sm()
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .flex_1()
+                                                .truncate()
+                                                .child(linked.session.title),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground)
+                                                .child(linked.project_name),
+                                        )
+                                        .child(Tag::new().small().child(linked.status))
+                                        .children(
+                                            linked
+                                                .session
+                                                .is_worktree
+                                                .then(|| Tag::new().small().child("Worktree")),
+                                        )
+                                        .children(
+                                            linked
+                                                .branch
+                                                .map(|branch| Tag::new().small().child(branch)),
+                                        )
+                                        .children(linked.pr_number.map(|number| {
+                                            Tag::new().small().child(format!("PR #{number}"))
+                                        }))
+                                        .child(
+                                            Button::new(SharedString::from(format!(
+                                                "open-linked-task-{}",
+                                                open_session_id
+                                            )))
+                                            .label("Open task")
+                                            .ghost()
+                                            .xsmall()
+                                            .on_click(move |_, _, cx| {
+                                                open_model.update(cx, |state, cx| {
+                                                    controller::dispatch(
+                                                        state,
+                                                        AppAction::SelectSession {
+                                                            work_dir: open_work_dir.clone(),
+                                                            session_id: open_session_id.clone(),
+                                                        },
+                                                    );
+                                                    controller::dispatch(
+                                                        state,
+                                                        AppAction::CloseGitHub,
+                                                    );
+                                                    cx.notify();
+                                                });
+                                            }),
+                                        )
+                                        .into_any_element()
+                                }))
+                        }))
+                        .children((!self.comment_rows.is_empty()).then(|| {
+                            div()
+                                .mt_5()
+                                .child(
+                                    div().text_sm().font_weight(FontWeight::SEMIBOLD).child(
+                                        format!("Conversation ({})", self.comment_rows.len()),
+                                    ),
+                                )
+                                .child(
+                                    div()
+                                        .relative()
+                                        .mt_2()
+                                        .h_64()
+                                        .border_1()
+                                        .border_color(theme.border)
+                                        .rounded(cx.theme().radius)
+                                        .child(
+                                            list(
+                                                self.comment_list_state.clone(),
+                                                cx.processor(Self::render_comment_row),
+                                            )
+                                            .size_full()
+                                            .with_sizing_behavior(ListSizingBehavior::Infer),
+                                        )
+                                        .child(
+                                            div().absolute().inset_0().child(Scrollbar::vertical(
+                                                &self.comment_list_state,
+                                            )),
+                                        ),
+                                )
+                        }))
+                        .children(self.detail_loading.then(|| {
+                            div()
+                                .mt_3()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(Spinner::new().xsmall())
+                                .child("Refreshing details…")
+                        })),
+                ),
+            )
             .into_any_element()
     }
 
@@ -3730,7 +3774,7 @@ impl GitHubView {
 
 impl Render for GitHubView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let narrow = window.bounds().size.width < px(900.0);
+        let narrow = window.bounds().size.width < window.rem_size() * 56.25;
         let master = div()
             .size_full()
             .min_h_0()
@@ -3740,7 +3784,9 @@ impl Render for GitHubView {
             .child(self.render_filters(cx))
             .child(div().flex_1().min_h_0().child(self.render_list(window, cx)));
         let detail = self.render_detail(window, cx);
-        let content = if narrow {
+        let content = if self.tab == GitHubTab::PullRequests && self.current_pr_tab() == PrDetailTab::Code {
+            detail
+        } else if narrow {
             div()
                 .size_full()
                 .min_h_0()
@@ -3761,8 +3807,8 @@ impl Render for GitHubView {
                 .with_state(&self.detail_split_state)
                 .child(
                     resizable_panel()
-                        .size(window.bounds().size.width * 0.35)
-                        .size_range(px(260.0)..px(640.0))
+                        .size(window.rem_size() * 24.)
+                        .size_range((window.rem_size() * 19.)..(window.rem_size() * 34.))
                         .child(master),
                 )
                 .child(resizable_panel().child(detail))
@@ -3856,6 +3902,10 @@ mod tests {
                 ..Default::default()
             },
         ];
+        view.model.update(cx, |model, _cx| {
+            model.projects.clear();
+            threadlane_ui_state::activate_test_session(model, "app", &project.join("fixture.jsonl"));
+        });
         view.project_work_dir = Some(project.clone());
         view.scope = GitHubScope::Project(project.clone());
         view.scope_initialized = true;
@@ -3933,7 +3983,7 @@ mod tests {
         let view = harness.read_with(cx, |harness, _| harness.0.clone());
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let search_width = cx.debug_bounds("github-search-field").unwrap().size.width;
-        assert!(search_width > px(100.0));
+        assert!(search_width > px(450.0), "Search owns a full row instead of competing with state filters");
 
         view.update(cx, |view, cx| {
             view.list_error = Some(raw.clone());
@@ -3945,12 +3995,12 @@ mod tests {
             cx.debug_bounds("github-search-field").unwrap().size.width,
             search_width
         );
-        let error = cx.debug_bounds("github-list-error").unwrap();
+        let error = cx.debug_bounds("github-list-warning").unwrap();
         let results = cx.debug_bounds("github-result-list").unwrap();
         assert!(error.bottom() <= results.top());
         assert!(error.size.height < px(200.0));
-        assert!(cx.debug_bounds("github-list-error-retry").is_some());
-        let copy = cx.debug_bounds("github-list-error-copy").unwrap();
+        assert!(cx.debug_bounds("github-list-warning-retry").is_some());
+        let copy = cx.debug_bounds("github-list-warning-copy").unwrap();
         cx.simulate_click(copy.center(), Modifiers::default());
         cx.update(|_, cx| assert_eq!(cx.read_from_clipboard().unwrap().text(), Some(raw.clone())));
 
@@ -4842,7 +4892,7 @@ mod tests {
         }
         assert_eq!(
             github_empty_message(GitHubTab::Issues, GitHubStateFilter::Open, ""),
-            "No open issues."
+            "No open issues in this scope."
         );
         assert_eq!(
             github_empty_message(
@@ -4850,7 +4900,7 @@ mod tests {
                 GitHubStateFilter::Merged,
                 "older fix"
             ),
-            "No matching pull requests. Try another search or state filter."
+            "No matching pull requests in this scope. Try another search or state filter."
         );
     }
 
@@ -5441,7 +5491,8 @@ mod tests {
 
     #[test]
     fn github_pr_tab_arrows_and_file_actions_keep_bounded_selection() {
-        assert_eq!(PrDetailTab::Summary.adjacent(1), PrDetailTab::Timeline);
+        assert_eq!(PrDetailTab::Summary.adjacent(1), PrDetailTab::Conversation);
+        assert_eq!(PrDetailTab::Conversation.adjacent(1), PrDetailTab::Timeline);
         assert_eq!(PrDetailTab::Timeline.adjacent(1), PrDetailTab::Code);
         assert_eq!(PrDetailTab::Code.adjacent(1), PrDetailTab::Code);
         assert_eq!(PrDetailTab::Code.adjacent(-1), PrDetailTab::Timeline);
@@ -5484,7 +5535,7 @@ mod tests {
         cx.simulate_keystrokes("right");
         assert_eq!(
             view.read_with(cx, |view, _| view.current_pr_tab()),
-            PrDetailTab::Timeline
+            PrDetailTab::Conversation
         );
 
         view.update(cx, |view, cx| {
@@ -5503,6 +5554,16 @@ mod tests {
             view.read_with(cx, |view, _| view.current_pr_file().map(str::to_owned)),
             Some("src/view.rs".into())
         );
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("github-result-list").is_none(),
+            "File review should use the work area rather than squeeze in a third column");
+        let back = cx.debug_bounds("github-back-to-pr-list").unwrap();
+        cx.simulate_click(back.center(), gpui::Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(view.read_with(cx, |view, _| view.current_pr_tab()), PrDetailTab::Summary);
+        assert!(cx.debug_bounds("github-result-list").is_some());
+        assert_eq!(view.read_with(cx, |view, _| view.current_pr_file().map(str::to_owned)),
+            Some("src/view.rs".into()), "Returning to the list retains the chosen file");
         view.update(cx, |view, cx| {
             view.detail_loading = true;
             view.select_ix(0, cx);
@@ -5800,20 +5861,22 @@ mod tests {
             view.pr_timeline_list_state
                 .reset(view.pr_timeline_rows.len());
             let key = view.current_pr_key().unwrap();
-            view.pr_selections.select_tab(key, PrDetailTab::Timeline);
-            cx.notify();
-        });
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        view.update(cx, |view, cx| {
-            let key = view.current_pr_key().unwrap();
             view.pr_selections.select_tab(key, PrDetailTab::Summary);
             cx.notify();
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("github-pr-conversation-comments").is_none(),
+            "Overview must not duplicate the conversation");
+        view.update(cx, |view, cx| {
+            let key = view.current_pr_key().unwrap();
+            view.pr_selections.select_tab(key, PrDetailTab::Conversation);
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
         assert!(
-            cx.debug_bounds("github-pr-summary-comments")
+            cx.debug_bounds("github-pr-conversation-comments")
                 .is_some_and(|bounds| bounds.size.height > gpui::px(0.)),
-            "Summary comments should be rendered in the visible scroll flow"
+            "Conversation comments should be rendered in the visible scroll flow"
         );
 
         view.update(cx, |view, cx| {

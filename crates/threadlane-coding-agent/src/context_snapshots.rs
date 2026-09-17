@@ -7,22 +7,18 @@ use serde_json::Value;
 use threadlane_runtime::harness::{
     ContextSnapshot, ContextSnapshotLoadOutcome, JsonlStore, Record, Reducer, TraceString,
 };
-use threadlane_runtime::{AgentMessage, AgentToolDefinition, ToolExecutor};
+use threadlane_protocol::{AgentMessage, AgentToolDefinition, ToolExecutor};
 
 use super::durable::sha256_hex;
 use super::harness::CodingSessionHarness;
 
-#[allow(dead_code)]
-pub const MAX_CONTEXT_LIST_RESULTS: usize = 20;
-#[allow(dead_code)]
-pub const MAX_SUBAGENT_CONTEXT_REFS: usize = 16;
-#[allow(dead_code)]
-pub const MAX_SUBAGENT_CONTEXT_CHARS: usize = 32_000;
+pub(crate) const MAX_CONTEXT_LIST_RESULTS: usize = 20;
+pub(crate) const MAX_SUBAGENT_CONTEXT_REFS: usize = 16;
+pub(crate) const MAX_SUBAGENT_CONTEXT_CHARS: usize = 32_000;
 
-#[allow(dead_code)]
-pub struct ResolvedContextSnapshot {
-    pub snapshot: ContextSnapshot,
-    pub content: String,
+pub(crate) struct ResolvedContextSnapshot {
+    pub(crate) snapshot: ContextSnapshot,
+    pub(crate) content: String,
 }
 
 pub struct ContextSnapshotToolExecutor {
@@ -31,7 +27,7 @@ pub struct ContextSnapshotToolExecutor {
 }
 
 impl ContextSnapshotToolExecutor {
-    pub fn new(session_file: PathBuf, work_dir: PathBuf) -> Self {
+    pub(crate) fn new(session_file: PathBuf, work_dir: PathBuf) -> Self {
         Self {
             session_file,
             work_dir,
@@ -181,7 +177,7 @@ fn snapshot_header(snapshot: &ContextSnapshot, digest: &str) -> String {
     )
 }
 
-pub fn snapshot_location(snapshot: &ContextSnapshot) -> String {
+pub(crate) fn snapshot_location(snapshot: &ContextSnapshot) -> String {
     match (snapshot.start_line, snapshot.end_line) {
         (None, None) => snapshot.path.clone(),
         (start, end) => format!(
@@ -193,7 +189,7 @@ pub fn snapshot_location(snapshot: &ContextSnapshot) -> String {
     }
 }
 
-pub fn compacted_context_snapshot_index_for_sources(
+pub(crate) fn compacted_context_snapshot_index_for_sources(
     snapshots: &[ContextSnapshot],
     prioritized_source_entry_ids: &[String],
 ) -> Vec<serde_json::Value> {
@@ -212,7 +208,7 @@ pub fn compacted_context_snapshot_index_for_sources(
                 .rev()
                 .filter(|snapshot| !prioritized.contains(snapshot.source_entry_id.as_str())),
         )
-        .take(threadlane_runtime::compaction::MAX_CONTEXT_SNAPSHOT_INDEX_ENTRIES)
+        .take(threadlane_compaction::MAX_CONTEXT_SNAPSHOT_INDEX_ENTRIES)
     {
         index.push(serde_json::json!({
             "context_id": snapshot.context_id,
@@ -222,7 +218,7 @@ pub fn compacted_context_snapshot_index_for_sources(
             "file_sha256": snapshot.file_sha256.as_str(),
         }));
         if serde_json::to_string(&index).map_or(usize::MAX, |value| value.chars().count())
-            > threadlane_runtime::compaction::MAX_CONTEXT_SNAPSHOT_INDEX_CHARS
+            > threadlane_compaction::MAX_CONTEXT_SNAPSHOT_INDEX_CHARS
         {
             index.pop();
             break;
@@ -315,7 +311,7 @@ impl ToolExecutor for ContextSnapshotToolExecutor {
     }
 }
 
-pub fn read_file_request(arguments: &Value) -> Option<(&str, Option<usize>, Option<usize>)> {
+pub(crate) fn read_file_request(arguments: &Value) -> Option<(&str, Option<usize>, Option<usize>)> {
     let path = arguments.get("path")?.as_str()?;
     Some((
         path,
@@ -330,7 +326,7 @@ pub fn read_file_request(arguments: &Value) -> Option<(&str, Option<usize>, Opti
     ))
 }
 
-pub fn is_local_path(path: &str) -> bool {
+pub(crate) fn is_local_path(path: &str) -> bool {
     ![
         "http:", "https:", "virtual:", "file:", "skill:", "agent:", "pr:", "mr:", "issue:",
     ]
@@ -348,7 +344,7 @@ fn file_sha256(path: &Path) -> Result<TraceString, String> {
     .map_err(|error| error.to_string())
 }
 
-pub fn resolve_context_snapshot(
+pub(crate) fn resolve_context_snapshot(
     session_file: &Path,
     work_dir: &Path,
     context_id: &str,
@@ -457,7 +453,7 @@ mod tests {
     };
     use crate::harness::CodingSessionHarness;
     use threadlane_runtime::harness::SessionStore;
-    use threadlane_runtime::{AgentMessage, ToolExecutor};
+    use threadlane_protocol::{AgentMessage, ToolExecutor};
 
     async fn snapshot_session() -> (tempfile::TempDir, std::path::PathBuf, String) {
         let dir = tempfile::tempdir().unwrap();

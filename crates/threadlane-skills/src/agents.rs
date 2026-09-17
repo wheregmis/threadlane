@@ -197,7 +197,7 @@ fn find_nearest_project_agent_dirs(cwd: &Path) -> (Option<PathBuf>, Vec<PathBuf>
 }
 
 pub fn discover_agents(cwd: &Path, scope: AgentScope) -> AgentDiscoveryResult {
-    let home = crate::dirs_home();
+    let home = threadlane_project::dirs_home();
     let user_dirs = home
         .map(|h| {
             vec![

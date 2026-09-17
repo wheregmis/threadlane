@@ -64,7 +64,7 @@ impl HashlineEdit {
 /// 12-bit FNV-1a over the line without trailing newline characters.
 /// Public so standalone consumers can anchor lines without calling
 /// [`format_line_hashline`] and reparsing the output.
-pub fn compute_line_hash(line: &str) -> String {
+pub(crate) fn compute_line_hash(line: &str) -> String {
     let clean = line.trim_end_matches(['\r', '\n']);
     let mut hash: u32 = 2166136261;
     for byte in clean.bytes() {
@@ -81,7 +81,7 @@ pub fn format_line_hashline(line_no: usize, line: &str) -> String {
 }
 
 /// Parse a line anchor string like `"12:a3f"` into line index (1-based) and lowercased hash.
-pub fn parse_anchor(anchor: &str) -> Result<(usize, String), String> {
+pub(crate) fn parse_anchor(anchor: &str) -> Result<(usize, String), String> {
     let (first, second) = anchor.split_once(':').ok_or_else(|| {
         format!(
             "Invalid anchor format '{anchor}'. Expected format 'line_number:hash' (e.g. '12:a3f')."
@@ -115,7 +115,8 @@ pub struct HashlineApplyResult {
 }
 
 /// Apply a series of hash-anchored edits to a multi-line document.
-pub fn apply_hashline_edits(content: &str, edits: &[HashlineEdit]) -> Result<String, String> {
+#[cfg(test)]
+pub(crate) fn apply_hashline_edits(content: &str, edits: &[HashlineEdit]) -> Result<String, String> {
     apply_hashline_edits_detailed(content, edits, 0).map(|r| r.new_content)
 }
 

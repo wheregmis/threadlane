@@ -15,7 +15,7 @@ use threadlane_wasi::broker::{
 use threadlane_mcp::McpManager;
 use crate::mcp::McpToolExecutor;
 use threadlane_permission::{PermissionHandle, PermissionManager};
-use threadlane_runtime::plan::{SessionPlanStore, UpdatePlanToolExecutor};
+use threadlane_plan::{SessionPlanStore, UpdatePlanToolExecutor};
 use threadlane_question::{AskQuestionToolExecutor, QuestionHandle};
 use async_trait::async_trait;
 use log::warn;
@@ -26,7 +26,7 @@ use std::sync::Arc;
 use threadlane_runtime::harness::{HookContext, HookEffect, HookHandler, HookKind};
 use threadlane_runtime::Capability;
 use threadlane_runtime::ToolPolicy;
-use threadlane_runtime::{AgentEvent, AgentToolCall, AgentToolDefinition, ToolExecutor};
+use threadlane_protocol::{AgentEvent, AgentToolCall, AgentToolDefinition, ToolExecutor};
 use threadlane_skills::{LoadSkillToolExecutor as SkillLoader, SkillRegistry};
 use threadlane_wasi::WasiExtensionManager;
 use tokio::sync::broadcast;
@@ -38,14 +38,14 @@ const CREATE_DRAFT_PR_TOOL_NAME: &str = "create_draft_pull_request";
 // channel shared by parent `hub` and child `message_peer`).
 // NOTE: oh-my-pi parity removed the explicit `complete_prewalk` handoff tool.
 // The handoff is automatic at the first qualifying edit/write behind an
-// opened `update_plan` todo gate (see `threadlane_runtime::orchestrator`).
+// opened `update_plan` todo gate (see `threadlane_orchestrator`).
 
 // ── Capability implementations ─────────────────────────────────────────
 // Each wraps a subsystem and implements [`threadlane_runtime::Capability`]
 // so tools and hooks can be registered declaratively.
 
 pub struct SkillCapability {
-    pub skills: Arc<SkillRegistry>,
+    pub(crate) skills: Arc<SkillRegistry>,
 }
 /// Session-owned `ToolExecutor` adapter over the runtime-agnostic skills loader.
 struct SessionLoadSkillExecutor(SkillLoader);
@@ -86,10 +86,10 @@ impl Capability for SkillCapability {
 }
 
 pub struct SubagentCapability {
-    pub agent_runner: AgentRunner,
-    pub hub: super::mailbox::SubagentHub,
-    pub session_file: Option<PathBuf>,
-    pub revive_hook: Option<ReviveHook>,
+    pub(crate) agent_runner: AgentRunner,
+    pub(crate) hub: super::mailbox::SubagentHub,
+    pub(crate) session_file: Option<PathBuf>,
+    pub(crate) revive_hook: Option<ReviveHook>,
 }
 impl Capability for SubagentCapability {
     fn id(&self) -> &str {
@@ -109,13 +109,13 @@ impl Capability for SubagentCapability {
 }
 
 pub struct PlanCapability {
-    pub plan_store: SessionPlanStore,
-    pub event_tx: broadcast::Sender<AgentEvent>,
+    pub(crate) plan_store: SessionPlanStore,
+    pub(crate) event_tx: broadcast::Sender<AgentEvent>,
 }
 
 pub struct ContextCapability {
-    pub session_file: PathBuf,
-    pub work_dir: PathBuf,
+    pub(crate) session_file: PathBuf,
+    pub(crate) work_dir: PathBuf,
 }
 
 impl Capability for ContextCapability {
@@ -132,7 +132,7 @@ impl Capability for ContextCapability {
 }
 
 pub struct GitHubCapability {
-    pub work_dir: PathBuf,
+    pub(crate) work_dir: PathBuf,
 }
 
 impl Capability for GitHubCapability {
@@ -148,7 +148,7 @@ impl Capability for GitHubCapability {
 }
 
 pub struct WorktreeCapability {
-    pub work_dir: PathBuf,
+    pub(crate) work_dir: PathBuf,
 }
 
 impl Capability for WorktreeCapability {
@@ -348,8 +348,8 @@ impl Capability for PlanCapability {
 }
 
 pub struct QuestionCapability {
-    pub handle: QuestionHandle,
-    pub event_tx: broadcast::Sender<AgentEvent>,
+    pub(crate) handle: QuestionHandle,
+    pub(crate) event_tx: broadcast::Sender<AgentEvent>,
 }
 
 impl Capability for QuestionCapability {
@@ -365,9 +365,9 @@ impl Capability for QuestionCapability {
 }
 
 pub struct WasiCapability {
-    pub extensions: Arc<WasiExtensionManager>,
-    pub broker_dispatcher: Arc<CapabilityDispatcher>,
-    pub tool_policy: Arc<tokio::sync::Mutex<ToolPolicy>>,
+    pub(crate) extensions: Arc<WasiExtensionManager>,
+    pub(crate) broker_dispatcher: Arc<CapabilityDispatcher>,
+    pub(crate) tool_policy: Arc<tokio::sync::Mutex<ToolPolicy>>,
 }
 impl Capability for WasiCapability {
     fn id(&self) -> &str {
@@ -403,7 +403,7 @@ impl Capability for WasiCapability {
 }
 
 pub struct McpCapability {
-    pub mcp_manager: Arc<McpManager>,
+    pub(crate) mcp_manager: Arc<McpManager>,
 }
 impl Capability for McpCapability {
     fn id(&self) -> &str {
@@ -415,7 +415,7 @@ impl Capability for McpCapability {
 }
 
 pub struct BrowserCapability {
-    pub bridge: BrowserBridge,
+    pub(crate) bridge: BrowserBridge,
 }
 impl Capability for BrowserCapability {
     fn id(&self) -> &str {
@@ -663,7 +663,7 @@ impl SubagentToolExecutor {
     }
 }
 
-pub fn parse_context_refs(value: &Value) -> Result<Vec<String>, String> {
+pub(crate) fn parse_context_refs(value: &Value) -> Result<Vec<String>, String> {
     let Some(refs) = value.get("context_refs") else {
         return Ok(Vec::new());
     };
@@ -715,7 +715,7 @@ impl ToolExecutor for SubagentToolExecutor {
     }
 }
 
-pub fn render_agent_catalog(work_dir: &Path) -> String {
+pub(crate) fn render_agent_catalog(work_dir: &Path) -> String {
     let mut agents = discover_agents(work_dir, AgentScope::Both).agents;
     agents.sort_by(|left, right| left.name.cmp(&right.name));
     agents.truncate(32);
@@ -739,7 +739,7 @@ pub fn render_agent_catalog(work_dir: &Path) -> String {
     catalog
 }
 
-pub fn restored_tool_policy(extensions: &WasiExtensionManager) -> ToolPolicy {
+pub(crate) fn restored_tool_policy(extensions: &WasiExtensionManager) -> ToolPolicy {
     match extensions
         .host_state("tools.policy")
         .and_then(|value| value.as_str().map(str::to_owned))
@@ -750,7 +750,7 @@ pub fn restored_tool_policy(extensions: &WasiExtensionManager) -> ToolPolicy {
     }
 }
 
-pub fn build_broker_dispatcher(
+pub(crate) fn build_broker_dispatcher(
     tool_policy: Arc<tokio::sync::Mutex<ToolPolicy>>,
     extensions: Arc<WasiExtensionManager>,
     persist_tool_policy: bool,
@@ -807,7 +807,7 @@ pub fn build_broker_dispatcher(
     )
 }
 
-pub async fn dispatch_hook_requests(
+pub(crate) async fn dispatch_hook_requests(
     dispatcher: &Arc<CapabilityDispatcher>,
     extensions: &WasiExtensionManager,
     requests: Vec<HostBrokerRequest>,
@@ -832,7 +832,7 @@ async fn dispatch_hook_requests_isolated(
     }
 }
 
-pub fn extension_before_tool_hook_handler(
+pub(crate) fn extension_before_tool_hook_handler(
     tool_policy: Arc<tokio::sync::Mutex<ToolPolicy>>,
     extensions: Arc<WasiExtensionManager>,
     broker_dispatcher: Arc<CapabilityDispatcher>,
@@ -907,7 +907,7 @@ pub fn extension_before_tool_hook_handler(
     })
 }
 
-pub fn create_after_tool_hook_handler(
+pub(crate) fn create_after_tool_hook_handler(
     extensions: Arc<WasiExtensionManager>,
     broker_dispatcher: Arc<CapabilityDispatcher>,
 ) -> HookHandler {

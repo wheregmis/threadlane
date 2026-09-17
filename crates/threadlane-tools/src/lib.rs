@@ -1,10 +1,9 @@
 pub mod definitions;
 pub mod dispatch;
-pub mod hashline;
-pub mod memory;
-pub mod repo_map;
+pub(crate) mod memory;
+pub(crate) mod repo_map;
 pub mod search;
-pub mod transaction;
+pub(crate) mod transaction;
 mod virtual_read;
 pub mod workspace;
 

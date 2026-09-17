@@ -1,12 +1,13 @@
 use gpui::SharedString;
-use threadlane_session::ImageAttachment;
+use threadlane_protocol::ImageAttachment;
 
 pub const INPUT_KEY_CONTEXT: &str = "Input";
 pub const SLASH_COMMAND_KEY_CONTEXT: &str = "SlashCommandMenu";
 pub const SLASH_COMMAND_BINDING_CONTEXT: &str = "SlashCommandMenu > Input";
 
-pub const CHAT_CONTENT_MAX_WIDTH: f32 = 1040.0;
-pub const USER_BUBBLE_MAX_WIDTH: f32 = 680.0;
+// Content widths are rem-based so the reading column follows interface zoom.
+pub const CHAT_CONTENT_MAX_WIDTH: f32 = 48.0;
+pub const USER_BUBBLE_MAX_WIDTH: f32 = 40.0;
 
 #[derive(Default, Clone)]
 pub struct ComposerDraft {

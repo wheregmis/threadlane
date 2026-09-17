@@ -5,7 +5,7 @@ use std::sync::{
 };
 
 use crate::types::{ProjectInfo, SessionHealth, SessionInfo};
-use crate::{compute_full_session_projection, AppState};
+use crate::{projection::compute_full_session_projection, AppState};
 
 struct ReportedShapeProvider {
     attempts: AtomicUsize,
@@ -96,8 +96,8 @@ impl threadlane_protocol::ProviderPort for ReportedShapeProvider {
 
 pub async fn generated_reported_session_path() -> PathBuf {
     use threadlane_runtime::AgentConfig;
-    use threadlane_session::coding_agent::CodingAgentOptions;
-    use threadlane_session::SystemPromptConfig;
+    use threadlane_coding_agent::CodingAgentOptions;
+    use threadlane_prompt::SystemPromptConfig;
 
     let root = tempfile::tempdir().unwrap().keep();
     let skill_dir = root.join(".agents/skills/reported-shape");
@@ -115,7 +115,7 @@ pub async fn generated_reported_session_path() -> PathBuf {
         attempts: AtomicUsize::new(0),
         previous_serialized_request: Mutex::new(None),
     });
-    let mut agent = threadlane_session::test_support::coding_agent_with_provider(
+    let mut agent = threadlane_coding_agent::controller::test_support::coding_agent_with_provider(
         CodingAgentOptions {
             api_key: "test-key".into(),
             account_id: None,
@@ -123,7 +123,13 @@ pub async fn generated_reported_session_path() -> PathBuf {
             work_dir: root,
             session_file: Some(path.clone()),
             system_prompt: SystemPromptConfig::default(),
-            agent_config: Some(AgentConfig::default()),
+            // Synthetic provider repeats one identical call 102 times; the
+            // loop guard would trip at 5 and end the run early.
+            agent_config: Some(
+                AgentConfig::builder()
+                    .loop_guard_enabled(false)
+                    .build(),
+            ),
             coding_config: None,
             browser: threadlane_protocol::browser::BrowserBridge::unavailable(),
         },

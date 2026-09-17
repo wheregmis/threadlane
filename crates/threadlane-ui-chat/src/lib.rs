@@ -5,8 +5,7 @@ mod trajectory;
 mod transcript;
 mod view;
 
-pub use composer::*;
-pub use context_meter::*;
-pub use markdown::*;
-pub use trajectory::*;
 pub use view::{init, CentralTab, ChatListView};
+
+// Owned by the surface that offers it; the workspace handles panel navigation.
+gpui::actions!(threadlane_chat, [OpenWorkspaceReview, OpenWorkspaceFiles]);

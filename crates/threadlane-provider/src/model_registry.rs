@@ -64,7 +64,7 @@ pub struct ModelInfo {
 }
 
 impl ModelInfo {
-    pub fn efforts(&self) -> Vec<ReasoningEffort> {
+    pub(crate) fn efforts(&self) -> Vec<ReasoningEffort> {
         if self.supported_efforts.is_empty() {
             return ReasoningEffort::known_levels().to_vec();
         }
@@ -97,7 +97,7 @@ fn builtin_entry(id: &str, label: &str, provider: &str, context_window: usize) -
 
 /// Compiled fallback seeds. Prefer `resources/models.json` or user files for
 /// new models; this list only guarantees offline startup.
-pub fn builtin_models() -> Vec<ModelInfo> {
+pub(crate) fn builtin_models() -> Vec<ModelInfo> {
     let mut models = Vec::new();
     for (id, label, context) in [
         ("gpt-5.6-luna", "GPT-5.6 Luna", 1_000_000),
@@ -163,7 +163,7 @@ fn parse_models_value(value: serde_json::Value) -> Vec<ModelInfo> {
     Vec::new()
 }
 
-pub fn load_models_from_file(path: &Path) -> Vec<ModelInfo> {
+pub(crate) fn load_models_from_file(path: &Path) -> Vec<ModelInfo> {
     std::fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
@@ -191,15 +191,14 @@ fn env_models() -> Vec<ModelInfo> {
 }
 
 fn global_models_file() -> Vec<ModelInfo> {
-    directories::BaseDirs::new()
-        .map(|base| base.home_dir().join(".threadlane").join("models.json"))
-        .map(|path| load_models_from_file(&path))
+    threadlane_project::default_global_threadlane_dir()
+        .map(|dir| load_models_from_file(&dir.join("models.json")))
         .unwrap_or_default()
 }
 
 /// Merges model lists by `id`; later lists win and can augment labels,
 /// context windows, and effort lists.
-pub fn merge_models(lists: &[Vec<ModelInfo>]) -> Vec<ModelInfo> {
+pub(crate) fn merge_models(lists: &[Vec<ModelInfo>]) -> Vec<ModelInfo> {
     let mut merged: HashMap<String, ModelInfo> = HashMap::new();
     let mut order: Vec<String> = Vec::new();
     for list in lists {

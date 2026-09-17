@@ -8,9 +8,8 @@ description = "Workspace shell for the Threadlane desktop app: window root compo
 gpui.workspace = true
 gpui-component.workspace = true
 rfd.workspace = true
+threadlane-coding-agent.workspace = true
 threadlane-git.workspace = true
-threadlane-session.workspace = true
-threadlane-ui-catalog.workspace = true
 threadlane-ui-chat.workspace = true
 threadlane-ui-editor.workspace = true
 threadlane-ui-github.workspace = true
@@ -21,3 +20,6 @@ threadlane-ui-state.workspace = true
 threadlane-ui-terminal.workspace = true
 threadlane-updater.workspace = true
 tokio = { workspace = true, features = ["full"] }
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

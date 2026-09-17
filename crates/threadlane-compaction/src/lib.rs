@@ -675,7 +675,7 @@ fn message_excerpt(message: &AgentMessage, output_omitted: bool) -> Option<Strin
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 fn extract_session_insights(messages: &[AgentMessage]) -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut verification = Vec::new();
     let mut gotchas = Vec::new();

@@ -74,7 +74,7 @@ pub fn load_github_credentials() -> Option<GitHubCredentials> {
 }
 
 /// Loads stored GitHub credentials from the injected store's location.
-pub fn load_github_credentials_in(locations: &CredentialStore) -> Option<GitHubCredentials> {
+pub(crate) fn load_github_credentials_in(locations: &CredentialStore) -> Option<GitHubCredentials> {
     let path = get_github_credentials_path(locations);
     if !path.exists() {
         return None;
@@ -92,7 +92,7 @@ pub fn save_github_token(
 }
 
 /// Saves a GitHub token to the injected store's location.
-pub fn save_github_token_in(
+pub(crate) fn save_github_token_in(
     token: &str,
     username: Option<&str>,
     auth_type: &str,
@@ -116,7 +116,7 @@ pub fn remove_github_credentials() -> Result<(), String> {
 }
 
 /// Removes the GitHub credentials file at the injected store's location.
-pub fn remove_github_credentials_in(locations: &CredentialStore) -> Result<(), String> {
+pub(crate) fn remove_github_credentials_in(locations: &CredentialStore) -> Result<(), String> {
     let path = get_github_credentials_path(locations);
     if path.exists() {
         fs::remove_file(path).map_err(|e| format!("Failed to remove GitHub credentials: {e}"))?;
@@ -186,7 +186,7 @@ pub fn sync_from_gh_cli() -> Result<GitHubCredentials, String> {
 }
 
 /// Imports the `gh` CLI token into the injected store's location.
-pub fn sync_from_gh_cli_in(locations: &CredentialStore) -> Result<GitHubCredentials, String> {
+pub(crate) fn sync_from_gh_cli_in(locations: &CredentialStore) -> Result<GitHubCredentials, String> {
     let token_output = Command::new("gh")
         .args(["auth", "token"])
         .output()
@@ -277,7 +277,7 @@ pub fn remove_gitlab_credentials() -> Result<(), String> {
 }
 
 /// Removes the GitLab credentials file at the injected store's location.
-pub fn remove_gitlab_credentials_in(locations: &CredentialStore) -> Result<(), String> {
+pub(crate) fn remove_gitlab_credentials_in(locations: &CredentialStore) -> Result<(), String> {
     let path = get_gitlab_credentials_path(locations);
     if path.exists() {
         fs::remove_file(path).map_err(|e| format!("Failed to remove GitLab credentials: {e}"))?;
