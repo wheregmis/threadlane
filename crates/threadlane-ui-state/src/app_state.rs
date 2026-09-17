@@ -722,11 +722,7 @@ impl AppState {
         self.requested_terminal_work_dir = Some(work_dir);
     }
 
-    pub fn select_session(
-        &mut self,
-        work_dir: PathBuf,
-        session_id: String,
-    ) -> SessionHydrationRequest {
+    pub fn select_session(&mut self, work_dir: PathBuf, session_id: String) {
         self.select_session_with_persistence(work_dir, session_id, true)
     }
 
@@ -735,7 +731,7 @@ impl AppState {
         work_dir: PathBuf,
         session_id: String,
         persist_selection: bool,
-    ) -> SessionHydrationRequest {
+    ) {
         self.workspace_page = WorkspacePage::Chat;
         let session = self
             .projects
@@ -796,8 +792,7 @@ impl AppState {
         self.pending_hydrations.retain(|pending| {
             pending.session_id != request.session_id || pending.session_file != request.session_file
         });
-        self.pending_hydrations.push(request.clone());
-        request
+        self.pending_hydrations.push(request);
     }
 
     pub fn settle_session(

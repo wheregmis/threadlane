@@ -1,11 +1,14 @@
 use super::actions::AppAction;
-use crate::{AppState, SessionHydrationRequest};
+use crate::AppState;
 
 /// Application intent boundary used by screens.
 ///
 /// The controller is intentionally small for now. Keeping actions in one place
 /// gives us a stable seam for moving backend work out of `AppState` incrementally.
-pub fn dispatch(state: &mut AppState, action: AppAction) -> Option<SessionHydrationRequest> {
+/// Hydration after a session switch flows through
+/// [`AppState::pending_hydrations`](crate::AppState::pending_hydrations),
+/// which the workspace pump drains; the return value carries nothing.
+pub fn dispatch(state: &mut AppState, action: AppAction) {
     match action {
         AppAction::AttachProject(path) => {
             if let Err(error) = state.attach_project(path) {
@@ -15,7 +18,9 @@ pub fn dispatch(state: &mut AppState, action: AppAction) -> Option<SessionHydrat
         AppAction::SelectSession {
             work_dir,
             session_id,
-        } => return Some(state.select_session(work_dir, session_id)),
+        } => {
+            state.select_session(work_dir, session_id);
+        }
         AppAction::SettleSession {
             work_dir,
             session_id,
@@ -115,5 +120,4 @@ pub fn dispatch(state: &mut AppState, action: AppAction) -> Option<SessionHydrat
         AppAction::RunTerminalCommand(cmd) => state.request_run_terminal_command(cmd),
         AppAction::OpenTerminalAt(work_dir) => state.request_open_terminal(work_dir),
     }
-    None
 }
