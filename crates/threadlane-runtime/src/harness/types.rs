@@ -712,15 +712,6 @@ pub enum Record {
         key: String,
         value: String,
     },
-    HookResumeData {
-        id: String,
-        seq: u64,
-        lane: String,
-        timestamp: u64,
-        run_id: Option<String>,
-        hook_id: String,
-        data: String,
-    },
     Usage {
         id: String,
         seq: u64,
@@ -1151,23 +1142,6 @@ impl Record {
                 key,
                 value,
             },
-            Self::HookResumeData {
-                id,
-                lane,
-                timestamp,
-                run_id,
-                hook_id,
-                data,
-                ..
-            } => Self::HookResumeData {
-                id,
-                seq,
-                lane,
-                timestamp,
-                run_id,
-                hook_id,
-                data,
-            },
             Self::Usage {
                 id,
                 lane,
@@ -1295,7 +1269,6 @@ impl Record {
             | Self::WriteDeferred { id, .. }
             | Self::WriteApplied { id, .. }
             | Self::FactSet { id, .. }
-            | Self::HookResumeData { id, .. }
             | Self::Usage { id, .. }
             | Self::RunContextCaptured { id, .. }
             | Self::ContextManifestCaptured { id, .. }
@@ -1331,7 +1304,6 @@ impl Record {
             | Self::WriteDeferred { seq, .. }
             | Self::WriteApplied { seq, .. }
             | Self::FactSet { seq, .. }
-            | Self::HookResumeData { seq, .. }
             | Self::Usage { seq, .. }
             | Self::RunContextCaptured { seq, .. }
             | Self::ContextManifestCaptured { seq, .. }
@@ -1367,7 +1339,6 @@ impl Record {
             | Self::WriteDeferred { lane, .. }
             | Self::WriteApplied { lane, .. }
             | Self::FactSet { lane, .. }
-            | Self::HookResumeData { lane, .. }
             | Self::Usage { lane, .. }
             | Self::RunContextCaptured { lane, .. }
             | Self::ContextManifestCaptured { lane, .. }
@@ -1413,7 +1384,6 @@ impl Record {
             | Self::AbortObserved { run_id, .. }
             | Self::StreamCheckpoint { run_id, .. } => Some(run_id),
             Self::FactSet { run_id, .. }
-            | Self::HookResumeData { run_id, .. }
             | Self::QueueEnqueued { run_id, .. }
             | Self::Usage { run_id, .. }
             | Self::PermissionRequested { run_id, .. }
@@ -1524,8 +1494,6 @@ pub struct LaneState {
     pub context_snapshots: Vec<ContextSnapshot>,
     #[serde(default)]
     pub(crate) facts: std::collections::BTreeMap<String, String>,
-    #[serde(default)]
-    pub(crate) resume_data: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

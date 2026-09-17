@@ -134,7 +134,6 @@ impl CodingSessionHarness {
             session_id: self.store.session_id().to_owned(),
             lane: "main".into(),
             run_id: Some(run_id.into()),
-            resume_data: None,
             tool_call_id: Some(tool_call_id.into()),
             tool_name: Some(tool_name.into()),
             tool_arguments: None,

@@ -145,7 +145,6 @@ impl ReductionContext {
                 tools: Vec::new(),
                 context_snapshots: Vec::new(),
                 facts: fact_seed,
-                resume_data: Default::default(),
             },
         );
         Self {
@@ -501,11 +500,6 @@ impl ReductionContext {
             Record::FactSet { key, .. } => {
                 if key.trim().is_empty() {
                     return Err(ReduceError::InvalidRecord("empty fact key".into()));
-                }
-            }
-            Record::HookResumeData { hook_id, .. } => {
-                if hook_id.trim().is_empty() {
-                    return Err(ReduceError::InvalidRecord("empty hook id".into()));
                 }
             }
             Record::Usage {
@@ -935,13 +929,6 @@ impl ReductionContext {
                     lane.facts.insert(key, value);
                 });
             }
-            Record::HookResumeData { hook_id, data, .. } => {
-                let hook_id = hook_id.clone();
-                let data = data.clone();
-                self.edit_lane(&lane_name, |lane| {
-                    lane.resume_data.insert(hook_id, data);
-                });
-            }
             Record::Usage {
                 usage,
                 cause: super::types::UsageCause::Provider,
@@ -1300,7 +1287,6 @@ impl Default for LaneState {
             tools: Vec::new(),
             context_snapshots: Vec::new(),
             facts: Default::default(),
-            resume_data: Default::default(),
         }
     }
 }

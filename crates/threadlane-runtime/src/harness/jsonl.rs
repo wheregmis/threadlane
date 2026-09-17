@@ -1057,7 +1057,6 @@ impl Record {
             | Self::WriteDeferred { .. }
             | Self::WriteApplied { .. }
             | Self::FactSet { .. }
-            | Self::HookResumeData { .. }
             | Self::Usage { .. }
             | Self::PermissionRequested { .. }
             | Self::PermissionResolved { .. }
