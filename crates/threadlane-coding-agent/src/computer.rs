@@ -1,23 +1,18 @@
-//! Native computer-use tools: compatibility re-exports.
-//!
-//! The implementation is canonical in `threadlane_computer`, which owns
-//! window introspection, screenshots, and input control behind the
-//! `ComputerApproval` trait. The session implements that trait with its
-//! permission manager (see `permission.rs`) and re-exports the crate below
-//! for compatibility; new code should import `threadlane_computer` directly.
-
-pub use threadlane_computer::{
-    global_previews_dir, watch_display_for_debug, ComputerAct, ComputerApproval, ComputerDecision,
-    ComputerToolExecutor, TargetedAct, COMPUTER_ACT_TOOL, COMPUTER_SCREENSHOT_TOOL,
-    COMPUTER_STATUS_TOOL, COMPUTER_UNAVAILABLE, COMPUTER_WINDOWS_TOOL,
-};
+//! Native computer-use tools: canonical implementation in `threadlane_computer`
+//! (window introspection, screenshots, input control behind the
+//! `ComputerApproval` trait); engine wiring (`Capability` → dispatcher) lives
+//! here so the computer crate stays a leaf depending only on
+//! `threadlane-protocol`. Import leaf items from `threadlane_computer`
+//! directly.
 
 /// Runtime capability adapter for native computer-use tools.
 ///
-/// Lives in the session (not `threadlane-computer`) so the computer crate
+/// Lives in the engine (not `threadlane-computer`) so the computer crate
 /// stays a leaf depending only on `threadlane-protocol`: it exposes the
-/// executor, while engine wiring (`Capability` → dispatcher) stays with the
-/// orchestrator.
+/// executor, while engine wiring (`Capability` → dispatcher) stays here.
+use threadlane_computer::ComputerApproval;
+use threadlane_computer::computer::ComputerToolExecutor;
+
 pub struct ComputerCapability {
     pub permissions: Option<std::sync::Arc<dyn ComputerApproval>>,
 }
@@ -36,7 +31,9 @@ impl threadlane_runtime::Capability for ComputerCapability {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use threadlane_computer::computer::{
+        COMPUTER_ACT_TOOL, COMPUTER_SCREENSHOT_TOOL, COMPUTER_STATUS_TOOL, COMPUTER_WINDOWS_TOOL,
+    };
 
     #[test]
     fn computer_tools_survive_core_schema_filter() {

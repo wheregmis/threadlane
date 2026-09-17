@@ -36,15 +36,22 @@ pub fn effective_session_work_dir(
     valid_worktree.unwrap_or(inferred)
 }
 
+/// Canonical on-disk home of a session transcript inside a work dir.
+/// Single spelling shared by stub fallback, transcript resolution, and
+/// hydration so the layout cannot drift between call sites.
+pub fn canonical_session_file(work_dir: &Path, session_id: &str) -> PathBuf {
+    work_dir
+        .join(".threadlane/sessions")
+        .join(format!("{session_id}.jsonl"))
+}
+
 pub fn resolve_session_transcript_file(
     stub_file: &Path,
     runtime_work_dir: &Path,
     session_id: &str,
     is_worktree: bool,
 ) -> PathBuf {
-    let worktree_file = runtime_work_dir
-        .join(".threadlane/sessions")
-        .join(format!("{session_id}.jsonl"));
+    let worktree_file = canonical_session_file(runtime_work_dir, session_id);
     if is_worktree && worktree_file.is_file() {
         worktree_file
     } else {

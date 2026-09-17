@@ -54,12 +54,12 @@ impl ProjectRecord {
 }
 
 pub fn load_project_registry() -> Vec<ProjectRecord> {
-    load_project_registry_from(&default_global_dir())
+    load_project_registry_from(&global_threadlane_dir())
 }
 
 pub fn save_project_registry(projects: &[ProjectRecord]) -> Result<(), String> {
     let _guard = registry_lock().lock().map_err(|error| error.to_string())?;
-    save_project_registry_to(&default_global_dir(), projects)
+    save_project_registry_to(&global_threadlane_dir(), projects)
 }
 
 pub fn register_project(raw_path: &Path) -> Result<ProjectRecord, String> {
@@ -70,7 +70,7 @@ pub fn register_project(raw_path: &Path) -> Result<ProjectRecord, String> {
             raw_path.display()
         )
     })?;
-    let global_dir = default_global_dir();
+    let global_dir = global_threadlane_dir();
     let mut projects = load_project_registry_from(&global_dir);
     if let Some(project) = projects
         .iter_mut()
@@ -95,7 +95,7 @@ pub fn select_project(raw_path: &Path, session_id: Option<&str>) -> Result<Proje
             raw_path.display()
         )
     })?;
-    let global_dir = default_global_dir();
+    let global_dir = global_threadlane_dir();
     let mut projects = load_project_registry_from(&global_dir);
     let index = if let Some(index) = projects
         .iter()
@@ -242,10 +242,6 @@ fn registry_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
-fn default_global_dir() -> PathBuf {
-    default_global_threadlane_dir().unwrap_or_else(|| PathBuf::from(".threadlane"))
-}
-
 fn project_id(path: &Path) -> String {
     use sha2::Digest;
     let digest = sha2::Sha256::digest(path.to_string_lossy().as_bytes());
@@ -285,5 +281,13 @@ mod tests {
         assert_eq!(projects[0].last_opened_at, 20);
         assert_eq!(projects[0].last_session_id.as_deref(), Some("session-2"));
         assert!(&projects[0].last_selected_task_id.as_deref() == &Some("task-3"));
+        // The atomic swap renames the temporary file into place: no residue
+        // may remain alongside the committed registry file.
+        let residue: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(residue.is_empty(), "unexpected files: {residue:?}");
     }
 }

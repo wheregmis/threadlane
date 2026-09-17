@@ -21,6 +21,7 @@ use threadlane_runtime::harness::{
     DurableEvent, HarnessEvent, LaneStatus as HarnessLaneStatus, OperationOutcome,
     Record as HarnessRecord, SubagentLifecyclePhase,
 };
+use threadlane_protocol::live::now_ms;
 use threadlane_protocol::{AgentEvent, AgentMessage, TokenUsage};
 use threadlane_wasi::packages::ExtensionScope;
 use tokio::sync::broadcast;
@@ -1289,13 +1290,6 @@ impl HarnessSupervisor {
 }
 
 // ── Free helpers ──────────────────────────────────────────────────────────
-
-fn now_ms() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-}
 
 fn child_task_id(tool_call_id: &str) -> Option<String> {
     let tagged = tool_call_id.strip_prefix("subagent-")?;

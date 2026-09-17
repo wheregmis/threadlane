@@ -1,7 +1,6 @@
 use super::harness::CodingSessionHarness;
 #[cfg(test)]
 use async_trait::async_trait;
-use log::warn;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -182,20 +181,6 @@ impl CodingAgentWorkHandle {
         }
     }
 
-    pub fn queue_follow_up(&self, content: impl Into<String>) {
-        self.queue_follow_up_with_images(content, Vec::new());
-    }
-
-    fn queue_follow_up_with_images(
-        &self,
-        content: impl Into<String>,
-        images: Vec<ImageAttachment>,
-    ) {
-        if let Err(error) = self.try_queue_follow_up_with_images(content, images) {
-            warn!("Failed to persist queued follow-up: {error}");
-        }
-    }
-
     pub fn queue_steer_with_images(
         &self,
         content: impl Into<String>,
@@ -242,11 +227,4 @@ impl CodingAgentWorkHandle {
         Ok(())
     }
 
-    pub fn cancel_queued_follow_up(&self, entry_id: &str) -> Result<(), String> {
-        let Some(path) = self.session_file.as_deref() else {
-            return Err("session persistence is unavailable".into());
-        };
-        let mut harness = CodingSessionHarness::open(path)?;
-        harness.cancel_queued_unbound(entry_id)
-    }
 }

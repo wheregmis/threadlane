@@ -139,7 +139,13 @@ impl McpSettings {
         };
         let bytes = serde_json::to_vec_pretty(&file_data)
             .map_err(|e| format!("Failed to serialize MCP settings: {e}"))?;
-        fs::write(file_path, bytes).map_err(|e| format!("Failed to write MCP settings: {e}"))
+        // Atomic swap like the other project-scoped stores: a crash mid-write
+        // must not leave a torn settings file behind.
+        let temporary = file_path.with_extension("json.tmp");
+        fs::write(&temporary, &bytes)
+            .map_err(|e| format!("Failed to write MCP settings: {e}"))?;
+        fs::rename(&temporary, file_path)
+            .map_err(|e| format!("Failed to write MCP settings: {e}"))
     }
 }
 
@@ -762,5 +768,36 @@ mod tests {
         let settings: McpSettingsFile = serde_json::from_str(json_str).unwrap();
         assert_eq!(settings.servers.len(), 1);
         assert_eq!(settings.servers[0].id, "tokensave");
+    }
+
+    #[test]
+    fn save_global_round_trips_without_temporary_residue() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = McpServerConfig {
+            id: "stub".into(),
+            name: "Stub".into(),
+            transport: McpTransport::Stdio {
+                command: "stub".into(),
+                args: Vec::new(),
+                env: HashMap::new(),
+            },
+            enabled: true,
+            scope: McpScope::Global,
+        };
+        McpSettings::save_global(dir.path(), &[config]).unwrap();
+        // The atomic swap renames the temporary file into place: no residue
+        // may remain alongside the committed settings file.
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            entries,
+            vec![std::ffi::OsString::from("mcp.json")],
+            "unexpected files: {entries:?}"
+        );
+        let reloaded = McpSettings::load_global(Some(dir.path()));
+        assert_eq!(reloaded.len(), 1);
+        assert_eq!(reloaded[0].id, "stub");
     }
 }

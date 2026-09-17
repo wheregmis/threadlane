@@ -23,7 +23,7 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -339,7 +339,7 @@ impl MirrorView {
             return;
         };
         self.error = None;
-        let now = now_ms();
+        let now = computer_live::now_ms();
         self.frame_times.push_back(now);
         while self
             .frame_times
@@ -368,7 +368,7 @@ impl MirrorView {
         self.action = overlay.label.clone();
         self.last_overlay_ms = overlay.ts_ms;
         self.overlays.push(overlay);
-        let now = now_ms();
+        let now = computer_live::now_ms();
         self.overlays
             .retain(|overlay| now.saturating_sub(overlay.ts_ms) < CAPTION_MS.max(OVERLAY_MS));
     }
@@ -395,7 +395,7 @@ impl MirrorView {
     /// fps readout, an expired caption) get their repaint without waiting
     /// for the very events whose absence defines them.
     fn header_key(&self) -> String {
-        let now = now_ms();
+        let now = computer_live::now_ms();
         let caption_live = self
             .overlays
             .last()
@@ -430,7 +430,8 @@ impl MirrorView {
                     // the sidecar only speaks for captures nobody narrated.
                     if let Some(action) = value.get("action").and_then(|value| value.as_str()) {
                         let narrated = self.last_overlay_ms > 0
-                            && now_ms().saturating_sub(self.last_overlay_ms) < CAPTION_MS;
+                            && computer_live::now_ms().saturating_sub(self.last_overlay_ms)
+                                < CAPTION_MS;
                         if !narrated && self.action != action {
                             self.action = action.to_string();
                             changed = true;
@@ -504,7 +505,7 @@ impl MirrorView {
     }
 
     fn feed_state_for(&self, status: &LiveStatus) -> FeedState {
-        let now = now_ms();
+        let now = computer_live::now_ms();
         if let Some(error) = status.last_error.as_deref() {
             return FeedState::Error(error.to_string());
         }
@@ -768,13 +769,6 @@ fn paint_cursor(at: Point<Pixels>, window: &mut Window) {
     );
 }
 
-fn now_ms() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or(0)
-}
-
 /// Newest `computer-*.jpg` screenshot in a previews dir, if any.
 fn newest_capture(dir: &std::path::Path) -> Option<PathBuf> {
     std::fs::read_dir(dir)
@@ -809,7 +803,7 @@ impl Focusable for MirrorView {
 impl Render for MirrorView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
-        let now = now_ms();
+        let now = computer_live::now_ms();
         self.overlays
             .retain(|overlay| now.saturating_sub(overlay.ts_ms) < CAPTION_MS.max(OVERLAY_MS));
         let state = self.feed_state();

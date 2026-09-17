@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -154,10 +154,12 @@ impl SkillSettings {
         };
         let bytes = serde_json::to_vec_pretty(&file)
             .map_err(|error| format!("Failed to encode skill settings: {error}"))?;
-        let mut handle = File::create(&path)
+        // Atomic swap like the other project-scoped stores: a crash mid-write
+        // must not leave a torn skills.json behind.
+        let temporary = path.with_extension("json.tmp");
+        fs::write(&temporary, &bytes)
             .map_err(|error| format!("Failed to write skill settings: {error}"))?;
-        handle
-            .write_all(&bytes)
+        fs::rename(&temporary, &path)
             .map_err(|error| format!("Failed to write skill settings: {error}"))?;
         Ok(())
     }
@@ -1585,6 +1587,26 @@ mod tests {
         let reloaded = SkillSettings::load(project.path());
         assert!(!reloaded.is_disabled("alpha"));
         assert!(reloaded.is_disabled("beta"));
+    }
+
+    #[test]
+    fn skill_settings_save_leaves_no_temporary_file() {
+        let project = tempfile::tempdir().unwrap();
+        let mut settings = SkillSettings::load(project.path());
+        settings
+            .set_enabled(project.path(), "alpha", false)
+            .unwrap();
+        // The atomic swap renames the temporary file into place: no residue
+        // may remain alongside the committed settings file.
+        let entries: Vec<_> = std::fs::read_dir(project.path().join(".threadlane"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            entries,
+            vec![std::ffi::OsString::from("skills.json")],
+            "unexpected files: {entries:?}"
+        );
     }
 
     #[test]

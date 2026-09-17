@@ -8,17 +8,15 @@ pub mod messages;
 pub mod orchestration;
 pub mod tool;
 
-pub use browser::{ActTarget, BrowserBridge, BrowserCommand, BrowserRequest};
+pub use browser::{ActTarget, BrowserBridge, BrowserCommand};
 pub use events::{
     AgentEvent, HarnessMetrics, SubagentIsolation, SubagentProgressUpdate, SubagentRecoveryStatus,
 };
 pub use interaction::{
-    PermissionRequest, PermissionScope, PermissionTraceDecision, PermissionTraceScope,
-    PermissionTraceSource, QuestionAnswer, QuestionItem, QuestionItemAnswer, QuestionRequest,
+    PermissionRequest, PermissionScope, QuestionAnswer, QuestionItem, QuestionItemAnswer,
+    QuestionRequest,
 };
-pub use live::{
-    LiveFrame, LiveOverlay, LiveOverlayKind, LiveStatus, StreamTarget, LIVE_FRAME_MAX_WIDTH,
-};
+pub use live::{LiveOverlayKind, StreamTarget, LIVE_FRAME_MAX_WIDTH};
 pub use messages::{
     AgentMessage, AgentToolCall, AgentToolDefinition, AgentToolResult, DeferredHandle,
     ImageAttachment, PlanItem, PlanItemStatus, ReasoningEffort, SessionPlan, TokenUsage,

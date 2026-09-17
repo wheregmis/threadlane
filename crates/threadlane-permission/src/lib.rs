@@ -821,6 +821,32 @@ mod tests {
     }
 
     #[test]
+    fn save_permissions_round_trips_without_temporary_residue() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let mut permissions = PersistentPermissions::default();
+        permissions.network_hosts.insert("example.com".into());
+        permissions.computer_allowed = true;
+        save_permissions(root, &permissions).unwrap();
+
+        let reloaded = load_permissions(root);
+        assert!(reloaded.network_hosts.contains("example.com"));
+        assert!(reloaded.computer_allowed);
+
+        // The uniquely-named temporary file is renamed into place: no residue
+        // may remain alongside the committed permissions file.
+        let residue: Vec<_> = std::fs::read_dir(root.join(".threadlane"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| {
+                let name = name.to_string_lossy();
+                name.ends_with(".tmp") || name.contains(".tmp.")
+            })
+            .collect();
+        assert!(residue.is_empty(), "unexpected files: {residue:?}");
+    }
+
+    #[test]
     fn save_permissions_rejects_symlink_destination() {
         let dir = tempdir().unwrap();
         let root = dir.path();

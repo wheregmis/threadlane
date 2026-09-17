@@ -69,5 +69,13 @@ mod tests {
         };
         save(dir.path(), &settings).unwrap();
         assert_eq!(load(dir.path()), settings);
+        // The atomic swap renames the temporary file into place: no residue
+        // may remain alongside the committed settings file.
+        let residue: Vec<_> = std::fs::read_dir(dir.path().join(".threadlane"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(residue.is_empty(), "unexpected files: {residue:?}");
     }
 }

@@ -834,7 +834,7 @@ impl AppState {
                     let _ = std::fs::remove_file(&archive_file);
                     return Err(error.to_string());
                 }
-                let stub = Self::canonical_session_file(&work_dir, &session_id);
+                let stub = canonical_session_file(&work_dir, &session_id);
                 Self::remove_file_if_present(&stub)?;
                 let _ = threadlane_git::prune_worktrees(&work_dir);
             } else {
@@ -845,7 +845,7 @@ impl AppState {
                         let _ = std::fs::remove_file(&session_file);
                     }
                 }
-                let stub = Self::canonical_session_file(&work_dir, &session_id);
+                let stub = canonical_session_file(&work_dir, &session_id);
                 Self::remove_file_if_present(&stub)?;
                 if delete_worktree {
                     let _ = threadlane_git::prune_worktrees(&work_dir);
@@ -878,7 +878,7 @@ impl AppState {
                     .map_err(|error| error.to_string())?;
                 let _ = threadlane_git::prune_worktrees(&work_dir);
             }
-            Self::remove_file_if_present(&Self::canonical_session_file(&work_dir, &session_id))?;
+            Self::remove_file_if_present(&canonical_session_file(&work_dir, &session_id))?;
             Self::remove_file_if_present(&session_file)?;
             if delete_worktree {
                 let _ = threadlane_git::prune_worktrees(&work_dir);
@@ -993,11 +993,7 @@ impl AppState {
                     && (session.work_dir == work_dir || session.session_file.starts_with(work_dir))
             })
             .map(|session| session.session_file.clone())
-            .unwrap_or_else(|| {
-                work_dir
-                    .join(".threadlane/sessions")
-                    .join(format!("{session_id}.jsonl"))
-            })
+            .unwrap_or_else(|| canonical_session_file(work_dir, session_id))
     }
 
     fn session_runtime_work_dir(&self, work_dir: &Path, session_id: &str) -> PathBuf {
@@ -1014,10 +1010,8 @@ impl AppState {
             .unwrap_or_else(|| work_dir.to_path_buf())
     }
 
-    fn canonical_session_file(work_dir: &Path, session_id: &str) -> PathBuf {
-        work_dir
-            .join(".threadlane/sessions")
-            .join(format!("{session_id}.jsonl"))
+    fn canonical_worktree_dir(work_dir: &Path, session_id: &str) -> PathBuf {
+        work_dir.join(".threadlane/worktrees").join(session_id)
     }
 
     fn session_worktree_path(&self, work_dir: &Path, session_id: &str) -> Option<PathBuf> {
@@ -1035,7 +1029,7 @@ impl AppState {
         {
             return Some(path);
         }
-        let stub = Self::canonical_session_file(work_dir, session_id);
+        let stub = canonical_session_file(work_dir, session_id);
         let store = JsonlStore::open_read_only(&stub).ok()?;
         let facts = store.facts();
         if facts
@@ -1440,7 +1434,7 @@ impl AppState {
 
         if self.draft_work_mode == WorkMode::Worktree && threadlane_git::is_git_repo(&work_dir) {
             let branch = format!("worktree/{session_id}");
-            let worktree_dir = work_dir.join(".threadlane/worktrees").join(&session_id);
+            let worktree_dir = Self::canonical_worktree_dir(&work_dir, &session_id);
             if let Err(error) = threadlane_git::create_worktree(&work_dir, &worktree_dir, &branch) {
                 tracing::warn!("Failed to create worktree: {error}, falling back to main workdir");
             } else {
@@ -1536,10 +1530,8 @@ impl AppState {
             &title,
             &suffix[suffix.len().saturating_sub(6)..],
         );
-        let session_file = work_dir
-            .join(".threadlane/sessions")
-            .join(format!("{session_id}.jsonl"));
-        let worktree_dir = work_dir.join(".threadlane/worktrees").join(&session_id);
+        let session_file = canonical_session_file(&work_dir, &session_id);
+        let worktree_dir = Self::canonical_worktree_dir(&work_dir, &session_id);
         if worktree_dir.exists() || session_file.exists() {
             return Err("Generated issue session path already exists".into());
         }

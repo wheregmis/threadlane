@@ -9,11 +9,7 @@
 pub mod computer;
 mod stream;
 
-pub use computer::{
-    global_previews_dir, resolve_previews_dir, watch_display_for_debug, ComputerAct,
-    ComputerToolExecutor, TargetedAct, COMPUTER_ACT_TOOL, COMPUTER_SCREENSHOT_TOOL,
-    COMPUTER_STATUS_TOOL, COMPUTER_UNAVAILABLE, COMPUTER_WINDOWS_TOOL,
-};
+pub use computer::{resolve_previews_dir, watch_display_for_debug};
 
 /// User decision for a computer-use approval prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
