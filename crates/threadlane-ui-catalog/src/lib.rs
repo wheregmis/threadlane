@@ -575,7 +575,7 @@ fn credentials_allow(provider: ModelProvider) -> bool {
             threadlane_auth::antigravity_auth::load_antigravity_credentials().is_some()
         }
         ModelProvider::OpenCode => {
-            threadlane_auth::opencode_auth::load_opencode_api_key().is_some()
+            threadlane_coding_agent::credentials::opencode_api_key().is_some()
         }
         ModelProvider::Acp => true,
     }
