@@ -13,32 +13,7 @@ pub enum ToolExecutionMode {
     Parallel,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "kebab-case")]
-pub enum QueueMode {
-    #[default]
-    All,
-    OneAtATime,
-}
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SubagentUsageSummary {
-    input_tokens: u64,
-    output_tokens: u64,
-    total_subagents: usize,
-}
-
-/// `TokenUsage` (cumulative token accounting) and `AgentToolResult` (one
-/// executed tool outcome) are likewise canonical in
-/// `threadlane_protocol::messages` and re-exported above.
-
-/// Rich tool output: text plus optional model-visible images.
-/// Canonical in `threadlane_protocol::ToolOutput`; re-exported via the
-/// `threadlane_protocol::{... ToolOutput}` import above so existing
-/// `threadlane_protocol::ToolOutput` paths keep working.
-///
-/// `AgentToolResult` (the executed-outcome twin) is likewise canonical in
-/// `threadlane_protocol::messages` and re-exported above.
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ModelRoles {
