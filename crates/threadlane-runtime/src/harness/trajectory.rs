@@ -328,8 +328,7 @@ pub fn project_trajectory<S: SessionStore>(store: &S) -> SessionTrajectory {
     // Merge the two seq-ordered streams in linear time instead of
     // concatenating and re-sorting (O(n log n)). All stores keep entries and
     // records in seq order (JsonlStore assigns at append and sorts records on
-    // load; SqliteStore loads ORDER BY seq), with entries winning ties to
-    // match the previous stable sort.
+    // load), with entries winning ties to match the previous stable sort.
     #[derive(Clone)]
     enum JournalItem<'a> {
         Entry(&'a Entry),

@@ -9,7 +9,6 @@ mod procedure;
 mod projections;
 mod reducer;
 mod session;
-mod sqlite;
 mod store;
 mod telemetry;
 mod trajectory;
@@ -46,7 +45,6 @@ pub use projections::{
 };
 pub use reducer::Reducer;
 pub use session::{LaneHandle, SessionAgent};
-pub use sqlite::SqliteStore;
 pub use store::{
     CompactionCheckpoint, ModelContextProjection, SessionIdGenerator, SessionStore,
     TranscriptProjection,
