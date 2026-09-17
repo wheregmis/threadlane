@@ -143,8 +143,8 @@ pub fn context_meter_view_model(
         return ContextMeterViewModel {
             percent: None,
             bar_percent: 0.0,
-            current_label: "Estimating…".into(),
-            detail_label: "Context usage details, estimating usage".into(),
+            current_label: "Unavailable".into(),
+            detail_label: "Context usage details, current usage unavailable".into(),
             total_processed_label: format_meter_tokens(total_processed),
             cache_hit_label,
             effective_model: None,
@@ -162,7 +162,7 @@ pub fn context_meter_view_model(
         ""
     };
     let current_label = if unknown {
-        "Estimating…".into()
+        "Unavailable".into()
     } else {
         format!(
             "{} / {limit_prefix}{}",
@@ -171,7 +171,7 @@ pub fn context_meter_view_model(
         )
     };
     let detail_label = percent.map_or_else(
-        || "Context usage details, estimating usage".into(),
+        || "Context usage details, current usage unavailable".into(),
         |percent| format!("Context usage details, {percent:.0}% used"),
     );
     ContextMeterViewModel {

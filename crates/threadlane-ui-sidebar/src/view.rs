@@ -569,7 +569,7 @@ impl SidebarView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search sessions…"));
+        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search tasks…"));
 
         let sub1 = cx.observe(&model, |this, model, cx| {
             let fingerprint = sidebar_fingerprint(model.read(cx), now_unix_secs());
@@ -620,12 +620,12 @@ impl SidebarView {
             .child(
                 Button::new("new-task-btn")
                     .icon(IconName::Plus)
-                    .label("New Session")
+                    .label("New task")
                     .outline()
                     .small()
                     .w_full()
                     .justify_between()
-                    .tooltip("Start a new session (⌘N)")
+                    .tooltip("Start a new task (⌘N)")
                     .child(
                         div()
                             .px_1p5()
@@ -742,7 +742,8 @@ impl SidebarView {
             .child(
                 Button::new("attach-project-btn")
                     .icon(IconName::Plus)
-                    .tooltip("Attach Project")
+                    .accessibility_label("Attach project")
+                    .tooltip("Attach project…")
                     .ghost()
                     .xsmall()
                     .on_click(move |_event, _window, cx| {
@@ -840,14 +841,14 @@ impl SidebarView {
                             .text_xs()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.muted_foreground)
-                            .child(format!("Sessions · {session_count}")),
+                            .child(format!("Tasks · {session_count}")),
                     )
                     .child(
                         Button::new("sidebar-status-filter")
                             .debug_selector(|| "sidebar-status-filter".into())
                             .label(selected_filter.map_or("All statuses", SessionAttention::label))
-                            .accessibility_label("Filter sessions by status")
-                            .tooltip("Filter sessions by status")
+                            .accessibility_label("Filter tasks by status")
+                            .tooltip("Filter tasks by status")
                             .small()
                             .ghost()
                             .dropdown_caret(true)
@@ -902,6 +903,10 @@ impl SidebarView {
         let status_indicator = match attention {
             SessionAttention::NeedsYou => Some(
                 div()
+                    .debug_selector({
+                        let id = session.id.clone();
+                        move || format!("session-attention-{id}")
+                    })
                     .flex()
                     .flex_none()
                     .items_center()
@@ -929,9 +934,9 @@ impl SidebarView {
                     .px_1p5()
                     .py(px(0.5))
                     .rounded_full()
-                    .bg(theme.primary.opacity(0.12))
-                    .text_color(theme.primary)
-                    .child(Spinner::new().xsmall().color(theme.primary))
+                    .bg(theme.muted)
+                    .text_color(theme.foreground)
+                    .child(Spinner::new().xsmall().color(theme.foreground))
                     .child(
                         div()
                             .text_xs()
@@ -942,27 +947,14 @@ impl SidebarView {
             ),
             SessionAttention::Ready => Some(
                 div()
-                    .flex()
                     .flex_none()
-                    .items_center()
-                    .gap(px(3.5))
-                    .px_1p5()
-                    .py(px(0.5))
-                    .rounded_full()
-                    .bg(theme.success.opacity(0.12))
-                    .text_color(theme.success)
-                    .child(div().size(px(6.0)).rounded_full().bg(theme.success))
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(attention.label()),
-                    )
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(attention.label())
                     .into_any_element(),
             ),
             SessionAttention::Idle => None,
         };
-        let has_status = status_indicator.is_some();
 
         let bg_color = if is_active {
             theme.sidebar_accent
@@ -983,7 +975,10 @@ impl SidebarView {
         };
         let session_identity = sidebar_session_identity(session);
         let session_title = session_identity.title;
-        let session_tooltip = session_identity.tooltip;
+        let session_tooltip = session.git_branch.as_ref().map_or_else(
+            || session_identity.tooltip.clone(),
+            |branch| format!("{}\nBranch: {branch}", session_identity.tooltip),
+        );
 
         let work_dir = session.work_dir.clone();
         let session_id = session.id.clone();
@@ -1058,75 +1053,6 @@ impl SidebarView {
                 )
             };
 
-            let ci_chip = if pr.failing_checks > 0 {
-                Some(
-                    div()
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .gap(px(2.0))
-                        .px_1()
-                        .py(px(0.5))
-                        .rounded_sm()
-                        .bg(theme.danger.opacity(0.12))
-                        .text_color(theme.danger)
-                        .child(IconName::Close)
-                        .child(format!("{} fail", pr.failing_checks)),
-                )
-            } else if pr.pending_checks > 0 {
-                Some(
-                    div()
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .gap(px(2.0))
-                        .px_1()
-                        .py(px(0.5))
-                        .rounded_sm()
-                        .bg(theme.warning.opacity(0.12))
-                        .text_color(theme.warning)
-                        .child(IconName::Asterisk)
-                        .child(format!("{}/{}", pr.passing_checks, pr.total_checks)),
-                )
-            } else if pr.total_checks > 0 {
-                Some(
-                    div()
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .gap(px(2.0))
-                        .px_1()
-                        .py(px(0.5))
-                        .rounded_sm()
-                        .bg(theme.success.opacity(0.12))
-                        .text_color(theme.success)
-                        .child(IconName::CircleCheck)
-                        .child(format!("{}/{}", pr.passing_checks, pr.total_checks)),
-                )
-            } else {
-                None
-            };
-
-            let comments_chip = (pr.comments_count > 0).then(|| {
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(2.0))
-                    .px_1()
-                    .py(px(0.5))
-                    .rounded_sm()
-                    .bg(theme.secondary)
-                    .text_color(theme.muted_foreground)
-                    .child(
-                        svg()
-                            .path("icons/git/comments.svg")
-                            .size(px(11.0))
-                            .text_color(theme.muted_foreground),
-                    )
-                    .child(format!("{}", pr.comments_count))
-            });
-
             div()
                 .flex()
                 .flex_none()
@@ -1145,15 +1071,14 @@ impl SidebarView {
                     .bg(pr_bg)
                     .text_color(pr_fg),
                 )
-                .children(ci_chip)
-                .children(comments_chip)
         });
 
         let mut row2_items = Vec::new();
         row2_items.push(
             div()
                 .flex()
-                .flex_none()
+                .flex_1()
+                .min_w_0()
                 .items_center()
                 .gap_1()
                 .text_color(theme.muted_foreground)
@@ -1162,7 +1087,7 @@ impl SidebarView {
                         .xsmall()
                         .text_color(theme.muted_foreground.opacity(0.6)),
                 )
-                .child(div().max_w(px(110.0)).truncate().child(project))
+                .child(div().min_w_0().truncate().child(project))
                 .into_any_element(),
         );
 
@@ -1177,39 +1102,24 @@ impl SidebarView {
             row2_items.push(pr_chips.into_any_element());
         }
 
-        if session.is_worktree {
+        if session.is_worktree && !session.worktree_available {
             let branch_display = session.git_branch.as_deref().unwrap_or("worktree");
-            let (background, foreground, tooltip) = if session.worktree_available {
-                (
-                    theme.secondary,
-                    theme.muted_foreground,
-                    format!(
-                        "Local worktree on branch '{branch_display}'\nChecked out at {}",
-                        session.runtime_work_dir.display()
-                    ),
-                )
-            } else {
-                (
-                    theme.warning.opacity(0.12),
-                    theme.warning,
-                    format!(
-                        "Worktree unavailable\nBranch: '{branch_display}'\nNot checked out locally\nRecorded path: {}\nSession history remains available",
-                        session.runtime_work_dir.display()
-                    ),
-                )
-            };
+            let tooltip = format!(
+                "Worktree unavailable\nBranch: '{branch_display}'\nNot checked out locally\nRecorded path: {}\nSession history remains available",
+                session.runtime_work_dir.display()
+            );
             row2_items.push(
                 Button::new(SharedString::from(format!(
                     "session-worktree-{}",
                     session.id
                 )))
                 .icon(Icon::default().path("icons/git/branch.svg"))
-                .label(branch_display.to_string())
+                .label("Not checked out")
                 .tooltip(tooltip)
                 .ghost()
                 .xsmall()
-                .bg(background)
-                .text_color(foreground)
+                .bg(theme.warning.opacity(0.12))
+                .text_color(theme.warning)
                 .into_any_element(),
             );
         }
@@ -1335,15 +1245,12 @@ impl SidebarView {
                                             .flex()
                                             .items_center()
                                             .gap_1()
-                                            .children(status_indicator)
-                                            .when(!has_status, |this| {
-                                                this.child(
-                                                    div()
-                                                        .text_xs()
-                                                        .text_color(theme.muted_foreground)
-                                                        .child(time_ago),
-                                                )
-                                            }),
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(theme.muted_foreground)
+                                                    .child(time_ago),
+                                            ),
                                     )
                                     .child(
                                         Button::new(SharedString::from(format!(
@@ -1403,8 +1310,9 @@ impl SidebarView {
                             .gap_1p5()
                             .text_xs()
                             .min_w_0()
-                            .overflow_hidden()
-                            .children(row2_items),
+                            .flex_wrap()
+                            .children(row2_items)
+                            .children(status_indicator),
                     ),
             )
             .context_menu(move |menu, _window, _cx| {
@@ -1764,9 +1672,9 @@ impl SidebarView {
                 .text_sm()
                 .text_color(theme.muted_foreground)
                 .child(if has_filters {
-                    "No matching sessions"
+                    "No matching tasks"
                 } else {
-                    "No sessions yet"
+                    "No tasks yet"
                 })
                 .when(has_filters, |this| {
                     this.child(
@@ -1784,7 +1692,7 @@ impl SidebarView {
                 .children((!has_filters).then(|| {
                     Button::new("empty-history-new-task")
                         .icon(IconName::Plus)
-                        .label("New session")
+                        .label("New task")
                         .ghost()
                         .small()
                         .on_click(move |_event, window, cx| {
@@ -1866,10 +1774,10 @@ mod tests {
                 self.sidebar.update(cx, |sidebar, cx| {
                     div()
                         .tab_group()
-                        .w(px(320.0))
+                        .w(px(223.0))
                         .child(sidebar.render_session_card(
                             &self.session,
-                            SessionAttention::Idle,
+                            SessionAttention::NeedsYou,
                             false,
                             cx,
                         ))
@@ -1904,7 +1812,10 @@ mod tests {
             cx.observe(&model, move |_, _| changes.set(changes.get() + 1))
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
+        let attention = cx.debug_bounds("session-attention-keyboard-task").unwrap();
+        assert!(attention.right() <= px(223.0), "attention must not clip in a narrow sidebar");
         let title = cx.debug_bounds("session-title-keyboard-task").unwrap();
+        assert!(title.size.width > px(0.0), "the title must retain usable width");
         cx.simulate_click(title.center(), Modifiers::default());
         assert_eq!(changes.get(), 1, "title click must select only once");
         model.read_with(cx, |state, _| {

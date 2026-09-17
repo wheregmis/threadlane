@@ -50,6 +50,13 @@ use threadlane_ui_state::projection::{
 };
 use threadlane_updater::UpdateStatus;
 
+fn close_command_palette(open: &mut bool, previous_focus: &mut Option<FocusHandle>, window: &mut Window, cx: &mut App) {
+    *open = false;
+    if let Some(focus) = previous_focus.take() {
+        focus.focus(window, cx);
+    }
+}
+
 fn open_github_from_palette(state: &mut AppState, notify: impl FnOnce()) {
     controller::dispatch(state, AppAction::OpenGitHub);
     notify();
@@ -91,7 +98,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-l", FocusComposer, None),
         KeyBinding::new("cmd-,", OpenSettings, None),
         KeyBinding::new("ctrl-,", OpenSettings, None),
-        KeyBinding::new("escape", CancelActiveGeneration, None),
+        KeyBinding::new("escape", CancelActiveGeneration, Some("ThreadlaneWorkspace")),
         KeyBinding::new("cmd-s", threadlane_ui_editor::SaveFile, None),
         KeyBinding::new("ctrl-s", threadlane_ui_editor::SaveFile, None),
     ]);
@@ -159,6 +166,7 @@ fn session_pr_refresh_delay(succeeded: bool) -> std::time::Duration {
 
 pub struct WorkspaceView {
     focus_handle: FocusHandle,
+    rendered_page: WorkspacePage,
     model: Entity<AppState>,
     sidebar: Entity<SidebarView>,
     chat_list: Entity<ChatListView>,
@@ -171,6 +179,7 @@ pub struct WorkspaceView {
     right_panel_visible: bool,
     bottom_panel_visible: bool,
     command_palette_open: bool,
+    command_palette_previous_focus: Option<FocusHandle>,
     command_state: Entity<CommandState>,
     recent_palette_actions: Vec<&'static str>,
     last_git_work_dir: Option<PathBuf>,
@@ -178,6 +187,9 @@ pub struct WorkspaceView {
     sidebar_resizable_state: Entity<ResizableState>,
     right_panel_resizable_state: Entity<ResizableState>,
     bottom_panel_resizable_state: Entity<ResizableState>,
+    // Only divider drags change these rem-based preferences; window constraints do not.
+    preferred_panel_sizes: [f32; 3],
+    panel_layout: Option<(gpui::Size<Pixels>, Pixels, [bool; 3])>,
     git_event_tx: tokio::sync::mpsc::UnboundedSender<GitEvent>,
     updater_tx: tokio::sync::mpsc::UnboundedSender<UpdaterEvent>,
     _subscriptions: Vec<Subscription>,
@@ -279,8 +291,8 @@ impl WorkspaceView {
         .detach();
     }
 
-    pub fn build(window: &mut Window, cx: &mut App) -> Entity<Self> {
-        let model = cx.new(|_cx| AppState::load());
+    pub fn build(state: AppState, window: &mut Window, cx: &mut App) -> Entity<Self> {
+        let model = cx.new(|_cx| state);
         let sidebar = cx.new(|cx| SidebarView::new(model.clone(), window, cx));
         let chat_list = cx.new(|cx| ChatListView::new(model.clone(), window, cx));
         let github = cx.new(|cx| GitHubView::new(model.clone(), window, cx));
@@ -416,6 +428,7 @@ impl WorkspaceView {
 
             Self {
                 focus_handle,
+                rendered_page: model.read(cx).workspace_page,
                 model,
                 sidebar,
                 chat_list,
@@ -428,6 +441,7 @@ impl WorkspaceView {
                 right_panel_visible: false,
                 bottom_panel_visible: false,
                 command_palette_open: false,
+                command_palette_previous_focus: None,
                 command_state,
                 recent_palette_actions: Vec::new(),
                 last_git_work_dir: None,
@@ -435,6 +449,8 @@ impl WorkspaceView {
                 sidebar_resizable_state,
                 right_panel_resizable_state,
                 bottom_panel_resizable_state,
+                preferred_panel_sizes: [15.0, 26.0, 14.0],
+                panel_layout: None,
                 git_event_tx,
                 updater_tx,
                 _subscriptions: vec![sub, right_panel_sub],
@@ -695,8 +711,11 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.command_palette_open = !self.command_palette_open;
         if self.command_palette_open {
+            close_command_palette(&mut self.command_palette_open, &mut self.command_palette_previous_focus, window, cx);
+        } else {
+            self.command_palette_previous_focus = window.focused(cx);
+            self.command_palette_open = true;
             self.command_state.update(cx, |state, cx| {
                 state.set_query("", window, cx);
                 state.focus(window, cx);
@@ -769,6 +788,7 @@ impl WorkspaceView {
             "go_task" => {
                 // Focus the session search in the palette itself — just clear the
                 // query so the sessions group is prominent.
+                self.command_palette_previous_focus = window.focused(cx);
                 self.command_palette_open = true;
                 self.command_state.update(cx, |state, cx| {
                     state.set_query("", window, cx);
@@ -1091,6 +1111,7 @@ impl WorkspaceView {
                     matches!(status, UpdateStatus::Available(_) | UpdateStatus::Error(_)).then(
                         || {
                             Button::new("update-dismiss")
+                                .accessibility_label("Dismiss update notice")
                                 .icon(IconName::Close)
                                 .tooltip("Dismiss")
                                 .ghost()
@@ -1396,8 +1417,8 @@ impl WorkspaceView {
             .pt(px(80.0))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _event, _window, cx| {
-                    this.command_palette_open = false;
+                cx.listener(|this, _event, window, cx| {
+                    close_command_palette(&mut this.command_palette_open, &mut this.command_palette_previous_focus, window, cx);
                     cx.notify();
                 }),
             )
@@ -1411,7 +1432,7 @@ impl WorkspaceView {
                     .bg(theme.title_bar)
                     .shadow_lg()
                     .overflow_hidden()
-                    .on_mouse_down(MouseButton::Left, |_event, _window, _cx| {})
+                    .on_mouse_down(MouseButton::Left, |_event, _window, cx| cx.stop_propagation())
                     .child(
                         Command::new(&self.command_state)
                             .bordered(false)
@@ -1420,15 +1441,15 @@ impl WorkspaceView {
                             .group(recent_group)
                             .group(commands_group)
                             .group(sessions_group)
-                            .on_cancel(move |_window, cx| {
+                            .on_cancel(move |window, cx| {
                                 let _ = view_cancel.update(cx, |this, cx| {
-                                    this.command_palette_open = false;
+                                    close_command_palette(&mut this.command_palette_open, &mut this.command_palette_previous_focus, window, cx);
                                     cx.notify();
                                 });
                             })
                             .on_confirm(move |index, window, cx| {
                                 let _ = view.update(cx, |this, cx| {
-                                    this.command_palette_open = false;
+                                    close_command_palette(&mut this.command_palette_open, &mut this.command_palette_previous_focus, window, cx);
                                     if index.section == 0 {
                                         if let Some(action_key) =
                                             this.recent_palette_actions.get(index.row)
@@ -1469,7 +1490,6 @@ impl WorkspaceView {
 
     fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.model.read(cx);
-        let theme = cx.theme().colors;
 
         let git_status =
             active_project_git_status(state.active_git_work_dir().as_deref(), &state.git_statuses);
@@ -1557,35 +1577,22 @@ impl WorkspaceView {
                     .child(
                         Button::new("status-git-branch")
                             .icon(IconName::Github)
-                            .label(format!("{active_project} · {branch}"))
+                            .label("Git")
                             .ghost()
                             .xsmall()
-                            .tooltip("Switch or manage Git branches")
+                            .tooltip(format!("{active_project} · {branch} — Switch or manage branches"))
                             .on_click(cx.listener(|this, _event, _window, cx| {
                                 this.open_git_branches(cx);
                             })),
                     )
                     .children((dirty_count > 0).then(|| {
-                        div()
-                            .id("status-git-changes")
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .text_xs()
-                            .cursor_pointer()
-                            .hover(|style| style.opacity(0.8))
+                        Button::new("status-git-changes")
+                            .label(format!("{dirty_count} changed · +{additions} −{deletions}"))
+                            .ghost()
+                            .xsmall()
+                            .tooltip("Review workspace changes")
                             .on_click(cx.listener(|this, _event, _window, cx| {
                                 this.open_git_review(cx);
-                            }))
-                            .children((additions > 0).then(|| {
-                                div()
-                                    .text_color(theme.success)
-                                    .child(format!("+{additions}"))
-                            }))
-                            .children((deletions > 0).then(|| {
-                                div()
-                                    .text_color(theme.danger)
-                                    .child(format!("−{deletions}"))
                             }))
                     }))
                     .children(pr_badge),
@@ -1598,10 +1605,10 @@ impl WorkspaceView {
                     .child(
                         Button::new("status-model-badge")
                             .icon(IconName::Cpu)
-                            .label(model_name.to_string())
+                            .label("Model")
                             .ghost()
                             .xsmall()
-                            .tooltip("Switch model")
+                            .tooltip(format!("Switch model · {model_name}"))
                             .on_click(cx.listener(|this, _event, window, cx| {
                                 this.execute_palette_action("model", window, cx);
                             })),
@@ -1666,10 +1673,13 @@ impl WorkspaceView {
     fn toggle_right_panel_action(
         &mut self,
         _: &ToggleRightPanel,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.right_panel_visible = !self.right_panel_visible;
+        if !self.right_panel_visible {
+            self.chat_list.update(cx, |chat, cx| chat.focus_composer(window, cx));
+        }
         cx.notify();
     }
 
@@ -1794,6 +1804,21 @@ impl Render for WorkspaceView {
             });
         }
         let workspace_page = self.model.read(cx).workspace_page;
+        if self.rendered_page != workspace_page {
+            let settings_transition = self.rendered_page == WorkspacePage::Settings
+                || workspace_page == WorkspacePage::Settings;
+            self.rendered_page = workspace_page;
+            if settings_transition {
+                self.focus_handle.focus(window, cx);
+                cx.on_next_frame(window, |this, window, cx| {
+                    if this.model.read(cx).workspace_page == WorkspacePage::Chat {
+                        this.chat_list.update(cx, |chat, cx| chat.focus_composer(window, cx));
+                    } else {
+                        window.focus_next(cx);
+                    }
+                });
+            }
+        }
         let terminal_project = self.model.read(cx).active_work_dir.clone();
         let (terminal_tabs, active_terminal_tab, active_terminal) =
             if let Some(project) = &terminal_project {
@@ -1813,16 +1838,68 @@ impl Render for WorkspaceView {
             "Collapse sidebar"
         };
         let theme = cx.theme().colors;
+        let rem = window.rem_size();
+        let viewport = window.viewport_size();
+        let sidebar_width = self.sidebar_resizable_state.read(cx).sizes().first()
+            .copied().unwrap_or(rem * 15.0).clamp(rem * 13.0, rem * 20.0);
+        let required_content = if self.right_panel_visible { rem * 48.0 } else { rem * 28.0 };
+        let show_sidebar = !self.sidebar_collapsed && viewport.width >= sidebar_width + required_content;
+        let review_focus = self.right_panel_visible && viewport.width < rem * 48.0;
+        let visible_panels = [
+            workspace_page != WorkspacePage::Settings && show_sidebar,
+            workspace_page == WorkspacePage::Chat && self.right_panel_visible && !review_focus,
+            workspace_page == WorkspacePage::Chat && self.bottom_panel_visible,
+        ];
+        let panel_layout = (viewport, rem, visible_panels);
+        if self.panel_layout != Some(panel_layout) {
+            self.panel_layout = Some(panel_layout);
+            // A reopened panel must measure its current container before restoring its split.
+            cx.on_next_frame(window, move |this, window, cx| {
+                if this.panel_layout != Some(panel_layout) {
+                    return;
+                }
+                for (visible, state, index, preferred) in [
+                    (visible_panels[0], this.sidebar_resizable_state.clone(), 0, this.preferred_panel_sizes[0]),
+                    (visible_panels[1], this.right_panel_resizable_state.clone(), 1, this.preferred_panel_sizes[1]),
+                    (visible_panels[2], this.bottom_panel_resizable_state.clone(), 1, this.preferred_panel_sizes[2]),
+                ] {
+                    if visible {
+                        state.update(cx, |state, cx| state.resize_panel(index, rem * preferred, window, cx));
+                    }
+                }
+                cx.notify();
+            });
+        }
+        let header_inset = if show_sidebar { px(14.0) } else { px(110.0) };
+        if self.chat_list.read(cx).header_left_padding != header_inset {
+            self.chat_list.update(cx, |chat, cx| {
+                chat.header_left_padding = header_inset;
+                cx.notify();
+            });
+        }
 
         let chat_page_content = {
-            let upper_content = if self.right_panel_visible {
+            let upper_content = if review_focus {
+                div().flex().flex_col().size_full()
+                    .child(Button::new("review-back-to-chat").label("Back to conversation").ghost().small()
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.toggle_right_panel_action(&ToggleRightPanel, window, cx);
+                        })))
+                    .child(div().flex_1().min_h_0().child(self.right_panel.clone()))
+                    .into_any_element()
+            } else if self.right_panel_visible {
                 h_resizable("workspace-chat-right-split")
                     .with_state(&self.right_panel_resizable_state)
-                    .child(resizable_panel().child(self.chat_list.clone()))
+                    .on_resize(cx.listener(|this, state: &Entity<ResizableState>, window, cx| {
+                        if let Some(size) = state.read(cx).sizes().get(1) {
+                            this.preferred_panel_sizes[1] = *size / window.rem_size();
+                        }
+                    }))
+                    .child(resizable_panel().size_range(rem * 28.0..Pixels::MAX).child(self.chat_list.clone()))
                     .child(
                         resizable_panel()
-                            .size(px(300.0))
-                            .size_range(px(240.0)..px(800.0))
+                            .size(rem * 26.0)
+                            .size_range(rem * 20.0..viewport.width * 0.5)
                             .child(self.right_panel.clone()),
                     )
                     .into_any_element()
@@ -1935,7 +2012,8 @@ impl Render for WorkspaceView {
                             let close_v = cx.entity().clone();
                             Button::new(SharedString::from(format!("terminal-tab-close-{tab}")))
                                 .icon(IconName::Close)
-                                .tooltip("Close shell")
+                                .accessibility_label("Close shell")
+                            .tooltip("Close shell")
                                 .ghost()
                                 .xsmall()
                                 .on_click(move |_event, _window, cx| {
@@ -1989,6 +2067,7 @@ impl Render for WorkspaceView {
                     .children(new_project.clone().map(|project| {
                         Button::new("terminal-new-tab")
                             .icon(IconName::Plus)
+                            .accessibility_label("New terminal tab")
                             .tooltip("New terminal tab")
                             .ghost()
                             .small()
@@ -2001,6 +2080,7 @@ impl Render for WorkspaceView {
                     .child(
                         Button::new("terminal-clear-btn")
                             .icon(IconName::Undo2)
+                            .accessibility_label("Clear terminal")
                             .tooltip("Clear terminal")
                             .ghost()
                             .small()
@@ -2011,6 +2091,7 @@ impl Render for WorkspaceView {
                     .child(
                         Button::new("terminal-restart-btn")
                             .icon(IconName::Redo)
+                            .accessibility_label("Restart shell")
                             .tooltip("Restart shell")
                             .ghost()
                             .small()
@@ -2020,6 +2101,7 @@ impl Render for WorkspaceView {
                     )
                     .child(
                         Button::new("terminal-close-panel-btn")
+                        .accessibility_label("Hide terminal")
                             .icon(IconName::Close)
                             .tooltip("Hide terminal (Cmd+J)")
                             .ghost()
@@ -2062,11 +2144,16 @@ impl Render for WorkspaceView {
 
                 v_resizable("workspace-main-bottom-split")
                     .with_state(&self.bottom_panel_resizable_state)
+                    .on_resize(cx.listener(|this, state: &Entity<ResizableState>, window, cx| {
+                        if let Some(size) = state.read(cx).sizes().get(1) {
+                            this.preferred_panel_sizes[2] = *size / window.rem_size();
+                        }
+                    }))
                     .child(resizable_panel().child(upper_content))
                     .child(
                         resizable_panel()
-                            .size(px(280.0))
-                            .size_range(px(120.0)..px(800.0))
+                            .size(rem * 14.0)
+                            .size_range(rem * 8.0..(viewport.height - rem * 24.0).max(rem * 8.0))
                             .child(terminal_panel),
                     )
                     .into_any_element()
@@ -2082,13 +2169,18 @@ impl Render for WorkspaceView {
             WorkspacePage::GitHub => self.github.clone().into_any_element(),
             WorkspacePage::Settings => self.settings.clone().into_any_element(),
         };
-        let page_content = if workspace_page != WorkspacePage::Settings && !self.sidebar_collapsed {
+        let page_content = if workspace_page != WorkspacePage::Settings && show_sidebar {
             h_resizable("workspace-sidebar-main-split")
                 .with_state(&self.sidebar_resizable_state)
+                .on_resize(cx.listener(|this, state: &Entity<ResizableState>, window, cx| {
+                    if let Some(size) = state.read(cx).sizes().first() {
+                        this.preferred_panel_sizes[0] = *size / window.rem_size();
+                    }
+                }))
                 .child(
                     resizable_panel()
-                        .size(px(240.0))
-                        .size_range(px(160.0)..px(500.0))
+                        .size(rem * 15.0)
+                        .size_range(rem * 13.0..rem * 20.0)
                         .child(self.sidebar.clone()),
                 )
                 .child(resizable_panel().child(central_content))
@@ -2109,12 +2201,13 @@ impl Render for WorkspaceView {
                 .into_any_element()
         };
 
-        let git_dialog_layer = self
-            .right_panel
-            .update(cx, |panel, cx| panel.render_git_dialog_layer(cx));
+        self.right_panel
+            .update(cx, |panel, cx| panel.sync_git_dialog(window, cx));
 
         div()
             .id("workspace-root")
+            .tab_group()
+            .key_context("ThreadlaneWorkspace")
             .relative()
             .flex()
             .w_full()
@@ -2124,6 +2217,9 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::toggle_command_palette))
             .on_action(cx.listener(Self::toggle_sidebar_action))
             .on_action(cx.listener(Self::toggle_right_panel_action))
+            .on_action(cx.listener(|this, _: &threadlane_ui_chat::OpenWorkspaceReview, _, cx| {
+                this.open_git_review(cx);
+            }))
             .on_action(cx.listener(Self::toggle_terminal_action))
             .on_action(cx.listener(Self::begin_new_task_action))
             .on_action(cx.listener(Self::open_settings_action))
@@ -2136,6 +2232,7 @@ impl Render for WorkspaceView {
             .child(view_with_status_bar)
             .children((workspace_page == WorkspacePage::Chat).then(|| {
                 Button::new("command-palette-btn")
+                        .accessibility_label("Command palette")
                     .icon(IconName::SquareTerminal)
                     .tooltip("Command Palette (Cmd+K)")
                     .ghost()
@@ -2145,18 +2242,12 @@ impl Render for WorkspaceView {
                     .top(px(9.0))
                     .right(px(48.0))
                     .on_click(cx.listener(|this, _event, window, cx| {
-                        this.command_palette_open = !this.command_palette_open;
-                        if this.command_palette_open {
-                            this.command_state.update(cx, |state, cx| {
-                                state.set_query("", window, cx);
-                                state.focus(window, cx);
-                            });
-                        }
-                        cx.notify();
+                        this.toggle_command_palette(&ToggleCommandPalette, window, cx);
                     }))
             }))
             .children((workspace_page == WorkspacePage::Chat).then(|| {
                 Button::new("right-panel-toggle")
+                        .accessibility_label("Toggle right panel")
                     .icon(IconName::PanelRight)
                     .tooltip(if self.right_panel_visible {
                         "Hide right panel"
@@ -2168,13 +2259,13 @@ impl Render for WorkspaceView {
                     .absolute()
                     .top(px(9.0))
                     .right(px(12.0))
-                    .on_click(cx.listener(|this, _event, _window, cx| {
-                        this.right_panel_visible = !this.right_panel_visible;
-                        cx.notify();
+                    .on_click(cx.listener(|this, _event, window, cx| {
+                        this.toggle_right_panel_action(&ToggleRightPanel, window, cx);
                     }))
             }))
             .children((workspace_page != WorkspacePage::Settings).then(|| {
                 Button::new("sidebar-collapse-toggle")
+                        .accessibility_label("Toggle sidebar")
                     .icon(IconName::PanelLeft)
                     .tooltip(sidebar_tooltip)
                     .ghost()
@@ -2190,7 +2281,6 @@ impl Render for WorkspaceView {
                 self.command_palette_open
                     .then(|| self.render_command_palette(cx)),
             )
-            .children(git_dialog_layer)
             .children(self.render_update_notice(cx))
             .children(Root::render_dialog_layer(window, cx))
             .children(Root::render_notification_layer(window, cx))
@@ -2211,6 +2301,99 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use std::path::{Path, PathBuf};
     use threadlane_git::GitStatus;
+
+    #[gpui::test]
+    fn palette_dismissal_restores_focus_once(cx: &mut gpui::TestAppContext) {
+        use gpui::{InteractiveElement as _, ParentElement as _, StatefulInteractiveElement as _};
+        struct FocusHost(gpui::FocusHandle, gpui::FocusHandle);
+        impl gpui::Render for FocusHost {
+            fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+                gpui::div()
+                    .child(gpui::div().id("trigger").role(gpui::Role::Button).track_focus(&self.0))
+                    .child(gpui::div().id("palette").role(gpui::Role::Button).track_focus(&self.1))
+            }
+        }
+        let (view, cx) = cx.add_window_view(|_, cx| FocusHost(cx.focus_handle(), cx.focus_handle()));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let trigger = view.read(cx).0.clone();
+            let palette = view.read(cx).1.clone();
+            palette.focus(window, cx);
+            let mut open = true;
+            let mut previous = Some(trigger.clone());
+            super::close_command_palette(&mut open, &mut previous, window, cx);
+            assert!(!open);
+            assert!(trigger.is_focused(window));
+            palette.focus(window, cx);
+            super::close_command_palette(&mut open, &mut previous, window, cx);
+            assert!(palette.is_focused(window), "a repeated dismissal must not restore stale focus");
+        });
+    }
+
+    #[gpui::test]
+    fn escape_dismisses_dialog_before_cancelling_generation(cx: &mut gpui::TestAppContext) {
+        use gpui::{AppContext as _, InteractiveElement as _, ParentElement as _, Styled as _};
+        use gpui_component::{Root, WindowExt as _};
+        use std::rc::Rc;
+        struct DialogHost(Rc<Cell<bool>>);
+        impl gpui::Render for DialogHost {
+            fn render(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+                let cancelled = self.0.clone();
+                gpui::div().size_full().key_context("ThreadlaneWorkspace")
+                    .on_action(move |_: &super::CancelActiveGeneration, _, _| cancelled.set(true))
+                    .children(Root::render_dialog_layer(window, cx))
+            }
+        }
+        cx.update(|cx| { gpui_component::init(cx); super::init(cx); });
+        let cancelled = Rc::new(Cell::new(false));
+        let tracked = cancelled.clone();
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            Root::new(cx.new(|_| DialogHost(tracked)), window, cx)
+        });
+        cx.update(|window, cx| window.open_dialog(cx, |dialog, _, _| dialog.title("Test dialog")));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        cx.update(|window, cx| assert!(!window.has_active_dialog(cx)));
+        assert!(!cancelled.get(), "dialog dismissal must not cancel the underlying turn");
+    }
+
+    #[gpui::test]
+    fn escape_dismisses_menu_before_cancelling_generation(cx: &mut gpui::TestAppContext) {
+        use gpui::{Focusable as _, InteractiveElement as _, StatefulInteractiveElement as _, ParentElement as _, Styled as _};
+        use gpui_component::menu::PopupMenu;
+        use std::rc::Rc;
+        struct MenuHost(gpui::Entity<PopupMenu>, Rc<Cell<bool>>, gpui::FocusHandle);
+        impl gpui::Render for MenuHost {
+            fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+                let stopped = self.1.clone();
+                gpui::div().id("menu-test-workspace").size_full().key_context("ThreadlaneWorkspace")
+                    .track_focus(&self.2).role(gpui::Role::Application)
+                    .on_action(move |_: &super::CancelActiveGeneration, _, _| stopped.set(true))
+                    .child(self.0.clone())
+            }
+        }
+        cx.update(|cx| { gpui_component::init(cx); super::init(cx); });
+        let stopped = Rc::new(Cell::new(false));
+        let tracked = stopped.clone();
+        let (host, cx) = cx.add_window_view(move |window, cx| {
+            let focus = cx.focus_handle();
+            let menu = PopupMenu::build(window, cx, |menu, _, _| menu.label("Test menu").action_context(focus.clone()));
+            menu.read(cx).focus_handle(cx).focus(window, cx);
+            MenuHost(menu, tracked, focus)
+        });
+        let dismissed = Rc::new(Cell::new(false));
+        let tracked = dismissed.clone();
+        let _subscription = cx.update(|_, cx| { let menu = host.read(cx).0.clone(); cx.subscribe(&menu, move |_, _: &gpui::DismissEvent, _| tracked.set(true)) });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(dismissed.get(), "Escape must dismiss the native menu");
+        assert!(!stopped.get(), "menu dismissal must not stop the underlying turn");
+        cx.simulate_keystrokes("escape");
+        assert!(stopped.get(), "Escape still stops a turn after focus returns to the workspace");
+    }
 
     #[test]
     fn status_bar_uses_shared_status_for_active_project() {

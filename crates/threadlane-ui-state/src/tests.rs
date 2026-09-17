@@ -3734,3 +3734,33 @@ fn mirror_trigger_fires_once_per_computer_activity() {
         "same tool call must not retrigger"
     );
 }
+
+#[tokio::test]
+async fn one_time_permission_rejects_stale_and_persistent_decisions() {
+    use threadlane_permission::PermissionDecision;
+    let root = tempfile::tempdir().unwrap();
+    let session_id = "scope-check";
+    let session_file = root.path().join(".threadlane/sessions/scope-check.jsonl");
+    std::fs::create_dir_all(session_file.parent().unwrap()).unwrap();
+    let mut state = AppState::load_from_registry(Vec::new());
+    state.active_work_dir = Some(root.path().to_path_buf());
+    state.active_session_id = Some(session_id.into());
+    let runtime = state.ensure_session_runtime(root.path().to_path_buf(), session_file);
+    let handle = runtime.permission_handle();
+    let (events, mut rx) = tokio::sync::broadcast::channel(4);
+    let pending = tokio::spawn(async move {
+        handle.request_external(&events, "test", "One-time test".into(),
+            "No operation executes".into(), false, std::future::pending()).await
+    });
+    let AgentEvent::PermissionRequested { request } = rx.recv().await.unwrap() else {
+        panic!("expected permission request");
+    };
+    state.pending_permissions.insert(session_id.into(), request.clone());
+    assert!(!state.resolve_active_permission("stale-request", PermissionDecision::AllowOnce));
+    assert!(!state.resolve_active_permission(&request.id, PermissionDecision::AllowAlways));
+    assert!(!pending.is_finished());
+    assert!(state.pending_permissions.contains_key(session_id));
+    assert!(state.resolve_active_permission(&request.id, PermissionDecision::AllowOnce));
+    assert_eq!(pending.await.unwrap(), Some(PermissionDecision::AllowOnce));
+    assert!(!state.pending_permissions.contains_key(session_id));
+}

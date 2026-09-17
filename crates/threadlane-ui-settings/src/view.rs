@@ -400,7 +400,7 @@ impl SettingsView {
         let model = self.model.clone();
 
         div()
-            .w(px(240.0))
+            .w(rems(15.0))
             .h_full()
             .flex_none()
             .flex()
@@ -426,16 +426,7 @@ impl SettingsView {
                     .gap_1()
                     .child(
                         Button::new("settings-general")
-                            .child(
-                                div()
-                                    .w_full()
-                                    .flex()
-                                    .items_center()
-                                    .justify_start()
-                                    .gap_2()
-                                    .child(IconName::Settings)
-                                    .child("General"),
-                            )
+                            .icon(IconName::Settings).label("General")
                             .ghost()
                             .selected(self.page == SettingsPage::General)
                             .w_full()
@@ -447,16 +438,7 @@ impl SettingsView {
                     )
                     .child(
                         Button::new("settings-appearance")
-                            .child(
-                                div()
-                                    .w_full()
-                                    .flex()
-                                    .items_center()
-                                    .justify_start()
-                                    .gap_2()
-                                    .child(IconName::Palette)
-                                    .child("Appearance"),
-                            )
+                            .icon(IconName::Palette).label("Appearance")
                             .ghost()
                             .selected(self.page == SettingsPage::Appearance)
                             .w_full()
@@ -468,16 +450,7 @@ impl SettingsView {
                     )
                     .child(
                         Button::new("settings-keybindings")
-                            .child(
-                                div()
-                                    .w_full()
-                                    .flex()
-                                    .items_center()
-                                    .justify_start()
-                                    .gap_2()
-                                    .child(IconName::SquareTerminal)
-                                    .child("Keybindings"),
-                            )
+                            .icon(IconName::SquareTerminal).label("Keybindings")
                             .ghost()
                             .selected(self.page == SettingsPage::Keybindings)
                             .w_full()
@@ -489,16 +462,7 @@ impl SettingsView {
                     )
                     .child(
                         Button::new("settings-providers")
-                            .child(
-                                div()
-                                    .w_full()
-                                    .flex()
-                                    .items_center()
-                                    .justify_start()
-                                    .gap_2()
-                                    .child(IconName::Bot)
-                                    .child("Providers"),
-                            )
+                            .icon(IconName::Bot).label("Providers")
                             .ghost()
                             .selected(self.page == SettingsPage::Providers)
                             .w_full()
@@ -511,16 +475,7 @@ impl SettingsView {
                     )
                     .child(
                         Button::new("settings-subagents")
-                            .child(
-                                div()
-                                    .w_full()
-                                    .flex()
-                                    .items_center()
-                                    .justify_start()
-                                    .gap_2()
-                                    .child(IconName::Bot)
-                                    .child("Subagents"),
-                            )
+                            .icon(IconName::Bot).label("Subagents")
                             .ghost()
                             .selected(self.page == SettingsPage::Subagents)
                             .w_full()
@@ -532,16 +487,7 @@ impl SettingsView {
                     )
                     .child(
                         Button::new("settings-skills")
-                            .child(
-                                div()
-                                    .w_full()
-                                    .flex()
-                                    .items_center()
-                                    .justify_start()
-                                    .gap_2()
-                                    .child(IconName::BookOpen)
-                                    .child("Skills"),
-                            )
+                            .icon(IconName::BookOpen).label("Skills")
                             .ghost()
                             .selected(self.page == SettingsPage::Skills)
                             .w_full()
@@ -555,16 +501,7 @@ impl SettingsView {
                     )
                     .child(
                         Button::new("settings-extensions")
-                            .child(
-                                div()
-                                    .w_full()
-                                    .flex()
-                                    .items_center()
-                                    .justify_start()
-                                    .gap_2()
-                                    .child(IconName::HardDrive)
-                                    .child("WASI Extensions"),
-                            )
+                            .icon(IconName::HardDrive).label("WASI Extensions")
                             .ghost()
                             .selected(self.page == SettingsPage::Extensions)
                             .w_full()
@@ -578,16 +515,7 @@ impl SettingsView {
                     )
                     .child(
                         Button::new("settings-acp")
-                            .child(
-                                div()
-                                    .w_full()
-                                    .flex()
-                                    .items_center()
-                                    .justify_start()
-                                    .gap_2()
-                                    .child(IconName::Network)
-                                    .child("ACP Agents"),
-                            )
+                            .icon(IconName::Network).label("ACP Agents")
                             .ghost()
                             .selected(self.page == SettingsPage::AcpAgents)
                             .w_full()
@@ -604,16 +532,7 @@ impl SettingsView {
             .child(
                 div().flex_none().px_3().py_2().child(
                     Button::new("settings-back")
-                        .child(
-                            div()
-                                .w_full()
-                                .flex()
-                                .items_center()
-                                .justify_start()
-                                .gap_2()
-                                .child(IconName::ArrowLeft)
-                                .child("Back"),
-                        )
+                        .icon(IconName::ArrowLeft).label("Back")
                         .ghost()
                         .w_full()
                         .justify_start()
@@ -1192,6 +1111,7 @@ impl SettingsView {
                     )
                     .child(
                         Switch::new("general-auto-address-pr-reviews-switch")
+                            .accessibility_label("Automatically address PR reviews")
                             .checked(auto_address_pr_reviews_enabled)
                             .tooltip(if auto_address_pr_reviews_enabled {
                                 "Disable automatic PR review addressing"
@@ -1231,8 +1151,14 @@ impl SettingsView {
                     .grid_cols(2)
                     .gap_4()
                     .child(
-                        div()
-                            .id("theme-card-dark")
+                        Button::new("theme-card-dark")
+                            .accessibility_label("Threadlane Dark")
+                            .tooltip("Use Threadlane Dark")
+                            .outline()
+                            .selected(is_dark)
+                            .h_auto()
+                            .items_stretch()
+                            .text_left()
                             .p_4()
                             .rounded_xl()
                             .border_2()
@@ -1245,6 +1171,7 @@ impl SettingsView {
                             .flex()
                             .flex_col()
                             .gap_3()
+                            .child(div().w_full().flex().flex_col().gap_3()
                             .child(
                                 div()
                                     .h(px(80.0))
@@ -1314,11 +1241,17 @@ impl SettingsView {
                                             .with_variant(TagVariant::Success)
                                             .small()
                                     })),
-                            ),
+                            )),
                     )
                     .child(
-                        div()
-                            .id("theme-card-light")
+                        Button::new("theme-card-light")
+                            .accessibility_label("Threadlane Light")
+                            .tooltip("Use Threadlane Light")
+                            .outline()
+                            .selected(is_light)
+                            .h_auto()
+                            .items_stretch()
+                            .text_left()
                             .p_4()
                             .rounded_xl()
                             .border_2()
@@ -1335,6 +1268,7 @@ impl SettingsView {
                             .flex()
                             .flex_col()
                             .gap_3()
+                            .child(div().w_full().flex().flex_col().gap_3()
                             .child(
                                 div()
                                     .h(px(80.0))
@@ -1404,7 +1338,7 @@ impl SettingsView {
                                             .with_variant(TagVariant::Success)
                                             .small()
                                     })),
-                            ),
+                            )),
                     ),
             )
             .into_any_element()
@@ -1422,7 +1356,7 @@ impl SettingsView {
                     ("⌘ R", "Toggle Right Panel"),
                     ("⌘ J", "Toggle Terminal Panel"),
                     ("⌘ E", "Toggle Code/Diff Editor"),
-                    ("⌘ N", "New Session"),
+                    ("⌘ N", "New task"),
                     ("⌘ P", "Open Project File Finder"),
                     ("⌘ ⇧ O", "Attach Local Project"),
                 ],
@@ -2587,6 +2521,7 @@ impl SettingsView {
                             "extension-toggle-{}",
                             record.id()
                         )))
+                        .accessibility_label(format!("Enable extension {}", record.id()))
                         .checked(enabled)
                         .tooltip(if enabled {
                             "Disable extension"
@@ -2616,6 +2551,7 @@ impl SettingsView {
                             "extension-remove-{}",
                             record.id()
                         )))
+                        .accessibility_label(format!("Remove extension {}", record.id()))
                         .icon(IconName::Delete)
                         .tooltip("Remove extension")
                         .ghost()
@@ -2781,6 +2717,7 @@ impl SettingsView {
                     )
                     .child(
                         Switch::new(SharedString::from(format!("skill-toggle-{skill_id}")))
+                            .accessibility_label(format!("Enable skill {skill_id}"))
                             .checked(enabled)
                             .disabled(!has_project || !skill.is_valid)
                             .tooltip(if enabled {
@@ -2912,6 +2849,7 @@ impl SettingsView {
                                     "acp-preset-{preset_id}-{:?}",
                                     selected_scope
                                 )))
+                                .accessibility_label(format!("Enable {}", preset.name))
                                 .checked(enabled)
                                 .disabled(selected_scope == AcpScope::Project && !has_project)
                                 .tooltip(if enabled {
@@ -3095,6 +3033,7 @@ impl SettingsView {
                     )
                     .child(
                         Switch::new(SharedString::from(format!("acp-toggle-{toggle_id}")))
+                            .accessibility_label(format!("Enable ACP agent {toggle_id}"))
                             .checked(enabled)
                             .tooltip(if enabled {
                                 "Disable ACP agent"
@@ -3119,6 +3058,7 @@ impl SettingsView {
                     )
                     .child(
                         Button::new(SharedString::from(format!("acp-remove-{remove_id}")))
+                            .accessibility_label(format!("Remove ACP agent {remove_id}"))
                             .icon(IconName::Delete)
                             .tooltip("Remove ACP agent")
                             .ghost()
@@ -3211,7 +3151,7 @@ impl Render for SettingsView {
                     .child(
                         div()
                             .w_full()
-                            .max_w(px(760.0))
+                            .max_w(rems(48.0))
                             .mx_auto()
                             .child(div().h(threadlane_ui_theme::WINDOW_CONTROLS_CLEARANCE).flex_none())
                             .child(

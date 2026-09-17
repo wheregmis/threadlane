@@ -25,3 +25,6 @@ wry = { version = "0.53.3", package = "lb-wry" }
 raw-window-handle = "0.6"
 objc2 = { version = "0.6", features = ["std"] }
 block2 = "0.6"
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

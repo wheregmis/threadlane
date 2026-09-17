@@ -8,7 +8,6 @@ use base64::Engine as _;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants, Toggle, ToggleVariants};
-use gpui_component::hover_card::HoverCard;
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenuItem};
 use gpui_component::notification::Notification;
@@ -243,7 +242,7 @@ pub struct ChatListView {
     slash_scroll_handle: ScrollHandle,
     selected_slash_index: usize,
     dismiss_slash_menu: bool,
-    permission_details_open: bool,
+    permission_details_request: Option<String>,
     context_meter_open: bool,
     /// Selected options per question, keyed by `request_id\0question_id`.
     /// Options toggle multi-select; Submit sends one answer per question.
@@ -277,11 +276,15 @@ impl ChatListView {
     ) -> Self {
         let transcript_list_state = ListState::new(0, ListAlignment::Bottom, px(600.0));
         transcript_list_state.set_follow_mode(FollowMode::Tail);
+        let chat = cx.entity().downgrade();
+        transcript_list_state.set_scroll_handler(move |_, _, cx| {
+            let _ = chat.update(cx, |_, cx| cx.notify());
+        });
         let trajectory_list_state = ListState::new(0, ListAlignment::Top, px(400.0));
         let input_state = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder("Ask a question, describe a task, or type / for commands...")
-                .auto_grow(2, 8)
+                .auto_grow(1, 8)
                 .submit_on_enter(true)
                 .soft_wrap(true)
         });
@@ -506,7 +509,7 @@ impl ChatListView {
             slash_scroll_handle: ScrollHandle::new(),
             selected_slash_index: 0,
             dismiss_slash_menu: false,
-            permission_details_open: false,
+            permission_details_request: None,
             context_meter_open: false,
             question_selections: std::collections::HashMap::new(),
             question_inputs: std::collections::HashMap::new(),
@@ -660,8 +663,8 @@ impl ChatListView {
                     .px_2()
                     .py(px(1.5))
                     .rounded_full()
-                    .bg(theme.accent.opacity(0.15))
-                    .text_color(theme.accent)
+                    .bg(theme.muted)
+                    .text_color(theme.foreground)
                     .child(Spinner::new().xsmall())
                     .child(
                         div()
@@ -679,9 +682,8 @@ impl ChatListView {
                     .px_2()
                     .py(px(1.5))
                     .rounded_full()
-                    .bg(theme.success.opacity(0.15))
-                    .text_color(theme.success)
-                    .child(div().size(px(6.0)).rounded_full().bg(theme.success))
+                    .bg(theme.muted)
+                    .text_color(theme.muted_foreground)
                     .child(
                         div()
                             .text_xs()
@@ -760,58 +762,50 @@ impl ChatListView {
                     })),
             )
             .child(
-                div()
-                    .h(px(30.0))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .p(px(2.0))
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.muted.opacity(0.4))
-                    .child(
-                        Button::new("trajectory-tab-events")
-                            .icon(Icon::default().path("icons/tabs/trajectory.svg"))
-                            .label("Trajectory")
-                            .tooltip("Trajectory (Execution & Diagnostics)")
-                            .ghost()
-                            .xsmall()
-                            .selected(self.current_tab == CentralTab::Trajectory)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.current_tab = CentralTab::Trajectory;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("trajectory-tab-chat")
-                            .icon(Icon::default().path("icons/tabs/chat.svg"))
-                            .label("Chat")
-                            .tooltip("Chat (Conversation & Turn History)")
-                            .ghost()
-                            .xsmall()
-                            .selected(self.current_tab == CentralTab::Chat)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.current_tab = CentralTab::Chat;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("trajectory-tab-editor")
-                            .icon(Icon::default().path("icons/tabs/editor.svg"))
-                            .label(editor_label)
-                            .tooltip("Editor (Code & Diff Review)")
-                            .ghost()
-                            .xsmall()
-                            .selected(self.current_tab == CentralTab::Editor)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.current_tab = CentralTab::Editor;
-                                cx.notify();
-                            })),
-                    ),
+                Button::new("trajectory-tab-chat")
+                    .icon(Icon::default().path("icons/tabs/chat.svg"))
+                    .label("Chat")
+                    .tooltip("Chat (⌘1)")
+                    .ghost()
+                    .small()
+                    .selected(self.current_tab == CentralTab::Chat)
+                    .on_click(cx.listener(|this, _, _, cx| this.set_tab(CentralTab::Chat, cx))),
             )
-            .child(div().flex_1())
+            .child(
+                Button::new("chat-tools")
+                    .label(match self.current_tab {
+                        CentralTab::Chat => "Tools".to_string(),
+                        CentralTab::Editor => editor_label.clone(),
+                        CentralTab::Trajectory => "Trajectory".to_string(),
+                    })
+                    .dropdown_caret(true)
+                    .tooltip("Editor and execution details")
+                    .ghost()
+                    .small()
+                    .selected(self.current_tab != CentralTab::Chat)
+                    .dropdown_menu({
+                        let view = cx.entity();
+                        let selected = self.current_tab;
+                        move |menu, _, _| {
+                            let editor = view.clone();
+                            let trajectory = view.clone();
+                            menu.item(
+                                PopupMenuItem::new(editor_label.clone())
+                                    .checked(selected == CentralTab::Editor)
+                                    .on_click(move |_, _, cx| {
+                                        editor.update(cx, |this, cx| this.set_tab(CentralTab::Editor, cx));
+                                    }),
+                            )
+                            .item(
+                                PopupMenuItem::new("Trajectory")
+                                    .checked(selected == CentralTab::Trajectory)
+                                    .on_click(move |_, _, cx| {
+                                        trajectory.update(cx, |this, cx| this.set_tab(CentralTab::Trajectory, cx));
+                                    }),
+                            )
+                        }
+                    }),
+            )
     }
 
     /// Renders the 16px status circle used for a plan step: a bordered ✓ for
@@ -871,6 +865,44 @@ impl ChatListView {
         }
     }
 
+    fn render_workspace_changes(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let state = self.model.read(cx);
+        let status = state.git_statuses.get(&state.active_git_work_dir()?)?;
+        let count = status.files.len();
+        if count == 0 {
+            return None;
+        }
+        Some(
+            div()
+                .w_full()
+                .max_w(rems(CHAT_CONTENT_MAX_WIDTH))
+                .mx_auto()
+                .px_4()
+                .py_1()
+                .flex()
+                .items_center()
+                .gap_2()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(format!(
+                    "Workspace changes · {count} {}",
+                    if count == 1 { "file" } else { "files" }
+                ))
+                .child(div().flex_1())
+                .child(
+                    Button::new("review-workspace-changes")
+                        .label("Review")
+                        .ghost()
+                        .small()
+                        .tooltip("Review all uncommitted changes in this workspace")
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(crate::OpenWorkspaceReview), cx)
+                        }),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn render_plan_tracker(
         &self,
         plan: &SessionPlan,
@@ -897,84 +929,85 @@ impl ChatListView {
                     .iter()
                     .position(|item| item.status == PlanItemStatus::Pending)
             })
-            .map(|index| index + 1)
-            .unwrap_or(total);
-        let is_complete = completed == total;
+            .map(|index| plan.items[index].step.as_str())
+            .unwrap_or("Plan complete");
         let content_plan = plan.clone();
 
         Some(
-            HoverCard::new("session-plan-hover-card")
+            div()
                 .w_full()
-                .flex_none()
-                .anchor(Anchor::BottomCenter)
-                .close_delay(Duration::from_millis(700))
-                .trigger(
-                    div().w_full().flex().justify_center().py_1().child(
-                        Button::new("session-plan-tracker").ghost().child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(Self::plan_step_marker(
-                                    if is_complete {
-                                        PlanItemStatus::Completed
-                                    } else {
-                                        PlanItemStatus::InProgress
-                                    },
-                                    is_generating,
-                                    theme,
-                                ))
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(theme.muted_foreground)
-                                        .child(format!("Step {current_step} / {total}")),
-                                ),
-                        ),
-                    ),
+                .max_w(rems(CHAT_CONTENT_MAX_WIDTH))
+                .mx_auto()
+                .px_4()
+                .min_w_0()
+                .flex()
+                .justify_center()
+                .py_1()
+                .child(
+                    Popover::new(SharedString::from(format!(
+                        "session-plan-{}",
+                        self.model
+                            .read(cx)
+                            .active_session_id
+                            .as_deref()
+                            .unwrap_or("draft")
+                    )))
+                    .anchor(Anchor::BottomCenter)
+                    .trigger(
+                        Button::new("session-plan-tracker")
+                            .debug_selector(|| "session-plan-tracker".into())
+                            .ghost()
+                            .small()
+                            .label(format!("Plan · {completed}/{total} · {current_step}"))
+                            .tooltip(format!("Show task plan · {current_step}"))
+                            .max_w(rems(26.0))
+                            .min_w_0()
+                            .flex_shrink_1()
+                            .overflow_hidden(),
+                    )
+                    .content(move |_state, _window, _cx| {
+                        let colors = theme;
+                        let rows = content_plan.items.iter().enumerate().map(|(index, item)| {
+                            let marker = Self::plan_step_marker(item.status, is_generating, colors);
+                            div().flex().items_start().gap_2().child(marker).child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .text_sm()
+                                    .text_color(colors.foreground)
+                                    .child(format!("{}. {}", index + 1, item.step)),
+                            )
+                        });
+                        div()
+                            .debug_selector(|| "session-plan-details".into())
+                            .w(rems(32.0))
+                            .max_w(rems(CHAT_CONTENT_MAX_WIDTH - 2.0))
+                            .p_2()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .children(content_plan.explanation.clone().map(|explanation| {
+                                div()
+                                    .flex_none()
+                                    .pb_2()
+                                    .border_b_1()
+                                    .border_color(colors.border)
+                                    .text_sm()
+                                    .text_color(colors.muted_foreground)
+                                    .child(explanation)
+                            }))
+                            .child(
+                                div()
+                                    .w_full()
+                                    .max_h(rems(18.0))
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .overflow_y_scrollbar()
+                                    .children(rows),
+                            )
+                    }),
                 )
-                .content(move |_state, _window, _cx| {
-                    let colors = theme;
-                    let rows = content_plan.items.iter().enumerate().map(|(index, item)| {
-                        let marker = Self::plan_step_marker(item.status, is_generating, colors);
-                        div().flex().items_start().gap_2().child(marker).child(
-                            div()
-                                .min_w_0()
-                                .flex_1()
-                                .text_sm()
-                                .text_color(colors.foreground)
-                                .child(format!("{}. {}", index + 1, item.step)),
-                        )
-                    });
-                    div()
-                        .w(px(520.0))
-                        .max_w(px(CHAT_CONTENT_MAX_WIDTH - 32.0))
-                        .p_2()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .children(content_plan.explanation.clone().map(|explanation| {
-                            div()
-                                .flex_none()
-                                .pb_2()
-                                .border_b_1()
-                                .border_color(colors.border)
-                                .text_sm()
-                                .text_color(colors.muted_foreground)
-                                .child(explanation)
-                        }))
-                        .child(
-                            div()
-                                .w_full()
-                                .max_h(px(280.0))
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .overflow_y_scrollbar()
-                                .children(rows),
-                        )
-                })
                 .into_any_element(),
         )
     }
@@ -994,6 +1027,7 @@ impl ChatListView {
             _ => ("✓", theme.muted_foreground),
         };
         let model = self.model.clone();
+        let transcript = self.transcript_list_state.clone();
         let tool_call_id = activity.id.clone();
         let has_detail = !activity.detail.trim().is_empty();
         let row_id = SharedString::from(activity.id.clone());
@@ -1006,24 +1040,21 @@ impl ChatListView {
             .flex_col()
             .py_1()
             .child(
-                div()
-                    .id(row_id)
-                    .tooltip({
-                        let summary = display_summary.clone();
-                        move |window, cx| {
-                            gpui_component::tooltip::Tooltip::new(summary.clone()).build(window, cx)
-                        }
-                    })
-                    .h(px(28.0))
-                    .px_1()
-                    .rounded_md()
-                    .flex()
-                    .items_center()
+                Button::new(row_id)
+                    .debug_selector(|| "tool-activity-disclosure".into())
+                    .accessibility_label(display_summary.clone())
+                    .tooltip(display_summary.clone())
+                    .ghost()
+                    .small()
+                    .w_full()
+                    .justify_start()
+                    .disabled(!has_detail)
                     .gap_2()
                     .when(has_detail, |row| {
                         row.cursor_pointer()
-                            .hover(|row| row.bg(theme.muted))
                             .on_click(move |_event, _window, cx| {
+                                transcript.pause_following_tail();
+                                transcript.remeasure();
                                 model.update(cx, |state, cx| {
                                     controller::dispatch(
                                         state,
@@ -1085,8 +1116,6 @@ impl ChatListView {
         messages: &[ChatMessageInfo],
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        const RECENT_ACTIVITY_LIMIT: usize = 4;
-
         let theme = cx.theme().colors;
         let activities = grouped_tool_activities(messages);
         let group_id = activities
@@ -1097,11 +1126,10 @@ impl ChatListView {
         let is_expanded = self.expanded_activity_groups.contains(&group_id);
         let hidden_count = activities
             .clone()
-            .count()
-            .saturating_sub(RECENT_ACTIVITY_LIMIT);
-        let visible_start = if is_expanded { 0 } else { hidden_count };
+            .filter(|activity| !matches!(activity.category.as_str(), "Working" | "Thinking" | "Error"))
+            .count();
         let activity_rows = activities
-            .skip(visible_start)
+            .filter(|activity| is_expanded || matches!(activity.category.as_str(), "Working" | "Thinking" | "Error"))
             .map(|activity| self.render_tool_activity(activity, cx))
             .collect::<Vec<_>>();
         let button_group_id = group_id.clone();
@@ -1120,20 +1148,23 @@ impl ChatListView {
                     .flex_col()
                     .children((hidden_count > 0).then(|| {
                         Button::new(SharedString::from(format!("activity-group-{group_id}")))
+                            .debug_selector(|| "activity-group-disclosure".into())
                             .xsmall()
                             .ghost()
                             .justify_start()
                             .text_color(theme.muted_foreground)
                             .label(if is_expanded {
-                                "Collapse earlier activities".to_string()
+                                "Collapse activities".to_string()
                             } else {
-                                format!("{hidden_count} earlier activities")
+                                format!("{hidden_count} completed activities")
                             })
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 if !this.expanded_activity_groups.remove(&button_group_id) {
                                     this.expanded_activity_groups
                                         .insert(button_group_id.clone());
                                 }
+                                this.transcript_list_state.pause_following_tail();
+                                this.transcript_list_state.remeasure();
                                 cx.notify();
                             }))
                     }))
@@ -1307,8 +1338,17 @@ impl ChatListView {
                 let duration_ms = entry.diagnostics.duration_ms;
                 let lane = entry.lane.clone();
                 let view = cx.entity().clone();
-                div()
-                    .id(("trajectory", all_index))
+                Button::new(("trajectory", all_index))
+                    .accessibility_label(format!("Inspect {badge_label}: {preview}"))
+                    .ghost().selected(selected).h_auto().w_full().p_0()
+                    .on_click(move |_, _, cx| {
+                        view.update(cx, |this, cx| {
+                            this.selected_trajectory_index = Some(all_index);
+                            this.trajectory_inspector_tab = TrajectoryInspectorTab::Overview;
+                            cx.notify();
+                        })
+                    }).child(div()
+                    .id(("trajectory-content", all_index))
                     .tooltip({
                         let tip = match lane.clone() {
                             Some(lane) => format!("{lane} · {preview}"),
@@ -1327,7 +1367,6 @@ impl ChatListView {
                     .px_3()
                     .border_b_1()
                     .border_color(theme.border.opacity(0.45))
-                    .cursor_pointer()
                     .border_l_2()
                     .border_color(if selected {
                         theme.accent
@@ -1335,7 +1374,6 @@ impl ChatListView {
                         theme.border.opacity(0.0)
                     })
                     .when(selected, |this| this.bg(theme.accent.opacity(0.16)))
-                    .hover(|style| style.bg(theme.muted.opacity(0.65)))
                     .child(div().size(px(6.0)).flex_none().rounded_full().bg(dot_color))
                     .child(
                         div()
@@ -1407,14 +1445,7 @@ impl ChatListView {
                             .text_color(theme.muted_foreground)
                             .child(format!("#{seq}"))
                     }))
-                    .on_click(move |_, _, cx| {
-                        view.update(cx, |this, cx| {
-                            this.selected_trajectory_index = Some(all_index);
-                            this.trajectory_inspector_tab = TrajectoryInspectorTab::Overview;
-                            cx.notify();
-                        })
-                    })
-                    .into_any_element()
+                    .into_any_element()).into_any_element()
             }
         }
     }
@@ -1766,6 +1797,7 @@ impl ChatListView {
                         }))
                         .child(
                             Button::new("copy-trajectory-row")
+                                .accessibility_label("Copy trajectory entry")
                                 .ghost()
                                 .xsmall()
                                 .icon(IconName::Copy)
@@ -1787,6 +1819,7 @@ impl ChatListView {
                         )
                         .child(
                             Button::new("close-trajectory-inspector")
+                                .accessibility_label("Close trajectory inspector")
                                 .ghost()
                                 .xsmall()
                                 .icon(IconName::Close)
@@ -2370,7 +2403,7 @@ impl ChatListView {
 
         div()
             .w_full()
-            .max_w(px(CHAT_CONTENT_MAX_WIDTH))
+            .max_w(rems(CHAT_CONTENT_MAX_WIDTH))
             .mx_auto()
             .children(content)
             .into_any_element()
@@ -2681,22 +2714,25 @@ impl ChatListView {
             .small()
             .with_variant(TagVariant::Secondary);
 
-        let header = div()
-            .id(SharedString::from(format!("reasoning-toggle-{}", msg.id)))
-            .h(px(32.0))
+        let transcript = self.transcript_list_state.clone();
+        let header = Button::new(SharedString::from(format!("reasoning-toggle-{}", msg.id)))
+            .debug_selector(|| "reasoning-disclosure".into())
+            .accessibility_label(if is_expanded { "Collapse thought process" } else { "Expand thought process" })
+            .ghost()
+            .small()
+            .w_full()
             .px_2()
             .rounded_lg()
             .flex()
             .items_center()
             .justify_between()
-            .cursor_pointer()
-            .hover(|s| s.bg(theme.muted.opacity(0.5)))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap_2()
                     .min_w_0()
+                    .flex_1()
                     .child(
                         div()
                             .text_sm()
@@ -2730,6 +2766,8 @@ impl ChatListView {
                 .text_color(theme.muted_foreground),
             )
             .on_click(move |_event, _window, cx| {
+                transcript.pause_following_tail();
+                transcript.remeasure();
                 model.update(cx, |state, cx| {
                     controller::dispatch(state, AppAction::ToggleReasoningExpanded(msg_id.clone()));
                     cx.notify();
@@ -2874,23 +2912,24 @@ impl ChatListView {
 
         let toggle_key = group_key.clone();
         let toggle_has_running = has_running;
-        let header = div()
-            .id(SharedString::from(format!("tool-toggle-{msg_id}")))
-            .h(px(28.0))
+        let header = Button::new(SharedString::from(format!("tool-toggle-{msg_id}")))
+            .accessibility_label(format!("{}: {summary}", if is_expanded { "Collapse tools" } else { "Expand tools" }))
+            .ghost()
+            .small()
+            .w_full()
             .px_2()
             .rounded_md()
             .bg(theme.muted.opacity(0.25))
-            .hover(|s| s.bg(theme.muted.opacity(0.5)))
             .flex()
             .items_center()
             .justify_between()
-            .cursor_pointer()
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap_2()
                     .min_w_0()
+                    .flex_1()
                     .child(status_icon)
                     .child(
                         div()
@@ -2917,6 +2956,8 @@ impl ChatListView {
                 .text_color(theme.muted_foreground),
             )
             .on_click(cx.listener(move |this, _event, _window, cx| {
+                this.transcript_list_state.pause_following_tail();
+                this.transcript_list_state.remeasure();
                 if toggle_has_running {
                     let key = format!("collapsed-{toggle_key}");
                     if !this.expanded_tool_aggregates.remove(&key) {
@@ -2997,7 +3038,7 @@ impl ChatListView {
                     .child(
                         div()
                             .min_w_0()
-                            .max_w(px(USER_BUBBLE_MAX_WIDTH))
+                            .max_w(rems(USER_BUBBLE_MAX_WIDTH))
                             .p_3()
                             .rounded_lg()
                             .bg(theme.secondary)
@@ -3258,13 +3299,17 @@ impl ChatListView {
         request_id: &str,
         decision: threadlane_permission::PermissionDecision,
         cx: &mut Context<Self>,
-    ) {
-        self.permission_details_open = false;
-        self.model.update(cx, |state, cx| {
-            state.resolve_active_permission(request_id, decision);
+    ) -> bool {
+        let resolved = self.model.update(cx, |state, cx| {
+            let resolved = state.resolve_active_permission(request_id, decision);
             cx.notify();
+            resolved
         });
+        if resolved {
+            self.permission_details_request = None;
+        }
         cx.notify();
+        resolved
     }
 
     fn question_selection_key(request_id: &str, question_id: &str) -> String {
@@ -3477,40 +3522,6 @@ impl ChatListView {
     ) {
         let key = event.keystroke.key.as_str();
 
-        if self.permission_details_open {
-            if key == "escape" {
-                self.permission_details_open = false;
-                cx.stop_propagation();
-                cx.notify();
-                return;
-            }
-
-            let request = {
-                let state = self.model.read(cx);
-                state
-                    .active_session_id
-                    .as_ref()
-                    .and_then(|session_id| state.pending_permissions.get(session_id))
-                    .cloned()
-            };
-            if let Some(request) = request {
-                let decision = match key {
-                    "y" | "Y" | "enter" => Some(threadlane_permission::PermissionDecision::AllowOnce),
-                    "a" | "A" => Some(threadlane_permission::PermissionDecision::AllowAlways),
-                    "n" | "N" => Some(threadlane_permission::PermissionDecision::Deny),
-                    _ => None,
-                };
-                if let Some(decision) = decision {
-                    self.resolve_pending_permission(&request.id, decision, cx);
-                    cx.stop_propagation();
-                    return;
-                }
-            } else {
-                self.permission_details_open = false;
-                cx.notify();
-            }
-        }
-
         let text = self.input_state.read(cx).value().to_string();
         let project_root = self.model.read(cx).active_work_dir.clone();
         if let Some(query) = active_slash_command_query(&text) {
@@ -3565,159 +3576,68 @@ impl ChatListView {
         }
     }
 
+    fn open_permission_details(&mut self, request_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let active = self.model.read(cx).active_session_id.as_ref()
+            .and_then(|id| self.model.read(cx).pending_permissions.get(id));
+        if active.is_none_or(|request| request.id != request_id) || self.permission_details_request.is_some() {
+            return;
+        }
+        self.permission_details_request = Some(request_id.to_string());
+        let chat = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let close_chat = chat.clone();
+            let content = chat.update(cx, |chat, cx| chat.render_permission_details_dialog(cx)).ok().flatten();
+            dialog.title("Permission request")
+                .w(window.rem_size() * 40.0)
+                .children(content)
+                .on_ok(|_, _, _| false)
+                .on_close(move |_, _, cx| {
+                    let _ = close_chat.update(cx, |chat, cx| {
+                        chat.permission_details_request = None;
+                        cx.notify();
+                    });
+                })
+        });
+        cx.notify();
+    }
+
     fn render_permission_details_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let state = self.model.read(cx);
-        let session_id = state.active_session_id.as_ref()?;
-        let request = state.pending_permissions.get(session_id)?.clone();
+        let request = state.pending_permissions.get(state.active_session_id.as_ref()?)?.clone();
+        if self.permission_details_request.as_ref() != Some(&request.id) {
+            return None;
+        }
         let theme = cx.theme().colors;
-
-        let action_button = |id: &'static str,
-                             label: &'static str,
-                             decision: threadlane_permission::PermissionDecision,
-                             primary: bool,
-                             danger: bool| {
+        let allows_always = request.scopes.contains(&threadlane_protocol::PermissionScope::Always);
+        let action_button = |id: &'static str, label: &'static str, decision, primary: bool| {
             let request_id = request.id.clone();
-            Button::new(id)
-                .label(label)
-                .small()
+            Button::new(id).label(label).small()
                 .when(primary, |button| button.primary())
-                .when(danger, |button| button.danger())
-                .on_click(cx.listener(move |this, _event, _window, cx| {
-                    this.resolve_pending_permission(&request_id, decision, cx);
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if this.resolve_pending_permission(&request_id, decision, cx) {
+                        window.close_dialog(cx);
+                    }
                 }))
         };
-
-        Some(
-            div()
-                .id("permission-details-backdrop")
-                .absolute()
-                .inset_0()
-                .bg(threadlane_ui_theme::overlay_scrim())
-                .flex()
-                .items_center()
-                .justify_center()
-                .p_4()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _event, _window, cx| {
-                        this.permission_details_open = false;
-                        cx.notify();
-                    }),
-                )
-                .child(
-                    div()
-                        .id("permission-details-modal")
-                        .w(px(640.0))
-                        .max_w(px(CHAT_CONTENT_MAX_WIDTH))
-                        .p_5()
-                        .rounded_xl()
-                        .border_1()
-                        .border_color(theme.border)
-                        .bg(theme.title_bar)
-                        .shadow_xl()
-                        .flex()
-                        .flex_col()
-                        .gap_4()
-                        .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
-                            cx.stop_propagation();
-                        })
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .child(
-                                            div()
-                                                .text_base()
-                                                .font_weight(FontWeight::BOLD)
-                                                .text_color(theme.foreground)
-                                                .child(format!("Permission Request: {}", request.title)),
-                                        )
-                                        .child(
-                                            Tag::new()
-                                                .child(request.capability.clone())
-                                                .with_variant(TagVariant::Secondary)
-                                                .small(),
-                                        ),
-                                )
-                                .child(
-                                    Button::new("close-permission-details-dialog-btn")
-                                        .icon(IconName::Close)
-                                        .ghost()
-                                        .xsmall()
-                                        .on_click(cx.listener(|this, _event, _window, cx| {
-                                            this.permission_details_open = false;
-                                            cx.notify();
-                                        })),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .w_full()
-                                .max_h(px(320.0))
-                                .p_3()
-                                .rounded_lg()
-                                .border_1()
-                                .border_color(theme.border)
-                                .bg(theme.background)
-                                .text_xs()
-                                .text_color(theme.foreground)
-                                .overflow_y_scrollbar()
-                                .child(request.detail.clone()),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground)
-                                        .child("Shortcuts: [Y] Allow once · [A] Always · [N] Deny · [Esc] Close"),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .child(action_button(
-                                            "details-deny",
-                                            "Deny [N]",
-                                            threadlane_permission::PermissionDecision::Deny,
-                                            false,
-                                            true,
-                                        ))
-                                        .child(action_button(
-                                            "details-allow-once",
-                                            "Allow once [Y]",
-                                            threadlane_permission::PermissionDecision::AllowOnce,
-                                            true,
-                                            false,
-                                        ))
-                                        .child(action_button(
-                                            "details-allow-always",
-                                            "Always [A]",
-                                            threadlane_permission::PermissionDecision::AllowAlways,
-                                            false,
-                                            false,
-                                        )),
-                                ),
-                        ),
-                )
-                .into_any_element(),
-        )
+        Some(div().w_full().min_w_0().flex().flex_col().gap_3()
+            .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child(request.title.clone()))
+            .child(div().text_xs().text_color(theme.muted_foreground).child(request.capability.clone()))
+            .child(div().w_full().max_h(rems(20.0)).p_3().rounded_lg().border_1()
+                .border_color(theme.border).bg(theme.background).text_sm()
+                .overflow_y_scrollbar().child(request.detail.clone()))
+            .child(div().flex().flex_wrap().justify_end().gap_2()
+                .child(action_button("details-deny", "Deny", threadlane_permission::PermissionDecision::Deny, false))
+                .child(action_button("details-allow-once", "Allow once", threadlane_permission::PermissionDecision::AllowOnce, true))
+                .when(allows_always, |row| row.child(action_button("details-allow-always", "Always allow", threadlane_permission::PermissionDecision::AllowAlways, false)
+                    .debug_selector(|| "permission-details-always".into()))))
+            .into_any_element())
     }
 
     fn render_permission_prompt(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let state = self.model.read(cx);
         let session_id = state.active_session_id.as_ref()?;
         let request = state.pending_permissions.get(session_id)?.clone();
+        let allows_always = request.scopes.contains(&threadlane_protocol::PermissionScope::Always);
         let theme = cx.theme().colors;
 
         let action_button = |id: &'static str,
@@ -3736,9 +3656,12 @@ impl ChatListView {
                 }))
         };
 
+        let button_request_id = request.id.clone();
         Some(
             div()
                 .w_full()
+                .max_w(rems(CHAT_CONTENT_MAX_WIDTH))
+                .mx_auto()
                 .flex_none()
                 .px_4()
                 .pt_1()
@@ -3746,7 +3669,7 @@ impl ChatListView {
                 .child(
                     div()
                         .w_full()
-                        .max_w(px(1000.0))
+                        .max_w(rems(CHAT_CONTENT_MAX_WIDTH))
                         .mx_auto()
                         .px_3()
                         .py_2()
@@ -3755,6 +3678,7 @@ impl ChatListView {
                         .border_color(theme.border)
                         .bg(theme.title_bar)
                         .flex()
+                        .flex_wrap()
                         .items_center()
                         .gap_2()
                         .child(
@@ -3774,15 +3698,9 @@ impl ChatListView {
                                 )
                                 .child(
                                     div()
-                                        .id("permission-prompt-detail-text")
                                         .min_w_0()
                                         .text_color(theme.muted_foreground)
                                         .truncate()
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(|this, _event, _window, cx| {
-                                            this.permission_details_open = true;
-                                            cx.notify();
-                                        }))
                                         .child(request.detail),
                                 ),
                         )
@@ -3793,32 +3711,31 @@ impl ChatListView {
                                 .ghost()
                                 .xsmall()
                                 .tooltip("View full command & arguments")
-                                .on_click(cx.listener(|this, _event, _window, cx| {
-                                    this.permission_details_open = true;
-                                    cx.notify();
+                                .on_click(cx.listener(move |this, _event, window, cx| {
+                                    this.open_permission_details(&button_request_id, window, cx);
                                 })),
                         )
                         .child(action_button(
                             "permission-deny",
-                            "Deny [N]",
+                            "Deny",
                             threadlane_permission::PermissionDecision::Deny,
                             false,
                             true,
                         ))
                         .child(action_button(
                             "permission-allow-once",
-                            "Allow once [Y]",
+                            "Allow once",
                             threadlane_permission::PermissionDecision::AllowOnce,
                             true,
                             false,
                         ))
-                        .child(action_button(
+                        .when(allows_always, |row| row.child(action_button(
                             "permission-allow-always",
-                            "Always [A]",
+                            "Always allow",
                             threadlane_permission::PermissionDecision::AllowAlways,
                             false,
                             false,
-                        )),
+                        ).debug_selector(|| "permission-inline-always".into()))),
                 )
                 .into_any_element(),
         )
@@ -3926,6 +3843,8 @@ impl ChatListView {
         Some(
             div()
                 .w_full()
+                .max_w(rems(CHAT_CONTENT_MAX_WIDTH))
+                .mx_auto()
                 .flex_none()
                 .px_4()
                 .pt_1()
@@ -3933,7 +3852,7 @@ impl ChatListView {
                 .child(
                     div()
                         .w_full()
-                        .max_w(px(1000.0))
+                        .max_w(rems(CHAT_CONTENT_MAX_WIDTH))
                         .mx_auto()
                         .px_3()
                         .py_2()
@@ -4209,7 +4128,7 @@ impl ChatListView {
         };
         div()
             .w(px(520.0))
-            .max_w(px(CHAT_CONTENT_MAX_WIDTH - 32.0))
+            .max_w(rems(CHAT_CONTENT_MAX_WIDTH - 2.0))
             .max_h(px(520.0))
             .rounded_xl()
             .border_1()
@@ -4590,7 +4509,6 @@ impl ChatListView {
                 });
             (state.active_session_metrics(), context_window)
         };
-        let subagent_count = self.model.read(cx).active_subagents().len();
         let supports_live_steering = !threadlane_acp_engine::is_acp_model(&selected_model);
         let steer_tooltip = if supports_live_steering {
             "Steer current turn immediately (Cmd+Enter)"
@@ -4713,7 +4631,7 @@ impl ChatListView {
         let provider_setup_banner = needs_provider.then(|| {
             div()
                 .w_full()
-                .max_w(px(1000.0))
+                .max_w(rems(CHAT_CONTENT_MAX_WIDTH))
                 .mx_auto()
                 .mb_2()
                 .px_3()
@@ -4928,24 +4846,41 @@ impl ChatListView {
                     )
             });
 
-        // Keep the context row focused on the two choices that affect where
-        // work happens. The branch is already represented by the worktree
-        // choice and is not an additional control the user needs to parse.
+        let branch = {
+            let state = self.model.read(cx);
+            state.active_git_work_dir()
+                .and_then(|dir| state.git_statuses.get(&dir))
+                .and_then(|status| status.branch.clone())
+        };
         let composer_context_bar = div()
             .w_full()
-            .max_w(px(1000.0))
+            .max_w(rems(CHAT_CONTENT_MAX_WIDTH))
             .mx_auto()
             .mb_2()
             .flex()
             .items_center()
             .gap_2()
             .child(project_chip)
-            .child(work_mode_chip);
+            .child(work_mode_chip)
+            .children(branch.map(|branch| {
+                div()
+                    .id("composer-branch")
+                    .min_w_0()
+                    .flex_1()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .truncate()
+                    .tooltip({
+                        let branch = branch.clone();
+                        move |window, cx| gpui_component::tooltip::Tooltip::new(branch.clone()).build(window, cx)
+                    })
+                    .child(branch)
+            }));
 
         let pending_preview = pending_message.map(|text| {
             div()
                 .w_full()
-                .max_w(px(1000.0))
+                .max_w(rems(CHAT_CONTENT_MAX_WIDTH))
                 .mx_auto()
                 .mb_2()
                 .h(px(52.0))
@@ -5026,6 +4961,7 @@ impl ChatListView {
         });
 
         let model_picker = Button::new("composer-model-picker")
+            .small()
             .label(model_label.clone())
             .dropdown_caret(true)
             .ghost()
@@ -5412,12 +5348,13 @@ impl ChatListView {
                     .rounded_full()
                     .size(px(32.0))
                     .tooltip(meter.detail_label.clone())
-                    .child(
+                    .when_some(meter.percent, |toggle, percent| toggle.child(
                         ProgressCircle::new("context-meter-circle")
-                            .value(meter.bar_percent as f32)
+                            .value(percent.clamp(0.0, 100.0) as f32)
                             .color(meter_color)
                             .size(px(24.0)),
-                    )
+                    ))
+                    .when(meter.percent.is_none(), |toggle| toggle.child("—"))
                     .on_click(move |open, _window, cx| {
                         toggle_context_meter.update(cx, |this, cx| {
                             this.context_meter_open = *open;
@@ -5469,7 +5406,7 @@ impl ChatListView {
                                     .child(current_summary),
                             ),
                     )
-                    .child(
+                    .when(meter.percent.is_some(), |card| card.child(
                         div()
                             .w_full()
                             .h(px(5.0))
@@ -5482,7 +5419,7 @@ impl ChatListView {
                                     .rounded_full()
                                     .bg(meter_color),
                             ),
-                    )
+                    ))
                     .when_some(meter.effective_model.clone(), |card, effective_model| {
                         card.child(
                             div()
@@ -5653,14 +5590,10 @@ impl ChatListView {
                 })
         };
 
-        let billed_input_tokens = metrics.billed_input_tokens();
-        let cache_hit = metrics
-            .cache_hit_percent()
-            .map(|percent| format!(" · Cache hit {percent}%"))
-            .unwrap_or_default();
-
         div()
             .w_full()
+            .max_w(rems(CHAT_CONTENT_MAX_WIDTH))
+            .mx_auto()
             .flex_none()
             .flex()
             .flex_col()
@@ -5681,7 +5614,7 @@ impl ChatListView {
                 }
                 div()
                     .w_full()
-                    .max_w(px(1000.0))
+                    .max_w(rems(CHAT_CONTENT_MAX_WIDTH))
                     .mx_auto()
                     .mb_2()
                     .px_3()
@@ -5704,19 +5637,18 @@ impl ChatListView {
             .child(
                 div()
                     .w_full()
-                    .max_w(px(1000.0))
+                    .max_w(rems(CHAT_CONTENT_MAX_WIDTH))
                     .mx_auto()
                     .relative()
-                    .min_h(px(136.0))
+                    .min_h_24()
                     .flex()
                     .flex_col()
                     .justify_between()
-                    .p_4()
+                    .p_3()
                     .rounded_xl()
                     .border_1()
                     .border_color(theme.border)
                     .bg(theme.title_bar)
-                    .shadow_md()
                     .hover(|style| style.border_color(theme.border.opacity(0.85)))
                     .on_action(cx.listener(Self::paste_composer_clipboard))
                     .when(slash_completion_active, |composer| {
@@ -5737,7 +5669,7 @@ impl ChatListView {
                         div()
                             .w_full()
                             .flex_1()
-                            .min_h(px(48.0))
+                            .min_h_8()
                             .child(
                                 Textarea::new(&self.input_state)
                                     .appearance(false)
@@ -5749,6 +5681,7 @@ impl ChatListView {
                             .flex()
                             .items_center()
                             .gap_1()
+                            .flex_wrap()
                             .child(model_picker)
                             .children(show_effort_picker.then_some(effort_picker))
                             .child(div().flex_1())
@@ -5825,8 +5758,7 @@ impl ChatListView {
                             } else {
                                 vec![
                                     Button::new("send-btn")
-                                        .w(px(34.0))
-                                        .h(px(34.0))
+                                        .small()
                                         .icon(IconName::ArrowUp)
                                         .accessibility_label("Send message")
                                         .tooltip(if needs_provider {
@@ -5863,34 +5795,6 @@ impl ChatListView {
                                 ]
                             }),
                     ),
-            )
-            // Keep this summary mounted even before the first response metrics arrive.
-            // Otherwise the composer gains a new row mid-turn, shifting the transcript and
-            // input as soon as the first tool call or token count is reported.
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(1000.0))
-                    .mx_auto()
-                    .flex()
-                    .justify_center()
-                    .pt_1()
-                    .pb_2()
-                    .px_1()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(format!(
-                        "{} turns · {} tool calls{cache_hit} · {} input / {} output tokens · {} subagents",
-                        metrics.turns,
-                        metrics.tool_calls,
-                        threadlane_ui_catalog::format_tokens(
-                            billed_input_tokens.min(u64::from(u32::MAX)) as u32
-                        ),
-                        threadlane_ui_catalog::format_tokens(
-                            metrics.output_tokens.min(u64::from(u32::MAX)) as u32
-                        ),
-                        subagent_count,
-                    )),
             )
     }
 }
@@ -5945,7 +5849,6 @@ impl ChatListView {
 
         let mut container = div()
             .id("chat-progress-summary")
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_progress_summary(cx)))
             .flex_none()
             .mx_4()
             .mt_2()
@@ -5958,8 +5861,7 @@ impl ChatListView {
             .rounded_lg()
             .border_1()
             .border_color(theme.border)
-            .bg(theme.muted.opacity(0.35))
-            .cursor_pointer();
+            .bg(theme.muted.opacity(0.35));
 
         let header_row = div()
             .flex()
@@ -6007,7 +5909,13 @@ impl ChatListView {
                 ),
             );
 
-        container = container.child(header_row);
+        container = container.child(
+            Button::new("progress-summary-disclosure")
+                .accessibility_label(if self.progress_summary_expanded { "Collapse activity details" } else { "Expand activity details" })
+                .ghost().h_auto().w_full().p_0()
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_progress_summary(cx)))
+                .child(header_row.w_full()),
+        );
 
         if self.progress_summary_expanded {
             let mut expanded_content = div()
@@ -6075,7 +5983,7 @@ impl ChatListView {
                     .justify_between()
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child("Click to collapse")
+                    .child("Activity details")
                     .child(
                         Button::new("progress-open-trajectory")
                             .label("Open Trajectory")
@@ -6130,12 +6038,13 @@ impl ChatListView {
 
 impl Render for ChatListView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (messages, is_new_task, active_plan, session_key, is_generating, has_active_permission) = {
+        let (messages, is_new_task, active_plan, session_key, is_generating, active_permission_id) = {
             let state = self.model.read(cx);
-            let has_active_permission = state
+            let active_permission_id = state
                 .active_session_id
                 .as_ref()
-                .is_some_and(|session_id| state.pending_permissions.contains_key(session_id));
+                .and_then(|session_id| state.pending_permissions.get(session_id))
+                .map(|request| request.id.clone());
             if !state.mirror_open {
                 // Dropping the entity ends its frame subscription, which is
                 // what lets the poller leave its video tier.
@@ -6150,7 +6059,7 @@ impl Render for ChatListView {
                     .clone()
                     .zip(state.active_session_id.clone()),
                 state.is_generating,
-                has_active_permission,
+                active_permission_id,
             )
         };
         let session_changed = session_key != self.last_session_key;
@@ -6177,15 +6086,16 @@ impl Render for ChatListView {
             self.selected_subagent_run_id = None;
             self.selected_slash_index = 0;
             self.dismiss_slash_menu = false;
-            self.permission_details_open = false;
             self.question_selections.clear();
             self.question_inputs.clear();
             self.trajectory_search_input.update(cx, |state, cx| {
                 state.set_value("", window, cx);
             });
         }
-        if self.permission_details_open && !has_active_permission {
-            self.permission_details_open = false;
+        if self.permission_details_request.is_some()
+            && (session_changed || self.permission_details_request != active_permission_id) {
+            self.permission_details_request = None;
+            window.defer(cx, |window, cx| window.close_dialog(cx));
         }
         self.sync_transcript_rows(messages.clone(), is_generating, session_changed);
         if let Some(prompt) = self
@@ -6224,6 +6134,13 @@ impl Render for ChatListView {
                 CentralTab::Chat => {
                     if is_new_task {
                         self.render_new_task(cx)
+                    } else if messages.is_empty()
+                        && self.model.read(cx).session_status.as_deref() == Some("Loading session…")
+                    {
+                        div().flex_1().flex().items_center().justify_center().gap_2()
+                            .text_sm().text_color(theme.muted_foreground)
+                            .child(Spinner::new().small()).child("Loading conversation…")
+                            .into_any_element()
                     } else if messages.is_empty() {
                         div()
                             .flex_1()
@@ -6296,7 +6213,7 @@ impl Render for ChatListView {
                                     cx.processor(Self::render_transcript_row),
                                 )
                                 .w_full()
-                                .max_w(px(CHAT_CONTENT_MAX_WIDTH))
+                                .max_w(rems(CHAT_CONTENT_MAX_WIDTH))
                                 .h_full()
                                 .mx_auto()
                                 .pt_3()
@@ -6308,6 +6225,17 @@ impl Render for ChatListView {
                                     &self.transcript_list_state,
                                 ),
                             ))
+                            .when(!self.transcript_list_state.is_following_tail(), |el| {
+                                el.child(div().absolute().bottom_3().right_4().child(
+                                    Button::new("jump-to-latest").debug_selector(|| "jump-to-latest".into())
+                                        .label("Jump to latest")
+                                        .small()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.transcript_list_state.scroll_to_end();
+                                            cx.notify();
+                                        })),
+                                ))
+                            })
                             .into_any_element()
                     }
                 }
@@ -6315,6 +6243,11 @@ impl Render for ChatListView {
             .children(
                 (self.current_tab == CentralTab::Chat)
                     .then(|| self.render_plan_tracker(&active_plan, cx))
+                    .flatten(),
+            )
+            .children(
+                (self.current_tab == CentralTab::Chat)
+                    .then(|| self.render_workspace_changes(cx))
                     .flatten(),
             )
             .children(
@@ -6328,11 +6261,6 @@ impl Render for ChatListView {
                     .flatten(),
             )
             .children((self.current_tab == CentralTab::Chat).then(|| self.render_composer(cx)))
-            .children(
-                (self.current_tab == CentralTab::Chat && self.permission_details_open)
-                    .then(|| self.render_permission_details_dialog(cx))
-                    .flatten(),
-            )
             // The computer-use mirror floats over everything above.
             .children(self.mirror.as_ref().map(|(mirror, _)| mirror.clone()))
     }
