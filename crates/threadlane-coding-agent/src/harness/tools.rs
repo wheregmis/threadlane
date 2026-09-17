@@ -254,31 +254,6 @@ impl CodingSessionHarness {
         Ok(())
     }
 
-    /// Finish a replayed tool result.
-    pub fn finish_replayed_tool(
-        &mut self,
-        run_id: &str,
-        result: &AgentToolResult,
-    ) -> Result<(), String> {
-        self.ensure_fresh()?;
-        self.store
-            .finish_existing_tool(
-                run_id,
-                HarnessToolResult {
-                    call_id: result.tool_call_id.clone(),
-                    name: result.name.clone(),
-                    content: result.content.clone(),
-                    is_error: result.is_error,
-                    terminate: result.terminates(),
-                    images: result.images.clone(),
-                },
-            )
-            .map_err(|error| error.to_string())?;
-        self.store
-            .drive_to_completion()
-            .map_err(|error| error.to_string())
-    }
-
     /// Record tool completions with termination flags.
     pub fn record_completed_tools_with_termination(
         &mut self,

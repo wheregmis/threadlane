@@ -875,6 +875,15 @@ fn settling_worktree_session_removes_checkout_when_requested() {
     run_git(&project, &["init", "-b", "main"]);
     run_git(&project, &["config", "user.email", "test@example.com"]);
     run_git(&project, &["config", "user.name", "Test"]);
+    // Neutralize host-global git hooks (e.g. tooling that auto-inits sidecar
+    // dirs on checkout): their untracked droppings are environment noise, not
+    // session state, and must not influence the archiving assertions below.
+    let empty_hooks = dir.path().join("empty-hooks");
+    std::fs::create_dir_all(&empty_hooks).unwrap();
+    run_git(
+        &project,
+        &["config", "core.hooksPath", empty_hooks.to_str().unwrap()],
+    );
     std::fs::write(project.join("base.txt"), "base\n").unwrap();
     run_git(&project, &["add", "."]);
     run_git(&project, &["commit", "-qm", "initial"]);

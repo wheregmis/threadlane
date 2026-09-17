@@ -817,13 +817,31 @@ impl AppState {
         let archive_file = archive_dir.join(file_name);
         if let Some(worktree_dir) = self.session_worktree_path(&work_dir, &session_id) {
             if delete_worktree && worktree_dir.exists() {
-                if threadlane_git::inspect(&worktree_dir)
+                // Untracked Threadlane bookkeeping (session transcripts,
+                // previews) lives inside the worktree by design and must
+                // never block archiving; every other change does.
+                let dirty = threadlane_git::inspect(&worktree_dir)
                     .map_err(|error| error.to_string())?
-                    .has_changes
-                {
+                    .files
+                    .iter()
+                    .any(|file| {
+                        !(file.is_untracked() && file.path.starts_with(".threadlane/"))
+                    });
+                if dirty {
                     return Err("Commit or discard worktree changes before archiving".into());
                 }
                 std::fs::copy(&session_file, &archive_file).map_err(|error| error.to_string())?;
+                // The transcript is archived above; drop the worktree-local
+                // bookkeeping dir so `git worktree remove` (non-force) has
+                // nothing app-owned left to trip on. Anything else untracked
+                // was already rejected by the dirtiness check.
+                let worktree_threadlane = worktree_dir.join(".threadlane");
+                if worktree_threadlane.exists() {
+                    if let Err(error) = std::fs::remove_dir_all(&worktree_threadlane) {
+                        let _ = Self::remove_file_if_present(&archive_file);
+                        return Err(error.to_string());
+                    }
+                }
                 if let Err(error) = threadlane_git::remove_worktree(&work_dir, &worktree_dir, false)
                 {
                     let _ = Self::remove_file_if_present(&archive_file);

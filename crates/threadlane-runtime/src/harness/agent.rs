@@ -1,9 +1,9 @@
 use super::{
     AbortProcedure, AssistantAttemptProcedure, CompactionProcedure, DeferredProcedure,
     DeferredResolution, EffectAction, EffectsError, GatedEffects, HarnessEventHub, HookRegistry,
-    NavigationProcedure, NoToolRun, NoopTelemetry, OperationProcedure, ProcedureError,
+    NavigationProcedure, NoopTelemetry, OperationProcedure, ProcedureError,
     PromptProcedure, ProvisionedEntry, QueueKind, QueueProcedure, ReduceError, SessionStore,
-    Snapshot, TelemetrySink, ToolBatchProcedure, ToolRecovery, ToolResult, ToolSpec,
+    Snapshot, TelemetrySink, ToolBatchProcedure, ToolResult, ToolSpec,
 };
 use threadlane_protocol::{AgentMessage, TokenUsage};
 use std::sync::Arc;
@@ -109,10 +109,6 @@ impl<S: SessionStore> AgentHarness<S> {
         &self.hooks
     }
 
-    pub fn hooks_mut(&mut self) -> &mut HookRegistry {
-        &mut self.hooks
-    }
-
     pub fn telemetry(&self) -> &dyn TelemetrySink {
         self.telemetry.as_ref()
     }
@@ -123,58 +119,6 @@ impl<S: SessionStore> AgentHarness<S> {
 
     pub fn close(&mut self) {
         self.effects.close();
-    }
-
-    pub fn accept_no_tool_run(
-        &mut self,
-        run_id: &str,
-        prompt: &str,
-        assistant: AgentMessage,
-    ) -> Result<(), super::ProcedureError> {
-        NoToolRun::accept(&self.store, run_id, prompt, assistant, &mut self.effects)
-    }
-
-    pub fn accept_no_tool_run_on_lane(
-        &mut self,
-        lane: &str,
-        run_id: &str,
-        prompt: &str,
-        assistant: AgentMessage,
-    ) -> Result<(), super::ProcedureError> {
-        NoToolRun::accept_on_lane(
-            &self.store,
-            lane,
-            run_id,
-            prompt,
-            assistant,
-            &mut self.effects,
-        )
-    }
-
-    pub fn resume_no_tool_run(
-        &mut self,
-        run_id: &str,
-        prompt: &str,
-        assistant: AgentMessage,
-    ) -> Result<(), ProcedureError> {
-        NoToolRun::resume(&self.store, run_id, prompt, assistant, &mut self.effects)
-    }
-
-    pub fn resume_no_tool_run_on_lane(
-        &mut self,
-        lane: &str,
-        run_id: &str,
-        prompt: &str,
-        assistant: AgentMessage,
-    ) -> Result<(), ProcedureError> {
-        NoToolRun::resume_on_lane(
-            &self.store,
-            lane,
-            run_id,
-            prompt,
-            assistant,
-            &mut self.effects,
-        )
     }
 
     pub fn finish_assistant_attempt(
@@ -211,14 +155,6 @@ impl<S: SessionStore> AgentHarness<S> {
             usage,
             &mut self.effects,
         )
-    }
-
-    pub fn record_usage_adjustment(
-        &mut self,
-        run_id: &str,
-        usage: TokenUsage,
-    ) -> Result<(), ProcedureError> {
-        AssistantAttemptProcedure::record_adjustment(&self.store, run_id, usage, &mut self.effects)
     }
 
     pub fn schedule_retry(
@@ -575,54 +511,6 @@ impl<S: SessionStore> AgentHarness<S> {
             .map_err(ProcedureError::Effects)
     }
 
-    pub fn accept_compaction_on_lane(
-        &mut self,
-        lane: &str,
-        run_id: &str,
-        summary: &str,
-    ) -> Result<(), ProcedureError> {
-        CompactionProcedure::accept_on_lane(
-            &self.store,
-            lane,
-            run_id,
-            summary,
-            &[],
-            &mut self.effects,
-        )
-    }
-
-    pub fn accept_navigation(
-        &mut self,
-        run_id: &str,
-        target_leaf_id: &str,
-        summary: Option<String>,
-    ) -> Result<(), ProcedureError> {
-        NavigationProcedure::accept(
-            &self.store,
-            run_id,
-            target_leaf_id,
-            summary,
-            &mut self.effects,
-        )
-    }
-
-    pub fn accept_navigation_on_lane(
-        &mut self,
-        lane: &str,
-        run_id: &str,
-        target_leaf_id: &str,
-        summary: Option<String>,
-    ) -> Result<(), ProcedureError> {
-        NavigationProcedure::accept_on_lane(
-            &self.store,
-            lane,
-            run_id,
-            target_leaf_id,
-            summary,
-            &mut self.effects,
-        )
-    }
-
     pub fn resume_navigation(
         &mut self,
         run_id: &str,
@@ -771,26 +659,6 @@ impl<S: SessionStore> AgentHarness<S> {
         QueueProcedure::consume_unbound_on_lane(&self.store, lane, entry_id, &mut self.effects)
     }
 
-    pub fn suspend_deferred(
-        &mut self,
-        run_id: &str,
-        entry: super::Entry,
-    ) -> Result<(), ProcedureError> {
-        DeferredProcedure::suspend(&self.store, run_id, entry, &mut self.effects)
-    }
-
-    pub fn enqueue_deferred(
-        &mut self,
-        run_id: &str,
-        target: ProvisionedEntry,
-    ) -> Result<(), ProcedureError> {
-        DeferredProcedure::enqueue(&self.store, run_id, target, &mut self.effects)
-    }
-
-    pub fn apply_deferred(&mut self, run_id: &str) -> Result<(), ProcedureError> {
-        DeferredProcedure::apply_pending(&self.store, run_id, &mut self.effects)
-    }
-
     pub fn set_fact(
         &mut self,
         lane: &str,
@@ -830,55 +698,6 @@ impl<S: SessionStore> AgentHarness<S> {
             .map_err(ProcedureError::from)
     }
 
-    pub fn set_hook_resume_data(
-        &mut self,
-        lane: &str,
-        hook_id: impl Into<String>,
-        data: impl Into<String>,
-        run_id: Option<String>,
-    ) -> Result<(), ProcedureError> {
-        let hook_id = hook_id.into();
-        if lane.trim().is_empty() || hook_id.trim().is_empty() {
-            return Err(ProcedureError::Invalid(
-                "hook lane and id must be non-empty".into(),
-            ));
-        }
-        let seq = self
-            .store
-            .entries()
-            .iter()
-            .map(|entry| entry.seq)
-            .chain(self.store.records().iter().map(super::Record::seq))
-            .chain(self.effects.pending_sequences())
-            .max()
-            .unwrap_or(0)
-            + 1;
-        self.effects
-            .park(EffectAction::AppendRecord {
-                id: format!("hook-resume-data-action-{lane}-{hook_id}-{seq}"),
-                record: super::Record::HookResumeData {
-                    id: format!("hook-resume-data-{lane}-{hook_id}-{seq}"),
-                    seq,
-                    lane: lane.into(),
-                    timestamp: seq,
-                    run_id,
-                    hook_id,
-                    data: data.into(),
-                },
-            })
-            .map_err(ProcedureError::from)
-    }
-
-    pub fn restore_hooks_for_lane(&mut self, lane: &str) -> Result<(), ReduceError> {
-        let state = super::Reducer::reduce(&self.store)?;
-        let data = state
-            .lane(lane)
-            .map(|lane| lane.resume_data.clone())
-            .unwrap_or_default();
-        self.hooks.restore_resume_data(&data);
-        Ok(())
-    }
-
     pub fn redeem_deferred(
         &mut self,
         run_id: &str,
@@ -906,60 +725,12 @@ impl<S: SessionStore> AgentHarness<S> {
         ToolBatchProcedure::finish(&self.store, run_id, result, &mut self.effects)
     }
 
-    pub fn finish_tool_with_usage(
-        &mut self,
-        run_id: &str,
-        result: ToolResult,
-        usage: TokenUsage,
-    ) -> Result<(), ProcedureError> {
-        ToolBatchProcedure::finish_with_usage(&self.store, run_id, result, usage, &mut self.effects)
-    }
-
-    pub fn finish_tool_batch(
-        &mut self,
-        run_id: &str,
-        results: &[ToolResult],
-        usage: TokenUsage,
-    ) -> Result<(), ProcedureError> {
-        ToolBatchProcedure::finish_batch(&self.store, run_id, results, usage, &mut self.effects)
-    }
-
     pub fn finish_existing_tool(
         &mut self,
         run_id: &str,
         result: ToolResult,
     ) -> Result<(), ProcedureError> {
         ToolBatchProcedure::finish_existing(&self.store, run_id, result, None, &mut self.effects)
-    }
-
-    pub fn finish_existing_tool_batch(
-        &mut self,
-        run_id: &str,
-        results: &[ToolResult],
-        usage: TokenUsage,
-    ) -> Result<(), ProcedureError> {
-        ToolBatchProcedure::finish_existing_batch(
-            &self.store,
-            run_id,
-            results,
-            usage,
-            &mut self.effects,
-        )
-    }
-
-    pub fn resume_tool_batch(
-        &mut self,
-        run_id: &str,
-        assistant_entry_id: &str,
-        current_specs: &[ToolSpec],
-    ) -> Result<Vec<ToolRecovery>, ProcedureError> {
-        ToolBatchProcedure::resume(
-            &self.store,
-            run_id,
-            assistant_entry_id,
-            current_specs,
-            &mut self.effects,
-        )
     }
 
     pub fn peek_action(&self) -> Option<&EffectAction> {
@@ -1031,10 +802,6 @@ impl<S: SessionStore> AgentHarness<S> {
 
     pub(crate) fn events(&self) -> &HarnessEventHub {
         &self.events
-    }
-
-    pub fn events_mut(&mut self) -> &mut HarnessEventHub {
-        &mut self.events
     }
 
     pub fn subscribe(&self) -> Result<super::Subscription, ReduceError> {

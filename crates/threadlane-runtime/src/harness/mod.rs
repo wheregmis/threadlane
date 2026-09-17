@@ -65,7 +65,7 @@ pub use types::{
     ErrorCategory, InterruptedSubagentLane, LaneState, LaneStatus, OperationIntent,
     OperationOutcome, PermissionTraceDecision, PermissionTraceScope, PermissionTraceSource,
     PromptSnapshot, ProviderErrorSummary, ProviderOutcome, ProvisionedEntry, QueueKind,
-    QueuedEntry, Record, RecoveryResult, ReduceError,     ReducedState, RetryState,
+    QueuedEntry, Record, ReduceError,     ReducedState, RetryState,
     SteerPriority, StreamCheckpointKind, SubagentLifecyclePhase, SurfaceOperation, ToolExecutionOutcome,
     ToolExecutionPhase, ToolReplaySafety, ToolResult, ToolSpec, ToolState, TraceString, UsageCause,
 };

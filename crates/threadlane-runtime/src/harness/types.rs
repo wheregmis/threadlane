@@ -1560,15 +1560,6 @@ impl std::fmt::Display for ReduceError {
 
 impl std::error::Error for ReduceError {}
 
-#[derive(Debug, Clone, Default)]
-pub struct RecoveryResult {
-    pub recovered_open_operations: usize,
-    pub open_operation_ids: Vec<String>,
-    pub abort_requested_operation_ids: Vec<String>,
-    pub unreplayable_tools: usize,
-    pub safe_tools_to_replay: Vec<Record>,
-}
-
 #[derive(Debug, Clone)]
 pub struct InterruptedSubagentLane {
     pub lane: String,

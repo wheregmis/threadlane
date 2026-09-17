@@ -184,10 +184,6 @@ impl SqliteStore {
         }
     }
 
-    pub fn path_exists(path: impl AsRef<Path>) -> bool {
-        path.as_ref().exists()
-    }
-
     pub fn parent_session_id(&self) -> Option<&str> {
         self.parent_session_id.as_deref()
     }

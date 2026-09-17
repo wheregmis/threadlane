@@ -28,10 +28,6 @@ impl ExecutionContext {
         }
         self.attributes.insert(key, value.into());
     }
-
-    pub fn attributes(&self) -> &BTreeMap<String, String> {
-        &self.attributes
-    }
 }
 
 pub trait TelemetrySink: Send + Sync {

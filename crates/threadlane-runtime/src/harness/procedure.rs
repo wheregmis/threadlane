@@ -145,16 +145,6 @@ impl AssistantAttemptProcedure {
             .map(|_| ())
     }
 
-    pub(crate) fn record_adjustment<S: SessionStore>(
-        store: &S,
-        run_id: &str,
-        usage: TokenUsage,
-        effects: &mut GatedEffects,
-    ) -> Result<(), ProcedureError> {
-        Self::record_usage_with_cause(store, run_id, usage, UsageCause::Adjustment, effects)
-            .map(|_| ())
-    }
-
     fn record_usage_with_cause<S: SessionStore>(
         store: &S,
         run_id: &str,
@@ -2038,32 +2028,6 @@ impl ToolBatchProcedure {
         Self::finish_inner(store, run_id, result, Some(TokenUsage::default()), effects)
     }
 
-    pub fn finish_with_usage<S: SessionStore>(
-        store: &S,
-        run_id: &str,
-        result: ToolResult,
-        usage: TokenUsage,
-        effects: &mut GatedEffects,
-    ) -> Result<(), ProcedureError> {
-        Self::finish_inner(store, run_id, result, Some(usage), effects)
-    }
-
-    pub fn finish_batch<S: SessionStore>(
-        store: &S,
-        run_id: &str,
-        results: &[ToolResult],
-        usage: TokenUsage,
-        effects: &mut GatedEffects,
-    ) -> Result<(), ProcedureError> {
-        // The caller supplies source order. Each parked result reserves its
-        // sequence before the next one is prepared, so a manual drive can
-        // release the whole batch without duplicate sequence numbers.
-        for result in results {
-            Self::finish_inner(store, run_id, result.clone(), Some(usage.clone()), effects)?;
-        }
-        Ok(())
-    }
-
     pub(crate) fn finish_existing<S: SessionStore>(
         store: &S,
         run_id: &str,
@@ -2153,19 +2117,6 @@ impl ToolBatchProcedure {
                 usage,
             },
         })?;
-        Ok(())
-    }
-
-    pub(crate) fn finish_existing_batch<S: SessionStore>(
-        store: &S,
-        run_id: &str,
-        results: &[ToolResult],
-        usage: TokenUsage,
-        effects: &mut GatedEffects,
-    ) -> Result<(), ProcedureError> {
-        for result in results {
-            Self::finish_existing(store, run_id, result.clone(), Some(usage.clone()), effects)?;
-        }
         Ok(())
     }
 

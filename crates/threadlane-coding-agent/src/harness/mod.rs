@@ -240,9 +240,7 @@ impl CodingSessionHarness {
         })
     }
 
-    pub fn append_message_to_path(path: &Path, message: AgentMessage) -> Result<(), String> {
-        Self::with_path(path, |journal| journal.append_message(message).map(|_| ()))
-    }
+
 
 
 

@@ -123,7 +123,13 @@ pub async fn generated_reported_session_path() -> PathBuf {
             work_dir: root,
             session_file: Some(path.clone()),
             system_prompt: SystemPromptConfig::default(),
-            agent_config: Some(AgentConfig::default()),
+            // Synthetic provider repeats one identical call 102 times; the
+            // loop guard would trip at 5 and end the run early.
+            agent_config: Some(
+                AgentConfig::builder()
+                    .loop_guard_enabled(false)
+                    .build(),
+            ),
             coding_config: None,
             browser: threadlane_protocol::browser::BrowserBridge::unavailable(),
         },

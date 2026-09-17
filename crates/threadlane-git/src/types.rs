@@ -249,6 +249,14 @@ pub struct GitFile {
 }
 
 impl GitFile {
+    /// Untracked (`??`) files are not user edits to versioned content.
+    /// Callers that guard destructive actions (e.g. archiving a worktree)
+    /// use this to exempt Threadlane's own untracked bookkeeping under
+    /// `.threadlane/` without exempting real untracked work.
+    pub fn is_untracked(&self) -> bool {
+        self.index_status == '?' || self.worktree_status == '?'
+    }
+
     #[cfg(test)]
     pub(crate) fn status_for_section(&self, staged_section: bool) -> char {
         if staged_section {

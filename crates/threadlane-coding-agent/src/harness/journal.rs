@@ -5,6 +5,7 @@ impl CodingSessionHarness {
         self.store.store().transcript(lane)
     }
 
+    #[cfg(test)]
     pub fn record_provider_trace_to_path(
         path: &Path,
         run_id: &str,
@@ -188,16 +189,6 @@ impl CodingSessionHarness {
             .store
             .drive_to_completion()
             .map_err(|error| error.to_string())
-    }
-
-    pub fn record_permission_trace_to_path(
-        path: &Path,
-        run_id: Option<&str>,
-        event: PermissionTraceEvent,
-    ) -> Result<(), String> {
-        Self::with_path(path, |journal| {
-            journal.record_permission_trace(run_id, event)
-        })
     }
 
     pub fn record_permission_trace(

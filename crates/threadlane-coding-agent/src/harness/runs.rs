@@ -34,17 +34,6 @@ impl CodingSessionHarness {
             .map_err(|error| error.to_string())
     }
 
-    pub fn begin_run_text(&mut self, prompt: &str) -> Result<AcceptedRun, String> {
-        let run_id = format!(
-            "run-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0)
-        );
-        self.begin_run(&run_id, AgentMessage::user(prompt.to_string(), Vec::new()))
-    }
-
     pub fn enqueue_unbound_with_images(
         &mut self,
         queue: QueueKind,
@@ -67,79 +56,6 @@ impl CodingSessionHarness {
             .drive_to_completion()
             .map_err(|error| error.to_string())?;
         Ok(id)
-    }
-
-    pub fn enqueue_unbound_on_lane_with_priority(
-        &mut self,
-        lane: &str,
-        queue: QueueKind,
-        target: ProvisionedEntry,
-        priority: Option<threadlane_runtime::SteerPriority>,
-    ) -> Result<String, String> {
-        self.ensure_fresh()?;
-        let id = target.id.clone();
-        if let Some(priority) = priority {
-            let underlying = self.store.store();
-            let queue_seq = underlying
-                .entries()
-                .iter()
-                .map(|e| e.seq)
-                .chain(underlying.records().iter().map(|r| r.seq()))
-                .max()
-                .unwrap_or(0)
-                + 1;
-            let record_id = format!(
-                "queue-{}",
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_millis())
-                    .unwrap_or(0)
-            );
-            self.store
-                .append_record_gated(threadlane_runtime::harness::Record::QueueEnqueued {
-                    id: record_id,
-                    seq: queue_seq,
-                    lane: lane.to_string(),
-                    timestamp: queue_seq,
-                    run_id: None,
-                    queue,
-                    priority: Some(priority),
-                    target,
-                })
-                .map_err(|error| error.to_string())?;
-        } else {
-            self.store
-                .enqueue_unbound_on_lane(lane, queue, target)
-                .map_err(|error| error.to_string())?;
-        }
-        self.store
-            .drive_to_completion()
-            .map_err(|error| error.to_string())?;
-        Ok(id)
-    }
-
-    pub fn consume_first_unbound_queue(&mut self, queue: QueueKind) -> Result<(), String> {
-        self.ensure_fresh()?;
-        let state = Reducer::reduce(self.store.store())
-            .map_err(|error| format!("reduce failed: {error:?}"))?;
-        let entry_id = state
-            .lane(&self.main_lane_name)
-            .and_then(|lane| {
-                lane.queued
-                    .iter()
-                    .find(|q| q.run_id.is_none() && q.queue == queue)
-            })
-            .map(|queued| queued.target.id.clone());
-        let Some(entry_id) = entry_id else {
-            return Ok(());
-        };
-        self.store
-            .consume_unbound(&entry_id)
-            .map_err(|error| error.to_string())?;
-        self.store
-            .drive_to_completion()
-            .map_err(|error| error.to_string())?;
-        Ok(())
     }
 
     pub fn consume_unbound_queue_entry(
@@ -175,16 +91,6 @@ impl CodingSessionHarness {
             .iter()
             .find(|q| q.run_id.is_none() && q.queue == queue && q.target.id == entry_id)
             .map(|queued| queued.target.message.clone()))
-    }
-
-    pub fn cancel_queued_unbound(&mut self, entry_id: &str) -> Result<(), String> {
-        self.ensure_fresh()?;
-        self.store
-            .cancel_unbound(entry_id)
-            .map_err(|error| error.to_string())?;
-        self.store
-            .drive_to_completion()
-            .map_err(|error| error.to_string())
     }
 
     /// Validate an accepted run token against the session journal and reduced state.

@@ -108,6 +108,7 @@ impl CodingSessionHarness {
         }
         Ok(())
     }
+    #[cfg(test)]
     pub fn assert_model_visible(&mut self, messages: &[AgentMessage]) -> Result<(), String> {
         self.ensure_fresh()?;
         let logged = self
@@ -133,100 +134,6 @@ impl CodingSessionHarness {
             logged.len(),
             expected.len()
         ))
-    }
-
-    pub fn commit_assistant_message(
-        &mut self,
-        lane: &str,
-        run_id: &str,
-        content: Option<String>,
-        stop_reason: Option<String>,
-    ) -> Result<String, String> {
-        self.append_message_to_lane(
-            lane,
-            run_id,
-            AgentMessage::Assistant {
-                content,
-                tool_calls: None,
-                stop_reason,
-                deferred_handle: None,
-            },
-        )
-    }
-
-    pub fn commit_thinking(
-        &mut self,
-        lane: &str,
-        run_id: &str,
-        reasoning: String,
-    ) -> Result<String, String> {
-        self.append_message_to_lane(
-            lane,
-            run_id,
-            AgentMessage::Custom {
-                custom_type: "thinking".to_string(),
-                payload: Value::String(reasoning),
-            },
-        )
-    }
-
-    pub fn commit_tool_calls(
-        &mut self,
-        lane: &str,
-        run_id: &str,
-        tool_calls: Vec<threadlane_provider::openai::ToolCall>,
-    ) -> Result<String, String> {
-        self.append_message_to_lane(
-            lane,
-            run_id,
-            AgentMessage::Assistant {
-                content: None,
-                tool_calls: Some(tool_calls),
-                stop_reason: None,
-                deferred_handle: None,
-            },
-        )
-    }
-
-    pub fn commit_tool_results(
-        &mut self,
-        lane: &str,
-        run_id: &str,
-        results: &[AgentToolResult],
-    ) -> Result<Vec<String>, String> {
-        let mut committed = Vec::new();
-        for result in results {
-            let msg = AgentMessage::Tool {
-                tool_call_id: result.tool_call_id.clone(),
-                name: result.name.clone(),
-                content: result.content.clone(),
-                is_error: result.is_error,
-                terminate: result.terminates(),
-                images: result.images.clone(),
-            };
-            let entry_id = self.append_message_to_lane(lane, run_id, msg)?;
-            let _ = self.finish_tool_result(run_id, result);
-            committed.push(entry_id);
-        }
-        Ok(committed)
-    }
-
-    pub fn commit_follow_up(
-        &mut self,
-        lane: &str,
-        run_id: &str,
-        message: AgentMessage,
-    ) -> Result<String, String> {
-        self.append_message_to_lane(lane, run_id, message)
-    }
-
-    pub fn commit_provider_failure(
-        &mut self,
-        _lane: &str,
-        run_id: &str,
-        error: String,
-    ) -> Result<(), String> {
-        self.finish_run(run_id, OperationOutcome::Failed, Some(error))
     }
 
     pub fn plan_recovery(

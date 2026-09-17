@@ -102,76 +102,6 @@ impl<S: SessionStore> SessionAgent<S> {
 }
 
 // ---------------------------------------------------------------------------
-// Child-lane bootstrap
-// ---------------------------------------------------------------------------
-
-impl<S: SessionStore> SessionAgent<S> {
-    /// Bootstrap a child lane that does not yet exist with an initial prompt.
-    ///
-    /// This is the canonical way to create a new lane through the facade.
-    /// The prompt and operation are parked through
-    /// [`AgentHarness::accept_prompt_on_lane`].  Then effects are driven
-    /// globally (in FIFO order across all lanes) until the new lane
-    /// materialises in the reduced state.  Driving globally rather than
-    /// lane-scoped ensures older pending effects from other lanes commit
-    /// before the new lane's effects, preserving global sequence ordering.
-    ///
-    /// When an effect executor is attached, the prompt is committed
-    /// synchronously during `accept_prompt_on_lane`, so the lane is
-    /// already visible and the handle is returned directly.
-    ///
-    /// Driving the remaining effects to completion is left to
-    /// [`SessionAgent::drive_to_completion`].
-    ///
-    /// Returns [`ProcedureError::Invalid`] if the lane already exists.
-    pub fn bootstrap_child_lane(
-        &mut self,
-        lane_name: &str,
-        run_id: &str,
-        prompt: AgentMessage,
-    ) -> Result<LaneHandle, ProcedureError> {
-        // Reject if the lane already exists in the reduced state.
-        if self.lane(lane_name).is_ok() {
-            return Err(ProcedureError::Invalid(format!(
-                "lane {lane_name} already exists"
-            )));
-        }
-        // Park the prompt and operation on the new lane.
-        self.harness
-            .accept_prompt_on_lane(lane_name, run_id, prompt)?;
-        // If the lane already materialised (e.g. executor committed
-        // synchronously into the same store), return the handle directly.
-        if self.lane(lane_name).is_ok() {
-            return self
-                .lane(lane_name)
-                .map_err(|e| ProcedureError::Invalid(e.to_string()));
-        }
-        // If no pending actions remain at all (executor already committed
-        // all effects to its own target store), track the lane so subsequent
-        // operations succeed without requiring it in the harness store.
-        if self.harness.peek_action().is_none() {
-            self.known_external_lanes.insert(lane_name.to_string());
-            return LaneHandle::new(lane_name.into())
-                .map_err(|e| ProcedureError::Invalid(e.to_string()));
-        }
-        // Drive globally (FIFO order) so older pending actions from other
-        // lanes commit before the child lane's actions, preserving global
-        // sequence ordering.
-        while self.harness.drive_one()? {
-            if self.lane(lane_name).is_ok() {
-                return self
-                    .lane(lane_name)
-                    .map_err(|e| ProcedureError::Invalid(e.to_string()));
-            }
-        }
-        // All pending actions were driven but the lane never appeared.
-        Err(ProcedureError::Invalid(format!(
-            "failed to bootstrap lane {lane_name}: all pending actions consumed"
-        )))
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Observation
 // ---------------------------------------------------------------------------
 
@@ -511,33 +441,6 @@ impl<S: SessionStore> SessionAgent<S> {
             safe_tools_to_replay,
             unreplayable_tools,
             abort_requested_operation_ids,
-        })
-    }
-
-    /// Execute a recovery plan on the session.
-    pub fn execute_recovery(
-        &mut self,
-        plan: &super::RecoveryPlan,
-    ) -> Result<super::RecoveryResult, ProcedureError> {
-        let lane = LaneHandle::new(plan.lane.clone())
-            .map_err(|e| ProcedureError::Invalid(e.to_string()))?;
-        self.validate_lane(&lane)
-            .map_err(|e| ProcedureError::Invalid(e.to_string()))?;
-
-        let mut recovered_open_operations = 0;
-        for op_id in &plan.open_operation_ids {
-            if plan.abort_requested_operation_ids.contains(op_id) {
-                self.harness.reconcile_abort_run(op_id)?;
-            }
-            recovered_open_operations += 1;
-        }
-
-        Ok(super::RecoveryResult {
-            recovered_open_operations,
-            open_operation_ids: plan.open_operation_ids.clone(),
-            abort_requested_operation_ids: plan.abort_requested_operation_ids.clone(),
-            unreplayable_tools: plan.unreplayable_tools,
-            safe_tools_to_replay: plan.safe_tools_to_replay.clone(),
         })
     }
 }

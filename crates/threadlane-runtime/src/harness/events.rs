@@ -800,6 +800,7 @@ impl HarnessEventHub {
         })
     }
 
+    #[cfg(test)]
     pub fn publish_durable(
         &self,
         payload: DurablePayload,
@@ -874,8 +875,6 @@ impl HarnessEventHub {
         let events = self.poll(subscription)?;
         Ok(events.into_iter().filter_map(|e| e.as_durable()).collect())
     }
-
-    pub fn unsubscribe(self) {}
 }
 
 #[cfg(test)]
