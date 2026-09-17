@@ -633,7 +633,7 @@ impl ToolDispatcher {
                 result
             }
             Err(_) => {
-                let result = AgentToolResult {
+                let mut result = AgentToolResult {
                     tool_call_id: tc.id.clone(),
                     name: tc.function.name.clone(),
                     content: format!(
@@ -645,6 +645,12 @@ impl ToolDispatcher {
                     terminate: false,
                     images: Vec::new(),
                 };
+                if let Some(recorder) = &self.tool_completion_recorder {
+                    if let Err(error) = recorder(&result).await {
+                        result.content = error;
+                        result.is_error = true;
+                    }
+                }
                 let _ = self.event_tx.send(AgentEvent::ToolExecutionEnd {
                     tool_call_id: tc.id.clone(),
                     name: tc.function.name.clone(),
@@ -1157,6 +1163,7 @@ mod tests {
     async fn sequential_tool_panic_records_completion() {
         let (event_tx, _) = broadcast::channel(8);
         let mut dispatcher = ToolDispatcher::new(event_tx, HookRegistry::default());
+        dispatcher.tool_execution_mode = ToolExecutionMode::Sequential;
         dispatcher
             .register_tool_executor(Arc::new(PanickingExecutor))
             .unwrap();

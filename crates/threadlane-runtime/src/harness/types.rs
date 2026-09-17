@@ -424,7 +424,6 @@ pub enum UsageCause {
     Tool,
     Replay,
     Compaction,
-    Adjustment,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

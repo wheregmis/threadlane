@@ -22,7 +22,7 @@ pub use capability::{Capability, CapabilityRegistry, ToolPolicy};
 pub use config::{AgentConfig, AgentConfigBuilder, CodingAgentConfig, CodingAgentConfigBuilder};
 pub use error::AgentError;
 pub use harness::{
-    has_open_subagent_lanes, interrupted_subagent_lanes, AcceptedRun, DurableEvent, DurablePayload,
+    has_open_subagent_lanes, interrupted_subagent_lanes, AcceptedRun,
     InterruptedSubagentLane, OperationOutcome, QueueKind, Record, SteerPriority,
     ToolReplaySafety,
 };
