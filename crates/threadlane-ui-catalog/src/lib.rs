@@ -74,7 +74,7 @@ pub fn available_models_for_project(
 ) -> Vec<ModelOption> {
     let mut models = models_for_credentials(
         threadlane_auth::antigravity_auth::load_antigravity_credentials().is_some(),
-        threadlane_auth::opencode_auth::load_opencode_api_key().is_some(),
+        threadlane_coding_agent::credentials::opencode_api_key().is_some(),
     );
     merge_discovered_opencode_models(&mut models);
     merge_discovered_openai_models(&mut models);
@@ -101,7 +101,7 @@ static DISCOVERED_OPENCODE: std::sync::OnceLock<
 /// Fetches the live Zen model list and caches it for the picker. Skips the
 /// network when there is no OpenCode key or the cache is still fresh.
 pub async fn refresh_discovered_models() {
-    if threadlane_auth::opencode_auth::load_opencode_api_key().is_none() {
+    if threadlane_coding_agent::credentials::opencode_api_key().is_none() {
         return;
     }
     let fresh = DISCOVERED_OPENCODE
@@ -112,7 +112,7 @@ pub async fn refresh_discovered_models() {
         return;
     }
     let mut discovered: Vec<ModelOption> = threadlane_provider::opencode::fetch_available_models(
-        &threadlane_auth::opencode_auth::load_opencode_api_key().unwrap_or_default(),
+        &threadlane_coding_agent::credentials::opencode_api_key().unwrap_or_default(),
     )
     .await
     .into_iter()

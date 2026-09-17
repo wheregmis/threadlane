@@ -216,7 +216,7 @@ impl AppState {
             .or_else(|| std::env::var("OPENAI_API_KEY").ok())
             .unwrap_or_default();
         let opencode_key =
-            threadlane_auth::opencode_auth::load_opencode_api_key().unwrap_or_default();
+            threadlane_coding_agent::credentials::opencode_api_key().unwrap_or_default();
 
         let (stream_tx, stream_rx) = tokio::sync::mpsc::unbounded_channel();
         let (session_refresh_tx, session_refresh_requests) = mpsc::channel::<PathBuf>();
