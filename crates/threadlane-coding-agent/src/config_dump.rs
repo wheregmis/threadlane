@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::{CodingAgentOptions, HarnessCompositionSnapshot};
+use crate::options::{CodingAgentOptions, HarnessCompositionSnapshot};
 use threadlane_skills::SkillManager;
 use threadlane_wasi::WasiExtensionManager;
 

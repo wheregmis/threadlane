@@ -45,7 +45,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session_file = dir.path().join("session.jsonl");
         let agent =
-            crate::CodingAgent::new(crate::CodingAgentOptions {
+            crate::runtime::CodingAgent::new(crate::options::CodingAgentOptions {
                 api_key: "test-key".into(),
                 account_id: None,
                 model: "gpt-4o".into(),

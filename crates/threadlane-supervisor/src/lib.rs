@@ -5,7 +5,8 @@
 #[cfg(test)]
 use threadlane_protocol::browser::BrowserBridge;
 use threadlane_coding_agent::harness::CodingSessionHarness;
-use threadlane_coding_agent::{CodingAgentOptions, SubagentCancellationGuard};
+use threadlane_coding_agent::cancellation::SubagentCancellationGuard;
+use threadlane_coding_agent::CodingAgentOptions;
 use threadlane_coding_agent::controller::{ExecutionMode, SessionController};
 use log::error;
 use serde::{Deserialize, Serialize};

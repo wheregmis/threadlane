@@ -7,9 +7,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::{
-    CodingAgent, CodingAgentCancellation, CodingAgentOptions, CodingAgentWorkHandle,
-};
+use crate::cancellation::CodingAgentCancellation;
+use crate::options::CodingAgentOptions;
+use crate::runtime::CodingAgent;
+use crate::scheduler::CodingAgentWorkHandle;
 use threadlane_permission::{PermissionDecision, PermissionHandle};
 use threadlane_question::QuestionHandle;
 use threadlane_protocol::ReasoningEffort;
