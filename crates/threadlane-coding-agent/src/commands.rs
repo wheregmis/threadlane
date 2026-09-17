@@ -96,7 +96,7 @@ pub enum CommandAction {
     Unknown(String),
 }
 
-pub fn parse_slash_command(input: &str) -> Option<CommandAction> {
+pub(crate) fn parse_slash_command(input: &str) -> Option<CommandAction> {
     let trimmed = input.trim();
     if !trimmed.starts_with('/') {
         return None;
@@ -121,7 +121,7 @@ pub fn parse_slash_command(input: &str) -> Option<CommandAction> {
     }
 }
 
-pub async fn execute_slash_command(
+pub(crate) async fn execute_slash_command(
     action: CommandAction,
     agent: &mut AgentRuntime,
 ) -> String {

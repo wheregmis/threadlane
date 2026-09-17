@@ -56,8 +56,8 @@ pub fn extract_session_title(
     };
     for message in messages {
         let content = match message {
-            crate::AgentMessage::User { content }
-            | crate::AgentMessage::UserWithImages { content, .. } => content,
+            threadlane_protocol::AgentMessage::User { content }
+            | threadlane_protocol::AgentMessage::UserWithImages { content, .. } => content,
             _ => continue,
         };
         let first_line = content.trim().lines().next().unwrap_or("");

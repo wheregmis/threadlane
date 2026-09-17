@@ -1,8 +1,11 @@
+# bindgen (via gpui-pre-media) needs a working libclang: Homebrew LLVM's
+# libclang is built against a newer LLVM than the pinned toolchain ships,
+# so point at Xcode's libclang on macOS.
 hawkcheck:
-    cargo +1.98.0 hawk check
+    LIBCLANG_PATH=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib cargo +1.98.0 hawk check
 
 hawkfix:
-    cargo +1.98.0 hawk check --fix --allow-dirty
+    LIBCLANG_PATH=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib cargo +1.98.0 hawk check --fix --allow-dirty
 
 # Run the desktop app (macOS needs an app bundle; see scripts/run-gpui-macos.sh)
 run *ARGS:

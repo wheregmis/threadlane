@@ -6,8 +6,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::definitions::tool_definitions;
-use crate::hashline;
 use crate::memory::{consolidate_memory_impl, read_memory_impl, save_memory_impl};
+use threadlane_hashline as hashline;
 use crate::repo_map::get_repo_map_impl;
 use crate::search;
 use crate::transaction::{commit_text_transaction, run_post_edit_diagnostics};
@@ -17,8 +17,8 @@ use crate::workspace::{
     validate_path_in_workspace,
 };
 
-pub const READ_FILE_SNAPSHOT_PREFIX: &str = "[Threadlane read_file SHA-256: ";
-pub const READ_FILE_SNAPSHOT_PATH_PREFIX: &str = "[Threadlane read_file path: ";
+pub(crate) const READ_FILE_SNAPSHOT_PREFIX: &str = "[Threadlane read_file SHA-256: ";
+pub(crate) const READ_FILE_SNAPSHOT_PATH_PREFIX: &str = "[Threadlane read_file path: ";
 
 pub fn read_file_snapshot_digest(output: &str) -> Option<&str> {
     output.lines().take(2).find_map(|line| {
@@ -39,9 +39,9 @@ pub fn read_file_snapshot_path(output: &str) -> Option<String> {
     })
 }
 
-pub(crate) const MAX_TOOL_OUTPUT_CHARS: usize = 3_000;
-pub(crate) const TRUNCATE_HEAD_CHARS: usize = 1_200;
-pub(crate) const TRUNCATE_TAIL_CHARS: usize = 1_200;
+const MAX_TOOL_OUTPUT_CHARS: usize = 3_000;
+const TRUNCATE_HEAD_CHARS: usize = 1_200;
+const TRUNCATE_TAIL_CHARS: usize = 1_200;
 
 pub(crate) fn truncate_tool_output(output: &str) -> String {
     let output_chars = output.chars().count();
@@ -488,7 +488,7 @@ pub(crate) fn worktree_cargo_target_dir(workspace_root: &Path) -> Option<PathBuf
 }
 
 /// Dispatches an in-process CLI tool invocation via `dyn <tool> [args]`.
-pub(crate) fn execute_dyn_cli(input: &str, workspace_root: &Path) -> Result<String, String> {
+fn execute_dyn_cli(input: &str, workspace_root: &Path) -> Result<String, String> {
     let input = input.trim();
     if input.is_empty() || input == "--help" || input == "-h" {
         let mut lines = vec![

@@ -1,6 +1,7 @@
 //! Non-macOS placeholder: the embedded browser is macOS-only.
 
 use gpui::*;
+use gpui_component::ActiveTheme;
 
 pub struct BrowserView;
 
@@ -38,12 +39,28 @@ impl BrowserView {
 }
 
 impl Render for BrowserView {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().colors;
         div()
             .size_full()
             .flex()
+            .flex_col()
             .items_center()
             .justify_center()
-            .child("Embedded browser is available on macOS only")
+            .gap_2()
+            .p_6()
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.foreground)
+                    .child("Embedded browser is available on macOS only."),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child("Open the URL in your system browser to continue."),
+            )
     }
 }

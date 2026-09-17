@@ -1,5 +1,4 @@
-use super::queue::SteerPriority;
-use crate::types::{AgentMessage, ImageAttachment, ReasoningEffort, TokenUsage};
+use threadlane_protocol::{AgentMessage, ImageAttachment, ReasoningEffort, TokenUsage};
 // Durable permission-trace vocabulary lives in `threadlane-protocol` so the
 // permission manager and trajectory analysis share it without depending on
 // the harness. Re-exported here so existing `harness::…` paths keep working.
@@ -355,7 +354,7 @@ pub struct QueuedEntry {
     pub run_id: Option<String>,
     pub queue: QueueKind,
     #[serde(default)]
-    pub priority: Option<SteerPriority>,
+    pub(crate) priority: Option<SteerPriority>,
     pub target: ProvisionedEntry,
 }
 
@@ -396,6 +395,13 @@ pub enum QueueKind {
     NextRun,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum SteerPriority {
+    Low = 0,
+    Normal = 1,
+    High = 2,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ToolReplaySafety {
     Never,
@@ -418,7 +424,6 @@ pub enum UsageCause {
     Tool,
     Replay,
     Compaction,
-    Adjustment,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -706,15 +711,6 @@ pub enum Record {
         run_id: Option<String>,
         key: String,
         value: String,
-    },
-    HookResumeData {
-        id: String,
-        seq: u64,
-        lane: String,
-        timestamp: u64,
-        run_id: Option<String>,
-        hook_id: String,
-        data: String,
     },
     Usage {
         id: String,
@@ -1146,23 +1142,6 @@ impl Record {
                 key,
                 value,
             },
-            Self::HookResumeData {
-                id,
-                lane,
-                timestamp,
-                run_id,
-                hook_id,
-                data,
-                ..
-            } => Self::HookResumeData {
-                id,
-                seq,
-                lane,
-                timestamp,
-                run_id,
-                hook_id,
-                data,
-            },
             Self::Usage {
                 id,
                 lane,
@@ -1290,7 +1269,6 @@ impl Record {
             | Self::WriteDeferred { id, .. }
             | Self::WriteApplied { id, .. }
             | Self::FactSet { id, .. }
-            | Self::HookResumeData { id, .. }
             | Self::Usage { id, .. }
             | Self::RunContextCaptured { id, .. }
             | Self::ContextManifestCaptured { id, .. }
@@ -1326,7 +1304,6 @@ impl Record {
             | Self::WriteDeferred { seq, .. }
             | Self::WriteApplied { seq, .. }
             | Self::FactSet { seq, .. }
-            | Self::HookResumeData { seq, .. }
             | Self::Usage { seq, .. }
             | Self::RunContextCaptured { seq, .. }
             | Self::ContextManifestCaptured { seq, .. }
@@ -1362,7 +1339,6 @@ impl Record {
             | Self::WriteDeferred { lane, .. }
             | Self::WriteApplied { lane, .. }
             | Self::FactSet { lane, .. }
-            | Self::HookResumeData { lane, .. }
             | Self::Usage { lane, .. }
             | Self::RunContextCaptured { lane, .. }
             | Self::ContextManifestCaptured { lane, .. }
@@ -1408,7 +1384,6 @@ impl Record {
             | Self::AbortObserved { run_id, .. }
             | Self::StreamCheckpoint { run_id, .. } => Some(run_id),
             Self::FactSet { run_id, .. }
-            | Self::HookResumeData { run_id, .. }
             | Self::QueueEnqueued { run_id, .. }
             | Self::Usage { run_id, .. }
             | Self::PermissionRequested { run_id, .. }
@@ -1504,7 +1479,7 @@ pub struct ToolState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LaneState {
     pub name: String,
-    pub status: LaneStatus,
+    pub(crate) status: LaneStatus,
     pub leaf_id: Option<String>,
     pub open_operation: Option<String>,
     pub attempts: u32,
@@ -1519,8 +1494,6 @@ pub struct LaneState {
     pub context_snapshots: Vec<ContextSnapshot>,
     #[serde(default)]
     pub(crate) facts: std::collections::BTreeMap<String, String>,
-    #[serde(default)]
-    pub(crate) resume_data: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

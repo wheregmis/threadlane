@@ -2,9 +2,7 @@
 //!
 //! The prewalk state machine and its prompt directives sit next to the
 //! `OrchestratorMode` turn-driving config they interpret (both contract
-//! types live in `threadlane-protocol`). Re-exported through
-//! `threadlane_runtime::orchestrator` and `threadlane_session::orchestrator`
-//! for compatibility; new code should import `threadlane_orchestrator`
+//! types live in `threadlane-protocol`). Import `threadlane_orchestrator`
 //! directly.
 //!
 //! Prewalk is off by default. When armed (explicit `/prewalk` or
@@ -42,7 +40,7 @@ pub struct PrewalkState {
     pub todo_seen: bool,
     /// Whether `update_plan` is in the active toolset. When false the gate
     /// is considered open from the start.
-    pub requires_todo: bool,
+    pub(crate) requires_todo: bool,
     /// Continuation safety net armed (fires at most once).
     pub continue_pending: bool,
 }

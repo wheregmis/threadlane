@@ -3,9 +3,11 @@
 //! Moved verbatim from `threadlane-session::project_registry` so session,
 //! daemon, and GPUI consumers share one registry without depending on the
 //! session crate. The only dependencies are `serde`/`serde_json` for the
-//! file format, `sha2` for stable project ids, and `directories` for home
-//! resolution — no runtime, wasi, or GPUI coupling.
+//! file format, `sha2` for stable project ids, `directories` for home
+//! resolution, and `threadlane-protocol` for shared model/effort contracts
+//! — no runtime, wasi, or GPUI coupling.
 
+pub mod subagent_settings;
 pub mod watcher;
 
 use serde::{Deserialize, Serialize};
@@ -52,12 +54,12 @@ impl ProjectRecord {
 }
 
 pub fn load_project_registry() -> Vec<ProjectRecord> {
-    load_project_registry_from(&default_global_dir())
+    load_project_registry_from(&global_threadlane_dir())
 }
 
 pub fn save_project_registry(projects: &[ProjectRecord]) -> Result<(), String> {
     let _guard = registry_lock().lock().map_err(|error| error.to_string())?;
-    save_project_registry_to(&default_global_dir(), projects)
+    save_project_registry_to(&global_threadlane_dir(), projects)
 }
 
 pub fn register_project(raw_path: &Path) -> Result<ProjectRecord, String> {
@@ -68,7 +70,7 @@ pub fn register_project(raw_path: &Path) -> Result<ProjectRecord, String> {
             raw_path.display()
         )
     })?;
-    let global_dir = default_global_dir();
+    let global_dir = global_threadlane_dir();
     let mut projects = load_project_registry_from(&global_dir);
     if let Some(project) = projects
         .iter_mut()
@@ -93,7 +95,7 @@ pub fn select_project(raw_path: &Path, session_id: Option<&str>) -> Result<Proje
             raw_path.display()
         )
     })?;
-    let global_dir = default_global_dir();
+    let global_dir = global_threadlane_dir();
     let mut projects = load_project_registry_from(&global_dir);
     let index = if let Some(index) = projects
         .iter()
@@ -113,7 +115,8 @@ pub fn select_project(raw_path: &Path, session_id: Option<&str>) -> Result<Proje
     Ok(result)
 }
 
-pub fn merge_and_save_project_registry_to(
+#[cfg(test)]
+pub(crate) fn merge_and_save_project_registry_to(
     global_dir: &Path,
     incoming: &[ProjectRecord],
 ) -> Result<(), String> {
@@ -146,7 +149,7 @@ pub fn merge_and_save_project_registry_to(
     save_project_registry_to(global_dir, &merged)
 }
 
-pub fn load_project_registry_from(global_dir: &Path) -> Vec<ProjectRecord> {
+pub(crate) fn load_project_registry_from(global_dir: &Path) -> Vec<ProjectRecord> {
     let canonical_file = global_dir.join("projects.json");
     let projects = fs::read(&canonical_file)
         .map(|contents| parse_project_records(&contents))
@@ -182,26 +185,6 @@ pub fn default_global_threadlane_dir() -> Option<PathBuf> {
 /// must construct paths even when home-directory discovery is unavailable.
 pub fn global_threadlane_dir() -> PathBuf {
     default_global_threadlane_dir().unwrap_or_else(|| PathBuf::from(".threadlane"))
-}
-
-pub fn load_needle_enabled() -> bool {
-    default_global_threadlane_dir()
-        .map(|dir| dir.join("gui").join("needle.json"))
-        .and_then(|path| fs::read(path).ok())
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or(false)
-}
-
-pub fn save_needle_enabled(enabled: bool) -> Result<(), String> {
-    let path = default_global_threadlane_dir()
-        .map(|dir| dir.join("gui").join("needle.json"))
-        .ok_or_else(|| "Global settings directory is unavailable.".to_string())?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| "Needle settings path has no parent.".to_string())?;
-    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    let bytes = serde_json::to_vec(&enabled).map_err(|error| error.to_string())?;
-    fs::write(path, bytes).map_err(|error| error.to_string())
 }
 
 fn save_project_registry_to(global_dir: &Path, projects: &[ProjectRecord]) -> Result<(), String> {
@@ -260,10 +243,6 @@ fn registry_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
-fn default_global_dir() -> PathBuf {
-    default_global_threadlane_dir().unwrap_or_else(|| PathBuf::from(".threadlane"))
-}
-
 fn project_id(path: &Path) -> String {
     use sha2::Digest;
     let digest = sha2::Sha256::digest(path.to_string_lossy().as_bytes());
@@ -303,5 +282,13 @@ mod tests {
         assert_eq!(projects[0].last_opened_at, 20);
         assert_eq!(projects[0].last_session_id.as_deref(), Some("session-2"));
         assert!(&projects[0].last_selected_task_id.as_deref() == &Some("task-3"));
+        // The atomic swap renames the temporary file into place: no residue
+        // may remain alongside the committed registry file.
+        let residue: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(residue.is_empty(), "unexpected files: {residue:?}");
     }
 }

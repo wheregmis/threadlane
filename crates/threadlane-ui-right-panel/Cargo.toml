@@ -10,10 +10,11 @@ gpui.workspace = true
 gpui-component.workspace = true
 rfd.workspace = true
 serde_json.workspace = true
+threadlane-coding-agent.workspace = true
 threadlane-git.workspace = true
+threadlane-project.workspace = true
 threadlane-protocol.workspace = true
 threadlane-provider.workspace = true
-threadlane-session.workspace = true
 threadlane-ui-state.workspace = true
 threadlane-ui-theme.workspace = true
 tokio = { workspace = true, features = ["full"] }
@@ -24,3 +25,6 @@ wry = { version = "0.53.3", package = "lb-wry" }
 raw-window-handle = "0.6"
 objc2 = { version = "0.6", features = ["std"] }
 block2 = "0.6"
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

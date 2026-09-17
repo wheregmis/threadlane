@@ -23,7 +23,7 @@ pub(crate) fn get_repo_map_impl(
     }
 }
 
-pub(crate) fn walk_repo_skeleton(
+fn walk_repo_skeleton(
     dir: &Path,
     root: &Path,
     depth: usize,

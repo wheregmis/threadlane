@@ -1,22 +1,21 @@
 //! Session-owned MCP adapter.
 //!
 //! The client implementation lives in [`threadlane_mcp`], which exposes
-//! MCP-native tool metadata and structured results. This module re-exports it
-//! so existing `crate::mcp::` paths keep working, and owns the one piece that
-//! belongs to the host application: converting [`McpToolDescription`] into the
-//! runtime [`AgentToolDefinition`] schema and flattening [`McpToolResult`]
-//! into the text the model consumes.
+//! MCP-native tool metadata and structured results. This module owns the one
+//! piece that belongs to the host application: converting
+//! [`McpToolDescription`] into the runtime [`AgentToolDefinition`] schema
+//! and flattening [`McpToolResult`] into the text the model consumes.
 //!
 //! [`McpToolDescription`]: threadlane_mcp::McpToolDescription
 //! [`McpToolResult`]: threadlane_mcp::McpToolResult
-//! [`AgentToolDefinition`]: threadlane_runtime::AgentToolDefinition
+//! [`AgentToolDefinition`]: threadlane_protocol::AgentToolDefinition
 
-pub use threadlane_mcp::*;
+use threadlane_mcp::{McpManager, McpToolDescription};
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use threadlane_runtime::{AgentToolDefinition, ToolExecutor};
+use threadlane_protocol::{AgentToolDefinition, ToolExecutor};
 
 /// Session-owned [`ToolExecutor`] over an [`McpManager`].
 ///
@@ -42,7 +41,7 @@ impl McpToolExecutor {
 }
 
 /// Projects one MCP-native description onto the runtime tool schema.
-pub fn mcp_tool_definition(description: &McpToolDescription) -> AgentToolDefinition {
+pub(crate) fn mcp_tool_definition(description: &McpToolDescription) -> AgentToolDefinition {
     AgentToolDefinition::new(
         description.full_name.clone(),
         description.description.clone(),

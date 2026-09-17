@@ -34,7 +34,7 @@ use threadlane_acp::{
 };
 use crate::bridge::agent_events_for;
 use threadlane_permission::{PermissionDecision, PermissionHandle};
-use threadlane_runtime::{
+use threadlane_protocol::{
     AgentEvent, AgentToolResult, ImageAttachment, ReasoningEffort, SessionPlan, TokenUsage,
 };
 

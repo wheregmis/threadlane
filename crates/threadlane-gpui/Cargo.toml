@@ -21,6 +21,9 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 hotpath.workspace = true
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [target.'cfg(target_os = "linux")'.dependencies]
 # GPUI does not select a Linux window-system backend by default. Enable both
 # native backends so a single Linux build works under Wayland and X11.

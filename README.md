@@ -57,6 +57,7 @@ flowchart TD
 
     subgraph Harness["Coding Agent & Harness V2 Core"]
         CSH["CodingSessionHarness"]
+        SessionController["SessionController (Interactive)"]
         AgentHarness["AgentHarness State Machine"]
 
         subgraph Reducer["Multi-Lane Reducer"]
@@ -94,7 +95,7 @@ flowchart TD
     %% UI Connections
     ChatView <--> CSH
     TrajectoryView <--> AgentHarness
-    Supervisor <--> AgentHarness
+    SessionController <--> AgentHarness
     CSH --> AgentHarness
 
     %% Harness Internal Connections
@@ -269,7 +270,7 @@ The Threadlane workspace is modularized into focused crates:
 | Crate | Path | Responsibility |
 | --- | --- | --- |
 | `threadlane-gpui` | [`crates/threadlane-gpui`](crates/threadlane-gpui) | Native GPUI desktop application, view hierarchy, PTY terminal, and UI event loops. |
-| `threadlane-session` | [`crates/threadlane-session`](crates/threadlane-session) | Coding agent orchestration, `CodingSessionHarness`, subagents, and ACP engine. |
+| `threadlane-coding-agent` | [`crates/threadlane-coding-agent`](crates/threadlane-coding-agent) | Coding agent orchestration, `CodingSessionHarness`, `SessionController`, subagents, and ACP engine wiring. |
 | `threadlane-runtime` | [`crates/threadlane-runtime`](crates/threadlane-runtime) | Core agent loop, `AgentHarness` V2 state machine, multi-lane reducer, and session trees. |
 | `threadlane-provider` | [`crates/threadlane-provider`](crates/threadlane-provider) | Multi-provider routing (Antigravity, OpenAI/Codex, OpenCode) and streaming parsers. |
 | `threadlane-tools` | [`crates/threadlane-tools`](crates/threadlane-tools) | Workspace-contained file tools, ripgrep search, and sandboxed process execution. |

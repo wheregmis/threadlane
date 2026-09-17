@@ -19,7 +19,7 @@ use threadlane_provider::router::{is_antigravity_model, is_opencode_model};
 /// True when `model` signs OpenAI-branch requests with the resolved pair.
 /// Antigravity/OpenCode resolve OAuth internally per request and ACP never
 /// touches the provider, so only this branch needs credential rotation.
-pub fn uses_openai_credentials(model: &str) -> bool {
+pub(crate) fn uses_openai_credentials(model: &str) -> bool {
     !is_antigravity_model(model)
         && !is_opencode_model(model)
         && !threadlane_acp_engine::is_acp_model(model)
@@ -29,7 +29,7 @@ pub fn uses_openai_credentials(model: &str) -> bool {
 /// constructed provider client. Resolves through [`provider_credentials`];
 /// no-ops when nothing usable resolves or the model never signs with this
 /// pair. Idempotent: safe to call on every switch and handoff.
-pub fn refresh_provider_for_model(provider: &std::sync::Arc<dyn ProviderPort>, model: &str) {
+pub(crate) fn refresh_provider_for_model(provider: &std::sync::Arc<dyn ProviderPort>, model: &str) {
     if !uses_openai_credentials(model) {
         return;
     }
@@ -79,11 +79,11 @@ pub fn provider_credentials(model: &str) -> (String, Option<String>) {
 pub struct AuthCredentialBridge;
 
 impl AuthCredentialBridge {
-    pub fn shared() -> SharedCodexResolver {
+    pub(crate) fn shared() -> SharedCodexResolver {
         std::sync::Arc::new(Self)
     }
 
-    pub fn shared_antigravity() -> SharedAntigravityCredentials {
+    pub(crate) fn shared_antigravity() -> SharedAntigravityCredentials {
         std::sync::Arc::new(Self)
     }
 }

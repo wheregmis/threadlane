@@ -12,29 +12,32 @@ robius-open.workspace = true
 tempfile = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["full"] }
 tracing.workspace = true
+threadlane-acp.workspace = true
+threadlane-acp-engine.workspace = true
 threadlane-auth.workspace = true
+threadlane-coding-agent.workspace = true
 threadlane-context.workspace = true
 threadlane-git.workspace = true
+threadlane-permission.workspace = true
 threadlane-project.workspace = true
+threadlane-prompt.workspace = true
 threadlane-protocol.workspace = true
 threadlane-provider.workspace = true
 threadlane-runtime.workspace = true
-threadlane-session.workspace = true
 threadlane-skills.workspace = true
 threadlane-tools.workspace = true
 threadlane-ui-catalog.workspace = true
 threadlane-updater.workspace = true
-threadlane-wasi.workspace = true
 
 [features]
 test-support = [
     "dep:async-trait",
     "dep:tempfile",
-    "threadlane-session/test-support",
+    "threadlane-coding-agent/test-support",
 ]
 
 [dev-dependencies]
 async-trait.workspace = true
 tempfile.workspace = true
-threadlane-session = { workspace = true, features = ["test-support"] }
+threadlane-coding-agent = { workspace = true, features = ["test-support"] }
 threadlane-skills.workspace = true

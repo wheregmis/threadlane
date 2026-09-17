@@ -227,7 +227,7 @@ impl AntigravityClient {
 
     /// Injects the host's Antigravity credential source. Without one,
     /// requests fail fast instead of reading the host's credential store.
-    pub fn new_with_credentials(credentials: SharedAntigravityCredentials) -> Self {
+    pub(crate) fn new_with_credentials(credentials: SharedAntigravityCredentials) -> Self {
         Self {
             client: reqwest::Client::new(),
             project_cache: Arc::new(Mutex::new(HashMap::new())),

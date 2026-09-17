@@ -95,12 +95,7 @@ pub extern "C" fn extension_info() -> u64 {
         name: "broker_smoke_ext".into(),
         version: "0.1.0".into(),
         description: "Capability broker ABI smoke test".into(),
-        capabilities: vec![if cfg!(feature = "agent-only") {
-            "agent"
-        } else {
-            "tools"
-        }
-        .into()],
+        capabilities: vec!["tools".into()],
         commands: vec![WasiCommandDefinition {
             name: "broker-smoke".into(),
             description: "Broker ABI smoke test".into(),

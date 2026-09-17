@@ -1,6 +1,6 @@
 use serde_json::Value;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 /// Credentials for remote forge reads (`pr://`, `mr://`, `issue://`, and
@@ -13,14 +13,14 @@ use std::process::Command;
 /// `GITLAB_TOKEN`/`GL_TOKEN`). `Default` is empty (ambient fallbacks only).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RemoteCredentials {
-    pub github_token: Option<String>,
-    pub gitlab_token: Option<String>,
+    pub(crate) github_token: Option<String>,
+    pub(crate) gitlab_token: Option<String>,
 }
 
 impl RemoteCredentials {
     /// Ambient environment only: `GITHUB_TOKEN`/`GH_TOKEN` and
     /// `GITLAB_TOKEN`/`GL_TOKEN` when set and non-blank.
-    pub fn from_env() -> Self {
+    pub(crate) fn from_env() -> Self {
         fn env_token(keys: &[&str]) -> Option<String> {
             keys.iter()
                 .filter_map(|key| std::env::var(key).ok())
@@ -95,42 +95,6 @@ pub fn parse_remote_ref(input: &str) -> Option<ParsedRemoteRef> {
     } else {
         None
     }
-}
-
-#[allow(dead_code)]
-// Backward compatibility alias for external callers
-pub fn parse_github_ref(input: &str) -> Option<ParsedGitHubRef> {
-    let parsed = parse_remote_ref(input)?;
-    let (owner, repo) = if let Some(ref or) = parsed.owner_repo {
-        let parts: Vec<&str> = or.split('/').collect();
-        if parts.len() == 2 {
-            (Some(parts[0].to_string()), Some(parts[1].to_string()))
-        } else {
-            (None, None)
-        }
-    } else {
-        (None, None)
-    };
-
-    Some(ParsedGitHubRef {
-        owner,
-        repo,
-        kind: if parsed.kind == "mr" {
-            "pr".to_string()
-        } else {
-            parsed.kind
-        },
-        number: parsed.number,
-    })
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParsedGitHubRef {
-    pub owner: Option<String>,
-    pub repo: Option<String>,
-    pub kind: String,
-    pub number: String,
 }
 
 fn parse_scheme_or_path(
@@ -323,26 +287,6 @@ pub fn parse_git_remote_url(remote: &str) -> Option<GitRemoteInfo> {
     None
 }
 
-#[allow(dead_code)]
-// Backward compatibility helper
-pub fn github_owner_repo(remote: &str) -> Option<(&str, &str)> {
-    let remote_clean = remote.strip_suffix(".git").unwrap_or(remote).trim();
-    if remote_clean.contains("gitlab") {
-        return None;
-    }
-    let path = if let Some(rest) = remote_clean.strip_prefix("git@github.com:") {
-        rest
-    } else if let Some(rest) = remote_clean
-        .strip_prefix("https://github.com/")
-        .or_else(|| remote_clean.strip_prefix("http://github.com/"))
-    {
-        rest
-    } else {
-        return None;
-    };
-    path.split_once('/')
-}
-
 pub fn remote_ref_path(root: &Path, reference: &str) -> String {
     try_remote_ref_path(root, reference).unwrap_or_else(|error| error)
 }
@@ -416,16 +360,6 @@ pub fn try_remote_ref_path_with(
             credentials.gitlab_token.as_deref(),
         ),
     }
-}
-
-#[allow(dead_code)]
-pub fn github_path(root: &Path, reference: &str) -> String {
-    github_path_with(root, reference, &RemoteCredentials::default())
-}
-
-#[allow(dead_code)]
-pub fn github_path_with(root: &Path, reference: &str, credentials: &RemoteCredentials) -> String {
-    try_remote_ref_path_with(root, reference, credentials).unwrap_or_else(|error| error)
 }
 
 fn fetch_github(
@@ -685,10 +619,6 @@ pub fn format_gitlab_markdown(kind: &str, number: &str, raw_json: &str) -> Strin
     out
 }
 
-fn dirs_home() -> Option<PathBuf> {
-    threadlane_project::dirs_home()
-}
-
 pub fn try_skill(root: &Path, name: &str) -> Result<String, String> {
     let clean_name = name.trim_matches('/');
     if clean_name.is_empty() {
@@ -701,7 +631,7 @@ pub fn try_skill(root: &Path, name: &str) -> Result<String, String> {
         root.join(".pi/skills"),
     ];
 
-    if let Some(home) = dirs_home() {
+    if let Some(home) = threadlane_project::dirs_home() {
         search_dirs.push(home.join(".threadlane/skills"));
         search_dirs.push(home.join(".agents/skills"));
         search_dirs.push(home.join(".pi/agent/skills"));
@@ -737,7 +667,7 @@ pub fn try_agent(root: &Path, name: &str) -> Result<String, String> {
 
     let mut search_dirs = vec![root.join(".threadlane/agents"), root.join(".agents/agents")];
 
-    if let Some(home) = dirs_home() {
+    if let Some(home) = threadlane_project::dirs_home() {
         search_dirs.push(home.join(".threadlane/agents"));
         search_dirs.push(home.join(".agents/agents"));
     }

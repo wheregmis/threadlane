@@ -5,9 +5,9 @@ edition = "2021"
 description = "OpenAI REST & Codex backend streaming client and device auth for threadlane agent"
 
 [dependencies]
+threadlane-project.workspace = true
 threadlane-protocol.workspace = true
 async-trait.workspace = true
-directories.workspace = true
 tokio = { workspace = true, features = ["full"] }
 reqwest = { workspace = true, features = ["default-tls", "json", "stream"] }
 serde.workspace = true

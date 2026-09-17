@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -95,7 +95,7 @@ struct SkillSettingsFile {
 }
 
 impl SkillSettings {
-    pub fn load(project_root: &Path) -> Self {
+    pub(crate) fn load(project_root: &Path) -> Self {
         let Some(root) = canonical_or_plain(project_root) else {
             return Self::default();
         };
@@ -117,7 +117,7 @@ impl SkillSettings {
         self.disabled.contains(skill_id)
     }
 
-    pub fn set_enabled(
+    pub(crate) fn set_enabled(
         &mut self,
         project_root: &Path,
         skill_id: &str,
@@ -132,7 +132,7 @@ impl SkillSettings {
     }
 
     /// Persist a disabled override for each discovered skill in one write.
-    pub fn disable_all(
+    pub(crate) fn disable_all(
         &mut self,
         project_root: &Path,
         skill_ids: impl IntoIterator<Item = String>,
@@ -154,10 +154,12 @@ impl SkillSettings {
         };
         let bytes = serde_json::to_vec_pretty(&file)
             .map_err(|error| format!("Failed to encode skill settings: {error}"))?;
-        let mut handle = File::create(&path)
+        // Atomic swap like the other project-scoped stores: a crash mid-write
+        // must not leave a torn skills.json behind.
+        let temporary = path.with_extension("json.tmp");
+        fs::write(&temporary, &bytes)
             .map_err(|error| format!("Failed to write skill settings: {error}"))?;
-        handle
-            .write_all(&bytes)
+        fs::rename(&temporary, &path)
             .map_err(|error| format!("Failed to write skill settings: {error}"))?;
         Ok(())
     }
@@ -201,7 +203,7 @@ impl Default for SkillDiscoveryOptions {
     fn default() -> Self {
         Self {
             project_root: None,
-            home_dir: dirs_home(),
+            home_dir: threadlane_project::dirs_home(),
             include_pi_compatibility: true,
             max_skill_bytes: DEFAULT_MAX_SKILL_BYTES,
             max_frontmatter_bytes: DEFAULT_MAX_FRONTMATTER_BYTES,
@@ -209,12 +211,6 @@ impl Default for SkillDiscoveryOptions {
             max_directory_entries: DEFAULT_MAX_DIRECTORY_ENTRIES,
             max_skills: DEFAULT_MAX_SKILLS,
         }
-    }
-}
-
-impl From<&SkillDiscoveryOptions> for SkillDiscoveryOptions {
-    fn from(options: &SkillDiscoveryOptions) -> Self {
-        options.clone()
     }
 }
 
@@ -385,7 +381,7 @@ impl SkillManager {
     }
 
     pub fn discover_skills(&mut self, project_root: Option<&Path>) {
-        self.discover_skills_with_home(project_root, dirs_home().as_deref());
+        self.discover_skills_with_home(project_root, threadlane_project::dirs_home().as_deref());
     }
 
     fn discover_skills_with_home(&mut self, project_root: Option<&Path>, home_dir: Option<&Path>) {
@@ -410,7 +406,7 @@ impl SkillManager {
         Arc::clone(&self.registry)
     }
 
-    pub fn list_skills(&self) -> Vec<SkillMetadata> {
+    pub(crate) fn list_skills(&self) -> Vec<SkillMetadata> {
         self.registry.list_skills()
     }
 
@@ -503,7 +499,7 @@ impl LoadSkillToolExecutor {
     }
 }
 
-pub fn load_skill_tool_definition() -> SkillToolDefinition {
+pub(crate) fn load_skill_tool_definition() -> SkillToolDefinition {
     SkillToolDefinition {
         name: LOAD_SKILL_TOOL_NAME.to_string(),
         description: Some(
@@ -1558,12 +1554,6 @@ fn valid_package_component(component: &str) -> bool {
         && !component.chars().any(char::is_control)
 }
 
-/// Home directory resolution, canonical in `threadlane-project`; new code
-/// should import `threadlane_project::dirs_home` directly.
-pub(crate) fn dirs_home() -> Option<PathBuf> {
-    threadlane_project::dirs_home()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1597,6 +1587,26 @@ mod tests {
         let reloaded = SkillSettings::load(project.path());
         assert!(!reloaded.is_disabled("alpha"));
         assert!(reloaded.is_disabled("beta"));
+    }
+
+    #[test]
+    fn skill_settings_save_leaves_no_temporary_file() {
+        let project = tempfile::tempdir().unwrap();
+        let mut settings = SkillSettings::load(project.path());
+        settings
+            .set_enabled(project.path(), "alpha", false)
+            .unwrap();
+        // The atomic swap renames the temporary file into place: no residue
+        // may remain alongside the committed settings file.
+        let entries: Vec<_> = std::fs::read_dir(project.path().join(".threadlane"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            entries,
+            vec![std::ffi::OsString::from("skills.json")],
+            "unexpected files: {entries:?}"
+        );
     }
 
     #[test]

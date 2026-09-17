@@ -226,9 +226,9 @@ pub struct ImageAttachment {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeferredHandle {
-    pub handle_id: String,
-    pub provider: String,
-    pub model: String,
+    pub(crate) handle_id: String,
+    pub(crate) provider: String,
+    pub(crate) model: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -34,7 +34,6 @@ threadlane-question = { version = "0.1.0", path = "crates/threadlane-question" }
 threadlane-protocol = { version = "0.1.0", path = "crates/threadlane-protocol" }
 threadlane-provider = { version = "0.1.0", path = "crates/threadlane-provider" }
 threadlane-runtime = { version = "0.1.0", path = "crates/threadlane-runtime" }
-threadlane-session = { version = "0.1.0", path = "crates/threadlane-session" }
 threadlane-skills = { version = "0.1.0", path = "crates/threadlane-skills" }
 threadlane-tools = { version = "0.1.0", path = "crates/threadlane-tools" }
 threadlane-ui-catalog = { version = "0.1.0", path = "crates/threadlane-ui-catalog" }
@@ -65,7 +64,6 @@ gpui-component = { git = "https://github.com/longbridge/gpui-kit" }
 gpui-kit-assets = { git = "https://github.com/longbridge/gpui-kit" }
 hotpath = "0.25"
 image = "0.25"
-libsqlite3-sys = "0.38.2"
 notify = "8.2"
 portable-pty = "0.9"
 regex = "1.10"

@@ -4,9 +4,8 @@
 //! depend only on `threadlane-protocol` contracts — never on the execution
 //! engine. Durable persistence goes through the injectable [`PlanJournal`]
 //! trait, which the engine implements with its session JSONL (see
-//! `threadlane_runtime::plan::JsonlPlanJournal`). Re-exported through
-//! `threadlane_runtime::plan` and `threadlane_session::plan` for
-//! compatibility; new code should import `threadlane_plan` directly.
+//! `threadlane_runtime::plan::JsonlPlanJournal`). Import `threadlane_plan`
+//! directly.
 
 use async_trait::async_trait;
 use serde::Deserialize;

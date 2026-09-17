@@ -79,10 +79,7 @@ struct McpSettingsFile {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct McpSettings {
-    #[allow(dead_code)]
-    servers: Vec<McpServerConfig>,
-}
+pub struct McpSettings;
 
 impl McpSettings {
     fn load_global(global_dir: Option<&Path>) -> Vec<McpServerConfig> {
@@ -142,7 +139,13 @@ impl McpSettings {
         };
         let bytes = serde_json::to_vec_pretty(&file_data)
             .map_err(|e| format!("Failed to serialize MCP settings: {e}"))?;
-        fs::write(file_path, bytes).map_err(|e| format!("Failed to write MCP settings: {e}"))
+        // Atomic swap like the other project-scoped stores: a crash mid-write
+        // must not leave a torn settings file behind.
+        let temporary = file_path.with_extension("json.tmp");
+        fs::write(&temporary, &bytes)
+            .map_err(|e| format!("Failed to write MCP settings: {e}"))?;
+        fs::rename(&temporary, file_path)
+            .map_err(|e| format!("Failed to write MCP settings: {e}"))
     }
 }
 
@@ -153,7 +156,7 @@ impl McpSettings {
 /// is the host adapter's job.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpToolDescription {
-    pub tool_name: String,
+    pub(crate) tool_name: String,
     pub full_name: String,
     pub description: String,
     pub input_schema: Value,
@@ -183,10 +186,10 @@ pub enum McpContentItem {
 /// [`McpToolResult::to_text`] for the legacy text projection.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpToolResult {
-    pub content: Vec<McpContentItem>,
+    pub(crate) content: Vec<McpContentItem>,
     #[serde(default)]
-    pub is_error: bool,
-    pub raw: Value,
+    pub(crate) is_error: bool,
+    pub(crate) raw: Value,
 }
 
 impl McpToolResult {
@@ -211,14 +214,14 @@ impl McpToolResult {
 
 #[derive(Debug, Clone)]
 pub struct McpToolInfo {
-    pub tool_name: String,
-    pub full_name: String,
-    pub description: String,
-    pub input_schema: Value,
+    pub(crate) tool_name: String,
+    pub(crate) full_name: String,
+    pub(crate) description: String,
+    pub(crate) input_schema: Value,
 }
 
 impl McpToolInfo {
-    pub fn description(&self) -> McpToolDescription {
+    pub(crate) fn description(&self) -> McpToolDescription {
         McpToolDescription {
             tool_name: self.tool_name.clone(),
             full_name: self.full_name.clone(),
@@ -230,8 +233,8 @@ impl McpToolInfo {
 
 #[derive(Debug, Clone)]
 pub struct McpServerRecord {
-    pub config: McpServerConfig,
-    pub tools: Vec<McpToolInfo>,
+    pub(crate) config: McpServerConfig,
+    pub(crate) tools: Vec<McpToolInfo>,
 }
 
 /// A live stdio session with one MCP server.
@@ -765,5 +768,36 @@ mod tests {
         let settings: McpSettingsFile = serde_json::from_str(json_str).unwrap();
         assert_eq!(settings.servers.len(), 1);
         assert_eq!(settings.servers[0].id, "tokensave");
+    }
+
+    #[test]
+    fn save_global_round_trips_without_temporary_residue() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = McpServerConfig {
+            id: "stub".into(),
+            name: "Stub".into(),
+            transport: McpTransport::Stdio {
+                command: "stub".into(),
+                args: Vec::new(),
+                env: HashMap::new(),
+            },
+            enabled: true,
+            scope: McpScope::Global,
+        };
+        McpSettings::save_global(dir.path(), &[config]).unwrap();
+        // The atomic swap renames the temporary file into place: no residue
+        // may remain alongside the committed settings file.
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            entries,
+            vec![std::ffi::OsString::from("mcp.json")],
+            "unexpected files: {entries:?}"
+        );
+        let reloaded = McpSettings::load_global(Some(dir.path()));
+        assert_eq!(reloaded.len(), 1);
+        assert_eq!(reloaded[0].id, "stub");
     }
 }

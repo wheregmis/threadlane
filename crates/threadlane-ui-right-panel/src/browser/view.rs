@@ -13,7 +13,7 @@
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::{ActiveTheme, IconName, Sizable};
+use gpui_component::{ActiveTheme, Icon, IconName, Sizable};
 
 use super::address::{resolve_address, search_url, AddressTarget};
 
@@ -233,14 +233,30 @@ impl Render for BrowserView {
                     .child(
                         Button::new("browser-back")
                             .icon(IconName::ArrowLeft)
-                            .tooltip("Back")
+                            .accessibility_label("Go back")
+                            .tooltip("Go back")
                             .ghost()
                             .xsmall()
                             .on_click(cx.listener(|this, _event, _window, cx| {
                                 this.go_back(cx);
                             })),
                     )
-                    .child(div().flex_1().child(Input::new(&self.address_input))),
+                    .child(
+                        Button::new("browser-reload")
+                            .icon(Icon::default().path("icons/refresh-cw.svg"))
+                            .accessibility_label("Reload page")
+                            .tooltip("Reload page")
+                            .ghost()
+                            .xsmall()
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.reload(cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(Input::new(&self.address_input).aria_label("Browser address")),
+                    ),
             )
             .child(
                 div()

@@ -4,9 +4,6 @@ pub mod settings;
 
 pub use broker::*;
 pub(crate) use packages::validate_extension_id;
-pub use packages::{
-    default_global_threadlane_dir, ExtensionManager, ExtensionRecord, ExtensionScope,
-};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -530,7 +527,7 @@ impl WasiExtensionManager {
         global_threadlane_dir: Option<&Path>,
         project_root: Option<&Path>,
     ) -> Result<usize, String> {
-        let records = ExtensionManager::new(
+        let records = packages::ExtensionManager::new(
             global_threadlane_dir.map(Path::to_path_buf),
             project_root.map(Path::to_path_buf),
         )

@@ -3,22 +3,25 @@
 //! Encapsulates streaming, auto-compaction, journal
 //! recording, tool execution, and queue draining for an active turn sequence.
 
-use crate::compaction::{
-    compact_messages_to_token_budget, is_context_overflow_error, should_auto_compact,
+use threadlane_compaction::{
+    compact_messages_to_token_budget, estimate_message_tokens, estimate_request_tokens,
+    is_context_overflow_error, provider_normalized_message, serialized_message,
+    should_auto_compact, CompactionParams,
 };
 use crate::config::AgentConfig;
-use crate::events::AgentEvent;
+use threadlane_protocol::AgentEvent;
 use crate::harness::{
     ContextItemSource, ContextItemStatus, ContextManifestItem, ErrorCategory, ProviderErrorSummary,
     ProviderOutcome, TraceString,
 };
-use crate::loop_detector::LoopDetector;
+use threadlane_loop::LoopDetector;
 use crate::provider::{
     ProviderBoundaryPreparer, ProviderBoundaryRequest, ProviderBoundaryResult, ProviderTraceEvent,
     ProviderTraceRecorder,
 };
 use crate::tool_dispatcher::ToolDispatcher;
-use crate::types::{AgentMessage, TokenUsage, ToolExecutionMode, TurnState};
+use crate::types::{ToolExecutionMode, TurnState};
+use threadlane_protocol::{AgentMessage, TokenUsage};
 use crate::utils::AbortOnDrop;
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -214,7 +217,7 @@ impl<'a> TurnDriver<'a> {
             // before another provider request can observe it.
             if self.message_recorder.is_none() {
                 let mut turn = self.turn.lock().await;
-                if should_auto_compact(&turn.messages, &self.config) {
+                if should_auto_compact(&turn.messages, &CompactionParams::from(&self.config)) {
                     turn.messages = compact_messages_to_token_budget(
                         &turn.messages,
                         self.config.auto_compaction_keep_recent_tokens,
@@ -234,24 +237,7 @@ impl<'a> TurnDriver<'a> {
                     .unwrap_or_else(|| turn.model.clone())
             };
             let overflow_recovery = std::mem::take(&mut overflow_recovery_pending);
-            let configured_tool_definitions = self.tool_dispatcher.configured_tool_definitions();
-            let query = {
-                let turn = self.turn.lock().await;
-                turn.messages
-                    .iter()
-                    .rev()
-                    .find_map(|message| match message {
-                        AgentMessage::User { content }
-                        | AgentMessage::UserWithImages { content, .. } => Some(content.clone()),
-                        _ => None,
-                    })
-            };
-            let tool_definitions = crate::local_tool_router::shortlist_from_environment(
-                &query.unwrap_or_default(),
-                &configured_tool_definitions,
-                self.config.needle_enabled,
-            )
-            .await;
+            let tool_definitions = self.tool_dispatcher.configured_tool_definitions();
             let provider_tools = tool_definitions
                 .iter()
                 .map(|tool| tool.to_chat_completions_tool())
@@ -316,14 +302,17 @@ impl<'a> TurnDriver<'a> {
             let manifest_items = {
                 let mut items = Vec::new();
                 for (idx, message) in request_messages.iter().enumerate() {
-                    let normalized = crate::compaction::provider_normalized_message(message);
+                    let normalized = provider_normalized_message(message);
                     let accounted_message = normalized.as_ref().unwrap_or(message);
-                    let serialized = crate::compaction::serialized_message(accounted_message);
+                    let serialized = serialized_message(accounted_message);
                     let digest = format!("{:x}", Sha256::digest(&serialized));
                     let token_estimate = normalized
                         .as_ref()
                         .map(|message| {
-                            crate::compaction::estimate_message_tokens(message, &self.config)
+                            estimate_message_tokens(
+                                message,
+                                &CompactionParams::from(&self.config)
+                            )
                                 .min(u32::MAX as usize) as u32
                         })
                         .unwrap_or(0);
@@ -375,10 +364,10 @@ impl<'a> TurnDriver<'a> {
                 }
                 items
             };
-            let total_estimated_tokens = crate::compaction::estimate_request_tokens(
+            let total_estimated_tokens = estimate_request_tokens(
                 &request_messages,
                 tool_schema_json.as_deref(),
-                &self.config,
+                &CompactionParams::from(&self.config),
             )
             .try_into()
             .ok();

@@ -2,17 +2,24 @@
 //!
 //! Provides the shared execution core across surface adapters (GPUI, Headless),
 //! adhering to the principle: One shared durable execution core; multiple thin surface adapters.
+//!
+//! This module is also the canonical home of the session-runtime surface
+//! (`SessionRuntime` alias, status text, blocking-pool constructor, and the
+//! `test_support` provider-injection helper) used by the GPUI crates.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::{
-    CodingAgent, CodingAgentCancellation, CodingAgentOptions, CodingAgentWorkHandle,
-};
+use crate::cancellation::CodingAgentCancellation;
+use crate::options::CodingAgentOptions;
+use crate::runtime::CodingAgent;
+use crate::scheduler::CodingAgentWorkHandle;
+use threadlane_acp::AcpConfigOption;
 use threadlane_permission::{PermissionDecision, PermissionHandle};
+use threadlane_protocol::{AgentEvent, ImageAttachment, ReasoningEffort};
 use threadlane_question::QuestionHandle;
-use threadlane_runtime::{ModelRoles, ReasoningEffort};
+use threadlane_runtime::ModelRoles;
 
 /// Dynamic status of the session controller.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -21,6 +28,48 @@ pub enum SessionStatus {
     Working,
     Interrupted,
     Error(String),
+}
+
+/// Historical alias: the GPUI session runtime *is* the session controller.
+pub type SessionRuntime = SessionController;
+/// Historical alias for the controller status.
+pub type SessionRuntimeStatus = SessionStatus;
+
+pub fn runtime_status_text(status: SessionRuntimeStatus) -> Option<String> {
+    match status {
+        SessionRuntimeStatus::Ready => None,
+        SessionRuntimeStatus::Working => Some("Working…".into()),
+        SessionRuntimeStatus::Interrupted => {
+            Some("Turn interrupted · Safe replay checkpoints available".into())
+        }
+        SessionRuntimeStatus::Error(error) => Some(error),
+    }
+}
+
+/// Construct a session controller on the shared Tokio blocking pool. WASI
+/// extension loading needs the larger stack and reactor provided there.
+pub fn spawn_session_runtime_construction(
+    options: CodingAgentOptions,
+) -> tokio::task::JoinHandle<std::sync::Arc<SessionController>> {
+    threadlane_provider::exec::get_runtime().spawn_blocking(move || SessionController::new(options))
+}
+
+/// Narrow adapters for cross-crate integration tests.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub mod test_support {
+    use std::sync::Arc;
+
+    use threadlane_protocol::ProviderPort;
+
+    use crate::{CodingAgent, CodingAgentOptions};
+
+    pub fn coding_agent_with_provider(
+        options: CodingAgentOptions,
+        provider: Arc<dyn ProviderPort>,
+    ) -> CodingAgent {
+        CodingAgent::new_with_provider(options, provider)
+    }
 }
 
 /// Unified execution controller for an agent session.
@@ -33,15 +82,14 @@ pub struct SessionController {
     pub work_handle: CodingAgentWorkHandle,
     permission_handle: PermissionHandle,
     question_handle: QuestionHandle,
-    pub prompt_lock: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) prompt_lock: Arc<tokio::sync::Mutex<()>>,
     pub session_file: PathBuf,
     pub selected_model: String,
-    pub reasoning_effort: ReasoningEffort,
+    pub(crate) reasoning_effort: ReasoningEffort,
     pub system_prompt: String,
     pub harness_error: Option<String>,
     is_generating: AtomicBool,
     status: Mutex<SessionStatus>,
-    pub recovery_loaded: AtomicBool,
 }
 
 impl SessionController {
@@ -85,7 +133,6 @@ impl SessionController {
             harness_error,
             is_generating: AtomicBool::new(false),
             status: Mutex::new(status),
-            recovery_loaded: AtomicBool::new(false),
         })
     }
 
@@ -162,7 +209,7 @@ impl SessionController {
     pub fn resolve_question(
         &self,
         request_id: &str,
-        answer: threadlane_runtime::QuestionAnswer,
+        answer: threadlane_protocol::QuestionAnswer,
     ) -> bool {
         self.question_handle.resolve(request_id, answer)
     }
@@ -171,17 +218,172 @@ impl SessionController {
         self.cancellation.cancel()
     }
 
+    /// Drive one interactive turn on the shared Tokio runtime: generation
+    /// guard, task registration, ACP pre-selection, git-branch fact, event
+    /// pump, and cleanup. The only UI-owned parts are the four sinks, which
+    /// the caller maps onto its own stream events; everything else here is
+    /// engine policy shared by every surface adapter.
+    pub fn spawn_interactive_turn<F1, F2, F3, F4>(
+        self: &Arc<Self>,
+        text: String,
+        images: Vec<ImageAttachment>,
+        effort: ReasoningEffort,
+        work_dir: PathBuf,
+        pending_acp: Vec<(String, String)>,
+        on_agent_event: F1,
+        on_output_text: F2,
+        on_acp_options: F3,
+        on_finished: F4,
+    ) -> Result<(), String>
+    where
+        F1: Fn(AgentEvent) + Send + Sync + 'static,
+        F2: Fn(String) + Send + Sync + 'static,
+        F3: Fn(Vec<AcpConfigOption>, Option<String>, Option<(String, String)>)
+            + Send
+            + Sync
+            + 'static,
+        F4: Fn() + Send + Sync + 'static,
+    {
+        self.begin_generation()?;
+        struct RunCleanup<F4: Fn()> {
+            runtime: Arc<SessionController>,
+            registration_id: u64,
+            on_finished: F4,
+            error: Option<String>,
+        }
+        impl<F4: Fn()> Drop for RunCleanup<F4> {
+            fn drop(&mut self) {
+                self.runtime
+                    .cancellation
+                    .finish_active_run(self.registration_id);
+                self.runtime.finish_generation(self.error.clone());
+                (self.on_finished)();
+            }
+        }
+        let task_runtime = self.clone();
+        let (registration_tx, registration_rx) = tokio::sync::oneshot::channel();
+        let task = threadlane_provider::exec::get_runtime().spawn(async move {
+            let Ok(registration_id) = registration_rx.await else {
+                task_runtime.finish_generation(Some("Generation registration failed".into()));
+                return;
+            };
+
+            let mut cleanup = RunCleanup {
+                runtime: task_runtime.clone(),
+                registration_id,
+                on_finished,
+                error: None,
+            };
+
+            // Apply New-task ACP selections before the first turn. A failure must
+            // abort this turn: otherwise the prompt would run under the agent's
+            // default configuration rather than the picker selection.
+            for (config_id, value) in pending_acp {
+                match task_runtime.set_acp_config_option(&config_id, &value).await {
+                    Ok(options) => {
+                        on_acp_options(options, None, None);
+                    }
+                    Err(error) => {
+                        cleanup.error = Some(error.clone());
+                        on_acp_options(Vec::new(), Some(error), Some((config_id, value)));
+                        return;
+                    }
+                }
+            }
+
+            let turn_span = tracing::info_span!("chat.turn");
+            tracing::info!(parent: &turn_span, "starting chat turn");
+            let git_branch =
+                tokio::task::spawn_blocking(move || threadlane_git::current_branch(&work_dir))
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .flatten();
+            let mut agent = task_runtime.agent.lock().await;
+            if let Some(branch) = git_branch {
+                if let Err(error) = agent.set_fact("git_branch", &branch) {
+                    cleanup.error = Some(error.clone());
+                    on_agent_event(AgentEvent::AgentError { error });
+                    return;
+                }
+            }
+            agent.set_reasoning_effort(effort).await;
+            let mut events = agent.subscribe();
+            let run_error = {
+                let run = agent.handle_input_with_images(&text, images);
+                tokio::pin!(run);
+                let mut run_error = None;
+                let mut saw_agent_error = false;
+
+                loop {
+                    tokio::select! {
+                        result = &mut run => {
+                            match result {
+                                Some(Ok(output)) if !output.is_empty() => {
+                                    on_output_text(output);
+                                }
+                                Some(Err(error)) => {
+                                    tracing::error!(error = %error, "chat turn failed");
+                                    run_error = Some(error);
+                                }
+                                _ => {}
+                            }
+                            while let Ok(event) = events.try_recv() {
+                                saw_agent_error |= matches!(event, AgentEvent::AgentError { .. });
+                                on_agent_event(event);
+                            }
+                            if let Some(error) = run_error.as_ref().filter(|_| !saw_agent_error) {
+                                on_agent_event(AgentEvent::AgentError { error: error.clone() });
+                            }
+                            break;
+                        }
+                        event = events.recv() => {
+                            match event {
+                                Ok(event) => {
+                                    saw_agent_error |= matches!(event, AgentEvent::AgentError { .. });
+                                    on_agent_event(event);
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                            }
+                        }
+                    }
+                }
+                run_error
+            };
+
+            tracing::info!(error = ?run_error, "chat turn finished");
+            // Read after the turn because an external agent defines its own
+            // settings and only reports them once a session is open. This is the
+            // free path: the turn already connected, so nothing is started here.
+            let acp_options = agent.acp_user_config_options();
+            if !acp_options.is_empty() {
+                on_acp_options(acp_options, None, None);
+            }
+            drop(agent);
+            cleanup.error = run_error;
+        });
+
+        let registration_id = match self.cancellation.track_active_run(task.abort_handle()) {
+            Ok(id) => id,
+            Err(error) => {
+                task.abort();
+                self.finish_generation(Some(error.clone()));
+                return Err(error);
+            }
+        };
+        if registration_tx.send(registration_id).is_err() {
+            self.cancellation.finish_active_run(registration_id);
+            let error = "Generation task stopped before registration".to_string();
+            self.finish_generation(Some(error.clone()));
+            return Err(error);
+        }
+        Ok(())
+    }
+
     pub async fn set_model_roles(&self, roles: ModelRoles) {
         let mut agent = self.agent.lock().await;
         agent.set_model_roles(roles);
-    }
-
-    pub fn try_set_needle_enabled(&self, enabled: bool) -> bool {
-        let Ok(mut agent) = self.agent.try_lock() else {
-            return false;
-        };
-        agent.set_needle_enabled(enabled);
-        true
     }
 
     pub async fn reload_extensions(&self) -> Result<usize, String> {

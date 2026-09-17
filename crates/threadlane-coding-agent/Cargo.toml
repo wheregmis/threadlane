@@ -2,7 +2,20 @@
 name = "threadlane-coding-agent"
 version = "0.1.0"
 edition = "2021"
-description = "Coding agent engine for Threadlane: CodingAgent runtime, durable harness, subagents, supervisor controller, and session support modules"
+description = "Coding agent engine for Threadlane: CodingAgent runtime, durable harness, subagents, session controller, and session support modules"
+# The only binary here is a test fixture, declared explicitly below so it is
+# not built into ordinary workspace builds.
+autobins = false
+
+# A stand-in ACP agent for `tests/acp_engine_tests.rs`. The ACP client spawns a
+# real subprocess, so covering it needs something real to spawn.
+[[bin]]
+name = "acp_stub_agent"
+path = "src/bin/acp_stub_agent.rs"
+required-features = ["test-support"]
+
+[features]
+test-support = ["threadlane-permission/test-support"]
 
 [dependencies]
 async-trait.workspace = true
@@ -12,10 +25,14 @@ threadlane-acp.workspace = true
 threadlane-acp-engine.workspace = true
 threadlane-auth.workspace = true
 threadlane-browser.workspace = true
+threadlane-compaction.workspace = true
 threadlane-computer.workspace = true
+threadlane-context.workspace = true
 threadlane-git.workspace = true
 threadlane-mcp.workspace = true
+threadlane-orchestrator.workspace = true
 threadlane-permission.workspace = true
+threadlane-plan.workspace = true
 threadlane-project.workspace = true
 threadlane-prompt.workspace = true
 threadlane-protocol.workspace = true
