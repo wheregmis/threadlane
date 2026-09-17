@@ -23,8 +23,8 @@ pub use config::{AgentConfig, AgentConfigBuilder, CodingAgentConfig, CodingAgent
 pub use error::AgentError;
 pub use harness::{
     has_open_subagent_lanes, interrupted_subagent_lanes, AcceptedRun, DurableEvent, DurablePayload,
-    InterruptedSubagentLane, LaneQueue, OperationOutcome, QueueKind, Record, RecoveryResult,
-    SteerItem, SteerPriority, ToolReplaySafety,
+    InterruptedSubagentLane, OperationOutcome, QueueKind, Record, RecoveryResult, SteerPriority,
+    ToolReplaySafety,
 };
 // Turn-repair helper lives in `threadlane-provider::convert`, next to the
 // id normalization it relies on; re-exported here so existing paths work.

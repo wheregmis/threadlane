@@ -7,7 +7,6 @@ mod jsonl;
 mod memory;
 mod procedure;
 mod projections;
-mod queue;
 mod reducer;
 mod session;
 mod sqlite;
@@ -45,7 +44,6 @@ pub use projections::{
     project_chat_messages, tool_activity_display_summary, tool_activity_summary, UiChatMessage,
     UiMessageRole, UiToolActivity,
 };
-pub use queue::{LaneQueue, SteerItem, SteerPriority};
 pub use reducer::Reducer;
 pub use session::{LaneHandle, SessionAgent};
 pub use sqlite::SqliteStore;
@@ -67,7 +65,7 @@ pub use types::{
     ErrorCategory, InterruptedSubagentLane, LaneState, LaneStatus, OperationIntent,
     OperationOutcome, PermissionTraceDecision, PermissionTraceScope, PermissionTraceSource,
     PromptSnapshot, ProviderErrorSummary, ProviderOutcome, ProvisionedEntry, QueueKind,
-    QueuedEntry, Record, RecoveryResult, ReduceError, ReducedState, RetryState,
-    StreamCheckpointKind, SubagentLifecyclePhase, SurfaceOperation, ToolExecutionOutcome,
+    QueuedEntry, Record, RecoveryResult, ReduceError,     ReducedState, RetryState,
+    SteerPriority, StreamCheckpointKind, SubagentLifecyclePhase, SurfaceOperation, ToolExecutionOutcome,
     ToolExecutionPhase, ToolReplaySafety, ToolResult, ToolSpec, ToolState, TraceString, UsageCause,
 };

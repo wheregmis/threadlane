@@ -1,4 +1,3 @@
-use super::queue::SteerPriority;
 use threadlane_protocol::{AgentMessage, ImageAttachment, ReasoningEffort, TokenUsage};
 // Durable permission-trace vocabulary lives in `threadlane-protocol` so the
 // permission manager and trajectory analysis share it without depending on
@@ -394,6 +393,13 @@ pub enum QueueKind {
     Steer,
     FollowUp,
     NextRun,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum SteerPriority {
+    Low = 0,
+    Normal = 1,
+    High = 2,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
