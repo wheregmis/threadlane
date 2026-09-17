@@ -3,7 +3,7 @@ use super::*;
 impl CodingSessionHarness {
     /// Request abort for all open lanes and return the main lane's run id,
     /// if any.
-    pub fn request_abort(&mut self) -> Result<Option<String>, String> {
+    pub(crate) fn request_abort(&mut self) -> Result<Option<String>, String> {
         self.cancellation.store(true, Ordering::SeqCst);
         self.ensure_fresh()?;
         let state = Reducer::reduce(&self.store).map_err(|error| error.to_string())?;
@@ -32,7 +32,7 @@ impl CodingSessionHarness {
         Ok(main_run_id)
     }
 
-    pub fn observe_abort_signal(
+    pub(crate) fn observe_abort_signal(
         &mut self,
         run_id: &str,
         acknowledged: bool,
@@ -118,7 +118,7 @@ impl CodingSessionHarness {
     /// Reconcile an aborted operation: insert abort entry, record, and
     /// finish with `Aborted` outcome.  Returns `true` if recovery produced
     /// a terminal state.
-    pub fn recover_abort(&mut self) -> Result<bool, String> {
+    pub(crate) fn recover_abort(&mut self) -> Result<bool, String> {
         self.ensure_fresh()?;
         let state = Reducer::reduce(&self.store).map_err(|error| error.to_string())?;
         let Some(lane) = state.lane("main") else {

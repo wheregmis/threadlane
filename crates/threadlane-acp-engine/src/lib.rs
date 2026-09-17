@@ -26,7 +26,7 @@ use std::sync::Arc;
 /// Builds an [`AcpWorkspaceClient`] with workspace-scoped filesystem access
 /// through the single shared [`threadlane_tools`] path guard, with the caller
 /// chaining permission/update wiring afterwards.
-pub fn session_workspace_client(workspace_root: PathBuf) -> AcpWorkspaceClient {
+pub(crate) fn session_workspace_client(workspace_root: PathBuf) -> AcpWorkspaceClient {
     AcpWorkspaceClient::new(workspace_root).with_path_validator(Arc::new(
         |requested: &str, root: &std::path::Path| {
             threadlane_tools::validate_path_in_workspace(requested, root)

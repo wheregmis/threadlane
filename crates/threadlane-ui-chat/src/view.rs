@@ -6107,7 +6107,7 @@ impl ChatListView {
     /// entity is created on first open; repeated triggers only raise the
     /// flag. The mirror is global (one panel, many project sessions) and the
     /// session tools write `latest.json` into the global previews dir.
-    pub fn open_mirror(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn open_mirror(&mut self, cx: &mut Context<Self>) {
         let previews_dir = self.model.update(cx, |state, cx| {
             if !state.mirror_open {
                 state.mirror_open = true;

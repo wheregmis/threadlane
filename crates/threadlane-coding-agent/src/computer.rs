@@ -14,7 +14,7 @@ use threadlane_computer::ComputerApproval;
 use threadlane_computer::computer::ComputerToolExecutor;
 
 pub struct ComputerCapability {
-    pub permissions: Option<std::sync::Arc<dyn ComputerApproval>>,
+    pub(crate) permissions: Option<std::sync::Arc<dyn ComputerApproval>>,
 }
 
 impl threadlane_runtime::Capability for ComputerCapability {

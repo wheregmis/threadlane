@@ -26,9 +26,9 @@ use threadlane_runtime::harness::{
 use threadlane_protocol::{AgentEvent, AgentMessage, AgentToolResult, SubagentRecoveryStatus};
 use tokio::sync::broadcast;
 
-pub const MAX_PERSISTED_SYSTEM_PROMPT_BYTES: usize = 256 * 1024;
+pub(crate) const MAX_PERSISTED_SYSTEM_PROMPT_BYTES: usize = 256 * 1024;
 
-pub fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
@@ -56,7 +56,7 @@ mod prewalk_tests {
     }
 }
 
-pub fn durable_prompt_snapshot(content: &str) -> PromptSnapshot {
+pub(crate) fn durable_prompt_snapshot(content: &str) -> PromptSnapshot {
     let sha256 = threadlane_runtime::harness::TraceString::new(sha256_hex(content.as_bytes()))
         .expect("sha256 digest is bounded");
     let explicitly_redacted = std::env::var("THREADLANE_REDACT_SYSTEM_PROMPTS")
@@ -82,7 +82,7 @@ pub fn durable_prompt_snapshot(content: &str) -> PromptSnapshot {
     }
 }
 
-pub fn is_retryable_generation_error(error: &str) -> bool {
+pub(crate) fn is_retryable_generation_error(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
     [
         "timeout",
@@ -100,7 +100,7 @@ pub fn is_retryable_generation_error(error: &str) -> bool {
     .any(|marker| error.contains(marker))
 }
 
-pub fn generation_event_drain_error(
+pub(crate) fn generation_event_drain_error(
     error: broadcast::error::TryRecvError,
 ) -> Option<&'static str> {
     match error {
@@ -111,7 +111,7 @@ pub fn generation_event_drain_error(
     }
 }
 
-pub fn requires_harness_compaction_reset(
+pub(crate) fn requires_harness_compaction_reset(
     durable_messages: &[AgentMessage],
     state_messages: &[AgentMessage],
 ) -> bool {
@@ -121,7 +121,7 @@ pub fn requires_harness_compaction_reset(
         && !state_messages.starts_with(durable_messages)
 }
 
-pub fn compaction_retained_tail(messages: &[AgentMessage]) -> Vec<AgentMessage> {
+pub(crate) fn compaction_retained_tail(messages: &[AgentMessage]) -> Vec<AgentMessage> {
     let Some(summary_index) = messages
         .iter()
         .rposition(|message| threadlane_compaction::compaction_summary_text(message).is_some())
@@ -376,7 +376,7 @@ impl CodingAgent {
         Ok(())
     }
 
-    pub async fn execute_accepted_run(
+    pub(crate) async fn execute_accepted_run(
         &mut self,
         accepted: &threadlane_runtime::harness::AcceptedRun,
     ) -> Result<(), String> {
@@ -481,14 +481,14 @@ impl CodingAgent {
         Ok(())
     }
 
-    pub async fn begin_harness_run(
+    pub(crate) async fn begin_harness_run(
         &mut self,
         prompt: AgentMessage,
     ) -> Result<Option<threadlane_runtime::harness::AcceptedRun>, String> {
         self.begin_harness_run_with_queue(prompt, None).await
     }
 
-    pub async fn begin_harness_run_with_queue(
+    pub(crate) async fn begin_harness_run_with_queue(
         &mut self,
         prompt: AgentMessage,
         queued: Option<(threadlane_runtime::harness::QueueKind, &str)>,
@@ -744,7 +744,7 @@ impl CodingAgent {
         Ok(())
     }
 
-    pub async fn finish_harness_run(
+    pub(crate) async fn finish_harness_run(
         &mut self,
         run_id: Option<&str>,
         outcome: OperationOutcome,
@@ -803,14 +803,14 @@ impl CodingAgent {
         result
     }
 
-    pub fn append_command_message(&mut self, message: AgentMessage) -> Result<(), String> {
+    pub(crate) fn append_command_message(&mut self, message: AgentMessage) -> Result<(), String> {
         if let Some(journal) = self.harness.as_mut() {
             journal.append_message(message)?;
         }
         Ok(())
     }
 
-    pub fn prompt_parent_leaf(
+    pub(crate) fn prompt_parent_leaf(
         &mut self,
         _message: AgentMessage,
         _harness_persisted: bool,
@@ -821,7 +821,7 @@ impl CodingAgent {
         })
     }
 
-    pub async fn compact_history_with_harness(&mut self) -> Result<bool, String> {
+    pub(crate) async fn compact_history_with_harness(&mut self) -> Result<bool, String> {
         let before = self.agent.messages().await;
         let compacted = self.agent.preview_compact_history(None).await;
         if compacted == before {
@@ -866,7 +866,7 @@ impl CodingAgent {
         Ok(true)
     }
 
-    pub fn persist_harness_compaction(
+    pub(crate) fn persist_harness_compaction(
         &mut self,
         summary: &str,
         retained_tail: &[AgentMessage],
@@ -909,7 +909,7 @@ impl CodingAgent {
         Ok(())
     }
 
-    pub async fn sync_turn_from_model_context(&self) -> Result<(), String> {
+    pub(crate) async fn sync_turn_from_model_context(&self) -> Result<(), String> {
         let Some(harness) = self.harness.as_ref() else {
             return Ok(());
         };
@@ -932,7 +932,7 @@ impl CodingAgent {
         }
     }
 
-    pub async fn dispatch_assistant_hook(&self, message: &AgentMessage) {
+    pub(crate) async fn dispatch_assistant_hook(&self, message: &AgentMessage) {
         let AgentMessage::Assistant {
             content,
             tool_calls,
@@ -966,7 +966,7 @@ impl CodingAgent {
         .await;
     }
 
-    pub async fn sync_harness_and_dispatch_assistant_hooks(&mut self) {
+    pub(crate) async fn sync_harness_and_dispatch_assistant_hooks(&mut self) {
         let messages = self.agent.messages().await;
         let state_messages: Vec<AgentMessage> = messages
             .into_iter()
@@ -1034,7 +1034,7 @@ impl CodingAgent {
         }
     }
 
-    pub fn commit_completed_subagent_lanes(&mut self) -> Result<(), String> {
+    pub(crate) fn commit_completed_subagent_lanes(&mut self) -> Result<(), String> {
         let lanes = {
             let mut completed = self
                 .completed_subagent_lanes
@@ -1097,7 +1097,7 @@ impl CodingAgent {
         Ok(())
     }
 
-    pub async fn recover_interrupted_subagent_lanes(&mut self) -> Result<usize, String> {
+    pub(crate) async fn recover_interrupted_subagent_lanes(&mut self) -> Result<usize, String> {
         match &self.interrupted_subagent_recovery {
             InterruptedSubagentRecoveryState::Complete => return Ok(0),
             InterruptedSubagentRecoveryState::Pending => {}
@@ -1478,7 +1478,7 @@ impl CodingAgent {
         Ok(recovered)
     }
 
-    pub async fn replay_safe_tools(
+    pub(crate) async fn replay_safe_tools(
         &self,
         records: &[threadlane_runtime::Record],
     ) -> Vec<AgentToolResult> {

@@ -240,7 +240,7 @@ pub(super) fn touch_or_start(target: StreamTarget) {
 /// Nobody watching means the model tier alone; a watched target runs at
 /// full rate while acts or picture changes are recent, settles to a calmer
 /// rate, and idles down to the model cadence after a quiet minute.
-pub(crate) fn tick_interval_ms(
+fn tick_interval_ms(
     watchers: usize,
     since_activity_ms: u128,
     since_change_ms: u128,
@@ -258,13 +258,13 @@ pub(crate) fn tick_interval_ms(
 /// Whether the model tier should refresh this tick: only while the model is
 /// actively using the computer, so a mirror-only feed never pays for 2×
 /// composites nobody will ask for, and only once per model interval.
-pub(crate) fn model_tier_due(since_activity_ms: u128, since_model_ms: u128) -> bool {
+fn model_tier_due(since_activity_ms: u128, since_model_ms: u128) -> bool {
     since_activity_ms < LIVE_BOOST_MS && since_model_ms >= u128::from(MODEL_FRAME_INTERVAL_MS)
 }
 
 /// True once the poller should stop: no computer calls for two minutes with
 /// nobody watching, or ten minutes regardless.
-pub(crate) fn should_exit(watchers: usize, since_activity_ms: u128) -> bool {
+fn should_exit(watchers: usize, since_activity_ms: u128) -> bool {
     since_activity_ms > WATCHED_IDLE_MS || (watchers == 0 && since_activity_ms > STREAM_IDLE_MS)
 }
 
@@ -448,7 +448,7 @@ pub(crate) fn encode_bgra_jpeg(
     encode_bounded_jpeg(&rgb, width, height, width, quality).map(|(jpeg, _, _)| jpeg)
 }
 
-pub(crate) fn encode_bounded_jpeg(
+fn encode_bounded_jpeg(
     rgb: &[u8],
     width: u32,
     height: u32,

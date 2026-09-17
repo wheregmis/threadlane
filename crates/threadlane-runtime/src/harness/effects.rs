@@ -209,7 +209,7 @@ impl GatedEffects {
     /// must consult both the store and this iterator, otherwise two parked
     /// procedures compute the same attempt/id and the second fails at commit
     /// with `DuplicateId` after reporting `Ok`.
-    pub(crate) fn pending_records(&self) -> impl Iterator<Item = &Record> + '_ {
+    fn pending_records(&self) -> impl Iterator<Item = &Record> + '_ {
         self.pending.iter().filter_map(|action| match action {
             EffectAction::AppendRecord { record, .. } => Some(record),
             EffectAction::AppendEntry { .. } => None,

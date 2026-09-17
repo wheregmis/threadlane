@@ -29,7 +29,7 @@ use threadlane_protocol::{
 };
 use tokio::sync::{broadcast, oneshot};
 
-pub const ASK_QUESTION_TOOL_NAME: &str = "ask_question";
+pub(crate) const ASK_QUESTION_TOOL_NAME: &str = "ask_question";
 const MAX_QUESTIONS: usize = 4;
 const MAX_OPTIONS: usize = 6;
 const MAX_TEXT_CHARS: usize = 500;
@@ -89,7 +89,7 @@ impl QuestionHandle {
     }
 
     /// Publishes a [`QuestionRequest`] and waits for the user's answer.
-    pub async fn ask(
+    pub(crate) async fn ask(
         &self,
         event_tx: &broadcast::Sender<AgentEvent>,
         questions: Vec<QuestionItem>,

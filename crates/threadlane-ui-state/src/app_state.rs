@@ -30,7 +30,7 @@ pub struct AppState {
     pub sidebar_project_filter: Option<PathBuf>,
     pub search_query: String,
     pub messages: Arc<Vec<ChatMessageInfo>>,
-    pub available_models: Vec<threadlane_ui_catalog::ModelOption>,
+    pub(crate) available_models: Vec<threadlane_ui_catalog::ModelOption>,
     pub active_plan: SessionPlan,
     pub is_generating: bool,
     composer_text: String,
@@ -67,7 +67,7 @@ pub struct AppState {
     pub git_prs: HashMap<(PathBuf, String), Option<threadlane_git::GitHubPrInfo>>,
     pub auto_address_pr_reviews_enabled: bool,
     /// Persistent PR review tracking per project, loaded on demand and cached.
-    pub pr_review_tracking:
+    pub(crate) pr_review_tracking:
         HashMap<PathBuf, threadlane_git::PrReviewTrackingStore>,
 
     pub selected_model: String,
@@ -334,7 +334,7 @@ impl AppState {
         state
     }
 
-    pub fn messages_mut(&mut self) -> &mut Vec<ChatMessageInfo> {
+    pub(crate) fn messages_mut(&mut self) -> &mut Vec<ChatMessageInfo> {
         Arc::make_mut(&mut self.messages)
     }
 
@@ -407,7 +407,7 @@ impl AppState {
         self.invalidate_idle_runtimes();
     }
 
-    pub fn save_openai_key(&mut self, key: String) -> Result<(), String> {
+    pub(crate) fn save_openai_key(&mut self, key: String) -> Result<(), String> {
         let key = key.trim().to_string();
         if !key.is_empty() {
             threadlane_auth::openai_auth::save_openai_api_key(&key)?;
@@ -423,7 +423,7 @@ impl AppState {
         Ok(())
     }
 
-    pub fn save_opencode_key(&mut self, key: String) -> Result<(), String> {
+    pub(crate) fn save_opencode_key(&mut self, key: String) -> Result<(), String> {
         let key = key.trim().to_string();
         if !key.is_empty() {
             threadlane_auth::opencode_auth::save_opencode_api_key(&key)?;
@@ -456,7 +456,7 @@ impl AppState {
         self.invalidate_idle_runtimes();
     }
 
-    pub fn set_selected_model(&mut self, model: String) {
+    pub(crate) fn set_selected_model(&mut self, model: String) {
         if !self.available_models.iter().any(|m| m.id == model) {
             return;
         }
@@ -535,25 +535,25 @@ impl AppState {
         self.active_session_runtime();
     }
 
-    pub fn open_settings(&mut self) {
+    pub(crate) fn open_settings(&mut self) {
         self.workspace_page = WorkspacePage::Settings;
         self.auth_status_msg = None;
     }
 
-    pub fn open_github(&mut self) {
+    pub(crate) fn open_github(&mut self) {
         self.workspace_page = WorkspacePage::GitHub;
     }
 
-    pub fn open_github_issue(&mut self, work_dir: PathBuf, number: u64) {
+    pub(crate) fn open_github_issue(&mut self, work_dir: PathBuf, number: u64) {
         self.workspace_page = WorkspacePage::GitHub;
         self.requested_github_issue = Some((work_dir, number));
     }
 
-    pub fn close_github(&mut self) {
+    pub(crate) fn close_github(&mut self) {
         self.workspace_page = WorkspacePage::Chat;
     }
 
-    pub fn close_settings(&mut self) {
+    pub(crate) fn close_settings(&mut self) {
         self.workspace_page = WorkspacePage::Chat;
         self.auth_status_msg = None;
     }
@@ -600,7 +600,7 @@ impl AppState {
         }
     }
 
-    pub fn begin_new_task(&mut self) {
+    pub(crate) fn begin_new_task(&mut self) {
         self.workspace_page = WorkspacePage::Chat;
         if let Some(project_work_dir) = self.active_session_id.as_ref().and_then(|session_id| {
             self.projects.iter().find_map(|project| {
@@ -632,7 +632,7 @@ impl AppState {
         self.draft_work_mode = mode;
     }
 
-    pub fn set_sidebar_project_filter(&mut self, work_dir: Option<PathBuf>) {
+    pub(crate) fn set_sidebar_project_filter(&mut self, work_dir: Option<PathBuf>) {
         self.sidebar_project_filter = work_dir.filter(|candidate| {
             self.projects
                 .iter()
@@ -646,7 +646,7 @@ impl AppState {
         }
     }
 
-    pub fn select_draft_project(&mut self, work_dir: PathBuf) {
+    pub(crate) fn select_draft_project(&mut self, work_dir: PathBuf) {
         if self
             .projects
             .iter()
@@ -714,15 +714,15 @@ impl AppState {
         self.requested_composer_prompt = Some(prompt);
     }
 
-    pub fn request_run_terminal_command(&mut self, command: String) {
+    pub(crate) fn request_run_terminal_command(&mut self, command: String) {
         self.requested_terminal_command = Some(command);
     }
 
-    pub fn request_open_terminal(&mut self, work_dir: PathBuf) {
+    pub(crate) fn request_open_terminal(&mut self, work_dir: PathBuf) {
         self.requested_terminal_work_dir = Some(work_dir);
     }
 
-    pub fn select_session(&mut self, work_dir: PathBuf, session_id: String) {
+    pub(crate) fn select_session(&mut self, work_dir: PathBuf, session_id: String) {
         self.select_session_with_persistence(work_dir, session_id, true)
     }
 
@@ -795,7 +795,7 @@ impl AppState {
         self.pending_hydrations.push(request);
     }
 
-    pub fn settle_session(
+    pub(crate) fn settle_session(
         &mut self,
         work_dir: PathBuf,
         session_id: String,
@@ -871,7 +871,7 @@ impl AppState {
         Ok(())
     }
 
-    pub fn remove_session(
+    pub(crate) fn remove_session(
         &mut self,
         work_dir: PathBuf,
         session_id: String,
@@ -1370,13 +1370,13 @@ impl AppState {
         )
     }
 
-    pub fn toggle_project_expanded(&mut self, work_dir: &Path) {
+    pub(crate) fn toggle_project_expanded(&mut self, work_dir: &Path) {
         if let Some(proj) = self.projects.iter_mut().find(|p| p.work_dir == work_dir) {
             proj.is_expanded = !proj.is_expanded;
         }
     }
 
-    pub fn toggle_tool_activity(&mut self, tool_call_id: &str) {
+    pub(crate) fn toggle_tool_activity(&mut self, tool_call_id: &str) {
         if let Some(activity) = self
             .messages_mut()
             .iter_mut()
@@ -1387,7 +1387,7 @@ impl AppState {
         }
     }
 
-    pub fn attach_project(&mut self, raw_path: PathBuf) -> Result<(), String> {
+    pub(crate) fn attach_project(&mut self, raw_path: PathBuf) -> Result<(), String> {
         let canonical = std::fs::canonicalize(&raw_path).map_err(|e| e.to_string())?;
         if !canonical.is_dir() {
             return Err("Selected path is not a directory".into());
@@ -1664,7 +1664,7 @@ impl AppState {
     }
 
     /// Projects trajectory entries, token usage, and metrics from an already-open store.
-    pub fn project_trajectory_from_store(
+    pub(crate) fn project_trajectory_from_store(
         store: &JsonlStore,
     ) -> (
         Vec<TrajectoryEntry>,
@@ -2683,7 +2683,7 @@ impl AppState {
     }
 }
 
-pub(super) fn is_attachable_project_root(path: &Path) -> bool {
+fn is_attachable_project_root(path: &Path) -> bool {
     path.parent().is_some()
 }
 
@@ -3306,7 +3306,7 @@ impl AppState {
     }
 
     /// Applies one of the selected external agent's settings.
-    pub fn set_acp_config_option(&mut self, config_id: String, value: String) {
+    pub(crate) fn set_acp_config_option(&mut self, config_id: String, value: String) {
         let Some((runtime, session_id)) = self.active_session_runtime() else {
             // No session yet (New task): remember the choice, show it
             // optimistically via the launch-time cache, and apply it to the
@@ -3371,7 +3371,7 @@ impl AppState {
 
     /// Takes pending ACP `config_id -> value` selections for `agent_id`,
     /// clearing them so they apply exactly once to the next runtime.
-    pub fn take_pending_acp_config(&mut self, agent_id: &str) -> Vec<(String, String)> {
+    pub(crate) fn take_pending_acp_config(&mut self, agent_id: &str) -> Vec<(String, String)> {
         self.pending_acp_config
             .remove(agent_id)
             .map(|map| map.into_iter().collect())
@@ -3844,7 +3844,7 @@ impl AppState {
             .map(|message| message.text.as_str())
     }
 
-    pub fn stage_busy_message(
+    pub(crate) fn stage_busy_message(
         &mut self,
         text: String,
         images: Vec<ImageAttachment>,
@@ -3865,7 +3865,7 @@ impl AppState {
         Ok(())
     }
 
-    pub fn queue_pending_message(&mut self) -> Result<(), String> {
+    pub(crate) fn queue_pending_message(&mut self) -> Result<(), String> {
         let (runtime, session_id, text, images) = self.pending_runtime_message()?;
         runtime
             .work_handle
@@ -3876,7 +3876,7 @@ impl AppState {
         Ok(())
     }
 
-    pub fn steer_pending_message(&mut self) -> Result<(), String> {
+    pub(crate) fn steer_pending_message(&mut self) -> Result<(), String> {
         let (runtime, session_id, text, images) = self.pending_runtime_message()?;
         runtime
             .work_handle
@@ -3887,7 +3887,7 @@ impl AppState {
         Ok(())
     }
 
-    pub fn dismiss_pending_message(&mut self) {
+    pub(crate) fn dismiss_pending_message(&mut self) {
         if let Some(session_id) = self.active_session_id.as_ref() {
             self.pending_composer_messages.remove(session_id);
         }
@@ -3933,11 +3933,11 @@ impl AppState {
         }
     }
 
-    pub fn send_prompt(&mut self, text: String) -> Result<(), String> {
+    pub(crate) fn send_prompt(&mut self, text: String) -> Result<(), String> {
         self.send_prompt_with_images(text, Vec::new())
     }
 
-    pub fn send_prompt_with_images(
+    pub(crate) fn send_prompt_with_images(
         &mut self,
         text: String,
         images: Vec<ImageAttachment>,
@@ -4063,7 +4063,7 @@ impl AppState {
         Ok(())
     }
 
-    pub fn cancel_generation(&mut self) -> Result<(), String> {
+    pub(crate) fn cancel_generation(&mut self) -> Result<(), String> {
         let (Some(work_dir), Some(session_id)) = (
             self.active_work_dir.as_ref(),
             self.active_session_id.as_ref(),

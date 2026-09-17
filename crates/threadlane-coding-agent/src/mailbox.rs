@@ -23,23 +23,23 @@ use std::time::Duration;
 /// One queued peer message.
 #[derive(Debug, Clone)]
 pub struct QueuedMessage {
-    pub from: String,
-    pub body: String,
-    pub seq: u64,
+    pub(crate) from: String,
+    pub(crate) body: String,
+    pub(crate) seq: u64,
 }
 
 /// Lane roster entry for `hub list`.
 #[derive(Debug, Clone)]
 pub struct HubLaneInfo {
-    pub lane_name: String,
-    pub run_id: String,
-    pub agent: String,
-    pub task: String,
-    pub model: String,
-    pub live: bool,
-    pub unread: usize,
+    pub(crate) lane_name: String,
+    pub(crate) run_id: String,
+    pub(crate) agent: String,
+    pub(crate) task: String,
+    pub(crate) model: String,
+    pub(crate) live: bool,
+    pub(crate) unread: usize,
     /// Terminal outcome once settled: `completed`, `failed`, or `killed`.
-    pub outcome: Option<String>,
+    pub(crate) outcome: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -70,13 +70,13 @@ pub struct SubagentHub {
 }
 
 impl SubagentHub {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Register a live lane (idempotent). Re-registering (e.g. revive)
     /// clears any stale kill flag and outcome for the lane and agent alias.
-    pub fn register(
+    pub(crate) fn register(
         &self,
         lane_name: String,
         run_id: String,
@@ -107,7 +107,7 @@ impl SubagentHub {
         self.wake.notify_waiters();
     }
 
-    pub fn mark_settled(&self, lane_name: &str, live: bool) {
+    pub(crate) fn mark_settled(&self, lane_name: &str, live: bool) {
         {
             if let Ok(mut inner) = self.inner.lock() {
                 if let Some(lane) = inner.lanes.get_mut(lane_name) {
@@ -119,7 +119,7 @@ impl SubagentHub {
     }
 
     /// Record a terminal outcome (`completed`, `failed`, `killed`).
-    pub fn set_outcome(&self, lane_name: &str, outcome: impl Into<String>) {
+    pub(crate) fn set_outcome(&self, lane_name: &str, outcome: impl Into<String>) {
         {
             if let Ok(mut inner) = self.inner.lock() {
                 inner.outcomes.insert(lane_name.to_string(), outcome.into());
@@ -131,7 +131,7 @@ impl SubagentHub {
     /// Flag a lane for shutdown. Returns false when the lane is unknown.
     /// The child observes the flag at its next turn boundary and exits its
     /// turn loop with a killed result; the caller records the harness abort.
-    pub fn flag_killed(&self, lane_name: &str, agent: &str) -> bool {
+    pub(crate) fn flag_killed(&self, lane_name: &str, agent: &str) -> bool {
         let known = {
             match self.inner.lock() {
                 Ok(mut inner) => {
@@ -154,7 +154,7 @@ impl SubagentHub {
         known
     }
 
-    pub fn is_killed(&self, lane_name: &str, agent: &str) -> bool {
+    pub(crate) fn is_killed(&self, lane_name: &str, agent: &str) -> bool {
         self.inner.lock().is_ok_and(|inner| {
             inner.killed.contains(lane_name) || (!agent.is_empty() && inner.killed.contains(agent))
         })
@@ -162,7 +162,7 @@ impl SubagentHub {
 
     /// Resolve when the lane (or its agent alias) is kill-flagged. Never
     /// holds the mutex across an await point.
-    pub async fn wait_killed(&self, lane_name: &str, agent: &str) {
+    pub(crate) async fn wait_killed(&self, lane_name: &str, agent: &str) {
         loop {
             if self.is_killed(lane_name, agent) {
                 return;
@@ -172,7 +172,7 @@ impl SubagentHub {
     }
 
     /// Resolve `target` (lane name or agent alias) to a roster entry.
-    pub fn resolve_lane(&self, target: &str) -> Option<HubLaneInfo> {
+    pub(crate) fn resolve_lane(&self, target: &str) -> Option<HubLaneInfo> {
         self.roster()
             .into_iter()
             .find(|lane| lane.lane_name == target || lane.agent == target)
@@ -181,7 +181,7 @@ impl SubagentHub {
     /// Wait until every listed lane settles or `timeout` elapses. An empty
     /// target list waits for all currently live lanes. Returns the per-lane
     /// status lines plus whether the wait timed out.
-    pub async fn wait_settled(
+    pub(crate) async fn wait_settled(
         &self,
         lane_names: &[String],
         timeout: Duration,
@@ -257,7 +257,7 @@ impl SubagentHub {
     /// started siblings are queued, not dropped. Callers validate names
     /// (sibling list / roster) before sending so typos still error there.
     /// Returns the resolved recipient keys.
-    pub fn send(&self, from: &str, to: &str, body: String) -> Result<Vec<String>, String> {
+    pub(crate) fn send(&self, from: &str, to: &str, body: String) -> Result<Vec<String>, String> {
         let body = body.trim().to_string();
         if body.is_empty() {
             return Err("message must be non-empty".into());
@@ -311,7 +311,7 @@ impl SubagentHub {
     }
 
     /// Drain pending inbox messages for a lane (marks roster read).
-    pub fn drain(&self, lane_name: &str) -> Vec<QueuedMessage> {
+    pub(crate) fn drain(&self, lane_name: &str) -> Vec<QueuedMessage> {
         let mut inner = match self.inner.lock() {
             Ok(inner) => inner,
             Err(_) => return Vec::new(),
@@ -327,7 +327,7 @@ impl SubagentHub {
         messages
     }
 
-    pub fn roster(&self) -> Vec<HubLaneInfo> {
+    pub(crate) fn roster(&self) -> Vec<HubLaneInfo> {
         let inner = match self.inner.lock() {
             Ok(inner) => inner,
             Err(_) => return Vec::new(),
@@ -357,11 +357,11 @@ impl SubagentHub {
 /// needed to spawn the follow-up run on the same lane.
 #[derive(Debug, Clone)]
 pub struct ReviveRequest {
-    pub lane_name: String,
-    pub agent: String,
-    pub task: String,
-    pub model: String,
-    pub message: String,
+    pub(crate) lane_name: String,
+    pub(crate) agent: String,
+    pub(crate) task: String,
+    pub(crate) model: String,
+    pub(crate) message: String,
 }
 
 /// Spawns a revived follow-up run; returns a short ack for the tool result.
@@ -677,13 +677,13 @@ mod tests {
 // `message_peer` runs inside child lanes; `hub` runs on the parent. Both
 // share `SubagentHub` so sibling IRC and parent steering use one channel.
 
-pub const HUB_TOOL_NAME: &str = "hub";
-pub const MESSAGE_PEER_TOOL_NAME: &str = "message_peer";
+pub(crate) const HUB_TOOL_NAME: &str = "hub";
+pub(crate) const MESSAGE_PEER_TOOL_NAME: &str = "message_peer";
 
 /// Drain both the lane-name inbox and the agent-role inbox. Lanes address
 /// each other by role (stable before journal identities resolve); the parent
 /// addresses by lane name from `hub list`.
-pub fn drain_lane_inbox(
+pub(crate) fn drain_lane_inbox(
     hub: &SubagentHub,
     lane_name: &str,
     agent: &str,
@@ -696,7 +696,7 @@ pub fn drain_lane_inbox(
     messages
 }
 
-pub fn format_inbox(messages: &[QueuedMessage]) -> serde_json::Value {
+pub(crate) fn format_inbox(messages: &[QueuedMessage]) -> serde_json::Value {
     serde_json::Value::Array(
         messages
             .iter()
@@ -715,7 +715,7 @@ pub struct MessagePeerToolExecutor {
 }
 
 impl MessagePeerToolExecutor {
-    pub fn new(
+    pub(crate) fn new(
         hub: SubagentHub,
         lane_name: String,
         agent: String,
@@ -814,7 +814,7 @@ pub struct HubToolExecutor {
 }
 
 impl HubToolExecutor {
-    pub fn new(hub: SubagentHub, session_file: Option<PathBuf>) -> Self {
+    pub(crate) fn new(hub: SubagentHub, session_file: Option<PathBuf>) -> Self {
         Self {
             hub,
             session_file,
@@ -822,7 +822,7 @@ impl HubToolExecutor {
         }
     }
 
-    pub fn with_revive_hook(mut self, hook: ReviveHook) -> Self {
+    pub(crate) fn with_revive_hook(mut self, hook: ReviveHook) -> Self {
         self.revive_hook = Some(hook);
         self
     }

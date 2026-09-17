@@ -1,7 +1,7 @@
 use super::*;
 
 impl CodingSessionHarness {
-    pub fn compaction_summary_without_indexed_tool_outputs(
+    pub(crate) fn compaction_summary_without_indexed_tool_outputs(
         &self,
         summary: &str,
         compacted_messages: usize,
@@ -35,7 +35,7 @@ impl CodingSessionHarness {
         Ok(build_checkpoint_omitting_tool_outputs(&pairs, &params))
     }
 
-    pub fn context_snapshot_index_for_compaction(
+    pub(crate) fn context_snapshot_index_for_compaction(
         &self,
         compacted_messages: usize,
     ) -> Result<Vec<Value>, String> {
@@ -53,7 +53,8 @@ impl CodingSessionHarness {
         ))
     }
 
-    pub fn checkpoint_open_run_compaction(
+    #[cfg(test)]
+    pub(crate) fn checkpoint_open_run_compaction(
         &mut self,
         run_id: &str,
         summary: &str,
@@ -184,7 +185,7 @@ impl CodingSessionHarness {
         result
     }
 
-    pub fn record_manual_compaction(
+    pub(crate) fn record_manual_compaction(
         &mut self,
         run_id: &str,
         model: &str,

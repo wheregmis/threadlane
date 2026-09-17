@@ -7,7 +7,7 @@ pub fn save_opencode_api_key(key: &str) -> Result<(), String> {
 }
 
 /// Saves the API key file at the injected store's location.
-pub fn save_opencode_api_key_in(key: &str, locations: &CredentialStore) -> Result<(), String> {
+pub(crate) fn save_opencode_api_key_in(key: &str, locations: &CredentialStore) -> Result<(), String> {
     let key = key.trim();
     if key.is_empty() {
         return Err("OpenCode API key cannot be empty".to_string());
@@ -23,7 +23,7 @@ pub fn load_opencode_api_key() -> Option<String> {
 
 /// Loads the API key file from the injected store's location (env fallback
 /// preserved: `OPENCODE_API_KEY`, then `OPENCODE_GO_API_KEY`).
-pub fn load_opencode_api_key_in(locations: &CredentialStore) -> Option<String> {
+pub(crate) fn load_opencode_api_key_in(locations: &CredentialStore) -> Option<String> {
     let path = locations.opencode_api_key_path();
     if path.exists() {
         if let Ok(content) = fs::read_to_string(path) {
@@ -51,7 +51,7 @@ pub fn clear_opencode_api_key() -> Result<(), String> {
 }
 
 /// Removes the API key file at the injected store's location.
-pub fn clear_opencode_api_key_in(locations: &CredentialStore) -> Result<(), String> {
+pub(crate) fn clear_opencode_api_key_in(locations: &CredentialStore) -> Result<(), String> {
     let path = locations.opencode_api_key_path();
     if path.exists() {
         fs::remove_file(path).map_err(|e| e.to_string())?;

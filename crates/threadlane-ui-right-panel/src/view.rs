@@ -55,7 +55,7 @@ pub struct RightPanelView {
     should_clear_commit_message: bool,
     git_busy: bool,
     git_message_pending: bool,
-    pub git_feedback: Option<String>,
+    pub(crate) git_feedback: Option<String>,
     pending_git_notifications: Vec<Notification>,
     branch_popover_open: bool,
     branch_filter_input: Entity<InputState>,
@@ -402,7 +402,7 @@ impl RightPanelView {
         self.git_status = status;
     }
 
-    pub fn draft_pr_checkout_key(&self) -> Option<DraftPrContextKey> {
+    pub(crate) fn draft_pr_checkout_key(&self) -> Option<DraftPrContextKey> {
         let project = self.project.clone()?;
         let status = self.git_status.as_ref()?;
         if self.worktree_unavailable || status.detached {
@@ -420,7 +420,7 @@ impl RightPanelView {
         })
     }
 
-    pub fn draft_pr_creation_key(&self) -> Option<DraftPrContextKey> {
+    pub(crate) fn draft_pr_creation_key(&self) -> Option<DraftPrContextKey> {
         can_create_pull_request(!self.worktree_unavailable, self.git_status.as_ref())
             .then(|| self.draft_pr_checkout_key())
             .flatten()
@@ -481,7 +481,7 @@ impl RightPanelView {
         }
     }
 
-    pub fn refresh_surface(&self, surface: Surface) {
+    pub(crate) fn refresh_surface(&self, surface: Surface) {
         let Some(project) = self.project.clone() else {
             return;
         };
@@ -841,7 +841,7 @@ impl RightPanelView {
         self.execute_git_action(action, Some(window), cx);
     }
 
-    pub fn run_git_action_without_window(
+    pub(crate) fn run_git_action_without_window(
         &mut self,
         action: GitAction,
         cx: &mut Context<Self>,
@@ -1582,7 +1582,7 @@ impl RightPanelView {
             .into_any_element()
     }
 
-    pub fn handle_discard_option(
+    pub(crate) fn handle_discard_option(
         panel: Entity<RightPanelView>,
         opt: DiscardOption,
         window: &mut Window,
@@ -4711,7 +4711,7 @@ fn convert_node_to_tree_item(node: FileNode, expanded_paths: &HashSet<String>) -
 /// explicit empty selection is preserved rather than re-defaulted.
 /// (Only exercised by `tests.rs`.)
 #[cfg(test)]
-pub fn retain_review_selection(
+pub(crate) fn retain_review_selection(
     selected: &mut HashSet<String>,
     available: HashSet<String>,
     initialized: &mut bool,

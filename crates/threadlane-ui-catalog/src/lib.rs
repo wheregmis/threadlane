@@ -461,10 +461,9 @@ fn antigravity_capabilities(
 /// successful load.
 #[derive(Clone, Debug)]
 pub struct CachedAcpAgentModels {
-    pub agent_id: String,
-    pub agent_name: String,
-    pub options: Vec<threadlane_acp::AcpConfigOption>,
-    pub error: Option<String>,
+    pub(crate) agent_id: String,
+    pub(crate) options: Vec<threadlane_acp::AcpConfigOption>,
+    pub(crate) error: Option<String>,
 }
 
 static CACHED_ACP_MODELS: std::sync::OnceLock<
@@ -504,7 +503,6 @@ pub async fn refresh_acp_models(project_root: Option<std::path::PathBuf>) {
         .into_iter()
         .map(|preloaded| CachedAcpAgentModels {
             agent_id: preloaded.agent_id,
-            agent_name: preloaded.agent_name,
             options: preloaded.options,
             error: preloaded.error,
         })

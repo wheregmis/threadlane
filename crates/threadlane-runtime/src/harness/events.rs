@@ -19,8 +19,8 @@ pub struct StreamingState {
 pub struct Snapshot {
     session_id: String,
     pub state: ReducedState,
-    pub entries: Vec<Entry>,
-    pub records: Vec<Record>,
+    pub(crate) entries: Vec<Entry>,
+    pub(crate) records: Vec<Record>,
     #[serde(default)]
     pub(crate) streaming: Option<StreamingState>,
 }

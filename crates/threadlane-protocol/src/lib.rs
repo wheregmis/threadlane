@@ -192,11 +192,11 @@ pub mod daemon {
     /// Transport-agnostic permission prompt, mirroring the runtime shape.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     pub struct PermissionRequest {
-        pub id: String,
-        pub capability: String,
-        pub title: String,
-        pub detail: String,
-        pub scopes: Vec<String>,
+        pub(crate) id: String,
+        pub(crate) capability: String,
+        pub(crate) title: String,
+        pub(crate) detail: String,
+        pub(crate) scopes: Vec<String>,
     }
 
     /// Transport-agnostic permission resolution.
@@ -212,23 +212,23 @@ pub mod daemon {
     /// A single question posed to the user over the daemon transport.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     pub struct QuestionItem {
-        pub id: String,
-        pub header: String,
-        pub question: String,
+        pub(crate) id: String,
+        pub(crate) header: String,
+        pub(crate) question: String,
         #[serde(default)]
-        pub options: Vec<String>,
+        pub(crate) options: Vec<String>,
         #[serde(default)]
-        pub allow_custom: bool,
+        pub(crate) allow_custom: bool,
     }
 
     /// The user's answer to one [`QuestionItem`].
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     pub struct QuestionItemAnswer {
-        pub question_id: String,
+        pub(crate) question_id: String,
         #[serde(default)]
-        pub selected: Vec<String>,
+        pub(crate) selected: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub custom_text: Option<String>,
+        pub(crate) custom_text: Option<String>,
     }
 
     /// Terminal output or lifecycle event streamed from the daemon-owned PTY.
@@ -253,18 +253,18 @@ pub mod daemon {
     /// Point-in-time project snapshot served by the daemon.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     pub struct ProjectState {
-        pub project_id: String,
-        pub root: String,
+        pub(crate) project_id: String,
+        pub(crate) root: String,
         #[serde(default)]
-        pub sessions: Vec<ProjectSessionSummary>,
+        pub(crate) sessions: Vec<ProjectSessionSummary>,
     }
 
     /// Lightweight per-session summary inside [`ProjectState`].
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     pub struct ProjectSessionSummary {
-        pub session_id: String,
-        pub title: String,
-        pub is_generating: bool,
+        pub(crate) session_id: String,
+        pub(crate) title: String,
+        pub(crate) is_generating: bool,
     }
 
     #[cfg(test)]

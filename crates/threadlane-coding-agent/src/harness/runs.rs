@@ -1,7 +1,7 @@
 use super::*;
 
 impl CodingSessionHarness {
-    pub fn checkpoint(
+    pub(crate) fn checkpoint(
         &mut self,
         lane: &str,
         run_id: &str,
@@ -23,7 +23,7 @@ impl CodingSessionHarness {
     ///
     /// Returns `Ok(AcceptedRun)` after `accept_prompt` is driven to completion
     /// (committed to the JSONL store).
-    pub fn begin_run(
+    pub(crate) fn begin_run(
         &mut self,
         run_id: &str,
         prompt: AgentMessage,
@@ -34,7 +34,7 @@ impl CodingSessionHarness {
             .map_err(|error| error.to_string())
     }
 
-    pub fn enqueue_unbound_with_images(
+    pub(crate) fn enqueue_unbound_with_images(
         &mut self,
         queue: QueueKind,
         content: String,
@@ -58,7 +58,7 @@ impl CodingSessionHarness {
         Ok(id)
     }
 
-    pub fn consume_unbound_queue_entry(
+    pub(crate) fn consume_unbound_queue_entry(
         &mut self,
         queue: QueueKind,
         entry_id: &str,
@@ -75,7 +75,7 @@ impl CodingSessionHarness {
         Ok(Some(message))
     }
 
-    pub fn unbound_queue_message(
+    pub(crate) fn unbound_queue_message(
         &mut self,
         queue: QueueKind,
         entry_id: &str,
@@ -94,14 +94,15 @@ impl CodingSessionHarness {
     }
 
     /// Validate an accepted run token against the session journal and reduced state.
-    pub fn validate_accepted_run(&self, accepted: &AcceptedRun) -> Result<(), String> {
+    pub(crate) fn validate_accepted_run(&self, accepted: &AcceptedRun) -> Result<(), String> {
         self.store
             .validate_accepted_run(accepted)
             .map_err(|error| error.to_string())
     }
 
     /// Append a tool intent.
-    pub async fn append_tool_intent(
+    #[cfg(test)]
+    pub(crate) async fn append_tool_intent(
         &mut self,
         run_id: &str,
         tool_call_id: &str,
@@ -124,7 +125,8 @@ impl CodingSessionHarness {
             .await
     }
 
-    pub async fn run_before_tool_hook(
+    #[cfg(test)]
+    pub(crate) async fn run_before_tool_hook(
         &self,
         run_id: &str,
         tool_call_id: &str,
@@ -189,7 +191,7 @@ impl CodingSessionHarness {
     }
 
     /// Finish an operation with the given outcome and optional error.
-    pub fn finish_run(
+    pub(crate) fn finish_run(
         &mut self,
         run_id: &str,
         outcome: OperationOutcome,
@@ -204,7 +206,7 @@ impl CodingSessionHarness {
     }
 
     /// Generate a unique run identifier scoped to this session.
-    pub fn unique_run_id(&mut self, prefix: &str) -> Result<String, String> {
+    pub(crate) fn unique_run_id(&mut self, prefix: &str) -> Result<String, String> {
         self.ensure_fresh()?;
         let used_ids = self
             .store

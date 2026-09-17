@@ -2,7 +2,7 @@ use super::*;
 
 impl CodingSessionHarness {
     /// Claim safe tool replays for recovery.
-    pub fn claim_safe_replays(
+    pub(crate) fn claim_safe_replays(
         &mut self,
         tools: &[HarnessRecord],
     ) -> Result<Vec<HarnessRecord>, String> {

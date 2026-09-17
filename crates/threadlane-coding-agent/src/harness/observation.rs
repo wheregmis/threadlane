@@ -4,7 +4,7 @@ impl CodingSessionHarness {
     // ── Observation ───────────────────────────────────────────────────
 
     /// Take a point-in-time snapshot of the session.
-    pub fn snapshot(&mut self) -> Result<Snapshot, String> {
+    pub(crate) fn snapshot(&mut self) -> Result<Snapshot, String> {
         self.ensure_fresh()?;
         self.store.snapshot().map_err(|error| error.to_string())
     }
@@ -32,7 +32,7 @@ impl CodingSessionHarness {
     // ── Internal ──────────────────────────────────────────────────────
 
     /// Re-read the store from disk to pick up external writes.
-    pub fn refresh(&mut self) -> Result<(), String> {
+    pub(crate) fn refresh(&mut self) -> Result<(), String> {
         self.ensure_fresh()
     }
 
@@ -46,7 +46,7 @@ impl CodingSessionHarness {
     /// run-scoped recorders before the next request; it must not reconcile a
     /// complete mutable provider transcript after the fact.
     #[cfg(test)]
-    pub fn sync_messages(&mut self, messages: &[AgentMessage]) -> Result<(), String> {
+    pub(crate) fn sync_messages(&mut self, messages: &[AgentMessage]) -> Result<(), String> {
         self.ensure_fresh()?;
         // The provider gives us the complete conversation, not stable entry
         // IDs.  Track occurrences rather than using a set: two turns can
@@ -109,7 +109,7 @@ impl CodingSessionHarness {
         Ok(())
     }
     #[cfg(test)]
-    pub fn assert_model_visible(&mut self, messages: &[AgentMessage]) -> Result<(), String> {
+    pub(crate) fn assert_model_visible(&mut self, messages: &[AgentMessage]) -> Result<(), String> {
         self.ensure_fresh()?;
         let logged = self
             .store

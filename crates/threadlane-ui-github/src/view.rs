@@ -83,7 +83,7 @@ fn github_empty_message(tab: GitHubTab, state: GitHubStateFilter, query: &str) -
 }
 
 #[cfg(test)]
-pub fn selected_issue_after_refresh(
+pub(crate) fn selected_issue_after_refresh(
     selected: Option<u64>,
     issues: &[threadlane_git::GitHubIssueSummary],
 ) -> Option<u64> {
@@ -100,7 +100,7 @@ fn same_issue(left: &GitHubIssueRef, right: &GitHubIssueRef) -> bool {
 }
 
 #[cfg(test)]
-pub fn linked_session_ids<'a>(
+pub(crate) fn linked_session_ids<'a>(
     sessions: &'a [SessionInfo],
     issue: &GitHubIssueRef,
 ) -> Vec<&'a str> {
@@ -150,7 +150,7 @@ fn linked_sessions_across_projects<'a>(
         .collect()
 }
 
-pub fn linked_session_status(
+pub(crate) fn linked_session_status(
     session: &SessionInfo,
     has_pending_permission: bool,
     is_generating: bool,
@@ -168,7 +168,7 @@ pub fn linked_session_status(
     }
 }
 
-pub fn list_count_splice(
+pub(crate) fn list_count_splice(
     old_count: usize,
     new_count: usize,
 ) -> Option<(Range<usize>, usize)> {

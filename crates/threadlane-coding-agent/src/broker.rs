@@ -31,7 +31,7 @@ const MAX_MANAGED_PROCESSES: usize = 16;
 const DEFAULT_RECV_TIMEOUT_MS: u64 = 5000;
 const MAX_RECV_TIMEOUT_MS: u64 = 30_000;
 const MAX_MANAGED_STDOUT_BYTES: usize = 16 * 1024 * 1024;
-pub const MAX_BROKER_CONTINUATION_ROUNDS: usize = 4;
+pub(crate) const MAX_BROKER_CONTINUATION_ROUNDS: usize = 4;
 
 /// A persistent subprocess managed by the host for WASI extensions.
 /// Extensions reference managed processes by name across invocations.
@@ -53,18 +53,18 @@ pub type ManagedProcessRegistry =
     Arc<tokio::sync::Mutex<HashMap<ManagedProcessKey, ManagedProcess>>>;
 
 pub struct HostCapabilityHandler {
-    pub capability: &'static str,
-    pub tool_policy: Option<Arc<tokio::sync::Mutex<ToolPolicy>>>,
-    pub extensions: Arc<WasiExtensionManager>,
-    pub work_dir: PathBuf,
-    pub event_tx: tokio::sync::broadcast::Sender<AgentEvent>,
-    pub allowed_hosts: Arc<std::collections::HashSet<String>>,
-    pub permissions: Option<Arc<PermissionManager>>,
-    pub agent_work: AgentWorkScheduler,
-    pub agent_runner: Option<AgentRunner>,
-    pub session_file: Option<PathBuf>,
-    pub persist_tool_policy: bool,
-    pub managed_processes: ManagedProcessRegistry,
+    pub(crate) capability: &'static str,
+    pub(crate) tool_policy: Option<Arc<tokio::sync::Mutex<ToolPolicy>>>,
+    pub(crate) extensions: Arc<WasiExtensionManager>,
+    pub(crate) work_dir: PathBuf,
+    pub(crate) event_tx: tokio::sync::broadcast::Sender<AgentEvent>,
+    pub(crate) allowed_hosts: Arc<std::collections::HashSet<String>>,
+    pub(crate) permissions: Option<Arc<PermissionManager>>,
+    pub(crate) agent_work: AgentWorkScheduler,
+    pub(crate) agent_runner: Option<AgentRunner>,
+    pub(crate) session_file: Option<PathBuf>,
+    pub(crate) persist_tool_policy: bool,
+    pub(crate) managed_processes: ManagedProcessRegistry,
 }
 impl HostCapabilityHandler {
     fn handle(&self, request: &BrokerRequest) -> Result<Value, BrokerError> {

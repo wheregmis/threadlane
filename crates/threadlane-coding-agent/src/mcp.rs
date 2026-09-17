@@ -41,7 +41,7 @@ impl McpToolExecutor {
 }
 
 /// Projects one MCP-native description onto the runtime tool schema.
-pub fn mcp_tool_definition(description: &McpToolDescription) -> AgentToolDefinition {
+pub(crate) fn mcp_tool_definition(description: &McpToolDescription) -> AgentToolDefinition {
     AgentToolDefinition::new(
         description.full_name.clone(),
         description.description.clone(),

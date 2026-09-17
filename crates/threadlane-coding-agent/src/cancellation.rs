@@ -12,16 +12,16 @@ use tokio::sync::broadcast;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentRunTask {
-    pub agent: String,
-    pub task: String,
-    pub instructions: Option<String>,
-    pub tools: Option<Vec<String>>,
-    pub model: Option<String>,
+    pub(crate) agent: String,
+    pub(crate) task: String,
+    pub(crate) instructions: Option<String>,
+    pub(crate) tools: Option<Vec<String>>,
+    pub(crate) model: Option<String>,
     #[serde(default)]
-    pub context_refs: Vec<String>,
+    pub(crate) context_refs: Vec<String>,
 }
 
-pub fn recover_v2_subagent_records(
+pub(crate) fn recover_v2_subagent_records(
     session_file: &Path,
 ) -> Result<Vec<HarnessRecord>, String> {
     let store = JsonlStore::open(session_file).map_err(|error| error.to_string())?;
@@ -130,7 +130,7 @@ pub struct CodingAgentCancellation {
 }
 
 impl CodingAgentCancellation {
-    pub fn new(
+    pub(crate) fn new(
         harness_session_file: Option<PathBuf>,
         event_tx: broadcast::Sender<AgentEvent>,
     ) -> Self {
@@ -152,7 +152,7 @@ impl CodingAgentCancellation {
         Ok(id)
     }
 
-    pub fn finish_active_run(&self, id: u64) {
+    pub(crate) fn finish_active_run(&self, id: u64) {
         if let Ok(mut state) = self.state.lock() {
             if state.active.as_ref().is_some_and(|active| active.id == id) {
                 state.active = None;
@@ -160,7 +160,7 @@ impl CodingAgentCancellation {
         }
     }
 
-    pub fn clear_cancellation_guard(&self) {
+    pub(crate) fn clear_cancellation_guard(&self) {
         if let Ok(mut state) = self.state.lock() {
             state.cancellation_guard = None;
         }
@@ -169,7 +169,7 @@ impl CodingAgentCancellation {
         }
     }
 
-    pub fn cancel(&self) -> Result<(), String> {
+    pub(crate) fn cancel(&self) -> Result<(), String> {
         // Single harness open: request the abort intent and observe the
         // signal on the same journal (ensure_fresh reloads across the abort).
         // The open/request result is held back until after the task abort so

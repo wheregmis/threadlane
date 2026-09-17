@@ -354,7 +354,7 @@ pub struct QueuedEntry {
     pub run_id: Option<String>,
     pub queue: QueueKind,
     #[serde(default)]
-    pub priority: Option<SteerPriority>,
+    pub(crate) priority: Option<SteerPriority>,
     pub target: ProvisionedEntry,
 }
 
@@ -1479,7 +1479,7 @@ pub struct ToolState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LaneState {
     pub name: String,
-    pub status: LaneStatus,
+    pub(crate) status: LaneStatus,
     pub leaf_id: Option<String>,
     pub open_operation: Option<String>,
     pub attempts: u32,

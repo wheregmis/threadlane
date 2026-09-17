@@ -16,12 +16,12 @@ use serde::{Deserialize, Serialize};
 /// Structured PR feedback item extracted from review comments or reviews.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrFeedbackItem {
-    pub remote_id: String,
-    pub author: String,
-    pub body: String,
-    pub path: Option<String>,
-    pub line: Option<u64>,
-    pub kind: &'static str,
+    pub(crate) remote_id: String,
+    pub(crate) author: String,
+    pub(crate) body: String,
+    pub(crate) path: Option<String>,
+    pub(crate) line: Option<u64>,
+    pub(crate) kind: &'static str,
 }
 
 /// Persistent store tracking PR review comment IDs that have been processed.
@@ -31,11 +31,11 @@ pub struct PrFeedbackItem {
 pub struct PrReviewTrackingStore {
     /// Map from git branch name to the set of seen review/comment remote IDs.
     #[serde(default)]
-    pub branches: HashMap<String, HashSet<String>>,
+    pub(crate) branches: HashMap<String, HashSet<String>>,
     /// Branches that have had their initial baseline established.
     /// Prevents cold-start replay storms when an existing PR is first loaded.
     #[serde(default)]
-    pub initialized_branches: HashSet<String>,
+    pub(crate) initialized_branches: HashSet<String>,
 }
 
 fn tracking_store_path(work_dir: &Path) -> PathBuf {
@@ -94,7 +94,7 @@ pub fn save_auto_address_pr_reviews_enabled(enabled: bool) -> Result<(), String>
 
 /// Check if an author is a known CI, status, or deployment bot that shouldn't
 /// trigger code fix attempts.
-pub fn is_ci_or_status_bot(author: &str) -> bool {
+pub(crate) fn is_ci_or_status_bot(author: &str) -> bool {
     let normalized = author.trim().to_ascii_lowercase();
     matches!(
         normalized.as_str(),

@@ -95,7 +95,7 @@ struct SkillSettingsFile {
 }
 
 impl SkillSettings {
-    pub fn load(project_root: &Path) -> Self {
+    pub(crate) fn load(project_root: &Path) -> Self {
         let Some(root) = canonical_or_plain(project_root) else {
             return Self::default();
         };
@@ -117,7 +117,7 @@ impl SkillSettings {
         self.disabled.contains(skill_id)
     }
 
-    pub fn set_enabled(
+    pub(crate) fn set_enabled(
         &mut self,
         project_root: &Path,
         skill_id: &str,
@@ -132,7 +132,7 @@ impl SkillSettings {
     }
 
     /// Persist a disabled override for each discovered skill in one write.
-    pub fn disable_all(
+    pub(crate) fn disable_all(
         &mut self,
         project_root: &Path,
         skill_ids: impl IntoIterator<Item = String>,
@@ -406,7 +406,7 @@ impl SkillManager {
         Arc::clone(&self.registry)
     }
 
-    pub fn list_skills(&self) -> Vec<SkillMetadata> {
+    pub(crate) fn list_skills(&self) -> Vec<SkillMetadata> {
         self.registry.list_skills()
     }
 
@@ -499,7 +499,7 @@ impl LoadSkillToolExecutor {
     }
 }
 
-pub fn load_skill_tool_definition() -> SkillToolDefinition {
+pub(crate) fn load_skill_tool_definition() -> SkillToolDefinition {
     SkillToolDefinition {
         name: LOAD_SKILL_TOOL_NAME.to_string(),
         description: Some(

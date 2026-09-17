@@ -106,28 +106,28 @@ fn harness_hook_registry(path: &Path) -> HookRegistry {
     harness_session_entry(path).hooks
 }
 
-pub fn harness_cancellation_state(path: &Path) -> Arc<AtomicBool> {
+pub(crate) fn harness_cancellation_state(path: &Path) -> Arc<AtomicBool> {
     harness_session_entry(path).cancellation
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SubagentLaneIdentity {
-    pub lane_name: String,
-    pub run_id: String,
-    pub source_leaf_id: Option<String>,
-    pub started_seq: u64,
+    pub(crate) lane_name: String,
+    pub(crate) run_id: String,
+    pub(crate) source_leaf_id: Option<String>,
+    pub(crate) started_seq: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StartedSubagentLane {
-    pub identity: SubagentLaneIdentity,
+    pub(crate) identity: SubagentLaneIdentity,
     accepted: AcceptedRun,
 }
 
 #[derive(Debug)]
 pub struct SubagentStartError {
-    pub identity: Option<SubagentLaneIdentity>,
-    pub error: String,
+    pub(crate) identity: Option<SubagentLaneIdentity>,
+    pub(crate) error: String,
 }
 
 pub use threadlane_runtime::AcceptedRun;
@@ -143,12 +143,11 @@ pub enum InterruptedSubagentRecoveryState {
 /// Every foreground operation enters the harness through this adapter;
 /// there is no second persistence path.
 pub struct CodingSessionHarness {
-    pub store: AgentHarness<JsonlStore>,
-    pub session_path: PathBuf,
-    pub main_lane_name: String,
-    pub events: HarnessEventHub,
-    pub hooks: HookRegistry,
-    pub cancellation: Arc<AtomicBool>,
+    pub(crate) store: AgentHarness<JsonlStore>,
+    pub(crate) main_lane_name: String,
+    pub(crate) events: HarnessEventHub,
+    pub(crate) hooks: HookRegistry,
+    pub(crate) cancellation: Arc<AtomicBool>,
 }
 
 fn boundary_result(
@@ -174,7 +173,7 @@ impl CodingSessionHarness {
 
     /// Open or create the JSONL session at `path` and build a canonical
     /// harness adapter.
-    pub fn open(path: &Path) -> Result<Self, String> {
+    pub(crate) fn open(path: &Path) -> Result<Self, String> {
         if !path.exists() {
             fs::OpenOptions::new()
                 .create(true)
@@ -190,7 +189,6 @@ impl CodingSessionHarness {
             .map_err(|error| error.to_string())?;
         Ok(Self {
             store,
-            session_path: path.to_path_buf(),
             main_lane_name: "main".into(),
             events,
             hooks,
@@ -216,7 +214,7 @@ impl CodingSessionHarness {
 
     /// Reloads the durable store only when another writer has appended
     /// (cheap file-length probe), instead of unconditionally reparsing.
-    pub fn ensure_fresh(&mut self) -> Result<(), String> {
+    pub(crate) fn ensure_fresh(&mut self) -> Result<(), String> {
         self.store
             .store_mut()
             .ensure_fresh()

@@ -4,7 +4,7 @@ impl CodingSessionHarness {
     // ── Tools ─────────────────────────────────────────────────────────
 
     /// Record a tool intent (after hooks have run).
-    pub async fn append_tool_intent_after_hook(
+    pub(crate) async fn append_tool_intent_after_hook(
         &mut self,
         run_id: &str,
         tool_call_id: &str,
@@ -70,7 +70,7 @@ impl CodingSessionHarness {
     }
 
     /// Record tool-started on a specific lane (subagent support).
-    pub fn tool_started_on_lane(
+    pub(crate) fn tool_started_on_lane(
         &mut self,
         lane: &str,
         run_id: &str,
@@ -193,7 +193,8 @@ impl CodingSessionHarness {
     }
 
     /// Finish a tool message: record ToolFinished and drive effects.
-    pub fn finish_tool_message(
+    #[cfg(test)]
+    pub(crate) fn finish_tool_message(
         &mut self,
         run_id: &str,
         message: &AgentMessage,
@@ -229,7 +230,7 @@ impl CodingSessionHarness {
     }
 
     /// Finish a freshly executed tool result: record the tool result Entry, ToolFinished, and drive effects.
-    pub fn finish_tool_result(
+    pub(crate) fn finish_tool_result(
         &mut self,
         run_id: &str,
         result: &AgentToolResult,
@@ -255,7 +256,7 @@ impl CodingSessionHarness {
     }
 
     /// Record tool completions with termination flags.
-    pub fn record_completed_tools_with_termination(
+    pub(crate) fn record_completed_tools_with_termination(
         &mut self,
         run_id: &str,
         termination: &HashMap<String, bool>,

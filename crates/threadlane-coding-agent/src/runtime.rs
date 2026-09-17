@@ -37,50 +37,50 @@ use tokio::sync::broadcast;
 
 pub struct CodingAgent {
     pub agent: AgentRuntime,
-    pub session_id: String,
-    pub session_file: Option<PathBuf>,
-    pub wasi_extensions: Arc<WasiExtensionManager>,
-    pub tool_policy: Arc<tokio::sync::Mutex<ToolPolicy>>,
-    pub work_dir: PathBuf,
-    pub agent_config: threadlane_runtime::AgentConfig,
-    pub skills: Arc<SkillRegistry>,
-    pub agent_runner: AgentRunner,
-    pub broker_dispatcher: Arc<CapabilityDispatcher>,
+    pub(crate) session_id: String,
+    pub(crate) session_file: Option<PathBuf>,
+    pub(crate) wasi_extensions: Arc<WasiExtensionManager>,
+    pub(crate) tool_policy: Arc<tokio::sync::Mutex<ToolPolicy>>,
+    pub(crate) work_dir: PathBuf,
+    pub(crate) agent_config: threadlane_runtime::AgentConfig,
+    pub(crate) skills: Arc<SkillRegistry>,
+    pub(crate) agent_runner: AgentRunner,
+    pub(crate) broker_dispatcher: Arc<CapabilityDispatcher>,
     managed_processes: ManagedProcessRegistry,
-    pub permission_handle: threadlane_permission::PermissionHandle,
-    pub question_handle: threadlane_question::QuestionHandle,
+    pub(crate) permission_handle: threadlane_permission::PermissionHandle,
+    pub(crate) question_handle: threadlane_question::QuestionHandle,
     agent_work: AgentWorkScheduler,
     mcp_manager: Arc<McpManager>,
-    pub prompt_templates: Option<Vec<threadlane_skills::prompts::PromptTemplate>>,
-    pub dispatch_parent_leaf: Arc<std::sync::Mutex<Option<String>>>,
-    pub completed_subagent_lanes: Arc<std::sync::Mutex<Vec<CompletedSubagentLane>>>,
-    pub harness: Option<CodingSessionHarness>,
-    pub harness_journal_error: Option<String>,
-    pub harness_run_id: Arc<std::sync::Mutex<Option<String>>>,
-    pub prewalk:
+    pub(crate) prompt_templates: Option<Vec<threadlane_skills::prompts::PromptTemplate>>,
+    pub(crate) dispatch_parent_leaf: Arc<std::sync::Mutex<Option<String>>>,
+    pub(crate) completed_subagent_lanes: Arc<std::sync::Mutex<Vec<CompletedSubagentLane>>>,
+    pub(crate) harness: Option<CodingSessionHarness>,
+    pub(crate) harness_journal_error: Option<String>,
+    pub(crate) harness_run_id: Arc<std::sync::Mutex<Option<String>>>,
+    pub(crate) prewalk:
         Arc<std::sync::Mutex<Option<threadlane_orchestrator::PrewalkState>>>,
     /// Live agent-to-agent mailbox shared by sibling `message_peer` and the
     /// parent `hub` tool (oh-my-pi hub/IRC parity).
-    pub hub: super::mailbox::SubagentHub,
+    pub(crate) hub: super::mailbox::SubagentHub,
     cancellation: CodingAgentCancellation,
-    pub interrupted_subagent_recovery: InterruptedSubagentRecoveryState,
+    pub(crate) interrupted_subagent_recovery: InterruptedSubagentRecoveryState,
     /// Connection to an external ACP agent, opened on first use.
     ///
     /// An ACP agent keeps its own conversation state, so this is held for the
     /// life of the session rather than rebuilt per turn.
     acp: threadlane_acp_engine::AcpEngine,
     #[cfg(test)]
-    pub subagent_work_observer: SubagentObserverState,
+    pub(crate) subagent_work_observer: SubagentObserverState,
     #[cfg(test)]
-    pub subagent_branch_observer: Option<SubagentBoundaryObserver>,
+    pub(crate) subagent_branch_observer: Option<SubagentBoundaryObserver>,
 }
 
 impl CodingAgent {
-    pub fn permission_handle(&self) -> threadlane_permission::PermissionHandle {
+    pub(crate) fn permission_handle(&self) -> threadlane_permission::PermissionHandle {
         self.permission_handle.clone()
     }
 
-    pub fn question_handle(&self) -> threadlane_question::QuestionHandle {
+    pub(crate) fn question_handle(&self) -> threadlane_question::QuestionHandle {
         self.question_handle.clone()
     }
 
@@ -117,7 +117,7 @@ impl CodingAgent {
         None
     }
 
-    pub fn work_handle(&self) -> CodingAgentWorkHandle {
+    pub(crate) fn work_handle(&self) -> CodingAgentWorkHandle {
         self.agent_work
             .set_acp_model(threadlane_acp_engine::is_acp_model(&self.agent.model()));
         CodingAgentWorkHandle::new(self.agent_work.clone(), self.session_file.clone())
@@ -139,13 +139,13 @@ impl CodingAgent {
             .map_err(|error| error.to_string())
     }
 
-    pub fn harness_error(&self) -> Option<&str> {
+    pub(crate) fn harness_error(&self) -> Option<&str> {
         self.harness_journal_error.as_deref()
     }
 
     /// Returns the fully built system prompt used by this runtime when the
     /// agent state is not currently locked by an active turn.
-    pub fn system_prompt_snapshot(&self) -> Option<String> {
+    pub(crate) fn system_prompt_snapshot(&self) -> Option<String> {
         self.agent
             .turn
             .try_lock()
@@ -160,11 +160,11 @@ impl CodingAgent {
         journal.watch().map(Some)
     }
 
-    pub fn cancellation_handle(&self) -> CodingAgentCancellation {
+    pub(crate) fn cancellation_handle(&self) -> CodingAgentCancellation {
         self.cancellation.clone()
     }
 
-    pub fn has_interrupted_work(&self) -> bool {
+    pub(crate) fn has_interrupted_work(&self) -> bool {
         matches!(
             self.interrupted_subagent_recovery,
             InterruptedSubagentRecoveryState::Pending
@@ -187,7 +187,7 @@ impl CodingAgent {
     ///
     /// Empty when no agent is selected or none has connected yet, which is
     /// what lets a caller read them after a turn without paying to start one.
-    pub fn acp_user_config_options(&self) -> Vec<threadlane_acp::AcpConfigOption> {
+    pub(crate) fn acp_user_config_options(&self) -> Vec<threadlane_acp::AcpConfigOption> {
         let model = self.agent.model();
         threadlane_acp_engine::acp_agent_id(&model)
             .map(|agent_id| self.acp.user_config_options(agent_id))
@@ -199,7 +199,7 @@ impl CodingAgent {
     ///
     /// Returns an empty list for a non-ACP model rather than an error: asking
     /// what an agent offers is a question the UI may ask about any selection.
-    pub async fn acp_config_options(
+    pub(crate) async fn acp_config_options(
         &mut self,
     ) -> Result<Vec<threadlane_acp::AcpConfigOption>, String> {
         let model = self.agent.model();
@@ -214,7 +214,7 @@ impl CodingAgent {
     }
 
     /// Applies one of the selected external agent's settings.
-    pub async fn set_acp_config_option(
+    pub(crate) async fn set_acp_config_option(
         &mut self,
         config_id: &str,
         value: &str,
@@ -240,11 +240,11 @@ impl CodingAgent {
         self.acp.model_label(agent_id)
     }
 
-    pub fn model(&self) -> String {
+    pub(crate) fn model(&self) -> String {
         self.agent.model()
     }
 
-    pub async fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {
+    pub(crate) async fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {
         self.agent.set_reasoning_effort(effort).await;
     }
 
@@ -307,7 +307,7 @@ impl CodingAgent {
     /// (401 `invalid_api_key`) after switching off an Antigravity model.
     /// Skips silently when nothing usable resolves, preserving legacy
     /// behavior for credential-less contexts.
-    pub fn refresh_provider_credentials(&mut self) {
+    pub(crate) fn refresh_provider_credentials(&mut self) {
         let model = self
             .agent
             .turn
@@ -317,7 +317,7 @@ impl CodingAgent {
         Self::rotate_credentials_for(&mut self.agent, &model);
     }
 
-    pub fn rotate_credentials_for(
+    pub(crate) fn rotate_credentials_for(
         agent: &mut threadlane_runtime::AgentRuntime,
         model: &str,
     ) {
@@ -367,7 +367,7 @@ impl CodingAgent {
         Self::new_with_provider(options, provider)
     }
 
-    pub fn new_with_provider(
+    pub(crate) fn new_with_provider(
         options: CodingAgentOptions,
         provider: Arc<dyn ProviderPort>,
     ) -> Self {

@@ -33,10 +33,10 @@ pub struct AntigravityCredentials {
 /// `ANTIGRAVITY_PROJECT_ID` through [`AntigravityOAuthConfig::from_env`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AntigravityOAuthConfig {
-    pub client_id: String,
-    pub client_secret: String,
-    pub redirect_uri: String,
-    pub project_id: Option<String>,
+    pub(crate) client_id: String,
+    pub(crate) client_secret: String,
+    pub(crate) redirect_uri: String,
+    pub(crate) project_id: Option<String>,
 }
 
 impl Default for AntigravityOAuthConfig {
@@ -53,7 +53,7 @@ impl Default for AntigravityOAuthConfig {
 impl AntigravityOAuthConfig {
     /// Defaults overlaid with `ANTIGRAVITY_CLIENT_ID`,
     /// `ANTIGRAVITY_CLIENT_SECRET`, and `ANTIGRAVITY_PROJECT_ID` when set.
-    pub fn from_env() -> Self {
+    pub(crate) fn from_env() -> Self {
         Self {
             client_id: std::env::var("ANTIGRAVITY_CLIENT_ID")
                 .unwrap_or_else(|_| DEFAULT_CLIENT_ID.to_string()),
@@ -70,7 +70,7 @@ pub fn load_antigravity_credentials() -> Option<AntigravityCredentials> {
 }
 
 /// Loads stored credentials from the injected store's location.
-pub fn load_antigravity_credentials_in(
+pub(crate) fn load_antigravity_credentials_in(
     locations: &CredentialStore,
 ) -> Option<AntigravityCredentials> {
     let path = locations.antigravity_credentials_path();
@@ -108,7 +108,7 @@ pub fn clear_antigravity_credentials() -> Result<(), String> {
 }
 
 /// Removes the credentials file at the injected store's location.
-pub fn clear_antigravity_credentials_in(locations: &CredentialStore) -> Result<(), String> {
+pub(crate) fn clear_antigravity_credentials_in(locations: &CredentialStore) -> Result<(), String> {
     let path = locations.antigravity_credentials_path();
     if path.exists() {
         fs::remove_file(path).map_err(|e| e.to_string())?;
@@ -141,7 +141,7 @@ pub fn build_authorization_url(code_challenge: &str, state: &str) -> String {
 }
 
 /// Builds the Google OAuth URL from an explicit provider configuration.
-pub fn build_authorization_url_with(
+pub(crate) fn build_authorization_url_with(
     code_challenge: &str,
     state: &str,
     config: &AntigravityOAuthConfig,
@@ -185,7 +185,7 @@ pub async fn exchange_code_for_tokens(
 
 /// Exchanges an OAuth code with an explicit provider configuration,
 /// persisting the credentials to the injected store's location.
-pub async fn exchange_code_for_tokens_in(
+pub(crate) async fn exchange_code_for_tokens_in(
     code: &str,
     code_verifier: &str,
     config: &AntigravityOAuthConfig,
@@ -361,7 +361,7 @@ pub async fn get_valid_antigravity_token() -> Result<String, String> {
 
 /// Returns a usable token from the injected store's location, refreshing with
 /// the explicit provider configuration when near expiry.
-pub async fn get_valid_antigravity_token_in(
+pub(crate) async fn get_valid_antigravity_token_in(
     config: &AntigravityOAuthConfig,
     locations: &CredentialStore,
 ) -> Result<String, String> {

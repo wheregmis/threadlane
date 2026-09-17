@@ -37,7 +37,7 @@ pub use provider::{
     ToolIntentRecorder,
 };
 #[cfg(test)]
-pub use provider::{ProviderAdapter, ProviderMessages, ProviderRouter};
+pub(crate) use provider::{ProviderAdapter, ProviderMessages, ProviderRouter};
 // Message translation, model registry, and the shared reactor live in
 // `threadlane-provider` (the dependency arrow points runtime → provider);
 // import them from there directly.

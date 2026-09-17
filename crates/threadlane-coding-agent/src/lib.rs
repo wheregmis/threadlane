@@ -18,7 +18,7 @@ pub mod config_dump;
 pub mod context_snapshots;
 pub mod controller;
 pub mod credentials;
-pub mod durable;
+pub(crate) mod durable;
 pub mod harness;
 pub mod mailbox;
 pub mod mcp;

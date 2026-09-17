@@ -32,10 +32,10 @@ pub const COMPUTER_UNAVAILABLE: &str = "Native computer use is available on macO
 
 const MAX_TYPE_CHARS: usize = 4_000;
 /// Screenshots larger than this ride as metadata only, never pixels.
-pub const MAX_IMAGE_BYTES: usize = 2_000_000;
+pub(crate) const MAX_IMAGE_BYTES: usize = 2_000_000;
 /// Capture width bound: enough for UI legibility, small enough for context.
-pub const SCREENSHOT_WIDTH: u32 = 1_560;
-pub const SCREENSHOT_JPEG_QUALITY: u8 = 70;
+pub(crate) const SCREENSHOT_WIDTH: u32 = 1_560;
+pub(crate) const SCREENSHOT_JPEG_QUALITY: u8 = 70;
 
 pub struct ComputerToolExecutor {
     permissions: Option<Arc<dyn ComputerApproval>>,
@@ -136,14 +136,14 @@ fn computer_tool_definitions() -> Arc<[AgentToolDefinition]> {
 /// Resolved delivery: screen-space intent plus where to post it.
 #[derive(Debug, PartialEq)]
 pub struct TargetedAct {
-    pub intent: ComputerAct,
+    pub(crate) intent: ComputerAct,
     /// Target process id for background delivery; None posts to the HID
     /// stream (foreground: moves the cursor, steals focus).
-    pub pid: Option<i32>,
-    pub app: Option<String>,
+    pub(crate) pid: Option<i32>,
+    pub(crate) app: Option<String>,
 }
 
-pub fn parse_act_target(args: &str) -> Result<Option<i64>, String> {
+pub(crate) fn parse_act_target(args: &str) -> Result<Option<i64>, String> {
     let parsed: serde_json::Value = serde_json::from_str(args)
         .map_err(|error| format!("Invalid {COMPUTER_ACT_TOOL} arguments: {error}"))?;
     match parsed.get("target") {
@@ -320,7 +320,7 @@ fn parse_modifiers(args: &serde_json::Value) -> Result<Vec<String>, String> {
         .collect()
 }
 
-pub fn parse_computer_act(args: &str) -> Result<ComputerAct, String> {
+pub(crate) fn parse_computer_act(args: &str) -> Result<ComputerAct, String> {
     let parsed: serde_json::Value = serde_json::from_str(args)
         .map_err(|error| format!("Invalid {COMPUTER_ACT_TOOL} arguments: {error}"))?;
     let action = parsed
@@ -826,13 +826,13 @@ mod mac {
     /// details; the kCGWindow* names are stable API.
     pub(super) struct WindowInfo {
         pub(super) id: i32,
-        pub(super) owner: String,
-        pub(super) title: String,
-        pub(super) pid: i32,
-        pub(super) layer: i32,
-        pub(super) alpha: f64,
+        owner: String,
+        title: String,
+        pid: i32,
+        layer: i32,
+        alpha: f64,
         pub(super) bounds: (f64, f64, f64, f64),
-        pub(super) onscreen: bool,
+        onscreen: bool,
     }
     fn cf_string(ptr: *const std::ffi::c_void) -> String {
         unsafe { CFString::wrap_under_get_rule(ptr as CFStringRef) }.to_string()
@@ -1247,7 +1247,7 @@ fn attach_jpeg(
 /// display minus our own windows. Returns (jpeg bytes, served width, served
 /// height, source points width).
 #[cfg(target_os = "macos")]
-pub fn capture_composited_for_target(
+pub(crate) fn capture_composited_for_target(
     target: crate::stream::StreamTarget,
     max_width: u32,
     quality: u8,
@@ -1258,7 +1258,7 @@ pub fn capture_composited_for_target(
 }
 
 #[cfg(target_os = "macos")]
-pub use mac::{composite_target, pointer_location, CaptureResolution};
+pub(crate) use mac::{composite_target, pointer_location, CaptureResolution};
 
 /// Start the live feed on the main display for the user's own mirror, with
 /// no model in the loop: a developer hook (`THREADLANE_MIRROR_DEBUG`) for
@@ -1278,7 +1278,7 @@ pub fn watch_display_for_debug() {}
 /// while sessions live in per-project worktrees, so `latest.json` lives
 /// here. Timestamped history files stay per-project.
 #[cfg(target_os = "macos")]
-pub fn global_previews_dir() -> Option<PathBuf> {
+pub(crate) fn global_previews_dir() -> Option<PathBuf> {
     threadlane_project::default_global_threadlane_dir().map(|dir| dir.join("previews"))
 }
 

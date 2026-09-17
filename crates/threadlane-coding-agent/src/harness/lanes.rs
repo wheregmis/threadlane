@@ -1,7 +1,7 @@
 use super::*;
 
 impl CodingSessionHarness {
-    pub fn start_subagent_lane(
+    pub(crate) fn start_subagent_lane(
         &mut self,
         lane_hint: &str,
         task: &str,
@@ -225,7 +225,7 @@ impl CodingSessionHarness {
         Ok(StartedSubagentLane { identity, accepted })
     }
 
-    pub fn accepted_subagent_run(
+    pub(crate) fn accepted_subagent_run(
         &self,
         identity: &SubagentLaneIdentity,
     ) -> Result<AcceptedRun, String> {
@@ -256,7 +256,7 @@ impl CodingSessionHarness {
     /// The lane keeps its history: the child syncs the lane context, so the
     /// revived run continues where the previous turn left off. Fails when
     /// the lane is missing or still has an open operation (use `hub send`).
-    pub fn resume_subagent_lane(
+    pub(crate) fn resume_subagent_lane(
         &mut self,
         lane: &str,
         prompt: &str,
@@ -331,7 +331,7 @@ impl CodingSessionHarness {
         Ok((identity, accepted))
     }
 
-    pub fn append_subagent_context(
+    pub(crate) fn append_subagent_context(
         &mut self,
         lane: &str,
         run_id: &str,
@@ -364,7 +364,7 @@ impl CodingSessionHarness {
             .map_err(|error| error.to_string())
     }
 
-    pub fn finish_subagent_lane(
+    pub(crate) fn finish_subagent_lane(
         &mut self,
         lane: &str,
         run_id: &str,

@@ -62,7 +62,7 @@ impl OpenCodeGoClient {
 
     /// Injects the stored OpenCode API key. Without one, requests fall back
     /// to `OPENCODE_API_KEY`/`OPENCODE_GO_API_KEY` from the environment.
-    pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
+    pub(crate) fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
         let key = api_key.into();
         self.api_key = (!key.trim().is_empty()).then_some(key);
         self

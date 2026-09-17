@@ -1,7 +1,7 @@
 use super::*;
 
 impl CodingSessionHarness {
-    pub fn capture_run_context(
+    pub(crate) fn capture_run_context(
         &mut self,
         run_id: &str,
         lane: &str,
@@ -65,7 +65,7 @@ impl CodingSessionHarness {
             .map_err(|error| error.to_string())
     }
 
-    pub fn model_context(
+    pub(crate) fn model_context(
         &self,
         lane: &str,
     ) -> Result<threadlane_runtime::harness::ModelContextProjection, String> {
@@ -75,7 +75,7 @@ impl CodingSessionHarness {
             .map_err(|error| error.to_string())
     }
 
-    pub fn prepare_provider_boundary(
+    pub(crate) fn prepare_provider_boundary(
         &mut self,
         run_id: &str,
         request: ProviderBoundaryRequest,

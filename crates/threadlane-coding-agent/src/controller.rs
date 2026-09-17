@@ -92,16 +92,15 @@ pub struct SessionController {
     pub work_handle: CodingAgentWorkHandle,
     permission_handle: PermissionHandle,
     question_handle: QuestionHandle,
-    pub prompt_lock: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) prompt_lock: Arc<tokio::sync::Mutex<()>>,
     pub session_file: PathBuf,
     mode: ExecutionMode,
     pub selected_model: String,
-    pub reasoning_effort: ReasoningEffort,
+    pub(crate) reasoning_effort: ReasoningEffort,
     pub system_prompt: String,
     pub harness_error: Option<String>,
     is_generating: AtomicBool,
     status: Mutex<SessionStatus>,
-    pub recovery_loaded: AtomicBool,
 }
 
 impl SessionController {
@@ -148,7 +147,6 @@ impl SessionController {
             harness_error,
             is_generating: AtomicBool::new(false),
             status: Mutex::new(status),
-            recovery_loaded: AtomicBool::new(false),
         })
     }
 

@@ -11,7 +11,7 @@ use crate::types::{
 use crate::AppState;
 
 #[cfg(test)]
-pub fn load_session_messages(session_file: &Path) -> Vec<ChatMessageInfo> {
+pub(crate) fn load_session_messages(session_file: &Path) -> Vec<ChatMessageInfo> {
     compute_session_messages(session_file).unwrap_or_default()
 }
 
@@ -99,7 +99,7 @@ pub fn compute_full_session_projection(
     })
 }
 
-pub fn project_subagents_from_store(store: &impl SessionStore) -> Vec<SubagentActivityInfo> {
+pub(crate) fn project_subagents_from_store(store: &impl SessionStore) -> Vec<SubagentActivityInfo> {
     use threadlane_runtime::harness::{Record, SubagentLifecyclePhase};
 
     let mut rows = Vec::new();
@@ -224,12 +224,12 @@ pub fn project_subagents_from_store(store: &impl SessionStore) -> Vec<SubagentAc
     rows
 }
 
-pub fn format_context_marker_tokens(tokens: usize) -> String {
+pub(crate) fn format_context_marker_tokens(tokens: usize) -> String {
     let formatted = threadlane_ui_catalog::format_tokens(tokens.min(u32::MAX as usize) as u32);
     formatted.replace(".0k", "k").replace(".0M", "M")
 }
 
-pub fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageInfo> {
+pub(crate) fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageInfo> {
     threadlane_runtime::harness::project_chat_messages(&agent_messages)
         .into_iter()
         .map(|msg| ChatMessageInfo {

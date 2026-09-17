@@ -115,7 +115,8 @@ pub fn select_project(raw_path: &Path, session_id: Option<&str>) -> Result<Proje
     Ok(result)
 }
 
-pub fn merge_and_save_project_registry_to(
+#[cfg(test)]
+pub(crate) fn merge_and_save_project_registry_to(
     global_dir: &Path,
     incoming: &[ProjectRecord],
 ) -> Result<(), String> {
@@ -148,7 +149,7 @@ pub fn merge_and_save_project_registry_to(
     save_project_registry_to(global_dir, &merged)
 }
 
-pub fn load_project_registry_from(global_dir: &Path) -> Vec<ProjectRecord> {
+pub(crate) fn load_project_registry_from(global_dir: &Path) -> Vec<ProjectRecord> {
     let canonical_file = global_dir.join("projects.json");
     let projects = fs::read(&canonical_file)
         .map(|contents| parse_project_records(&contents))

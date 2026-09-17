@@ -13,7 +13,7 @@ pub fn executor() -> Result<&'static tokio::runtime::Runtime, String> {
     Ok(threadlane_provider::exec::get_runtime())
 }
 
-pub fn execute_prompt(
+pub(crate) fn execute_prompt(
     runtime: Arc<SessionRuntime>,
     work_dir: PathBuf,
     session_id: String,
@@ -82,7 +82,7 @@ pub fn execute_prompt(
 /// Starting the agent is the point: it reports its settings on `session/new`,
 /// so opening the picker before the first turn is the only way to find out what
 /// it offers. After a turn they arrive free from `execute_prompt`.
-pub fn load_acp_config_options(
+pub(crate) fn load_acp_config_options(
     runtime: Arc<SessionRuntime>,
     session_id: String,
     stream_tx: Sender<ChatStreamEvent>,
@@ -93,7 +93,7 @@ pub fn load_acp_config_options(
 }
 
 /// Applies one of the agent's own settings and reports what it holds afterwards.
-pub fn set_acp_config_option(
+pub(crate) fn set_acp_config_option(
     runtime: Arc<SessionRuntime>,
     session_id: String,
     config_id: String,
@@ -142,7 +142,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn maybe_generate_session_title(
+pub(crate) fn maybe_generate_session_title(
     session_file: PathBuf,
     session_id: String,
     submitted_prompt: String,
@@ -236,7 +236,7 @@ pub fn maybe_generate_session_title(
 
     use threadlane_runtime::titles::normalize_session_title;
 
-pub fn cancel_prompt(
+pub(crate) fn cancel_prompt(
     runtime: Arc<SessionRuntime>,
     session_id: String,
     stream_tx: Sender<ChatStreamEvent>,

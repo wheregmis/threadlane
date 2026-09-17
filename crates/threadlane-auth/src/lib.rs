@@ -11,7 +11,6 @@ pub use codex_auth::*;
 pub use github_auth::*;
 pub use openai_auth::*;
 pub use opencode_auth::*;
-pub use store::CredentialStore;
 
 use serde::de::DeserializeOwned;
 

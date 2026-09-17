@@ -1,7 +1,7 @@
 use super::*;
 
 impl CodingSessionHarness {
-    pub fn index_read_snapshot(
+    pub(crate) fn index_read_snapshot(
         &mut self,
         run_id: &str,
         work_dir: &Path,
@@ -118,7 +118,7 @@ impl CodingSessionHarness {
         Ok(Some(context_id))
     }
 
-    pub fn context_snapshots(
+    pub(crate) fn context_snapshots(
         &self,
         lane: &str,
     ) -> Vec<threadlane_runtime::harness::ContextSnapshot> {
@@ -128,7 +128,7 @@ impl CodingSessionHarness {
             .unwrap_or_default()
     }
 
-    pub async fn record_context_snapshot_load_to_path(
+    pub(crate) async fn record_context_snapshot_load_to_path(
         path: &Path,
         context_id: &str,
         source_lane: &str,

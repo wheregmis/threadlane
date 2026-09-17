@@ -156,7 +156,7 @@ impl McpSettings {
 /// is the host adapter's job.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpToolDescription {
-    pub tool_name: String,
+    pub(crate) tool_name: String,
     pub full_name: String,
     pub description: String,
     pub input_schema: Value,
@@ -186,10 +186,10 @@ pub enum McpContentItem {
 /// [`McpToolResult::to_text`] for the legacy text projection.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpToolResult {
-    pub content: Vec<McpContentItem>,
+    pub(crate) content: Vec<McpContentItem>,
     #[serde(default)]
-    pub is_error: bool,
-    pub raw: Value,
+    pub(crate) is_error: bool,
+    pub(crate) raw: Value,
 }
 
 impl McpToolResult {
@@ -214,14 +214,14 @@ impl McpToolResult {
 
 #[derive(Debug, Clone)]
 pub struct McpToolInfo {
-    pub tool_name: String,
-    pub full_name: String,
-    pub description: String,
-    pub input_schema: Value,
+    pub(crate) tool_name: String,
+    pub(crate) full_name: String,
+    pub(crate) description: String,
+    pub(crate) input_schema: Value,
 }
 
 impl McpToolInfo {
-    pub fn description(&self) -> McpToolDescription {
+    pub(crate) fn description(&self) -> McpToolDescription {
         McpToolDescription {
             tool_name: self.tool_name.clone(),
             full_name: self.full_name.clone(),
@@ -233,8 +233,8 @@ impl McpToolInfo {
 
 #[derive(Debug, Clone)]
 pub struct McpServerRecord {
-    pub config: McpServerConfig,
-    pub tools: Vec<McpToolInfo>,
+    pub(crate) config: McpServerConfig,
+    pub(crate) tools: Vec<McpToolInfo>,
 }
 
 /// A live stdio session with one MCP server.

@@ -231,7 +231,7 @@ impl ProviderRouter {
     /// from the caller. Test-only: production code builds payloads through
     /// the provider clients.
     #[cfg(test)]
-    pub(crate) fn build_payload(
+    fn build_payload(
         &self,
         format: PayloadFormat,
         state: &TurnState,

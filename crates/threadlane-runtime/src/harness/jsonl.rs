@@ -63,7 +63,7 @@ impl Drop for WriterClaim {
 /// parents) would split into independent gates and lock files. Canonicalize
 /// the parent directory (which must exist for the file to be openable) and
 /// join the file name instead.
-pub(crate) fn canonical_writer_key(path: &Path) -> PathBuf {
+fn canonical_writer_key(path: &Path) -> PathBuf {
     if let (Some(parent), Some(name)) = (
         path.parent().filter(|p| !p.as_os_str().is_empty()),
         path.file_name(),
@@ -868,7 +868,7 @@ impl SessionStore for JsonlStore {
 }
 
 impl JsonlStore {
-    pub fn append_plan(&mut self, plan: &threadlane_protocol::SessionPlan) -> Result<(), ReduceError> {
+    pub(crate) fn append_plan(&mut self, plan: &threadlane_protocol::SessionPlan) -> Result<(), ReduceError> {
         let record = Record::FactSet {
             id: format!("fact-plan-{}", self.next_sequence()),
             seq: self.next_sequence(),

@@ -626,7 +626,7 @@ impl NavigationProcedure {
         Self::accept_on_lane(store, "main", run_id, target_leaf_id, summary, effects)
     }
 
-    pub(crate) fn accept_on_lane<S: SessionStore>(
+    fn accept_on_lane<S: SessionStore>(
         store: &S,
         lane_name: &str,
         run_id: &str,
@@ -839,7 +839,7 @@ impl CompactionProcedure {
         })?;
         Ok(())
     }
-    pub(crate) fn accept_on_lane<S: SessionStore>(
+    fn accept_on_lane<S: SessionStore>(
         store: &S,
         lane_name: &str,
         run_id: &str,
@@ -1527,7 +1527,7 @@ impl DeferredProcedure {
         Ok(())
     }
 
-    pub(crate) fn apply_pending<S: SessionStore>(
+    fn apply_pending<S: SessionStore>(
         store: &S,
         run_id: &str,
         effects: &mut GatedEffects,

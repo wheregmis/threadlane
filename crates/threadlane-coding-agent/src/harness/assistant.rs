@@ -9,7 +9,7 @@ impl CodingSessionHarness {
     /// Consecutive identical messages are legitimate (e.g. two `"hello"`
     /// user turns), so no last-entry content dedup is applied. Idempotency
     /// for tool results is handled by deterministic entry ids below.
-    pub fn append_message(&mut self, message: AgentMessage) -> Result<String, String> {
+    pub(crate) fn append_message(&mut self, message: AgentMessage) -> Result<String, String> {
         self.append_message_inner(message, false, false)
     }
 
@@ -29,7 +29,7 @@ impl CodingSessionHarness {
     /// A replacement with an empty range changes no prior context entries. Its
     /// non-append surface metadata identifies this as context restoration rather
     /// than a second human-visible transcript occurrence.
-    pub fn append_message_occurrence(
+    pub(crate) fn append_message_occurrence(
         &mut self,
         message: AgentMessage,
     ) -> Result<String, String> {
@@ -133,7 +133,7 @@ impl CodingSessionHarness {
     }
 
     /// Append a message to a named lane (used for subagent results).
-    pub fn append_message_to_lane(
+    pub(crate) fn append_message_to_lane(
         &mut self,
         lane: &str,
         run_id: &str,
@@ -249,7 +249,7 @@ impl CodingSessionHarness {
 
     /// Prepare an assistant attempt record for the given run.  Returns
     /// the result entry id that the assistant message should carry.
-    pub fn prepare_assistant_attempt(&mut self, run_id: &str) -> Result<String, String> {
+    pub(crate) fn prepare_assistant_attempt(&mut self, run_id: &str) -> Result<String, String> {
         self.ensure_fresh()?;
         let state = Reducer::reduce(&self.store).map_err(|error| error.to_string())?;
         let lane = state
@@ -300,7 +300,7 @@ impl CodingSessionHarness {
 
     /// Record a completed assistant attempt after the assistant message
     /// has been appended.
-    pub fn record_assistant_attempt(
+    pub(crate) fn record_assistant_attempt(
         &mut self,
         run_id: &str,
         usage: TokenUsage,

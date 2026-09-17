@@ -1,12 +1,13 @@
 use super::*;
 
 impl CodingSessionHarness {
-    pub fn transcript(&self, lane: &str) -> threadlane_runtime::harness::TranscriptProjection {
+    #[cfg(test)]
+    pub(crate) fn transcript(&self, lane: &str) -> threadlane_runtime::harness::TranscriptProjection {
         self.store.store().transcript(lane)
     }
 
     #[cfg(test)]
-    pub fn record_provider_trace_to_path(
+    pub(crate) fn record_provider_trace_to_path(
         path: &Path,
         run_id: &str,
         event: ProviderTraceEvent,
@@ -14,7 +15,7 @@ impl CodingSessionHarness {
         Self::with_path(path, |journal| journal.record_provider_trace(run_id, event))
     }
 
-    pub fn record_provider_trace(
+    pub(crate) fn record_provider_trace(
         &mut self,
         run_id: &str,
         event: ProviderTraceEvent,
@@ -191,7 +192,7 @@ impl CodingSessionHarness {
             .map_err(|error| error.to_string())
     }
 
-    pub fn record_permission_trace(
+    pub(crate) fn record_permission_trace(
         &mut self,
         run_id: Option<&str>,
         event: PermissionTraceEvent,
@@ -251,7 +252,8 @@ impl CodingSessionHarness {
             .map_err(|error| error.to_string())
     }
 
-    pub async fn record_tool_execution_to_path(
+    #[cfg(test)]
+    pub(crate) async fn record_tool_execution_to_path(
         path: &Path,
         run_id: &str,
         event: ToolExecutionTraceEvent,
@@ -260,7 +262,7 @@ impl CodingSessionHarness {
         journal.record_tool_execution(run_id, event).await
     }
 
-    pub async fn record_tool_execution(
+    pub(crate) async fn record_tool_execution(
         &mut self,
         run_id: &str,
         event: ToolExecutionTraceEvent,
@@ -382,7 +384,8 @@ impl CodingSessionHarness {
             .await
     }
 
-    pub async fn record_tool_result_to_path(
+    #[cfg(test)]
+    pub(crate) async fn record_tool_result_to_path(
         path: &Path,
         run_id: &str,
         result: &AgentToolResult,
@@ -399,7 +402,7 @@ impl CodingSessionHarness {
         .map_err(|error| error.to_string())?
     }
 
-    pub fn record_tool_result(
+    pub(crate) fn record_tool_result(
         &mut self,
         run_id: &str,
         result: &AgentToolResult,

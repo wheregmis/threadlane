@@ -384,7 +384,8 @@ impl Default for CodingAgentConfig {
 
 impl CodingAgentConfig {
     /// Creates a new [`CodingAgentConfigBuilder`].
-    pub fn builder() -> CodingAgentConfigBuilder {
+    #[cfg(test)]
+    pub(crate) fn builder() -> CodingAgentConfigBuilder {
         CodingAgentConfigBuilder::default()
     }
 }
@@ -441,7 +442,8 @@ impl CodingAgentConfigBuilder {
         self
     }
 
-    pub fn max_subagent_tasks(mut self, value: usize) -> Self {
+    #[cfg(test)]
+    pub(crate) fn max_subagent_tasks(mut self, value: usize) -> Self {
         self.config.max_subagent_tasks = value;
         self
     }
@@ -451,7 +453,8 @@ impl CodingAgentConfigBuilder {
         self
     }
 
-    pub fn subagent_concurrency_limit(mut self, value: usize) -> Self {
+    #[cfg(test)]
+    pub(crate) fn subagent_concurrency_limit(mut self, value: usize) -> Self {
         self.config.subagent_concurrency_limit = value;
         self
     }
@@ -466,7 +469,8 @@ impl CodingAgentConfigBuilder {
         self
     }
 
-    pub fn build(self) -> CodingAgentConfig {
+    #[cfg(test)]
+    pub(crate) fn build(self) -> CodingAgentConfig {
         self.config
     }
 }

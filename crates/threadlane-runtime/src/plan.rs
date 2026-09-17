@@ -21,7 +21,7 @@ pub struct JsonlPlanJournal {
 }
 
 impl JsonlPlanJournal {
-    pub fn new(path: impl AsRef<Path>) -> Self {
+    pub(crate) fn new(path: impl AsRef<Path>) -> Self {
         Self {
             path: path.as_ref().to_path_buf(),
         }

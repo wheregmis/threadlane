@@ -286,7 +286,7 @@ impl PermissionManager {
     /// Ask the user to approve one computer-use action (screenshot or input).
     /// A remembered project grant skips the prompt; otherwise every action
     /// re-prompts with Once/Always scopes. Unattended sessions deny.
-    pub async fn request_computer(&self, title: &str, detail: &str) -> PermissionDecision {
+    pub(crate) async fn request_computer(&self, title: &str, detail: &str) -> PermissionDecision {
         let id = self.generate_request_id();
         let interactive = self.handle.inner.interactive.load(Ordering::SeqCst);
         let persisted = self.computer_is_approved();
@@ -390,7 +390,7 @@ impl PermissionManager {
         effective
     }
 
-    pub fn computer_is_approved(&self) -> bool {
+    pub(crate) fn computer_is_approved(&self) -> bool {
         self.handle
             .inner
             .persistent

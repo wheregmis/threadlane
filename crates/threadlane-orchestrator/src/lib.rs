@@ -40,7 +40,7 @@ pub struct PrewalkState {
     pub todo_seen: bool,
     /// Whether `update_plan` is in the active toolset. When false the gate
     /// is considered open from the start.
-    pub requires_todo: bool,
+    pub(crate) requires_todo: bool,
     /// Continuation safety net armed (fires at most once).
     pub continue_pending: bool,
 }

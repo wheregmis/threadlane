@@ -97,14 +97,14 @@ pub enum Surface {
 }
 
 impl Surface {
-    pub fn all() -> Vec<Self> {
+    pub(crate) fn all() -> Vec<Self> {
         let mut surfaces = vec![Self::Review, Self::Files];
         #[cfg(target_os = "macos")]
         surfaces.push(Self::Browser);
         surfaces
     }
 
-    pub fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Review => "Review",
             Self::Files => "Files",
@@ -112,7 +112,7 @@ impl Surface {
         }
     }
 
-    pub fn icon(self) -> IconName {
+    pub(crate) fn icon(self) -> IconName {
         match self {
             Self::Review => IconName::File,
             Self::Files => IconName::Folder,
@@ -154,7 +154,7 @@ pub enum DiscardOption {
 }
 
 impl DiscardOption {
-    pub fn label(&self) -> String {
+    pub(crate) fn label(&self) -> String {
         match self {
             Self::Single(_) => "Discard Changes...".to_string(),
             Self::Selected(paths) => format!("Discard Selected Changes ({})...", paths.len()),
@@ -162,7 +162,7 @@ impl DiscardOption {
         }
     }
 
-    pub fn git_action(&self) -> GitAction {
+    pub(crate) fn git_action(&self) -> GitAction {
         match self {
             Self::Single(path) => GitAction::DiscardFile(path.clone()),
             Self::Selected(paths) => GitAction::DiscardFiles(paths.clone()),
@@ -170,11 +170,11 @@ impl DiscardOption {
         }
     }
 
-    pub fn requires_confirmation(&self) -> bool {
+    pub(crate) fn requires_confirmation(&self) -> bool {
         matches!(self, Self::Selected(_) | Self::All(_))
     }
 
-    pub fn confirmation_prompt(&self) -> Option<(String, String)> {
+    pub(crate) fn confirmation_prompt(&self) -> Option<(String, String)> {
         match self {
             Self::Single(_) => None,
             Self::Selected(paths) => {

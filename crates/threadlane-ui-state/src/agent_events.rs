@@ -26,7 +26,7 @@ pub enum ChatAgentUpdate {
     Ignore,
 }
 
-pub fn adapt_agent_event(event: AgentEvent) -> ChatAgentUpdate {
+pub(crate) fn adapt_agent_event(event: AgentEvent) -> ChatAgentUpdate {
     match event {
         AgentEvent::AgentEnd { usage } => ChatAgentUpdate::Usage(usage),
         AgentEvent::MessageUpdate {

@@ -36,7 +36,7 @@ impl CodingSessionHarness {
     // ── Retry ─────────────────────────────────────────────────────────
 
     /// Schedule a retry for a failed run.
-    pub fn schedule_retry(&mut self, run_id: &str, reason: &str) -> Result<u32, String> {
+    pub(crate) fn schedule_retry(&mut self, run_id: &str, reason: &str) -> Result<u32, String> {
         self.ensure_fresh()?;
         let attempt = self
             .store

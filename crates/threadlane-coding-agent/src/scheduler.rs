@@ -55,7 +55,7 @@ fn enqueue_harness_queue(
     harness.enqueue_unbound_with_images(queue, content, images)
 }
 
-pub fn enqueue_harness_follow_up(
+pub(crate) fn enqueue_harness_follow_up(
     session_file: &Path,
     content: String,
     images: Vec<ImageAttachment>,
@@ -72,7 +72,7 @@ pub struct AgentWorkScheduler {
 }
 
 impl AgentWorkScheduler {
-    pub fn schedule(&self, work: AgentWork) {
+    pub(crate) fn schedule(&self, work: AgentWork) {
         if let Ok(mut pending) = self.pending.lock() {
             pending.push_back(work);
         }
@@ -85,28 +85,28 @@ impl AgentWorkScheduler {
             .unwrap_or_default()
     }
 
-    pub fn set_acp_model(&self, is_acp: bool) {
+    pub(crate) fn set_acp_model(&self, is_acp: bool) {
         self.acp_model.store(is_acp, Ordering::SeqCst);
     }
 
-    pub fn next(&self) -> Option<AgentWork> {
+    pub(crate) fn next(&self) -> Option<AgentWork> {
         self.pending.lock().ok()?.front().cloned()
     }
 
-    pub fn finish_next(&self) {
+    pub(crate) fn finish_next(&self) {
         if let Ok(mut pending) = self.pending.lock() {
             pending.pop_front();
         }
     }
 
     #[cfg(test)]
-    pub fn set_test_observer(&self, observer: Arc<std::sync::Mutex<Vec<AgentWork>>>) {
+    pub(crate) fn set_test_observer(&self, observer: Arc<std::sync::Mutex<Vec<AgentWork>>>) {
         if let Ok(mut current) = self.test_observer.lock() {
             *current = Some(observer);
         }
     }
 
-    pub async fn run_executor(
+    pub(crate) async fn run_executor(
         &self,
         agent: &mut AgentRuntime,
         session_file: Option<&Path>,
@@ -150,7 +150,7 @@ impl AgentWorkScheduler {
 
 #[cfg(test)]
 pub struct DeterministicSubagentToolExecutor {
-    pub observed: Arc<AtomicBool>,
+    pub(crate) observed: Arc<AtomicBool>,
 }
 
 #[cfg(test)]
@@ -185,7 +185,7 @@ pub struct CodingAgentWorkHandle {
 }
 
 impl CodingAgentWorkHandle {
-    pub fn new(scheduler: AgentWorkScheduler, session_file: Option<PathBuf>) -> Self {
+    pub(crate) fn new(scheduler: AgentWorkScheduler, session_file: Option<PathBuf>) -> Self {
         Self {
             scheduler,
             session_file,

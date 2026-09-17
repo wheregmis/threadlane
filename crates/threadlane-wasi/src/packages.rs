@@ -74,7 +74,7 @@ impl ExtensionManager {
         }
     }
 
-    pub fn install_from_wasm(
+    pub(crate) fn install_from_wasm(
         &self,
         source: &Path,
         scope: ExtensionScope,
@@ -359,7 +359,7 @@ impl ExtensionManager {
         Ok(self.discover())
     }
 
-    pub fn set_enabled(&self, record: &ExtensionRecord, enabled: bool) -> Result<(), String> {
+    pub(crate) fn set_enabled(&self, record: &ExtensionRecord, enabled: bool) -> Result<(), String> {
         self.validate_record(record)?;
         let marker = disabled_marker(&record.module_path);
         match fs::symlink_metadata(&marker) {
@@ -389,7 +389,7 @@ impl ExtensionManager {
         Ok(())
     }
 
-    pub fn remove(&self, record: &ExtensionRecord) -> Result<(), String> {
+    pub(crate) fn remove(&self, record: &ExtensionRecord) -> Result<(), String> {
         self.validate_record(record)?;
         match record.layout {
             ExtensionLayout::Loose => {

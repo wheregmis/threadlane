@@ -13,14 +13,14 @@ use std::process::Command;
 /// `GITLAB_TOKEN`/`GL_TOKEN`). `Default` is empty (ambient fallbacks only).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RemoteCredentials {
-    pub github_token: Option<String>,
-    pub gitlab_token: Option<String>,
+    pub(crate) github_token: Option<String>,
+    pub(crate) gitlab_token: Option<String>,
 }
 
 impl RemoteCredentials {
     /// Ambient environment only: `GITHUB_TOKEN`/`GH_TOKEN` and
     /// `GITLAB_TOKEN`/`GL_TOKEN` when set and non-blank.
-    pub fn from_env() -> Self {
+    pub(crate) fn from_env() -> Self {
         fn env_token(keys: &[&str]) -> Option<String> {
             keys.iter()
                 .filter_map(|key| std::env::var(key).ok())

@@ -12,13 +12,13 @@ use threadlane_protocol::{AgentMessage, AgentToolDefinition, ToolExecutor};
 use super::durable::sha256_hex;
 use super::harness::CodingSessionHarness;
 
-pub const MAX_CONTEXT_LIST_RESULTS: usize = 20;
-pub const MAX_SUBAGENT_CONTEXT_REFS: usize = 16;
-pub const MAX_SUBAGENT_CONTEXT_CHARS: usize = 32_000;
+pub(crate) const MAX_CONTEXT_LIST_RESULTS: usize = 20;
+pub(crate) const MAX_SUBAGENT_CONTEXT_REFS: usize = 16;
+pub(crate) const MAX_SUBAGENT_CONTEXT_CHARS: usize = 32_000;
 
-pub struct ResolvedContextSnapshot {
-    pub snapshot: ContextSnapshot,
-    pub content: String,
+pub(crate) struct ResolvedContextSnapshot {
+    pub(crate) snapshot: ContextSnapshot,
+    pub(crate) content: String,
 }
 
 pub struct ContextSnapshotToolExecutor {
@@ -27,7 +27,7 @@ pub struct ContextSnapshotToolExecutor {
 }
 
 impl ContextSnapshotToolExecutor {
-    pub fn new(session_file: PathBuf, work_dir: PathBuf) -> Self {
+    pub(crate) fn new(session_file: PathBuf, work_dir: PathBuf) -> Self {
         Self {
             session_file,
             work_dir,
@@ -177,7 +177,7 @@ fn snapshot_header(snapshot: &ContextSnapshot, digest: &str) -> String {
     )
 }
 
-pub fn snapshot_location(snapshot: &ContextSnapshot) -> String {
+pub(crate) fn snapshot_location(snapshot: &ContextSnapshot) -> String {
     match (snapshot.start_line, snapshot.end_line) {
         (None, None) => snapshot.path.clone(),
         (start, end) => format!(
@@ -189,7 +189,7 @@ pub fn snapshot_location(snapshot: &ContextSnapshot) -> String {
     }
 }
 
-pub fn compacted_context_snapshot_index_for_sources(
+pub(crate) fn compacted_context_snapshot_index_for_sources(
     snapshots: &[ContextSnapshot],
     prioritized_source_entry_ids: &[String],
 ) -> Vec<serde_json::Value> {
@@ -311,7 +311,7 @@ impl ToolExecutor for ContextSnapshotToolExecutor {
     }
 }
 
-pub fn read_file_request(arguments: &Value) -> Option<(&str, Option<usize>, Option<usize>)> {
+pub(crate) fn read_file_request(arguments: &Value) -> Option<(&str, Option<usize>, Option<usize>)> {
     let path = arguments.get("path")?.as_str()?;
     Some((
         path,
@@ -326,7 +326,7 @@ pub fn read_file_request(arguments: &Value) -> Option<(&str, Option<usize>, Opti
     ))
 }
 
-pub fn is_local_path(path: &str) -> bool {
+pub(crate) fn is_local_path(path: &str) -> bool {
     ![
         "http:", "https:", "virtual:", "file:", "skill:", "agent:", "pr:", "mr:", "issue:",
     ]
@@ -344,7 +344,7 @@ fn file_sha256(path: &Path) -> Result<TraceString, String> {
     .map_err(|error| error.to_string())
 }
 
-pub fn resolve_context_snapshot(
+pub(crate) fn resolve_context_snapshot(
     session_file: &Path,
     work_dir: &Path,
     context_id: &str,

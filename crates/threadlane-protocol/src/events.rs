@@ -166,7 +166,7 @@ pub struct HarnessMetrics {
     total_tools_executed: u64,
     total_input_tokens: u64,
     total_output_tokens: u64,
-    pub active_lanes: usize,
+    pub(crate) active_lanes: usize,
 }
 
 #[cfg(test)]
