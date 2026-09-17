@@ -212,12 +212,6 @@ impl Default for SkillDiscoveryOptions {
     }
 }
 
-impl From<&SkillDiscoveryOptions> for SkillDiscoveryOptions {
-    fn from(options: &SkillDiscoveryOptions) -> Self {
-        options.clone()
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum SkillDiscoveryWarningKind {
     DuplicateSkill,

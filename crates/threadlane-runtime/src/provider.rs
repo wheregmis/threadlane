@@ -166,15 +166,12 @@ impl ProviderAdapter for CodexResponsesAdapter {
     }
 }
 
-/// A router that selects the correct [`ProviderAdapter`] for a given model.
+/// A router that selects the correct [`ProviderAdapter`] for a given payload
+/// format.
 ///
-/// # Example
-///
-/// ```ignore
-/// let router = ProviderRouter::default();
-/// let adapter = router.select_for_model("gpt-5.6-luna");
-/// let payload = adapter.build_payload(&state, &tools, None);
-/// ```
+/// Test-only scaffolding around the adapter implementations: production code
+/// routes through the provider clients. Selection and payload helpers below
+/// are `#[cfg(test)]` for the same reason.
 #[derive(Default)]
 pub struct ProviderRouter {
     adapters: Vec<Arc<dyn ProviderAdapter>>,
@@ -204,6 +201,8 @@ impl ProviderRouter {
     }
 
     /// Returns the first adapter whose format matches the given format.
+    /// Test-only: production code routes through the provider clients.
+    #[cfg(test)]
     fn select(&self, format: PayloadFormat) -> Arc<dyn ProviderAdapter> {
         self.adapters
             .iter()
@@ -213,8 +212,9 @@ impl ProviderRouter {
     }
 
     /// Builds a complete payload for the given format, reading state and tools
-    /// from the caller.
-    #[allow(dead_code)]
+    /// from the caller. Test-only: production code builds payloads through
+    /// the provider clients.
+    #[cfg(test)]
     pub(crate) fn build_payload(
         &self,
         format: PayloadFormat,
@@ -227,6 +227,7 @@ impl ProviderRouter {
     }
 }
 
+#[cfg(test)]
 fn default_adapter_for(format: PayloadFormat) -> Arc<dyn ProviderAdapter> {
     match format {
         PayloadFormat::ChatCompletions => Arc::new(ChatCompletionsAdapter),
