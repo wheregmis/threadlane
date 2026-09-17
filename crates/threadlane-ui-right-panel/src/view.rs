@@ -1306,7 +1306,7 @@ impl RightPanelView {
                     .child(
                         Button::new("right-panel-refresh")
                         .accessibility_label("Refresh surface")
-                            .icon(IconName::Redo)
+                            .icon(Icon::default().path("icons/refresh-cw.svg"))
                             .tooltip("Refresh surface")
                             .ghost()
                             .xsmall()
@@ -1978,7 +1978,7 @@ impl RightPanelView {
                 }))
         } else {
             Button::new("git-sync-action-btn")
-                .icon(IconName::Redo)
+                .icon(Icon::default().path("icons/download.svg"))
                 .label("Fetch")
                 .ghost()
                 .small()

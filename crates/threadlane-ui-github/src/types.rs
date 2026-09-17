@@ -213,26 +213,29 @@ pub fn detail_result_matches_list(
 pub enum PrDetailTab {
     #[default]
     Summary,
+    Conversation,
     Timeline,
     Code,
 }
 
 impl PrDetailTab {
-    pub const ALL: [Self; 3] = [Self::Summary, Self::Timeline, Self::Code];
+    pub const ALL: [Self; 4] = [Self::Summary, Self::Conversation, Self::Timeline, Self::Code];
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Summary => "Summary",
-            Self::Timeline => "Timeline",
-            Self::Code => "Code",
+            Self::Summary => "Overview",
+            Self::Conversation => "Conversation",
+            Self::Timeline => "Commits",
+            Self::Code => "Files changed",
         }
     }
 
     pub fn ix(self) -> usize {
         match self {
             Self::Summary => 0,
-            Self::Timeline => 1,
-            Self::Code => 2,
+            Self::Conversation => 1,
+            Self::Timeline => 2,
+            Self::Code => 3,
         }
     }
 

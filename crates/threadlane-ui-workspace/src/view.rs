@@ -1878,6 +1878,13 @@ impl Render for WorkspaceView {
             });
         }
 
+        let environment_width = if self.right_panel_visible { Pixels::ZERO } else {
+            viewport.width - if show_sidebar { sidebar_width } else { Pixels::ZERO }
+        };
+        self.chat_list.update(cx, |chat, cx| {
+            chat.set_environment_width(environment_width, rem, cx);
+        });
+
         let chat_page_content = {
             let upper_content = if review_focus {
                 div().flex().flex_col().size_full()
@@ -2219,6 +2226,13 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::toggle_right_panel_action))
             .on_action(cx.listener(|this, _: &threadlane_ui_chat::OpenWorkspaceReview, _, cx| {
                 this.open_git_review(cx);
+            }))
+            .on_action(cx.listener(|this, _: &threadlane_ui_chat::OpenWorkspaceFiles, _, cx| {
+                this.right_panel_visible = true;
+                this.right_panel.update(cx, |panel, cx| {
+                    panel.open_surface(threadlane_ui_right_panel::Surface::Files, cx);
+                });
+                cx.notify();
             }))
             .on_action(cx.listener(Self::toggle_terminal_action))
             .on_action(cx.listener(Self::begin_new_task_action))

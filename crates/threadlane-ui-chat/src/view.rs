@@ -205,6 +205,7 @@ pub struct ChatListView {
     model: Entity<AppState>,
     pub input_state: Entity<TextareaState>,
     pub header_left_padding: Pixels,
+    environment_available: bool,
     transcript_list_state: ListState,
     transcript_messages: Arc<Vec<ChatMessageInfo>>,
     transcript_rows: Vec<TranscriptRow>,
@@ -479,6 +480,7 @@ impl ChatListView {
             model,
             input_state,
             header_left_padding: px(14.0),
+            environment_available: false,
             transcript_list_state,
             transcript_messages: Arc::new(Vec::new()),
             transcript_rows: Vec::new(),
@@ -863,6 +865,166 @@ impl ChatListView {
                 .border_color(colors.muted_foreground)
                 .into_any_element(),
         }
+    }
+
+    /// The workspace owns the available width and hides this summary when a tool panel opens.
+    pub fn set_environment_width(&mut self, width: Pixels, rem: Pixels, cx: &mut Context<Self>) {
+        let available = width >= rem * (CHAT_CONTENT_MAX_WIDTH + 20.0);
+        if self.environment_available != available {
+            self.environment_available = available;
+            cx.notify();
+        }
+    }
+
+    fn render_environment(&self, cx: &mut Context<Self>) -> AnyElement {
+        let state = self.model.read(cx);
+        let project = state.active_work_dir.as_ref();
+        let checkout = state.active_git_work_dir();
+        let status = checkout
+            .as_ref()
+            .and_then(|dir| state.git_statuses.get(dir));
+        let name = project
+            .and_then(|dir| state.projects.iter().find(|p| p.work_dir == *dir))
+            .map(|p| p.name.clone())
+            .or_else(|| {
+                project
+                    .and_then(|dir| dir.file_name())
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| "No project".into());
+        let location = match checkout.as_ref() {
+            None => "Checkout unavailable",
+            Some(dir) if Some(dir) != project => "Worktree",
+            Some(_) => "Local",
+        };
+        let branch = status
+            .and_then(|status| status.branch.clone())
+            .unwrap_or_else(|| {
+                if status.is_some_and(|s| s.detached) {
+                    "Detached HEAD"
+                } else {
+                    "Branch unavailable"
+                }
+                .into()
+            });
+        let changes = status
+            .map(|status| match status.files.len() {
+                0 => "No uncommitted changes".to_string(),
+                1 => "1 changed file".to_string(),
+                count => format!("{count} changed files"),
+            })
+            .unwrap_or_else(|| "Git status unavailable".into());
+        let model = self.model.clone();
+        let theme = cx.theme();
+        div()
+            .id("chat-environment")
+            .debug_selector(|| "chat-environment".into())
+            .w(rems(18.0))
+            .flex_none()
+            .p_3()
+            .m_3()
+            .ml_0()
+            .self_start()
+            .rounded(theme.radius)
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.sidebar)
+            .flex()
+            .flex_col()
+            .gap_2()
+            .text_sm()
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child("Environment"),
+            )
+            .child(
+                div()
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(Icon::new(IconName::Folder).small())
+                    .child(div().min_w_0().truncate().child(name)),
+            )
+            .child(
+                div()
+                    .px_2()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(location),
+            )
+            .child(
+                Button::new("environment-branch")
+                    .ghost()
+                    .small()
+                    .w_full()
+                    .justify_start()
+                    .icon(Icon::default().path("icons/git/branch.svg"))
+                    .label(branch.clone())
+                    .tooltip(branch)
+                    .disabled(checkout.is_none())
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(Box::new(crate::OpenWorkspaceReview), cx)
+                    }),
+            )
+            .child(
+                Button::new("environment-changes")
+                    .ghost()
+                    .small()
+                    .w_full()
+                    .justify_start()
+                    .icon(IconName::File)
+                    .label(changes)
+                    .disabled(checkout.is_none())
+                    .tooltip("Review workspace changes")
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(Box::new(crate::OpenWorkspaceReview), cx)
+                    }),
+            )
+            .child(
+                div()
+                    .mt_1()
+                    .pt_2()
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .child(
+                        Button::new("environment-files")
+                            .ghost()
+                            .small()
+                            .w_full()
+                            .justify_start()
+                            .icon(IconName::Folder)
+                            .label("Files")
+                            .disabled(checkout.is_none())
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(crate::OpenWorkspaceFiles), cx)
+                            }),
+                    ),
+            )
+            .child(
+                Button::new("environment-terminal")
+                    .debug_selector(|| "environment-terminal".into())
+                    .ghost()
+                    .small()
+                    .w_full()
+                    .justify_start()
+                    .icon(IconName::SquareTerminal)
+                    .label("Terminal")
+                    .disabled(checkout.is_none())
+                    .on_click(move |_, _, cx| {
+                        if let Some(dir) = checkout.as_ref() {
+                            model.update(cx, |state, cx| {
+                                controller::dispatch(state, AppAction::OpenTerminalAt(dir.clone()));
+                                cx.notify();
+                            });
+                        }
+                    }),
+            )
+            .into_any_element()
     }
 
     fn render_workspace_changes(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -6093,7 +6255,8 @@ impl Render for ChatListView {
             });
         }
         if self.permission_details_request.is_some()
-            && (session_changed || self.permission_details_request != active_permission_id) {
+            && (session_changed || self.permission_details_request != active_permission_id)
+        {
             self.permission_details_request = None;
             window.defer(cx, |window, cx| window.close_dialog(cx));
         }
@@ -6112,6 +6275,10 @@ impl Render for ChatListView {
             self.initial_scroll_frames = self.initial_scroll_frames.saturating_sub(1);
         }
         let theme = cx.theme().colors;
+        let show_environment = self.environment_available
+            && self.current_tab == CentralTab::Chat
+            && !is_new_task
+            && self.model.read(cx).active_work_dir.is_some();
 
         div()
             .relative()
@@ -6124,6 +6291,8 @@ impl Render for ChatListView {
             .bg(theme.background)
             .on_key_down(cx.listener(Self::handle_key_down))
             .child(self.render_header(cx))
+            .child(div().flex().flex_1().min_h_0().min_w_0()
+                .child(div().flex().flex_col().flex_1().min_h_0().min_w_0()
             .children(
                 (self.current_tab == CentralTab::Chat && is_generating)
                     .then(|| self.render_progress_summary(cx)),
@@ -6246,7 +6415,7 @@ impl Render for ChatListView {
                     .flatten(),
             )
             .children(
-                (self.current_tab == CentralTab::Chat)
+                (self.current_tab == CentralTab::Chat && !show_environment)
                     .then(|| self.render_workspace_changes(cx))
                     .flatten(),
             )
@@ -6261,6 +6430,8 @@ impl Render for ChatListView {
                     .flatten(),
             )
             .children((self.current_tab == CentralTab::Chat).then(|| self.render_composer(cx)))
+                )
+                .children(show_environment.then(|| self.render_environment(cx))))
             // The computer-use mirror floats over everything above.
             .children(self.mirror.as_ref().map(|(mirror, _)| mirror.clone()))
     }

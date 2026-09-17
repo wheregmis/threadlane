@@ -1263,3 +1263,42 @@ fn reasoning_disclosure_supports_keyboard_and_pauses_following(cx: &mut gpui::Te
         assert!(!chat.model.read(cx).messages[0].reasoning_expanded, "focused disclosure supports Space");
     });
 }
+
+#[gpui::test]
+fn environment_tracks_checkout_and_yields_space_to_chat(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+    cx.update(gpui_component::init);
+    let model = cx.new(|_| {
+        let mut state = threadlane_ui_state::AppState::default();
+        state.projects.clear();
+        threadlane_ui_state::activate_test_session(&mut state, "first", std::path::Path::new("/projects/one/first.jsonl"));
+        state.is_new_task = false;
+        state
+    });
+    let retained_model = model.clone();
+    let (chat, cx) = cx.add_window_view(move |window, cx| super::ChatListView::new(model, window, cx));
+    chat.update(cx, |chat, cx| chat.set_environment_width(gpui::px(1200.), gpui::px(16.), cx));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("chat-environment").is_some());
+    let terminal = cx.debug_bounds("environment-terminal").unwrap();
+    cx.simulate_click(terminal.center(), gpui::Modifiers::default());
+    retained_model.read_with(cx, |state, _| {
+        assert_eq!(state.requested_terminal_work_dir, state.active_git_work_dir());
+        assert!(state.requested_terminal_work_dir.is_some());
+    });
+    retained_model.update(cx, |state, cx| {
+        threadlane_ui_state::activate_test_session(state, "second", std::path::Path::new("/projects/two/second.jsonl"));
+        state.requested_terminal_work_dir = None;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let terminal = cx.debug_bounds("environment-terminal").unwrap();
+    cx.simulate_click(terminal.center(), gpui::Modifiers::default());
+    retained_model.read_with(cx, |state, _| {
+        assert_eq!(state.requested_terminal_work_dir, Some("/projects/two".into()));
+    });
+    chat.update(cx, |chat, cx| chat.set_environment_width(gpui::px(900.), gpui::px(16.), cx));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("chat-environment").is_none());
+}
