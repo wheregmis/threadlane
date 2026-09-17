@@ -2,52 +2,16 @@ pub mod acp;
 pub mod acp_bridge;
 pub mod acp_presets;
 pub mod acp_runtime;
-/// Agent definitions, canonical in `threadlane_skills::agents`.
-/// Re-exported here so existing `threadlane_session::agents` paths keep
-/// working; new code should import `threadlane_skills::agents` directly.
-pub use threadlane_skills::agents;
 pub mod browser;
 pub mod commands;
 pub mod computer;
 pub mod config;
-/// Project context discovery, canonical in `threadlane-prompt`.
-/// Re-exported here so existing `threadlane_session::context` paths keep
-/// working; new code should import `threadlane_prompt` directly.
-pub use threadlane_prompt as context;
 pub mod controller;
 pub mod credentials;
 pub mod extension_broker;
 pub mod mcp;
-/// Prewalk orchestration, canonical in `threadlane_orchestrator`.
-/// Re-exported here so existing `threadlane_session::orchestrator` paths keep
-/// working; new code should import `threadlane_orchestrator` directly.
-pub use threadlane_runtime::orchestrator;
 pub mod permission;
-/// Attached-project registry, canonical in `threadlane-project`.
-/// Re-exported here so existing `threadlane_session::project_registry` and
-/// `threadlane_session::ProjectRecord` paths keep working; new code should
-/// import `threadlane_project` directly.
-pub use threadlane_project as project_registry;
-/// Model-managed session plans, canonical in `threadlane_plan` (persisted
-/// through its `PlanJournal` trait; `threadlane_runtime::plan` adapts the
-/// session JSONL).
-/// Re-exported here so existing `threadlane_session::plan` paths keep
-/// working; new code should import `threadlane_plan` directly.
-pub use threadlane_runtime::plan;
-/// Execution policy, canonical in `threadlane_runtime::capability`.
-/// Re-exported here so existing `threadlane_session::ToolPolicy` paths keep
-/// working; new code should import `threadlane_runtime::ToolPolicy` directly.
-pub use threadlane_runtime::ToolPolicy;
-/// Prompt templates, canonical in `threadlane_skills::prompts`.
-/// Re-exported here so existing `threadlane_session::prompt_templates` paths
-/// keep working; new code should import `threadlane_skills::prompts` directly.
-pub use threadlane_skills::prompts as prompt_templates;
 pub mod question;
-pub mod supervisor;
-/// System-prompt builder, canonical in `threadlane-prompt`.
-/// Re-exported here so existing `threadlane_session::system_prompt` paths
-/// keep working; new code should import `threadlane_prompt` directly.
-pub use threadlane_prompt as system_prompt;
 
 // ── SessionController & CodingAgent ──────────────────────────────────
 pub mod coding_agent;
@@ -58,7 +22,7 @@ pub use coding_agent::{
     subagent_workspace, AgentRunTask, CodingAgent, CodingAgentCancellation, CodingAgentOptions,
     CodingAgentWorkHandle, HarnessCompositionSnapshot, SubagentCancellationGuard,
 };
-pub use controller::{ExecutionMode, SessionController, SessionStatus};
+pub use controller::{SessionController, SessionStatus};
 pub type SessionRuntime = SessionController;
 pub type SessionRuntimeStatus = SessionStatus;
 
@@ -77,9 +41,8 @@ pub fn runtime_status_text(status: SessionRuntimeStatus) -> Option<String> {
 /// extension loading needs the larger stack and reactor provided there.
 pub fn spawn_session_runtime_construction(
     options: CodingAgentOptions,
-    mode: ExecutionMode,
 ) -> tokio::task::JoinHandle<std::sync::Arc<SessionController>> {
-    threadlane_runtime::get_runtime().spawn_blocking(move || SessionController::new(options, mode))
+    threadlane_runtime::get_runtime().spawn_blocking(move || SessionController::new(options))
 }
 
 // ── Re-exports ───────────────────────────────────────────────────────
@@ -105,7 +68,7 @@ pub use credentials::{
 };
 pub use permission::{PermissionDecision, PermissionHandle};
 pub use question::QuestionHandle;
-pub use system_prompt::SystemPromptConfig;
+pub use threadlane_prompt::SystemPromptConfig;
 pub use threadlane_project::{
     load_project_registry, register_project, save_project_registry, select_project, ProjectRecord,
 };

@@ -21,7 +21,6 @@ test-support = ["threadlane-permission/test-support"]
 threadlane-acp.workspace = true
 threadlane-acp-engine.workspace = true
 threadlane-coding-agent.workspace = true
-threadlane-supervisor.workspace = true
 threadlane-browser.workspace = true
 threadlane-runtime.workspace = true
 threadlane-protocol.workspace = true

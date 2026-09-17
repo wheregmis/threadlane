@@ -63,8 +63,8 @@ pub use events::{
 };
 pub use harness::{
     has_open_subagent_lanes, interrupted_subagent_lanes, AcceptedRun, DurableEvent, DurablePayload,
-    InterruptedSubagentLane, LaneQueue, OperationOutcome, QueueKind, Record, RecoveryResult,
-    SteerItem, SteerPriority, ToolReplaySafety,
+    InterruptedSubagentLane, OperationOutcome, QueueKind, Record,
+    SteerPriority, ToolReplaySafety,
 };
 pub use loop_detector::{LoopDetector, LoopTrip};
 // Turn-repair helper lives in `threadlane-provider::convert`, next to the

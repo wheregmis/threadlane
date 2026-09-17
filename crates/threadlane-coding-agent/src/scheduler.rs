@@ -1,7 +1,6 @@
 use super::harness::CodingSessionHarness;
 #[cfg(test)]
 use async_trait::async_trait;
-use log::warn;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -178,20 +177,6 @@ impl CodingAgentWorkHandle {
         Self {
             scheduler,
             session_file,
-        }
-    }
-
-    pub fn queue_follow_up(&self, content: impl Into<String>) {
-        self.queue_follow_up_with_images(content, Vec::new());
-    }
-
-    fn queue_follow_up_with_images(
-        &self,
-        content: impl Into<String>,
-        images: Vec<ImageAttachment>,
-    ) {
-        if let Err(error) = self.try_queue_follow_up_with_images(content, images) {
-            warn!("Failed to persist queued follow-up: {error}");
         }
     }
 

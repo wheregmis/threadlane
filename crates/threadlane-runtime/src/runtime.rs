@@ -60,7 +60,7 @@ pub struct AgentRuntime {
     /// In-memory working copy of turn state. The harness is authoritative;
     /// this copy is refreshed from the canonical store before each turn.
     pub turn: Arc<Mutex<TurnState>>,
-    /// Agent configuration (compaction, stream rules, model roles, etc.).
+    /// Agent configuration (compaction, model roles, etc.).
     config: AgentConfig,
     /// API key for the active provider.
     pub api_key: String,
@@ -78,8 +78,6 @@ pub struct AgentRuntime {
     steering_queue: Vec<AgentMessage>,
     /// Follow-up queue — appends to turn after completion.
     follow_up_queue: Vec<AgentMessage>,
-    /// Compiled stream rules for runtime monitoring.
-    stream_rules: Vec<(crate::rules::StreamRule, regex::Regex)>,
     /// Prompt cache key for provider-side caching.
     prompt_cache_key: Option<String>,
     /// Optional allowlist of tool names.
@@ -139,7 +137,6 @@ impl AgentRuntime {
             hook_registry: hooks,
             steering_queue: Vec::new(),
             follow_up_queue: Vec::new(),
-            stream_rules: Vec::new(),
             prompt_cache_key: None,
             allowed_tool_names: None,
             provider_trace_recorder: None,
@@ -499,13 +496,6 @@ impl AgentRuntime {
         self.tool_dispatcher.allowed_tool_names = names;
     }
 
-    pub fn set_stream_rules(&mut self, rules: Vec<crate::rules::StreamRule>) {
-        self.stream_rules = rules
-            .into_iter()
-            .filter_map(|r| regex::Regex::new(&r.pattern).ok().map(|re| (r, re)))
-            .collect();
-    }
-
     pub fn tool_executor_count(&self) -> usize {
         self.tool_dispatcher.tool_executor_count()
     }
@@ -765,7 +755,6 @@ impl AgentRuntime {
             provider_trace_recorder: self.provider_trace_recorder.clone(),
             provider_boundary_preparer: self.provider_boundary_preparer.clone(),
             message_recorder: self.message_recorder.clone(),
-            stream_rules: self.stream_rules.clone(),
             steering_queue: &mut self.steering_queue,
             follow_up_queue: &mut self.follow_up_queue,
         };

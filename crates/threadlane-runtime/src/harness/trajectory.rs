@@ -195,20 +195,6 @@ pub struct SubagentTrajectory {
     seq: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct GenericDurableTrajectory {
-    seq: u64,
-    id: String,
-    lane: String,
-    category: String,
-    summary: String,
-    detail: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    run_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    turn: Option<u32>,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AnomalyKind {
     RepeatedToolCallIdenticalArgs,
@@ -241,8 +227,6 @@ pub enum TrajectoryItem {
     Tool(ToolTrajectory),
     Permission(PermissionTrajectory),
     Subagent(SubagentTrajectory),
-    Anomaly(DiagnosticAnomaly),
-    Event(GenericDurableTrajectory),
 }
 
 impl TrajectoryItem {
@@ -256,8 +240,6 @@ impl TrajectoryItem {
             Self::Tool(t) => t.started_seq,
             Self::Permission(p) => p.requested_seq,
             Self::Subagent(s) => s.seq,
-            Self::Anomaly(a) => a.related_refs.first().map_or(0, |r| r.seq),
-            Self::Event(e) => e.seq,
         }
     }
 }

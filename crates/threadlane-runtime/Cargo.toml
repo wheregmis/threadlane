@@ -21,12 +21,10 @@ serde.workspace = true
 serde_json.workspace = true
 async-trait.workspace = true
 futures.workspace = true
-regex.workspace = true
 thiserror.workspace = true
 directories.workspace = true
 tracing.workspace = true
 sha2.workspace = true
-libsqlite3-sys.workspace = true
 
 [features]
 default = []

@@ -1,19 +1,17 @@
 use super::{
     AbortProcedure, AssistantAttemptProcedure, CompactionProcedure, DeferredProcedure,
     DeferredResolution, EffectAction, EffectsError, GatedEffects, HarnessEventHub, HookRegistry,
-    NavigationProcedure, NoToolRun, NoopTelemetry, OperationProcedure, ProcedureError,
+    NavigationProcedure, NoToolRun, OperationProcedure, ProcedureError,
     PromptProcedure, ProvisionedEntry, QueueKind, QueueProcedure, ReduceError, SessionStore,
-    Snapshot, TelemetrySink, ToolBatchProcedure, ToolRecovery, ToolResult, ToolSpec,
+    Snapshot, ToolBatchProcedure, ToolRecovery, ToolResult, ToolSpec,
 };
 use crate::types::{AgentMessage, TokenUsage};
-use std::sync::Arc;
 
 pub struct AgentHarness<S: SessionStore> {
     store: S,
     effects: GatedEffects,
     events: HarnessEventHub,
     hooks: HookRegistry,
-    telemetry: Arc<dyn TelemetrySink>,
 }
 
 impl<S: SessionStore> AgentHarness<S> {
@@ -27,7 +25,6 @@ impl<S: SessionStore> AgentHarness<S> {
             effects: GatedEffects::new(),
             events,
             hooks: HookRegistry::default(),
-            telemetry: Arc::new(NoopTelemetry),
         }
     }
 
@@ -37,7 +34,6 @@ impl<S: SessionStore> AgentHarness<S> {
             effects: GatedEffects::new(),
             events,
             hooks,
-            telemetry: Arc::new(NoopTelemetry),
         }
     }
 
@@ -60,36 +56,6 @@ impl<S: SessionStore> AgentHarness<S> {
             effects: GatedEffects::with_executor(executor),
             events,
             hooks,
-            telemetry: Arc::new(NoopTelemetry),
-        }
-    }
-
-    pub fn with_telemetry(
-        store: S,
-        events: HarnessEventHub,
-        telemetry: Arc<dyn TelemetrySink>,
-    ) -> Self {
-        Self {
-            store,
-            effects: GatedEffects::with_telemetry(telemetry.clone()),
-            events,
-            hooks: HookRegistry::default(),
-            telemetry,
-        }
-    }
-
-    pub fn with_executor_and_telemetry(
-        store: S,
-        events: HarnessEventHub,
-        executor: impl FnMut(EffectAction) -> Result<(), ReduceError> + Send + Sync + 'static,
-        telemetry: Arc<dyn TelemetrySink>,
-    ) -> Self {
-        Self {
-            store,
-            effects: GatedEffects::with_executor_and_telemetry(executor, telemetry.clone()),
-            events,
-            hooks: HookRegistry::default(),
-            telemetry,
         }
     }
 
@@ -111,10 +77,6 @@ impl<S: SessionStore> AgentHarness<S> {
 
     pub fn hooks_mut(&mut self) -> &mut HookRegistry {
         &mut self.hooks
-    }
-
-    pub fn telemetry(&self) -> &dyn TelemetrySink {
-        self.telemetry.as_ref()
     }
 
     pub fn fault(&self) -> Option<&ReduceError> {
@@ -966,42 +928,6 @@ impl<S: SessionStore> AgentHarness<S> {
         self.effects.peek_action()
     }
 
-    pub fn peek_action_on_lane(&self, lane: &str) -> Option<&EffectAction> {
-        self.effects.peek_action_on_lane(lane)
-    }
-
-    pub(crate) fn drive_one_on_lane(&mut self, lane: &str) -> Result<bool, EffectsError> {
-        let Some(id) = self
-            .effects
-            .peek_action_on_lane(lane)
-            .map(|action| action.id().to_owned())
-        else {
-            return Ok(false);
-        };
-        self.effects.execute_action_on_lane_with_events(
-            &mut self.store,
-            &mut self.events,
-            lane,
-            &id,
-        )?;
-        self.store.refresh().map_err(EffectsError::Store)?;
-        Ok(true)
-    }
-
-    pub fn drive_one(&mut self) -> Result<bool, EffectsError> {
-        let Some(id) = self
-            .effects
-            .peek_action()
-            .map(|action| action.id().to_owned())
-        else {
-            return Ok(false);
-        };
-        self.effects
-            .execute_action_with_events(&mut self.store, &mut self.events, &id)?;
-        self.store.refresh().map_err(EffectsError::Store)?;
-        Ok(true)
-    }
-
     pub fn drive_to_completion(&mut self) -> Result<(), EffectsError> {
         self.effects
             .run_to_completion_with_events(&mut self.store, &mut self.events)?;
@@ -1031,10 +957,6 @@ impl<S: SessionStore> AgentHarness<S> {
 
     pub(crate) fn events(&self) -> &HarnessEventHub {
         &self.events
-    }
-
-    pub fn events_mut(&mut self) -> &mut HarnessEventHub {
-        &mut self.events
     }
 
     pub fn subscribe(&self) -> Result<super::Subscription, ReduceError> {

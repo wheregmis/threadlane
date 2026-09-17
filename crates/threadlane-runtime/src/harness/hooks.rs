@@ -209,40 +209,6 @@ impl HookRegistry {
         self.run_handlers(HookKind::AfterTool, context, false).await
     }
 
-    pub fn set_resume_data(
-        &self,
-        hook_id: impl Into<String>,
-        data: impl Into<String>,
-    ) -> Result<(), HookFailure> {
-        let hook_id = hook_id.into();
-        let hooks = self
-            .state
-            .hooks
-            .read()
-            .unwrap_or_else(|error| error.into_inner());
-        if !hooks.iter().any(|hook| hook.id == hook_id) {
-            return Err(HookFailure {
-                id: hook_id,
-                message: "resume data requires a registered hook".into(),
-            });
-        }
-        drop(hooks);
-        self.state
-            .resume_data
-            .write()
-            .unwrap_or_else(|error| error.into_inner())
-            .insert(hook_id, data.into());
-        Ok(())
-    }
-
-    pub fn clear_resume_data(&self, hook_id: &str) {
-        self.state
-            .resume_data
-            .write()
-            .unwrap_or_else(|error| error.into_inner())
-            .remove(hook_id);
-    }
-
     pub(crate) fn restore_resume_data(
         &self,
         persisted: &std::collections::BTreeMap<String, String>,

@@ -196,20 +196,20 @@ impl Clone for ProviderRouter {
 }
 
 impl ProviderRouter {
-    /// Creates a router with the default adapters (Chat Completions + Codex).
-    #[allow(dead_code)]
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
     /// Registers a custom adapter. Later registrations take priority over
     /// earlier ones when selecting by model.
     pub fn register(&mut self, adapter: Arc<dyn ProviderAdapter>) {
         self.adapters.push(adapter);
     }
 
-    /// Returns the first adapter whose format matches the given format.
-    #[allow(dead_code)]
+    /// Test-only payload helpers (no production callers; covered by unit tests).
+    #[cfg(test)]
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Test-only adapter selection.
+    #[cfg(test)]
     fn select(&self, format: PayloadFormat) -> Arc<dyn ProviderAdapter> {
         self.adapters
             .iter()
@@ -218,9 +218,8 @@ impl ProviderRouter {
             .unwrap_or_else(|| default_adapter_for(format))
     }
 
-    /// Builds a complete payload for the given format, reading state and tools
-    /// from the caller.
-    #[allow(dead_code)]
+    /// Test-only payload builder.
+    #[cfg(test)]
     pub(crate) fn build_payload(
         &self,
         format: PayloadFormat,
@@ -233,7 +232,7 @@ impl ProviderRouter {
     }
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn default_adapter_for(format: PayloadFormat) -> Arc<dyn ProviderAdapter> {
     match format {
         PayloadFormat::ChatCompletions => Arc::new(ChatCompletionsAdapter),

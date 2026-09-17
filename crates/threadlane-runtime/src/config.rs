@@ -52,11 +52,6 @@ pub struct AgentConfig {
     #[serde(default = "default_loop_error_limit")]
     pub(crate) loop_error_limit: usize,
 
-    // ── Stream Rules ────────────────────────────────────────────────────
-    /// Maximum bytes of accumulated streaming text to retain for regex
-    /// matching. Text beyond this window is discarded.
-    pub(crate) stream_rule_max_window_bytes: usize,
-
     // ── Provider ────────────────────────────────────────────────────────
     /// Default system prompt used when none is explicitly set.
     pub(crate) default_system_prompt: String,
@@ -143,7 +138,6 @@ impl Default for AgentConfig {
             context_minimum_retained_tail_tokens: 20_000,
             context_maximum_retained_tail_tokens: 64_000,
             context_retained_tail_percent: 25,
-            stream_rule_max_window_bytes: 4096,
             default_system_prompt: "You are threadlane AI coding agent. Lead with answers and actions. Omit conversational filler, preambles, and recaps. Keep edits minimal, focused on root causes, and strictly avoid unrequested refactoring or speculative abstractions.".into(),
             model_roles: ModelRoles::default(),
             subagent_model: None,
@@ -245,11 +239,6 @@ impl AgentConfigBuilder {
 
     pub fn context_retained_tail_percent(mut self, value: usize) -> Self {
         self.config.context_retained_tail_percent = value;
-        self
-    }
-
-    pub fn stream_rule_max_window_bytes(mut self, value: usize) -> Self {
-        self.config.stream_rule_max_window_bytes = value;
         self
     }
 

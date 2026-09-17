@@ -19,7 +19,7 @@ pub use threadlane_runtime::harness::Record as HarnessRecord;
 use threadlane_runtime::harness::{
     AbortInitiator, AbortObservation, AbortTarget, AgentHarness, BoundedText, CapabilitySnapshot,
     CompactionReason, ContextSnapshotLoadOutcome, DeferredResolution, Entry as HarnessEntry,
-    ErrorCategory, HarnessEventHub, HookContext, HookKind, HookRegistry, JsonlStore,
+    ErrorCategory, HarnessEventHub, HookContext, HookRegistry, JsonlStore,
     OperationOutcome, PromptSnapshot, ProviderErrorSummary, ProviderOutcome, ProvisionedEntry,
     QueueKind, Reducer, RetryPolicy, SessionIdGenerator, SessionStore, Snapshot,
     SubagentLifecyclePhase, ToolExecutionOutcome, ToolExecutionPhase,
@@ -33,7 +33,7 @@ use threadlane_runtime::{
     ToolExecutionTraceEvent,
 };
 
-use threadlane_runtime::harness::{EventError, HarnessEvent, OperationIntent, Subscription};
+use threadlane_runtime::harness::OperationIntent;
 
 #[cfg(test)]
 static LAST_PATH_OPERATION_THREAD: std::sync::Mutex<Option<std::thread::ThreadId>> =
@@ -43,21 +43,6 @@ static NEXT_CONTEXT_SNAPSHOT_LOAD_ID: AtomicU64 = AtomicU64::new(1);
 #[cfg(test)]
 fn last_path_operation_thread() -> Option<std::thread::ThreadId> {
     *LAST_PATH_OPERATION_THREAD.lock().ok()?
-}
-
-pub struct HarnessWatch {
-    hub: HarnessEventHub,
-    subscription: Subscription,
-}
-
-impl HarnessWatch {
-    pub fn snapshot(&self) -> &Snapshot {
-        &self.subscription.snapshot
-    }
-
-    pub async fn wait(&mut self) -> Result<Vec<HarnessEvent>, EventError> {
-        self.hub.wait(&mut self.subscription).await
-    }
 }
 
 #[derive(Clone)]
@@ -237,10 +222,6 @@ impl CodingSessionHarness {
                 .append_fact(lane, key, value, run_id)
                 .map_err(|error| error.to_string())
         })
-    }
-
-    pub fn append_message_to_path(path: &Path, message: AgentMessage) -> Result<(), String> {
-        Self::with_path(path, |journal| journal.append_message(message).map(|_| ()))
     }
 
     pub fn index_read_snapshot(
@@ -1750,17 +1731,6 @@ impl CodingSessionHarness {
             .map_err(|error| error.to_string())
     }
 
-    pub fn begin_run_text(&mut self, prompt: &str) -> Result<AcceptedRun, String> {
-        let run_id = format!(
-            "run-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0)
-        );
-        self.begin_run(&run_id, AgentMessage::user(prompt.to_string(), Vec::new()))
-    }
-
     pub fn enqueue_unbound_with_images(
         &mut self,
         queue: QueueKind,
@@ -2848,31 +2818,6 @@ impl CodingSessionHarness {
         Ok(())
     }
 
-    /// Finish a replayed tool result.
-    pub fn finish_replayed_tool(
-        &mut self,
-        run_id: &str,
-        result: &AgentToolResult,
-    ) -> Result<(), String> {
-        self.ensure_fresh()?;
-        self.store
-            .finish_existing_tool(
-                run_id,
-                HarnessToolResult {
-                    call_id: result.tool_call_id.clone(),
-                    name: result.name.clone(),
-                    content: result.content.clone(),
-                    is_error: result.is_error,
-                    terminate: result.terminates(),
-                    images: result.images.clone(),
-                },
-            )
-            .map_err(|error| error.to_string())?;
-        self.store
-            .drive_to_completion()
-            .map_err(|error| error.to_string())
-    }
-
     /// Record tool completions with termination flags.
     pub fn record_completed_tools_with_termination(
         &mut self,
@@ -3120,66 +3065,6 @@ impl CodingSessionHarness {
 
     // ── Replay & navigation ───────────────────────────────────────────
 
-    /// Append a replayed tool entry to the store.
-    pub fn append_replayed_tool_entry(
-        &mut self,
-        run_id: &str,
-        assistant_entry_id: &str,
-        spec: &ToolSpec,
-        result: &AgentToolResult,
-    ) -> Result<(), String> {
-        let state = Reducer::reduce(self.store.store()).map_err(|error| error.to_string())?;
-        let lane = state
-            .lanes
-            .iter()
-            .find(|lane| lane.open_operation.as_deref() == Some(run_id))
-            .ok_or_else(|| format!("harness operation {run_id} is not open"))?;
-        let parent_id = if spec.index == 0 {
-            assistant_entry_id.to_string()
-        } else {
-            state
-                .lanes
-                .iter()
-                .flat_map(|lane| lane.tools.iter())
-                .find(|tool| {
-                    tool.run_id == run_id
-                        && tool.assistant_entry_id == assistant_entry_id
-                        && tool.tool_index + 1 == spec.index
-                })
-                .filter(|tool| {
-                    self.store
-                        .entries()
-                        .iter()
-                        .any(|entry| entry.id == tool.result_entry_id)
-                })
-                .map(|tool| tool.result_entry_id.clone())
-                .unwrap_or_else(|| assistant_entry_id.to_string())
-        };
-        let seq = self.next_seq();
-        self.store
-            .append_entry_gated(HarnessEntry {
-                id: spec.result_entry_id.clone(),
-                parent_id: Some(parent_id),
-                lane: lane.name.clone(),
-                seq,
-                timestamp: timestamp(),
-                message: AgentMessage::Tool {
-                    tool_call_id: result.tool_call_id.clone(),
-                    name: result.name.clone(),
-                    content: result.content.clone(),
-                    is_error: result.is_error,
-                    terminate: result.terminates(),
-                    images: result.images.clone(),
-                },
-                surface_op: threadlane_runtime::harness::SurfaceOperation::Append,
-                terminate: result.terminates(),
-            })
-            .map_err(|error| error.to_string())?;
-        self.store
-            .drive_to_completion()
-            .map_err(|error| error.to_string())
-    }
-
     /// Claim safe tool replays for recovery.
     pub fn claim_safe_replays(
         &mut self,
@@ -3276,19 +3161,6 @@ impl CodingSessionHarness {
     pub fn snapshot(&mut self) -> Result<Snapshot, String> {
         self.ensure_fresh()?;
         self.store.snapshot().map_err(|error| error.to_string())
-    }
-
-    /// Subscribe to session-scoped events.
-    pub fn watch(&mut self) -> Result<HarnessWatch, String> {
-        self.ensure_fresh()?;
-        let subscription = self
-            .store
-            .watch_session()
-            .map_err(|error| error.to_string())?;
-        Ok(HarnessWatch {
-            hub: self.events.clone(),
-            subscription,
-        })
     }
 
     /// Drive all pending effects to completion.
@@ -3402,125 +3274,6 @@ impl CodingSessionHarness {
             logged.len(),
             expected.len()
         ))
-    }
-
-    pub fn commit_assistant_message(
-        &mut self,
-        lane: &str,
-        run_id: &str,
-        content: Option<String>,
-        stop_reason: Option<String>,
-    ) -> Result<String, String> {
-        self.append_message_to_lane(
-            lane,
-            run_id,
-            AgentMessage::Assistant {
-                content,
-                tool_calls: None,
-                stop_reason,
-                deferred_handle: None,
-            },
-        )
-    }
-
-    pub fn commit_thinking(
-        &mut self,
-        lane: &str,
-        run_id: &str,
-        reasoning: String,
-    ) -> Result<String, String> {
-        self.append_message_to_lane(
-            lane,
-            run_id,
-            AgentMessage::Custom {
-                custom_type: "thinking".to_string(),
-                payload: Value::String(reasoning),
-            },
-        )
-    }
-
-    pub fn commit_tool_calls(
-        &mut self,
-        lane: &str,
-        run_id: &str,
-        tool_calls: Vec<threadlane_provider::openai::ToolCall>,
-    ) -> Result<String, String> {
-        self.append_message_to_lane(
-            lane,
-            run_id,
-            AgentMessage::Assistant {
-                content: None,
-                tool_calls: Some(tool_calls),
-                stop_reason: None,
-                deferred_handle: None,
-            },
-        )
-    }
-
-    pub fn commit_tool_results(
-        &mut self,
-        lane: &str,
-        run_id: &str,
-        results: &[AgentToolResult],
-    ) -> Result<Vec<String>, String> {
-        let mut committed = Vec::new();
-        for result in results {
-            let msg = AgentMessage::Tool {
-                tool_call_id: result.tool_call_id.clone(),
-                name: result.name.clone(),
-                content: result.content.clone(),
-                is_error: result.is_error,
-                terminate: result.terminates(),
-                images: result.images.clone(),
-            };
-            let entry_id = self.append_message_to_lane(lane, run_id, msg)?;
-            let _ = self.finish_tool_result(run_id, result);
-            committed.push(entry_id);
-        }
-        Ok(committed)
-    }
-
-    pub fn commit_follow_up(
-        &mut self,
-        lane: &str,
-        run_id: &str,
-        message: AgentMessage,
-    ) -> Result<String, String> {
-        self.append_message_to_lane(lane, run_id, message)
-    }
-
-    pub fn commit_provider_failure(
-        &mut self,
-        _lane: &str,
-        run_id: &str,
-        error: String,
-    ) -> Result<(), String> {
-        self.finish_run(run_id, OperationOutcome::Failed, Some(error))
-    }
-
-    pub fn plan_recovery(
-        &mut self,
-        lane: &str,
-    ) -> Result<threadlane_runtime::harness::RecoveryPlan, String> {
-        self.ensure_fresh()?;
-        let agent = threadlane_runtime::harness::SessionAgent::new(AgentHarness::new(
-            self.store.store().clone(),
-        ));
-        let lane_handle = threadlane_runtime::harness::LaneHandle::new(lane.to_string())
-            .map_err(|error| error.to_string())?;
-        agent
-            .plan_recovery(&lane_handle)
-            .map_err(|error| error.to_string())
-    }
-
-    /// Run hooks of the given kind for the main lane.
-    pub async fn run_hooks(&self, kind: HookKind, context: &HookContext) {
-        for failure in self.store.hooks().run(kind, context).await {
-            eprintln!(
-                "hook {} ({:?}) failed: {}",
-                failure.id, kind, failure.message
-            );
-        }
     }
 }
 
