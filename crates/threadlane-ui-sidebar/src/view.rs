@@ -1191,7 +1191,6 @@ impl SidebarView {
                     theme.list_hover
                 })
             })
-            .cursor_pointer()
             .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                 let work_dir = work_dir.clone();
                 let session_id = session_id.clone();

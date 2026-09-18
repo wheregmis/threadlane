@@ -1165,7 +1165,6 @@ impl SettingsView {
                             .border_2()
                             .border_color(if is_dark { theme.primary } else { theme.border })
                             .bg(theme.title_bar)
-                            .cursor_pointer()
                             .on_click(|_event, _window, cx| {
                                 threadlane_ui_theme::apply_theme("Threadlane Dark", cx);
                             })
@@ -1262,7 +1261,6 @@ impl SettingsView {
                                 theme.border
                             })
                             .bg(theme.title_bar)
-                            .cursor_pointer()
                             .on_click(|_event, _window, cx| {
                                 threadlane_ui_theme::apply_theme("Threadlane Light", cx);
                             })

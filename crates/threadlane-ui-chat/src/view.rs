@@ -1237,8 +1237,7 @@ impl ChatListView {
                     .disabled(!has_detail)
                     .gap_2()
                     .when(has_detail, |row| {
-                        row.cursor_pointer()
-                            .on_click(move |_event, _window, cx| {
+                        row.on_click(move |_event, _window, cx| {
                                 transcript.pause_following_tail();
                                 transcript.remeasure();
                                 model.update(cx, |state, cx| {
@@ -4308,7 +4307,6 @@ impl ChatListView {
                     .px_3()
                     .py_2()
                     .rounded_md()
-                    .cursor_pointer()
                     .when(is_selected, |row| row.bg(theme.muted))
                     .flex()
                     .items_start()
@@ -5542,7 +5540,6 @@ impl ChatListView {
                                         gpui::transparent_black()
                                     })
                                     .hover(|style| style.bg(theme.list_hover))
-                                    .cursor_pointer()
                                     .child(
                                         div()
                                             .w(px(160.0))
