@@ -1639,6 +1639,10 @@ impl GitHubView {
             .border_b_1()
             .border_color(theme.border)
             .bg(theme.title_bar)
+            // Same top clearance as the sidebar/right-panel/settings
+            // headers so toolbar text sits on the shared line under the
+            // traffic lights instead of riding higher.
+            .pt(threadlane_ui_theme::WINDOW_CONTROLS_CLEARANCE)
             .px_4()
             .when_some(self.window_controls_inset, |this, inset| this.pl(inset))
             .py_2()

@@ -8659,6 +8659,7 @@ dependencies = [
  "serde_json",
  "threadlane-git",
  "threadlane-ui-state",
+ "threadlane-ui-theme",
 ]
 
 [[package]]

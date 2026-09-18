@@ -12,6 +12,7 @@ rfd.workspace = true
 serde_json.workspace = true
 threadlane-git.workspace = true
 threadlane-ui-state.workspace = true
+threadlane-ui-theme.workspace = true
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
