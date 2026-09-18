@@ -1,11 +1,16 @@
-//! In-process live feed for native computer use.
+//! In-process live feed for computer use.
 //!
-//! The GPUI mirror wants video, not a slideshow. The macOS poller in
-//! `threadlane_computer::stream` publishes bounded opaque BGRA frames
-//! here at up to 20fps while a mirror is subscribed, along with input
-//! overlays (where a click landed, what was typed) and poller status for the
-//! mirror header. Everything is process-global because the poller is: one
-//! machine, one live feed, many project sessions.
+//! The GPUI mirror subscribes here for frames, input overlays (where a click
+//! landed, what was typed), and capture status for the mirror header.
+//! Everything is process-global: one machine, one live feed, many project
+//! sessions.
+//!
+//! Since the CUA-driver migration frames come from `threadlane-computer`'s
+//! driver-backed feed (`computer/mirror.rs`, ~1fps captures of the last-used
+//! target while computer calls are recent): the driver's own agent-cursor
+//! overlay shows live input, and each screenshot/act also publishes an
+//! overlay plus a `latest.json` sidecar so the mirror popup keeps showing
+//! the last capture.
 //!
 //! This module lives in `threadlane-protocol` (moved from
 //! `threadlane-session::computer_live`) because it is the contract between

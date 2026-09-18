@@ -932,7 +932,10 @@ fn select_option(
             AcpPermissionOptionKind::AllowAlways,
             AcpPermissionOptionKind::AllowOnce,
         ],
-        PermissionDecision::AllowOnce => &[AcpPermissionOptionKind::AllowOnce],
+        // A session grant has no ACP equivalent: answer once, like AllowOnce.
+        PermissionDecision::AllowOnce | PermissionDecision::AllowSession => {
+            &[AcpPermissionOptionKind::AllowOnce]
+        }
         PermissionDecision::Deny => &[
             AcpPermissionOptionKind::RejectOnce,
             AcpPermissionOptionKind::RejectAlways,

@@ -462,12 +462,12 @@ impl ChatListView {
 
         let stream_model = model.clone();
         cx.spawn(async move |this, cx| {
-            // Dev hook: `THREADLANE_MIRROR_DEBUG=1` opens the mirror on the
-            // main display at launch, so the live feed can be observed and
-            // profiled without a model turn or an approval prompt. Nothing
-            // reaches a model through this path.
+            // Dev hook: `THREADLANE_MIRROR_DEBUG=1` opens the mirror at
+            // launch, so the popup can be observed without a model turn or
+            // an approval prompt. It shows the last screenshot sidecar until
+            // the first computer call lands. Nothing reaches a model through
+            // this path.
             if std::env::var_os("THREADLANE_MIRROR_DEBUG").is_some() {
-                threadlane_computer::watch_display_for_debug();
                 let _ = this.update(cx, |view, cx| view.open_mirror(cx));
             }
             while let Some(events) = next_chat_stream_batch(&mut stream_rx).await {
@@ -3825,6 +3825,7 @@ impl ChatListView {
         }
         let theme = cx.theme().colors;
         let allows_always = request.scopes.contains(&threadlane_protocol::PermissionScope::Always);
+        let allows_session = request.scopes.contains(&threadlane_protocol::PermissionScope::Session);
         let action_button = |id: &'static str, label: &'static str, decision, primary: bool| {
             let request_id = request.id.clone();
             Button::new(id).label(label).small()
@@ -3844,6 +3845,8 @@ impl ChatListView {
             .child(div().flex().flex_wrap().justify_end().gap_2()
                 .child(action_button("details-deny", "Deny", threadlane_permission::PermissionDecision::Deny, false))
                 .child(action_button("details-allow-once", "Allow once", threadlane_permission::PermissionDecision::AllowOnce, true))
+                .when(allows_session, |row| row.child(action_button("details-allow-session", "Allow session", threadlane_permission::PermissionDecision::AllowSession, false)
+                    .debug_selector(|| "permission-details-session".into())))
                 .when(allows_always, |row| row.child(action_button("details-allow-always", "Always allow", threadlane_permission::PermissionDecision::AllowAlways, false)
                     .debug_selector(|| "permission-details-always".into()))))
             .into_any_element())
@@ -3854,6 +3857,7 @@ impl ChatListView {
         let session_id = state.active_session_id.as_ref()?;
         let request = state.pending_permissions.get(session_id)?.clone();
         let allows_always = request.scopes.contains(&threadlane_protocol::PermissionScope::Always);
+        let allows_session = request.scopes.contains(&threadlane_protocol::PermissionScope::Session);
         let theme = cx.theme().colors;
 
         let action_button = |id: &'static str,
@@ -3948,6 +3952,13 @@ impl ChatListView {
                             true,
                             false,
                         ))
+                        .when(allows_session, |row| row.child(action_button(
+                            "permission-allow-session",
+                            "Allow session",
+                            threadlane_permission::PermissionDecision::AllowSession,
+                            false,
+                            false,
+                        ).debug_selector(|| "permission-inline-session".into())))
                         .when(allows_always, |row| row.child(action_button(
                             "permission-allow-always",
                             "Always allow",

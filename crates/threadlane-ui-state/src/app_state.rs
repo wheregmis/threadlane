@@ -1011,7 +1011,12 @@ impl AppState {
         let Some(request) = self.pending_permissions.get(&session_id) else { return false; };
         if request.id != request_id
             || (decision == threadlane_permission::PermissionDecision::AllowAlways
-                && !request.scopes.contains(&threadlane_protocol::PermissionScope::Always)) {
+                && !request.scopes.contains(&threadlane_protocol::PermissionScope::Always))
+            || (decision == threadlane_permission::PermissionDecision::AllowSession
+                && !request
+                    .scopes
+                    .contains(&threadlane_protocol::PermissionScope::Session))
+        {
             return false;
         }
         let Some(work_dir) = self.active_work_dir.clone() else {

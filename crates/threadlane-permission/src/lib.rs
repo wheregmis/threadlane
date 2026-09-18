@@ -1,7 +1,7 @@
 //! Session permission manager: user approval flows for sensitive actions.
 //!
 //! `PermissionManager`/`PermissionHandle`/`PermissionDecision` govern network,
-//! computer-use, and external-agent prompts with Once/Always scopes,
+//! computer-use, and external-agent prompts with Once/Session/Always scopes,
 //! per-project persisted grants, and default-deny unattended posture. They
 //! depend only on `threadlane-protocol` contracts, the
 //! `threadlane-computer` approval trait, and local persistence — never on
@@ -28,6 +28,8 @@ const PERMISSIONS_FILE: &str = ".threadlane/permissions.json";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PermissionDecision {
     AllowOnce,
+    /// In-memory grant for the rest of the session (never persisted).
+    AllowSession,
     AllowAlways,
     Deny,
 }
@@ -74,6 +76,9 @@ struct PermissionManagerInner {
     project_root: PathBuf,
     persistent: Mutex<PersistentPermissions>,
     trace_recorder: Mutex<Option<PermissionTraceRecorder>>,
+    /// Session-scoped computer-use grant: set by one `AllowSession` decision,
+    /// never persisted, dies with this manager (one per session runtime).
+    computer_session_allowed: AtomicBool,
 }
 
 /// Persistent permissions remembered across agent runs and restarts.
@@ -120,6 +125,7 @@ impl PermissionManager {
                     project_root,
                     persistent: Mutex::new(persistent),
                     trace_recorder: Mutex::new(None),
+                    computer_session_allowed: AtomicBool::new(false),
                 }),
             },
             event_tx,
@@ -250,6 +256,12 @@ impl PermissionManager {
                 PermissionTraceDecision::Allowed,
                 Some(PermissionTraceScope::Once),
             ),
+            // Network prompts never offer Session; a programmatic resolve
+            // with it is a one-time allow that persists nothing.
+            PermissionDecision::AllowSession => (
+                PermissionTraceDecision::Allowed,
+                Some(PermissionTraceScope::Once),
+            ),
             PermissionDecision::AllowAlways => (
                 PermissionTraceDecision::Allowed,
                 Some(PermissionTraceScope::Project),
@@ -284,12 +296,14 @@ impl PermissionManager {
     }
 
     /// Ask the user to approve one computer-use action (screenshot or input).
-    /// A remembered project grant skips the prompt; otherwise every action
-    /// re-prompts with Once/Always scopes. Unattended sessions deny.
+    /// A remembered project grant or a session grant for this run skips the
+    /// prompt; otherwise every action re-prompts with Once/Session/Always
+    /// scopes. Unattended sessions deny.
     pub(crate) async fn request_computer(&self, title: &str, detail: &str) -> PermissionDecision {
         let id = self.generate_request_id();
         let interactive = self.handle.inner.interactive.load(Ordering::SeqCst);
         let persisted = self.computer_is_approved();
+        let session_grant = self.handle.inner.computer_session_allowed.load(Ordering::SeqCst);
         let source = if persisted {
             PermissionTraceSource::PersistedGrant
         } else if interactive {
@@ -300,7 +314,11 @@ impl PermissionManager {
         let requested = PermissionTraceEvent::Requested {
             request_id: id.clone(),
             capability: "computer".into(),
-            scopes: vec![PermissionTraceScope::Once, PermissionTraceScope::Project],
+            scopes: vec![
+                PermissionTraceScope::Once,
+                PermissionTraceScope::Session,
+                PermissionTraceScope::Project,
+            ],
             detail_sha256: format!("{:x}", Sha256::digest(detail.as_bytes())),
             source: source.clone(),
         };
@@ -315,6 +333,18 @@ impl PermissionManager {
                     scope: Some(PermissionTraceScope::Project),
                     source,
                     remembered: true,
+                })
+                .await;
+            return PermissionDecision::AllowOnce;
+        }
+        if session_grant {
+            let _ = self
+                .record_trace(PermissionTraceEvent::Resolved {
+                    request_id: id,
+                    decision: PermissionTraceDecision::Allowed,
+                    scope: Some(PermissionTraceScope::Session),
+                    source,
+                    remembered: false,
                 })
                 .await;
             return PermissionDecision::AllowOnce;
@@ -342,7 +372,11 @@ impl PermissionManager {
             capability: "computer".into(),
             title: title.to_owned(),
             detail: detail.to_owned(),
-            scopes: vec![PermissionScope::Once, PermissionScope::Always],
+            scopes: vec![
+                PermissionScope::Once,
+                PermissionScope::Session,
+                PermissionScope::Always,
+            ],
         };
         if self
             .event_tx
@@ -367,10 +401,20 @@ impl PermissionManager {
                 remembered = true;
             }
         }
+        if effective == PermissionDecision::AllowSession {
+            self.handle
+                .inner
+                .computer_session_allowed
+                .store(true, Ordering::SeqCst);
+        }
         let (trace_decision, scope) = match effective {
             PermissionDecision::AllowOnce => (
                 PermissionTraceDecision::Allowed,
                 Some(PermissionTraceScope::Once),
+            ),
+            PermissionDecision::AllowSession => (
+                PermissionTraceDecision::Allowed,
+                Some(PermissionTraceScope::Session),
             ),
             PermissionDecision::AllowAlways => (
                 PermissionTraceDecision::Allowed,
@@ -412,7 +456,7 @@ impl PermissionManager {
 
 /// Approval channel backing `threadlane_computer`: the executor prompts
 /// through the session permission manager, so computer actions keep the
-/// Once/Always scopes, per-project persisted grant, and default-deny
+/// Once/Session/Always scopes, per-project persisted grant, and default-deny
 /// unattended posture of every other capability.
 #[async_trait::async_trait]
 impl threadlane_computer::ComputerApproval for PermissionManager {
@@ -422,7 +466,9 @@ impl threadlane_computer::ComputerApproval for PermissionManager {
         detail: &str,
     ) -> threadlane_computer::ComputerDecision {
         match PermissionManager::request_computer(self, title, detail).await {
-            PermissionDecision::AllowOnce => threadlane_computer::ComputerDecision::AllowOnce,
+            PermissionDecision::AllowOnce | PermissionDecision::AllowSession => {
+                threadlane_computer::ComputerDecision::AllowOnce
+            }
             PermissionDecision::AllowAlways => threadlane_computer::ComputerDecision::AllowAlways,
             PermissionDecision::Deny => threadlane_computer::ComputerDecision::Deny,
         }
@@ -503,7 +549,8 @@ impl PermissionHandle {
             .iter()
             .map(|scope| match scope {
                 PermissionScope::Always => PermissionTraceScope::Project,
-                _ => PermissionTraceScope::Once,
+                PermissionScope::Session => PermissionTraceScope::Session,
+                PermissionScope::Once => PermissionTraceScope::Once,
             })
             .collect();
         let requested = PermissionTraceEvent::Requested {
@@ -564,6 +611,7 @@ impl PermissionHandle {
                 },
                 scope: match decision {
                     Some(PermissionDecision::AllowAlways) => Some(PermissionTraceScope::Project),
+                    Some(PermissionDecision::AllowSession) => Some(PermissionTraceScope::Session),
                     Some(PermissionDecision::AllowOnce) => Some(PermissionTraceScope::Once),
                     _ => None,
                 },
@@ -799,6 +847,82 @@ mod tests {
         assert!(
             events.try_recv().is_err(),
             "remembered grant must not prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn computer_allow_session_covers_later_actions_without_persisting() {
+        let dir = tempdir().unwrap();
+        let (event_tx, mut events) = tokio::sync::broadcast::channel(8);
+        let manager = Arc::new(PermissionManager::new(dir.path().to_path_buf(), event_tx));
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let trace_observed = observed.clone();
+        manager
+            .handle()
+            .set_trace_recorder(Some(Arc::new(move |event| {
+                let observed = trace_observed.clone();
+                Box::pin(async move {
+                    observed.lock().unwrap().push(event);
+                    Ok(())
+                })
+            })));
+        let handle = manager.handle();
+        handle.set_interactive(true);
+        let request_manager = manager.clone();
+        let task = tokio::spawn(async move {
+            request_manager
+                .request_computer("Click at (1, 1)", "click")
+                .await
+        });
+        let AgentEvent::PermissionRequested { request } = events.recv().await.unwrap() else {
+            panic!("expected permission request");
+        };
+        assert!(request
+            .scopes
+            .contains(&threadlane_protocol::PermissionScope::Session));
+        assert!(handle.resolve(&request.id, PermissionDecision::AllowSession));
+        assert_eq!(task.await.unwrap(), PermissionDecision::AllowSession);
+        // Later actions in this session skip the prompt...
+        assert_eq!(
+            manager.request_computer("Type", "type").await,
+            PermissionDecision::AllowOnce
+        );
+        assert!(
+            events.try_recv().is_err(),
+            "session grant must not prompt"
+        );
+        // ...but nothing is persisted: a fresh manager prompts again.
+        let (event_tx, mut fresh_events) = tokio::sync::broadcast::channel(4);
+        let restored = PermissionManager::new(dir.path().to_path_buf(), event_tx);
+        restored.handle().set_interactive(true);
+        let restored = Arc::new(restored);
+        let task = tokio::spawn({
+            let restored = restored.clone();
+            async move { restored.request_computer("Click", "click").await }
+        });
+        let AgentEvent::PermissionRequested { request } = fresh_events.recv().await.unwrap()
+        else {
+            panic!("fresh manager must prompt");
+        };
+        assert!(restored.handle().resolve(&request.id, PermissionDecision::Deny));
+        assert_eq!(task.await.unwrap(), PermissionDecision::Deny);
+        // Trace shows the session grant and its reuse distinctly from Once.
+        let observed = observed.lock().unwrap();
+        let resolved: Vec<_> = observed
+            .iter()
+            .filter_map(|event| match event {
+                PermissionTraceEvent::Resolved {
+                    decision, scope, ..
+                } => Some((decision.clone(), scope.clone())),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            resolved.contains(&(
+                PermissionTraceDecision::Allowed,
+                Some(PermissionTraceScope::Session)
+            )),
+            "session grant must trace Session scope: {resolved:?}"
         );
     }
 

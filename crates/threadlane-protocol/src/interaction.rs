@@ -24,6 +24,10 @@ pub struct PermissionRequest {
 #[serde(rename_all = "snake_case")]
 pub enum PermissionScope {
     Once,
+    /// In-memory grant for the rest of the session: no persistence, dies with
+    /// the session runtime. Offered on computer-use prompts so one approval
+    /// covers a whole task without a project-wide Always grant.
+    Session,
     Always,
 }
 
