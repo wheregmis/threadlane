@@ -284,7 +284,7 @@ Before deciding that the goal is achieved, perform a completion audit against th
 6. Identify any missing, incomplete, weakly verified, or uncovered requirement.
 7. Treat uncertainty as not achieved: perform more verification or continue the work.
 
-Only call the `update_goal` tool with `status: "complete"` and detailed evidence when the audit verifies that ALL requirements have been fully satisfied. If work remains, continue executing.
+Only call the `update_goal` tool with `status: "complete"` and detailed evidence when the audit verifies that ALL requirements have been fully satisfied. If work remains and you can make progress, continue executing. If progress requires unavailable permissions, credentials, dependencies, or a user decision, call `update_goal` with `status: "blocked"` and explain the blocker and required next action in `evidence`. This pauses automatic continuation until the user runs `/goal resume`. Do not repeatedly retry the same blocked action or repeat the completion audit while waiting for external input.
 
 If the `update_goal` tool is not available in your environment (external ACP agent), emit the marker `<!-- GOAL_COMPLETE -->` on its own line followed by the same detailed evidence instead — the host treats it exactly like `update_goal` with `status: "complete"`."#,
         goal.objective, goal.turns_count, budget_line
@@ -534,10 +534,10 @@ fn handle_tool(
                 .unwrap_or("")
                 .trim();
 
-            if status_str != "complete" {
+            if !matches!(status_str, "complete" | "blocked") {
                 return (
                     Response::error(
-                        "The `update_goal` tool only permits status: `complete` upon evidence verification.",
+                        "The `update_goal` tool permits status: `complete` upon evidence verification or `blocked` when progress requires external input.",
                         serde_json::to_value(&state).unwrap(),
                     ),
                     requests,
@@ -549,6 +549,26 @@ fn handle_tool(
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .trim();
+
+            if status_str == "blocked" {
+                goal.status = GoalStatus::Paused;
+                let status_line = format_goal_status_line(goal);
+                requests.push(set_ui_status(&status_line));
+                requests.push(notify_ui(
+                    "Goal paused: blocked. Use /goal resume after resolving the blocker.",
+                ));
+                return (
+                    Response::ok(
+                        format!(
+                            "Goal paused because progress is blocked.\nBlocker: {}\n{}\nUse /goal resume after resolving the blocker.",
+                            if evidence.is_empty() { "(no details provided)" } else { evidence },
+                            status_line
+                        ),
+                        serde_json::to_value(&state).unwrap(),
+                    ),
+                    requests,
+                );
+            }
 
             goal.status = GoalStatus::Complete;
             let status_line = format_goal_status_line(goal);
@@ -671,35 +691,55 @@ fn handle_hook_invocation(
     // and nested (`{"function":{"name":..,"arguments":..}}`) from the native
     // `ToolCall` serialization — accept either so completion detection does
     // not depend on which shape the host emitted.
-    let called_complete =
-        args.get("tool_calls")
-            .and_then(|v| v.as_array())
-            .map_or(false, |calls| {
-                calls.iter().any(|call| {
-                    let (name, arguments) = match call.get("function") {
-                        Some(function) => (
-                            function.get("name").and_then(|n| n.as_str()),
-                            function.get("arguments"),
-                        ),
-                        None => (
-                            call.get("name").and_then(|n| n.as_str()),
-                            call.get("arguments"),
-                        ),
-                    };
-                    name == Some("update_goal")
-                        && (arguments
-                            .and_then(|a| a.get("status"))
-                            .and_then(|s| s.as_str())
-                            == Some("complete")
-                            || arguments
-                                .and_then(|a| a.as_str())
-                                .is_some_and(|s| s.contains("\"complete\"")))
+    let called_status = args
+        .get("tool_calls")
+        .and_then(|v| v.as_array())
+        .and_then(|calls| {
+            calls.iter().find_map(|call| {
+                let (name, arguments) = match call.get("function") {
+                    Some(function) => (
+                        function.get("name").and_then(|n| n.as_str()),
+                        function.get("arguments"),
+                    ),
+                    None => (
+                        call.get("name").and_then(|n| n.as_str()),
+                        call.get("arguments"),
+                    ),
+                };
+                (name == Some("update_goal")).then(|| {
+                    arguments
+                        .and_then(|a| a.get("status"))
+                        .and_then(|s| s.as_str())
+                        .or_else(|| arguments.and_then(|a| a.as_str()))
                 })
             })
-            || args
-                .get("content")
-                .and_then(|v| v.as_str())
-                .is_some_and(|c| c.contains("<!-- GOAL_COMPLETE -->"));
+        });
+    let called_complete = called_status == Some(Some("complete"))
+        || called_status
+            .is_some_and(|status| status.is_some_and(|value| value.contains("\"complete\"")))
+        || args
+            .get("content")
+            .and_then(|v| v.as_str())
+            .is_some_and(|c| c.contains("<!-- GOAL_COMPLETE -->"));
+    let called_blocked = called_status == Some(Some("blocked"))
+        || called_status
+            .is_some_and(|status| status.is_some_and(|value| value.contains("\"blocked\"")));
+
+    if called_blocked {
+        goal.status = GoalStatus::Paused;
+        let status_line = format_goal_status_line(goal);
+        requests.push(set_ui_status(&status_line));
+        requests.push(notify_ui(
+            "Goal paused: blocked. Use /goal resume after resolving the blocker.",
+        ));
+        return (
+            Response::ok(
+                "goal paused because progress is blocked",
+                serde_json::to_value(&state).unwrap(),
+            ),
+            requests,
+        );
+    }
 
     if called_complete {
         goal.status = GoalStatus::Complete;
@@ -775,18 +815,18 @@ fn extension_manifest() -> WasiExtensionManifest {
             },
             WasiToolDefinition {
                 name: "update_goal".into(),
-                description: "Mark the active goal as complete after verifying evidence against all objective requirements.".into(),
+                description: "Mark the active goal as complete after verifying evidence against all objective requirements, or blocked to pause automatic continuation until the user resolves a blocker and runs /goal resume.".into(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "status": {
                             "type": "string",
-                            "enum": ["complete"],
-                            "description": "Must be `complete` once verified."
+                            "enum": ["complete", "blocked"],
+                            "description": "Use `complete` once verified, or `blocked` when progress requires external input."
                         },
                         "evidence": {
                             "type": "string",
-                            "description": "Concise summary of verified evidence satisfying each requirement."
+                            "description": "Concise summary of verified evidence satisfying each requirement, or the blocker and required next action."
                         }
                     },
                     "required": ["status", "evidence"]

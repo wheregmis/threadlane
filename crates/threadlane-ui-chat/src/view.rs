@@ -281,7 +281,7 @@ impl ChatListView {
         transcript_list_state.set_scroll_handler(move |_, _, cx| {
             let _ = chat.update(cx, |_, cx| cx.notify());
         });
-        let trajectory_list_state = ListState::new(0, ListAlignment::Top, px(400.0));
+        let trajectory_list_state = ListState::new(0, ListAlignment::Top, window.rem_size() * 25.0);
         let input_state = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder("Ask a question, describe a task, or type / for commands...")
@@ -939,6 +939,17 @@ impl ChatListView {
             .unwrap_or_else(|| "Git status unavailable".into());
         let model = self.model.clone();
         let theme = cx.theme();
+        // Button's built-in icon/label wrapper centers its contents independently.
+        let action_content = |icon: Icon, label: String| {
+            div()
+                .w_full()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(icon.small().flex_none())
+                .child(div().min_w_0().truncate().child(label))
+        };
         div()
             .id("chat-environment")
             .debug_selector(|| "chat-environment".into())
@@ -986,8 +997,11 @@ impl ChatListView {
                     .small()
                     .w_full()
                     .justify_start()
-                    .icon(Icon::default().path("icons/git/branch.svg"))
-                    .label(branch.clone())
+                    .accessibility_label(branch.clone())
+                    .child(action_content(
+                        Icon::default().path("icons/git/branch.svg"),
+                        branch.clone(),
+                    ))
                     .tooltip(branch)
                     .disabled(checkout.is_none())
                     .on_click(|_, window, cx| {
@@ -1000,8 +1014,8 @@ impl ChatListView {
                     .small()
                     .w_full()
                     .justify_start()
-                    .icon(IconName::File)
-                    .label(changes)
+                    .accessibility_label(changes.clone())
+                    .child(action_content(Icon::new(IconName::File), changes))
                     .disabled(checkout.is_none())
                     .tooltip("Review workspace changes")
                     .on_click(|_, window, cx| {
@@ -1020,8 +1034,8 @@ impl ChatListView {
                             .small()
                             .w_full()
                             .justify_start()
-                            .icon(IconName::Folder)
-                            .label("Files")
+                            .accessibility_label("Files")
+                            .child(action_content(Icon::new(IconName::Folder), "Files".into()))
                             .disabled(checkout.is_none())
                             .on_click(|_, window, cx| {
                                 window.dispatch_action(Box::new(crate::OpenWorkspaceFiles), cx)
@@ -1035,8 +1049,11 @@ impl ChatListView {
                     .small()
                     .w_full()
                     .justify_start()
-                    .icon(IconName::SquareTerminal)
-                    .label("Terminal")
+                    .accessibility_label("Terminal")
+                    .child(action_content(
+                        Icon::new(IconName::SquareTerminal),
+                        "Terminal".into(),
+                    ))
                     .disabled(checkout.is_none())
                     .on_click(move |_, _, cx| {
                         if let Some(dir) = checkout.as_ref() {
@@ -3256,7 +3273,7 @@ impl ChatListView {
                             })
                             .context_menu({
                                 let content = msg.content.clone();
-                                move |menu, _window, _cx| {
+                                move |menu, window, _cx| {
                                     let text = content.clone();
                                     menu.item(PopupMenuItem::new("Copy Message").on_click(
                                         move |_event, window, cx| {
@@ -3354,7 +3371,7 @@ impl ChatListView {
                             .children(tools_element)
                             .context_menu({
                                 let content = msg.content.clone();
-                                move |menu, _window, _cx| {
+                                move |menu, window, _cx| {
                                     let text = content.clone();
                                     menu.item(PopupMenuItem::new("Copy Message").on_click(
                                         move |_event, window, cx| {
@@ -3386,7 +3403,7 @@ impl ChatListView {
                     .child(msg.content.clone())
                     .context_menu({
                         let content = msg.content.clone();
-                        move |menu, _window, _cx| {
+                        move |menu, window, _cx| {
                             let text = content.clone();
                             menu.item(PopupMenuItem::new("Copy Message").on_click(
                                 move |_event, window, cx| {
@@ -3431,7 +3448,7 @@ impl ChatListView {
             .dropdown_caret(true)
             .ghost()
             .small()
-            .dropdown_menu(move |menu, _window, _cx| {
+            .dropdown_menu(move |menu, window, _cx| {
                 let mut menu = menu;
                 for (name, work_dir) in projects.clone() {
                     let model = model.clone();
@@ -5016,7 +5033,7 @@ impl ChatListView {
             // cap the width, keep the full path in the tooltip.
             .max_w(px(160.0))
             .tooltip(format!("Project: {project_chip_tooltip}"))
-            .dropdown_menu(move |menu, _window, _cx| {
+            .dropdown_menu(move |menu, window, _cx| {
                 let mut menu = menu;
                 for (name, work_dir) in projects_list.clone() {
                     let model = project_chip_model.clone();
@@ -5078,7 +5095,7 @@ impl ChatListView {
             .dropdown_caret(true)
             .outline()
             .xsmall()
-            .dropdown_menu(move |menu, _window, _cx| {
+            .dropdown_menu(move |menu, window, _cx| {
                 let menu = menu.check_side(gpui_component::Side::Right);
                 let local_model = work_mode_model.clone();
                 let wt_model = work_mode_model.clone();
@@ -5250,11 +5267,11 @@ impl ChatListView {
         };
         let selected_model_for_picker = selected_model.clone();
         let submenu_click_model = self.model.clone();
-        let model_picker = model_picker.dropdown_menu(move |menu, _window, _cx| {
+        let model_picker = model_picker.dropdown_menu(move |menu, window, _cx| {
             let menu = menu.check_side(gpui_component::Side::Right);
             let mut previous_provider = None;
             let menu = model_options.iter().cloned().fold(
-                menu.max_h(px(320.0)).scrollable(true),
+                menu.max_h(window.rem_size() * 20.0).scrollable(true),
                 |menu, option| {
                     let menu = if previous_provider == Some(option.provider) {
                         menu
@@ -5404,7 +5421,7 @@ impl ChatListView {
             .tooltip(format!("Reasoning effort: {}", reasoning_effort.label()))
             .dropdown_caret(true)
             .ghost()
-            .dropdown_menu(move |menu, _window, _cx| {
+            .dropdown_menu(move |menu, window, _cx| {
                 let menu = menu.check_side(gpui_component::Side::Right);
                 effort_options
                     .clone()

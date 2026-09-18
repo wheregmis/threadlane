@@ -637,7 +637,7 @@ impl SidebarView {
             history_fingerprint,
             attention_filter: None,
             history_cache: None,
-            history_list_state: ListState::new(0, ListAlignment::Top, px(72.0)),
+            history_list_state: ListState::new(0, ListAlignment::Top, window.rem_size() * 4.5),
             _subscriptions: vec![sub1, sub2],
         }
     }
@@ -683,7 +683,7 @@ impl SidebarView {
                     .items_center()
                     .gap_2()
                     .px_2()
-                    .h(px(36.0))
+                    .h(rems(2.25))
                     .rounded_md()
                     .text_color(theme.muted_foreground)
                     .child(IconName::Search)
@@ -946,13 +946,13 @@ impl SidebarView {
                     .flex()
                     .flex_none()
                     .items_center()
-                    .gap(px(3.5))
+                    .gap(rems(0.21875))
                     .px_1p5()
                     .py(px(0.5))
                     .rounded_full()
                     .bg(theme.warning.opacity(0.15))
                     .text_color(theme.warning)
-                    .child(div().size(px(6.0)).rounded_full().bg(theme.warning))
+                    .child(div().size(rems(0.375)).rounded_full().bg(theme.warning))
                     .child(
                         div()
                             .text_xs()
@@ -966,7 +966,7 @@ impl SidebarView {
                     .flex()
                     .flex_none()
                     .items_center()
-                    .gap(px(3.5))
+                    .gap(rems(0.21875))
                     .px_1p5()
                     .py(px(0.5))
                     .rounded_full()
@@ -1209,10 +1209,10 @@ impl SidebarView {
                 this.child(
                     div()
                         .absolute()
-                        .left(px(0.0))
-                        .top(px(4.0))
-                        .bottom(px(4.0))
-                        .w(px(2.5))
+                        .left_0()
+                        .top_1()
+                        .bottom_1()
+                        .w(rems(0.15625))
                         .rounded_r_full()
                         .bg(theme.primary),
                 )
@@ -1223,7 +1223,7 @@ impl SidebarView {
                     .min_w_0()
                     .flex()
                     .flex_col()
-                    .gap(px(3.0))
+                    .gap(rems(0.1875))
                     .px_2p5()
                     .py_2()
                     .child(
@@ -1653,7 +1653,7 @@ impl SidebarView {
     fn render_history_row(
         &mut self,
         index: usize,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().colors;
@@ -1668,7 +1668,7 @@ impl SidebarView {
                 .items_center()
                 .gap_2()
                 .px_3()
-                .pt(if index == 0 { px(4.0) } else { px(12.0) })
+                .pt(if index == 0 { window.rem_size() * 0.25 } else { window.rem_size() * 0.75 })
                 .pb_1()
                 .child(
                     div()
@@ -1843,7 +1843,7 @@ mod tests {
                 self.sidebar.update(cx, |sidebar, cx| {
                     div()
                         .tab_group()
-                        .w(px(223.0))
+                        .w(rems(13.9375))
                         .child(sidebar.render_session_card(
                             &self.session,
                             SessionAttention::NeedsYou,
@@ -2101,7 +2101,7 @@ mod tests {
 }
 
 impl Render for SidebarView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
 
         div()

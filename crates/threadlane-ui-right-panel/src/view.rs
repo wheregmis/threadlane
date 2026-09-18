@@ -278,8 +278,8 @@ impl RightPanelView {
             selected_commit_files: Vec::new(),
             loading_commit_sha: None,
             review_files: Vec::new(),
-            review_files_list_state: ListState::new(0, ListAlignment::Top, px(160.0))
-                .with_uniform_item_height(px(32.0)),
+            review_files_list_state: ListState::new(0, ListAlignment::Top, window.rem_size() * 10.0)
+                .with_uniform_item_height(window.rem_size() * 2.0),
             selected_files: HashSet::new(),
             review_selection_initialized: false,
             review_diff_revision: 0,
@@ -1384,7 +1384,7 @@ impl RightPanelView {
                             )
                             .outline()
                             .flex_1()
-                            .h(px(104.0))
+                            .h(rems(6.5))
                             .p_0()
                             .on_click(cx.listener(
                                 move |this, _event, _window, cx| {
@@ -1547,7 +1547,7 @@ impl RightPanelView {
                                     })
                                     .child(if is_folder {
                                         div()
-                                            .w(px(14.0))
+                                            .w(rems(0.875))
                                             .flex_none()
                                             .flex()
                                             .items_center()
@@ -1563,7 +1563,7 @@ impl RightPanelView {
                                             })
                                             .into_any_element()
                                     } else {
-                                        div().w(px(14.0)).flex_none().into_any_element()
+                                        div().w(rems(0.875)).flex_none().into_any_element()
                                     })
                                     .child(if is_folder {
                                         Icon::new(IconName::Folder).xsmall().into_any_element()
@@ -1690,7 +1690,7 @@ impl RightPanelView {
         let context_path = path.clone();
         div()
             .id(SharedString::from(format!("review-file-{path}")))
-            .h(px(32.0))
+            .h_8()
             .mx_2()
             .px_2()
             .rounded_md()
@@ -1906,10 +1906,10 @@ impl RightPanelView {
             .into_any_element()
     }
 
-    fn render_review(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_review(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if self.review_files_list_state.item_count() != self.review_files.len() {
             self.review_files_list_state
-                .reset_with_uniform_height(self.review_files.len(), px(32.0));
+                .reset_with_uniform_height(self.review_files.len(), window.rem_size() * 2.0);
         }
         let panel_entity = cx.entity().clone();
         let theme = cx.theme().colors;
@@ -2056,7 +2056,7 @@ impl RightPanelView {
                     }))
                     .child(
                         div()
-                            .size(px(16.0))
+                            .size_4()
                             .flex()
                             .items_center()
                             .justify_center()
@@ -2074,7 +2074,7 @@ impl RightPanelView {
                     )
                     .child(
                         div()
-                            .size(px(14.0))
+                            .size(rems(0.875))
                             .flex()
                             .items_center()
                             .justify_center()
@@ -2161,7 +2161,7 @@ impl RightPanelView {
                                 .flex_1()
                                 .child(
                                     div()
-                                        .size(px(14.0))
+                                        .size(rems(0.875))
                                         .flex()
                                         .items_center()
                                         .justify_center()
@@ -2174,7 +2174,7 @@ impl RightPanelView {
                                 )
                                 .child(
                                     div()
-                                        .size(px(16.0))
+                                        .size_4()
                                         .flex()
                                         .items_center()
                                         .justify_center()
@@ -2222,7 +2222,7 @@ impl RightPanelView {
                                 .min_w_0()
                                 .child(
                                     div()
-                                        .size(px(14.0))
+                                        .size(rems(0.875))
                                         .flex()
                                         .items_center()
                                         .justify_center()
@@ -2307,7 +2307,7 @@ impl RightPanelView {
                                     .min_w_0()
                                     .child(
                                         div()
-                                            .size(px(14.0))
+                                            .size(rems(0.875))
                                             .flex()
                                             .items_center()
                                             .justify_center()
@@ -2796,7 +2796,7 @@ impl RightPanelView {
                                     .gap_1p5()
                                     .min_w_0()
                                     .flex_1()
-                                    .child(div().size(px(14.0)).text_color(theme.primary).child(
+                                    .child(div().size(rems(0.875)).text_color(theme.primary).child(
                                         if is_expanded {
                                             IconName::ChevronDown
                                         } else {
@@ -2881,7 +2881,7 @@ impl RightPanelView {
                                         .detach();
                                     }))
                                     .child(div().w_full().whitespace_normal()
-                                    .h(px(26.0))
+                                    .h(rems(1.625))
                                     .px_2()
                                     .rounded_sm()
                                     .flex()
@@ -3219,7 +3219,7 @@ impl RightPanelView {
                                         .text_color(theme.muted_foreground)
                                         .child(
                                             div()
-                                                .size(px(12.0))
+                                                .size_3()
                                                 .flex()
                                                 .items_center()
                                                 .justify_center()
@@ -3307,7 +3307,7 @@ impl RightPanelView {
                                             .detach();
                                         }))
                                         .child(div().w_full().whitespace_normal()
-                                        .h(px(26.0))
+                                        .h(rems(1.625))
                                         .px_2()
                                         .rounded_md()
                                         .flex()
@@ -3323,7 +3323,7 @@ impl RightPanelView {
                                                 .gap_1p5()
                                                 .child(
                                                     div()
-                                                        .size(px(12.0))
+                                                        .size_3()
                                                         .text_color(theme.muted_foreground)
                                                         .child(IconName::File),
                                                 )
@@ -3358,7 +3358,7 @@ impl RightPanelView {
                                                 })
                                                 .child(
                                                     div()
-                                                        .size(px(14.0))
+                                                        .size(rems(0.875))
                                                         .rounded_sm()
                                                         .flex()
                                                         .items_center()
@@ -3400,7 +3400,7 @@ impl RightPanelView {
                             .bg(theme.background)
                             .child(
                                 div()
-                                    .size(px(14.0))
+                                    .size(rems(0.875))
                                     .text_color(theme.muted_foreground)
                                     .child(IconName::Search),
                             )
@@ -3509,14 +3509,14 @@ impl RightPanelView {
                             .items_center()
                             .gap_1p5()
                             .px_2()
-                            .h(px(32.0))
+                            .h_8()
                             .rounded_md()
                             .border_1()
                             .border_color(theme.border)
                             .bg(theme.background)
                             .child(
                                 div()
-                                    .size(px(14.0))
+                                    .size(rems(0.875))
                                     .text_color(theme.muted_foreground)
                                     .child(IconName::Search),
                             )
@@ -3588,7 +3588,7 @@ impl RightPanelView {
                                     .gap_2()
                                     .child(
                                         div()
-                                            .size(px(16.0))
+                                            .size_4()
                                             .text_color(theme.primary)
                                             .child(Icon::default().path("icons/git/branch.svg")),
                                     )
@@ -3602,7 +3602,7 @@ impl RightPanelView {
                             )
                             .child(
                                 div()
-                                    .size(px(14.0))
+                                    .size(rems(0.875))
                                     .text_color(theme.muted_foreground)
                                     .child(IconName::ChevronRight),
                             )),
@@ -3690,7 +3690,7 @@ impl RightPanelView {
                             .flex_1()
                             .child(
                                 div()
-                                    .size(px(16.0))
+                                    .size_4()
                                     .flex()
                                     .items_center()
                                     .justify_center()
@@ -3980,14 +3980,14 @@ impl RightPanelView {
                     .items_center()
                     .gap_1p5()
                     .px_2()
-                    .h(px(32.0))
+                    .h_8()
                     .rounded_md()
                     .border_1()
                     .border_color(theme.border)
                     .bg(theme.background)
                     .child(
                         div()
-                            .size(px(14.0))
+                            .size(rems(0.875))
                             .text_color(theme.muted_foreground)
                             .child(IconName::Search),
                     )
@@ -4051,7 +4051,7 @@ impl RightPanelView {
                                             .gap_2()
                                             .child(
                                                 div()
-                                                    .size(px(16.0))
+                                                    .size_4()
                                                     .flex()
                                                     .items_center()
                                                     .justify_center()
@@ -4353,7 +4353,7 @@ impl Render for RightPanelView {
             match self.active_surface {
                 None => self.render_chooser(cx).into_any_element(),
                 Some(Surface::Review) if self.document_title.is_some() => self.render_files(cx),
-                Some(Surface::Review) => self.render_review(cx),
+                Some(Surface::Review) => self.render_review(window, cx),
                 Some(Surface::Files) => self.render_files(cx),
                 Some(Surface::Browser) => self.render_browser(window, cx),
             }

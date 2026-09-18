@@ -575,10 +575,10 @@ impl GitHubView {
             pr_detail: None,
             detail_body,
             comment_rows: Vec::new(),
-            comment_list_state: ListState::new(0, ListAlignment::Top, px(96.0)),
+            comment_list_state: ListState::new(0, ListAlignment::Top, window.rem_size() * 6.0),
             pr_timeline_rows: Vec::new(),
-            pr_timeline_list_state: ListState::new(0, ListAlignment::Top, px(112.0)),
-            pr_file_list_state: ListState::new(0, ListAlignment::Top, px(52.0)),
+            pr_timeline_list_state: ListState::new(0, ListAlignment::Top, window.rem_size() * 7.0),
+            pr_file_list_state: ListState::new(0, ListAlignment::Top, window.rem_size() * 3.25),
             pr_diff_body,
             pr_selections: PrWorkspaceSelections::default(),
             pr_drafts: PrCommentDrafts::default(),
@@ -600,8 +600,8 @@ impl GitHubView {
             pr_has_more: false,
             active_list_request: None,
             active_detail_request: None,
-            issue_list_state: ListState::new(0, ListAlignment::Top, px(88.0)),
-            pr_list_state: ListState::new(0, ListAlignment::Top, px(78.0)),
+            issue_list_state: ListState::new(0, ListAlignment::Top, window.rem_size() * 5.5),
+            pr_list_state: ListState::new(0, ListAlignment::Top, window.rem_size() * 4.875),
             detail_split_state,
             list_focus: cx.focus_handle(),
             pr_tabs_focus: cx.focus_handle(),
@@ -4259,8 +4259,8 @@ mod tests {
             fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
                 self.0.update(cx, |view, cx| {
                     div()
-                        .w(px(520.0))
-                        .h(px(500.0))
+                        .w(rems(32.5))
+                        .h(rems(31.25))
                         .flex()
                         .flex_col()
                         .child(view.render_filters(cx))

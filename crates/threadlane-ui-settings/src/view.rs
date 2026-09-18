@@ -399,6 +399,16 @@ impl SettingsView {
     fn render_navigation(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
         let model = self.model.clone();
+        // Keep icon and label alignment independent of Button's centered content wrapper.
+        let nav_content = |icon: Icon, label: &'static str| {
+            div()
+                .w_full()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(icon.small().flex_none())
+                .child(label)
+        };
 
         div()
             .w(rems(15.0))
@@ -412,7 +422,7 @@ impl SettingsView {
             .child(div().h(threadlane_ui_theme::WINDOW_CONTROLS_CLEARANCE).flex_none())
             .child(
                 div()
-                    .px_3()
+                    .pl(rems(1.25)).pr_3()
                     .pb_2()
                     .text_xs()
                     .font_weight(FontWeight::SEMIBOLD)
@@ -427,7 +437,7 @@ impl SettingsView {
                     .gap_1()
                     .child(
                         Button::new("settings-general")
-                            .icon(IconName::Settings).label("General")
+                            .child(nav_content(Icon::new(IconName::Settings), "General"))
                             .ghost()
                             .selected(self.page == SettingsPage::General)
                             .w_full()
@@ -439,7 +449,7 @@ impl SettingsView {
                     )
                     .child(
                         Button::new("settings-appearance")
-                            .icon(IconName::Palette).label("Appearance")
+                            .child(nav_content(Icon::new(IconName::Palette), "Appearance"))
                             .ghost()
                             .selected(self.page == SettingsPage::Appearance)
                             .w_full()
@@ -451,7 +461,10 @@ impl SettingsView {
                     )
                     .child(
                         Button::new("settings-keybindings")
-                            .icon(IconName::SquareTerminal).label("Keybindings")
+                            .child(nav_content(
+                                Icon::new(IconName::SquareTerminal),
+                                "Keybindings",
+                            ))
                             .ghost()
                             .selected(self.page == SettingsPage::Keybindings)
                             .w_full()
@@ -463,7 +476,7 @@ impl SettingsView {
                     )
                     .child(
                         Button::new("settings-providers")
-                            .icon(IconName::Bot).label("Providers")
+                            .child(nav_content(Icon::new(IconName::Bot), "Providers"))
                             .ghost()
                             .selected(self.page == SettingsPage::Providers)
                             .w_full()
@@ -476,7 +489,7 @@ impl SettingsView {
                     )
                     .child(
                         Button::new("settings-subagents")
-                            .icon(IconName::Bot).label("Subagents")
+                            .child(nav_content(Icon::new(IconName::Bot), "Subagents"))
                             .ghost()
                             .selected(self.page == SettingsPage::Subagents)
                             .w_full()
@@ -488,7 +501,7 @@ impl SettingsView {
                     )
                     .child(
                         Button::new("settings-skills")
-                            .icon(IconName::BookOpen).label("Skills")
+                            .child(nav_content(Icon::new(IconName::BookOpen), "Skills"))
                             .ghost()
                             .selected(self.page == SettingsPage::Skills)
                             .w_full()
@@ -502,7 +515,10 @@ impl SettingsView {
                     )
                     .child(
                         Button::new("settings-extensions")
-                            .icon(IconName::HardDrive).label("WASI Extensions")
+                            .child(nav_content(
+                                Icon::new(IconName::HardDrive),
+                                "WASI Extensions",
+                            ))
                             .ghost()
                             .selected(self.page == SettingsPage::Extensions)
                             .w_full()
@@ -516,7 +532,7 @@ impl SettingsView {
                     )
                     .child(
                         Button::new("settings-acp")
-                            .icon(IconName::Network).label("ACP Agents")
+                            .child(nav_content(Icon::new(IconName::Network), "ACP Agents"))
                             .ghost()
                             .selected(self.page == SettingsPage::AcpAgents)
                             .w_full()
@@ -533,7 +549,7 @@ impl SettingsView {
             .child(
                 div().flex_none().px_3().py_2().child(
                     Button::new("settings-back")
-                        .icon(IconName::ArrowLeft).label("Back")
+                        .child(nav_content(Icon::new(IconName::ArrowLeft), "Back"))
                         .ghost()
                         .w_full()
                         .justify_start()
@@ -3151,7 +3167,7 @@ impl Render for SettingsView {
                         div()
                             .w_full()
                             .max_w(rems(48.0))
-                            .mx_auto()
+                            
                             .child(div().h(threadlane_ui_theme::WINDOW_CONTROLS_CLEARANCE).flex_none())
                             .child(
                                 div()

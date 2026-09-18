@@ -1080,9 +1080,9 @@ impl WorkspaceView {
         Some(
             div()
                 .absolute()
-                .right(px(16.0))
-                .bottom(px(16.0))
-                .w(px(420.0))
+                .right_4()
+                .bottom_4()
+                .w(rems(26.25))
                 .rounded_lg()
                 .border_1()
                 .border_color(theme.border)
@@ -1428,7 +1428,7 @@ impl WorkspaceView {
             .flex()
             .items_start()
             .justify_center()
-            .pt(px(80.0))
+            .pt_20()
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _event, window, cx| {
@@ -1439,7 +1439,7 @@ impl WorkspaceView {
             .child(
                 div()
                     .id("command-palette-modal")
-                    .w(px(560.0))
+                    .w(rems(35.0))
                     .rounded_lg()
                     .border_1()
                     .border_color(theme.border)
@@ -1451,7 +1451,7 @@ impl WorkspaceView {
                         Command::new(&self.command_state)
                             .bordered(false)
                             .placeholder("Type a command or search sessions…")
-                            .max_h(px(420.0))
+                            .max_h(rems(26.25))
                             .group(recent_group)
                             .group(commands_group)
                             .group(sessions_group)
@@ -1665,14 +1665,14 @@ impl WorkspaceView {
     fn toggle_sidebar_action(
         &mut self,
         _: &ToggleSidebar,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.sidebar_collapsed = !self.sidebar_collapsed;
         let inset = if self.sidebar_collapsed {
-            px(110.0)
+            window.rem_size() * 6.875
         } else {
-            px(14.0)
+            window.rem_size() * 0.875
         };
         self.chat_list.update(cx, |chat, cx| {
             chat.header_left_padding = inset;
@@ -1737,7 +1737,7 @@ impl WorkspaceView {
     fn open_settings_action(
         &mut self,
         _: &OpenSettings,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.model.update(cx, |state, cx| {
@@ -1750,7 +1750,7 @@ impl WorkspaceView {
     fn cancel_active_generation_action(
         &mut self,
         _: &CancelActiveGeneration,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let is_generating = self.model.read(cx).is_generating;
@@ -1765,7 +1765,7 @@ impl WorkspaceView {
     fn select_chat_tab_action(
         &mut self,
         _: &SelectChatTab,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.chat_list.update(cx, |chat, cx| {
@@ -1776,7 +1776,7 @@ impl WorkspaceView {
     fn select_trajectory_tab_action(
         &mut self,
         _: &SelectTrajectoryTab,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.chat_list.update(cx, |chat, cx| {
@@ -1787,7 +1787,7 @@ impl WorkspaceView {
     fn select_editor_tab_action(
         &mut self,
         _: &SelectEditorTab,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.chat_list.update(cx, |chat, cx| {
@@ -1884,7 +1884,7 @@ impl Render for WorkspaceView {
                 cx.notify();
             });
         }
-        let header_inset = if show_sidebar { px(14.0) } else { px(110.0) };
+        let header_inset = if show_sidebar { window.rem_size() * 0.875 } else { window.rem_size() * 6.875 };
         if self.chat_list.read(cx).header_left_padding != header_inset {
             self.chat_list.update(cx, |chat, cx| {
                 chat.header_left_padding = header_inset;
@@ -2162,7 +2162,7 @@ impl Render for WorkspaceView {
                     .border_color(theme.border)
                     .child(
                         div()
-                            .h(px(34.0))
+                            .h(rems(2.125))
                             .flex_none()
                             .flex()
                             .items_center()
@@ -2173,7 +2173,7 @@ impl Render for WorkspaceView {
                             .border_b_1()
                             .border_color(theme.border)
                             .child(project_badge)
-                            .child(div().w(px(1.0)).h(px(16.0)).bg(theme.border))
+                            .child(div().w(px(1.0)).h_4().bg(theme.border))
                             .children(tab_buttons)
                             .child(div().flex_1())
                             .child(toolbar_actions),
@@ -2284,8 +2284,8 @@ impl Render for WorkspaceView {
                     .selected(self.command_palette_open)
                     .xsmall()
                     .absolute()
-                    .top(px(9.0))
-                    .right(px(48.0))
+                    .top(rems(0.5625))
+                    .right_12()
                     .on_click(cx.listener(|this, _event, window, cx| {
                         this.toggle_command_palette(&ToggleCommandPalette, window, cx);
                     }))
@@ -2302,8 +2302,8 @@ impl Render for WorkspaceView {
                     .ghost()
                     .xsmall()
                     .absolute()
-                    .top(px(9.0))
-                    .right(px(12.0))
+                    .top(rems(0.5625))
+                    .right_3()
                     .on_click(cx.listener(|this, _event, window, cx| {
                         this.toggle_right_panel_action(&ToggleRightPanel, window, cx);
                     }))
@@ -2316,8 +2316,8 @@ impl Render for WorkspaceView {
                     .ghost()
                     .xsmall()
                     .absolute()
-                    .top(px(9.0))
-                    .left(px(76.0))
+                    .top(rems(0.5625))
+                    .left(rems(4.75))
                     .on_click(cx.listener(|this, _event, window, cx| {
                         this.toggle_sidebar_action(&ToggleSidebar, window, cx);
                     }))
