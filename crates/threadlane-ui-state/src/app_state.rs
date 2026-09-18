@@ -3540,25 +3540,27 @@ impl AppState {
                     }
                     self.record_trajectory(&session_id, &event);
                     self.record_subagent_activity(&event);
-                    let key = self
-                        .active_session_projection_key()
-                        .expect("active stream event must have a projection key");
-                    let metrics = self.session_metrics.entry(key.clone()).or_default();
-                    match &event {
-                        AgentEvent::AgentStart | AgentEvent::SubagentStarted { .. } => {
-                            metrics.turns = metrics.turns.saturating_add(1)
+                    // Metrics are best-effort: an event without a projection
+                    // key (session switched mid-pump) still flows through
+                    // the updates below, it just skips usage accounting.
+                    if let Some(key) = self.active_session_projection_key() {
+                        let metrics = self.session_metrics.entry(key.clone()).or_default();
+                        match &event {
+                            AgentEvent::AgentStart | AgentEvent::SubagentStarted { .. } => {
+                                metrics.turns = metrics.turns.saturating_add(1)
+                            }
+                            AgentEvent::ToolExecutionStart { .. }
+                            | AgentEvent::SubagentUpdate {
+                                update: SubagentProgressUpdate::ToolStarted { .. },
+                                ..
+                            } => metrics.tool_calls = metrics.tool_calls.saturating_add(1),
+                            AgentEvent::AgentEnd { usage }
+                            | AgentEvent::SubagentUpdate {
+                                update: SubagentProgressUpdate::Usage { usage },
+                                ..
+                            } => metrics.accumulate_usage(usage),
+                            _ => {}
                         }
-                        AgentEvent::ToolExecutionStart { .. }
-                        | AgentEvent::SubagentUpdate {
-                            update: SubagentProgressUpdate::ToolStarted { .. },
-                            ..
-                        } => metrics.tool_calls = metrics.tool_calls.saturating_add(1),
-                        AgentEvent::AgentEnd { usage }
-                        | AgentEvent::SubagentUpdate {
-                            update: SubagentProgressUpdate::Usage { usage },
-                            ..
-                        } => metrics.accumulate_usage(usage),
-                        _ => {}
                     }
                     match adapt_agent_event(event) {
                         ChatAgentUpdate::TextDelta(delta) => {
@@ -3691,8 +3693,14 @@ impl AppState {
                             self.active_plan = plan;
                         }
                         ChatAgentUpdate::Usage(usage) => {
-                            let entry = self.session_token_usage.entry(key.clone()).or_default();
-                            entry.accumulate(&usage);
+                            // Best-effort like the metrics above: usage
+                            // without a projection key is dropped, never
+                            // panicked on.
+                            if let Some(key) = self.active_session_projection_key() {
+                                let entry =
+                                    self.session_token_usage.entry(key.clone()).or_default();
+                                entry.accumulate(&usage);
+                            }
                         }
                         ChatAgentUpdate::PermissionRequested(request) => {
                             changed = true;

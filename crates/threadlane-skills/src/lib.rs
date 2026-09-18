@@ -1303,7 +1303,11 @@ fn parse_frontmatter_document(
         }
         return Err("Unclosed standalone YAML frontmatter delimiter '---'".to_string());
     };
-    let body_offset = body_offset.expect("closing delimiter sets body offset");
+    // Set together with `yaml_end` above; the else is unreachable, but
+    // user-controlled frontmatter must never panic the host.
+    let Some(body_offset) = body_offset else {
+        return Err("Unclosed standalone YAML frontmatter delimiter '---'".to_string());
+    };
     if body_offset > max_frontmatter_bytes {
         return Err(format!(
             "YAML frontmatter exceeds {max_frontmatter_bytes} bytes"

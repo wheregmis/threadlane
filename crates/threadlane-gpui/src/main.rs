@@ -67,15 +67,21 @@ fn main() {
         };
 
         cx.spawn(async move |cx| {
-            cx.open_window(options, |window, cx| {
-                #[cfg(feature = "gpui-profiler")]
-                if std::env::var_os("THREADLANE_GPUI_PROFILE").is_some() {
-                    window.set_debug_frame_overlay_mode(DebugFrameOverlayMode::Full);
-                }
-                let view = StartupView::build(window, cx);
-                cx.new(|cx| Root::new(view, window, cx))
-            })
-            .expect("failed to open GPUI window");
+            if let Err(error) = cx
+                .open_window(options, |window, cx| {
+                    #[cfg(feature = "gpui-profiler")]
+                    if std::env::var_os("THREADLANE_GPUI_PROFILE").is_some() {
+                        window.set_debug_frame_overlay_mode(DebugFrameOverlayMode::Full);
+                    }
+                    let view = StartupView::build(window, cx);
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+                .map(|_| ())
+            {
+                // A window failure must report, not panic the spawn task:
+                // without a window there is nothing to render into.
+                eprintln!("Threadlane could not open its window: {error:?}");
+            }
         })
         .detach();
     });

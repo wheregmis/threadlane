@@ -2531,7 +2531,10 @@ impl GitHubView {
     }
 
     fn render_pr_comment_editor(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        self.render_pr_conversation_editor(false, cx).unwrap()
+        // The reply variant degrades to None; a missing comment composer
+        // renders nothing instead of panicking the paint.
+        self.render_pr_conversation_editor(false, cx)
+            .unwrap_or_else(|| div().into_any_element())
     }
 
     fn render_pr_reply_editor(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {

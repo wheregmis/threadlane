@@ -37,9 +37,11 @@ impl AcpPreset {
             .contains(&agent.command_line().as_str())
     }
 
-    pub(crate) fn to_agent_config(&self, scope: AcpScope) -> AcpAgentConfig {
+    pub(crate) fn to_agent_config(&self, scope: AcpScope) -> Result<AcpAgentConfig, String> {
+        // Built-in presets are static data, but a typo must surface as a
+        // settings error (pinned by test below), never a render panic.
         AcpAgentConfig::from_command_line(self.name, self.command, scope)
-            .expect("built-in ACP presets must have a name and command")
+            .ok_or_else(|| format!("built-in ACP preset '{}' is invalid", self.id))
     }
 }
 
@@ -89,7 +91,7 @@ pub fn upgrade_acp_presets(project_root: Option<&Path>) -> Result<(), String> {
             };
             if preset.needs_command_upgrade(agent) {
                 let enabled = agent.enabled;
-                *agent = preset.to_agent_config(scope);
+                *agent = preset.to_agent_config(scope)?;
                 agent.enabled = enabled;
                 changed = true;
             }
@@ -110,11 +112,11 @@ pub fn set_acp_preset_enabled(
     let mut agents = load_acp_scope(project_root, scope)?;
     if let Some(agent) = agents.iter_mut().find(|agent| preset.matches_agent(agent)) {
         if preset.needs_command_upgrade(agent) {
-            *agent = preset.to_agent_config(scope);
+            *agent = preset.to_agent_config(scope)?;
         }
         agent.enabled = enabled;
     } else {
-        let mut config = preset.to_agent_config(scope);
+        let mut config = preset.to_agent_config(scope)?;
         config.enabled = enabled;
         agents.push(config);
     }
@@ -208,5 +210,22 @@ mod tests {
         let error =
             add_acp_agent(None, AcpScope::Global, "remote", "https://example.test").unwrap_err();
         assert!(error.contains("local stdio"));
+    }
+}
+
+#[cfg(test)]
+mod preset_tests {
+    use super::*;
+
+    #[test]
+    fn every_builtin_preset_constructs() {
+        // Guards the static preset table: a typo fails here in CI, never as
+        // a panic in settings render.
+        for preset in ACP_PRESETS {
+            // Construction success is the pin: a typo fails here in CI,
+            // never as a panic in settings render. (Config ids derive from
+            // the command line, not the preset id.)
+            preset.to_agent_config(AcpScope::Global).expect("preset must construct");
+        }
     }
 }

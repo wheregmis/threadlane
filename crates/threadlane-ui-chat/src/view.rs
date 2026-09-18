@@ -294,7 +294,12 @@ impl ChatListView {
             cx.new(|cx| InputState::new(window, cx).placeholder("Search trajectory…"));
         let mut stream_rx = model
             .update(cx, |state, _cx| state.stream_rx.take())
-            .expect("chat stream receiver was already taken");
+            .unwrap_or_else(|| {
+                // A second view construction must not panic the UI: fall
+                // back to a detached channel (no stream events arrive).
+                tracing::warn!("chat stream receiver was already taken; using a detached channel");
+                tokio::sync::mpsc::unbounded_channel().1
+            });
 
         let editor = cx.new(|cx| EditorView::new(model.clone(), window, cx));
 
@@ -1420,18 +1425,20 @@ impl ChatListView {
                 .child(format!("Turn {turn}"))
                 .into_any_element(),
             TrajectoryRow::Entry(all_index) => {
-                let entry = &self
-                    .trajectory_cache
-                    .as_ref()
-                    .expect("trajectory cache")
-                    .all_entries[all_index];
+                // Stale indices (cache rebuilt mid-render) render nothing
+                // instead of panicking the paint.
+                let Some(cache) = self.trajectory_cache.as_ref() else {
+                    return Empty.into_any_element();
+                };
+                let Some(entry) = cache.all_entries.get(all_index) else {
+                    return Empty.into_any_element();
+                };
                 let selected = Some(all_index) == self.selected_trajectory_index;
-                let preview = self
-                    .trajectory_cache
-                    .as_ref()
-                    .expect("trajectory cache")
-                    .previews[all_index]
-                    .clone();
+                let preview = cache
+                    .previews
+                    .get(all_index)
+                    .cloned()
+                    .unwrap_or_default();
                 let (badge_bg, badge_fg, badge_label): (Hsla, Hsla, SharedString) =
                     match entry.category.as_str() {
                         "Tool" | "Tool runtime" => {
@@ -1819,7 +1826,17 @@ impl ChatListView {
                     .map(|entry| (revision, index, format_trajectory_raw_json(entry)));
             }
         }
-        let cache = self.trajectory_cache.as_ref().expect("trajectory cache");
+        let Some(cache) = self.trajectory_cache.as_ref() else {
+            return div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_sm()
+                .text_color(cx.theme().colors.muted_foreground)
+                .child("Trajectory unavailable.")
+                .into_any_element();
+        };
         let all_entries = &cache.all_entries;
         let categories = Arc::clone(&cache.categories);
         let lanes = Arc::clone(&cache.lanes);
@@ -4418,9 +4435,11 @@ impl ChatListView {
             .isolation
             .as_ref()
             .map(|isolation| (isolation.workspace.clone(), isolation.branch.clone()));
-        let branch_controls = workspace.map(|(worktree, branch)| {
+        let branch_controls = workspace.and_then(|(worktree, branch)| {
+            // No active project (or a deleted work dir) hides the worktree
+            // controls instead of panicking the render.
             let inspect_model = self.model.clone();
-            let inspect_root = self.model.read(cx).active_git_work_dir().unwrap();
+            let inspect_root = self.model.read(cx).active_git_work_dir()?;
             let inspect_branch = branch.clone();
             let apply_model = self.model.clone();
             let apply_root = inspect_root.clone();
@@ -4433,7 +4452,8 @@ impl ChatListView {
             let terminal_model = self.model.clone();
             let terminal_worktree = worktree.clone();
             let worktree_available = worktree.is_dir();
-            div()
+            Some(
+                div()
                 .flex()
                 .flex_col()
                 .gap_2()
@@ -4598,7 +4618,8 @@ impl ChatListView {
                                     .detach();
                                 }),
                         ),
-                )
+                ),
+            )
         });
         div()
             .w_full()

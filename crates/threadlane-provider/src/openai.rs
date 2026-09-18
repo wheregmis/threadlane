@@ -1163,13 +1163,19 @@ impl OpenAIClient {
                     };
                 }
             };
-            if let Err(error) = state
-                .socket
-                .as_mut()
-                .expect("socket was connected")
-                .send(Message::Text(text.into()))
-                .await
-            {
+            if let Err(error) = match state.socket.as_mut() {
+                // A concurrent reset (credential rotation) may clear the
+                // socket between polls: fail over instead of panicking.
+                None => {
+                    state.reset().await;
+                    return WsResult::Failed {
+                        message: "Codex WebSocket reset during send".to_string(),
+                        emitted: false,
+                        fallback_allowed: true,
+                    };
+                }
+                Some(socket) => socket.send(Message::Text(text.into())).await,
+            } {
                 state.reset().await;
                 return WsResult::Failed {
                     message: format!("Codex WebSocket send error: {error}"),
@@ -1180,12 +1186,20 @@ impl OpenAIClient {
 
             let mut accumulator = ResponseAccumulator::default();
             let terminal_success = loop {
-                let message = match tokio::time::timeout(
-                    WS_RESPONSE_IDLE_TIMEOUT,
-                    state.socket.as_mut().expect("socket exists").next(),
-                )
-                .await
-                {
+                // The socket borrow cannot assume presence: rotation may
+                // reset it between polls (see the send site above).
+                let next = match state.socket.as_mut() {
+                    Some(socket) => socket.next(),
+                    None => {
+                        state.reset().await;
+                        return WsResult::Failed {
+                            message: "Codex WebSocket reset during response".to_string(),
+                            emitted: accumulator.emitted_model_event,
+                            fallback_allowed: true,
+                        };
+                    }
+                };
+                let message = match tokio::time::timeout(WS_RESPONSE_IDLE_TIMEOUT, next).await {
                     Ok(Some(Ok(message))) => message,
                     Ok(Some(Err(error))) => {
                         let emitted = accumulator.emitted_model_event;
