@@ -38,7 +38,6 @@ use threadlane_ui_right_panel::RightPanelView;
 use threadlane_ui_settings::SettingsView;
 use threadlane_ui_sidebar::SidebarView;
 use threadlane_ui_terminal::TerminalView;
-use threadlane_coding_agent::controller::ExecutionMode;
 use threadlane_coding_agent::controller::spawn_session_runtime_construction;
 use threadlane_ui_state::updater::{self, UpdaterEvent};
 use threadlane_coding_agent::controller::runtime_status_text;
@@ -213,7 +212,6 @@ impl WorkspaceView {
                         let session_file = request.session_file.clone();
                         spawn_session_runtime_construction(
                             coding_agent_options(work_dir, session_file, model, roles, browser),
-                            ExecutionMode::Interactive,
                         )
                     });
             if request.reload_messages {

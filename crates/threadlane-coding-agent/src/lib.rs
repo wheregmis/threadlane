@@ -3,7 +3,7 @@
 //! [`CodingAgent`] is the durable prompt-execution runtime (provider turns,
 //! tool dispatch, subagents, queue/steer, cancellation); [`harness`] is the
 //! canonical session adapter persisting every intent before work starts.
-//! [`controller`] unifies interactive and background execution, and the
+//! [`controller`] is the interactive session controller, and the
 //! support modules (`commands`, `computer`, `credentials`, `mcp`) are the
 //! session-owned adapters the engine is built from. Import each module
 //! directly; the root re-exports below cover only the handful of names

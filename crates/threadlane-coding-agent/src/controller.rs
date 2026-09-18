@@ -1,4 +1,4 @@
-//! Unified Session Controller for interactive chat and background tasks.
+//! Unified Session Controller for interactive chat.
 //!
 //! Provides the shared execution core across surface adapters (GPUI, Headless),
 //! adhering to the principle: One shared durable execution core; multiple thin surface adapters.
@@ -20,15 +20,6 @@ use threadlane_permission::{PermissionDecision, PermissionHandle};
 use threadlane_protocol::{AgentEvent, ImageAttachment, ReasoningEffort};
 use threadlane_question::QuestionHandle;
 use threadlane_runtime::ModelRoles;
-
-/// Execution mode configured for a session.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ExecutionMode {
-    /// Interactive desktop/user session (enables interactive permission prompts).
-    Interactive,
-    /// Headless or background autonomous execution (e.g. /task).
-    Background,
-}
 
 /// Dynamic status of the session controller.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -59,9 +50,8 @@ pub fn runtime_status_text(status: SessionRuntimeStatus) -> Option<String> {
 /// extension loading needs the larger stack and reactor provided there.
 pub fn spawn_session_runtime_construction(
     options: CodingAgentOptions,
-    mode: ExecutionMode,
 ) -> tokio::task::JoinHandle<std::sync::Arc<SessionController>> {
-    threadlane_provider::exec::get_runtime().spawn_blocking(move || SessionController::new(options, mode))
+    threadlane_provider::exec::get_runtime().spawn_blocking(move || SessionController::new(options))
 }
 
 /// Narrow adapters for cross-crate integration tests.
@@ -94,7 +84,6 @@ pub struct SessionController {
     question_handle: QuestionHandle,
     pub(crate) prompt_lock: Arc<tokio::sync::Mutex<()>>,
     pub session_file: PathBuf,
-    mode: ExecutionMode,
     pub selected_model: String,
     pub(crate) reasoning_effort: ReasoningEffort,
     pub system_prompt: String,
@@ -104,8 +93,8 @@ pub struct SessionController {
 }
 
 impl SessionController {
-    /// Construct a new session controller with the specified options and execution mode.
-    pub fn new(options: CodingAgentOptions, mode: ExecutionMode) -> Arc<Self> {
+    /// Construct a new interactive session controller.
+    pub fn new(options: CodingAgentOptions) -> Arc<Self> {
         let session_file = options
             .session_file
             .clone()
@@ -115,10 +104,8 @@ impl SessionController {
         let work_handle = agent.work_handle();
         let permission_handle = agent.permission_handle();
         let question_handle = agent.question_handle();
-        if mode == ExecutionMode::Interactive {
-            permission_handle.set_interactive(true);
-            question_handle.set_interactive(true);
-        }
+        permission_handle.set_interactive(true);
+        question_handle.set_interactive(true);
         let system_prompt = agent.system_prompt_snapshot().unwrap_or_default();
         let harness_error = agent.harness_error().map(str::to_owned);
         let status = if let Some(error) = &harness_error {
@@ -140,7 +127,6 @@ impl SessionController {
             question_handle,
             prompt_lock: Arc::new(tokio::sync::Mutex::new(())),
             session_file,
-            mode,
             selected_model,
             reasoning_effort,
             system_prompt,
@@ -152,10 +138,6 @@ impl SessionController {
 
     pub fn session_file(&self) -> &Path {
         &self.session_file
-    }
-
-    pub fn mode(&self) -> ExecutionMode {
-        self.mode
     }
 
     pub fn model(&self) -> &str {

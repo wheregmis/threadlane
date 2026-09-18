@@ -8,9 +8,7 @@ mod memory;
 mod procedure;
 mod projections;
 mod reducer;
-mod session;
 mod store;
-mod telemetry;
 mod trajectory;
 mod types;
 
@@ -18,7 +16,7 @@ pub use agent::AgentHarness;
 pub use diagnostics::{
     project_recovery, project_session_diagnostics, DurableEventDiagnostic, DurableEventKind,
     InterruptedToolDiagnostic, LaneRecoveryDiagnostic, ModelContextDiagnostic,
-    QueuedWorkDiagnostic, RecoveryDecision, RecoveryPlan, SessionDiagnostics,
+    QueuedWorkDiagnostic, RecoveryDecision, SessionDiagnostics,
 };
 pub use effects::{EffectAction, EffectsError, GatedEffects};
 pub use events::{
@@ -44,17 +42,12 @@ pub use projections::{
     UiMessageRole, UiToolActivity,
 };
 pub use reducer::Reducer;
-pub use session::{LaneHandle, SessionAgent};
 pub use store::{
     CompactionCheckpoint, ModelContextProjection, SessionIdGenerator, SessionStore,
     TranscriptProjection,
 };
-pub use telemetry::{ExecutionContext, NoopTelemetry, TelemetrySink};
 pub use trajectory::{
-    project_trajectory, AnomalyKind, ContextManifestTrajectory, DiagnosticAnomaly,
-    GenericDurableTrajectory, PermissionTrajectory, ProviderTrajectory, RequestStatus,
-    RequestTrajectory, SessionTrajectory, SubagentTrajectory, ToolStatus, ToolTrajectory,
-    TrajectoryItem, TrajectoryRef,
+    project_trajectory, AnomalyKind, DiagnosticAnomaly, SessionTrajectory, TrajectoryRef,
 };
 pub use types::{
     sanitize_tool_args, AbortInitiator, AbortObservation, AbortTarget, AcceptedRun,

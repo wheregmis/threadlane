@@ -47,7 +47,6 @@ fn builtin_commands() -> Vec<SlashCommandInfo> {
             "subagent",
             "Delegate tasks to subagents in parallel or sequentially",
         ),
-        ("task", "Run a prompt as a background task"),
         ("quit", "Quit threadlane agent"),
     ]
     .into_iter()

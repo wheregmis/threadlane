@@ -1,6 +1,6 @@
 //! Turn loop driver for [`UnifiedAgent`].
 //!
-//! Encapsulates streaming, auto-compaction, stream rule monitoring, journal
+//! Encapsulates streaming, auto-compaction, journal
 //! recording, tool execution, and queue draining for an active turn sequence.
 
 use threadlane_compaction::{
@@ -19,12 +19,10 @@ use crate::provider::{
     ProviderBoundaryPreparer, ProviderBoundaryRequest, ProviderBoundaryResult, ProviderTraceEvent,
     ProviderTraceRecorder,
 };
-use crate::rules::{StreamRule, StreamRuleMonitor};
 use crate::tool_dispatcher::ToolDispatcher;
 use crate::types::{ToolExecutionMode, TurnState};
 use threadlane_protocol::{AgentMessage, TokenUsage};
 use crate::utils::AbortOnDrop;
-use regex::Regex;
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -155,7 +153,6 @@ pub(crate) struct TurnDriver<'a> {
     /// Persists model-visible messages before they may affect another provider
     /// request. Durable runtimes install the canonical session-journal writer.
     pub(crate) message_recorder: Option<crate::provider::AssistantMessageRecorder>,
-    pub(crate) stream_rules: Vec<(StreamRule, Regex)>,
     pub(crate) steering_queue: &'a mut Vec<AgentMessage>,
     pub(crate) follow_up_queue: &'a mut Vec<AgentMessage>,
 }
@@ -182,7 +179,6 @@ impl<'a> TurnDriver<'a> {
         let mut total_usage = TokenUsage::default();
         let mut overflow_recovery_attempted = false;
         let mut overflow_recovery_pending = false;
-        let mut stream_rule_recovery_attempted = false;
         let mut provider_fallback_attempted = false;
         let mut effective_model_override: Option<String> = None;
         let mut loop_detector = LoopDetector::new(
@@ -457,8 +453,6 @@ impl<'a> TurnDriver<'a> {
             let mut checkpointed_bytes = 0usize;
             let mut captured_tool_calls: Vec<ToolCall> = Vec::new();
             let mut provider_step = ProviderStepAccumulator::default();
-            let mut monitor = StreamRuleMonitor::new(self.stream_rules.clone(), &self.config);
-            let mut stream_rule_matched = false;
 
             let mut pending_evt = None;
             while let Some(evt) = match pending_evt.take() {
@@ -501,57 +495,6 @@ impl<'a> TurnDriver<'a> {
                                 return total_usage;
                             }
                             checkpointed_bytes = current_text.len();
-                        }
-                        if let Some(matched) = monitor.push_chunk(&token) {
-                            tracing::warn!(
-                                rule_id = %matched.rule_id,
-                                "stream rule matched; aborting current response"
-                            );
-                            self.emit_event(AgentEvent::MessageEnd {
-                                message: AgentMessage::Assistant {
-                                    content: None,
-                                    tool_calls: None,
-                                    stop_reason: Some("stream_rule_abort".into()),
-                                    deferred_handle: None,
-                                },
-                            });
-                            self.turn.lock().await.messages.push(AgentMessage::user(
-                                format!(
-                                    "System reminder from rule '{}': {}",
-                                    matched.rule_name, matched.reminder
-                                ),
-                                Vec::new(),
-                            ));
-                            monitor.reset();
-                            stream_rule_matched = true;
-                            if current_text.len() > checkpointed_bytes {
-                                checkpoint_index = checkpoint_index.saturating_add(1);
-                                let _ = self
-                                    .record_provider_trace(ProviderTraceEvent::Checkpoint {
-                                        attempt: provider_attempt,
-                                        request_id: request_id.clone(),
-                                        checkpoint_index,
-                                        text: current_text.clone(),
-                                        reasoning: None,
-                                    })
-                                    .await;
-                            }
-                            let _ = self
-                                .record_provider_trace(ProviderTraceEvent::Finished {
-                                    attempt: provider_attempt,
-                                    request_id: request_id.clone(),
-                                    outcome: ProviderOutcome::Aborted,
-                                    error: Some(ProviderErrorSummary {
-                                        category: ErrorCategory::Cancelled,
-                                        code: TraceString::new("stream_rule_abort").ok(),
-                                        retryable: true,
-                                    }),
-                                    duration_ms: request_started_at.elapsed().as_millis() as u64,
-                                    usage: None,
-                                })
-                                .await;
-                            provider_terminal_recorded = true;
-                            break;
                         }
                         self.emit_event(AgentEvent::MessageUpdate {
                             text_delta: Some(token),
@@ -736,19 +679,6 @@ impl<'a> TurnDriver<'a> {
                     });
                     return total_usage;
                 }
-            }
-
-            if stream_rule_matched {
-                if stream_rule_recovery_attempted {
-                    self.emit_event(AgentEvent::AgentError {
-                        error: "stream rule matched again after corrective retry".into(),
-                    });
-                    return total_usage;
-                }
-                stream_rule_recovery_attempted = true;
-                // Do not persist or emit the partial completion. The injected reminder
-                // already entered canonical turn state; continue creates the corrected retry.
-                continue;
             }
 
             if current_text.trim().is_empty() && captured_tool_calls.is_empty() {

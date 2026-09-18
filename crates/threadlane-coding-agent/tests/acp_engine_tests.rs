@@ -939,7 +939,7 @@ async fn assert_stopping_acp_preserves_queued_input(reopen: bool) {
 }
 
 fn queued_controller(work: &Path) -> std::sync::Arc<threadlane_coding_agent::controller::SessionController> {
-    use threadlane_coding_agent::controller::{ExecutionMode, SessionController};
+    use threadlane_coding_agent::controller::SessionController;
     use threadlane_coding_agent::CodingAgentOptions;
     use threadlane_protocol::browser::BrowserBridge;
     let session_file = work.join(".threadlane/sessions/session_queue.jsonl");
@@ -956,7 +956,6 @@ fn queued_controller(work: &Path) -> std::sync::Arc<threadlane_coding_agent::con
             coding_config: None,
             browser: BrowserBridge::unavailable(),
         },
-        ExecutionMode::Interactive,
     )
 }
 

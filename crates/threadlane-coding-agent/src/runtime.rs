@@ -10,7 +10,7 @@ use super::capabilities::{
     ContextCapability, GitHubCapability, McpCapability, PlanCapability, QuestionCapability,
     SkillCapability, SubagentCapability, WasiCapability, WorktreeCapability,
 };
-use super::harness::{CodingSessionHarness, HarnessWatch, InterruptedSubagentRecoveryState};
+use super::harness::{CodingSessionHarness, InterruptedSubagentRecoveryState};
 use crate::commands::{execute_slash_command, parse_slash_command, CommandAction};
 use crate::computer::ComputerCapability;
 use threadlane_prompt::ProjectContext;
@@ -25,7 +25,7 @@ use threadlane_mcp::McpManager;
 use threadlane_project::default_global_threadlane_dir;
 use threadlane_protocol::ProviderPort;
 use threadlane_provider::openai::fetch_available_models;
-use threadlane_runtime::harness::{OperationOutcome, Reducer, SessionStore, Snapshot};
+use threadlane_runtime::harness::{OperationOutcome, Reducer, SessionStore};
 use threadlane_runtime::ToolPolicy;
 use threadlane_protocol::{
     AgentEvent, AgentMessage, ImageAttachment, ReasoningEffort, TokenUsage,
@@ -127,18 +127,6 @@ impl CodingAgent {
         self.agent.subscribe()
     }
 
-    pub fn harness_snapshot(&mut self) -> Result<Option<Snapshot>, String> {
-        let Some(journal) = self.harness.as_mut() else {
-            return Ok(None);
-        };
-        journal.refresh()?;
-        journal
-            .store
-            .snapshot()
-            .map(Some)
-            .map_err(|error| error.to_string())
-    }
-
     pub(crate) fn harness_error(&self) -> Option<&str> {
         self.harness_journal_error.as_deref()
     }
@@ -151,13 +139,6 @@ impl CodingAgent {
             .try_lock()
             .ok()
             .map(|state| state.system_prompt.clone())
-    }
-
-    pub fn watch_harness(&mut self) -> Result<Option<HarnessWatch>, String> {
-        let Some(journal) = self.harness.as_mut() else {
-            return Ok(None);
-        };
-        journal.watch().map(Some)
     }
 
     pub(crate) fn cancellation_handle(&self) -> CodingAgentCancellation {

@@ -20,7 +20,7 @@ pub use threadlane_runtime::harness::Record as HarnessRecord;
 use threadlane_runtime::harness::{
     AbortInitiator, AbortObservation, AbortTarget, AgentHarness, BoundedText, CapabilitySnapshot,
     CompactionReason, ContextSnapshotLoadOutcome, DeferredResolution, Entry as HarnessEntry,
-    ErrorCategory, HarnessEventHub, HookContext, HookKind, HookRegistry, JsonlStore,
+    ErrorCategory, HarnessEventHub, HookRegistry, JsonlStore,
     OperationOutcome, PromptSnapshot, ProviderErrorSummary, ProviderOutcome, ProvisionedEntry,
     QueueKind, Reducer, RetryPolicy, SessionIdGenerator, SessionStore, Snapshot,
     SubagentLifecyclePhase, ToolExecutionOutcome, ToolExecutionPhase,
@@ -36,7 +36,9 @@ use threadlane_runtime::{
     ToolExecutionTraceEvent,
 };
 
-use threadlane_runtime::harness::{EventError, HarnessEvent, OperationIntent, Subscription};
+use threadlane_runtime::harness::OperationIntent;
+#[cfg(test)]
+use threadlane_runtime::harness::HookContext;
 
 
 mod assistant;
@@ -59,21 +61,6 @@ static NEXT_CONTEXT_SNAPSHOT_LOAD_ID: AtomicU64 = AtomicU64::new(1);
 #[cfg(test)]
 fn last_path_operation_thread() -> Option<std::thread::ThreadId> {
     *LAST_PATH_OPERATION_THREAD.lock().ok()?
-}
-
-pub struct HarnessWatch {
-    hub: HarnessEventHub,
-    subscription: Subscription,
-}
-
-impl HarnessWatch {
-    pub fn snapshot(&self) -> &Snapshot {
-        &self.subscription.snapshot
-    }
-
-    pub async fn wait(&mut self) -> Result<Vec<HarnessEvent>, EventError> {
-        self.hub.wait(&mut self.subscription).await
-    }
 }
 
 #[derive(Clone)]

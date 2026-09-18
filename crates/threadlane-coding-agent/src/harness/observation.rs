@@ -9,19 +9,6 @@ impl CodingSessionHarness {
         self.store.snapshot().map_err(|error| error.to_string())
     }
 
-    /// Subscribe to session-scoped events.
-    pub fn watch(&mut self) -> Result<HarnessWatch, String> {
-        self.ensure_fresh()?;
-        let subscription = self
-            .store
-            .watch_session()
-            .map_err(|error| error.to_string())?;
-        Ok(HarnessWatch {
-            hub: self.events.clone(),
-            subscription,
-        })
-    }
-
     /// Drive all pending effects to completion.
     pub fn drive_to_completion(&mut self) -> Result<(), String> {
         self.store
@@ -134,30 +121,5 @@ impl CodingSessionHarness {
             logged.len(),
             expected.len()
         ))
-    }
-
-    pub fn plan_recovery(
-        &mut self,
-        lane: &str,
-    ) -> Result<threadlane_runtime::harness::RecoveryPlan, String> {
-        self.ensure_fresh()?;
-        let agent = threadlane_runtime::harness::SessionAgent::new(AgentHarness::new(
-            self.store.store().clone(),
-        ));
-        let lane_handle = threadlane_runtime::harness::LaneHandle::new(lane.to_string())
-            .map_err(|error| error.to_string())?;
-        agent
-            .plan_recovery(&lane_handle)
-            .map_err(|error| error.to_string())
-    }
-
-    /// Run hooks of the given kind for the main lane.
-    pub async fn run_hooks(&self, kind: HookKind, context: &HookContext) {
-        for failure in self.store.hooks().run(kind, context).await {
-            eprintln!(
-                "hook {} ({:?}) failed: {}",
-                failure.id, kind, failure.message
-            );
-        }
     }
 }

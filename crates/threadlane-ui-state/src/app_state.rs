@@ -11,7 +11,6 @@ use threadlane_protocol::{
 use threadlane_acp::AcpConfigOption;
 
 use crate::agent_events::{adapt_agent_event, ChatAgentUpdate};
-use threadlane_coding_agent::controller::ExecutionMode;
 use threadlane_coding_agent::controller::SessionRuntime;
 use threadlane_project::load_project_registry;
 
@@ -929,7 +928,7 @@ impl AppState {
         let runtime = std::thread::Builder::new()
             .name("session-runtime-construct".into())
             .stack_size(8 * 1024 * 1024)
-            .spawn(move || SessionRuntime::new(options, ExecutionMode::Interactive))
+            .spawn(move || SessionRuntime::new(options))
             .expect("failed to spawn session runtime constructor")
             .join()
             .expect("session runtime construction panicked");
