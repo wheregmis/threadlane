@@ -37,6 +37,10 @@ pub const COMPUTER_ACT_TOOL: &str = "computer_act";
 /// Accessibility snapshot of one window: element tree plus a grounding
 /// screenshot. The cheap re-index path before element actions.
 pub const COMPUTER_AX_TOOL: &str = "computer_ax";
+/// Act on one UI element by visible text: snapshots fresh, resolves the
+/// element, and acts with its token in a single approval. Prefer this over
+/// `computer_ax` + pixel `computer_act` for buttons, links, and fields.
+pub const COMPUTER_INTERACT_TOOL: &str = "computer_interact";
 /// Full-catalog passthrough: any `cua-driver` MCP tool by name. Read-only
 /// discovery skips approval; everything else prompts like `computer_act`.
 pub const CUA_CALL_TOOL: &str = "cua_call";
@@ -122,6 +126,38 @@ fn computer_tool_definitions() -> Arc<[AgentToolDefinition]> {
                     "include_screenshot": { "type": "boolean", "description": "Default true. False returns the tree only (no approval needed)." }
                 },
                 "required": ["pid", "window_id"],
+                "additionalProperties": false
+            }),
+        ),
+        AgentToolDefinition::new(
+            COMPUTER_INTERACT_TOOL,
+            "Click, double-click, type into, press a key on, or scroll one UI element by its visible text: takes pid + window_id from computer_windows, snapshots the window fresh, resolves your query to an element, and acts with its token — all in one approval, never a stale index. Prefer this over computer_ax plus pixel computer_act for buttons, links, text fields, and menu items. For canvases, video, or custom-drawn surfaces with no element text, use computer_screenshot plus computer_act with coordinates instead.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pid": { "type": "integer", "description": "Owner pid from computer_windows." },
+                    "window_id": { "type": "integer", "description": "Window id from computer_windows." },
+                    "query": { "type": "string", "description": "Visible text of the target (button label, link text, field name). Matched case-insensitively against element labels and values; omit only when passing element_index." },
+                    "element_index": { "type": "integer", "description": "Element index from a previous computer_ax snapshot. Re-resolved against a fresh snapshot; prefer query, which never goes stale." },
+                    "action": {
+                        "type": "string",
+                        "enum": ["click", "double_click", "type", "press", "scroll"],
+                        "description": "type needs text, press needs key, scroll needs dx/dy."
+                    },
+                    "text": { "type": "string", "description": "Text for the type action." },
+                    "key": {
+                        "type": "string",
+                        "description": "Key for press: a named key (Enter, Escape, Tab, Space, Backspace, Delete, Up, Down, Left, Right) or a single character for combos."
+                    },
+                    "modifiers": {
+                        "type": "array",
+                        "items": { "type": "string", "enum": ["shift", "ctrl", "alt", "cmd"] },
+                        "description": "Optional modifiers held for click/press."
+                    },
+                    "dx": { "type": "number", "description": "Horizontal scroll pixels (positive = right)." },
+                    "dy": { "type": "number", "description": "Vertical scroll pixels (positive = down)." }
+                },
+                "required": ["pid", "window_id", "action"],
                 "additionalProperties": false
             }),
         ),
@@ -460,6 +496,7 @@ impl ToolExecutor for ComputerToolExecutor {
                     .await
                     .map(|output| output.content),
             ),
+            COMPUTER_INTERACT_TOOL => Some(self.interact(args, work_dir).await),
             COMPUTER_ACT_TOOL => Some(self.act(args, work_dir).await),
             CUA_CALL_TOOL => Some(
                 self.cua_call_with_output(args, work_dir)
@@ -758,6 +795,275 @@ fn note_screenshot(label: &str) {
     );
 }
 
+/// One actionable element resolved from a fresh snapshot: its opaque token
+/// plus human-readable identity for approvals and results.
+#[derive(Debug, PartialEq)]
+struct InteractTarget {
+    token: String,
+    role: String,
+    label: String,
+}
+
+impl InteractTarget {
+    fn describe(&self) -> String {
+        if self.label.is_empty() {
+            format!("({})", self.role)
+        } else {
+            format!("{:?} ({})", self.label, self.role)
+        }
+    }
+}
+
+struct InteractAttempt {
+    target: InteractTarget,
+    snapshot_id: String,
+}
+
+/// Validated per-action payload for [`COMPUTER_INTERACT_TOOL`].
+struct InteractPayload {
+    text: Option<String>,
+    key: Option<String>,
+    modifiers: Vec<String>,
+    dx: f64,
+    dy: f64,
+}
+
+impl InteractPayload {
+    /// Dominant scroll axis mapped to a driver direction + wheel amount.
+    fn scroll_vector(&self) -> (&'static str, u64) {
+        let (direction, magnitude) = if self.dx.abs() >= self.dy.abs() {
+            (
+                if self.dx > 0.0 { "right" } else { "left" },
+                self.dx.abs(),
+            )
+        } else {
+            (if self.dy > 0.0 { "down" } else { "up" }, self.dy.abs())
+        };
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let amount = (magnitude / 40.0).round().clamp(1.0, 50.0) as u64;
+        (direction, amount)
+    }
+
+    fn scroll_delta(&self) -> Option<(f64, f64)> {
+        Some((self.dx, self.dy))
+    }
+}
+
+fn interact_payload(action: &str, parsed: &serde_json::Value) -> Result<InteractPayload, String> {
+    let text = parsed
+        .get("text")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let key = parsed
+        .get("key")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_string);
+    let delta = |name: &str| {
+        parsed
+            .get(name)
+            .and_then(|value| value.as_f64())
+            .filter(|value| value.is_finite())
+            .unwrap_or(0.0)
+    };
+    let (dx, dy) = (delta("dx"), delta("dy"));
+    match action {
+        "type" => {
+            let text = text.filter(|text| !text.is_empty()).ok_or_else(|| {
+                format!("`{COMPUTER_INTERACT_TOOL}` type requires non-empty `text`.")
+            })?;
+            if text.chars().count() > MAX_TYPE_CHARS {
+                return Err(format!(
+                    "`{COMPUTER_INTERACT_TOOL}` type accepts at most {MAX_TYPE_CHARS} characters."
+                ));
+            }
+            Ok(InteractPayload {
+                text: Some(text),
+                key: None,
+                modifiers: Vec::new(),
+                dx: 0.0,
+                dy: 0.0,
+            })
+        }
+        "press" => {
+            let key = key.ok_or_else(|| {
+                format!("`{COMPUTER_INTERACT_TOOL}` press requires `key`.")
+            })?;
+            let is_character = key.chars().count() == 1;
+            if !is_character && !VALID_KEYS.contains(&key.as_str()) {
+                return Err(format!(
+                    "`{COMPUTER_INTERACT_TOOL}` press key must be a single character or one of {}.",
+                    VALID_KEYS.join(", ")
+                ));
+            }
+            Ok(InteractPayload {
+                text: None,
+                key: Some(driver_key(&key)),
+                modifiers: driver_modifiers(&parse_modifiers(parsed)?),
+                dx: 0.0,
+                dy: 0.0,
+            })
+        }
+        "scroll" => {
+            if dx == 0.0 && dy == 0.0 {
+                return Err(format!(
+                    "`{COMPUTER_INTERACT_TOOL}` scroll needs a non-zero dx or dy."
+                ));
+            }
+            Ok(InteractPayload {
+                text: None,
+                key: None,
+                modifiers: Vec::new(),
+                dx,
+                dy,
+            })
+        }
+        "click" | "double_click" => Ok(InteractPayload {
+            text: None,
+            key: None,
+            modifiers: driver_modifiers(&parse_modifiers(parsed)?),
+            dx: 0.0,
+            dy: 0.0,
+        }),
+        _ => Err(format!("Unsupported interact action: {action}")),
+    }
+}
+
+/// Ranked element match: exact label beats prefix beats substring, so
+/// "Send" does not land on "Send Feedback".
+fn match_element_by_query(
+    elements: &[serde_json::Value],
+    query: &str,
+) -> Result<InteractTarget, String> {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return Err("empty query matches everything; name the element text.".to_string());
+    }
+    let mut best: Option<(u8, InteractTarget)> = None;
+    let mut tied = 0usize;
+    for element in elements {
+        let token = element
+            .get("element_token")
+            .and_then(|token| token.as_str())
+            .unwrap_or("");
+        if token.is_empty() {
+            continue;
+        }
+        let label = element
+            .get("label")
+            .and_then(|label| label.as_str())
+            .unwrap_or("")
+            .trim();
+        let value = element
+            .get("value")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .trim();
+        let haystack = format!("{label}\n{value}").to_lowercase();
+        if haystack.trim().is_empty() {
+            continue;
+        }
+        let rank = if label.to_lowercase() == needle {
+            0
+        } else if haystack.starts_with(&needle) {
+            1
+        } else if haystack.contains(&needle) {
+            2
+        } else {
+            continue;
+        };
+        let candidate = InteractTarget {
+            token: token.to_string(),
+            role: element
+                .get("role")
+                .and_then(|role| role.as_str())
+                .unwrap_or("element")
+                .to_string(),
+            label: if label.is_empty() {
+                value.to_string()
+            } else {
+                label.to_string()
+            },
+        };
+        match &best {
+            Some((best_rank, _)) if *best_rank < rank => {}
+            Some((best_rank, _)) if *best_rank == rank => tied += 1,
+            _ => {
+                best = Some((rank, candidate));
+                tied = 0;
+            }
+        }
+    }
+    match best {
+        None => Err("matched no actionable element (canvas or custom-drawn surface? use computer_screenshot plus computer_act with coordinates).".to_string()),
+        Some((_, _target)) if tied > 0 => Err(format!(
+            "matched {} elements; re-query with more specific text or pass element_index from computer_ax.",
+            tied + 1
+        )),
+        Some((_, target)) => Ok(target),
+    }
+}
+
+fn match_element_by_index(elements: &[serde_json::Value], index: i64) -> Option<InteractTarget> {
+    elements.iter().find_map(|element| {
+        if element.get("element_index")?.as_i64()? != index {
+            return None;
+        }
+        Some(InteractTarget {
+            token: element
+                .get("element_token")?
+                .as_str()
+                .filter(|token| !token.is_empty())?
+                .to_string(),
+            role: element
+                .get("role")
+                .and_then(|role| role.as_str())
+                .unwrap_or("element")
+                .to_string(),
+            label: element
+                .get("label")
+                .and_then(|label| label.as_str())
+                .unwrap_or("")
+                .to_string(),
+        })
+    })
+}
+
+/// The driver fails closed with an explicit stale error once a newer snapshot
+/// supersedes the token's. Match loosely: the exact wording is versioned.
+fn is_stale_snapshot_error(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    lower.contains("stale")
+        && (lower.contains("snapshot")
+            || lower.contains("supersede")
+            || lower.contains("token"))
+}
+
+fn action_verb(action: &str) -> &'static str {
+    match action {
+        "double_click" => "Double-clicked",
+        "type" => "Typed into",
+        "press" => "Pressed key on",
+        "scroll" => "Scrolled",
+        _ => "Clicked",
+    }
+}
+
+/// Mirror overlay for an element action: positions are unknown (token path),
+/// so markers ride label-only — except scroll, which carries its delta.
+fn publish_interact_overlay(action: &str, title: &str, delta: Option<(f64, f64)>) {
+    use threadlane_protocol::live::{publish_overlay, LiveOverlayKind};
+    let kind = match action {
+        "double_click" => LiveOverlayKind::DoubleClick,
+        "type" => LiveOverlayKind::Type,
+        "press" => LiveOverlayKind::Press,
+        "scroll" => LiveOverlayKind::Scroll,
+        _ => LiveOverlayKind::Click,
+    };
+    publish_overlay(kind, None, delta.filter(|_| action == "scroll"), title);
+}
+
 impl ComputerToolExecutor {
     async fn screenshot_with_output(
         &self,
@@ -914,6 +1220,201 @@ impl ComputerToolExecutor {
             images = attached;
         }
         Ok(ToolOutput { content, images })
+    }
+    /// Act on one element by visible text: fresh tree-only snapshot, resolve,
+    /// approve once against the resolved label, act with the token, and retry
+    /// once on a stale snapshot. One approval and zero screenshots for the
+    /// common button/link/field case.
+    async fn interact(&self, args: &str, work_dir: Option<&Path>) -> Result<String, String> {
+        if !driver_available() {
+            return Err(DRIVER_MISSING_HINT.to_string());
+        }
+        let parsed: serde_json::Value = serde_json::from_str(args)
+            .map_err(|error| format!("Invalid {COMPUTER_INTERACT_TOOL} arguments: {error}"))?;
+        let pid = parsed
+            .get("pid")
+            .and_then(|value| value.as_i64())
+            .ok_or_else(|| {
+                format!("`{COMPUTER_INTERACT_TOOL}` requires `pid` from computer_windows.")
+            })?;
+        let window_id = parsed
+            .get("window_id")
+            .and_then(|value| value.as_i64())
+            .ok_or_else(|| {
+                format!("`{COMPUTER_INTERACT_TOOL}` requires `window_id` from computer_windows.")
+            })?;
+        let action = parsed
+            .get("action")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        if !["click", "double_click", "type", "press", "scroll"].contains(&action) {
+            return Err(format!(
+                "`{COMPUTER_INTERACT_TOOL}` action must be one of click, double_click, type, press, scroll."
+            ));
+        }
+        let query = parsed
+            .get("query")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|query| !query.is_empty());
+        let element_index = parsed
+            .get("element_index")
+            .and_then(|value| value.as_i64());
+        if query.is_none() && element_index.is_none() {
+            return Err(format!(
+                "`{COMPUTER_INTERACT_TOOL}` needs `query` (visible text) or `element_index`."
+            ));
+        }
+        // Per-action payload, validated before any driver call.
+        let payload = interact_payload(action, &parsed)?;
+        // Tree-only snapshots are read-only: resolve first so the approval
+        // names the exact element, then act.
+        let attempt = self
+            .resolve_interact_target(pid, window_id, query, element_index)
+            .await?;
+        let title = format!(
+            "{} {} in window {window_id}",
+            action_verb(action),
+            attempt.target.describe()
+        );
+        self.approve(
+            title.clone(),
+            format!(
+                "{title} via the CUA driver (background-first: cursor and focus usually stay untouched). Deny if the target looks wrong."
+            ),
+        )
+        .await?;
+        match self
+            .drive_interact(pid, window_id, &attempt, action, &payload)
+            .await
+        {
+            Ok(outcome) => {
+                crate::mirror::ensure_feed_window(window_id);
+                publish_interact_overlay(action, &title, payload.scroll_delta());
+                let mirror_dir =
+                    global_previews_dir().unwrap_or_else(|| previews_dir(work_dir));
+                write_mirror_sidecar(&mirror_dir, None, &format!("{title} — {outcome}"));
+                Ok(format!(
+                    "{outcome}\nAct again with `{COMPUTER_INTERACT_TOOL}` (fresh tokens every call); snapshot indices from `computer_ax` expire."
+                ))
+            }
+            Err(error) if is_stale_snapshot_error(&error) => {
+                // One retry against a fresh snapshot: the window re-rendered
+                // between resolve and act.
+                let attempt = self
+                    .resolve_interact_target(pid, window_id, query, element_index)
+                    .await
+                    .map_err(|retry_error| {
+                        format!("{error}\nRetry also failed to resolve: {retry_error}")
+                    })?;
+                let outcome = self
+                    .drive_interact(pid, window_id, &attempt, action, &payload)
+                    .await?;
+                crate::mirror::ensure_feed_window(window_id);
+                Ok(format!("{outcome} (after re-resolving a stale snapshot)"))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Fresh tree-only snapshot plus element resolution.
+    async fn resolve_interact_target(
+        &self,
+        pid: i64,
+        window_id: i64,
+        query: Option<&str>,
+        element_index: Option<i64>,
+    ) -> Result<InteractAttempt, String> {
+        let result = driver_call(
+            "get_window_state",
+            serde_json::json!({
+                "pid": pid,
+                "window_id": window_id,
+                "include_screenshot": false,
+            }),
+        )
+        .await?;
+        let elements = result
+            .structured
+            .as_ref()
+            .and_then(|structured| structured.get("elements"))
+            .and_then(|elements| elements.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let target = match (query, element_index) {
+            (_, Some(index)) => match_element_by_index(&elements, index).ok_or_else(|| {
+                format!(
+                    "No element {index} in the fresh snapshot of window {window_id}; re-query with `{COMPUTER_INTERACT_TOOL}` or take a new `computer_ax` snapshot."
+                )
+            })?,
+            (Some(query), None) => match_element_by_query(&elements, query).map_err(|hint| {
+                format!("No match for {query:?} in window {window_id}: {hint}")
+            })?,
+            (None, None) => {
+                return Err(format!(
+                    "`{COMPUTER_INTERACT_TOOL}` needs `query` or `element_index`."
+                ));
+            }
+        };
+        let snapshot = result
+            .structured
+            .as_ref()
+            .and_then(|structured| structured.get("snapshot_id"))
+            .and_then(|snapshot| snapshot.as_str())
+            .unwrap_or("unknown");
+        Ok(InteractAttempt {
+            target,
+            snapshot_id: snapshot.to_string(),
+        })
+    }
+
+    /// Execute one resolved element action by token.
+    async fn drive_interact(
+        &self,
+        pid: i64,
+        window_id: i64,
+        attempt: &InteractAttempt,
+        action: &str,
+        payload: &InteractPayload,
+    ) -> Result<String, String> {
+        let token = &attempt.target.token;
+        let base = serde_json::json!({
+            "pid": pid,
+            "window_id": window_id,
+            "element_token": token,
+            "snapshot_id": attempt.snapshot_id,
+        });
+        let (tool, args) = match action {
+            "click" => ("click", base),
+            "double_click" => ("double_click", base),
+            "type" => {
+                let mut args = base;
+                args["text"] = serde_json::json!(payload.text.as_deref().unwrap_or(""));
+                ("type_text", args)
+            }
+            "press" => {
+                let mut args = base;
+                args["key"] = serde_json::json!(payload.key.as_deref().unwrap_or(""));
+                args["modifiers"] = serde_json::json!(payload.modifiers);
+                ("press_key", args)
+            }
+            "scroll" => {
+                let mut args = base;
+                let (direction, amount) = payload.scroll_vector();
+                args["direction"] = serde_json::json!(direction);
+                args["amount"] = serde_json::json!(amount);
+                args["by"] = serde_json::json!("line");
+                ("scroll", args)
+            }
+            _ => return Err(format!("Unsupported interact action: {action}")),
+        };
+        let result = driver_call(tool, args).await?;
+        Ok(format!(
+            "{} {} in window {window_id}. {}",
+            action_verb(action),
+            attempt.target.describe(),
+            result.joined_text()
+        ))
     }
 
     async fn act(&self, args: &str, work_dir: Option<&Path>) -> Result<String, String> {
@@ -1336,10 +1837,98 @@ mod tests {
                 COMPUTER_WINDOWS_TOOL,
                 COMPUTER_SCREENSHOT_TOOL,
                 COMPUTER_AX_TOOL,
+                COMPUTER_INTERACT_TOOL,
                 COMPUTER_ACT_TOOL,
                 CUA_CALL_TOOL,
             ]
         );
+    }
+
+    fn element(index: i64, role: &str, label: &str) -> serde_json::Value {
+        serde_json::json!({
+            "element_index": index,
+            "role": role,
+            "label": label,
+            "value": "",
+            "element_token": format!("s00000001:{index}"),
+        })
+    }
+
+    #[test]
+    fn interact_match_prefers_exact_over_substring() {
+        let elements = vec![
+            element(0, "AXWindow", "YouTube"),
+            element(1, "AXButton", "Send Feedback"),
+            element(2, "AXButton", "Send"),
+        ];
+        // Exact label wins even though it sorts last.
+        let target = match_element_by_query(&elements, "send").unwrap();
+        assert_eq!(target.token, "s00000001:2");
+        assert_eq!(target.role, "AXButton");
+        // Case-insensitive substring on the label.
+        let target = match_element_by_query(&elements, "FEEDBACK").unwrap();
+        assert_eq!(target.token, "s00000001:1");
+        // Tokenless rows are never actionable.
+        let untokened = vec![serde_json::json!({
+            "element_index": 9, "role": "AXButton", "label": "Send",
+        })];
+        assert!(match_element_by_query(&untokened, "send").is_err());
+    }
+
+    #[test]
+    fn interact_match_rejects_ambiguity_and_emptiness() {
+        let elements = vec![
+            element(1, "AXButton", "Copy link"),
+            element(2, "AXButton", "Copy address"),
+        ];
+        let error = match_element_by_query(&elements, "copy").unwrap_err();
+        assert!(error.contains("2 elements"), "unexpected: {error}");
+        // No canvas text: steer to pixels, not a blind guess.
+        let error = match_element_by_query(&elements, "play video").unwrap_err();
+        assert!(error.contains("computer_act"), "unexpected: {error}");
+        assert!(match_element_by_query(&elements, "   ").is_err());
+    }
+
+    #[test]
+    fn interact_match_by_index_needs_a_live_token() {
+        let elements = vec![element(4, "AXTextField", "Search")];
+        assert_eq!(
+            match_element_by_index(&elements, 4).unwrap().token,
+            "s00000001:4"
+        );
+        assert!(match_element_by_index(&elements, 5).is_none());
+    }
+
+    #[test]
+    fn stale_snapshot_errors_match_loosely() {
+        assert!(is_stale_snapshot_error(
+            "element_token is stale: snapshot s00000001 was superseded"
+        ));
+        assert!(is_stale_snapshot_error("STALE snapshot id"));
+        assert!(!is_stale_snapshot_error("window_id_not_found"));
+        assert!(!is_stale_snapshot_error("Clicked (1, 2). ok"));
+    }
+
+    #[test]
+    fn interact_payload_validates_per_action() {
+        let args = serde_json::json!({"text": "hello"});
+        assert_eq!(
+            interact_payload("type", &args).unwrap().text.as_deref(),
+            Some("hello")
+        );
+        assert!(interact_payload("type", &serde_json::json!({"text": ""})).is_err());
+        let press = interact_payload(
+            "press",
+            &serde_json::json!({"key": "L", "modifiers": ["cmd"]}),
+        )
+        .unwrap();
+        assert_eq!(press.key.as_deref(), Some("l"));
+        assert_eq!(press.modifiers, ["cmd"]);
+        assert!(interact_payload("press", &serde_json::json!({"key": "F13"})).is_err());
+        let scroll = interact_payload("scroll", &serde_json::json!({"dy": 120})).unwrap();
+        assert_eq!(scroll.scroll_vector(), ("down", 3));
+        assert!(interact_payload("scroll", &serde_json::json!({})).is_err());
+        assert!(interact_payload("move", &serde_json::json!({})).is_err());
     }
 
     #[test]

@@ -14,8 +14,9 @@ mod mirror;
 
 pub use computer::{
     global_previews_dir, parse_act_target, parse_computer_act, resolve_previews_dir, ComputerAct,
-    ComputerToolExecutor, COMPUTER_ACT_TOOL, COMPUTER_AX_TOOL, COMPUTER_SCREENSHOT_TOOL,
-    COMPUTER_STATUS_TOOL, COMPUTER_WINDOWS_TOOL, CUA_CALL_TOOL, MAX_IMAGE_BYTES,
+    ComputerToolExecutor, COMPUTER_ACT_TOOL, COMPUTER_AX_TOOL, COMPUTER_INTERACT_TOOL,
+    COMPUTER_SCREENSHOT_TOOL, COMPUTER_STATUS_TOOL, COMPUTER_WINDOWS_TOOL, CUA_CALL_TOOL,
+    MAX_IMAGE_BYTES,
 };
 pub use driver::{driver_available, driver_binary, driver_call, driver_version, DRIVER_MISSING_HINT};
 

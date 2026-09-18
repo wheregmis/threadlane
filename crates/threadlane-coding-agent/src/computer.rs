@@ -32,8 +32,8 @@ impl threadlane_runtime::Capability for ComputerCapability {
 #[cfg(test)]
 mod tests {
     use threadlane_computer::computer::{
-        COMPUTER_ACT_TOOL, COMPUTER_AX_TOOL, COMPUTER_SCREENSHOT_TOOL, COMPUTER_STATUS_TOOL,
-        COMPUTER_WINDOWS_TOOL, CUA_CALL_TOOL,
+        COMPUTER_ACT_TOOL, COMPUTER_AX_TOOL, COMPUTER_INTERACT_TOOL, COMPUTER_SCREENSHOT_TOOL,
+        COMPUTER_STATUS_TOOL, COMPUTER_WINDOWS_TOOL, CUA_CALL_TOOL,
     };
 
     #[test]
@@ -65,6 +65,7 @@ mod tests {
             COMPUTER_WINDOWS_TOOL,
             COMPUTER_SCREENSHOT_TOOL,
             COMPUTER_AX_TOOL,
+            COMPUTER_INTERACT_TOOL,
             COMPUTER_ACT_TOOL,
             CUA_CALL_TOOL,
         ] {

@@ -362,6 +362,7 @@ const CORE_TOOL_NAMES: &[&str] = &[
     "computer_windows",
     "computer_screenshot",
     "computer_ax",
+    "computer_interact",
     "computer_act",
     "cua_call",
 ];
