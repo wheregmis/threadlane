@@ -120,7 +120,9 @@ impl SubagentHub {
         model: String,
     ) {
         {
-            let mut inner = self.inner.lock().unwrap();
+            // Poison-tolerant: a panicked holder must not cascade-panic
+            // every later register/send on the shared hub.
+            let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
             let is_new = !inner.lanes.contains_key(&lane_name);
             inner.killed.remove(&lane_name);
             inner.killed.remove(&agent);

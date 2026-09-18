@@ -273,7 +273,7 @@ impl CodingAgent {
                 // workspace-mutating edit/write behind an open gate switches
                 // one-shot to the fast model. No explicit handoff tool.
                 let handoff = {
-                    let mut guard = prewalk.lock().unwrap();
+                    let mut guard = prewalk.lock().unwrap_or_else(|error| error.into_inner());
                     match guard.as_mut() {
                         None => None,
                         Some(state)
@@ -434,20 +434,20 @@ impl CodingAgent {
                     };
                     let parent_leaf =
                         self.prompt_parent_leaf(AgentMessage::user(prompt, Vec::new()), true);
-                    *self.dispatch_parent_leaf.lock().unwrap() = parent_leaf;
+                    *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = parent_leaf;
                     let result = match (self.agent_runner)(vec![task], false, None).await {
                         Ok(result) => result,
                         Err(err) => {
-                            *self.dispatch_parent_leaf.lock().unwrap() = None;
+                            *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = None;
                             return Err(format!("Subagent Error: {err}"));
                         }
                     };
                     let output = result["output"].as_str().unwrap_or_default().to_string();
                     if let Err(error) = self.commit_completed_subagent_lanes() {
-                        *self.dispatch_parent_leaf.lock().unwrap() = None;
+                        *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = None;
                         return Err(format!("Subagent Sync Error: {error}"));
                     }
-                    *self.dispatch_parent_leaf.lock().unwrap() = None;
+                    *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = None;
 
                     if let Some(harness) = self.harness.as_mut() {
                         let _ = harness.append_message_to_lane(

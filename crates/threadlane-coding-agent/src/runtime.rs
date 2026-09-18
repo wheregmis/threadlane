@@ -787,7 +787,20 @@ impl CodingAgent {
         });
 
         {
-            let mut turn = agent.turn.try_lock().expect("Failed to lock initial state");
+            // Spin briefly on transient contention instead of panicking:
+            // construction-time locking only races a concurrent holder for
+            // an instant. Poison still panics (state is unrecoverable).
+            let mut turn_guard = None;
+            for _ in 0..100 {
+                match agent.turn.try_lock() {
+                    Ok(guard) => {
+                        turn_guard = Some(guard);
+                        break;
+                    }
+                    Err(_) => std::thread::yield_now(),
+                }
+            }
+            let mut turn = turn_guard.expect("Failed to lock initial state");
             turn.system_prompt = base_system_prompt.clone();
             turn.messages.push(AgentMessage::System {
                 content: base_system_prompt.clone(),
@@ -1140,7 +1153,7 @@ impl CodingAgent {
                 *run_id = None;
             }
         }
-        *self.dispatch_parent_leaf.lock().unwrap() = None;
+        *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = None;
         let trimmed = input.trim();
 
         if self.prompt_templates.is_none() {
@@ -1185,7 +1198,7 @@ impl CodingAgent {
                             AgentMessage::user(input, images.clone()),
                             harness_run_id.is_some(),
                         );
-                        *self.dispatch_parent_leaf.lock().unwrap() = parent_leaf;
+                        *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = parent_leaf;
                         if let Some(accepted) = harness_run_id.as_ref() {
                             if let Err(error) = self.execute_accepted_run(accepted).await {
                                 self.harness_journal_error = Some(error);
@@ -1197,7 +1210,7 @@ impl CodingAgent {
                         self.sync_harness_and_dispatch_assistant_hooks().await;
                         self.run_scheduled_agent_work().await;
                         if let Err(error) = self.commit_completed_subagent_lanes() {
-                            *self.dispatch_parent_leaf.lock().unwrap() = None;
+                            *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = None;
                             let _ = self
                                 .finish_harness_run(
                                     harness_run_id.as_ref().map(|run| run.run_id.as_str()),
@@ -1207,7 +1220,7 @@ impl CodingAgent {
                                 .await;
                             return Some(Err(error));
                         }
-                        *self.dispatch_parent_leaf.lock().unwrap() = None;
+                        *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = None;
                         if let Err(error) = self
                             .finish_harness_run(
                                 harness_run_id.as_ref().map(|run| run.run_id.as_str()),
@@ -1269,11 +1282,11 @@ impl CodingAgent {
                     AgentMessage::user(input, images.clone()),
                     harness_run_id.is_some(),
                 );
-                *self.dispatch_parent_leaf.lock().unwrap() = parent_leaf;
+                *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = parent_leaf;
                 let result = match (self.agent_runner)(vec![task], false, None).await {
                     Ok(result) => result,
                     Err(err) => {
-                        *self.dispatch_parent_leaf.lock().unwrap() = None;
+                        *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = None;
                         let _ = self
                             .finish_harness_run(
                                 harness_run_id.as_ref().map(|run| run.run_id.as_str()),
@@ -1286,7 +1299,7 @@ impl CodingAgent {
                 };
                 let output = result["output"].as_str().unwrap_or_default().to_string();
                 if let Err(error) = self.commit_completed_subagent_lanes() {
-                    *self.dispatch_parent_leaf.lock().unwrap() = None;
+                    *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = None;
                     let _ = self
                         .finish_harness_run(
                             harness_run_id.as_ref().map(|run| run.run_id.as_str()),
@@ -1296,7 +1309,7 @@ impl CodingAgent {
                         .await;
                     return Some(Err(error));
                 }
-                *self.dispatch_parent_leaf.lock().unwrap() = None;
+                *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = None;
                 let assistant = AgentMessage::Assistant {
                     content: Some(output.clone()),
                     tool_calls: None,
@@ -1353,7 +1366,7 @@ impl CodingAgent {
                     AgentMessage::user(input, images.clone()),
                     harness_run_id.is_some(),
                 );
-                *self.dispatch_parent_leaf.lock().unwrap() = parent_leaf;
+                *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = parent_leaf;
                 return match res {
                     Ok(result) => {
                         let message = if result.message.is_empty() {
@@ -1446,7 +1459,7 @@ impl CodingAgent {
                             }
                         }
                         if let Err(error) = self.commit_completed_subagent_lanes() {
-                            *self.dispatch_parent_leaf.lock().unwrap() = None;
+                            *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = None;
                             let _ = self
                                 .finish_harness_run(
                                     harness_run_id.as_ref().map(|run| run.run_id.as_str()),
@@ -1456,7 +1469,7 @@ impl CodingAgent {
                                 .await;
                             return Some(Err(error));
                         }
-                        *self.dispatch_parent_leaf.lock().unwrap() = None;
+                        *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = None;
                         if let Some(agent_run_output) = agent_run_output {
                             let result = agent_run_output;
                             let outcome = if result.is_ok() {
@@ -1571,7 +1584,7 @@ impl CodingAgent {
                             self.agent.configured_tool_definitions().iter().any(|tool| {
                                 tool.name == threadlane_orchestrator::PREWALK_TODO_TOOL
                             });
-                        *self.prewalk.lock().unwrap() =
+                        *self.prewalk.lock().unwrap_or_else(|error| error.into_inner()) =
                             Some(threadlane_orchestrator::PrewalkState::new(
                                 fast_model.clone(),
                                 fast_reasoning,
@@ -1600,7 +1613,7 @@ impl CodingAgent {
         // --- One-shot Prewalk orchestrator (oh-my-pi parity): no classifier.
         // Only `Always` mode arms automatically; explicit `/prewalk` above
         // bypasses this. `Auto` is deprecated and inert.
-        if architect_directive.is_none() && self.prewalk.lock().unwrap().is_none() {
+        if architect_directive.is_none() && self.prewalk.lock().unwrap_or_else(|error| error.into_inner()).is_none() {
             let (active_model, active_effort) = {
                 let turn = self.agent.turn.lock().await;
                 (turn.model.clone(), Some(turn.reasoning_effort))
@@ -1648,7 +1661,7 @@ impl CodingAgent {
                         message: format!("Prewalk: target `{target_fast}` already matches the active model and reasoning; nothing to switch."),
                     });
                 } else {
-                    *self.prewalk.lock().unwrap() =
+                    *self.prewalk.lock().unwrap_or_else(|error| error.into_inner()) =
                         Some(threadlane_orchestrator::PrewalkState::new(
                             target_fast.clone(),
                             target_effort,
@@ -1704,7 +1717,7 @@ impl CodingAgent {
             }
         };
         let parent_leaf = self.prompt_parent_leaf(msg.clone(), harness_run_id.is_some());
-        *self.dispatch_parent_leaf.lock().unwrap() = parent_leaf;
+        *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = parent_leaf;
         if let (Some(run_id), Some(harness)) = (
             harness_run_id.as_ref().map(|run| run.run_id.as_str()),
             self.harness.as_mut(),
@@ -1727,7 +1740,7 @@ impl CodingAgent {
             self.sync_harness_and_dispatch_assistant_hooks().await;
         }
         if let Some(error) = self.harness_journal_error.clone() {
-            *self.dispatch_parent_leaf.lock().unwrap() = None;
+            *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = None;
             let _ = self
                 .finish_harness_run(
                     harness_run_id.as_ref().map(|run| run.run_id.as_str()),
@@ -1739,7 +1752,7 @@ impl CodingAgent {
         }
         self.run_scheduled_agent_work().await;
         if let Some(error) = self.harness_journal_error.clone() {
-            *self.dispatch_parent_leaf.lock().unwrap() = None;
+            *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = None;
             let _ = self
                 .finish_harness_run(
                     harness_run_id.as_ref().map(|run| run.run_id.as_str()),
@@ -1750,7 +1763,7 @@ impl CodingAgent {
             return Some(Err(format!("Harness Error: {error}")));
         }
         if let Err(error) = self.commit_completed_subagent_lanes() {
-            *self.dispatch_parent_leaf.lock().unwrap() = None;
+            *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = None;
             let _ = self
                 .finish_harness_run(
                     harness_run_id.as_ref().map(|run| run.run_id.as_str()),
@@ -1763,7 +1776,7 @@ impl CodingAgent {
             });
             return Some(Err(error));
         }
-        *self.dispatch_parent_leaf.lock().unwrap() = None;
+        *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = None;
         // Bounded continuation safety net (oh-my-pi `prewalk-continue.md`
         // parity): if prewalk is still armed after the turn and the last
         // assistant message made no tool calls, the plan nudge's prose reply
@@ -1803,7 +1816,7 @@ impl CodingAgent {
                 // Only remind when the turn truly ended text-only with no
                 // handoff. If tools ran (todo opened, edits attempted), the
                 // normal gate/handoff path already applies.
-                if text_only && self.prewalk.lock().unwrap().is_some() {
+                if text_only && self.prewalk.lock().unwrap_or_else(|error| error.into_inner()).is_some() {
                     let _ = self.agent.event_tx.send(AgentEvent::PrewalkCompleted {
                         model: self.agent.model(),
                         message: format!(

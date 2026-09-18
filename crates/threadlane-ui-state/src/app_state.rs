@@ -167,7 +167,11 @@ impl AppState {
                 if is_attachable_project_root(&curr) {
                     let project = AttachedProject::from_path(curr);
                     registry_projects.push(project.clone());
-                    let _ = threadlane_project::save_project_registry(&registry_projects);
+                    if let Err(error) =
+                        threadlane_project::save_project_registry(&registry_projects)
+                    {
+                        tracing::warn!("failed to persist project registry: {error}");
+                    }
                 }
             }
         }
@@ -413,9 +417,14 @@ impl AppState {
             self.openai_key = key;
             self.auth_status_msg = Some("OpenAI API key saved successfully!".into());
         } else {
-            let _ = threadlane_auth::openai_auth::remove_credentials();
+            if let Err(error) = threadlane_auth::openai_auth::remove_credentials() {
+                tracing::warn!("failed to remove OpenAI credentials: {error}");
+                self.auth_status_msg =
+                    Some(format!("OpenAI API key removal may be incomplete: {error}"));
+            } else {
+                self.auth_status_msg = Some("OpenAI API key removed.".into());
+            }
             self.openai_key.clear();
-            self.auth_status_msg = Some("OpenAI API key removed.".into());
         }
         self.invalidate_idle_runtimes();
         self.reconcile_selected_model();
@@ -429,9 +438,14 @@ impl AppState {
             self.opencode_key = key;
             self.auth_status_msg = Some("Opencode API key saved successfully!".into());
         } else {
-            let _ = threadlane_auth::opencode_auth::clear_opencode_api_key();
+            if let Err(error) = threadlane_auth::opencode_auth::clear_opencode_api_key() {
+                tracing::warn!("failed to remove Opencode API key: {error}");
+                self.auth_status_msg =
+                    Some(format!("Opencode API key removal may be incomplete: {error}"));
+            } else {
+                self.auth_status_msg = Some("Opencode API key removed.".into());
+            }
             self.opencode_key.clear();
-            self.auth_status_msg = Some("Opencode API key removed.".into());
         }
         self.invalidate_idle_runtimes();
         self.reconcile_selected_model();
@@ -837,30 +851,40 @@ impl AppState {
                 let worktree_threadlane = worktree_dir.join(".threadlane");
                 if worktree_threadlane.exists() {
                     if let Err(error) = std::fs::remove_dir_all(&worktree_threadlane) {
-                        let _ = Self::remove_file_if_present(&archive_file);
+                        if let Err(error) = Self::remove_file_if_present(&archive_file) {
+                            tracing::warn!("session teardown rollback failed: {error}");
+                        }
                         return Err(error.to_string());
                     }
                 }
                 if let Err(error) = threadlane_git::remove_worktree(&work_dir, &worktree_dir, false)
                 {
-                    let _ = Self::remove_file_if_present(&archive_file);
+                    if let Err(cleanup_error) = Self::remove_file_if_present(&archive_file) {
+                        tracing::warn!("session teardown rollback failed: {cleanup_error}");
+                    }
                     return Err(error.to_string());
                 }
                 let stub = canonical_session_file(&work_dir, &session_id);
                 Self::remove_file_if_present(&stub)?;
-                let _ = threadlane_git::prune_worktrees(&work_dir);
+                if let Err(error) = threadlane_git::prune_worktrees(&work_dir) {
+                    tracing::warn!("worktree prune failed: {error}");
+                }
             } else {
                 if session_file.exists() {
                     if std::fs::rename(&session_file, &archive_file).is_err() {
                         std::fs::copy(&session_file, &archive_file)
                             .map_err(|error| error.to_string())?;
-                        let _ = Self::remove_file_if_present(&session_file);
+                        if let Err(error) = Self::remove_file_if_present(&session_file) {
+                            tracing::warn!("session teardown rollback failed: {error}");
+                        }
                     }
                 }
                 let stub = canonical_session_file(&work_dir, &session_id);
                 Self::remove_file_if_present(&stub)?;
                 if delete_worktree {
-                    let _ = threadlane_git::prune_worktrees(&work_dir);
+                    if let Err(error) = threadlane_git::prune_worktrees(&work_dir) {
+                    tracing::warn!("worktree prune failed: {error}");
+                }
                 }
             }
         } else {
@@ -914,12 +938,16 @@ impl AppState {
                 }
                 threadlane_git::remove_worktree(&work_dir, &worktree_dir, true)
                     .map_err(|error| error.to_string())?;
-                let _ = threadlane_git::prune_worktrees(&work_dir);
+                if let Err(error) = threadlane_git::prune_worktrees(&work_dir) {
+                    tracing::warn!("worktree prune failed: {error}");
+                }
             }
             Self::remove_file_if_present(&canonical_session_file(&work_dir, &session_id))?;
             Self::remove_file_if_present(&session_file)?;
             if delete_worktree {
-                let _ = threadlane_git::prune_worktrees(&work_dir);
+                if let Err(error) = threadlane_git::prune_worktrees(&work_dir) {
+                    tracing::warn!("worktree prune failed: {error}");
+                }
             }
         } else {
             std::fs::remove_file(session_file).map_err(|error| error.to_string())?;
@@ -1289,7 +1317,9 @@ impl AppState {
         self.pr_review_tracking
             .insert(work_dir.clone(), candidate_store);
         if let Some(store) = self.pr_review_tracking.get(&work_dir) {
-            let _ = threadlane_git::save_pr_review_tracking(&work_dir, store);
+            if let Err(error) = threadlane_git::save_pr_review_tracking(&work_dir, store) {
+                tracing::warn!("failed to persist PR review tracking: {error}");
+            }
         }
         self.push_optimistic_follow_up(&session_id, prompt.clone(), "pr-review");
         Some(prompt)
@@ -1344,7 +1374,9 @@ impl AppState {
             .entry(work_dir.clone())
             .or_insert_with(|| threadlane_git::load_pr_review_tracking(&work_dir));
         threadlane_git::mark_feedback_seen(store, &branch, &feedback_items);
-        let _ = threadlane_git::save_pr_review_tracking(&work_dir, store);
+        if let Err(error) = threadlane_git::save_pr_review_tracking(&work_dir, store) {
+            tracing::warn!("failed to persist PR review tracking: {error}");
+        }
         Ok(prompt)
     }
 
