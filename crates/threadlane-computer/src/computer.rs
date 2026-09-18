@@ -197,7 +197,7 @@ fn computer_tool_definitions() -> Arc<[AgentToolDefinition]> {
         ),
         AgentToolDefinition::new(
             CUA_CALL_TOOL,
-            "Full CUA driver catalog passthrough: call any driver tool not covered above (element clicks via element_token, drag, hotkey, set_value, invoke_menu, clipboard_read/write, launch_app, bring_to_front, set_window_frame, verify_state, zoom, browser_* page tools, recording, sessions). Read-only discovery skips approval; everything else prompts first and denied actions must not be retried verbatim. Get element_token/snapshot_id from computer_ax; get pid/window_id from computer_windows.",
+            "Full CUA driver catalog passthrough: call any driver tool not covered above (element clicks via element_token, drag, hotkey, set_value, invoke_menu, clipboard_read/write, launch_app, bring_to_front, set_window_frame, verify_state, zoom, browser_* page tools, recording, sessions). For Chrome/Edge pages prefer the typed browser route: bind with the pid/window_id from computer_windows (computer_status names the live route), then browser_navigate, browser state reads, and browser_click/browser_type by DOM ref — no screenshots needed; verify with state reads, never transport success alone. Safari has no typed engine: use native AX/pixel tools there. Read-only discovery skips approval; everything else prompts first and denied actions must not be retried verbatim. Get element_token/snapshot_id from computer_ax; get pid/window_id from computer_windows.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -564,9 +564,72 @@ async fn computer_status() -> String {
             )
         })
         .unwrap_or_else(|| "Permission status unavailable.".to_string());
+    // Read-only: surfaces the auto-recording tied to the mirror feed.
+    let recording_line = driver_call("get_recording_state", serde_json::json!({}))
+        .await
+        .ok()
+        .and_then(|result| result.structured)
+        .map(|structured| {
+            let enabled = structured
+                .get("enabled")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            if enabled {
+                let dir = structured
+                    .get("output_dir")
+                    .or_else(|| structured.get("output_directory"))
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("unknown directory");
+                format!("Trajectory recording is on ({dir}).")
+            } else {
+                "Trajectory recording starts automatically with computer use.".to_string()
+            }
+        })
+        .unwrap_or_else(|| "Trajectory recording state unavailable.".to_string());
+    let browser_hint = browser_route_hint().await;
     format!(
-        "Computer use is available through the CUA driver ({version}): computer_windows lists top-level windows, computer_ax snapshots one window's accessibility tree plus screenshot, computer_screenshot captures the display or one window, computer_act clicks/types/presses keys background-first, cua_call reaches the rest of the driver catalog. {permission_line} Every screenshot and input action asks for approval first; if a macOS permission is missing, grant it in System Settings → Privacy & Security, then retry."
+        "Computer use is available through the CUA driver ({version}): computer_windows lists top-level windows, computer_ax snapshots one window's accessibility tree plus screenshot, computer_interact acts on one element by text in a single approval, computer_screenshot captures the display or one window, computer_act clicks/types/presses keys background-first, cua_call reaches the rest of the driver catalog. {permission_line} {recording_line} {browser_hint} Every screenshot and input action asks for approval first (allow once, for the session, or always for the project); if a macOS permission is missing, grant it in System Settings → Privacy & Security, then retry."
     )
+}
+
+/// Browsers with a driver-typed DOM route (proven: Chrome, Edge, Chromium).
+/// Safari has no CDP engine in the driver and goes through native AX/pixel.
+fn is_typed_browser_app(app: &str) -> bool {
+    let app = app.to_lowercase();
+    app.contains("chrome") || app.contains("chromium") || app == "microsoft edge"
+}
+
+/// One-line typed-browser route for `computer_status`: the first live
+/// Chrome/Edge window, so the model knows DOM-ref tools are available
+/// without another discovery round trip.
+async fn browser_route_hint() -> String {
+    let Ok(result) = driver_call("list_windows", serde_json::json!({})).await else {
+        return "Browser route unknown (window list failed).".to_string();
+    };
+    let found = result
+        .structured
+        .as_ref()
+        .and_then(|structured| structured.get("windows"))
+        .and_then(|windows| windows.as_array())
+        .and_then(|windows| {
+            windows.iter().find_map(|window| {
+                let app = window.get("app_name")?.as_str()?;
+                if !is_typed_browser_app(app) {
+                    return None;
+                }
+                Some((
+                    app.to_string(),
+                    window.get("pid")?.as_i64()?,
+                    window.get("window_id")?.as_i64()?,
+                ))
+            })
+        });
+    match found {
+        Some((app, pid, window_id)) => format!(
+            "Typed browser route available: {app} (pid {pid}, window {window_id}) — drive its pages with cua_call browser_* tools bound to that pid/window_id (DOM refs beat pixels and screenshots)."
+        ),
+        None => "No Chrome/Edge window open (their pages get typed DOM tools via cua_call); Safari and other apps go through native AX/pixel tools.".to_string(),
+    }
 }
 
 /// One live `list_windows` row: (window_id, pid, app, title).
@@ -1929,6 +1992,16 @@ mod tests {
         assert_eq!(scroll.scroll_vector(), ("down", 3));
         assert!(interact_payload("scroll", &serde_json::json!({})).is_err());
         assert!(interact_payload("move", &serde_json::json!({})).is_err());
+    }
+
+    #[test]
+    fn typed_browser_route_covers_chromium_family_only() {
+        assert!(is_typed_browser_app("Google Chrome"));
+        assert!(is_typed_browser_app("Chromium"));
+        assert!(is_typed_browser_app("Microsoft Edge"));
+        assert!(!is_typed_browser_app("Safari"));
+        assert!(!is_typed_browser_app("Finder"));
+        assert!(!is_typed_browser_app(""));
     }
 
     #[test]

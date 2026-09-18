@@ -135,6 +135,43 @@ fn should_exit(watchers: usize, since_activity_ms: u128) -> bool {
 }
 
 async fn feed_loop() {
+    // Trajectory recording rides the feed lifetime: one directory per burst
+    // of computer use, stopped when the feed idles out. Best-effort — a
+    // failed start/stop must never break captures.
+    let recording = start_trajectory_recording().await;
+    feed_poll_loop().await;
+    if recording {
+        let _ = driver_call("stop_recording", serde_json::json!({})).await;
+    }
+}
+
+/// Output directory for one recording burst. Under the global previews dir
+/// (like the mirror sidecar) so bursts from any project land together.
+fn recording_output_dir() -> Option<PathBuf> {
+    let base = crate::computer::global_previews_dir()?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    Some(base.join("recordings").join(format!("computer-{stamp}")))
+}
+
+async fn start_trajectory_recording() -> bool {
+    let Some(dir) = recording_output_dir() else {
+        return false;
+    };
+    if std::fs::create_dir_all(&dir).is_err() {
+        return false;
+    }
+    driver_call(
+        "start_recording",
+        serde_json::json!({"output_dir": dir.to_string_lossy()}),
+    )
+    .await
+    .is_ok()
+}
+
+async fn feed_poll_loop() {
     loop {
         tokio::time::sleep(Duration::from_millis(FEED_INTERVAL_MS)).await;
         let (target, watchers) = {
@@ -460,5 +497,17 @@ mod tests {
             FeedTarget::Window { window_id: 7 }.label(),
             "window 7"
         );
+    }
+
+    #[test]
+    fn recording_dirs_are_namespaced_per_burst() {
+        let dir = recording_output_dir().expect("home dir present");
+        assert!(dir
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with("computer-")));
+        assert!(dir
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .is_some_and(|name| name == "recordings"));
     }
 }
