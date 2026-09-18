@@ -1,10 +1,8 @@
 use super::events::{EventPayload, HarnessEventHub};
 use super::store::SessionStore;
-use super::telemetry::{ExecutionContext, NoopTelemetry, TelemetrySink};
 use super::types::Entry;
 use super::types::{Record, ReduceError};
 use std::collections::VecDeque;
-use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum EffectAction {
@@ -31,13 +29,6 @@ impl EffectAction {
         match self {
             Self::AppendEntry { entry } => entry.seq,
             Self::AppendRecord { record, .. } => record.seq(),
-        }
-    }
-
-    fn run_id(&self) -> Option<&str> {
-        match self {
-            Self::AppendEntry { .. } => None,
-            Self::AppendRecord { record, .. } => record.run_id(),
         }
     }
 
@@ -83,7 +74,6 @@ pub struct GatedEffects {
     closed: bool,
     fault: Option<ReduceError>,
     executor: Option<EffectExecutor>,
-    telemetry: Arc<dyn TelemetrySink>,
 }
 
 type EffectExecutor = Box<dyn FnMut(EffectAction) -> Result<(), ReduceError> + Send + Sync>;
@@ -109,7 +99,6 @@ impl Default for GatedEffects {
             closed: false,
             fault: None,
             executor: None,
-            telemetry: Arc::new(NoopTelemetry),
         }
     }
 }
@@ -125,40 +114,10 @@ impl GatedEffects {
     pub(crate) fn with_executor(
         executor: impl FnMut(EffectAction) -> Result<(), ReduceError> + Send + Sync + 'static,
     ) -> Self {
-        Self::with_executor_and_telemetry(executor, Arc::new(NoopTelemetry))
-    }
-
-    pub(crate) fn with_executor_and_telemetry(
-        executor: impl FnMut(EffectAction) -> Result<(), ReduceError> + Send + Sync + 'static,
-        telemetry: Arc<dyn TelemetrySink>,
-    ) -> Self {
         Self {
             executor: Some(Box::new(executor)),
-            telemetry,
             ..Self::default()
         }
-    }
-
-    pub(crate) fn with_telemetry(telemetry: Arc<dyn TelemetrySink>) -> Self {
-        Self {
-            telemetry,
-            ..Self::default()
-        }
-    }
-
-    fn notify_committed(&self, action: &EffectAction) {
-        let mut context = ExecutionContext::default();
-        context.lane = Some(action.lane().to_owned());
-        context.run_id = action.run_id().map(str::to_owned);
-        context.set_attribute(
-            "effect",
-            match action {
-                EffectAction::AppendEntry { .. } => "append_entry",
-                EffectAction::AppendRecord { .. } => "append_record",
-            },
-        );
-        context.set_attribute("effect_id", action.id().to_owned());
-        self.telemetry.event("effect_committed", &context);
     }
 
     pub(crate) fn park(&mut self, action: EffectAction) -> Result<(), EffectsError> {
@@ -169,16 +128,12 @@ impl GatedEffects {
             return Err(EffectsError::Closed);
         }
         if let Some(executor) = self.executor.as_mut() {
-            let committed_action = action.clone();
             let seq = action.seq();
             if let Err(error) = executor(action) {
                 self.fault = Some(error.clone());
                 return Err(EffectsError::Faulted(error));
             }
             self.max_committed_seq = self.max_committed_seq.max(seq);
-            // The executor has committed the action before observers are told.
-            // Keep telemetry aligned with the durable boundary.
-            self.notify_committed(&committed_action);
         } else {
             self.pending.push_back(action);
         }
@@ -209,7 +164,7 @@ impl GatedEffects {
     /// must consult both the store and this iterator, otherwise two parked
     /// procedures compute the same attempt/id and the second fails at commit
     /// with `DuplicateId` after reporting `Ok`.
-    pub(crate) fn pending_records(&self) -> impl Iterator<Item = &Record> + '_ {
+    fn pending_records(&self) -> impl Iterator<Item = &Record> + '_ {
         self.pending.iter().filter_map(|action| match action {
             EffectAction::AppendRecord { record, .. } => Some(record),
             EffectAction::AppendEntry { .. } => None,
@@ -287,7 +242,6 @@ impl GatedEffects {
             .pending
             .remove(index)
             .expect("action index was present");
-        self.notify_committed(&action);
         Ok(action)
     }
 
@@ -344,7 +298,6 @@ impl GatedEffects {
         self.pending.clear();
         for action in &actions {
             self.max_committed_seq = self.max_committed_seq.max(action.seq());
-            self.notify_committed(action);
         }
         Ok(actions)
     }
@@ -461,7 +414,7 @@ fn publish_committed(hub: &HarnessEventHub, action: &EffectAction) {
 mod tests {
     use super::*;
     use crate::harness::MemoryStore;
-    use crate::types::AgentMessage;
+    use threadlane_protocol::AgentMessage;
 
     fn message(text: &str) -> AgentMessage {
         AgentMessage::user(text, Vec::new())

@@ -5,9 +5,11 @@ edition = "2021"
 description = "Picker-facing model catalog for Threadlane: provider inventory, live discovery caches, and effort metadata"
 
 [dependencies]
+threadlane-acp.workspace = true
+threadlane-acp-engine.workspace = true
 threadlane-auth.workspace = true
+threadlane-coding-agent.workspace = true
 threadlane-project.workspace = true
+threadlane-protocol.workspace = true
 threadlane-provider.workspace = true
-threadlane-runtime.workspace = true
-threadlane-session.workspace = true
 tracing.workspace = true

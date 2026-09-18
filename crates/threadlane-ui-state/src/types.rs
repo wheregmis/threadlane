@@ -2,10 +2,11 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
-use threadlane_session::{AcpConfigOption, AgentEvent, ImageAttachment, SessionPlan, TokenUsage};
+use threadlane_protocol::{AgentEvent, ImageAttachment, SessionPlan, TokenUsage};
+use threadlane_acp::AcpConfigOption;
 
 use crate::AppState;
-use threadlane_session::{SessionRuntime, SessionRuntimeStatus};
+use threadlane_coding_agent::controller::{SessionRuntime, SessionRuntimeStatus};
 
 pub type AttachedProject = threadlane_project::ProjectRecord;
 
@@ -93,6 +94,21 @@ pub struct SessionInfo {
     pub github_issue: Option<threadlane_git::GitHubIssueRef>,
     pub is_worktree: bool,
     pub worktree_available: bool,
+}
+
+/// Hash of the session-identity fields every session list renders (id, title,
+/// health, worktree flags, branch). Shared by the sidebar and GitHub views so
+/// the two fingerprints cannot drift on identity; each view hashes its own
+/// extras (attention, issue URL, PR state, project scope) on top. Fingerprints
+/// are in-memory only, so field order here carries no stability contract.
+pub fn hash_session_identity(hasher: &mut impl std::hash::Hasher, session: &SessionInfo) {
+    use std::hash::Hash;
+    session.id.hash(hasher);
+    session.title.hash(hasher);
+    session.health.hash(hasher);
+    session.worktree_available.hash(hasher);
+    session.is_worktree.hash(hasher);
+    session.git_branch.hash(hasher);
 }
 
 #[derive(Clone, Debug)]
@@ -247,7 +263,7 @@ pub struct SubagentActivityInfo {
     pub model: Option<String>,
     pub status: SubagentActivityStatus,
     pub messages: Vec<ChatMessageInfo>,
-    pub isolation: Option<threadlane_runtime::SubagentIsolation>,
+    pub isolation: Option<threadlane_protocol::SubagentIsolation>,
     pub error: Option<String>,
 }
 
@@ -317,7 +333,7 @@ pub struct SessionHydrationRequest {
     pub runtime_options: Option<(
         PathBuf,
         String,
-        threadlane_session::ModelRoles,
+        threadlane_runtime::ModelRoles,
         threadlane_protocol::browser::BrowserBridge,
     )>,
 }
@@ -327,7 +343,7 @@ pub struct SessionProjectionResult {
     pub plan: SessionPlan,
     pub trajectory: Vec<TrajectoryEntry>,
     pub subagents: Vec<SubagentActivityInfo>,
-    pub diagnostics: threadlane_session::harness::SessionDiagnostics,
+    pub diagnostics: threadlane_runtime::harness::SessionDiagnostics,
     pub metrics: SessionMetricsInfo,
     pub token_usage: TokenUsage,
     pub context_window: Option<ContextWindowInfo>,

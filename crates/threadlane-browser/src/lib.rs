@@ -2,15 +2,14 @@
 //!
 //! Turns tool calls into [`threadlane_protocol::browser`] bridge round-trips.
 //! Depends only on `threadlane-protocol` tool contracts plus the protocol
-//! browser contract — never on the runtime engine. Re-exported through
-//! `threadlane_runtime::browser` and `threadlane_session::browser` for
-//! compatibility; new code should import `threadlane_browser` directly.
+//! browser contract — never on the runtime engine. Import `threadlane_browser`
+//! directly.
 
-pub use threadlane_protocol::browser::{
-    ActTarget, BrowserBridge, BrowserCommand, BrowserRequest, BROWSER_ACT_TOOL, BROWSER_BACK_TOOL,
+use threadlane_protocol::browser::{
+    ActTarget, BrowserBridge, BrowserCommand, BROWSER_ACT_TOOL, BROWSER_BACK_TOOL,
     BROWSER_CONSOLE_LOGS_TOOL, BROWSER_CURRENT_URL_TOOL, BROWSER_EVALUATE_TOOL,
     BROWSER_NAVIGATE_TOOL, BROWSER_RELOAD_TOOL, BROWSER_SCREENSHOT_TOOL, BROWSER_SNAPSHOT_TOOL,
-    BROWSER_UNAVAILABLE, BROWSER_WAIT_TOOL,
+    BROWSER_WAIT_TOOL,
 };
 
 use async_trait::async_trait;

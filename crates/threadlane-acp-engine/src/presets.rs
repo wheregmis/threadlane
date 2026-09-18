@@ -23,7 +23,7 @@ pub struct AcpPreset {
     pub id: &'static str,
     pub name: &'static str,
     pub description: &'static str,
-    pub command: &'static str,
+    pub(crate) command: &'static str,
     previous_commands: &'static [&'static str],
 }
 
@@ -32,12 +32,12 @@ impl AcpPreset {
         self.id == agent.id
     }
 
-    pub fn needs_command_upgrade(&self, agent: &AcpAgentConfig) -> bool {
+    pub(crate) fn needs_command_upgrade(&self, agent: &AcpAgentConfig) -> bool {
         self.previous_commands
             .contains(&agent.command_line().as_str())
     }
 
-    pub fn to_agent_config(&self, scope: AcpScope) -> AcpAgentConfig {
+    pub(crate) fn to_agent_config(&self, scope: AcpScope) -> AcpAgentConfig {
         AcpAgentConfig::from_command_line(self.name, self.command, scope)
             .expect("built-in ACP presets must have a name and command")
     }

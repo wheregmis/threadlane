@@ -57,7 +57,7 @@ flowchart TD
 
     subgraph Harness["Coding Agent & Harness V2 Core"]
         CSH["CodingSessionHarness"]
-        Supervisor["HarnessSupervisor (/task)"]
+        SessionController["SessionController (Interactive)"]
         AgentHarness["AgentHarness State Machine"]
 
         subgraph Reducer["Multi-Lane Reducer"]
@@ -72,7 +72,6 @@ flowchart TD
 
     subgraph Store["Durable Storage Layer"]
         JSONL["Canonical Session JSONL\n(Append-Only Entries & Records)"]
-        MemStore["MemoryStore / SQLite"]
         Snapshots["In-Memory Live Stream Projections"]
     end
 
@@ -96,7 +95,7 @@ flowchart TD
     %% UI Connections
     ChatView <--> CSH
     TrajectoryView <--> AgentHarness
-    Supervisor <--> AgentHarness
+    SessionController <--> AgentHarness
     CSH --> AgentHarness
 
     %% Harness Internal Connections
@@ -258,7 +257,6 @@ Type `/` in the composer to activate command completion:
 | `/fork` | Fork the conversation into a new independent branch. |
 | `/clone` | Clone the current session tree. |
 | `/skill` | Manually load and activate a discovered skill. |
-| `/task` | Launch an autonomous background supervisor task. |
 | `/quit` | Exit the application. |
 
 *Discovered skills and WASI extension commands are automatically indexed into slash completion.*
@@ -272,7 +270,7 @@ The Threadlane workspace is modularized into focused crates:
 | Crate | Path | Responsibility |
 | --- | --- | --- |
 | `threadlane-gpui` | [`crates/threadlane-gpui`](crates/threadlane-gpui) | Native GPUI desktop application, view hierarchy, PTY terminal, and UI event loops. |
-| `threadlane-session` | [`crates/threadlane-session`](crates/threadlane-session) | Coding agent orchestration, `CodingSessionHarness`, supervisor, subagents, and ACP engine. |
+| `threadlane-coding-agent` | [`crates/threadlane-coding-agent`](crates/threadlane-coding-agent) | Coding agent orchestration, `CodingSessionHarness`, `SessionController`, subagents, and ACP engine wiring. |
 | `threadlane-runtime` | [`crates/threadlane-runtime`](crates/threadlane-runtime) | Core agent loop, `AgentHarness` V2 state machine, multi-lane reducer, and session trees. |
 | `threadlane-provider` | [`crates/threadlane-provider`](crates/threadlane-provider) | Multi-provider routing (Antigravity, OpenAI/Codex, OpenCode) and streaming parsers. |
 | `threadlane-tools` | [`crates/threadlane-tools`](crates/threadlane-tools) | Workspace-contained file tools, ripgrep search, and sandboxed process execution. |

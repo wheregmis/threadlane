@@ -6,6 +6,7 @@
 //! to them; `threadlane-runtime` re-exports them for backward compatibility.
 
 use serde_json::Value;
+#[cfg(test)]
 use std::collections::HashSet;
 use threadlane_protocol::AgentMessage;
 
@@ -78,7 +79,7 @@ pub fn compaction_checkpoint_text(message: &AgentMessage) -> Option<String> {
     })
 }
 
-pub fn normalized_tool_call_id(id: &str, empty_index: usize) -> String {
+pub(crate) fn normalized_tool_call_id(id: &str, empty_index: usize) -> String {
     if id.is_empty() {
         format!("call_{empty_index}")
     } else {
@@ -93,7 +94,8 @@ pub fn normalized_tool_call_id(id: &str, empty_index: usize) -> String {
 /// `normalized_tool_call_id`, which it uses to match calls to results, and
 /// only touches the shared `AgentMessage` contract — never engine state.
 /// `threadlane-runtime` re-exports it for compatibility.
-pub fn repair_interrupted_tool_turn(messages: &mut Vec<AgentMessage>) -> bool {
+#[cfg(test)]
+pub(crate) fn repair_interrupted_tool_turn(messages: &mut Vec<AgentMessage>) -> bool {
     let mut index = 0;
     while index < messages.len() {
         let AgentMessage::Assistant {

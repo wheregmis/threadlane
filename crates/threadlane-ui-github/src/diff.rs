@@ -7,16 +7,6 @@ pub struct PrDiffRequest {
     pub revision: u64,
 }
 
-impl PrDiffRequest {
-    pub fn new(key: PrWorkspaceKey, path: String, revision: u64) -> Self {
-        Self {
-            key,
-            path,
-            revision,
-        }
-    }
-}
-
 pub fn pr_diff_result_matches_request(
     result: &PrDiffRequest,
     active: Option<&PrDiffRequest>,

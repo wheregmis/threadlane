@@ -24,13 +24,13 @@ pub struct CodingAgentOptions {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct HarnessCompositionSnapshot {
-    pub active_lane: String,
-    pub session_file: Option<String>,
-    pub model: String,
-    pub provider: String,
-    pub skills: Vec<String>,
-    pub extensions: Vec<String>,
-    pub sandbox_policy: String,
+    pub(crate) active_lane: String,
+    pub(crate) session_file: Option<String>,
+    pub(crate) model: String,
+    pub(crate) provider: String,
+    pub(crate) skills: Vec<String>,
+    pub(crate) extensions: Vec<String>,
+    pub(crate) sandbox_policy: String,
 }
 
 impl HarnessCompositionSnapshot {
@@ -58,7 +58,7 @@ impl HarnessCompositionSnapshot {
         }
     }
 
-    pub fn resolved(
+    pub(crate) fn resolved(
         options: &CodingAgentOptions,
         skills: &SkillRegistry,
         extensions: &WasiExtensionManager,

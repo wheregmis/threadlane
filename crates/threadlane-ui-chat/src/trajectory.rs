@@ -29,7 +29,7 @@ pub fn format_trajectory_raw_json(entry: &TrajectoryEntry) -> String {
 }
 
 #[cfg(test)]
-pub fn reconcile_trajectory_entries(
+pub(crate) fn reconcile_trajectory_entries(
     cached: Vec<TrajectoryEntry>,
     source: &[TrajectoryEntry],
 ) -> Vec<TrajectoryEntry> {

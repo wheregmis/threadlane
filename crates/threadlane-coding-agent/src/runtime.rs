@@ -10,7 +10,7 @@ use super::capabilities::{
     ContextCapability, GitHubCapability, McpCapability, PlanCapability, QuestionCapability,
     SkillCapability, SubagentCapability, WasiCapability, WorktreeCapability,
 };
-use super::harness::{CodingSessionHarness, HarnessWatch, InterruptedSubagentRecoveryState};
+use super::harness::{CodingSessionHarness, InterruptedSubagentRecoveryState};
 use crate::commands::{execute_slash_command, parse_slash_command, CommandAction};
 use crate::computer::ComputerCapability;
 use threadlane_prompt::ProjectContext;
@@ -25,61 +25,62 @@ use threadlane_mcp::McpManager;
 use threadlane_project::default_global_threadlane_dir;
 use threadlane_protocol::ProviderPort;
 use threadlane_provider::openai::fetch_available_models;
-use threadlane_runtime::harness::{OperationOutcome, Reducer, SessionStore, Snapshot};
+use threadlane_runtime::harness::{OperationOutcome, Reducer, SessionStore};
 use threadlane_runtime::ToolPolicy;
-use threadlane_runtime::{
-    AgentEvent, AgentMessage, AgentRuntime, ImageAttachment, ReasoningEffort, TokenUsage,
+use threadlane_protocol::{
+    AgentEvent, AgentMessage, ImageAttachment, ReasoningEffort, TokenUsage,
 };
+use threadlane_runtime::AgentRuntime;
 use threadlane_skills::{SkillManager, SkillRegistry};
 use threadlane_wasi::{WasiExtensionManager, WasiLegacyEffect};
 use tokio::sync::broadcast;
 
 pub struct CodingAgent {
     pub agent: AgentRuntime,
-    pub session_id: String,
-    pub session_file: Option<PathBuf>,
-    pub wasi_extensions: Arc<WasiExtensionManager>,
-    pub tool_policy: Arc<tokio::sync::Mutex<ToolPolicy>>,
-    pub work_dir: PathBuf,
-    pub agent_config: threadlane_runtime::AgentConfig,
-    pub skills: Arc<SkillRegistry>,
-    pub agent_runner: AgentRunner,
-    pub broker_dispatcher: Arc<CapabilityDispatcher>,
+    pub(crate) session_id: String,
+    pub(crate) session_file: Option<PathBuf>,
+    pub(crate) wasi_extensions: Arc<WasiExtensionManager>,
+    pub(crate) tool_policy: Arc<tokio::sync::Mutex<ToolPolicy>>,
+    pub(crate) work_dir: PathBuf,
+    pub(crate) agent_config: threadlane_runtime::AgentConfig,
+    pub(crate) skills: Arc<SkillRegistry>,
+    pub(crate) agent_runner: AgentRunner,
+    pub(crate) broker_dispatcher: Arc<CapabilityDispatcher>,
     managed_processes: ManagedProcessRegistry,
-    pub permission_handle: threadlane_permission::PermissionHandle,
-    pub question_handle: threadlane_question::QuestionHandle,
+    pub(crate) permission_handle: threadlane_permission::PermissionHandle,
+    pub(crate) question_handle: threadlane_question::QuestionHandle,
     agent_work: AgentWorkScheduler,
     mcp_manager: Arc<McpManager>,
-    pub prompt_templates: Option<Vec<threadlane_skills::prompts::PromptTemplate>>,
-    pub dispatch_parent_leaf: Arc<std::sync::Mutex<Option<String>>>,
-    pub completed_subagent_lanes: Arc<std::sync::Mutex<Vec<CompletedSubagentLane>>>,
-    pub harness: Option<CodingSessionHarness>,
-    pub harness_journal_error: Option<String>,
-    pub harness_run_id: Arc<std::sync::Mutex<Option<String>>>,
-    pub prewalk:
-        Arc<std::sync::Mutex<Option<threadlane_runtime::orchestrator::PrewalkState>>>,
+    pub(crate) prompt_templates: Option<Vec<threadlane_skills::prompts::PromptTemplate>>,
+    pub(crate) dispatch_parent_leaf: Arc<std::sync::Mutex<Option<String>>>,
+    pub(crate) completed_subagent_lanes: Arc<std::sync::Mutex<Vec<CompletedSubagentLane>>>,
+    pub(crate) harness: Option<CodingSessionHarness>,
+    pub(crate) harness_journal_error: Option<String>,
+    pub(crate) harness_run_id: Arc<std::sync::Mutex<Option<String>>>,
+    pub(crate) prewalk:
+        Arc<std::sync::Mutex<Option<threadlane_orchestrator::PrewalkState>>>,
     /// Live agent-to-agent mailbox shared by sibling `message_peer` and the
     /// parent `hub` tool (oh-my-pi hub/IRC parity).
-    pub hub: super::mailbox::SubagentHub,
+    pub(crate) hub: super::mailbox::SubagentHub,
     cancellation: CodingAgentCancellation,
-    pub interrupted_subagent_recovery: InterruptedSubagentRecoveryState,
+    pub(crate) interrupted_subagent_recovery: InterruptedSubagentRecoveryState,
     /// Connection to an external ACP agent, opened on first use.
     ///
     /// An ACP agent keeps its own conversation state, so this is held for the
     /// life of the session rather than rebuilt per turn.
     acp: threadlane_acp_engine::AcpEngine,
     #[cfg(test)]
-    pub subagent_work_observer: SubagentObserverState,
+    pub(crate) subagent_work_observer: SubagentObserverState,
     #[cfg(test)]
-    pub subagent_branch_observer: Option<SubagentBoundaryObserver>,
+    pub(crate) subagent_branch_observer: Option<SubagentBoundaryObserver>,
 }
 
 impl CodingAgent {
-    pub fn permission_handle(&self) -> threadlane_permission::PermissionHandle {
+    pub(crate) fn permission_handle(&self) -> threadlane_permission::PermissionHandle {
         self.permission_handle.clone()
     }
 
-    pub fn question_handle(&self) -> threadlane_question::QuestionHandle {
+    pub(crate) fn question_handle(&self) -> threadlane_question::QuestionHandle {
         self.question_handle.clone()
     }
 
@@ -116,7 +117,7 @@ impl CodingAgent {
         None
     }
 
-    pub fn work_handle(&self) -> CodingAgentWorkHandle {
+    pub(crate) fn work_handle(&self) -> CodingAgentWorkHandle {
         self.agent_work
             .set_acp_model(threadlane_acp_engine::is_acp_model(&self.agent.model()));
         CodingAgentWorkHandle::new(self.agent_work.clone(), self.session_file.clone())
@@ -126,25 +127,13 @@ impl CodingAgent {
         self.agent.subscribe()
     }
 
-    pub fn harness_snapshot(&mut self) -> Result<Option<Snapshot>, String> {
-        let Some(journal) = self.harness.as_mut() else {
-            return Ok(None);
-        };
-        journal.refresh()?;
-        journal
-            .store
-            .snapshot()
-            .map(Some)
-            .map_err(|error| error.to_string())
-    }
-
-    pub fn harness_error(&self) -> Option<&str> {
+    pub(crate) fn harness_error(&self) -> Option<&str> {
         self.harness_journal_error.as_deref()
     }
 
     /// Returns the fully built system prompt used by this runtime when the
     /// agent state is not currently locked by an active turn.
-    pub fn system_prompt_snapshot(&self) -> Option<String> {
+    pub(crate) fn system_prompt_snapshot(&self) -> Option<String> {
         self.agent
             .turn
             .try_lock()
@@ -152,18 +141,11 @@ impl CodingAgent {
             .map(|state| state.system_prompt.clone())
     }
 
-    pub fn watch_harness(&mut self) -> Result<Option<HarnessWatch>, String> {
-        let Some(journal) = self.harness.as_mut() else {
-            return Ok(None);
-        };
-        journal.watch().map(Some)
-    }
-
-    pub fn cancellation_handle(&self) -> CodingAgentCancellation {
+    pub(crate) fn cancellation_handle(&self) -> CodingAgentCancellation {
         self.cancellation.clone()
     }
 
-    pub fn has_interrupted_work(&self) -> bool {
+    pub(crate) fn has_interrupted_work(&self) -> bool {
         matches!(
             self.interrupted_subagent_recovery,
             InterruptedSubagentRecoveryState::Pending
@@ -178,10 +160,6 @@ impl CodingAgent {
         self.agent.set_model_roles(roles);
     }
 
-    pub fn set_needle_enabled(&mut self, enabled: bool) {
-        self.agent.set_needle_enabled(enabled);
-    }
-
     pub fn model_roles(&self) -> &threadlane_runtime::ModelRoles {
         self.agent.model_roles()
     }
@@ -190,7 +168,7 @@ impl CodingAgent {
     ///
     /// Empty when no agent is selected or none has connected yet, which is
     /// what lets a caller read them after a turn without paying to start one.
-    pub fn acp_user_config_options(&self) -> Vec<threadlane_acp::AcpConfigOption> {
+    pub(crate) fn acp_user_config_options(&self) -> Vec<threadlane_acp::AcpConfigOption> {
         let model = self.agent.model();
         threadlane_acp_engine::acp_agent_id(&model)
             .map(|agent_id| self.acp.user_config_options(agent_id))
@@ -202,7 +180,7 @@ impl CodingAgent {
     ///
     /// Returns an empty list for a non-ACP model rather than an error: asking
     /// what an agent offers is a question the UI may ask about any selection.
-    pub async fn acp_config_options(
+    pub(crate) async fn acp_config_options(
         &mut self,
     ) -> Result<Vec<threadlane_acp::AcpConfigOption>, String> {
         let model = self.agent.model();
@@ -217,7 +195,7 @@ impl CodingAgent {
     }
 
     /// Applies one of the selected external agent's settings.
-    pub async fn set_acp_config_option(
+    pub(crate) async fn set_acp_config_option(
         &mut self,
         config_id: &str,
         value: &str,
@@ -243,11 +221,11 @@ impl CodingAgent {
         self.acp.model_label(agent_id)
     }
 
-    pub fn model(&self) -> String {
+    pub(crate) fn model(&self) -> String {
         self.agent.model()
     }
 
-    pub async fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {
+    pub(crate) async fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {
         self.agent.set_reasoning_effort(effort).await;
     }
 
@@ -310,7 +288,7 @@ impl CodingAgent {
     /// (401 `invalid_api_key`) after switching off an Antigravity model.
     /// Skips silently when nothing usable resolves, preserving legacy
     /// behavior for credential-less contexts.
-    pub fn refresh_provider_credentials(&mut self) {
+    pub(crate) fn refresh_provider_credentials(&mut self) {
         let model = self
             .agent
             .turn
@@ -320,7 +298,7 @@ impl CodingAgent {
         Self::rotate_credentials_for(&mut self.agent, &model);
     }
 
-    pub fn rotate_credentials_for(
+    pub(crate) fn rotate_credentials_for(
         agent: &mut threadlane_runtime::AgentRuntime,
         model: &str,
     ) {
@@ -370,7 +348,7 @@ impl CodingAgent {
         Self::new_with_provider(options, provider)
     }
 
-    pub fn new_with_provider(
+    pub(crate) fn new_with_provider(
         options: CodingAgentOptions,
         provider: Arc<dyn ProviderPort>,
     ) -> Self {
@@ -407,7 +385,7 @@ impl CodingAgent {
         let github_issue_work = harness
             .as_ref()
             .is_some_and(|harness| harness.store.facts().contains_key("github_issue"));
-        let mut initial_plan = threadlane_runtime::SessionPlan::default();
+        let mut initial_plan = threadlane_protocol::SessionPlan::default();
         if let Some(h) = harness.as_ref() {
             if let Some(model) = h.store.facts().get("model") {
                 effective_model = model.clone();
@@ -421,7 +399,7 @@ impl CodingAgent {
                 effective_reasoning_effort = effort;
             }
             if let Some(plan_json) = h.store.facts().get("session_plan") {
-                if let Ok(plan) = serde_json::from_str::<threadlane_runtime::SessionPlan>(plan_json)
+                if let Ok(plan) = serde_json::from_str::<threadlane_protocol::SessionPlan>(plan_json)
                 {
                     initial_plan = plan;
                 }
@@ -767,7 +745,7 @@ impl CodingAgent {
         }
 
         let manager_clone = mcp_manager.clone();
-        threadlane_runtime::get_runtime().spawn(async move {
+        threadlane_provider::exec::get_runtime().spawn(async move {
             manager_clone.discover_and_connect().await;
         });
         agent.work_dir = Some(options.work_dir.clone());
@@ -1003,7 +981,7 @@ impl CodingAgent {
                     })
                     .and_then(|_| {
                         let mut result = tool.result.unwrap_or_else(|| {
-                            threadlane_runtime::types::AgentToolResult::external(
+                            threadlane_protocol::AgentToolResult::external(
                                 tool.tool_call_id,
                                 tool.name.clone(),
                                 "ACP tool call ended without a terminal update",
@@ -1564,7 +1542,7 @@ impl CodingAgent {
                         .resolve_fast(&active_model)
                         .to_string();
                     let fast_reasoning = self.agent.config().fast_reasoning_effort;
-                    if threadlane_runtime::orchestrator::prewalk_would_be_noop(
+                    if threadlane_orchestrator::prewalk_would_be_noop(
                         &active_model,
                         active_effort,
                         &fast_model,
@@ -1578,10 +1556,10 @@ impl CodingAgent {
                     } else {
                         let requires_todo =
                             self.agent.configured_tool_definitions().iter().any(|tool| {
-                                tool.name == threadlane_runtime::orchestrator::PREWALK_TODO_TOOL
+                                tool.name == threadlane_orchestrator::PREWALK_TODO_TOOL
                             });
                         *self.prewalk.lock().unwrap() =
-                            Some(threadlane_runtime::orchestrator::PrewalkState::new(
+                            Some(threadlane_orchestrator::PrewalkState::new(
                                 fast_model.clone(),
                                 fast_reasoning,
                                 requires_todo,
@@ -1594,7 +1572,7 @@ impl CodingAgent {
 
                         effective_input = task_prompt.to_string();
                         architect_directive =
-                            Some(threadlane_runtime::orchestrator::build_architect_directive(
+                            Some(threadlane_orchestrator::build_architect_directive(
                                 &fast_model,
                                 requires_todo,
                             ));
@@ -1628,9 +1606,9 @@ impl CodingAgent {
                 .agent
                 .configured_tool_definitions()
                 .iter()
-                .any(|tool| tool.name == threadlane_runtime::orchestrator::PREWALK_TODO_TOOL);
+                .any(|tool| tool.name == threadlane_orchestrator::PREWALK_TODO_TOOL);
 
-            let decision = threadlane_runtime::orchestrator::Orchestrator::evaluate(
+            let decision = threadlane_orchestrator::Orchestrator::evaluate(
                 &effective_input,
                 orchestrator_mode,
                 &active_model,
@@ -1639,13 +1617,13 @@ impl CodingAgent {
                 requires_todo,
             );
 
-            if let threadlane_runtime::orchestrator::OrchestratorDecision::EngagePrewalk {
+            if let threadlane_orchestrator::OrchestratorDecision::EngagePrewalk {
                 fast_model: target_fast,
                 fast_reasoning: target_effort,
                 architect_system_directive,
             } = decision
             {
-                if threadlane_runtime::orchestrator::prewalk_would_be_noop(
+                if threadlane_orchestrator::prewalk_would_be_noop(
                     &active_model,
                     active_effort,
                     &target_fast,
@@ -1657,7 +1635,7 @@ impl CodingAgent {
                     });
                 } else {
                     *self.prewalk.lock().unwrap() =
-                        Some(threadlane_runtime::orchestrator::PrewalkState::new(
+                        Some(threadlane_orchestrator::PrewalkState::new(
                             target_fast.clone(),
                             target_effort,
                             requires_todo,
@@ -1679,7 +1657,7 @@ impl CodingAgent {
             let mut turn = self.agent.turn.lock().await;
             if !turn
                 .system_prompt
-                .contains(threadlane_runtime::orchestrator::ARCHITECT_PROTOCOL_HEADER)
+                .contains(threadlane_orchestrator::ARCHITECT_PROTOCOL_HEADER)
             {
                 turn.system_prompt.push_str(&directive);
             }
@@ -1816,7 +1794,7 @@ impl CodingAgent {
                         model: self.agent.model(),
                         message: format!(
                             "Prewalk: plan received but no todo/edits yet. {}",
-                            threadlane_runtime::orchestrator::PREWALK_CONTINUE_PROMPT
+                            threadlane_orchestrator::PREWALK_CONTINUE_PROMPT
                         ),
                     });
                 }
@@ -1921,12 +1899,13 @@ mod compaction_sync_tests {
         DeferredResponse, ProviderPort, RuntimeRequest, RuntimeStreamEvent, RuntimeToolCall,
         RuntimeToolCallFunction, RuntimeUsage,
     };
+    use threadlane_protocol::{AgentMessage, AgentToolResult};
     use threadlane_runtime::{
         harness::{
             read_transcript_page, CompactionReason, JsonlStore, OperationOutcome, SessionStore,
             TranscriptItem,
         },
-        AgentMessage, AgentToolResult, Record,
+        Record,
     };
 
     fn summary() -> AgentMessage {
@@ -2157,10 +2136,10 @@ mod compaction_sync_tests {
             .unwrap()
             .messages()
             .into_iter()
-            .find(|message| threadlane_runtime::compaction_summary_text(message).is_some())
+            .find(|message| threadlane_compaction::compaction_summary_text(message).is_some())
             .unwrap();
         assert_eq!(
-            threadlane_runtime::compaction_summary_text(&checkpoint),
+            threadlane_compaction::compaction_summary_text(&checkpoint),
             Some(summary)
         );
         let AgentMessage::Custom { payload, .. } = checkpoint else {
@@ -2373,7 +2352,7 @@ mod compaction_sync_tests {
         ) {
             let messages: Vec<AgentMessage> =
                 serde_json::from_value(request.messages.clone()).unwrap();
-            let (instructions, _) = threadlane_runtime::convert_to_codex_llm(&messages);
+            let (instructions, _) = threadlane_provider::convert_to_codex_llm(&messages);
             assert!(
                 instructions.contains("You are an expert coding assistant"),
                 "every outgoing request, including after compaction, must retain system instructions"

@@ -34,7 +34,7 @@ pub const BROWSER_WAIT_TOOL: &str = "browser_wait";
 
 const BROWSER_ROUND_TRIP_TIMEOUT: Duration = Duration::from_secs(15);
 
-pub const BROWSER_UNAVAILABLE: &str = "The embedded browser is unavailable (macOS desktop app with the Browser panel only). Tell the user what you would have opened instead.";
+pub(crate) const BROWSER_UNAVAILABLE: &str = "The embedded browser is unavailable (macOS desktop app with the Browser panel only). Tell the user what you would have opened instead.";
 
 /// A single intent for the panel's browser view.
 #[derive(Debug)]

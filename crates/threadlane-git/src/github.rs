@@ -91,11 +91,11 @@ pub fn invalidate_github_cache(work_dir: &Path) {
     }
 }
 
-pub(crate) fn gh_command(work_dir: &Path, args: &[&str]) -> Command {
+fn gh_command(work_dir: &Path, args: &[&str]) -> Command {
     gh_command_with_captured_token(work_dir, args).0
 }
 
-pub(crate) fn gh_command_with_captured_token(
+fn gh_command_with_captured_token(
     work_dir: &Path,
     args: &[&str],
 ) -> (Command, Option<String>) {
@@ -103,7 +103,7 @@ pub(crate) fn gh_command_with_captured_token(
     gh_command_with_token_capture(work_dir, args, stored_token)
 }
 
-pub(crate) fn stored_github_token() -> Option<String> {
+fn stored_github_token() -> Option<String> {
     threadlane_auth::load_github_credentials()
         .map(|credentials| credentials.token)
         .filter(|token| !token.trim().is_empty())
@@ -157,7 +157,7 @@ pub(crate) fn gh_failure_message(stderr: &str, stored_token: Option<&str>) -> St
     redact_gh_failure(stderr.trim(), stored_token)
 }
 
-pub(crate) fn gh_failure(
+fn gh_failure(
     work_dir: &Path,
     status: std::process::ExitStatus,
     stderr: &str,
@@ -311,7 +311,7 @@ pub(crate) fn parse_gh_pr_json(json_str: &str) -> Result<GitHubPrInfo, String> {
     })
 }
 
-pub(crate) fn github_login(value: &serde_json::Value) -> String {
+fn github_login(value: &serde_json::Value) -> String {
     value["login"]
         .as_str()
         .or_else(|| value.as_str())
@@ -319,7 +319,7 @@ pub(crate) fn github_login(value: &serde_json::Value) -> String {
         .to_owned()
 }
 
-pub(crate) fn github_id(value: &serde_json::Value) -> String {
+fn github_id(value: &serde_json::Value) -> String {
     value
         .as_str()
         .map(str::to_owned)
@@ -327,7 +327,7 @@ pub(crate) fn github_id(value: &serde_json::Value) -> String {
         .unwrap_or_default()
 }
 
-pub(crate) fn parse_pr_conversation_comments(
+fn parse_pr_conversation_comments(
     value: &serde_json::Value,
 ) -> Vec<PrConversationComment> {
     value
@@ -392,7 +392,7 @@ pub(crate) fn enrich_pr_review_comments(info: &mut GitHubPrInfo, json: &str) -> 
     Ok(())
 }
 
-pub(crate) fn parse_github_repository(url: &str) -> Result<GitHubRepository, String> {
+fn parse_github_repository(url: &str) -> Result<GitHubRepository, String> {
     let url = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))
@@ -472,7 +472,7 @@ pub(crate) fn parse_github_issue_json(json_str: &str) -> Result<GitHubIssueDetai
     })
 }
 
-pub(crate) fn inspect_pr_uncached(
+fn inspect_pr_uncached(
     work_dir: &Path,
     branch: &str,
 ) -> Result<Option<GitHubPrInfo>, GitError> {
@@ -537,7 +537,7 @@ pub(crate) fn inspect_pr_uncached(
     Ok(Some(info))
 }
 
-pub fn inspect_pr(work_dir: &Path) -> Result<Option<GitHubPrInfo>, GitError> {
+pub(crate) fn inspect_pr(work_dir: &Path) -> Result<Option<GitHubPrInfo>, GitError> {
     let Some(branch) = current_branch(work_dir)? else {
         return Ok(None);
     };
@@ -634,14 +634,14 @@ pub(crate) fn github_api_args(host: &str, args: &[&str]) -> Vec<String> {
     result
 }
 
-pub(crate) fn validated_github_list_state(state: &str) -> Result<&str, String> {
+fn validated_github_list_state(state: &str) -> Result<&str, String> {
     match state {
         "open" | "closed" => Ok(state),
         _ => Err("GitHub list state must be open or closed".into()),
     }
 }
 
-pub(crate) fn validated_github_pr_list_state(state: &str) -> Result<&str, String> {
+fn validated_github_pr_list_state(state: &str) -> Result<&str, String> {
     match state {
         "open" | "closed" | "merged" => Ok(state),
         _ => Err("GitHub pull request list state must be open, closed, or merged".into()),
@@ -693,20 +693,20 @@ pub(crate) fn github_pr_review_args(
     ])
 }
 
-pub(crate) fn validate_github_number(number: u64, resource: &str) -> Result<(), String> {
+fn validate_github_number(number: u64, resource: &str) -> Result<(), String> {
     (number != 0)
         .then_some(())
         .ok_or_else(|| format!("{resource} number must be greater than zero"))
 }
 
-pub(crate) fn validated_text(value: &str, name: &str) -> Result<String, String> {
+fn validated_text(value: &str, name: &str) -> Result<String, String> {
     let value = value.trim();
     (!value.is_empty())
         .then(|| value.to_owned())
         .ok_or_else(|| format!("{name} cannot be empty"))
 }
 
-pub(crate) fn review_verdict_flag(verdict: PullRequestReviewVerdict) -> &'static str {
+fn review_verdict_flag(verdict: PullRequestReviewVerdict) -> &'static str {
     match verdict {
         PullRequestReviewVerdict::Comment => "--comment",
         PullRequestReviewVerdict::Approve => "--approve",
@@ -714,7 +714,7 @@ pub(crate) fn review_verdict_flag(verdict: PullRequestReviewVerdict) -> &'static
     }
 }
 
-pub(crate) fn validate_review_path(path: &str) -> Result<&str, String> {
+fn validate_review_path(path: &str) -> Result<&str, String> {
     let path = path.trim();
     let candidate = Path::new(path);
     (!path.is_empty()
@@ -744,7 +744,7 @@ pub(crate) fn review_comment_payloads(
         .collect()
 }
 
-pub(crate) fn execute_gh(work_dir: &Path, args: &[String]) -> Result<String, GitError> {
+fn execute_gh(work_dir: &Path, args: &[String]) -> Result<String, GitError> {
     let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
     let (mut command, stored_token) = gh_command_with_captured_token(work_dir, &refs);
     let output = command
@@ -762,7 +762,7 @@ pub(crate) fn execute_gh(work_dir: &Path, args: &[String]) -> Result<String, Git
     ))
 }
 
-pub(crate) fn execute_gh_json(
+fn execute_gh_json(
     work_dir: &Path,
     args: &[String],
     payload: &serde_json::Value,
@@ -1036,7 +1036,7 @@ pub fn comment_on_pull_request(
     execute_gh(work_dir, &args)
 }
 
-pub(crate) fn parse_pull_request_url(url: &str) -> Result<(GitHubRepository, u64), String> {
+fn parse_pull_request_url(url: &str) -> Result<(GitHubRepository, u64), String> {
     let repository = parse_github_repository(url)?;
     let number = url
         .trim_end_matches('/')

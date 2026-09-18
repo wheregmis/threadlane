@@ -3,7 +3,7 @@ use gpui_component::Root;
 use threadlane_coding_agent::config_dump::dump_config;
 use threadlane_ui_chat::init as init_chat;
 use threadlane_ui_theme::{init as init_theme, Assets};
-use threadlane_ui_workspace::{init as init_workspace, WorkspaceView};
+use threadlane_ui_workspace::{init as init_workspace, StartupView};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod process_environment;
@@ -72,7 +72,7 @@ fn main() {
                 if std::env::var_os("THREADLANE_GPUI_PROFILE").is_some() {
                     window.set_debug_frame_overlay_mode(DebugFrameOverlayMode::Full);
                 }
-                let view = WorkspaceView::build(window, cx);
+                let view = StartupView::build(window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
             .expect("failed to open GPUI window");

@@ -3,18 +3,20 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use threadlane_session::harness::{JsonlStore, SessionStore};
-use threadlane_session::{
-    AcpConfigOption, AgentEvent, AgentMessage, ImageAttachment, ReasoningEffort, SessionPlan,
+use threadlane_runtime::harness::{JsonlStore, SessionStore};
+use threadlane_protocol::{
+    AgentEvent, AgentMessage, ImageAttachment, ReasoningEffort, SessionPlan,
     SubagentProgressUpdate, TokenUsage,
 };
+use threadlane_acp::AcpConfigOption;
 
 use crate::agent_events::{adapt_agent_event, ChatAgentUpdate};
-use threadlane_session::{ExecutionMode, SessionRuntime};
+use threadlane_coding_agent::controller::SessionRuntime;
 use threadlane_project::load_project_registry;
 
 use crate::discovery::*;
 use crate::projection::*;
+use threadlane_runtime::harness::{tool_activity_display_summary, tool_activity_summary};
 pub use crate::types::*;
 
 pub struct AppState {
@@ -27,7 +29,7 @@ pub struct AppState {
     pub sidebar_project_filter: Option<PathBuf>,
     pub search_query: String,
     pub messages: Arc<Vec<ChatMessageInfo>>,
-    pub available_models: Vec<threadlane_ui_catalog::ModelOption>,
+    pub(crate) available_models: Vec<threadlane_ui_catalog::ModelOption>,
     pub active_plan: SessionPlan,
     pub is_generating: bool,
     composer_text: String,
@@ -40,7 +42,7 @@ pub struct AppState {
     trajectory_epoch: u64,
     diagnostics_revision: u64,
     diagnostics_by_session:
-        HashMap<SessionProjectionKey, threadlane_session::harness::SessionDiagnostics>,
+        HashMap<SessionProjectionKey, threadlane_runtime::harness::SessionDiagnostics>,
     session_metrics: HashMap<SessionProjectionKey, SessionMetricsInfo>,
     context_windows: HashMap<SessionProjectionKey, ContextWindowInfo>,
     /// Settings each ACP session's agent exposes, keyed by session id.
@@ -57,23 +59,22 @@ pub struct AppState {
     /// next runtime before its first turn.
     pending_acp_config: HashMap<String, HashMap<String, String>>,
     stashed_prompts: HashMap<String, String>,
-    pub pending_permissions: HashMap<String, threadlane_session::PermissionRequest>,
-    pub pending_questions: HashMap<String, threadlane_session::QuestionRequest>,
+    pub pending_permissions: HashMap<String, threadlane_protocol::PermissionRequest>,
+    pub pending_questions: HashMap<String, threadlane_protocol::QuestionRequest>,
     pub pending_hydrations: Vec<SessionHydrationRequest>,
     pub git_statuses: HashMap<PathBuf, threadlane_git::GitStatus>,
     pub git_prs: HashMap<(PathBuf, String), Option<threadlane_git::GitHubPrInfo>>,
     pub auto_address_pr_reviews_enabled: bool,
     /// Persistent PR review tracking per project, loaded on demand and cached.
-    pub pr_review_tracking:
+    pub(crate) pr_review_tracking:
         HashMap<PathBuf, threadlane_git::PrReviewTrackingStore>,
 
     pub selected_model: String,
-    model_roles: threadlane_session::ModelRoles,
+    model_roles: threadlane_runtime::ModelRoles,
     pub reasoning_effort: ReasoningEffort,
     pub workspace_page: WorkspacePage,
     pub openai_key: String,
     pub opencode_key: String,
-    pub needle_enabled: bool,
     pub auth_status_msg: Option<String>,
     pub update_status: threadlane_updater::UpdateStatus,
     pub update_notice_dismissed: bool,
@@ -214,7 +215,7 @@ impl AppState {
             .or_else(|| std::env::var("OPENAI_API_KEY").ok())
             .unwrap_or_default();
         let opencode_key =
-            threadlane_auth::opencode_auth::load_opencode_api_key().unwrap_or_default();
+            threadlane_coding_agent::credentials::opencode_api_key().unwrap_or_default();
 
         let (stream_tx, stream_rx) = tokio::sync::mpsc::unbounded_channel();
         let (session_refresh_tx, session_refresh_requests) = mpsc::channel::<PathBuf>();
@@ -239,7 +240,7 @@ impl AppState {
             threadlane_ui_catalog::default_model_for_project(active_work_dir.as_deref())
                 .unwrap_or_default();
 
-        let model_roles = threadlane_session::ModelRoles::default();
+        let model_roles = threadlane_runtime::ModelRoles::default();
         let session_runtimes = HashMap::new();
         let session_status = active_session_id
             .as_ref()
@@ -285,7 +286,6 @@ impl AppState {
             workspace_page: WorkspacePage::Chat,
             openai_key,
             opencode_key,
-            needle_enabled: threadlane_project::load_needle_enabled(),
             auth_status_msg: None,
             update_status: threadlane_updater::UpdateStatus::Idle,
             update_notice_dismissed: false,
@@ -333,7 +333,7 @@ impl AppState {
         state
     }
 
-    pub fn messages_mut(&mut self) -> &mut Vec<ChatMessageInfo> {
+    pub(crate) fn messages_mut(&mut self) -> &mut Vec<ChatMessageInfo> {
         Arc::make_mut(&mut self.messages)
     }
 
@@ -352,15 +352,6 @@ impl AppState {
                 .unwrap_or_default();
         }
         self.set_reasoning_effort(self.reasoning_effort);
-    }
-
-    pub fn set_needle_enabled(&mut self, enabled: bool) -> Result<(), String> {
-        threadlane_project::save_needle_enabled(enabled)?;
-        self.needle_enabled = enabled;
-        for runtime in self.session_runtimes.values() {
-            let _ = runtime.try_set_needle_enabled(enabled);
-        }
-        Ok(())
     }
 
     pub fn set_auto_address_pr_reviews_enabled(
@@ -415,7 +406,7 @@ impl AppState {
         self.invalidate_idle_runtimes();
     }
 
-    pub fn save_openai_key(&mut self, key: String) -> Result<(), String> {
+    pub(crate) fn save_openai_key(&mut self, key: String) -> Result<(), String> {
         let key = key.trim().to_string();
         if !key.is_empty() {
             threadlane_auth::openai_auth::save_openai_api_key(&key)?;
@@ -431,7 +422,7 @@ impl AppState {
         Ok(())
     }
 
-    pub fn save_opencode_key(&mut self, key: String) -> Result<(), String> {
+    pub(crate) fn save_opencode_key(&mut self, key: String) -> Result<(), String> {
         let key = key.trim().to_string();
         if !key.is_empty() {
             threadlane_auth::opencode_auth::save_opencode_api_key(&key)?;
@@ -464,7 +455,7 @@ impl AppState {
         self.invalidate_idle_runtimes();
     }
 
-    pub fn set_selected_model(&mut self, model: String) {
+    pub(crate) fn set_selected_model(&mut self, model: String) {
         if !self.available_models.iter().any(|m| m.id == model) {
             return;
         }
@@ -512,7 +503,7 @@ impl AppState {
     }
 
     pub fn set_reasoning_effort(&mut self, effort: ReasoningEffort) {
-        let effort = threadlane_runtime::model_registry::effective_effort(
+        let effort = threadlane_provider::model_registry::effective_effort(
             &self.selected_model,
             effort,
             self.active_work_dir.as_deref(),
@@ -543,25 +534,25 @@ impl AppState {
         self.active_session_runtime();
     }
 
-    pub fn open_settings(&mut self) {
+    pub(crate) fn open_settings(&mut self) {
         self.workspace_page = WorkspacePage::Settings;
         self.auth_status_msg = None;
     }
 
-    pub fn open_github(&mut self) {
+    pub(crate) fn open_github(&mut self) {
         self.workspace_page = WorkspacePage::GitHub;
     }
 
-    pub fn open_github_issue(&mut self, work_dir: PathBuf, number: u64) {
+    pub(crate) fn open_github_issue(&mut self, work_dir: PathBuf, number: u64) {
         self.workspace_page = WorkspacePage::GitHub;
         self.requested_github_issue = Some((work_dir, number));
     }
 
-    pub fn close_github(&mut self) {
+    pub(crate) fn close_github(&mut self) {
         self.workspace_page = WorkspacePage::Chat;
     }
 
-    pub fn close_settings(&mut self) {
+    pub(crate) fn close_settings(&mut self) {
         self.workspace_page = WorkspacePage::Chat;
         self.auth_status_msg = None;
     }
@@ -608,7 +599,7 @@ impl AppState {
         }
     }
 
-    pub fn begin_new_task(&mut self) {
+    pub(crate) fn begin_new_task(&mut self) {
         self.workspace_page = WorkspacePage::Chat;
         if let Some(project_work_dir) = self.active_session_id.as_ref().and_then(|session_id| {
             self.projects.iter().find_map(|project| {
@@ -640,7 +631,7 @@ impl AppState {
         self.draft_work_mode = mode;
     }
 
-    pub fn set_sidebar_project_filter(&mut self, work_dir: Option<PathBuf>) {
+    pub(crate) fn set_sidebar_project_filter(&mut self, work_dir: Option<PathBuf>) {
         self.sidebar_project_filter = work_dir.filter(|candidate| {
             self.projects
                 .iter()
@@ -654,7 +645,7 @@ impl AppState {
         }
     }
 
-    pub fn select_draft_project(&mut self, work_dir: PathBuf) {
+    pub(crate) fn select_draft_project(&mut self, work_dir: PathBuf) {
         if self
             .projects
             .iter()
@@ -722,19 +713,15 @@ impl AppState {
         self.requested_composer_prompt = Some(prompt);
     }
 
-    pub fn request_run_terminal_command(&mut self, command: String) {
+    pub(crate) fn request_run_terminal_command(&mut self, command: String) {
         self.requested_terminal_command = Some(command);
     }
 
-    pub fn request_open_terminal(&mut self, work_dir: PathBuf) {
+    pub(crate) fn request_open_terminal(&mut self, work_dir: PathBuf) {
         self.requested_terminal_work_dir = Some(work_dir);
     }
 
-    pub fn select_session(
-        &mut self,
-        work_dir: PathBuf,
-        session_id: String,
-    ) -> SessionHydrationRequest {
+    pub(crate) fn select_session(&mut self, work_dir: PathBuf, session_id: String) {
         self.select_session_with_persistence(work_dir, session_id, true)
     }
 
@@ -743,7 +730,7 @@ impl AppState {
         work_dir: PathBuf,
         session_id: String,
         persist_selection: bool,
-    ) -> SessionHydrationRequest {
+    ) {
         self.workspace_page = WorkspacePage::Chat;
         let session = self
             .projects
@@ -804,11 +791,10 @@ impl AppState {
         self.pending_hydrations.retain(|pending| {
             pending.session_id != request.session_id || pending.session_file != request.session_file
         });
-        self.pending_hydrations.push(request.clone());
-        request
+        self.pending_hydrations.push(request);
     }
 
-    pub fn settle_session(
+    pub(crate) fn settle_session(
         &mut self,
         work_dir: PathBuf,
         session_id: String,
@@ -830,19 +816,37 @@ impl AppState {
         let archive_file = archive_dir.join(file_name);
         if let Some(worktree_dir) = self.session_worktree_path(&work_dir, &session_id) {
             if delete_worktree && worktree_dir.exists() {
-                if threadlane_git::inspect(&worktree_dir)
+                // Untracked Threadlane bookkeeping (session transcripts,
+                // previews) lives inside the worktree by design and must
+                // never block archiving; every other change does.
+                let dirty = threadlane_git::inspect(&worktree_dir)
                     .map_err(|error| error.to_string())?
-                    .has_changes
-                {
+                    .files
+                    .iter()
+                    .any(|file| {
+                        !(file.is_untracked() && file.path.starts_with(".threadlane/"))
+                    });
+                if dirty {
                     return Err("Commit or discard worktree changes before archiving".into());
                 }
                 std::fs::copy(&session_file, &archive_file).map_err(|error| error.to_string())?;
+                // The transcript is archived above; drop the worktree-local
+                // bookkeeping dir so `git worktree remove` (non-force) has
+                // nothing app-owned left to trip on. Anything else untracked
+                // was already rejected by the dirtiness check.
+                let worktree_threadlane = worktree_dir.join(".threadlane");
+                if worktree_threadlane.exists() {
+                    if let Err(error) = std::fs::remove_dir_all(&worktree_threadlane) {
+                        let _ = Self::remove_file_if_present(&archive_file);
+                        return Err(error.to_string());
+                    }
+                }
                 if let Err(error) = threadlane_git::remove_worktree(&work_dir, &worktree_dir, false)
                 {
-                    let _ = std::fs::remove_file(&archive_file);
+                    let _ = Self::remove_file_if_present(&archive_file);
                     return Err(error.to_string());
                 }
-                let stub = Self::canonical_session_file(&work_dir, &session_id);
+                let stub = canonical_session_file(&work_dir, &session_id);
                 Self::remove_file_if_present(&stub)?;
                 let _ = threadlane_git::prune_worktrees(&work_dir);
             } else {
@@ -850,10 +854,10 @@ impl AppState {
                     if std::fs::rename(&session_file, &archive_file).is_err() {
                         std::fs::copy(&session_file, &archive_file)
                             .map_err(|error| error.to_string())?;
-                        let _ = std::fs::remove_file(&session_file);
+                        let _ = Self::remove_file_if_present(&session_file);
                     }
                 }
-                let stub = Self::canonical_session_file(&work_dir, &session_id);
+                let stub = canonical_session_file(&work_dir, &session_id);
                 Self::remove_file_if_present(&stub)?;
                 if delete_worktree {
                     let _ = threadlane_git::prune_worktrees(&work_dir);
@@ -866,7 +870,7 @@ impl AppState {
         Ok(())
     }
 
-    pub fn remove_session(
+    pub(crate) fn remove_session(
         &mut self,
         work_dir: PathBuf,
         session_id: String,
@@ -886,7 +890,7 @@ impl AppState {
                     .map_err(|error| error.to_string())?;
                 let _ = threadlane_git::prune_worktrees(&work_dir);
             }
-            Self::remove_file_if_present(&Self::canonical_session_file(&work_dir, &session_id))?;
+            Self::remove_file_if_present(&canonical_session_file(&work_dir, &session_id))?;
             Self::remove_file_if_present(&session_file)?;
             if delete_worktree {
                 let _ = threadlane_git::prune_worktrees(&work_dir);
@@ -898,17 +902,7 @@ impl AppState {
         Ok(())
     }
 
-    #[allow(dead_code)]
-    pub fn update_model_roles(&mut self, roles: threadlane_session::ModelRoles) {
-        self.model_roles = roles.clone();
-        for runtime in self.session_runtimes.values() {
-            let runtime = runtime.clone();
-            let roles = roles.clone();
-            tokio::spawn(async move {
-                runtime.set_model_roles(roles).await;
-            });
-        }
-    }
+
 
     pub fn ensure_session_runtime(
         &mut self,
@@ -918,16 +912,26 @@ impl AppState {
         if let Some(runtime) = self.session_runtimes.get(&session_file) {
             return runtime.clone();
         }
-        let runtime = SessionRuntime::new(
-            coding_agent_options(
-                work_dir,
-                session_file.clone(),
-                self.selected_model.clone(),
-                self.model_roles.clone(),
-                self.browser_bridge.clone(),
-            ),
-            ExecutionMode::Interactive,
+        // Build on a dedicated thread with a large stack: CodingAgent loads
+        // WASI extensions through wasmi, which needs more than GPUI's 512
+        // KiB GCD worker stacks provide. A plain spawn (not the Tokio
+        // runtime) keeps this lazy path safe whether or not the caller runs
+        // inside async context; the hydrated path in
+        // threadlane-ui-workspace awaits the same constructor asynchronously.
+        let options = coding_agent_options(
+            work_dir,
+            session_file.clone(),
+            self.selected_model.clone(),
+            self.model_roles.clone(),
+            self.browser_bridge.clone(),
         );
+        let runtime = std::thread::Builder::new()
+            .name("session-runtime-construct".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || SessionRuntime::new(options))
+            .expect("failed to spawn session runtime constructor")
+            .join()
+            .expect("session runtime construction panicked");
         self.session_runtimes.insert(session_file, runtime.clone());
         runtime
     }
@@ -935,11 +939,17 @@ impl AppState {
     pub fn resolve_active_permission(
         &mut self,
         request_id: &str,
-        decision: threadlane_session::PermissionDecision,
+        decision: threadlane_permission::PermissionDecision,
     ) -> bool {
         let Some(session_id) = self.active_session_id.clone() else {
             return false;
         };
+        let Some(request) = self.pending_permissions.get(&session_id) else { return false; };
+        if request.id != request_id
+            || (decision == threadlane_permission::PermissionDecision::AllowAlways
+                && !request.scopes.contains(&threadlane_protocol::PermissionScope::Always)) {
+            return false;
+        }
         let Some(work_dir) = self.active_work_dir.clone() else {
             return false;
         };
@@ -967,7 +977,7 @@ impl AppState {
             return false;
         };
         let session_file = self.session_file(&work_dir, &session_id);
-        let answer = threadlane_session::QuestionAnswer::dismissed(request_id);
+        let answer = threadlane_protocol::QuestionAnswer::dismissed(request_id);
         let resolved = self
             .session_runtimes
             .get(&session_file)
@@ -983,7 +993,7 @@ impl AppState {
     pub fn resolve_active_question_answer(
         &mut self,
         request_id: &str,
-        answer: threadlane_session::QuestionAnswer,
+        answer: threadlane_protocol::QuestionAnswer,
     ) -> bool {
         let Some(session_id) = self.active_session_id.clone() else {
             return false;
@@ -1011,11 +1021,7 @@ impl AppState {
                     && (session.work_dir == work_dir || session.session_file.starts_with(work_dir))
             })
             .map(|session| session.session_file.clone())
-            .unwrap_or_else(|| {
-                work_dir
-                    .join(".threadlane/sessions")
-                    .join(format!("{session_id}.jsonl"))
-            })
+            .unwrap_or_else(|| canonical_session_file(work_dir, session_id))
     }
 
     fn session_runtime_work_dir(&self, work_dir: &Path, session_id: &str) -> PathBuf {
@@ -1032,10 +1038,8 @@ impl AppState {
             .unwrap_or_else(|| work_dir.to_path_buf())
     }
 
-    fn canonical_session_file(work_dir: &Path, session_id: &str) -> PathBuf {
-        work_dir
-            .join(".threadlane/sessions")
-            .join(format!("{session_id}.jsonl"))
+    fn canonical_worktree_dir(work_dir: &Path, session_id: &str) -> PathBuf {
+        work_dir.join(".threadlane/worktrees").join(session_id)
     }
 
     fn session_worktree_path(&self, work_dir: &Path, session_id: &str) -> Option<PathBuf> {
@@ -1053,7 +1057,7 @@ impl AppState {
         {
             return Some(path);
         }
-        let stub = Self::canonical_session_file(work_dir, session_id);
+        let stub = canonical_session_file(work_dir, session_id);
         let store = JsonlStore::open_read_only(&stub).ok()?;
         let facts = store.facts();
         if facts
@@ -1062,7 +1066,7 @@ impl AppState {
         {
             let canonical_work_dir =
                 std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
-            Some(crate::effective_session_work_dir(
+            Some(crate::discovery::effective_session_work_dir(
                 &canonical_work_dir,
                 session_id,
                 &facts,
@@ -1230,11 +1234,11 @@ impl AppState {
         } else {
             let model = runtime.model().to_owned();
             let reasoning_effort = runtime.reasoning_effort();
-            let (api_key, _) = threadlane_session::provider_credentials(&model);
-            if api_key.is_empty() && !threadlane_session::is_acp_model(&model) {
+            let (api_key, _) = threadlane_coding_agent::credentials::provider_credentials(&model);
+            if api_key.is_empty() && !threadlane_acp_engine::is_acp_model(&model) {
                 return None;
             }
-            let pending_acp = threadlane_session::acp_agent_id(&model)
+            let pending_acp = threadlane_acp_engine::acp_agent_id(&model)
                 .map(|agent_id| self.take_pending_acp_config(agent_id))
                 .unwrap_or_default();
             if crate::chat::execute_prompt(
@@ -1301,8 +1305,8 @@ impl AppState {
             return Err("Couldn't select the linked task for this pull request.".into());
         }
         let model = self.selected_model.clone();
-        let (api_key, _) = threadlane_session::provider_credentials(&model);
-        if api_key.is_empty() && !threadlane_session::is_acp_model(&model) {
+        let (api_key, _) = threadlane_coding_agent::credentials::provider_credentials(&model);
+        if api_key.is_empty() && !threadlane_acp_engine::is_acp_model(&model) {
             return Err(format!(
                 "No API key configured for model `{model}`. Open Settings and save the provider credential."
             ));
@@ -1371,13 +1375,13 @@ impl AppState {
         )
     }
 
-    pub fn toggle_project_expanded(&mut self, work_dir: &Path) {
+    pub(crate) fn toggle_project_expanded(&mut self, work_dir: &Path) {
         if let Some(proj) = self.projects.iter_mut().find(|p| p.work_dir == work_dir) {
             proj.is_expanded = !proj.is_expanded;
         }
     }
 
-    pub fn toggle_tool_activity(&mut self, tool_call_id: &str) {
+    pub(crate) fn toggle_tool_activity(&mut self, tool_call_id: &str) {
         if let Some(activity) = self
             .messages_mut()
             .iter_mut()
@@ -1388,7 +1392,7 @@ impl AppState {
         }
     }
 
-    pub fn attach_project(&mut self, raw_path: PathBuf) -> Result<(), String> {
+    pub(crate) fn attach_project(&mut self, raw_path: PathBuf) -> Result<(), String> {
         let canonical = std::fs::canonicalize(&raw_path).map_err(|e| e.to_string())?;
         if !canonical.is_dir() {
             return Err("Selected path is not a directory".into());
@@ -1458,7 +1462,7 @@ impl AppState {
 
         if self.draft_work_mode == WorkMode::Worktree && threadlane_git::is_git_repo(&work_dir) {
             let branch = format!("worktree/{session_id}");
-            let worktree_dir = work_dir.join(".threadlane/worktrees").join(&session_id);
+            let worktree_dir = Self::canonical_worktree_dir(&work_dir, &session_id);
             if let Err(error) = threadlane_git::create_worktree(&work_dir, &worktree_dir, &branch) {
                 tracing::warn!("Failed to create worktree: {error}, falling back to main workdir");
             } else {
@@ -1467,7 +1471,7 @@ impl AppState {
                     ("worktree_path", worktree_dir.to_string_lossy().to_string()),
                     ("git_branch", branch.clone()),
                 ] {
-                    if let Err(error) = threadlane_session::coding_agent::harness::CodingSessionHarness::append_fact_to_path(
+                    if let Err(error) = threadlane_coding_agent::harness::CodingSessionHarness::append_fact_to_path(
                         &session_file,
                         "main",
                         key,
@@ -1481,7 +1485,7 @@ impl AppState {
             }
         }
 
-        threadlane_session::coding_agent::harness::CodingSessionHarness::append_fact_to_path(
+        threadlane_coding_agent::harness::CodingSessionHarness::append_fact_to_path(
             &session_file,
             "main",
             "reasoning_effort",
@@ -1554,10 +1558,8 @@ impl AppState {
             &title,
             &suffix[suffix.len().saturating_sub(6)..],
         );
-        let session_file = work_dir
-            .join(".threadlane/sessions")
-            .join(format!("{session_id}.jsonl"));
-        let worktree_dir = work_dir.join(".threadlane/worktrees").join(&session_id);
+        let session_file = canonical_session_file(&work_dir, &session_id);
+        let worktree_dir = Self::canonical_worktree_dir(&work_dir, &session_id);
         if worktree_dir.exists() || session_file.exists() {
             return Err("Generated issue session path already exists".into());
         }
@@ -1565,7 +1567,7 @@ impl AppState {
         let cleanup = |work_dir: &Path, worktree_dir: &Path, session_file: &Path| {
             let _ = threadlane_git::remove_worktree(work_dir, worktree_dir, true);
             let _ = std::fs::remove_dir_all(worktree_dir);
-            let _ = std::fs::remove_file(session_file);
+            let _ = Self::remove_file_if_present(session_file);
         };
         if let Err(error) = threadlane_git::create_worktree(&work_dir, &worktree_dir, &branch) {
             cleanup(&work_dir, &worktree_dir, &session_file);
@@ -1595,7 +1597,7 @@ impl AppState {
             ("name", format!("#{} {title}", issue.number)),
         ] {
             if let Err(error) =
-                threadlane_session::coding_agent::harness::CodingSessionHarness::append_fact_to_path(
+                threadlane_coding_agent::harness::CodingSessionHarness::append_fact_to_path(
                     &session_file,
                     "main",
                     key,
@@ -1667,7 +1669,7 @@ impl AppState {
     }
 
     /// Projects trajectory entries, token usage, and metrics from an already-open store.
-    pub fn project_trajectory_from_store(
+    pub(crate) fn project_trajectory_from_store(
         store: &JsonlStore,
     ) -> (
         Vec<TrajectoryEntry>,
@@ -1686,10 +1688,10 @@ impl AppState {
             .records()
             .iter()
             .filter_map(|record| match record {
-                threadlane_session::harness::Record::Usage {
+                threadlane_runtime::harness::Record::Usage {
                     run_id: Some(run_id),
                     attempt: Some(attempt),
-                    cause: threadlane_session::harness::UsageCause::Provider,
+                    cause: threadlane_runtime::harness::UsageCause::Provider,
                     ..
                 } => Some((run_id.clone(), *attempt)),
                 _ => None,
@@ -1697,7 +1699,7 @@ impl AppState {
             .collect::<HashSet<_>>();
 
         for record in store.records() {
-            use threadlane_session::harness::Record;
+            use threadlane_runtime::harness::Record;
             let entry = match record {
                 Record::OperationStarted {
                     seq,
@@ -1821,7 +1823,7 @@ impl AppState {
                     usage,
                     ..
                 } => {
-                    if *cause == threadlane_session::harness::UsageCause::Provider {
+                    if *cause == threadlane_runtime::harness::UsageCause::Provider {
                         metrics.accumulate_usage(usage);
                         durable_usage.accumulate(usage);
                     }
@@ -1859,14 +1861,14 @@ impl AppState {
                     ..
                 } => {
                     let prompt_text = match system_prompt {
-                        threadlane_session::harness::PromptSnapshot::Full { sha256, content } => {
+                        threadlane_runtime::harness::PromptSnapshot::Full { sha256, content } => {
                             format!(
                                 "### System Prompt (SHA256 `{}`)\n\n```markdown\n{}\n```",
                                 sha256.as_str(),
                                 content.as_str()
                             )
                         }
-                        threadlane_session::harness::PromptSnapshot::Redacted {
+                        threadlane_runtime::harness::PromptSnapshot::Redacted {
                             sha256,
                             byte_len,
                             reason,
@@ -2479,7 +2481,7 @@ impl AppState {
         }
 
         // Anomaly items from typed trajectory pass
-        let typed_traj = threadlane_session::harness::project_trajectory(store);
+        let typed_traj = threadlane_runtime::harness::project_trajectory(store);
         for anomaly in typed_traj.anomalies {
             trajectory.push(TrajectoryEntry {
                 seq: anomaly.related_refs.first().map(|r| r.seq),
@@ -2516,7 +2518,7 @@ impl AppState {
     }
 
     fn project_context_window(store: &JsonlStore) -> Option<ContextWindowInfo> {
-        use threadlane_session::harness::Record;
+        use threadlane_runtime::harness::Record;
         let manifest = store
             .records()
             .iter()
@@ -2651,7 +2653,7 @@ impl AppState {
     pub fn session_status_for_file(&self, session_file: &Path) -> Option<String> {
         self.session_runtimes
             .get(session_file)
-            .and_then(|runtime| runtime_status_text(runtime.status()))
+            .and_then(|runtime| threadlane_coding_agent::controller::runtime_status_text(runtime.status()))
     }
 
     pub fn apply_session_messages(
@@ -2686,7 +2688,7 @@ impl AppState {
     }
 }
 
-pub(super) fn is_attachable_project_root(path: &Path) -> bool {
+fn is_attachable_project_root(path: &Path) -> bool {
     path.parent().is_some()
 }
 
@@ -3192,12 +3194,12 @@ impl AppState {
             .iter()
             .map(|event| {
                 let (category, summary, detail) = match &event.kind {
-                    threadlane_session::harness::DurableEventKind::Entry { role, parent_id } => (
+                    threadlane_runtime::harness::DurableEventKind::Entry { role, parent_id } => (
                         "Entry",
                         format!("{} · {role}", event.id),
                         format!("parent={parent_id:?}"),
                     ),
-                    threadlane_session::harness::DurableEventKind::Record => (
+                    threadlane_runtime::harness::DurableEventKind::Record => (
                         "Record",
                         format!("{} · durable record", event.id),
                         format!(
@@ -3291,7 +3293,7 @@ impl AppState {
     ///
     /// A no-op for a provider model, which has no agent to ask.
     fn request_acp_config_options(&mut self) {
-        if !threadlane_session::is_acp_model(&self.selected_model) {
+        if !threadlane_acp_engine::is_acp_model(&self.selected_model) {
             return;
         }
         let Some((runtime, session_id)) = self.active_session_runtime() else {
@@ -3309,7 +3311,7 @@ impl AppState {
     }
 
     /// Applies one of the selected external agent's settings.
-    pub fn set_acp_config_option(&mut self, config_id: String, value: String) {
+    pub(crate) fn set_acp_config_option(&mut self, config_id: String, value: String) {
         let Some((runtime, session_id)) = self.active_session_runtime() else {
             // No session yet (New task): remember the choice, show it
             // optimistically via the launch-time cache, and apply it to the
@@ -3317,7 +3319,7 @@ impl AppState {
             // silently keeps the agent's default (e.g. DeepSeek) no matter
             // what the user clicks.
             let Some(agent_id) =
-                threadlane_session::acp_agent_id(&self.selected_model).map(str::to_string)
+                threadlane_acp_engine::acp_agent_id(&self.selected_model).map(str::to_string)
             else {
                 self.session_status = Some("Open a session before changing agent settings".into());
                 return;
@@ -3362,7 +3364,7 @@ impl AppState {
         }
         // A live session now owns the setting; drop any New-task pending for
         // the same agent so a later draft does not re-apply a stale choice.
-        if let Some(agent_id) = threadlane_session::acp_agent_id(&self.selected_model) {
+        if let Some(agent_id) = threadlane_acp_engine::acp_agent_id(&self.selected_model) {
             if let Some(pending) = self.pending_acp_config.get_mut(agent_id) {
                 pending.remove(&config_id);
                 if pending.is_empty() {
@@ -3374,7 +3376,7 @@ impl AppState {
 
     /// Takes pending ACP `config_id -> value` selections for `agent_id`,
     /// clearing them so they apply exactly once to the next runtime.
-    pub fn take_pending_acp_config(&mut self, agent_id: &str) -> Vec<(String, String)> {
+    pub(crate) fn take_pending_acp_config(&mut self, agent_id: &str) -> Vec<(String, String)> {
         self.pending_acp_config
             .remove(agent_id)
             .map(|map| map.into_iter().collect())
@@ -3404,7 +3406,7 @@ impl AppState {
     /// Pending New-task selections override the cached current value so the
     /// picker and status bar show what will run, not the agent default.
     pub fn active_acp_config_options(&self) -> Vec<AcpConfigOption> {
-        if !threadlane_session::is_acp_model(&self.selected_model) {
+        if !threadlane_acp_engine::is_acp_model(&self.selected_model) {
             return Vec::new();
         }
         if let Some(options) = self
@@ -3413,12 +3415,12 @@ impl AppState {
         {
             return options.clone();
         }
-        let agent_id = threadlane_session::acp_agent_id(&self.selected_model);
+        let agent_id = threadlane_acp_engine::acp_agent_id(&self.selected_model);
         let cached = agent_id
             .map(threadlane_ui_catalog::cached_acp_config_options)
             .unwrap_or_default();
         match agent_id.and_then(|id| self.pending_acp_config.get(id)) {
-            Some(pending) => threadlane_session::apply_pending_config_values(cached, pending),
+            Some(pending) => threadlane_acp::apply_pending_config_values(cached, pending),
             None => cached,
         }
     }
@@ -3428,9 +3430,9 @@ impl AppState {
     /// Derived from the same settings the picker shows, so the status bar and
     /// the picker can never disagree about what is running.
     pub fn active_acp_model_label(&self) -> Option<String> {
-        threadlane_session::config_option_for(
+        threadlane_acp::config_option_for(
             &self.active_acp_config_options(),
-            threadlane_session::ACP_CONFIG_CATEGORY_MODEL,
+            threadlane_acp::ACP_CONFIG_CATEGORY_MODEL,
         )
         .and_then(AcpConfigOption::current_detail_label)
     }
@@ -3754,7 +3756,7 @@ impl AppState {
                     if let Some(error) = error {
                         if let (Some((config_id, value)), Some(agent_id)) = (
                             failed_config,
-                            threadlane_session::acp_agent_id(&self.selected_model),
+                            threadlane_acp_engine::acp_agent_id(&self.selected_model),
                         ) {
                             self.pending_acp_config
                                 .entry(agent_id.to_string())
@@ -3847,7 +3849,7 @@ impl AppState {
             .map(|message| message.text.as_str())
     }
 
-    pub fn stage_busy_message(
+    pub(crate) fn stage_busy_message(
         &mut self,
         text: String,
         images: Vec<ImageAttachment>,
@@ -3868,7 +3870,7 @@ impl AppState {
         Ok(())
     }
 
-    pub fn queue_pending_message(&mut self) -> Result<(), String> {
+    pub(crate) fn queue_pending_message(&mut self) -> Result<(), String> {
         let (runtime, session_id, text, images) = self.pending_runtime_message()?;
         runtime
             .work_handle
@@ -3879,7 +3881,7 @@ impl AppState {
         Ok(())
     }
 
-    pub fn steer_pending_message(&mut self) -> Result<(), String> {
+    pub(crate) fn steer_pending_message(&mut self) -> Result<(), String> {
         let (runtime, session_id, text, images) = self.pending_runtime_message()?;
         runtime
             .work_handle
@@ -3890,7 +3892,7 @@ impl AppState {
         Ok(())
     }
 
-    pub fn dismiss_pending_message(&mut self) {
+    pub(crate) fn dismiss_pending_message(&mut self) {
         if let Some(session_id) = self.active_session_id.as_ref() {
             self.pending_composer_messages.remove(session_id);
         }
@@ -3936,11 +3938,11 @@ impl AppState {
         }
     }
 
-    pub fn send_prompt(&mut self, text: String) -> Result<(), String> {
+    pub(crate) fn send_prompt(&mut self, text: String) -> Result<(), String> {
         self.send_prompt_with_images(text, Vec::new())
     }
 
-    pub fn send_prompt_with_images(
+    pub(crate) fn send_prompt_with_images(
         &mut self,
         text: String,
         images: Vec<ImageAttachment>,
@@ -3971,12 +3973,12 @@ impl AppState {
 
         // Resolve credentials using the same provider routing as the runtime and title task.
         let model = self.selected_model.clone();
-        let (api_key, account_id) = threadlane_session::provider_credentials(&model);
+        let (api_key, account_id) = threadlane_coding_agent::credentials::provider_credentials(&model);
 
         // An external ACP agent authenticates itself — Claude Code uses its own
         // CLI login — so it has no Threadlane provider credential to check, and
         // gating it on one blocks every ACP turn before it starts.
-        if api_key.is_empty() && !threadlane_session::is_acp_model(&model) {
+        if api_key.is_empty() && !threadlane_acp_engine::is_acp_model(&model) {
             self.messages_mut().push(ChatMessageInfo {
                 id: format!("credential-error-{session_id}"),
                 role: MessageRole::Error,
@@ -3995,7 +3997,7 @@ impl AppState {
         // New-task ACP picks have no session to apply to yet; they wait here
         // and are applied inside the turn task before generation starts, so
         // the first turn runs the model the picker shows.
-        let pending_acp = threadlane_session::acp_agent_id(&model)
+        let pending_acp = threadlane_acp_engine::acp_agent_id(&model)
             .map(|agent_id| self.take_pending_acp_config(agent_id))
             .unwrap_or_default();
         crate::chat::execute_prompt(
@@ -4066,7 +4068,7 @@ impl AppState {
         Ok(())
     }
 
-    pub fn cancel_generation(&mut self) -> Result<(), String> {
+    pub(crate) fn cancel_generation(&mut self) -> Result<(), String> {
         let (Some(work_dir), Some(session_id)) = (
             self.active_work_dir.as_ref(),
             self.active_session_id.as_ref(),
@@ -4085,25 +4087,25 @@ impl AppState {
 }
 
 fn project_recovery_diagnostics(
-    lanes: &[threadlane_session::harness::LaneRecoveryDiagnostic],
+    lanes: &[threadlane_runtime::harness::LaneRecoveryDiagnostic],
 ) -> Vec<TrajectoryEntry> {
     let mut rows = Vec::new();
     for lane in lanes {
         let decision = match lane.decision {
-            threadlane_session::harness::RecoveryDecision::None => "No recovery required",
-            threadlane_session::harness::RecoveryDecision::ResumeFromLeaf => {
+            threadlane_runtime::harness::RecoveryDecision::None => "No recovery required",
+            threadlane_runtime::harness::RecoveryDecision::ResumeFromLeaf => {
                 "Resume interrupted operation from durable leaf"
             }
-            threadlane_session::harness::RecoveryDecision::ReplaySafeToolsThenResume => {
+            threadlane_runtime::harness::RecoveryDecision::ReplaySafeToolsThenResume => {
                 "Replay safe interrupted tools, then resume"
             }
-            threadlane_session::harness::RecoveryDecision::AbortUnsafeTool => {
+            threadlane_runtime::harness::RecoveryDecision::AbortUnsafeTool => {
                 "Abort interrupted run; unsafe tool cannot be replayed"
             }
-            threadlane_session::harness::RecoveryDecision::WaitForDeferredResult => {
+            threadlane_runtime::harness::RecoveryDecision::WaitForDeferredResult => {
                 "Wait for deferred provider result"
             }
-            threadlane_session::harness::RecoveryDecision::ExplicitRetryRequired => {
+            threadlane_runtime::harness::RecoveryDecision::ExplicitRetryRequired => {
                 "Keep failed; require explicit retry"
             }
         };

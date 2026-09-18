@@ -362,7 +362,7 @@ pub struct AcpConfigOptionChoice {
 #[serde(rename_all = "camelCase")]
 pub struct AcpConfigOption {
     pub id: String,
-    pub name: String,
+    pub(crate) name: String,
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
@@ -459,7 +459,7 @@ impl AcpConfigOption {
     ///
     /// Only applies when the agent actually offers `value`; an unknown value
     /// is ignored so a stale pending selection cannot invent a model.
-    pub fn with_current_value_override(mut self, value: &str) -> Self {
+    pub(crate) fn with_current_value_override(mut self, value: &str) -> Self {
         if self.has_choice(value) {
             self.current_value = Value::String(value.to_string());
         }
@@ -951,7 +951,7 @@ pub type AcpPathValidator = Arc<dyn Fn(&str, &Path) -> Result<PathBuf, String> +
 /// Compares canonical paths, never lexical spellings: a workspace reached
 /// through a symlink is spelled two ways (`/tmp/...` and `/private/tmp/...`
 /// on macOS), so a lexical check rejects valid new files anywhere under it.
-pub fn default_path_validator(requested: &str, workspace_root: &Path) -> Result<PathBuf, String> {
+pub(crate) fn default_path_validator(requested: &str, workspace_root: &Path) -> Result<PathBuf, String> {
     let requested_path = Path::new(requested);
     let joined = if requested_path.is_absolute() {
         requested_path.to_path_buf()
@@ -1201,7 +1201,7 @@ impl AcpConnection {
 
     /// Builds a connection over arbitrary byte streams. Used by [`Self::spawn`]
     /// and by tests that pair the client with an in-process stub agent.
-    pub fn from_streams<W, R>(
+    pub(crate) fn from_streams<W, R>(
         writer: W,
         reader: R,
         handler: Arc<dyn AcpClientHandler>,

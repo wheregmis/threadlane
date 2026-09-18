@@ -1,5 +1,5 @@
 use super::types::{Entry, Record, ReduceError, ReducedState, UsageCause};
-use crate::types::{AgentMessage, TokenUsage};
+use threadlane_protocol::{AgentMessage, TokenUsage};
 use std::collections::BTreeSet;
 
 /// A deterministic, model-facing projection of the canonical event log.
@@ -178,13 +178,13 @@ pub trait SessionStore {
             .get("title_attempted")
             .map_or(false, |v| v == "true")
     }
-    fn plan(&self) -> crate::types::SessionPlan {
+    fn plan(&self) -> threadlane_protocol::SessionPlan {
         if let Some(plan_json) = self.facts().get("session_plan") {
-            if let Ok(plan) = serde_json::from_str::<crate::types::SessionPlan>(plan_json) {
+            if let Ok(plan) = serde_json::from_str::<threadlane_protocol::SessionPlan>(plan_json) {
                 return plan;
             }
         }
-        crate::types::SessionPlan::default()
+        threadlane_protocol::SessionPlan::default()
     }
     fn active_branch_messages(&self, lane: &str) -> Vec<AgentMessage>
     where
@@ -401,7 +401,7 @@ pub trait SessionStore {
 mod tests {
     use super::{SessionIdGenerator, SessionStore};
     use crate::harness::{MemoryStore, Record, Reducer, UsageCause};
-    use crate::types::{AgentMessage, TokenUsage};
+use threadlane_protocol::{AgentMessage, TokenUsage};
 
     #[test]
     fn reference_queries_are_bounded_and_consistent() {

@@ -1,7 +1,7 @@
 use super::reducer::ReductionContext;
 use super::store::SessionStore;
 use super::types::{Entry, Record, ReduceError};
-use crate::types::PlanItem;
+use threadlane_protocol::PlanItem;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use std::collections::HashSet as IdSet;
@@ -63,7 +63,7 @@ impl Drop for WriterClaim {
 /// parents) would split into independent gates and lock files. Canonicalize
 /// the parent directory (which must exist for the file to be openable) and
 /// join the file name instead.
-pub(crate) fn canonical_writer_key(path: &Path) -> PathBuf {
+fn canonical_writer_key(path: &Path) -> PathBuf {
     if let (Some(parent), Some(name)) = (
         path.parent().filter(|p| !p.as_os_str().is_empty()),
         path.file_name(),
@@ -109,7 +109,6 @@ fn writer_claim(path: &Path) -> io::Result<Arc<WriterClaim>> {
     Ok(claim)
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 enum KnownSessionRecord {
@@ -143,7 +142,7 @@ struct LegacySessionNode {
     timestamp: u64,
     #[serde(default)]
     seq: Option<u64>,
-    message: crate::types::AgentMessage,
+    message: threadlane_protocol::AgentMessage,
 }
 
 #[derive(Debug, serde::Serialize, Deserialize)]
@@ -192,7 +191,7 @@ pub struct ContextCompactedMarker {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TranscriptItem {
-    Message(crate::types::AgentMessage),
+    Message(threadlane_protocol::AgentMessage),
     ContextCompacted(ContextCompactedMarker),
 }
 
@@ -205,7 +204,7 @@ pub struct TranscriptPage {
 
 #[cfg(test)]
 impl TranscriptPage {
-    fn messages(&self) -> Vec<crate::types::AgentMessage> {
+    fn messages(&self) -> Vec<threadlane_protocol::AgentMessage> {
         self.items
             .iter()
             .filter_map(|item| match item {
@@ -384,7 +383,7 @@ fn transcript_items(path: &Path, offset: u64, bytes: &[u8]) -> io::Result<Vec<Tr
                         && matches!(entry.surface_op, super::types::SurfaceOperation::Append) =>
                 {
                     match entry.message {
-                        crate::types::AgentMessage::Custom {
+                        threadlane_protocol::AgentMessage::Custom {
                             ref custom_type, ..
                         } if custom_type == "compaction_summary" => None,
                         message => Some(TranscriptItem::Message(message)),
@@ -419,7 +418,7 @@ fn transcript_items(path: &Path, offset: u64, bytes: &[u8]) -> io::Result<Vec<Tr
                 && matches!(entry.surface_op, super::types::SurfaceOperation::Append) =>
         {
             match entry.message {
-                crate::types::AgentMessage::Custom {
+                threadlane_protocol::AgentMessage::Custom {
                     ref custom_type, ..
                 } if custom_type == "compaction_summary" => Vec::new(),
                 message => vec![TranscriptItem::Message(message)],
@@ -869,7 +868,7 @@ impl SessionStore for JsonlStore {
 }
 
 impl JsonlStore {
-    pub fn append_plan(&mut self, plan: &crate::SessionPlan) -> Result<(), ReduceError> {
+    pub(crate) fn append_plan(&mut self, plan: &threadlane_protocol::SessionPlan) -> Result<(), ReduceError> {
         let record = Record::FactSet {
             id: format!("fact-plan-{}", self.next_sequence()),
             seq: self.next_sequence(),
@@ -881,124 +880,6 @@ impl JsonlStore {
                 .map_err(|e| ReduceError::InvalidRecord(e.to_string()))?,
         };
         self.append_record(record)
-    }
-
-    pub fn fork_branch(
-        &self,
-        path: impl AsRef<Path>,
-        session_id: impl Into<String>,
-        leaf_id: &str,
-    ) -> Result<Self, ReduceError> {
-        let mut included = HashSet::new();
-        let mut current = Some(leaf_id.to_owned());
-        while let Some(id) = current {
-            let entry = self
-                .entries
-                .iter()
-                .find(|entry| entry.id == id)
-                .ok_or_else(|| ReduceError::MissingParent(id.clone()))?;
-            included.insert(entry.id.clone());
-            current = entry.parent_id.clone();
-        }
-        self.fork_entries(path, session_id, &included)
-    }
-
-    pub fn fork_tree(
-        &self,
-        path: impl AsRef<Path>,
-        session_id: impl Into<String>,
-    ) -> Result<Self, ReduceError> {
-        let included = self.entries.iter().map(|entry| entry.id.clone()).collect();
-        self.fork_entries(path, session_id, &included)
-    }
-
-    fn fork_entries(
-        &self,
-        path: impl AsRef<Path>,
-        _session_id: impl Into<String>,
-        included: &HashSet<String>,
-    ) -> Result<Self, ReduceError> {
-        let path = path.as_ref();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|error| ReduceError::Storage(error.to_string()))?;
-        }
-        fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(path)
-            .map_err(|error| ReduceError::Storage(error.to_string()))?;
-        let _session_id = _session_id.into();
-        let mut fork = Self::open(path).map_err(|error| ReduceError::Storage(error.to_string()))?;
-        fork.append_record(Record::FactSet {
-            id: "fact-main-parent_session_id".into(),
-            seq: fork.next_sequence(),
-            lane: "main".into(),
-            timestamp: 0,
-            run_id: None,
-            key: "parent_session_id".into(),
-            value: self.session_id().to_string(),
-        })?;
-        if let Some(model) = self.model() {
-            fork.append_record(Record::FactSet {
-                id: "fact-main-model".into(),
-                seq: fork.next_sequence(),
-                lane: "main".into(),
-                timestamp: 0,
-                run_id: None,
-                key: "model".into(),
-                value: model,
-            })?;
-        }
-        if let Some(name) = self.name() {
-            fork.append_record(Record::FactSet {
-                id: "fact-main-name".into(),
-                seq: fork.next_sequence(),
-                lane: "main".into(),
-                timestamp: 0,
-                run_id: None,
-                key: "name".into(),
-                value: name,
-            })?;
-        }
-        for source in self
-            .entries
-            .iter()
-            .filter(|entry| included.contains(&entry.id))
-        {
-            let mut entry = source.clone();
-            if entry
-                .parent_id
-                .as_ref()
-                .is_some_and(|parent| !included.contains(parent))
-            {
-                entry.parent_id = None;
-            }
-            entry.seq = fork.next_sequence();
-            fork.append_entry(entry)?;
-        }
-        for source in self
-            .records
-            .iter()
-            .filter(|record| matches!(record, Record::FactSet { .. }))
-        {
-            fork.append_record(source.clone().with_seq(fork.next_sequence()))?;
-        }
-        for (key, value) in self.facts() {
-            if !fork.records.iter().any(|record| {
-                matches!(record, Record::FactSet { key: record_key, .. } if record_key == &key)
-            }) {
-                fork.append_record(Record::FactSet {
-                    id: format!("fact-main-{key}"),
-                    seq: fork.next_sequence(),
-                    lane: "main".into(),
-                    timestamp: fork.next_sequence(),
-                    run_id: None,
-                    key: key.clone(),
-                    value: value.clone(),
-                })?;
-            }
-        }
-        Ok(fork)
     }
 
     pub fn next_sequence(&self) -> u64 {
@@ -1058,7 +939,6 @@ impl Record {
             | Self::WriteDeferred { .. }
             | Self::WriteApplied { .. }
             | Self::FactSet { .. }
-            | Self::HookResumeData { .. }
             | Self::Usage { .. }
             | Self::PermissionRequested { .. }
             | Self::PermissionResolved { .. }
@@ -1253,7 +1133,7 @@ fn classify_lines(
                     }
                 }
                 KnownSessionRecord::Plan { items, explanation } => {
-                    let plan = crate::types::SessionPlan { explanation, items };
+                    let plan = threadlane_protocol::SessionPlan { explanation, items };
                     if let Ok(plan_json) = serde_json::to_string(&plan) {
                         records.push(Record::FactSet {
                             id: format!("fact-plan-{}", index + 1),
@@ -1405,7 +1285,7 @@ mod tests {
         ContextSnapshot, ContextSnapshotLoadOutcome, HarnessEventHub, JsonlStore, Record, Reducer,
         SessionStore, TraceString,
     };
-    use crate::types::AgentMessage;
+    use threadlane_protocol::AgentMessage;
 
     fn user_entry(id: &str, lane: &str) -> crate::harness::Entry {
         crate::harness::Entry::new(

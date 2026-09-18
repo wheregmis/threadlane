@@ -13,11 +13,11 @@ use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Selectable, Sizab
 use threadlane_ui_state::{actions::AppAction, controller};
 use threadlane_ui_state::next_event_batch;
 use threadlane_ui_state::provider_auth::{self, ProviderAuthEvent};
-use threadlane_ui_state::settings::{self, SettingsEvent};
+use threadlane_ui_state::settings::SettingsEvent;
 use threadlane_ui_state::AppState;
-use threadlane_session::{
-    AcpAgentRecord, AcpScope, ExtensionRecord, ExtensionScope, SkillMetadata,
-};
+use threadlane_acp::{AcpAgentRecord, AcpScope};
+use threadlane_skills::SkillMetadata;
+use threadlane_wasi::packages::{ExtensionRecord, ExtensionScope};
 use threadlane_updater::UpdateStatus;
 
 /// Fixed palette for the Appearance page's miniature theme previews. These
@@ -341,12 +341,12 @@ impl SettingsView {
     }
 
     fn refresh_extensions(&mut self, cx: &mut Context<Self>) {
-        self.extension_rows = settings::discover_extensions(self.active_project(cx));
+        self.extension_rows = threadlane_wasi::settings::discover_extensions(self.active_project(cx));
     }
 
     fn refresh_skills(&mut self, cx: &mut Context<Self>) {
         let project = self.active_project(cx);
-        self.skill_rows = settings::discover_skills(project.as_deref());
+        self.skill_rows = threadlane_skills::settings::discover_skills(project.as_deref());
     }
 
     fn refresh_providers_snapshot(&mut self) {
@@ -355,15 +355,15 @@ impl SettingsView {
 
     fn refresh_acp(&mut self, cx: &mut Context<Self>) {
         let project = self.active_project(cx);
-        if let Err(error) = settings::upgrade_acp_presets(project.as_deref()) {
+        if let Err(error) = threadlane_acp_engine::upgrade_acp_presets(project.as_deref()) {
             self.capability_status = Some(error);
         }
-        self.acp_rows = settings::configured_acp_agents(project.clone());
+        self.acp_rows = threadlane_acp_engine::configured_acp_agents(project.clone());
         self.model.update(cx, |state, cx| {
             state.reconcile_selected_model();
             cx.notify();
         });
-        if let Err(error) = settings::probe_acp_agents(project, self.settings_tx.clone()) {
+        if let Err(error) = threadlane_ui_state::settings::probe_acp_agents(project, self.settings_tx.clone()) {
             self.capability_status = Some(error);
         }
         // Keep the shared model cache warm while the status probe runs: the
@@ -400,7 +400,7 @@ impl SettingsView {
         let model = self.model.clone();
 
         div()
-            .w(px(240.0))
+            .w(rems(15.0))
             .h_full()
             .flex_none()
             .flex()
@@ -426,16 +426,7 @@ impl SettingsView {
                     .gap_1()
                     .child(
                         Button::new("settings-general")
-                            .child(
-                                div()
-                                    .w_full()
-                                    .flex()
-                                    .items_center()
-                                    .justify_start()
-                                    .gap_2()
-                                    .child(IconName::Settings)
-                                    .child("General"),
-                            )
+                            .icon(IconName::Settings).label("General")
                             .ghost()
                             .selected(self.page == SettingsPage::General)
                             .w_full()
@@ -447,16 +438,7 @@ impl SettingsView {
                     )
                     .child(
                         Button::new("settings-appearance")
-                            .child(
-                                div()
-                                    .w_full()
-                                    .flex()
-                                    .items_center()
-                                    .justify_start()
-                                    .gap_2()
-                                    .child(IconName::Palette)
-                                    .child("Appearance"),
-                            )
+                            .icon(IconName::Palette).label("Appearance")
                             .ghost()
                             .selected(self.page == SettingsPage::Appearance)
                             .w_full()
@@ -468,16 +450,7 @@ impl SettingsView {
                     )
                     .child(
                         Button::new("settings-keybindings")
-                            .child(
-                                div()
-                                    .w_full()
-                                    .flex()
-                                    .items_center()
-                                    .justify_start()
-                                    .gap_2()
-                                    .child(IconName::SquareTerminal)
-                                    .child("Keybindings"),
-                            )
+                            .icon(IconName::SquareTerminal).label("Keybindings")
                             .ghost()
                             .selected(self.page == SettingsPage::Keybindings)
                             .w_full()
@@ -489,16 +462,7 @@ impl SettingsView {
                     )
                     .child(
                         Button::new("settings-providers")
-                            .child(
-                                div()
-                                    .w_full()
-                                    .flex()
-                                    .items_center()
-                                    .justify_start()
-                                    .gap_2()
-                                    .child(IconName::Bot)
-                                    .child("Providers"),
-                            )
+                            .icon(IconName::Bot).label("Providers")
                             .ghost()
                             .selected(self.page == SettingsPage::Providers)
                             .w_full()
@@ -511,16 +475,7 @@ impl SettingsView {
                     )
                     .child(
                         Button::new("settings-subagents")
-                            .child(
-                                div()
-                                    .w_full()
-                                    .flex()
-                                    .items_center()
-                                    .justify_start()
-                                    .gap_2()
-                                    .child(IconName::Bot)
-                                    .child("Subagents"),
-                            )
+                            .icon(IconName::Bot).label("Subagents")
                             .ghost()
                             .selected(self.page == SettingsPage::Subagents)
                             .w_full()
@@ -532,16 +487,7 @@ impl SettingsView {
                     )
                     .child(
                         Button::new("settings-skills")
-                            .child(
-                                div()
-                                    .w_full()
-                                    .flex()
-                                    .items_center()
-                                    .justify_start()
-                                    .gap_2()
-                                    .child(IconName::BookOpen)
-                                    .child("Skills"),
-                            )
+                            .icon(IconName::BookOpen).label("Skills")
                             .ghost()
                             .selected(self.page == SettingsPage::Skills)
                             .w_full()
@@ -555,16 +501,7 @@ impl SettingsView {
                     )
                     .child(
                         Button::new("settings-extensions")
-                            .child(
-                                div()
-                                    .w_full()
-                                    .flex()
-                                    .items_center()
-                                    .justify_start()
-                                    .gap_2()
-                                    .child(IconName::HardDrive)
-                                    .child("WASI Extensions"),
-                            )
+                            .icon(IconName::HardDrive).label("WASI Extensions")
                             .ghost()
                             .selected(self.page == SettingsPage::Extensions)
                             .w_full()
@@ -578,16 +515,7 @@ impl SettingsView {
                     )
                     .child(
                         Button::new("settings-acp")
-                            .child(
-                                div()
-                                    .w_full()
-                                    .flex()
-                                    .items_center()
-                                    .justify_start()
-                                    .gap_2()
-                                    .child(IconName::Network)
-                                    .child("ACP Agents"),
-                            )
+                            .icon(IconName::Network).label("ACP Agents")
                             .ghost()
                             .selected(self.page == SettingsPage::AcpAgents)
                             .w_full()
@@ -604,16 +532,7 @@ impl SettingsView {
             .child(
                 div().flex_none().px_3().py_2().child(
                     Button::new("settings-back")
-                        .child(
-                            div()
-                                .w_full()
-                                .flex()
-                                .items_center()
-                                .justify_start()
-                                .gap_2()
-                                .child(IconName::ArrowLeft)
-                                .child("Back"),
-                        )
+                        .icon(IconName::ArrowLeft).label("Back")
                         .ghost()
                         .w_full()
                         .justify_start()
@@ -634,7 +553,7 @@ impl SettingsView {
         let Some(project) = state.active_work_dir.clone() else {
             return Self::empty_state("Attach a project to configure subagents.", theme);
         };
-        let preferences = threadlane_runtime::subagent_settings::load(&project);
+        let preferences = threadlane_project::subagent_settings::load(&project);
         let available = threadlane_ui_catalog::available_models_for_project(Some(&project));
         let selected_model = preferences.model.clone();
         let reasoning_model = selected_model
@@ -642,7 +561,7 @@ impl SettingsView {
             .or(preferences.fast_model.as_deref())
             .unwrap_or(&state.selected_model);
         let selected_reasoning = preferences.reasoning_effort.map(|effort| {
-            threadlane_runtime::model_registry::effective_effort(
+            threadlane_provider::model_registry::effective_effort(
                 reasoning_model,
                 effort,
                 Some(&project),
@@ -683,9 +602,9 @@ impl SettingsView {
                             .checked(selected_model.is_none())
                             .on_click(move |_, _, cx| {
                                 let mut settings =
-                                    threadlane_runtime::subagent_settings::load(&project_for_parent);
+                                    threadlane_project::subagent_settings::load(&project_for_parent);
                                 settings.model = None;
-                                if threadlane_runtime::subagent_settings::save(
+                                if threadlane_project::subagent_settings::save(
                                     &project_for_parent,
                                     &settings,
                                 )
@@ -713,9 +632,9 @@ impl SettingsView {
                                 .checked(is_current)
                                 .on_click(move |_, _, cx| {
                                     let mut settings =
-                                        threadlane_runtime::subagent_settings::load(&project);
+                                        threadlane_project::subagent_settings::load(&project);
                                     settings.model = Some(option.id.clone());
-                                    if threadlane_runtime::subagent_settings::save(&project, &settings)
+                                    if threadlane_project::subagent_settings::save(&project, &settings)
                                         .is_ok()
                                     {
                                         model_entity.update(cx, |state, cx| {
@@ -737,7 +656,7 @@ impl SettingsView {
             .dropdown_menu(move |menu, _, _| {
                 let entity = reasoning_entity.clone();
                 let project = project_for_reasoning.clone();
-                let mut options: Vec<Option<threadlane_runtime::ReasoningEffort>> = vec![None];
+                let mut options: Vec<Option<threadlane_protocol::ReasoningEffort>> = vec![None];
                 options.extend(
                     threadlane_ui_catalog::efforts_for_model(
                         &reasoning_for_model_cloned,
@@ -757,9 +676,9 @@ impl SettingsView {
                         )
                         .checked(selected_reasoning == effort)
                         .on_click(move |_, _, cx| {
-                            let mut settings = threadlane_runtime::subagent_settings::load(&project);
+                            let mut settings = threadlane_project::subagent_settings::load(&project);
                             settings.reasoning_effort = effort;
-                            if threadlane_runtime::subagent_settings::save(&project, &settings).is_ok()
+                            if threadlane_project::subagent_settings::save(&project, &settings).is_ok()
                             {
                                 entity.update(cx, |state, cx| {
                                     state.invalidate_capability_runtimes();
@@ -795,9 +714,9 @@ impl SettingsView {
                             .checked(selected_fast_model.is_none())
                             .on_click(move |_, _, cx| {
                                 let mut settings =
-                                    threadlane_runtime::subagent_settings::load(&project_for_parent);
+                                    threadlane_project::subagent_settings::load(&project_for_parent);
                                 settings.fast_model = None;
-                                if threadlane_runtime::subagent_settings::save(
+                                if threadlane_project::subagent_settings::save(
                                     &project_for_parent,
                                     &settings,
                                 )
@@ -825,9 +744,9 @@ impl SettingsView {
                                 .checked(is_current)
                                 .on_click(move |_, _, cx| {
                                     let mut settings =
-                                        threadlane_runtime::subagent_settings::load(&project);
+                                        threadlane_project::subagent_settings::load(&project);
                                     settings.fast_model = Some(option.id.clone());
-                                    if threadlane_runtime::subagent_settings::save(&project, &settings)
+                                    if threadlane_project::subagent_settings::save(&project, &settings)
                                         .is_ok()
                                     {
                                         model_entity.update(cx, |state, cx| {
@@ -841,7 +760,7 @@ impl SettingsView {
                 )
             });
         let selected_fast_reasoning = preferences.fast_reasoning_effort.map(|effort| {
-            threadlane_runtime::model_registry::effective_effort(
+            threadlane_provider::model_registry::effective_effort(
                 preferences.fast_model.as_deref().unwrap_or_default(),
                 effort,
                 Some(&project),
@@ -861,7 +780,7 @@ impl SettingsView {
             .dropdown_menu(move |menu, _, _| {
                 let entity = fast_reasoning_entity.clone();
                 let project = project_for_fast_reasoning.clone();
-                let mut options: Vec<Option<threadlane_runtime::ReasoningEffort>> = vec![None];
+                let mut options: Vec<Option<threadlane_protocol::ReasoningEffort>> = vec![None];
                 options.extend(
                     threadlane_ui_catalog::efforts_for_model(&fast_for_model, Some(&project))
                         .into_iter()
@@ -878,9 +797,9 @@ impl SettingsView {
                         )
                         .checked(selected_fast_reasoning == effort)
                         .on_click(move |_, _, cx| {
-                            let mut settings = threadlane_runtime::subagent_settings::load(&project);
+                            let mut settings = threadlane_project::subagent_settings::load(&project);
                             settings.fast_reasoning_effort = effort;
-                            if threadlane_runtime::subagent_settings::save(&project, &settings).is_ok()
+                            if threadlane_project::subagent_settings::save(&project, &settings).is_ok()
                             {
                                 entity.update(cx, |state, cx| {
                                     state.invalidate_capability_runtimes();
@@ -902,17 +821,17 @@ impl SettingsView {
                 let entity = orchestrator_entity.clone();
                 let project = project_for_orchestrator.clone();
                 [
-                    threadlane_runtime::OrchestratorMode::Always,
-                    threadlane_runtime::OrchestratorMode::Off,
+                    threadlane_protocol::OrchestratorMode::Always,
+                    threadlane_protocol::OrchestratorMode::Off,
                 ]
                 .into_iter()
                 .fold(menu, |menu, mode| {
                     let entity = entity.clone();
                     let project = project.clone();
                     menu.item(PopupMenuItem::new(mode.label()).on_click(move |_, _, cx| {
-                        let mut settings = threadlane_runtime::subagent_settings::load(&project);
+                        let mut settings = threadlane_project::subagent_settings::load(&project);
                         settings.orchestrator_mode = mode;
-                        if threadlane_runtime::subagent_settings::save(&project, &settings).is_ok() {
+                        if threadlane_project::subagent_settings::save(&project, &settings).is_ok() {
                             entity.update(cx, |state, cx| {
                                 state.invalidate_capability_runtimes();
                                 cx.notify();
@@ -993,9 +912,7 @@ impl SettingsView {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "No active project".to_string());
         let project_count = state.projects.len();
-        let needle_enabled = state.needle_enabled;
         let auto_address_pr_reviews_enabled = state.auto_address_pr_reviews_enabled;
-        let toggle_view_needle = cx.entity().downgrade();
         let toggle_view_auto_address = cx.entity().downgrade();
         let update_status_label = match &state.update_status {
             UpdateStatus::Checking => "Checking for updates...",
@@ -1171,72 +1088,6 @@ impl SettingsView {
                                             .text_sm()
                                             .font_weight(FontWeight::MEDIUM)
                                             .text_color(theme.foreground)
-                                            .child("Local Needle Indexing"),
-                                    )
-                                    .child(
-                                        Tag::new()
-                                            .child(if needle_enabled { "Enabled" } else { "Disabled" })
-                                            .with_variant(if needle_enabled {
-                                                TagVariant::Success
-                                            } else {
-                                                TagVariant::Secondary
-                                            })
-                                            .small(),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .mt_1()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child("Accelerate file search and symbol extraction using the native local index."),
-                            ),
-                    )
-                    .child(
-                        Switch::new("general-needle-switch")
-                            .checked(needle_enabled)
-                            .tooltip(if needle_enabled {
-                                "Disable Needle routing"
-                            } else {
-                                "Enable Needle routing"
-                            })
-                            .on_click(move |checked, _window, cx| {
-                                let _ = toggle_view_needle.update(cx, |this, cx| {
-                                    let result = this.model.update(cx, |state, _cx| {
-                                        state.set_needle_enabled(*checked)
-                                    });
-                                    if let Err(error) = result {
-                                        this.capability_status = Some(error);
-                                    }
-                                    cx.notify();
-                                });
-                            }),
-                    ),
-            )
-            .child(
-                div()
-                    .rounded_xl()
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.title_bar)
-                    .p_4()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(theme.foreground)
                                             .child("Auto-Address PR Reviews"),
                                     )
                                     .child(
@@ -1260,6 +1111,7 @@ impl SettingsView {
                     )
                     .child(
                         Switch::new("general-auto-address-pr-reviews-switch")
+                            .accessibility_label("Automatically address PR reviews")
                             .checked(auto_address_pr_reviews_enabled)
                             .tooltip(if auto_address_pr_reviews_enabled {
                                 "Disable automatic PR review addressing"
@@ -1299,8 +1151,14 @@ impl SettingsView {
                     .grid_cols(2)
                     .gap_4()
                     .child(
-                        div()
-                            .id("theme-card-dark")
+                        Button::new("theme-card-dark")
+                            .accessibility_label("Threadlane Dark")
+                            .tooltip("Use Threadlane Dark")
+                            .outline()
+                            .selected(is_dark)
+                            .h_auto()
+                            .items_stretch()
+                            .text_left()
                             .p_4()
                             .rounded_xl()
                             .border_2()
@@ -1313,6 +1171,7 @@ impl SettingsView {
                             .flex()
                             .flex_col()
                             .gap_3()
+                            .child(div().w_full().flex().flex_col().gap_3()
                             .child(
                                 div()
                                     .h(px(80.0))
@@ -1382,11 +1241,17 @@ impl SettingsView {
                                             .with_variant(TagVariant::Success)
                                             .small()
                                     })),
-                            ),
+                            )),
                     )
                     .child(
-                        div()
-                            .id("theme-card-light")
+                        Button::new("theme-card-light")
+                            .accessibility_label("Threadlane Light")
+                            .tooltip("Use Threadlane Light")
+                            .outline()
+                            .selected(is_light)
+                            .h_auto()
+                            .items_stretch()
+                            .text_left()
                             .p_4()
                             .rounded_xl()
                             .border_2()
@@ -1403,6 +1268,7 @@ impl SettingsView {
                             .flex()
                             .flex_col()
                             .gap_3()
+                            .child(div().w_full().flex().flex_col().gap_3()
                             .child(
                                 div()
                                     .h(px(80.0))
@@ -1472,7 +1338,7 @@ impl SettingsView {
                                             .with_variant(TagVariant::Success)
                                             .small()
                                     })),
-                            ),
+                            )),
                     ),
             )
             .into_any_element()
@@ -1490,7 +1356,7 @@ impl SettingsView {
                     ("⌘ R", "Toggle Right Panel"),
                     ("⌘ J", "Toggle Terminal Panel"),
                     ("⌘ E", "Toggle Code/Diff Editor"),
-                    ("⌘ N", "New Session"),
+                    ("⌘ N", "New task"),
                     ("⌘ P", "Open Project File Finder"),
                     ("⌘ ⇧ O", "Attach Local Project"),
                 ],
@@ -2559,7 +2425,7 @@ impl SettingsView {
                                             };
                                             let project = this.active_project(cx);
                                             this.capability_status = Some(
-                                                settings::install_extension(project, &path, scope)
+                                                threadlane_wasi::settings::install_extension(project, &path, scope)
                                                     .unwrap_or_else(|error| error),
                                             );
                                             this.refresh_extensions(cx);
@@ -2655,6 +2521,7 @@ impl SettingsView {
                             "extension-toggle-{}",
                             record.id()
                         )))
+                        .accessibility_label(format!("Enable extension {}", record.id()))
                         .checked(enabled)
                         .tooltip(if enabled {
                             "Disable extension"
@@ -2664,7 +2531,7 @@ impl SettingsView {
                         .on_click(move |checked, _window, cx| {
                             let checked = *checked;
                             let _ = toggle_view.update(cx, |this, cx| {
-                                let result = settings::set_extension_enabled(
+                                let result = threadlane_wasi::settings::set_extension_enabled(
                                     this.active_project(cx),
                                     &toggle_record,
                                     checked,
@@ -2684,6 +2551,7 @@ impl SettingsView {
                             "extension-remove-{}",
                             record.id()
                         )))
+                        .accessibility_label(format!("Remove extension {}", record.id()))
                         .icon(IconName::Delete)
                         .tooltip("Remove extension")
                         .ghost()
@@ -2691,7 +2559,7 @@ impl SettingsView {
                         .h(px(32.0))
                         .on_click(move |_event, _window, cx| {
                             let _ = remove_view.update(cx, |this, cx| {
-                                let result = settings::remove_extension(
+                                let result = threadlane_wasi::settings::remove_extension(
                                     this.active_project(cx),
                                     &remove_record,
                                 );
@@ -2750,7 +2618,7 @@ impl SettingsView {
                                     return;
                                 };
                                 this.capability_status =
-                                    settings::disable_all_skills(&project, skill_ids.clone()).err();
+                                    threadlane_skills::settings::disable_all_skills(&project, skill_ids.clone()).err();
                                 this.refresh_skills(cx);
                                 this.model.update(cx, |state, cx| {
                                     state.invalidate_capability_runtimes();
@@ -2849,6 +2717,7 @@ impl SettingsView {
                     )
                     .child(
                         Switch::new(SharedString::from(format!("skill-toggle-{skill_id}")))
+                            .accessibility_label(format!("Enable skill {skill_id}"))
                             .checked(enabled)
                             .disabled(!has_project || !skill.is_valid)
                             .tooltip(if enabled {
@@ -2866,7 +2735,7 @@ impl SettingsView {
                                         return;
                                     };
                                     this.capability_status =
-                                        settings::set_skill_enabled(&project, &skill_id, checked)
+                                        threadlane_skills::settings::set_skill_enabled(&project, &skill_id, checked)
                                             .err();
                                     this.refresh_skills(cx);
                                     this.model.update(cx, |state, cx| {
@@ -2917,7 +2786,7 @@ impl SettingsView {
                             .font_weight(FontWeight::MEDIUM)
                             .child("Quick setup"),
                     )
-                    .children(settings::ACP_PRESETS.iter().map(|preset| {
+                    .children(threadlane_acp_engine::ACP_PRESETS.iter().map(|preset| {
                         let preset_view = cx.entity().downgrade();
                         let configured = rows.iter().find(|record| {
                             preset.matches_agent(&record.config)
@@ -2980,6 +2849,7 @@ impl SettingsView {
                                     "acp-preset-{preset_id}-{:?}",
                                     selected_scope
                                 )))
+                                .accessibility_label(format!("Enable {}", preset.name))
                                 .checked(enabled)
                                 .disabled(selected_scope == AcpScope::Project && !has_project)
                                 .tooltip(if enabled {
@@ -2993,7 +2863,7 @@ impl SettingsView {
                                         let _ = preset_view.update(cx, |this, cx| {
                                             let project = this.active_project(cx);
                                             this.capability_status =
-                                                settings::set_acp_preset_enabled(
+                                                threadlane_acp_engine::set_acp_preset_enabled(
                                                     project.as_deref(),
                                                     selected_scope,
                                                     preset,
@@ -3057,7 +2927,7 @@ impl SettingsView {
                                                 AcpScope::Project
                                             };
                                             let project = this.active_project(cx);
-                                            this.capability_status = settings::add_acp_agent(
+                                            this.capability_status = threadlane_acp_engine::add_acp_agent(
                                                 project.as_deref(),
                                                 scope,
                                                 &name,
@@ -3072,7 +2942,7 @@ impl SettingsView {
                     ),
             )
             .children(rows.into_iter().filter_map(|record| {
-                if settings::ACP_PRESETS
+                if threadlane_acp_engine::ACP_PRESETS
                     .iter()
                     .any(|preset| preset.matches_agent(&record.config))
                 {
@@ -3163,6 +3033,7 @@ impl SettingsView {
                     )
                     .child(
                         Switch::new(SharedString::from(format!("acp-toggle-{toggle_id}")))
+                            .accessibility_label(format!("Enable ACP agent {toggle_id}"))
                             .checked(enabled)
                             .tooltip(if enabled {
                                 "Disable ACP agent"
@@ -3173,7 +3044,7 @@ impl SettingsView {
                                 let checked = *checked;
                                 let _ = toggle_view.update(cx, |this, cx| {
                                     let project = this.active_project(cx);
-                                    this.capability_status = settings::set_acp_enabled(
+                                    this.capability_status = threadlane_acp_engine::set_acp_enabled(
                                         project.as_deref(),
                                         scope,
                                         &toggle_id,
@@ -3187,6 +3058,7 @@ impl SettingsView {
                     )
                     .child(
                         Button::new(SharedString::from(format!("acp-remove-{remove_id}")))
+                            .accessibility_label(format!("Remove ACP agent {remove_id}"))
                             .icon(IconName::Delete)
                             .tooltip("Remove ACP agent")
                             .ghost()
@@ -3195,7 +3067,7 @@ impl SettingsView {
                             .on_click(move |_event, _window, cx| {
                                 let _ = remove_view.update(cx, |this, cx| {
                                     let project = this.active_project(cx);
-                                    this.capability_status = settings::remove_acp_agent(
+                                    this.capability_status = threadlane_acp_engine::remove_acp_agent(
                                         project.as_deref(),
                                         scope,
                                         &remove_id,
@@ -3279,7 +3151,7 @@ impl Render for SettingsView {
                     .child(
                         div()
                             .w_full()
-                            .max_w(px(760.0))
+                            .max_w(rems(48.0))
                             .mx_auto()
                             .child(div().h(threadlane_ui_theme::WINDOW_CONTROLS_CLEARANCE).flex_none())
                             .child(

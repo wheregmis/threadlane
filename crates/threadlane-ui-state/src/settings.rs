@@ -2,18 +2,7 @@ use std::path::PathBuf;
 use tokio::sync::mpsc::UnboundedSender as Sender;
 
 use threadlane_project::default_global_threadlane_dir;
-pub use threadlane_skills::settings::{
-    disable_all_skills, discover_skills, set_skill_enabled,
-};
-pub use threadlane_wasi::settings::{
-    discover_extensions, install_extension, remove_extension, set_extension_enabled,
-};
-pub use threadlane_session::ACP_PRESETS;
-pub use threadlane_session::{
-    add_acp_agent, configured_acp_agents, remove_acp_agent, set_acp_enabled,
-    set_acp_preset_enabled, upgrade_acp_presets,
-};
-use threadlane_session::{AcpAgentRecord, AcpManager};
+use threadlane_acp::{AcpAgentRecord, AcpManager};
 
 #[derive(Debug)]
 pub enum SettingsEvent {
@@ -21,7 +10,7 @@ pub enum SettingsEvent {
 }
 
 fn executor() -> Result<&'static tokio::runtime::Runtime, String> {
-    Ok(threadlane_runtime::get_runtime())
+    Ok(threadlane_provider::exec::get_runtime())
 }
 
 fn acp_manager(project_root: Option<PathBuf>) -> AcpManager {

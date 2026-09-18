@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
@@ -6,21 +5,9 @@ use std::sync::{Arc, RwLock};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookKind {
     BeforeRun,
-    BeforeResume,
     AfterRun,
-    BeforeContext,
-    BeforeRequest,
-    AfterRequest,
-    BeforePayload,
-    AfterPayload,
-    BeforeResponse,
-    AfterResponse,
     BeforeTool,
     AfterTool,
-    BeforeCompaction,
-    AfterCompaction,
-    BeforeNavigation,
-    AfterNavigation,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -28,7 +15,6 @@ pub struct HookContext {
     pub session_id: String,
     pub lane: String,
     pub run_id: Option<String>,
-    pub resume_data: Option<String>,
     /// Tool-specific context populated for BeforeTool / AfterTool hooks.
     pub tool_call_id: Option<String>,
     pub tool_name: Option<String>,
@@ -75,7 +61,6 @@ struct RegisteredHook {
 #[derive(Default)]
 struct HookRegistryState {
     hooks: RwLock<Vec<RegisteredHook>>,
-    resume_data: RwLock<HashMap<String, String>>,
 }
 
 /// Session-scoped asynchronous hook registry.
@@ -111,12 +96,7 @@ impl HookRegistry {
         Ok(())
     }
 
-    async fn run_handlers(
-        &self,
-        kind: HookKind,
-        context: &HookContext,
-        use_resume_data: bool,
-    ) -> HookRun {
+    async fn run_handlers(&self, kind: HookKind, context: &HookContext) -> HookRun {
         let hooks = self
             .state
             .hooks
@@ -126,19 +106,9 @@ impl HookRegistry {
             .filter(|hook| hook.kind == kind)
             .cloned()
             .collect::<Vec<_>>();
-        let resume_data = use_resume_data.then(|| {
-            self.state
-                .resume_data
-                .read()
-                .unwrap_or_else(|error| error.into_inner())
-                .clone()
-        });
         let mut run = HookRun::default();
         for hook in hooks {
-            let mut context = context.clone();
-            if let Some(resume_data) = resume_data.as_ref() {
-                context.resume_data = resume_data.get(&hook.id).cloned();
-            }
+            let context = context.clone();
             match (hook.handler)(context).await {
                 Ok(effect) => {
                     if effect.override_content.is_some() {
@@ -193,7 +163,7 @@ impl HookRegistry {
     }
 
     pub async fn run(&self, kind: HookKind, context: &HookContext) -> Vec<HookFailure> {
-        self.run_handlers(kind, context, false).await.failures
+        self.run_handlers(kind, context).await.failures
     }
 
     pub async fn run_before_tool(&self, context: &HookContext) -> Result<(), Vec<HookFailure>> {
@@ -206,68 +176,6 @@ impl HookRegistry {
     }
 
     pub(crate) async fn run_after_tool(&self, context: &HookContext) -> HookRun {
-        self.run_handlers(HookKind::AfterTool, context, false).await
-    }
-
-    pub fn set_resume_data(
-        &self,
-        hook_id: impl Into<String>,
-        data: impl Into<String>,
-    ) -> Result<(), HookFailure> {
-        let hook_id = hook_id.into();
-        let hooks = self
-            .state
-            .hooks
-            .read()
-            .unwrap_or_else(|error| error.into_inner());
-        if !hooks.iter().any(|hook| hook.id == hook_id) {
-            return Err(HookFailure {
-                id: hook_id,
-                message: "resume data requires a registered hook".into(),
-            });
-        }
-        drop(hooks);
-        self.state
-            .resume_data
-            .write()
-            .unwrap_or_else(|error| error.into_inner())
-            .insert(hook_id, data.into());
-        Ok(())
-    }
-
-    pub fn clear_resume_data(&self, hook_id: &str) {
-        self.state
-            .resume_data
-            .write()
-            .unwrap_or_else(|error| error.into_inner())
-            .remove(hook_id);
-    }
-
-    pub(crate) fn restore_resume_data(
-        &self,
-        persisted: &std::collections::BTreeMap<String, String>,
-    ) {
-        let hooks = self
-            .state
-            .hooks
-            .read()
-            .unwrap_or_else(|error| error.into_inner());
-        let resume_data = persisted
-            .iter()
-            .filter(|(hook_id, _)| hooks.iter().any(|hook| &hook.id == *hook_id))
-            .map(|(hook_id, data)| (hook_id.clone(), data.clone()))
-            .collect();
-        drop(hooks);
-        *self
-            .state
-            .resume_data
-            .write()
-            .unwrap_or_else(|error| error.into_inner()) = resume_data;
-    }
-
-    pub async fn run_before_resume(&self, context: &HookContext) -> Vec<HookFailure> {
-        self.run_handlers(HookKind::BeforeResume, context, true)
-            .await
-            .failures
+        self.run_handlers(HookKind::AfterTool, context).await
     }
 }

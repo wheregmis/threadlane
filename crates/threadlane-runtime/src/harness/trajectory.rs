@@ -8,7 +8,7 @@ use super::{
     PermissionTraceSource, ProviderErrorSummary, ProviderOutcome, Record, SessionStore,
     SubagentLifecyclePhase, ToolExecutionOutcome, ToolExecutionPhase,
 };
-use crate::types::{AgentMessage, TokenUsage};
+use threadlane_protocol::{AgentMessage, TokenUsage};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -195,20 +195,6 @@ pub struct SubagentTrajectory {
     seq: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct GenericDurableTrajectory {
-    seq: u64,
-    id: String,
-    lane: String,
-    category: String,
-    summary: String,
-    detail: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    run_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    turn: Option<u32>,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AnomalyKind {
     RepeatedToolCallIdenticalArgs,
@@ -241,8 +227,6 @@ pub enum TrajectoryItem {
     Tool(ToolTrajectory),
     Permission(PermissionTrajectory),
     Subagent(SubagentTrajectory),
-    Anomaly(DiagnosticAnomaly),
-    Event(GenericDurableTrajectory),
 }
 
 impl TrajectoryItem {
@@ -256,8 +240,6 @@ impl TrajectoryItem {
             Self::Tool(t) => t.started_seq,
             Self::Permission(p) => p.requested_seq,
             Self::Subagent(s) => s.seq,
-            Self::Anomaly(a) => a.related_refs.first().map_or(0, |r| r.seq),
-            Self::Event(e) => e.seq,
         }
     }
 }
@@ -328,8 +310,7 @@ pub fn project_trajectory<S: SessionStore>(store: &S) -> SessionTrajectory {
     // Merge the two seq-ordered streams in linear time instead of
     // concatenating and re-sorting (O(n log n)). All stores keep entries and
     // records in seq order (JsonlStore assigns at append and sorts records on
-    // load; SqliteStore loads ORDER BY seq), with entries winning ties to
-    // match the previous stable sort.
+    // load), with entries winning ties to match the previous stable sort.
     #[derive(Clone)]
     enum JournalItem<'a> {
         Entry(&'a Entry),
@@ -914,11 +895,12 @@ pub fn project_trajectory<S: SessionStore>(store: &S) -> SessionTrajectory {
     // ── Diagnostic Anomaly Detection Pass ──────────────────────────────────
     let mut anomalies = Vec::new();
 
-    /// Minimum consecutive same-error runs for an ErrorLoop anomaly (mirrors
-    /// the runtime loop guard default).
-    const ERROR_LOOP_MIN_RUN: usize = 3;
-    /// Minimum consecutive cycle rounds for a PingPongCycle anomaly.
-    const PING_PONG_MIN_ROUNDS: usize = 3;
+    /// Minimum consecutive same-error runs for an ErrorLoop anomaly, shared
+    /// with the live loop guard default so the two cannot drift apart.
+    const ERROR_LOOP_MIN_RUN: usize = threadlane_loop::DEFAULT_ERROR_LIMIT;
+    /// Minimum consecutive cycle rounds for a PingPongCycle anomaly, shared
+    /// with the live loop guard default.
+    const PING_PONG_MIN_ROUNDS: usize = threadlane_loop::DEFAULT_PINGPONG_ROUNDS;
 
     // 1. Detect repeated tool calls with identical arguments (potential execution loop)
     let mut seen_calls: HashMap<(String, String), Vec<TrajectoryRef>> = HashMap::new();

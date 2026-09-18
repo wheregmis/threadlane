@@ -1,15 +1,26 @@
+//! Session work scheduler: durable intent plus an in-memory wake.
+//!
+//! Every queued input is persisted as a durable queue entry first
+//! (`QueueEnqueued`); the in-memory [`AgentWork`] wake only tells the turn
+//! loop something is pending. Consumption is always by exact
+//! `(queue, entry_id)` identity — never by message value, since consecutive
+//! identical messages are legitimate — and a wake is finished only after its
+//! own entry is consumed, so a steer or follow-up arriving mid-turn keeps its
+//! own scheduler wake. This is the only in-memory staging in the session;
+//! there is no second queue implementation.
+
 use super::harness::CodingSessionHarness;
 #[cfg(test)]
 use async_trait::async_trait;
-use log::warn;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use threadlane_runtime::harness::QueueKind;
-use threadlane_runtime::{AgentMessage, AgentRuntime, ImageAttachment};
+use threadlane_protocol::{AgentMessage, ImageAttachment};
+use threadlane_runtime::AgentRuntime;
 #[cfg(test)]
-use threadlane_runtime::{AgentToolDefinition, ToolExecutor};
+use threadlane_protocol::{AgentToolDefinition, ToolExecutor};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentWork {
@@ -44,7 +55,7 @@ fn enqueue_harness_queue(
     harness.enqueue_unbound_with_images(queue, content, images)
 }
 
-pub fn enqueue_harness_follow_up(
+pub(crate) fn enqueue_harness_follow_up(
     session_file: &Path,
     content: String,
     images: Vec<ImageAttachment>,
@@ -61,7 +72,7 @@ pub struct AgentWorkScheduler {
 }
 
 impl AgentWorkScheduler {
-    pub fn schedule(&self, work: AgentWork) {
+    pub(crate) fn schedule(&self, work: AgentWork) {
         if let Ok(mut pending) = self.pending.lock() {
             pending.push_back(work);
         }
@@ -74,28 +85,28 @@ impl AgentWorkScheduler {
             .unwrap_or_default()
     }
 
-    pub fn set_acp_model(&self, is_acp: bool) {
+    pub(crate) fn set_acp_model(&self, is_acp: bool) {
         self.acp_model.store(is_acp, Ordering::SeqCst);
     }
 
-    pub fn next(&self) -> Option<AgentWork> {
+    pub(crate) fn next(&self) -> Option<AgentWork> {
         self.pending.lock().ok()?.front().cloned()
     }
 
-    pub fn finish_next(&self) {
+    pub(crate) fn finish_next(&self) {
         if let Ok(mut pending) = self.pending.lock() {
             pending.pop_front();
         }
     }
 
     #[cfg(test)]
-    pub fn set_test_observer(&self, observer: Arc<std::sync::Mutex<Vec<AgentWork>>>) {
+    pub(crate) fn set_test_observer(&self, observer: Arc<std::sync::Mutex<Vec<AgentWork>>>) {
         if let Ok(mut current) = self.test_observer.lock() {
             *current = Some(observer);
         }
     }
 
-    pub async fn run_executor(
+    pub(crate) async fn run_executor(
         &self,
         agent: &mut AgentRuntime,
         session_file: Option<&Path>,
@@ -139,7 +150,7 @@ impl AgentWorkScheduler {
 
 #[cfg(test)]
 pub struct DeterministicSubagentToolExecutor {
-    pub observed: Arc<AtomicBool>,
+    pub(crate) observed: Arc<AtomicBool>,
 }
 
 #[cfg(test)]
@@ -174,24 +185,10 @@ pub struct CodingAgentWorkHandle {
 }
 
 impl CodingAgentWorkHandle {
-    pub fn new(scheduler: AgentWorkScheduler, session_file: Option<PathBuf>) -> Self {
+    pub(crate) fn new(scheduler: AgentWorkScheduler, session_file: Option<PathBuf>) -> Self {
         Self {
             scheduler,
             session_file,
-        }
-    }
-
-    pub fn queue_follow_up(&self, content: impl Into<String>) {
-        self.queue_follow_up_with_images(content, Vec::new());
-    }
-
-    fn queue_follow_up_with_images(
-        &self,
-        content: impl Into<String>,
-        images: Vec<ImageAttachment>,
-    ) {
-        if let Err(error) = self.try_queue_follow_up_with_images(content, images) {
-            warn!("Failed to persist queued follow-up: {error}");
         }
     }
 
@@ -241,11 +238,4 @@ impl CodingAgentWorkHandle {
         Ok(())
     }
 
-    pub fn cancel_queued_follow_up(&self, entry_id: &str) -> Result<(), String> {
-        let Some(path) = self.session_file.as_deref() else {
-            return Err("session persistence is unavailable".into());
-        };
-        let mut harness = CodingSessionHarness::open(path)?;
-        harness.cancel_queued_unbound(entry_id)
-    }
 }

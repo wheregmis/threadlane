@@ -53,7 +53,6 @@ and are separate from Apple code signing.
 Local bundle commands (run from the repository root):
 
 ```bash
-./scripts/bundle-gpui-linux.sh
 brew install create-dmg
 ./scripts/bundle-gpui-macos.sh
 ```

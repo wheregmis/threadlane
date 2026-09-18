@@ -1,23 +1,27 @@
-//! Provider adapter abstraction.
+//! Provider adapter abstraction (test-only scaffolding).
 //!
-//! Each LLM provider (OpenAI Chat Completions, OpenAI Codex Responses, etc.)
-//! has its own message format and API payload shape. The [`ProviderAdapter`]
-//! trait encapsulates these differences so the agent runtime can remain
-//! provider-agnostic.
-//!
-//! The free functions `convert_to_llm` and `convert_to_codex_llm` live in
-//! `threadlane_provider::convert` and are re-exported from the crate root
-//! for backward compatibility.
+//! Production code routes through the provider clients in
+//! `threadlane-provider`; the adapter trait, formats, and router below exist
+//! to pin payload-rendering behavior in unit tests. Message conversion itself
+//! lives in `threadlane_provider::convert`; import it from there directly.
 
-use crate::types::{AgentMessage, AgentToolDefinition, AgentToolResult, TokenUsage, TurnState};
-use async_trait::async_trait;
-use serde_json::Value;
-use std::fmt;
+use crate::types::TurnState;
+use threadlane_protocol::{AgentMessage, AgentToolResult, TokenUsage};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+#[cfg(test)]
+use threadlane_protocol::AgentToolDefinition;
+#[cfg(test)]
+use async_trait::async_trait;
+#[cfg(test)]
+use serde_json::Value;
+#[cfg(test)]
+use std::fmt;
+#[cfg(test)]
 use threadlane_provider::convert::{convert_to_codex_llm, convert_to_llm};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(test)]
 pub enum PayloadFormat {
     ChatCompletions,
     Codex,
@@ -28,6 +32,7 @@ pub enum PayloadFormat {
 /// Chat Completions providers receive `Vec<Value>` (array of message objects).
 /// Codex Responses providers receive `(String, Vec<Value>)` (instructions + input items).
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub enum ProviderMessages {
     ChatMessages(Vec<Value>),
     CodexMessages {
@@ -41,6 +46,7 @@ pub enum ProviderMessages {
 /// Implementations encapsulate:
 /// - Message format conversion (`AgentMessage` → provider messages)
 /// - API payload structure (model, tools, streaming, reasoning, cache keys)
+#[cfg(test)]
 #[async_trait]
 pub trait ProviderAdapter: fmt::Debug + Send + Sync {
     /// The [`PayloadFormat`] this adapter targets.
@@ -63,9 +69,12 @@ pub trait ProviderAdapter: fmt::Debug + Send + Sync {
 }
 
 /// Chat Completions adapter (OpenAI, Antigravity, OpenCode).
+/// Test-only: production code routes through the provider clients.
 #[derive(Debug, Clone, Default)]
+#[cfg(test)]
 pub struct ChatCompletionsAdapter;
 
+#[cfg(test)]
 #[async_trait]
 impl ProviderAdapter for ChatCompletionsAdapter {
     fn format(&self) -> PayloadFormat {
@@ -97,7 +106,7 @@ impl ProviderAdapter for ChatCompletionsAdapter {
         if let Some(key) = prompt_cache_key {
             chat_payload["prompt_cache_key"] = key.into();
         }
-        if let Some(effort) = crate::model_registry::effective_api_effort(
+        if let Some(effort) = threadlane_provider::model_registry::effective_api_effort(
             &state.model,
             state.reasoning_effort,
             state.project_root.as_deref(),
@@ -109,9 +118,12 @@ impl ProviderAdapter for ChatCompletionsAdapter {
 }
 
 /// Codex Responses adapter.
+/// Test-only: production code routes through the provider clients.
 #[derive(Debug, Clone, Default)]
+#[cfg(test)]
 pub struct CodexResponsesAdapter;
 
+#[cfg(test)]
 #[async_trait]
 impl ProviderAdapter for CodexResponsesAdapter {
     fn format(&self) -> PayloadFormat {
@@ -151,7 +163,7 @@ impl ProviderAdapter for CodexResponsesAdapter {
         if let Some(key) = prompt_cache_key {
             codex_payload["prompt_cache_key"] = key.into();
         }
-        if let Some(effort) = crate::model_registry::effective_api_effort(
+        if let Some(effort) = threadlane_provider::model_registry::effective_api_effort(
             &state.model,
             state.reasoning_effort,
             state.project_root.as_deref(),
@@ -165,20 +177,20 @@ impl ProviderAdapter for CodexResponsesAdapter {
     }
 }
 
-/// A router that selects the correct [`ProviderAdapter`] for a given model.
+/// A router that selects the correct [`ProviderAdapter`] for a given payload
+/// format.
 ///
-/// # Example
-///
-/// ```ignore
-/// let router = ProviderRouter::default();
-/// let adapter = router.select_for_model("gpt-5.6-luna");
-/// let payload = adapter.build_payload(&state, &tools, None);
-/// ```
+/// Test-only scaffolding around the adapter implementations: production code
+/// routes through the provider clients. Selection and payload helpers below
+/// are `#[cfg(test)]` for the same reason.
+/// Test-only: production code routes through the provider clients.
 #[derive(Default)]
+#[cfg(test)]
 pub struct ProviderRouter {
     adapters: Vec<Arc<dyn ProviderAdapter>>,
 }
 
+#[cfg(test)]
 impl fmt::Debug for ProviderRouter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ProviderRouter")
@@ -187,6 +199,7 @@ impl fmt::Debug for ProviderRouter {
     }
 }
 
+#[cfg(test)]
 impl Clone for ProviderRouter {
     fn clone(&self) -> Self {
         Self {
@@ -195,13 +208,8 @@ impl Clone for ProviderRouter {
     }
 }
 
+#[cfg(test)]
 impl ProviderRouter {
-    /// Creates a router with the default adapters (Chat Completions + Codex).
-    #[allow(dead_code)]
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
     /// Registers a custom adapter. Later registrations take priority over
     /// earlier ones when selecting by model.
     pub fn register(&mut self, adapter: Arc<dyn ProviderAdapter>) {
@@ -209,7 +217,8 @@ impl ProviderRouter {
     }
 
     /// Returns the first adapter whose format matches the given format.
-    #[allow(dead_code)]
+    /// Test-only: production code routes through the provider clients.
+    #[cfg(test)]
     fn select(&self, format: PayloadFormat) -> Arc<dyn ProviderAdapter> {
         self.adapters
             .iter()
@@ -219,9 +228,10 @@ impl ProviderRouter {
     }
 
     /// Builds a complete payload for the given format, reading state and tools
-    /// from the caller.
-    #[allow(dead_code)]
-    pub(crate) fn build_payload(
+    /// from the caller. Test-only: production code builds payloads through
+    /// the provider clients.
+    #[cfg(test)]
+    fn build_payload(
         &self,
         format: PayloadFormat,
         state: &TurnState,
@@ -233,7 +243,7 @@ impl ProviderRouter {
     }
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn default_adapter_for(format: PayloadFormat) -> Arc<dyn ProviderAdapter> {
     match format {
         PayloadFormat::ChatCompletions => Arc::new(ChatCompletionsAdapter),
@@ -396,7 +406,7 @@ pub type ModelContextRefresh = Arc<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ReasoningEffort;
+    use threadlane_protocol::ReasoningEffort;
 
     #[test]
     fn default_router_has_both_formats() {
@@ -442,7 +452,7 @@ mod tests {
 
     #[test]
     fn adapters_enforce_discovered_reasoning_capabilities() {
-        use crate::model_registry::{update_discovered_models, ModelInfo};
+        use threadlane_provider::model_registry::{update_discovered_models, ModelInfo};
         let id = "test-dynamic-capabilities";
         let mut info = ModelInfo {
             id: id.into(),
@@ -772,7 +782,7 @@ mod normalize_tool_arguments_tests {
 
     #[test]
     fn tool_images_translate_to_provider_parts() {
-        use crate::types::ImageAttachment;
+        use threadlane_protocol::ImageAttachment;
         let messages = vec![AgentMessage::Tool {
             tool_call_id: "call-1".into(),
             name: "computer_screenshot".into(),

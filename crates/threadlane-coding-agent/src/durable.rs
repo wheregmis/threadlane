@@ -8,6 +8,8 @@ use super::subagents::{
     run_subagent_task, subagent_workspace, SubagentLaneStatus, SubagentRunContext,
     NEXT_SUBAGENT_UI_RUN_ID,
 };
+use threadlane_compaction::CompactionParams;
+use threadlane_context::{context_budget, BudgetConfig};
 use threadlane_skills::agents::AgentDefinition;
 use crate::commands::{execute_slash_command, parse_slash_command};
 use log::warn;
@@ -21,18 +23,18 @@ use threadlane_runtime::harness::{
     HookContext, HookKind, JsonlStore, OperationOutcome, PromptSnapshot, Record as HarnessRecord,
     Reducer, SessionStore,
 };
-use threadlane_runtime::{AgentEvent, AgentMessage, AgentToolResult, SubagentRecoveryStatus};
+use threadlane_protocol::{AgentEvent, AgentMessage, AgentToolResult, SubagentRecoveryStatus};
 use tokio::sync::broadcast;
 
-pub const MAX_PERSISTED_SYSTEM_PROMPT_BYTES: usize = 256 * 1024;
+pub(crate) const MAX_PERSISTED_SYSTEM_PROMPT_BYTES: usize = 256 * 1024;
 
-pub fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
 #[cfg(test)]
 mod prewalk_tests {
-    use threadlane_runtime::orchestrator::{
+    use threadlane_orchestrator::{
         is_prewalk_implementation_action, is_prewalk_todo_gate_opener, prewalk_would_be_noop,
     };
 
@@ -54,7 +56,7 @@ mod prewalk_tests {
     }
 }
 
-pub fn durable_prompt_snapshot(content: &str) -> PromptSnapshot {
+pub(crate) fn durable_prompt_snapshot(content: &str) -> PromptSnapshot {
     let sha256 = threadlane_runtime::harness::TraceString::new(sha256_hex(content.as_bytes()))
         .expect("sha256 digest is bounded");
     let explicitly_redacted = std::env::var("THREADLANE_REDACT_SYSTEM_PROMPTS")
@@ -80,7 +82,7 @@ pub fn durable_prompt_snapshot(content: &str) -> PromptSnapshot {
     }
 }
 
-pub fn is_retryable_generation_error(error: &str) -> bool {
+pub(crate) fn is_retryable_generation_error(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
     [
         "timeout",
@@ -98,7 +100,7 @@ pub fn is_retryable_generation_error(error: &str) -> bool {
     .any(|marker| error.contains(marker))
 }
 
-pub fn generation_event_drain_error(
+pub(crate) fn generation_event_drain_error(
     error: broadcast::error::TryRecvError,
 ) -> Option<&'static str> {
     match error {
@@ -109,20 +111,20 @@ pub fn generation_event_drain_error(
     }
 }
 
-pub fn requires_harness_compaction_reset(
+pub(crate) fn requires_harness_compaction_reset(
     durable_messages: &[AgentMessage],
     state_messages: &[AgentMessage],
 ) -> bool {
     state_messages
         .iter()
-        .any(|message| threadlane_runtime::compaction_summary_text(message).is_some())
+        .any(|message| threadlane_compaction::compaction_summary_text(message).is_some())
         && !state_messages.starts_with(durable_messages)
 }
 
-pub fn compaction_retained_tail(messages: &[AgentMessage]) -> Vec<AgentMessage> {
+pub(crate) fn compaction_retained_tail(messages: &[AgentMessage]) -> Vec<AgentMessage> {
     let Some(summary_index) = messages
         .iter()
-        .rposition(|message| threadlane_runtime::compaction_summary_text(message).is_some())
+        .rposition(|message| threadlane_compaction::compaction_summary_text(message).is_some())
     else {
         return Vec::new();
     };
@@ -260,7 +262,7 @@ impl CodingAgent {
                     match guard.as_mut() {
                         None => None,
                         Some(state)
-                            if threadlane_runtime::orchestrator::is_prewalk_todo_gate_opener(
+                            if threadlane_orchestrator::is_prewalk_todo_gate_opener(
                                 &result.name,
                                 result.is_error,
                             ) =>
@@ -272,7 +274,7 @@ impl CodingAgent {
                         }
                         Some(state)
                             if state.todo_gate_open()
-                                && threadlane_runtime::orchestrator::is_prewalk_implementation_action(
+                                && threadlane_orchestrator::is_prewalk_implementation_action(
                                     &result.name,
                                     result.is_error,
                                 ) =>
@@ -289,13 +291,13 @@ impl CodingAgent {
                                 }
                             };
                             if !active_model.is_empty()
-                                && threadlane_runtime::orchestrator::prewalk_would_be_noop(
+                                && threadlane_orchestrator::prewalk_would_be_noop(
                                     &active_model,
                                     active_effort,
                                     &state.target_model,
                                     state.target_reasoning,
                                 ) {
-                                let _ = event_tx.send(threadlane_runtime::AgentEvent::PrewalkCompleted {
+                                let _ = event_tx.send(threadlane_protocol::AgentEvent::PrewalkCompleted {
                                     model: state.target_model.clone(),
                                     message: format!(
                                         "Prewalk: target `{}` already matches the active model and reasoning; nothing to switch.",
@@ -325,17 +327,17 @@ impl CodingAgent {
                         // post-handoff verification checklist.
                         if let Some(pos) = turn
                             .system_prompt
-                            .find(threadlane_runtime::orchestrator::ARCHITECT_PROTOCOL_HEADER)
+                            .find(threadlane_orchestrator::ARCHITECT_PROTOCOL_HEADER)
                         {
                             turn.system_prompt.truncate(pos);
                             turn.system_prompt = turn.system_prompt.trim_end().to_string();
                         }
                         if !turn
                             .system_prompt
-                            .contains(threadlane_runtime::orchestrator::PREWALK_CHECKLIST_HEADER)
+                            .contains(threadlane_orchestrator::PREWALK_CHECKLIST_HEADER)
                         {
                             turn.system_prompt.push_str(
-                                &threadlane_runtime::orchestrator::build_checklist_directive(),
+                                &threadlane_orchestrator::build_checklist_directive(),
                             );
                         }
                     }
@@ -346,7 +348,7 @@ impl CodingAgent {
                     let effort_info = target_effort
                         .map(|e| format!(" with reasoning effort `{}`", e.label()))
                         .unwrap_or_default();
-                    let _ = event_tx.send(threadlane_runtime::AgentEvent::PrewalkCompleted {
+                    let _ = event_tx.send(threadlane_protocol::AgentEvent::PrewalkCompleted {
                         model: target_model.clone(),
                         message: format!(
                             "Prewalk complete: first `{action_name}` landed behind an opened todo gate. Switched model to `{target_model}`{effort_info}."
@@ -374,7 +376,7 @@ impl CodingAgent {
         Ok(())
     }
 
-    pub async fn execute_accepted_run(
+    pub(crate) async fn execute_accepted_run(
         &mut self,
         accepted: &threadlane_runtime::harness::AcceptedRun,
     ) -> Result<(), String> {
@@ -479,14 +481,14 @@ impl CodingAgent {
         Ok(())
     }
 
-    pub async fn begin_harness_run(
+    pub(crate) async fn begin_harness_run(
         &mut self,
         prompt: AgentMessage,
     ) -> Result<Option<threadlane_runtime::harness::AcceptedRun>, String> {
         self.begin_harness_run_with_queue(prompt, None).await
     }
 
-    pub async fn begin_harness_run_with_queue(
+    pub(crate) async fn begin_harness_run_with_queue(
         &mut self,
         prompt: AgentMessage,
         queued: Option<(threadlane_runtime::harness::QueueKind, &str)>,
@@ -559,7 +561,7 @@ impl CodingAgent {
             .unwrap_or_default();
         let system_prompt = durable_prompt_snapshot(&self.agent.system_prompt());
         let context_window_limit = Some(
-            threadlane_runtime::model_metadata::context_budget(&model, self.agent.config()).limit,
+            context_budget(&model, &BudgetConfig::from(self.agent.config())).limit,
         );
         let work_dir = self.work_dir.to_string_lossy().into_owned();
         let Some(journal) = self.harness.as_mut() else {
@@ -593,7 +595,6 @@ impl CodingAgent {
             session_id: journal.store.session_id().to_owned(),
             lane: "main".into(),
             run_id: Some(run_id.clone()),
-            resume_data: None,
             tool_call_id: None,
             tool_name: None,
             tool_arguments: None,
@@ -713,8 +714,7 @@ impl CodingAgent {
                 })
                 .unwrap_or_default();
             let context_window_limit = Some(
-                threadlane_runtime::model_metadata::context_budget(&model, self.agent.config())
-                    .limit,
+                context_budget(&model, &BudgetConfig::from(self.agent.config())).limit,
             );
             journal.capture_run_context(
                 run_id,
@@ -744,7 +744,7 @@ impl CodingAgent {
         Ok(())
     }
 
-    pub async fn finish_harness_run(
+    pub(crate) async fn finish_harness_run(
         &mut self,
         run_id: Option<&str>,
         outcome: OperationOutcome,
@@ -773,7 +773,6 @@ impl CodingAgent {
                 session_id: journal.store.session_id().to_owned(),
                 lane: "main".into(),
                 run_id: Some(run_id.into()),
-                resume_data: None,
                 tool_call_id: None,
                 tool_name: None,
                 tool_arguments: None,
@@ -804,14 +803,14 @@ impl CodingAgent {
         result
     }
 
-    pub fn append_command_message(&mut self, message: AgentMessage) -> Result<(), String> {
+    pub(crate) fn append_command_message(&mut self, message: AgentMessage) -> Result<(), String> {
         if let Some(journal) = self.harness.as_mut() {
             journal.append_message(message)?;
         }
         Ok(())
     }
 
-    pub fn prompt_parent_leaf(
+    pub(crate) fn prompt_parent_leaf(
         &mut self,
         _message: AgentMessage,
         _harness_persisted: bool,
@@ -822,7 +821,7 @@ impl CodingAgent {
         })
     }
 
-    pub async fn compact_history_with_harness(&mut self) -> Result<bool, String> {
+    pub(crate) async fn compact_history_with_harness(&mut self) -> Result<bool, String> {
         let before = self.agent.messages().await;
         let compacted = self.agent.preview_compact_history(None).await;
         if compacted == before {
@@ -831,13 +830,17 @@ impl CodingAgent {
         let summary = compacted
             .iter()
             .rev()
-            .find_map(threadlane_runtime::compaction_summary_text)
+            .find_map(threadlane_compaction::compaction_summary_text)
             .ok_or_else(|| "compaction produced no durable summary".to_string())?
             .to_owned();
         let retained_tail = compaction_retained_tail(&compacted);
         let config = self.agent.config().clone();
         let pre_tokens =
-            threadlane_runtime::compaction::estimate_request_tokens(&before, None, &config);
+            threadlane_compaction::estimate_request_tokens(
+                &before,
+                None,
+                &CompactionParams::from(&config),
+            );
         let compacted_messages = before
             .len()
             .saturating_sub(compacted.len().saturating_sub(1));
@@ -863,7 +866,7 @@ impl CodingAgent {
         Ok(true)
     }
 
-    pub fn persist_harness_compaction(
+    pub(crate) fn persist_harness_compaction(
         &mut self,
         summary: &str,
         retained_tail: &[AgentMessage],
@@ -872,7 +875,11 @@ impl CodingAgent {
     ) -> Result<(), String> {
         let config = self.agent.config().clone();
         let retained_tail_tokens =
-            threadlane_runtime::compaction::estimate_request_tokens(retained_tail, None, &config);
+            threadlane_compaction::estimate_request_tokens(
+                retained_tail,
+                None,
+                &CompactionParams::from(&config),
+            );
         let model = self.agent.model().to_string();
         if let Some(journal) = self.harness.as_mut() {
             journal.ensure_fresh()?;
@@ -902,7 +909,7 @@ impl CodingAgent {
         Ok(())
     }
 
-    pub async fn sync_turn_from_model_context(&self) -> Result<(), String> {
+    pub(crate) async fn sync_turn_from_model_context(&self) -> Result<(), String> {
         let Some(harness) = self.harness.as_ref() else {
             return Ok(());
         };
@@ -925,7 +932,7 @@ impl CodingAgent {
         }
     }
 
-    pub async fn dispatch_assistant_hook(&self, message: &AgentMessage) {
+    pub(crate) async fn dispatch_assistant_hook(&self, message: &AgentMessage) {
         let AgentMessage::Assistant {
             content,
             tool_calls,
@@ -959,7 +966,7 @@ impl CodingAgent {
         .await;
     }
 
-    pub async fn sync_harness_and_dispatch_assistant_hooks(&mut self) {
+    pub(crate) async fn sync_harness_and_dispatch_assistant_hooks(&mut self) {
         let messages = self.agent.messages().await;
         let state_messages: Vec<AgentMessage> = messages
             .into_iter()
@@ -979,15 +986,15 @@ impl CodingAgent {
             if requires_harness_compaction_reset(&durable_messages, &state_messages) {
                 let summary = state_messages
                     .iter()
-                    .find_map(threadlane_runtime::compaction_summary_text)
+                    .find_map(threadlane_compaction::compaction_summary_text)
                     .expect("compaction reset requires a summary")
                     .to_owned();
                 let retained_tail = compaction_retained_tail(&state_messages);
                 let config = self.agent.config().clone();
-                let pre_tokens = threadlane_runtime::compaction::estimate_request_tokens(
+                let pre_tokens = threadlane_compaction::estimate_request_tokens(
                     &durable_messages,
                     None,
-                    &config,
+                    &CompactionParams::from(&config),
                 );
                 let compacted_messages = durable_messages
                     .len()
@@ -1027,7 +1034,7 @@ impl CodingAgent {
         }
     }
 
-    pub fn commit_completed_subagent_lanes(&mut self) -> Result<(), String> {
+    pub(crate) fn commit_completed_subagent_lanes(&mut self) -> Result<(), String> {
         let lanes = {
             let mut completed = self
                 .completed_subagent_lanes
@@ -1090,7 +1097,7 @@ impl CodingAgent {
         Ok(())
     }
 
-    pub async fn recover_interrupted_subagent_lanes(&mut self) -> Result<usize, String> {
+    pub(crate) async fn recover_interrupted_subagent_lanes(&mut self) -> Result<usize, String> {
         match &self.interrupted_subagent_recovery {
             InterruptedSubagentRecoveryState::Complete => return Ok(0),
             InterruptedSubagentRecoveryState::Pending => {}
@@ -1471,7 +1478,7 @@ impl CodingAgent {
         Ok(recovered)
     }
 
-    pub async fn replay_safe_tools(
+    pub(crate) async fn replay_safe_tools(
         &self,
         records: &[threadlane_runtime::Record],
     ) -> Vec<AgentToolResult> {

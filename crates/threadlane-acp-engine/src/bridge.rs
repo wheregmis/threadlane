@@ -11,8 +11,8 @@ use threadlane_acp::{
     AcpContentBlock, AcpPlanEntry, AcpPlanEntryStatus, AcpSessionUpdate, AcpToolCall,
     AcpToolCallStatus, AcpToolKind,
 };
-use threadlane_runtime::types::{AgentToolResult, PlanItem, PlanItemStatus, SessionPlan};
-use threadlane_runtime::AgentEvent;
+use threadlane_protocol::{AgentToolResult, PlanItem, PlanItemStatus, SessionPlan};
+use threadlane_protocol::AgentEvent;
 
 /// Model id prefix that selects an external ACP agent.
 ///

@@ -12,7 +12,9 @@
 //! functions remain as thin wrappers over the default so current callers keep
 //! working unchanged.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+#[cfg(test)]
+use std::path::Path;
 
 /// Where credential files live.
 ///
@@ -37,7 +39,8 @@ impl CredentialStore {
 
     /// Points at an isolated `threadlane_dir` under `root` with `root` itself
     /// as the home dir. Intended for tests; creates nothing.
-    pub fn isolated(root: PathBuf) -> Self {
+    #[cfg(test)]
+    pub(crate) fn isolated(root: PathBuf) -> Self {
         Self {
             threadlane_dir: root.join(".threadlane"),
             home_dir: root,
@@ -46,16 +49,18 @@ impl CredentialStore {
 
     /// The application settings directory, creating it like the historical
     /// helpers did.
-    pub fn ensure_threadlane_dir(&self) -> PathBuf {
+    pub(crate) fn ensure_threadlane_dir(&self) -> PathBuf {
         let _ = std::fs::create_dir_all(&self.threadlane_dir);
         self.threadlane_dir.clone()
     }
 
-    pub fn threadlane_dir(&self) -> &Path {
+    #[cfg(test)]
+    pub(crate) fn threadlane_dir(&self) -> &Path {
         &self.threadlane_dir
     }
 
-    pub fn home_dir(&self) -> &Path {
+    #[cfg(test)]
+    pub(crate) fn home_dir(&self) -> &Path {
         &self.home_dir
     }
 
@@ -64,37 +69,37 @@ impl CredentialStore {
     }
 
     /// `credentials.json`: the multi-account Codex/ChatGPT store.
-    pub fn credentials_path(&self) -> PathBuf {
+    pub(crate) fn credentials_path(&self) -> PathBuf {
         self.file("credentials.json")
     }
 
     /// `openai_api_key`: the plain OpenAI API key file.
-    pub fn openai_api_key_path(&self) -> PathBuf {
+    pub(crate) fn openai_api_key_path(&self) -> PathBuf {
         self.file("openai_api_key")
     }
 
     /// `opencode_api_key`: the plain OpenCode API key file.
-    pub fn opencode_api_key_path(&self) -> PathBuf {
+    pub(crate) fn opencode_api_key_path(&self) -> PathBuf {
         self.file("opencode_api_key")
     }
 
     /// `antigravity_credentials.json`: Google OAuth tokens for Antigravity.
-    pub fn antigravity_credentials_path(&self) -> PathBuf {
+    pub(crate) fn antigravity_credentials_path(&self) -> PathBuf {
         self.file("antigravity_credentials.json")
     }
 
     /// `github_credentials.json`: stored GitHub token.
-    pub fn github_credentials_path(&self) -> PathBuf {
+    pub(crate) fn github_credentials_path(&self) -> PathBuf {
         self.file("github_credentials.json")
     }
 
     /// `gitlab_credentials.json`: stored GitLab token.
-    pub fn gitlab_credentials_path(&self) -> PathBuf {
+    pub(crate) fn gitlab_credentials_path(&self) -> PathBuf {
         self.file("gitlab_credentials.json")
     }
 
     /// Third-party Codex CLI fallback (`~/.codex/auth.json`), read-only.
-    pub fn codex_cli_auth_path(&self) -> PathBuf {
+    pub(crate) fn codex_cli_auth_path(&self) -> PathBuf {
         self.home_dir.join(".codex").join("auth.json")
     }
 }

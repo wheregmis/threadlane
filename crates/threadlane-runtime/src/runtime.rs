@@ -5,45 +5,27 @@
 //! It replaces the previous split between [`UnifiedAgent`] and
 //! [`ProviderRunExecutor`].
 
-use crate::compaction::{compact_messages_to_token_budget, should_auto_compact};
+use threadlane_compaction::{
+    compact_messages, compact_messages_to_token_budget, should_auto_compact, CompactionOptions,
+    CompactionParams,
+};
 use crate::config::AgentConfig;
 use crate::error::AgentError;
-use crate::events::AgentEvent;
+use threadlane_protocol::AgentEvent;
 use crate::harness::{
     AgentHarness, HarnessEventHub, HookRegistry, JsonlStore, ProcedureError, ProvisionedEntry,
     QueueKind, Reducer, SessionStore,
 };
 use crate::tool_dispatcher::ToolDispatcher;
-use crate::types::{
+use crate::types::{ToolExecutionMode, TurnState};
+use threadlane_protocol::{
     AgentMessage, AgentToolDefinition, AgentToolResult, ImageAttachment, TokenUsage,
-    ToolExecutionMode, TurnState,
 };
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use threadlane_protocol::{DeferredResponse, ProviderPort, RuntimeToolCall as ToolCall};
 use tokio::sync::{broadcast, Mutex};
-
-/// Unified source for model-visible context.
-///
-/// Durable callers should provide the canonical session projection. The
-/// legacy closure aliases below remain available for compatibility, but new
-/// integrations should use this single source instead of coordinating several
-/// precedence-based callbacks.
-pub trait ModelContextSource: Send + Sync {
-    fn project(&self) -> Result<Vec<AgentMessage>, String>;
-}
-
-impl<F> ModelContextSource for F
-where
-    F: Fn() -> Result<Vec<AgentMessage>, String> + Send + Sync,
-{
-    fn project(&self) -> Result<Vec<AgentMessage>, String> {
-        self()
-    }
-}
-
-pub type ModelContextProjector = Arc<dyn Fn() -> Vec<AgentMessage> + Send + Sync>;
 
 /// The single, unified agent runtime.
 ///
@@ -60,7 +42,7 @@ pub struct AgentRuntime {
     /// In-memory working copy of turn state. The harness is authoritative;
     /// this copy is refreshed from the canonical store before each turn.
     pub turn: Arc<Mutex<TurnState>>,
-    /// Agent configuration (compaction, stream rules, model roles, etc.).
+    /// Agent configuration (compaction, model roles, etc.).
     config: AgentConfig,
     /// API key for the active provider.
     pub api_key: String,
@@ -78,8 +60,6 @@ pub struct AgentRuntime {
     steering_queue: Vec<AgentMessage>,
     /// Follow-up queue — appends to turn after completion.
     follow_up_queue: Vec<AgentMessage>,
-    /// Compiled stream rules for runtime monitoring.
-    stream_rules: Vec<(crate::rules::StreamRule, regex::Regex)>,
     /// Prompt cache key for provider-side caching.
     prompt_cache_key: Option<String>,
     /// Optional allowlist of tool names.
@@ -139,50 +119,12 @@ impl AgentRuntime {
             hook_registry: hooks,
             steering_queue: Vec::new(),
             follow_up_queue: Vec::new(),
-            stream_rules: Vec::new(),
             prompt_cache_key: None,
             allowed_tool_names: None,
             provider_trace_recorder: None,
             provider_boundary_preparer: None,
             message_recorder: None,
         }
-    }
-
-    /// Create a new runtime backed by the given session journal path.
-    ///
-    /// If `session_file` is provided, opens (or creates) a JSONL journal.
-    /// Otherwise, an in-memory store is used.
-    pub fn new(
-        _api_key: impl Into<String>,
-        _account_id: Option<String>,
-        _model: impl Into<String>,
-        session_file: Option<&Path>,
-        config: AgentConfig,
-    ) -> Result<Self, AgentError> {
-        let store = if let Some(path) = session_file {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).ok();
-            }
-            if !path.exists() {
-                std::fs::File::create(path)
-                    .map_err(|e| AgentError::Session(format!("create session file: {e}")))?;
-            }
-            JsonlStore::open(path)
-                .map_err(|e| AgentError::Session(format!("open session journal: {e}")))?
-        } else {
-            // Ephemeral store backed by a temp file.
-            let tmp =
-                std::env::temp_dir().join(format!("threadlane-ephemeral-{}", std::process::id()));
-            let _ = std::fs::create_dir_all(tmp.parent().unwrap());
-            JsonlStore::open(&tmp)
-                .map_err(|e| AgentError::Session(format!("open ephemeral journal: {e}")))?
-        };
-
-        let harness_event_hub = HarnessEventHub::new(config.event_channel_capacity);
-        let _harness = AgentHarness::with_events(store, harness_event_hub);
-        Err(AgentError::Session(
-            "AgentRuntime requires an injected ProviderPort; use new_with_provider".into(),
-        ))
     }
 
     pub fn new_with_provider(
@@ -434,10 +376,6 @@ impl AgentRuntime {
         self.config.model_roles = roles;
     }
 
-    pub fn set_needle_enabled(&mut self, enabled: bool) {
-        self.config.needle_enabled = enabled;
-    }
-
     pub fn model_roles(&self) -> &crate::types::ModelRoles {
         &self.config.model_roles
     }
@@ -471,7 +409,7 @@ impl AgentRuntime {
     }
 
     /// Returns the current reasoning effort.
-    pub fn reasoning_effort(&self) -> crate::types::ReasoningEffort {
+    pub fn reasoning_effort(&self) -> threadlane_protocol::ReasoningEffort {
         self.turn
             .try_lock()
             .map(|t| t.reasoning_effort)
@@ -485,7 +423,7 @@ impl AgentRuntime {
 
     pub fn register_tool_executor(
         &mut self,
-        executor: Arc<dyn crate::tool_executor::ToolExecutor>,
+        executor: Arc<dyn threadlane_protocol::ToolExecutor>,
     ) -> Result<(), AgentError> {
         self.tool_dispatcher.register_tool_executor(executor)
     }
@@ -499,18 +437,11 @@ impl AgentRuntime {
         self.tool_dispatcher.allowed_tool_names = names;
     }
 
-    pub fn set_stream_rules(&mut self, rules: Vec<crate::rules::StreamRule>) {
-        self.stream_rules = rules
-            .into_iter()
-            .filter_map(|r| regex::Regex::new(&r.pattern).ok().map(|re| (r, re)))
-            .collect();
-    }
-
     pub fn tool_executor_count(&self) -> usize {
         self.tool_dispatcher.tool_executor_count()
     }
 
-    pub async fn set_reasoning_effort(&self, effort: crate::types::ReasoningEffort) {
+    pub async fn set_reasoning_effort(&self, effort: threadlane_protocol::ReasoningEffort) {
         self.turn.lock().await.reasoning_effort = effort;
     }
 
@@ -529,21 +460,18 @@ impl AgentRuntime {
     /// callers commit this projection before installing it in memory.
     pub async fn preview_compact_history(
         &self,
-        options: Option<crate::compaction::CompactionOptions>,
+        options: Option<CompactionOptions>,
     ) -> Vec<AgentMessage> {
         let turn = self.turn.lock().await;
         match options {
-            Some(opts) => crate::compaction::compact_messages(&turn.messages, &opts),
+            Some(opts) => compact_messages(&turn.messages, &opts),
             None => {
                 let by_tokens = compact_messages_to_token_budget(
                     &turn.messages,
                     self.config.auto_compaction_keep_recent_tokens,
                 );
                 if by_tokens.len() == turn.messages.len() {
-                    crate::compaction::compact_messages(
-                        &turn.messages,
-                        &crate::compaction::CompactionOptions::default(),
-                    )
+                    compact_messages(&turn.messages, &CompactionOptions::default())
                 } else {
                     by_tokens
                 }
@@ -553,7 +481,7 @@ impl AgentRuntime {
 
     pub async fn compact_history(
         &self,
-        options: Option<crate::compaction::CompactionOptions>,
+        options: Option<CompactionOptions>,
     ) -> bool {
         let compacted = self.preview_compact_history(options).await;
         let mut turn = self.turn.lock().await;
@@ -564,7 +492,7 @@ impl AgentRuntime {
 
     pub async fn auto_compact_history(&self) -> bool {
         let mut turn = self.turn.lock().await;
-        if !should_auto_compact(&turn.messages, &self.config) {
+        if !should_auto_compact(&turn.messages, &CompactionParams::from(&self.config)) {
             return false;
         }
         let compacted = compact_messages_to_token_budget(
@@ -765,7 +693,6 @@ impl AgentRuntime {
             provider_trace_recorder: self.provider_trace_recorder.clone(),
             provider_boundary_preparer: self.provider_boundary_preparer.clone(),
             message_recorder: self.message_recorder.clone(),
-            stream_rules: self.stream_rules.clone(),
             steering_queue: &mut self.steering_queue,
             follow_up_queue: &mut self.follow_up_queue,
         };
@@ -778,6 +705,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use sha2::Digest;
+    use threadlane_compaction::{estimate_message_tokens, provider_normalized_message};
     use threadlane_protocol::{
         RuntimeRequest, RuntimeStreamEvent, RuntimeToolCall as ToolCall,
         RuntimeToolCallFunction as ToolCallFunction, RuntimeUsage,
@@ -1081,7 +1009,7 @@ mod tests {
             },
             AgentMessage::UserWithImages {
                 content: "inspect".into(),
-                images: vec![crate::types::ImageAttachment {
+                images: vec![threadlane_protocol::ImageAttachment {
                     display_name: "screen.png".into(),
                     data_url: "data:image/png;base64,AA==".into(),
                 }],
@@ -1120,7 +1048,7 @@ mod tests {
                         .collect::<Vec<_>>();
                     assert_eq!(message_items.len(), expected.len());
                     for (item, message) in message_items.iter().zip(&expected) {
-                        let normalized = crate::compaction::provider_normalized_message(message);
+                        let normalized = provider_normalized_message(message);
                         let accounted = normalized.as_ref().unwrap_or(message);
                         let serialized = serde_json::to_vec(accounted).unwrap();
                         assert_eq!(
@@ -1138,7 +1066,10 @@ mod tests {
                         assert_eq!(
                             item.token_estimate as usize,
                             normalized.as_ref().map_or(0, |message| {
-                                crate::compaction::estimate_message_tokens(message, &config)
+                                estimate_message_tokens(
+                                    message,
+                                    &CompactionParams::from(&config)
+                                )
                             })
                         );
                     }
@@ -1335,8 +1266,10 @@ mod tests {
             let preparer_models = preparer_models.clone();
             Box::pin(async move {
                 preparer_models.lock().unwrap().push(request.model.clone());
-                let budget =
-                    crate::model_metadata::context_budget(&request.model, &AgentConfig::default());
+                let budget = threadlane_context::context_budget(
+                    &request.model,
+                    &threadlane_context::BudgetConfig::from(&AgentConfig::default()),
+                );
                 Ok(ProviderBoundaryResult {
                     messages: request.messages,
                     context_limit: budget.limit,

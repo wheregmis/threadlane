@@ -4457,16 +4457,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "libsqlite3-sys"
-version = "0.38.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1d20bef17f513b9b3004532233187769cd072d790971f4e4da0e346eb6401e8"
-dependencies = [
- "pkg-config",
- "vcpkg",
-]
-
-[[package]]
 name = "linebender_resource_handle"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4922,22 +4912,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee6cda3051665f1fb8d9e08fc35c96d5a244fb1be711a03b71118828afc9a873"
 dependencies = [
  "jni-sys 0.3.1",
-]
-
-[[package]]
-name = "needle-core"
-version = "0.2.1"
-source = "git+https://github.com/Geekgineer/needle-rs#7ce949851bacd8f5d701d9c50823d6b930f4bd99"
-dependencies = [
- "libm",
-]
-
-[[package]]
-name = "needle-infer"
-version = "0.2.1"
-source = "git+https://github.com/Geekgineer/needle-rs#7ce949851bacd8f5d701d9c50823d6b930f4bd99"
-dependencies = [
- "needle-core",
 ]
 
 [[package]]
@@ -8316,6 +8290,7 @@ dependencies = [
  "threadlane-acp",
  "threadlane-permission",
  "threadlane-project",
+ "threadlane-protocol",
  "threadlane-runtime",
  "threadlane-tools",
  "tokio",
@@ -8377,10 +8352,14 @@ dependencies = [
  "threadlane-acp-engine",
  "threadlane-auth",
  "threadlane-browser",
+ "threadlane-compaction",
  "threadlane-computer",
+ "threadlane-context",
  "threadlane-git",
  "threadlane-mcp",
+ "threadlane-orchestrator",
  "threadlane-permission",
+ "threadlane-plan",
  "threadlane-project",
  "threadlane-prompt",
  "threadlane-protocol",
@@ -8442,12 +8421,13 @@ dependencies = [
 
 [[package]]
 name = "threadlane-gpui"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "gpui-component",
  "gpui-pre",
  "gpui-pre-platform",
  "hotpath",
+ "tempfile",
  "threadlane-coding-agent",
  "threadlane-ui-chat",
  "threadlane-ui-theme",
@@ -8520,6 +8500,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
+ "threadlane-protocol",
 ]
 
 [[package]]
@@ -8546,13 +8527,13 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
- "directories",
  "futures-util",
  "reqwest",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
+ "threadlane-project",
  "threadlane-protocol",
  "tokio",
  "tokio-tungstenite",
@@ -8578,64 +8559,20 @@ dependencies = [
  "async-trait",
  "directories",
  "futures",
- "libsqlite3-sys",
- "needle-infer",
- "regex",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.20",
- "threadlane-browser",
  "threadlane-compaction",
  "threadlane-context",
  "threadlane-loop",
- "threadlane-orchestrator",
  "threadlane-plan",
- "threadlane-project",
  "threadlane-protocol",
  "threadlane-provider",
- "threadlane-question",
  "threadlane-tools",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "threadlane-session"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64",
- "directories",
- "futures",
- "log",
- "reqwest",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "thiserror 2.0.20",
- "threadlane-acp",
- "threadlane-acp-engine",
- "threadlane-auth",
- "threadlane-browser",
- "threadlane-coding-agent",
- "threadlane-computer",
- "threadlane-git",
- "threadlane-mcp",
- "threadlane-permission",
- "threadlane-project",
- "threadlane-prompt",
- "threadlane-protocol",
- "threadlane-provider",
- "threadlane-question",
- "threadlane-runtime",
- "threadlane-skills",
- "threadlane-supervisor",
- "threadlane-tools",
- "threadlane-wasi",
- "tokio",
 ]
 
 [[package]]
@@ -8647,23 +8584,6 @@ dependencies = [
  "serde_yaml",
  "tempfile",
  "threadlane-project",
-]
-
-[[package]]
-name = "threadlane-supervisor"
-version = "0.1.0"
-dependencies = [
- "log",
- "serde",
- "serde_json",
- "tempfile",
- "threadlane-coding-agent",
- "threadlane-project",
- "threadlane-protocol",
- "threadlane-provider",
- "threadlane-runtime",
- "threadlane-wasi",
- "tokio",
 ]
 
 [[package]]
@@ -8681,11 +8601,13 @@ dependencies = [
 name = "threadlane-ui-catalog"
 version = "0.1.0"
 dependencies = [
+ "threadlane-acp",
+ "threadlane-acp-engine",
  "threadlane-auth",
+ "threadlane-coding-agent",
  "threadlane-project",
+ "threadlane-protocol",
  "threadlane-provider",
- "threadlane-runtime",
- "threadlane-session",
  "tracing",
 ]
 
@@ -8699,8 +8621,13 @@ dependencies = [
  "rfd",
  "serde_json",
  "tempfile",
+ "threadlane-acp",
+ "threadlane-acp-engine",
+ "threadlane-coding-agent",
+ "threadlane-computer",
  "threadlane-git",
- "threadlane-session",
+ "threadlane-permission",
+ "threadlane-protocol",
  "threadlane-ui-catalog",
  "threadlane-ui-editor",
  "threadlane-ui-mirror",
@@ -8761,10 +8688,11 @@ dependencies = [
  "raw-window-handle",
  "rfd",
  "serde_json",
+ "threadlane-coding-agent",
  "threadlane-git",
+ "threadlane-project",
  "threadlane-protocol",
  "threadlane-provider",
- "threadlane-session",
  "threadlane-ui-state",
  "threadlane-ui-theme",
  "tokio",
@@ -8777,13 +8705,19 @@ dependencies = [
  "gpui-component",
  "gpui-pre",
  "rfd",
+ "threadlane-acp",
+ "threadlane-acp-engine",
  "threadlane-auth",
+ "threadlane-project",
+ "threadlane-protocol",
+ "threadlane-provider",
  "threadlane-runtime",
- "threadlane-session",
+ "threadlane-skills",
  "threadlane-ui-catalog",
  "threadlane-ui-state",
  "threadlane-ui-theme",
  "threadlane-updater",
+ "threadlane-wasi",
  "tokio",
 ]
 
@@ -8796,8 +8730,8 @@ dependencies = [
  "rfd",
  "serde_json",
  "tempfile",
+ "threadlane-coding-agent",
  "threadlane-git",
- "threadlane-session",
  "threadlane-ui-state",
  "threadlane-ui-theme",
 ]
@@ -8811,19 +8745,22 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "threadlane-acp",
+ "threadlane-acp-engine",
  "threadlane-auth",
+ "threadlane-coding-agent",
  "threadlane-context",
  "threadlane-git",
+ "threadlane-permission",
  "threadlane-project",
+ "threadlane-prompt",
  "threadlane-protocol",
  "threadlane-provider",
  "threadlane-runtime",
- "threadlane-session",
  "threadlane-skills",
  "threadlane-tools",
  "threadlane-ui-catalog",
  "threadlane-updater",
- "threadlane-wasi",
  "tokio",
  "tracing",
 ]
@@ -8860,9 +8797,8 @@ dependencies = [
  "gpui-component",
  "gpui-pre",
  "rfd",
+ "threadlane-coding-agent",
  "threadlane-git",
- "threadlane-session",
- "threadlane-ui-catalog",
  "threadlane-ui-chat",
  "threadlane-ui-editor",
  "threadlane-ui-github",
@@ -8877,7 +8813,7 @@ dependencies = [
 
 [[package]]
 name = "threadlane-updater"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "cargo-packager-updater",
 ]

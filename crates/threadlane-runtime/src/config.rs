@@ -3,7 +3,8 @@
 //! All tunable parameters for the agent execution loop, compaction, and
 //! stream rules live here rather than as scattered `const` items.
 
-use crate::types::{ModelRoles, OrchestratorMode, ReasoningEffort};
+use crate::types::ModelRoles;
+use threadlane_protocol::{OrchestratorMode, ReasoningEffort};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -52,11 +53,6 @@ pub struct AgentConfig {
     #[serde(default = "default_loop_error_limit")]
     pub(crate) loop_error_limit: usize,
 
-    // ── Stream Rules ────────────────────────────────────────────────────
-    /// Maximum bytes of accumulated streaming text to retain for regex
-    /// matching. Text beyond this window is discarded.
-    pub(crate) stream_rule_max_window_bytes: usize,
-
     // ── Provider ────────────────────────────────────────────────────────
     /// Default system prompt used when none is explicitly set.
     pub(crate) default_system_prompt: String,
@@ -86,10 +82,6 @@ pub struct AgentConfig {
     pub orchestrator_mode: OrchestratorMode,
 
     // ── Tool Execution ──────────────────────────────────────────────────
-    /// Enable local Needle tool routing when compiled with the `needle` feature.
-    #[serde(default)]
-    pub needle_enabled: bool,
-
     /// Timeout for individual tool executions. `None` means no timeout.
     tool_execution_timeout: Option<Duration>,
 
@@ -118,15 +110,15 @@ fn default_loop_guard_enabled() -> bool {
 }
 
 fn default_loop_identical_limit() -> usize {
-    5
+    threadlane_loop::DEFAULT_IDENTICAL_LIMIT
 }
 
 fn default_loop_pingpong_rounds() -> usize {
-    3
+    threadlane_loop::DEFAULT_PINGPONG_ROUNDS
 }
 
 fn default_loop_error_limit() -> usize {
-    3
+    threadlane_loop::DEFAULT_ERROR_LIMIT
 }
 
 impl Default for AgentConfig {
@@ -143,14 +135,12 @@ impl Default for AgentConfig {
             context_minimum_retained_tail_tokens: 20_000,
             context_maximum_retained_tail_tokens: 64_000,
             context_retained_tail_percent: 25,
-            stream_rule_max_window_bytes: 4096,
             default_system_prompt: "You are threadlane AI coding agent. Lead with answers and actions. Omit conversational filler, preambles, and recaps. Keep edits minimal, focused on root causes, and strictly avoid unrequested refactoring or speculative abstractions.".into(),
             model_roles: ModelRoles::default(),
             subagent_model: None,
             subagent_reasoning_effort: None,
             fast_reasoning_effort: None,
             orchestrator_mode: OrchestratorMode::default(),
-            needle_enabled: false,
             core_tool_schema_mode: true,
             loop_guard_enabled: true,
             loop_identical_limit: 5,
@@ -245,11 +235,6 @@ impl AgentConfigBuilder {
 
     pub fn context_retained_tail_percent(mut self, value: usize) -> Self {
         self.config.context_retained_tail_percent = value;
-        self
-    }
-
-    pub fn stream_rule_max_window_bytes(mut self, value: usize) -> Self {
-        self.config.stream_rule_max_window_bytes = value;
         self
     }
 
@@ -388,7 +373,8 @@ impl Default for CodingAgentConfig {
 
 impl CodingAgentConfig {
     /// Creates a new [`CodingAgentConfigBuilder`].
-    pub fn builder() -> CodingAgentConfigBuilder {
+    #[cfg(test)]
+    pub(crate) fn builder() -> CodingAgentConfigBuilder {
         CodingAgentConfigBuilder::default()
     }
 }
@@ -445,7 +431,8 @@ impl CodingAgentConfigBuilder {
         self
     }
 
-    pub fn max_subagent_tasks(mut self, value: usize) -> Self {
+    #[cfg(test)]
+    pub(crate) fn max_subagent_tasks(mut self, value: usize) -> Self {
         self.config.max_subagent_tasks = value;
         self
     }
@@ -455,7 +442,8 @@ impl CodingAgentConfigBuilder {
         self
     }
 
-    pub fn subagent_concurrency_limit(mut self, value: usize) -> Self {
+    #[cfg(test)]
+    pub(crate) fn subagent_concurrency_limit(mut self, value: usize) -> Self {
         self.config.subagent_concurrency_limit = value;
         self
     }
@@ -470,7 +458,8 @@ impl CodingAgentConfigBuilder {
         self
     }
 
-    pub fn build(self) -> CodingAgentConfig {
+    #[cfg(test)]
+    pub(crate) fn build(self) -> CodingAgentConfig {
         self.config
     }
 }

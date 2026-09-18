@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
-use threadlane_session::harness::{JsonlStore, SessionStore};
-use threadlane_session::AgentMessage;
+use threadlane_runtime::harness::{
+    tool_activity_display_summary, JsonlStore, SessionStore,
+};
+use threadlane_protocol::AgentMessage;
 
 use crate::types::{
     ChatMessageInfo, MessageRole, SessionProjectionResult, SubagentActivityInfo,
@@ -8,17 +10,15 @@ use crate::types::{
 };
 use crate::AppState;
 
-pub use threadlane_runtime::titles::extract_session_title;
-
 #[cfg(test)]
-pub fn load_session_messages(session_file: &Path) -> Vec<ChatMessageInfo> {
+pub(crate) fn load_session_messages(session_file: &Path) -> Vec<ChatMessageInfo> {
     compute_session_messages(session_file).unwrap_or_default()
 }
 
 pub fn compute_session_messages(
     session_file: &Path,
 ) -> Result<Vec<ChatMessageInfo>, String> {
-    use threadlane_session::harness::{read_transcript_page, TranscriptItem};
+    use threadlane_runtime::harness::{read_transcript_page, TranscriptItem};
 
     // The durable pager is the single transcript source, but exhaust it here:
     // GPUI state continues to expose complete chronological history.
@@ -83,7 +83,7 @@ pub fn compute_full_session_projection(
     session_file: &Path,
 ) -> Result<SessionProjectionResult, String> {
     let store = JsonlStore::open_read_only(session_file).map_err(|error| error.to_string())?;
-    let diagnostics = threadlane_session::harness::project_session_diagnostics(&store, "main")
+    let diagnostics = threadlane_runtime::harness::project_session_diagnostics(&store, "main")
         .map_err(|error| error.to_string())?;
     let (trajectory, metrics, token_usage, context_window) =
         AppState::project_trajectory_from_store(&store);
@@ -99,8 +99,8 @@ pub fn compute_full_session_projection(
     })
 }
 
-pub fn project_subagents_from_store(store: &impl SessionStore) -> Vec<SubagentActivityInfo> {
-    use threadlane_session::harness::{Record, SubagentLifecyclePhase};
+pub(crate) fn project_subagents_from_store(store: &impl SessionStore) -> Vec<SubagentActivityInfo> {
+    use threadlane_runtime::harness::{Record, SubagentLifecyclePhase};
 
     let mut rows = Vec::new();
     for lane in store.lanes().into_iter().filter(|lane| lane != "main") {
@@ -224,25 +224,21 @@ pub fn project_subagents_from_store(store: &impl SessionStore) -> Vec<SubagentAc
     rows
 }
 
-pub use threadlane_runtime::harness::tool_activity_summary;
-
-pub use threadlane_runtime::harness::tool_activity_display_summary;
-
-pub fn format_context_marker_tokens(tokens: usize) -> String {
+pub(crate) fn format_context_marker_tokens(tokens: usize) -> String {
     let formatted = threadlane_ui_catalog::format_tokens(tokens.min(u32::MAX as usize) as u32);
     formatted.replace(".0k", "k").replace(".0M", "M")
 }
 
-pub fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageInfo> {
-    threadlane_session::harness::project_chat_messages(&agent_messages)
+pub(crate) fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMessageInfo> {
+    threadlane_runtime::harness::project_chat_messages(&agent_messages)
         .into_iter()
         .map(|msg| ChatMessageInfo {
             id: msg.id,
             role: match msg.role {
-                threadlane_session::harness::UiMessageRole::User => MessageRole::User,
-                threadlane_session::harness::UiMessageRole::Assistant => MessageRole::Assistant,
-                threadlane_session::harness::UiMessageRole::System => MessageRole::System,
-                threadlane_session::harness::UiMessageRole::Error => MessageRole::Error,
+                threadlane_runtime::harness::UiMessageRole::User => MessageRole::User,
+                threadlane_runtime::harness::UiMessageRole::Assistant => MessageRole::Assistant,
+                threadlane_runtime::harness::UiMessageRole::System => MessageRole::System,
+                threadlane_runtime::harness::UiMessageRole::Error => MessageRole::Error,
             },
             content: msg.content,
             tool_activities: msg
@@ -267,19 +263,17 @@ pub fn project_agent_messages(agent_messages: Vec<AgentMessage>) -> Vec<ChatMess
         .collect()
 }
 
-pub use threadlane_session::runtime_status_text;
-
 pub fn coding_agent_options(
     work_dir: PathBuf,
     session_file: PathBuf,
     model: String,
-    model_roles: threadlane_session::ModelRoles,
+    model_roles: threadlane_runtime::ModelRoles,
     browser: threadlane_protocol::browser::BrowserBridge,
-) -> threadlane_session::CodingAgentOptions {
-    let (api_key, account_id) = threadlane_session::provider_credentials(&model);
-    let mut agent_config = threadlane_session::AgentConfig::default();
+) -> threadlane_coding_agent::CodingAgentOptions {
+    let (api_key, account_id) = threadlane_coding_agent::credentials::provider_credentials(&model);
+    let mut agent_config = threadlane_runtime::AgentConfig::default();
     agent_config.model_roles = model_roles;
-    let subagent_settings = threadlane_runtime::subagent_settings::load(&work_dir);
+    let subagent_settings = threadlane_project::subagent_settings::load(&work_dir);
     agent_config.subagent_model = subagent_settings.model;
     agent_config.subagent_reasoning_effort = subagent_settings.reasoning_effort;
     if agent_config.model_roles.fast.is_none() {
@@ -287,9 +281,8 @@ pub fn coding_agent_options(
     }
     agent_config.fast_reasoning_effort = subagent_settings.fast_reasoning_effort;
     agent_config.orchestrator_mode = subagent_settings.orchestrator_mode;
-    agent_config.needle_enabled = threadlane_project::load_needle_enabled();
 
-    threadlane_session::CodingAgentOptions {
+    threadlane_coding_agent::CodingAgentOptions {
         api_key,
         account_id,
         model,

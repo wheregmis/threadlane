@@ -18,47 +18,11 @@ pub struct ContextMeterContext {
     pub estimating: bool,
 }
 
-impl ContextMeterContext {
-    pub fn new(
-        current_tokens: u64,
-        context_limit: u64,
-        context_limit_is_estimate: bool,
-        effective_model: String,
-        last_compaction_seq: Option<u64>,
-        provisional: bool,
-        estimating: bool,
-    ) -> Self {
-        Self {
-            current_tokens,
-            context_limit,
-            context_limit_is_estimate,
-            effective_model,
-            last_compaction_seq,
-            provisional,
-            estimating,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ContextMeterMetrics {
     pub billed_input_tokens: u64,
     pub output_tokens: u64,
     pub cache_hit_percent: Option<u64>,
-}
-
-impl ContextMeterMetrics {
-    pub fn new(
-        billed_input_tokens: u64,
-        output_tokens: u64,
-        cache_hit_percent: Option<u64>,
-    ) -> Self {
-        Self {
-            billed_input_tokens,
-            output_tokens,
-            cache_hit_percent,
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -78,12 +42,6 @@ pub struct ContextMeterViewModel {
 pub struct ContextMeterTrigger {
     pub toggle: Toggle,
     pub selected: bool,
-}
-
-impl ContextMeterTrigger {
-    pub fn new(toggle: Toggle, selected: bool) -> Self {
-        Self { toggle, selected }
-    }
 }
 
 impl Selectable for ContextMeterTrigger {
@@ -107,12 +65,6 @@ impl RenderOnce for ContextMeterTrigger {
 pub struct SubagentPopoverTrigger {
     pub toggle: Toggle,
     pub selected: bool,
-}
-
-impl SubagentPopoverTrigger {
-    pub fn new(toggle: Toggle, selected: bool) -> Self {
-        Self { toggle, selected }
-    }
 }
 
 impl Selectable for SubagentPopoverTrigger {
@@ -191,8 +143,8 @@ pub fn context_meter_view_model(
         return ContextMeterViewModel {
             percent: None,
             bar_percent: 0.0,
-            current_label: "Estimating…".into(),
-            detail_label: "Context usage details, estimating usage".into(),
+            current_label: "Unavailable".into(),
+            detail_label: "Context usage details, current usage unavailable".into(),
             total_processed_label: format_meter_tokens(total_processed),
             cache_hit_label,
             effective_model: None,
@@ -210,7 +162,7 @@ pub fn context_meter_view_model(
         ""
     };
     let current_label = if unknown {
-        "Estimating…".into()
+        "Unavailable".into()
     } else {
         format!(
             "{} / {limit_prefix}{}",
@@ -219,7 +171,7 @@ pub fn context_meter_view_model(
         )
     };
     let detail_label = percent.map_or_else(
-        || "Context usage details, estimating usage".into(),
+        || "Context usage details, current usage unavailable".into(),
         |percent| format!("Context usage details, {percent:.0}% used"),
     );
     ContextMeterViewModel {

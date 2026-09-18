@@ -61,11 +61,6 @@ impl ExtensionRecord {
     }
 }
 
-/// Canonical global Threadlane directory, owned by `threadlane-project`.
-/// Re-exported here so existing `threadlane_wasi::packages::…` paths keep
-/// working; new code should import `threadlane_project` directly.
-pub use threadlane_project::default_global_threadlane_dir;
-
 pub struct ExtensionManager {
     global_threadlane_dir: Option<PathBuf>,
     project_root: Option<PathBuf>,
@@ -79,7 +74,7 @@ impl ExtensionManager {
         }
     }
 
-    pub fn install_from_wasm(
+    pub(crate) fn install_from_wasm(
         &self,
         source: &Path,
         scope: ExtensionScope,
@@ -364,7 +359,7 @@ impl ExtensionManager {
         Ok(self.discover())
     }
 
-    pub fn set_enabled(&self, record: &ExtensionRecord, enabled: bool) -> Result<(), String> {
+    pub(crate) fn set_enabled(&self, record: &ExtensionRecord, enabled: bool) -> Result<(), String> {
         self.validate_record(record)?;
         let marker = disabled_marker(&record.module_path);
         match fs::symlink_metadata(&marker) {
@@ -394,7 +389,7 @@ impl ExtensionManager {
         Ok(())
     }
 
-    pub fn remove(&self, record: &ExtensionRecord) -> Result<(), String> {
+    pub(crate) fn remove(&self, record: &ExtensionRecord) -> Result<(), String> {
         self.validate_record(record)?;
         match record.layout {
             ExtensionLayout::Loose => {

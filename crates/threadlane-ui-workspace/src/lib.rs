@@ -7,5 +7,7 @@
 //! constructs it directly.
 
 mod view;
+mod startup;
 
 pub use view::{init, WorkspaceView};
+pub use startup::StartupView;

@@ -38,12 +38,12 @@ const DEVICE_TOKEN_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/
 /// of editing the defaults.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexOAuthConfig {
-    pub client_id: String,
-    pub token_url: String,
-    pub authorize_url: String,
-    pub browser_redirect_uri: String,
-    pub device_usercode_url: String,
-    pub device_token_url: String,
+    pub(crate) client_id: String,
+    pub(crate) token_url: String,
+    pub(crate) authorize_url: String,
+    pub(crate) browser_redirect_uri: String,
+    pub(crate) device_usercode_url: String,
+    pub(crate) device_token_url: String,
 }
 
 impl Default for CodexOAuthConfig {
@@ -340,7 +340,7 @@ pub fn remove_credentials() -> Result<(), String> {
 }
 
 /// Removes the credentials file at the injected store's location.
-pub fn remove_credentials_in(locations: &CredentialStore) -> Result<(), String> {
+pub(crate) fn remove_credentials_in(locations: &CredentialStore) -> Result<(), String> {
     let _guard = account_store_guard();
     remove_credentials_file_in(locations)
 }
@@ -448,7 +448,7 @@ pub fn save_openai_api_key(key: &str) -> Result<(), String> {
 }
 
 /// Saves the API key file at the injected store's location.
-pub fn save_openai_api_key_in(key: &str, locations: &CredentialStore) -> Result<(), String> {
+pub(crate) fn save_openai_api_key_in(key: &str, locations: &CredentialStore) -> Result<(), String> {
     if key.trim().is_empty() {
         return Err("OpenAI API key cannot be empty".to_string());
     }
@@ -462,7 +462,7 @@ pub fn load_openai_api_key() -> Option<String> {
 }
 
 /// Loads the API key file from the injected store's location.
-pub fn load_openai_api_key_in(locations: &CredentialStore) -> Option<String> {
+pub(crate) fn load_openai_api_key_in(locations: &CredentialStore) -> Option<String> {
     let path = locations.openai_api_key_path();
     let key = fs::read_to_string(path).ok()?;
     let key = key.trim().to_string();
@@ -583,7 +583,7 @@ pub fn load_credentials() -> Option<StoredCredentials> {
 }
 
 /// Loads the active account from the injected store's location.
-pub fn load_credentials_in(locations: &CredentialStore) -> Option<StoredCredentials> {
+pub(crate) fn load_credentials_in(locations: &CredentialStore) -> Option<StoredCredentials> {
     let store = load_credentials_store_in(locations);
     let account = store.active_account()?;
     Some(StoredCredentials {
@@ -599,7 +599,7 @@ pub fn load_all_codex_accounts() -> Vec<CodexAccount> {
 }
 
 /// Lists all accounts in the injected store's location.
-pub fn load_all_codex_accounts_in(locations: &CredentialStore) -> Vec<CodexAccount> {
+pub(crate) fn load_all_codex_accounts_in(locations: &CredentialStore) -> Vec<CodexAccount> {
     load_credentials_store_in(locations).accounts
 }
 
@@ -608,7 +608,7 @@ pub fn get_active_codex_account() -> Option<CodexAccount> {
 }
 
 /// Returns the active account from the injected store's location.
-pub fn get_active_codex_account_in(locations: &CredentialStore) -> Option<CodexAccount> {
+pub(crate) fn get_active_codex_account_in(locations: &CredentialStore) -> Option<CodexAccount> {
     load_credentials_store_in(locations)
         .active_account()
         .cloned()
@@ -621,7 +621,7 @@ pub fn codex_account_id_for_token(token: &str) -> Option<String> {
 }
 
 /// Finds the owning account for `token` in the injected store's location.
-pub fn codex_account_id_for_token_in(token: &str, locations: &CredentialStore) -> Option<String> {
+pub(crate) fn codex_account_id_for_token_in(token: &str, locations: &CredentialStore) -> Option<String> {
     let identity = codex_token_identity(token);
     load_all_codex_accounts_in(locations)
         .into_iter()
@@ -650,7 +650,7 @@ pub fn get_backup_codex_accounts() -> Vec<CodexAccount> {
 }
 
 /// Lists non-active accounts from the injected store's location.
-pub fn get_backup_codex_accounts_in(locations: &CredentialStore) -> Vec<CodexAccount> {
+pub(crate) fn get_backup_codex_accounts_in(locations: &CredentialStore) -> Vec<CodexAccount> {
     let store = load_credentials_store_in(locations);
     let active_id = store.active_account().map(|a| a.id.clone());
     store
@@ -665,7 +665,7 @@ pub fn set_active_codex_account(id: &str) -> Result<(), String> {
 }
 
 /// Marks `id` active in the injected store's location.
-pub fn set_active_codex_account_in(id: &str, locations: &CredentialStore) -> Result<(), String> {
+pub(crate) fn set_active_codex_account_in(id: &str, locations: &CredentialStore) -> Result<(), String> {
     let _guard = account_store_guard();
     let mut store = load_credentials_store_unlocked_in(locations);
     if !store.accounts.iter().any(|a| a.id == id) {
@@ -680,7 +680,7 @@ pub fn remove_codex_account(id: &str) -> Result<(), String> {
 }
 
 /// Removes `id` from the injected store's location.
-pub fn remove_codex_account_in(id: &str, locations: &CredentialStore) -> Result<(), String> {
+pub(crate) fn remove_codex_account_in(id: &str, locations: &CredentialStore) -> Result<(), String> {
     let _guard = account_store_guard();
     let mut store = load_credentials_store_unlocked_in(locations);
     let initial_len = store.accounts.len();
@@ -717,7 +717,7 @@ pub async fn get_valid_codex_account_token(id: &str) -> Result<String, String> {
 
 /// Resolves a usable token for `id` from the injected store's location,
 /// refreshing with the default [`CodexOAuthConfig`] when near expiry.
-pub async fn get_valid_codex_account_token_in(
+pub(crate) async fn get_valid_codex_account_token_in(
     id: &str,
     locations: &CredentialStore,
 ) -> Result<String, String> {
@@ -894,7 +894,7 @@ pub fn build_browser_oauth_url(challenge: &str, state: &str) -> String {
 }
 
 /// Builds the browser OAuth URL from an explicit provider configuration.
-pub fn build_browser_oauth_url_with(
+pub(crate) fn build_browser_oauth_url_with(
     challenge: &str,
     state: &str,
     config: &CodexOAuthConfig,
@@ -1027,7 +1027,7 @@ pub async fn exchange_browser_code_for_tokens(
 
 /// Exchanges a browser OAuth code with an explicit provider configuration,
 /// persisting the account to the injected store's location.
-pub async fn exchange_browser_code_for_tokens_in(
+pub(crate) async fn exchange_browser_code_for_tokens_in(
     code: &str,
     code_verifier: &str,
     config: &CodexOAuthConfig,

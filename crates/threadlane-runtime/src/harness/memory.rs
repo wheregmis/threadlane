@@ -2,7 +2,7 @@ use super::reducer::{validate_candidate_entry, validate_candidate_record};
 use super::store::SessionStore;
 use super::types::{Entry, Record, ReduceError};
 #[cfg(test)]
-use crate::types::AgentMessage;
+use threadlane_protocol::AgentMessage;
 use std::collections::HashSet;
 
 #[derive(Debug, Clone)]
@@ -11,7 +11,6 @@ pub struct MemoryStore {
     entries: Vec<Entry>,
     records: Vec<Record>,
     ids: HashSet<String>,
-    effects: usize,
     next_seq: u64,
 }
 
@@ -22,7 +21,6 @@ impl MemoryStore {
             entries: Vec::new(),
             records: Vec::new(),
             ids: HashSet::new(),
-            effects: 0,
             next_seq: 1,
         }
     }
@@ -35,9 +33,6 @@ impl MemoryStore {
     }
     fn records(&self) -> &[Record] {
         &self.records
-    }
-    pub fn effect_count(&self) -> usize {
-        self.effects
     }
 
     #[cfg(test)]
@@ -126,26 +121,6 @@ impl MemoryStore {
         self.next_seq = record.seq() + 1;
         self.records.push(record);
         Ok(())
-    }
-
-    /// Test-fixture escape hatch for constructing a corrupt durable prefix.
-    /// Production callers use the validated `SessionStore` implementation.
-    pub fn append_record_unchecked(&mut self, record: Record) {
-        validate_record(
-            &record,
-            self.records
-                .last()
-                .map(Record::seq)
-                .into_iter()
-                .chain(self.entries.last().map(|entry| entry.seq))
-                .max(),
-        )
-        .expect("valid record shape");
-        if !self.ids.insert(record.id().to_owned()) {
-            panic!("duplicate durable record id: {}", record.id());
-        }
-        self.next_seq = self.next_seq.max(record.seq() + 1);
-        self.records.push(record);
     }
 }
 

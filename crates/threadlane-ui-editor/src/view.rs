@@ -683,6 +683,7 @@ impl EditorView {
                             })
                             .child(
                                 Button::new(SharedString::from(format!("tab-close-{}", idx)))
+                                    .accessibility_label("Close tab")
                                     .ghost()
                                     .xsmall()
                                     .icon(IconName::Close)

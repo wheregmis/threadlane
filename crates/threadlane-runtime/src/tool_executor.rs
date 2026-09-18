@@ -1,8 +1,5 @@
-use crate::types::AgentToolDefinition;
+use threadlane_protocol::{AgentToolDefinition, ToolExecutor};
 use std::sync::Arc;
-// `ToolExecutor` is canonical in `threadlane-protocol`; re-exported here so
-// existing `crate::tool_executor::ToolExecutor` paths keep working.
-pub use threadlane_protocol::ToolExecutor;
 use threadlane_tools::{
     get_available_tools, get_codex_tools, try_execute_tool, try_execute_tool_in_workspace,
 };
