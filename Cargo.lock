@@ -8701,6 +8701,7 @@ dependencies = [
  "threadlane-ui-state",
  "threadlane-ui-theme",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -333,7 +333,7 @@ mod tests {
 /// uninstalls. Returns `"ok"` immediately; the host polls
 /// [`annotate_poll_js`] for the pick. Escape cancels.
 pub fn annotate_install_js() -> String {
-    r#"(() => {
+    r##"(() => {
   if (window.__tlane_annotating) return "already";
   window.__tlane_annotating = true;
   window.__tlane_pick = null;
@@ -398,7 +398,7 @@ pub fn annotate_install_js() -> String {
   document.addEventListener("click", on_click, true);
   document.addEventListener("keydown", on_key, true);
   return "ok";
-})()"#
+})()"##
     .to_string()
 }
 
@@ -411,6 +411,28 @@ pub fn annotate_poll_js() -> String {
 
 /// Removes picker listeners and hover outlines without recording.
 pub fn annotate_uninstall_js() -> String {
-    r#"(() => { if (window.__tlane_uninstall) window.__tlane_uninstall(); return "ok"; })()"#
+    r##"(() => { if (window.__tlane_uninstall) window.__tlane_uninstall(); return "ok"; })()"##
         .to_string()
+}
+
+#[cfg(test)]
+mod annotate_tests {
+    use super::*;
+
+    #[test]
+    fn annotate_scripts_form_a_complete_protocol() {
+        let install = annotate_install_js();
+        let poll = annotate_poll_js();
+        let uninstall = annotate_uninstall_js();
+        // The picker records to a well-known slot the poll reads back.
+        for script in [&install, &poll, &uninstall] {
+            assert!(script.contains("__tlane_"), "picker slot missing: {script}");
+        }
+        assert!(install.contains("Escape"));
+        assert!(poll.contains("active"));
+        // No template placeholders left unsubstituted.
+        for script in [&install, &poll, &uninstall] {
+            assert!(!script.contains("__MAX__"), "unsubstituted placeholder");
+        }
+    }
 }

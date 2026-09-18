@@ -10,10 +10,12 @@
 //! pinned fork), so the native view paints above GPUI menus/tooltips that
 //! overlap its rect. The tab hides the view when inactive to bound this.
 
+use base64::Engine as _;
 use gpui::*;
+use gpui::prelude::FluentBuilder;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::{ActiveTheme, Icon, IconName, Sizable};
+use gpui_component::{ActiveTheme, Icon, IconName, Selectable, Sizable};
 use threadlane_ui_state::{AppState, RequestedComposerInsert};
 
 use super::address::{resolve_address, search_url, AddressTarget};
@@ -53,13 +55,7 @@ impl BrowserView {
             |this: &mut Self, input, event: &InputEvent, cx| match event {
                 InputEvent::PressEnter { .. } => {
                     let raw = input.read(cx).value().to_string();
-                    // Address-bar navigation needs a window for tab webview
-                    // creation; the render path owns none, so navigation
-                    // from other surfaces goes through `load_url`, which
-                    // receives one.
-                    let _ = &raw;
-                    let _ = this.active_tab;
-                    cx.notify();
+                    this.navigate_to_input(&raw, cx);
                 }
                 _ => {}
             },
@@ -80,14 +76,20 @@ impl BrowserView {
         this
     }
 
-    fn navigate_to_input(&mut self, raw: &str, window: &mut Window, cx: &mut Context<Self>) {
+    fn navigate_to_input(&mut self, raw: &str, cx: &mut Context<Self>) {
         let target = resolve_address(raw);
         let url = match target {
             None => return,
             Some(AddressTarget::Url(url)) => url,
             Some(AddressTarget::Search(query)) => search_url(&query),
         };
-        self.load_url(&url, window, cx);
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.url = url.clone();
+            if let Some(webview) = tab.webview.clone() {
+                webview.update(cx, |view, _| view.load_url(&url));
+            }
+        }
+        cx.notify();
     }
 
     fn active_webview(&self) -> Option<Entity<gpui_wry::WebView>> {
@@ -137,7 +139,7 @@ impl BrowserView {
 
     /// Close a tab. The last tab becomes a fresh default tab instead of
     /// leaving the surface empty.
-    pub fn close_tab(&mut self, id: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn close_tab(&mut self, id: usize, _window: &mut Window, cx: &mut Context<Self>) {
         if self.tabs.len() <= 1 {
             let url = DEFAULT_URL.to_string();
             if let Some(tab) = self.tabs.get_mut(self.active_tab) {
@@ -146,7 +148,6 @@ impl BrowserView {
                     webview.update(cx, |view, _| view.load_url(&url));
                 }
             }
-            self.sync_address_input(window, cx);
             cx.notify();
             return;
         }
@@ -162,7 +163,6 @@ impl BrowserView {
             }
             self.stop_annotate(cx);
             self.sync_active_visibility(cx);
-            self.sync_address_input(window, cx);
             cx.notify();
         }
     }
@@ -180,7 +180,6 @@ impl BrowserView {
             self.tabs[position].webview = Some(webview);
         }
         self.sync_active_visibility(cx);
-        self.sync_address_input(window, cx);
         cx.notify();
     }
 
@@ -209,27 +208,39 @@ impl BrowserView {
         }
     }
 
-    fn sync_address_input(&self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Mirrors the active tab URL into the address bar. Render-owned
+    /// (it needs the window) and guarded: never clobbers focused typing,
+    /// and no-ops once in sync so it cannot loop renders.
+    fn sync_address_bar(&self, window: &mut Window, cx: &mut Context<Self>) {
         let url = self
             .tabs
             .get(self.active_tab)
             .map(|tab| tab.url.clone())
             .unwrap_or_default();
-        self.address_input.update(cx, |input, cx| {
-            input.set_value(url, window, cx);
-        });
+        let focused = self
+            .address_input
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window);
+        if !focused
+            && self.address_input.read(cx).value().to_string() != url
+        {
+            self.address_input.update(cx, |input, cx| {
+                input.set_value(url, window, cx);
+            });
+        }
     }
 
     /// Navigate the active tab's page. Public for agent-tool wiring and
-    /// address-bar input (both lack a window for tab creation).
-    pub fn load_url(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// address-bar input. The address bar syncs from the active tab during
+    /// render ([`Self::sync_address_bar`]), so no window is needed here.
+    pub fn load_url(&mut self, url: &str, cx: &mut Context<Self>) {
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
             tab.url = url.to_string();
             if let Some(webview) = tab.webview.clone() {
                 webview.update(cx, |view, _| view.load_url(url));
             }
         }
-        self.sync_address_input(window, cx);
         cx.notify();
     }
 
@@ -279,6 +290,7 @@ impl BrowserView {
     ) -> Result<tokio::sync::oneshot::Receiver<Result<(Vec<u8>, u32, u32), String>>, String> {
         use block2::RcBlock;
         use objc2::runtime::AnyObject;
+        use wry::WebViewExtMacOS;
 
         let webview = self
             .active_webview()
@@ -354,7 +366,7 @@ impl BrowserView {
         }
     }
 
-    pub fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn reload(&mut self, cx: &mut Context<Self>) {
         let url = self
             .current_url(cx)
             .filter(|url| !url.is_empty())
@@ -362,7 +374,6 @@ impl BrowserView {
         if let Some(webview) = self.active_webview() {
             webview.update(cx, |view, _| view.load_url(&url));
         }
-        self.sync_address_input(window, cx);
         cx.notify();
     }
 
@@ -405,14 +416,19 @@ impl BrowserView {
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(300))
                     .await;
-                let poll = this.update(cx, |this, cx| {
-                    this.evaluate_script(&annotate_poll_js(), cx).ok()
-                });
+                let poll = this
+                    .update(cx, |this, cx| {
+                        this.evaluate_script(&annotate_poll_js(), cx).ok()
+                    })
+                    .ok()
+                    .flatten();
                 let Some(poll) = poll else { break };
                 let Ok(raw) = poll.await else { break };
                 let payload = unwrap_callback_payload(&raw);
                 let parsed: Option<serde_json::Value> =
-                    serde_json::from_str(&payload).ok().and_then(|outer| {
+                    serde_json::from_str::<serde_json::Value>(&payload)
+                        .ok()
+                        .and_then(|outer| {
                         // wry JSON-serializes the script's return string.
                         outer.as_str().and_then(|inner| serde_json::from_str(inner).ok())
                     });
@@ -422,15 +438,17 @@ impl BrowserView {
                     }
                     _ => (None, None),
                 };
-                if pick.is_some() {
-                    let _ = this.update(cx, |this, cx| {
-                        this.finish_annotation(pick, window, cx);
-                    });
-                    break;
+                match pick {
+                    Some(value) if !value.is_null() => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.finish_annotation(Some(value), cx);
+                        });
+                        break;
+                    }
+                    _ => {}
                 }
-                if !active.is_some_and(|value| value != serde_json::Value::Null && value.as_bool() != Some(false))
-                {
-                    // Picker cancelled (Escape): stop polling.
+                // Picker cancelled (Escape reports active=false): stop.
+                if !active.is_some_and(|value| value.as_bool().unwrap_or(false)) {
                     let _ = this.update(cx, |this, cx| {
                         this.stop_annotate(cx);
                         cx.notify();
@@ -461,7 +479,6 @@ impl BrowserView {
     fn finish_annotation(
         &mut self,
         pick: Option<serde_json::Value>,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.annotating = false;
@@ -561,7 +578,8 @@ fn tab_title(url: &str) -> String {
 }
 
 impl Render for BrowserView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_address_bar(window, cx);
         let webview = self.active_webview();
         let active_id = self.active_tab_id();
         let tabs = self.tabs();
@@ -596,13 +614,13 @@ impl Render for BrowserView {
                             .tooltip("Reload page")
                             .ghost()
                             .xsmall()
-                            .on_click(cx.listener(|this, _event, window, cx| {
-                                this.reload(window, cx);
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.reload(cx);
                             })),
                     )
                     .child(
                         Button::new("browser-annotate")
-                            .icon(IconName::Crosshair)
+                            .icon(Icon::default().path("icons/crosshair.svg"))
                             .accessibility_label(if annotating {
                                 "Stop annotating"
                             } else {
@@ -696,5 +714,20 @@ impl Render for BrowserView {
                     .overflow_hidden()
                     .children(webview),
             )
+    }
+}
+
+#[cfg(test)]
+mod browser_tabs_tests {
+    use super::*;
+
+    #[test]
+    fn tab_titles_show_hosts_compactly() {
+        assert_eq!(tab_title("https://example.com/some/long/path"), "example.com");
+        assert_eq!(tab_title("https://gpui-kit.com"), "gpui-kit.com");
+        assert_eq!(
+            tab_title("https://very-long-subdomain-name.example.com/x"),
+            "very-long-subdomain-nam…"
+        );
     }
 }
