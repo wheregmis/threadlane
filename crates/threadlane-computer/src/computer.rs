@@ -415,19 +415,26 @@ pub fn parse_computer_act(args: &str) -> Result<ComputerAct, String> {
 }
 
 pub fn parse_act_target(args: &str) -> Result<Option<i64>, String> {
+    parse_window_target(args, COMPUTER_ACT_TOOL, "target")
+}
+
+fn parse_window_target(args: &str, tool: &str, field: &str) -> Result<Option<i64>, String> {
     let parsed: serde_json::Value = serde_json::from_str(args)
-        .map_err(|error| format!("Invalid {COMPUTER_ACT_TOOL} arguments: {error}"))?;
-    match parsed.get("target") {
+        .map_err(|error| format!("Invalid {tool} arguments: {error}"))?;
+    if !parsed.is_object() {
+        return Err(format!("Invalid {tool} arguments: expected an object."));
+    }
+    match parsed.get(field) {
         None => Ok(None),
         // Window id 0 is kCGNullWindowID and never names a window; a zero
         // target is always a caller defaulting the field, not a real target.
         Some(value) => value
             .as_i64()
-            .filter(|id| *id > 0)
+            .filter(|id| *id > 0 && u32::try_from(*id).is_ok())
             .map(Some)
             .ok_or_else(|| {
-                "`computer_act` target must be a window id from computer_windows.".to_string()
-            }),
+                format!("`{tool}` {field} must be a window id from computer_windows.")
+            })
     }
 }
 
@@ -1133,12 +1140,10 @@ impl ComputerToolExecutor {
         args: &str,
         work_dir: Option<&Path>,
     ) -> Result<ToolOutput, String> {
+        let window_id = parse_window_target(args, "computer_screenshot", "window_id")?;
         if !driver_available() {
             return Err(DRIVER_MISSING_HINT.to_string());
         }
-        let window_id: Option<i64> = serde_json::from_str::<serde_json::Value>(args)
-            .ok()
-            .and_then(|value| value.get("window_id")?.as_i64());
         let target_label = match window_id {
             Some(id) => format!("window {id}"),
             None => "the main display".to_string(),
@@ -1848,6 +1853,15 @@ mod tests {
         );
         assert!(parse_act_target(r#"{"action":"click","target":-1}"#).is_err());
         assert!(parse_act_target(r#"{"action":"click","target":"x"}"#).is_err());
+    }
+
+    #[test]
+    fn screenshot_target_parsing_rejects_invalid_ids() {
+        assert_eq!(parse_window_target(r#"{"window_id":16958}"#, "computer_screenshot", "window_id").unwrap(), Some(16958));
+        assert!(parse_window_target(r#"{"window_id":0}"#, "computer_screenshot", "window_id").is_err());
+        assert!(parse_window_target(r#"{"window_id":-1}"#, "computer_screenshot", "window_id").is_err());
+        assert!(parse_window_target(r#"{"window_id":4294967296}"#, "computer_screenshot", "window_id").is_err());
+        assert!(parse_window_target("not-json", "computer_screenshot", "window_id").is_err());
     }
 
     #[test]

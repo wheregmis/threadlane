@@ -3918,6 +3918,21 @@ impl AppState {
     /// transcript. The chat pump uses this to open the mirror popup exactly
     /// once per new activity instead of once per pump tick.
     pub fn take_computer_mirror_trigger(&mut self) -> bool {
+        // Bound de-duplication to requests and activities still observable in
+        // state; completed/evicted activities must not leak one key forever.
+        let mut visible = HashSet::new();
+        for id in self.pending_permissions.keys() {
+            visible.insert(format!("permission:{id}"));
+        }
+        for message in self.messages.iter() {
+            for activity in message.tool_activities.iter() {
+                if activity.title.starts_with("computer_") {
+                    visible.insert(format!("tool:{}", activity.id));
+                }
+            }
+        }
+        self.mirror_seen.retain(|key| visible.contains(key));
+
         for (id, request) in &self.pending_permissions {
             if request.capability == "computer"
                 && self.mirror_seen.insert(format!("permission:{id}"))
