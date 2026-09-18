@@ -172,6 +172,10 @@ async fn start_trajectory_recording() -> bool {
 }
 
 async fn feed_poll_loop() {
+    // Last *successful* capture: the status clock the panel judges staleness
+    // by. Ticks that fail leave it alone, so a wedged or erroring feed reads
+    // STALLED instead of looking freshly alive.
+    let mut last_ok_ms = computer_live::now_ms();
     loop {
         tokio::time::sleep(Duration::from_millis(FEED_INTERVAL_MS)).await;
         let (target, watchers) = {
@@ -212,6 +216,7 @@ async fn feed_poll_loop() {
         let mut error = None;
         match capture_frame(target).await {
             Ok(Some(frame)) => {
+                last_ok_ms = started;
                 let unchanged = lock_slot().last_pixels.as_ref().is_some_and(
                     |(prev_target, w, h, pixels)| {
                         *prev_target == frame.target
@@ -241,7 +246,7 @@ async fn feed_poll_loop() {
         computer_live::set_status(LiveStatus {
             running: true,
             target: Some(target.stream_target()),
-            last_capture_ms: started,
+            last_capture_ms: last_ok_ms,
             interval_ms: FEED_INTERVAL_MS,
             last_error: error,
             pointer,

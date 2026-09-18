@@ -1,28 +1,31 @@
-//! Live video mirror for native computer use: a small floating panel inside
-//! the chat view that shows the target as it changes plus where the agent's
-//! input lands. It displays; it never drives anything itself.
+//! Live mirror for computer use: a small floating panel inside the chat view
+//! that shows the target as it changes plus where the agent's input lands.
+//! It displays; it never drives anything itself.
 //!
 //! The panel floats over the chat, anchored to the bottom-right corner:
-//! compact by default, dragged by its header to move, grown from its
-//! top-left grip (anchored bottom-right, so dragging up and left enlarges
-//! it), and toggled to fill the chat panel with the expand button. The host
-//! view owns the entity and drops it when `AppState::mirror_open` clears.
+//! compact by default, dragged by its header to move (the spot is remembered
+//! while the app runs, so reopening does not cover the composer again),
+//! grown from its top-left grip (anchored bottom-right, so dragging up and
+//! left enlarges it), and toggled to fill the chat panel with the expand
+//! button. The host view owns the entity and drops it when
+//! `AppState::mirror_open` clears.
 //!
 //! Frames arrive in-process from `threadlane_protocol::live`: the
-//! macOS poller publishes bounded BGRA frames at up to 20fps while this view
-//! holds a subscription, and each one is painted straight from a
+//! driver-backed feed publishes downscaled BGRA frames about once a second
+//! while computer calls are recent, and each one is painted straight from a
 //! `RenderImage` — no JPEG round trip and no file polling on the hot path.
 //! Input overlays (click ripples, scroll direction, the pointer) ride the
-//! same feed so the panel reads like a screen recording, not a slideshow.
+//! same feed. The header badge reads LIVE, STALLED (with starvation age,
+//! after several missed poll intervals), PAUSED, LAST CAPTURE, or NO SIGNAL.
 //!
 //! `<previews>/latest.json` stays the cold fallback: it names the last
-//! capture on disk for when no live frame exists (fresh launch, Linux) and
-//! carries the last action line. Captures exclude our own windows, so the
-//! mirror cannot recurse into itself.
+//! capture on disk for when no live frame exists (fresh launch) and carries
+//! the last action line. Captures exclude our own windows, so the mirror
+//! cannot recurse into itself.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
@@ -48,8 +51,24 @@ const RETIRE_PAINTS: u8 = 3;
 /// Retired frames beyond this are released immediately, paints or not, so a
 /// panel that is not being painted never hoards textures.
 const RETIRE_CAP: usize = 8;
-/// A poller capture older than this while running means the feed stalled.
-const STALE_MS: u128 = 3_000;
+/// Grace without a capture before a running feed counts as stalled: several
+/// poll intervals plus slack, so a ~1fps driver feed does not read STALLED on
+/// jitter. Minimum keeps slow or unknown cadences honest.
+fn stale_after_ms(interval_ms: u64) -> u128 {
+    const MIN_STALE_MS: u128 = 8_000;
+    (u128::from(interval_ms) * 5 + 2_000).max(MIN_STALE_MS)
+}
+
+/// Compact age for badges: `12s`, `3m`. Hours+ renders as minutes; a mirror
+/// stalled that long is broken, not slow.
+fn format_age_secs(age_ms: u128) -> String {
+    let secs = (age_ms / 1_000).min(u64::MAX as u128) as u64;
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        format!("{}m", secs / 60)
+    }
+}
 /// Gap between the panel and the chat view's edges.
 const PANEL_MARGIN: Pixels = px(12.0);
 /// Compact size on first open: a 16:10 picture under a 30px header.
@@ -65,6 +84,20 @@ struct ResizeDrag;
 /// render and frozen into the active drag by gpui, so a move handler can
 /// tell a new drag from a continuing one without any drop event.
 struct MoveDrag(u64);
+
+/// Last dragged offset/size, process-wide: reopening the panel restores
+/// where the user put it instead of covering the composer again. Clamped to
+/// the host on every layout probe, so a stale save can never strand it.
+fn saved_geometry() -> &'static Mutex<Option<(Point<Pixels>, Size<Pixels>)>> {
+    static SAVED: OnceLock<Mutex<Option<(Point<Pixels>, Size<Pixels>)>>> = OnceLock::new();
+    SAVED.get_or_init(|| Mutex::new(None))
+}
+
+fn remember_geometry(offset: Point<Pixels>, size: Size<Pixels>) {
+    if let Ok(mut saved) = saved_geometry().lock() {
+        *saved = Some((offset, size));
+    }
+}
 
 /// The frame currently on screen and the pixels it was built from.
 struct LivePicture {
@@ -126,8 +159,8 @@ impl MirrorView {
         previews_dir: PathBuf,
         cx: &mut Context<Self>,
     ) -> Self {
-        // Live frames: holding this receiver is what switches the poller to
-        // its video tier, and dropping the task on close switches it back.
+        // Live frames: the feed captures while computer calls are recent;
+        // dropping this task on close removes its only watcher.
         let frames = cx.spawn(async move |this, cx| {
             let mut receiver = computer_live::subscribe_frames();
             // A fresh subscription has already "seen" the current frame, and
@@ -177,7 +210,7 @@ impl MirrorView {
                 }
             }
         });
-        // Poller status every tick: the pointer keeps moving over a picture
+        // Feed status every tick: the pointer keeps moving over a picture
         // that has not changed, and the header learns about stalls at once.
         let status = cx.spawn(async move |this, cx| {
             let mut receiver = computer_live::subscribe_status();
@@ -251,8 +284,18 @@ impl MirrorView {
             error: None,
             last_ts: 0,
             last_header_key: String::new(),
-            offset: point(PANEL_MARGIN, PANEL_MARGIN),
-            size: size(PANEL_INITIAL_WIDTH, PANEL_INITIAL_HEIGHT),
+            // Reopen where the user last dragged it; the layout probe
+            // clamps a stale save back inside the host.
+            offset: saved_geometry()
+                .lock()
+                .ok()
+                .and_then(|saved| saved.map(|(offset, _)| offset))
+                .unwrap_or_else(|| point(PANEL_MARGIN, PANEL_MARGIN)),
+            size: saved_geometry()
+                .lock()
+                .ok()
+                .and_then(|saved| saved.map(|(_, size)| size))
+                .unwrap_or_else(|| size(PANEL_INITIAL_WIDTH, PANEL_INITIAL_HEIGHT)),
             expanded: false,
             move_grab: None,
             move_grab_for: None,
@@ -282,6 +325,7 @@ impl MirrorView {
             self.expanded = false;
         }
         self.size = resized_panel(host, self.offset, mouse);
+        remember_geometry(self.offset, self.size);
     }
 
     /// Follow a header drag, keeping the whole panel inside the host. A new
@@ -300,6 +344,7 @@ impl MirrorView {
             .move_grab
             .get_or_insert(point(mouse.x - panel_left, mouse.y - panel_top));
         self.offset = moved_panel(host, self.size, grab, mouse);
+        remember_geometry(self.offset, self.size);
     }
 
     fn toggle_expanded(&mut self, cx: &mut Context<Self>) {
@@ -307,9 +352,9 @@ impl MirrorView {
         cx.notify();
     }
 
-    /// Take a poller status; true when something visible changed. Every tick
-    /// bumps `last_capture_ms`, which the header does not show directly, so
-    /// only real changes redraw.
+    /// Take a feed status; true when something visible changed. Staleness is
+    /// judged against the feed's own interval (see `stale_after_ms`), and
+    /// the header timer repaints for time-driven badge ages.
     fn apply_status(&mut self, status: LiveStatus) -> bool {
         let visible = |status: &LiveStatus| {
             (
@@ -401,13 +446,14 @@ impl MirrorView {
             .last()
             .is_some_and(|overlay| now.saturating_sub(overlay.ts_ms) < CAPTION_MS);
         format!(
-            "{:?}|{:?}|{caption_live}",
+            "{:?}|{:?}|{caption_live}|{:?}",
             self.feed_state(),
-            self.fps(now).map(|fps| fps.round() as u32)
+            self.fps(now).map(|fps| fps.round() as u32),
+            self.stalled_secs(),
         )
     }
 
-    /// Re-read poller status and the sidecar; true when the view changed.
+    /// Re-read feed status and the sidecar; true when the view changed.
     /// Never fails silently: a missing sidecar falls back to the newest
     /// capture on disk, and an unreadable image surfaces as an error line
     /// instead of a blank window.
@@ -492,8 +538,8 @@ impl MirrorView {
     }
 
     /// Hide the panel. The host observes this view and drops the entity once
-    /// the flag clears, which also ends the frame subscription that keeps the
-    /// poller in its video tier.
+    /// the flag clears, which also ends the frame subscription that keeps
+    /// the feed alive while watched.
     fn close(&mut self, cx: &mut Context<Self>) {
         self.model.update(cx, |state, _| state.mirror_open = false);
         cx.notify();
@@ -510,7 +556,8 @@ impl MirrorView {
             return FeedState::Error(error.to_string());
         }
         if status.running {
-            let stalled = now.saturating_sub(status.last_capture_ms) > STALE_MS;
+            let stalled =
+                now.saturating_sub(status.last_capture_ms) > stale_after_ms(status.interval_ms);
             if stalled {
                 FeedState::Stalled
             } else {
@@ -522,6 +569,27 @@ impl MirrorView {
             FeedState::Idle
         }
     }
+
+    /// Whole seconds since the last capture, when currently stalled: drives
+    /// the badge age and the header repaint timer.
+    fn stalled_secs(&self) -> Option<u64> {
+        if self.feed_state() != FeedState::Stalled {
+            return None;
+        }
+        Some(
+            (computer_live::now_ms().saturating_sub(self.status.last_capture_ms) / 1_000)
+                .min(u64::MAX as u128) as u64,
+        )
+    }
+
+    /// Badge text for a stalled feed: the state plus how long it has been
+    /// starved, so STALLED answers "since when" at a glance.
+    fn stalled_badge(&self) -> String {
+        match self.stalled_secs() {
+            Some(secs) => format!("STALLED · {}", format_age_secs(u128::from(secs) * 1_000)),
+            None => "STALLED".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -530,9 +598,9 @@ enum FeedState {
     Live {
         fps: Option<f32>,
     },
-    /// The poller reports running but has not captured lately.
+    /// The feed reports running but has not captured lately.
     Stalled,
-    /// The poller stopped; the last frame stays up until the next action.
+    /// The feed stopped; the last frame stays up until the next action.
     Paused,
     /// Nothing live yet: showing the last capture on disk, if any.
     Idle,
@@ -540,7 +608,7 @@ enum FeedState {
 }
 
 /// Upload-ready image for a live frame: gpui wants tightly packed BGRA rows,
-/// which is exactly what the poller publishes, so this is one copy.
+/// which is exactly what the feed publishes, so this is one copy.
 fn render_image(frame: &LiveFrame) -> Option<Arc<RenderImage>> {
     // `from_raw` accepts any buffer at least this long, and the atlas
     // uploads with a tight pitch, so a padded buffer would shear silently.
@@ -812,7 +880,7 @@ impl Render for MirrorView {
                 (theme.success, format!("LIVE · {fps:.0} fps"), theme.success)
             }
             FeedState::Live { fps: None } => (theme.success, "LIVE".to_string(), theme.success),
-            FeedState::Stalled => (theme.warning, "STALLED".to_string(), theme.warning),
+            FeedState::Stalled => (theme.warning, self.stalled_badge(), theme.warning),
             FeedState::Paused => (
                 theme.muted_foreground,
                 "PAUSED".to_string(),
@@ -1010,6 +1078,9 @@ impl Render for MirrorView {
             .relative()
             .child(picture)
             .when_some(caption, |this, caption| {
+                // The chip wraps to two lines so a long action (a typed URL,
+                // a full approval title) stays readable; the header subtitle
+                // keeps the truncated one-liner.
                 this.child(
                     div()
                         .absolute()
@@ -1022,7 +1093,6 @@ impl Render for MirrorView {
                         .bg(hsla(0.0, 0.0, 0.0, 0.62))
                         .text_xs()
                         .text_color(hsla(0.0, 0.0, 1.0, 0.95))
-                        .truncate()
                         .child(caption),
                 )
             });
@@ -1134,9 +1204,9 @@ mod tests {
     };
 
     use super::{
-        circle, file_mtime_ms, fit_contain, fitted_panel, markers, moved_panel,
-        newest_capture, place, render_image, resized_panel, OVERLAY_MS, PANEL_MARGIN,
-        PANEL_MIN_HEIGHT, PANEL_MIN_WIDTH,
+        circle, file_mtime_ms, fit_contain, fitted_panel, format_age_secs, markers, moved_panel,
+        newest_capture, place, remember_geometry, render_image, resized_panel, saved_geometry,
+        stale_after_ms, OVERLAY_MS, PANEL_MARGIN, PANEL_MIN_HEIGHT, PANEL_MIN_WIDTH,
     };
 
     fn frame(width: u32, height: u32) -> LiveFrame {
@@ -1190,6 +1260,29 @@ mod tests {
         assert_eq!(tall.origin, point(px(135.0), px(20.0)));
         // Degenerate frame: nothing to draw, no panic.
         assert_eq!(fit_contain(bounds, 0.0, 10.0).size, size(px(0.0), px(0.0)));
+    }
+
+    #[test]
+    fn staleness_scales_with_feed_interval() {
+        // A ~1fps driver feed must survive ordinary poll jitter: grace is
+        // several intervals plus slack, floored so slow cadences stay honest.
+        assert_eq!(stale_after_ms(1_000), 8_000);
+        assert_eq!(stale_after_ms(0), 8_000);
+        assert_eq!(stale_after_ms(5_000), 27_000);
+        assert_eq!(format_age_secs(0), "0s");
+        assert_eq!(format_age_secs(12_000), "12s");
+        assert_eq!(format_age_secs(59_999), "59s");
+        assert_eq!(format_age_secs(180_000), "3m");
+    }
+
+    #[test]
+    fn reopened_panel_restores_dragged_geometry() {
+        remember_geometry(point(px(40.0), px(50.0)), size(px(400.0), px(300.0)));
+        let saved = saved_geometry().lock().unwrap();
+        assert_eq!(
+            *saved,
+            Some((point(px(40.0), px(50.0)), size(px(400.0), px(300.0))))
+        );
     }
 
     #[test]
