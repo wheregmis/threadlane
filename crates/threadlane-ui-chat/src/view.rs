@@ -4916,12 +4916,20 @@ impl ChatListView {
         .unwrap_or_else(|| "Select project".to_string());
 
         let project_chip_model = self.model.clone();
+        let project_chip_tooltip = active_work_dir
+            .as_ref()
+            .map(|dir| dir.display().to_string())
+            .unwrap_or_else(|| selected_project_name.clone());
         let project_chip = Button::new("composer-project-chip")
             .icon(IconName::Folder)
             .label(selected_project_name)
             .dropdown_caret(true)
             .outline()
             .xsmall()
+            // Duplicate folder names are indistinguishable by label alone:
+            // cap the width, keep the full path in the tooltip.
+            .max_w(px(160.0))
+            .tooltip(format!("Project: {project_chip_tooltip}"))
             .dropdown_menu(move |menu, _window, _cx| {
                 let mut menu = menu;
                 for (name, work_dir) in projects_list.clone() {
@@ -5139,6 +5147,10 @@ impl ChatListView {
             .dropdown_caret(true)
             .ghost()
             .disabled(!has_models)
+            // Long agent model names ("Claude Code · Opus 4.8 with 1M
+            // context") must not squeeze Send off the composer row: cap the
+            // width, the full label stays in the tooltip.
+            .max_w(px(200.0))
             .tooltip(if has_models {
                 format!("Model: {model_label}")
             } else {
@@ -5692,6 +5704,16 @@ impl ChatListView {
                                 .text_xs()
                                 .text_color(theme.foreground)
                                 .truncate()
+                                // Full draft in the tooltip: restoring blind
+                                // just to read it, then re-stashing, is gone.
+                                .id("stashed-draft-preview")
+                                .tooltip({
+                                    let tip = format!("Stashed draft:\n{draft}");
+                                    move |window, cx| {
+                                        gpui_component::tooltip::Tooltip::new(tip.clone())
+                                            .build(window, cx)
+                                    }
+                                })
                                 .child(format!("Stashed draft: \"{preview_text}\"")),
                         ),
                 )

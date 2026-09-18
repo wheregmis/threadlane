@@ -2791,6 +2791,7 @@ impl GitHubView {
                         .label("Reply")
                         .ghost()
                         .xsmall()
+                        .tooltip(format!("Reply to {}", target.author))
                         .on_click(cx.listener(
                             move |this, _, window, cx| {
                                 this.select_pr_reply_target(target.clone(), window, cx)
@@ -2806,6 +2807,7 @@ impl GitHubView {
                         .label("Ask agent to draft reply")
                         .ghost()
                         .xsmall()
+                        .tooltip("Ask the coding agent to draft a reply to this thread")
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.handoff_pr_reply(&head_ref, prompt.clone(), cx);
                         })),
@@ -2879,7 +2881,19 @@ impl GitHubView {
                 this.pr_file_focus.focus(window, cx);
                 this.select_pr_file(path.clone(), cx);
             }))
-            .child(div().text_sm().truncate().child(file.path))
+            .child(
+                div()
+                    .text_sm()
+                    .truncate()
+                    .id(SharedString::from(format!("pr-file-path-{}", file.path)))
+                    .tooltip({
+                        let tip = file.path.clone();
+                        move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                        }
+                    })
+                    .child(file.path),
+            )
             .child(
                 div()
                     .mt_1()

@@ -440,6 +440,12 @@ impl TerminalView {
         &self.project
     }
 
+    /// Whether the visible screen holds any output. Used to confirm closing
+    /// a shell that would discard scrollback/build output with one misclick.
+    pub fn has_output(&self) -> bool {
+        !self.screen.contents().trim().is_empty()
+    }
+
     fn start(&mut self) {
         let result = start_parser_worker(self.rows, self.cols, self.event_tx.clone())
             .map_err(|e| e.to_string())

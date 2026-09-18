@@ -1726,7 +1726,15 @@ impl RightPanelView {
                 Button::new(SharedString::from(format!("review-file-btn-{path}")))
                     .label(path.clone())
                     .icon(IconName::File)
-                    .tooltip(format!("Review {path} · {status} · +{} −{}", file.additions, file.deletions))
+                    .tooltip(format!(
+                        "Review {path} · {status} · +{} −{}{}",
+                        file.additions,
+                        file.deletions,
+                        absolute_path
+                            .as_deref()
+                            .map(|abs| format!("\n{abs}"))
+                            .unwrap_or_default()
+                    ))
                     .ghost()
                     .small()
                     .flex_1()

@@ -191,6 +191,10 @@ pub struct WorkspaceView {
     panel_layout: Option<(gpui::Size<Pixels>, Pixels, [bool; 3])>,
     git_event_tx: tokio::sync::mpsc::UnboundedSender<GitEvent>,
     updater_tx: tokio::sync::mpsc::UnboundedSender<UpdaterEvent>,
+    /// Two-step close confirm for shells holding output: (project, tab).
+    /// A misclick arms instead of destroying build/test scrollback; the
+    /// second click confirms.
+    pending_terminal_close: Option<(PathBuf, usize)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -451,10 +455,10 @@ impl WorkspaceView {
                 panel_layout: None,
                 git_event_tx,
                 updater_tx,
+                pending_terminal_close: None,
                 _subscriptions: vec![sub, right_panel_sub],
             }
         });
-
         view.update(cx, |view, cx| {
             let hydration_requests = view.model.update(cx, |state, _cx| {
                 std::mem::take(&mut state.pending_hydrations)
@@ -667,7 +671,19 @@ impl WorkspaceView {
     }
 
     fn close_terminal_tab(&mut self, project: &PathBuf, tab: usize, cx: &mut Context<Self>) {
-        if let Some(group) = self.terminal_groups.get_mut(project) {
+        // Two-step confirm when the shell holds output: the first click arms,
+        // the second destroys. A clean shell closes immediately.
+        let dirty = self
+            .terminal_groups
+            .get(project)
+            .and_then(|group| group.tabs.get(tab))
+            .is_some_and(|terminal| terminal.read(cx).has_output());
+        if dirty && self.pending_terminal_close != Some((project.clone(), tab)) {
+            self.pending_terminal_close = Some((project.clone(), tab));
+            cx.notify();
+            return;
+        }
+        self.pending_terminal_close = None;        if let Some(group) = self.terminal_groups.get_mut(project) {
             if tab >= group.tabs.len() {
                 return;
             }
@@ -2015,19 +2031,36 @@ impl Render for WorkspaceView {
                         .child({
                             let close_p = terminal_project.clone();
                             let close_v = cx.entity().clone();
-                            Button::new(SharedString::from(format!("terminal-tab-close-{tab}")))
-                                .icon(IconName::Close)
-                                .accessibility_label("Close shell")
-                            .tooltip("Close shell")
-                                .ghost()
-                                .xsmall()
-                                .on_click(move |_event, _window, cx| {
-                                    if let Some(project) = &close_p {
-                                        close_v.update(cx, |this, cx| {
-                                            this.close_terminal_tab(project, tab, cx)
-                                        });
-                                    }
-                                })
+                            let armed = terminal_project.as_ref().is_some_and(|project| {
+                                self.pending_terminal_close == Some((project.clone(), tab))
+                            });
+                            let close_button = Button::new(SharedString::from(format!(
+                                "terminal-tab-close-{tab}"
+                            )))
+                            .ghost()
+                            .xsmall()
+                            .accessibility_label(if armed {
+                                "Confirm close shell with output"
+                            } else {
+                                "Close shell"
+                            })
+                            .tooltip(if armed {
+                                "Shell holds output — click again to close it"
+                            } else {
+                                "Close shell"
+                            });
+                            let close_button = if armed {
+                                close_button.label("Sure?").danger()
+                            } else {
+                                close_button.icon(IconName::Close)
+                            };
+                            close_button.on_click(move |_event, _window, cx| {
+                                if let Some(project) = &close_p {
+                                    close_v.update(cx, |this, cx| {
+                                        this.close_terminal_tab(project, tab, cx)
+                                    });
+                                }
+                            })
                         })
                 });
 
