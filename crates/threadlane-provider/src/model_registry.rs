@@ -1,10 +1,21 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use threadlane_protocol::ReasoningEffort;
 
-static DISCOVERED_MODELS: std::sync::OnceLock<std::sync::RwLock<HashMap<String, ModelInfo>>> =
+/// Live discovery freshness: background refresh triggers aim here, and
+/// availability pruning trusts live data only within it. Expired entries
+/// are still served (stale on failure) until a refresh replaces them.
+pub const DISCOVERED_TTL: Duration = Duration::from_secs(5 * 60);
+
+struct DiscoveredEntry {
+    info: ModelInfo,
+    discovered_at: Instant,
+}
+
+static DISCOVERED_MODELS: std::sync::OnceLock<std::sync::RwLock<HashMap<String, DiscoveredEntry>>> =
     std::sync::OnceLock::new();
 
 pub fn pretty_model_label(id: &str) -> String {
@@ -33,11 +44,43 @@ pub fn update_discovered_models(provider: &str, models: Vec<ModelInfo>) {
         return;
     }
     if let Ok(mut cache) = DISCOVERED_MODELS.get_or_init(Default::default).write() {
-        cache.retain(|_, model| model.provider.as_deref() != Some(provider));
+        let now = Instant::now();
+        cache.retain(|_, entry| entry.info.provider.as_deref() != Some(provider));
         for model in models {
-            cache.insert(model.id.clone(), model);
+            cache.insert(
+                model.id.clone(),
+                DiscoveredEntry {
+                    info: model,
+                    discovered_at: now,
+                },
+            );
         }
     }
+}
+
+/// Snapshot of live-discovered models for registry merging: fresh and stale
+/// alike. An empty or failed fetch never wipes (see
+/// [`update_discovered_models`]), so expired entries stay visible until a
+/// refresh replaces them.
+fn discovered_snapshot() -> Vec<ModelInfo> {
+    DISCOVERED_MODELS
+        .get()
+        .and_then(|cache| cache.read().ok())
+        .map(|cache| cache.values().map(|entry| entry.info.clone()).collect())
+        .unwrap_or_default()
+}
+
+/// True when live discovery is missing or older than [`DISCOVERED_TTL`]:
+/// background refresh triggers consult this, and availability pruning
+/// trusts live data only while fresh.
+pub fn discovered_is_stale() -> bool {
+    let Some(cache) = DISCOVERED_MODELS.get().and_then(|cache| cache.read().ok()) else {
+        return true;
+    };
+    cache.is_empty()
+        || cache
+            .values()
+            .any(|entry| entry.discovered_at.elapsed() > DISCOVERED_TTL)
 }
 
 /// A model entry that can be supplied without a code change.
@@ -47,7 +90,10 @@ pub fn update_discovered_models(provider: &str, models: Vec<ModelInfo>) {
 /// 2. `resources/models.json` if present (kept out of `target/`),
 /// 3. `$THREADLANE_MODELS_JSON` file or inline JSON,
 /// 4. `~/.threadlane/models.json`,
-/// 5. `<project>/.threadlane/models.json`.
+/// 5. `<project>/.threadlane/models.json`,
+/// 6. live discovery ([`update_discovered_models`]): reasoning levels
+///    overlay known ids and unknown ids append; labels and context windows
+///    of curated seeds never change.
 /// Later sources override earlier ones by `id`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelInfo {
@@ -215,40 +261,43 @@ pub(crate) fn merge_models(lists: &[Vec<ModelInfo>]) -> Vec<ModelInfo> {
         .collect()
 }
 
-/// Full registry for a project: builtins, bundled JSON, env, global, project.
+/// Full registry for a project: builtins, bundled JSON, env, global,
+/// project, plus live discovery merged additively.
+///
+/// Live entries never relabel curated seeds (label/context stay) and never
+/// remove static entries: they overlay reasoning levels onto known ids and
+/// append unknown ids, so new models appear with neither a code change nor
+/// a `models.json` entry.
 pub fn registry_for_project(project_root: Option<&Path>) -> Vec<ModelInfo> {
     let project_models = project_root
         .map(|root| load_models_from_file(&root.join(".threadlane").join("models.json")))
         .unwrap_or_default();
-    merge_models(&[
+    let mut registry = merge_models(&[
         builtin_models(),
         bundled_models(),
         env_models(),
         global_models_file(),
         project_models,
-    ])
-}
-
-/// Registry lookup by id across all file sources.
-pub fn find_model(model_id: &str, project_root: Option<&Path>) -> Option<ModelInfo> {
-    let mut model = registry_for_project(project_root)
-        .into_iter()
-        .find(|model| model.id == model_id);
-    if let Some(live) = DISCOVERED_MODELS
-        .get()
-        .and_then(|cache| cache.read().ok())
-        .and_then(|cache| cache.get(model_id).cloned())
-    {
-        if let Some(model) = &mut model {
-            if !live.supported_efforts.is_empty() {
-                model.supported_efforts = live.supported_efforts;
-                model.default_effort = live.default_effort;
+    ]);
+    for live in discovered_snapshot() {
+        match registry.iter_mut().find(|model| model.id == live.id) {
+            Some(existing) => {
+                if !live.supported_efforts.is_empty() {
+                    existing.supported_efforts = live.supported_efforts.clone();
+                    existing.default_effort = live.default_effort.clone();
+                }
             }
-        } else {
-            model = Some(live);
+            None => registry.push(live),
         }
     }
-    model
+    registry
+}
+
+/// Registry lookup by id across all file sources plus live discovery.
+pub fn find_model(model_id: &str, project_root: Option<&Path>) -> Option<ModelInfo> {
+    registry_for_project(project_root)
+        .into_iter()
+        .find(|model| model.id == model_id)
 }
 
 /// Preserve a valid selection; otherwise use the advertised default/first mode.
@@ -380,5 +429,69 @@ mod tests {
         let models = load_models_from_file(&path);
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "custom/model");
+    }
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+
+    fn live(provider: &str, id: &str, label: &str, efforts: &[&str]) -> ModelInfo {
+        ModelInfo {
+            id: id.into(),
+            label: label.into(),
+            provider: Some(provider.into()),
+            context_window: Some(999),
+            supported_efforts: efforts.iter().map(|effort| (*effort).into()).collect(),
+            default_effort: None,
+        }
+    }
+
+    #[test]
+    fn discovered_models_merge_additively_without_relabeling_seeds() {
+        update_discovered_models(
+            "live-test-append",
+            vec![live(
+                "live-test-append",
+                "live-test/brand-new",
+                "Live Name",
+                &["low"],
+            )],
+        );
+        // Unknown ids append so new models reach the picker and payloads.
+        let found = find_model("live-test/brand-new", None).expect("discovered model visible");
+        assert_eq!(found.label, "Live Name");
+
+        // Empty updates never wipe.
+        update_discovered_models("live-test-append", Vec::new());
+        assert!(find_model("live-test/brand-new", None).is_some());
+    }
+
+    #[test]
+    fn discovered_levels_overlay_without_touching_curated_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".threadlane")).unwrap();
+        std::fs::write(
+            dir.path().join(".threadlane/models.json"),
+            r#"[{"id":"live-test/seeded","label":"Curated","provider":"test","context_window":111,"supported_efforts":["off"],"default_effort":"off"}]"#,
+        )
+        .unwrap();
+        update_discovered_models(
+            "live-test-overlay",
+            vec![live(
+                "live-test-overlay",
+                "live-test/seeded",
+                "Upstream Relabel",
+                &["low", "high"],
+            )],
+        );
+        let merged = registry_for_project(Some(dir.path()))
+            .into_iter()
+            .find(|model| model.id == "live-test/seeded")
+            .expect("seeded model present");
+        // Levels come from live; label and context stay curated.
+        assert_eq!(merged.supported_efforts, vec!["low", "high"]);
+        assert_eq!(merged.label, "Curated");
+        assert_eq!(merged.context_window, Some(111));
     }
 }

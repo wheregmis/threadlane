@@ -210,6 +210,9 @@ impl WasiExtension {
         linker
     }
 
+    /// Lenient loader for tests only; production discovery goes through
+    /// [`Self::load_from_file`], which requires a manifest.
+    #[cfg(test)]
     fn load_from_bytes(wasm_bytes: Vec<u8>) -> Result<Self, String> {
         Self::load_from_bytes_inner(wasm_bytes, false)
     }
@@ -270,10 +273,15 @@ impl WasiExtension {
         }
     }
 
+    /// Loads a module from disk for production discovery. Unlike
+    /// [`Self::load_from_bytes`] (kept lenient for tests), a manifest is
+    /// mandatory here: the synthesized `unnamed_wasi_ext` with empty
+    /// capabilities loads a silently nonfunctional extension, so
+    /// manifest-less modules are denied with a rebuild pointer instead.
     fn load_from_file(path: &Path) -> Result<Self, String> {
         let bytes =
             fs::read(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
-        let mut ext = Self::load_from_bytes(bytes)?;
+        let mut ext = Self::load_from_bytes_inner(bytes, true)?;
         ext.file_path = Some(path.to_path_buf());
         Ok(ext)
     }
@@ -340,6 +348,11 @@ fn read_json_result<T: for<'de> Deserialize<'de>, D>(
 ) -> Result<T, String> {
     let ptr = (result >> 32) as usize;
     let len = (result & 0xFFFF_FFFF) as usize;
+    if len > MAX_WASM_JSON_BYTES {
+        return Err(format!(
+            "WASM extension returned {len} bytes, exceeding the {MAX_WASM_JSON_BYTES}-byte JSON cap"
+        ));
+    }
     let memory = instance.get_memory(&*store, "memory").ok_or("No memory")?;
     let mut buffer = vec![0; len];
     memory
@@ -462,6 +475,15 @@ fn extension_state_file_name(extension_name: &str) -> String {
 
 type PendingExtensionEvents = HashMap<Option<String>, HashMap<String, Vec<WasiExtensionEvent>>>;
 
+/// Bound per-extension queued events: an extension that never runs must not
+/// accumulate without limit (oldest evicted first).
+const MAX_PENDING_EVENTS_PER_EXTENSION: usize = 256;
+
+/// Cap bytes read back from WASM memory for a JSON result: without a bound,
+/// a corrupt or hostile `len` allocates gigabytes before the bounds check
+/// can fail.
+const MAX_WASM_JSON_BYTES: usize = 8 * 1024 * 1024;
+
 #[derive(Default)]
 pub struct WasiExtensionManager {
     extensions: RwLock<HashMap<String, Arc<WasiExtension>>>,
@@ -534,7 +556,19 @@ impl WasiExtensionManager {
         .discover_checked()?;
         let mut loaded = HashMap::new();
         for record in records.into_iter().filter(|record| record.is_effective()) {
-            let extension = WasiExtension::load_from_file(record.module_path())?;
+            // A module that changed (or vanished) between discovery and load
+            // skips like a discovery-time failure: warn, retire the stale
+            // registration below, and keep the other extensions running.
+            let extension = match WasiExtension::load_from_file(record.module_path()) {
+                Ok(extension) => extension,
+                Err(error) => {
+                    tracing::warn!(
+                        "Skipping unloadable extension '{}': {error}",
+                        record.module_path().display()
+                    );
+                    continue;
+                }
+            };
             if extension.manifest.name != record.name() {
                 return Err(format!(
                     "Extension manifest changed while reloading '{}'",
@@ -633,6 +667,10 @@ impl WasiExtensionManager {
 
     /// Switches the active state scope and reloads every registered extension.
     /// Callers should serialize this with extension invocation.
+    ///
+    /// Queues belonging to other scopes are evicted: they are session-owned,
+    /// and retaining them grows without bound plus risks delivering a stale
+    /// `broker_response` if a session id is ever reused.
     pub fn set_session_scope(&self, session_id: impl Into<String>) -> Result<(), String> {
         let session_id = session_id.into();
         let scope = Some(session_id);
@@ -642,16 +680,23 @@ impl WasiExtensionManager {
             .map_err(|_| "Extension session lock poisoned".to_string())? = scope.clone();
         // Queued work is session-owned too: switching scope selects a separate
         // queue so one conversation cannot receive another's broker outcomes.
-        self.pending_events
-            .lock()
-            .map_err(|_| "Extension event lock poisoned".to_string())?
-            .entry(scope.clone())
-            .or_default();
-        self.pending_broker_requests
-            .lock()
-            .map_err(|_| "Extension broker request lock poisoned".to_string())?
-            .entry(scope)
-            .or_default();
+        // Evict every other scope's queues rather than leaking them.
+        {
+            let mut pending = self
+                .pending_events
+                .lock()
+                .map_err(|_| "Extension event lock poisoned".to_string())?;
+            pending.retain(|existing, _| existing == &scope);
+            pending.entry(scope.clone()).or_default();
+        }
+        {
+            let mut pending = self
+                .pending_broker_requests
+                .lock()
+                .map_err(|_| "Extension broker request lock poisoned".to_string())?;
+            pending.retain(|existing, _| existing == &scope);
+            pending.entry(scope).or_default();
+        }
 
         let extension_names = self.extension_names()?;
         let mut states = self
@@ -741,10 +786,13 @@ impl WasiExtensionManager {
         let pending = pending.entry(scope).or_default();
         for (extension, topics) in subscribers.iter() {
             if topics.contains(&topic) {
-                pending
-                    .entry(extension.clone())
-                    .or_default()
-                    .push(event.clone());
+                let queue = pending.entry(extension.clone()).or_default();
+                // Bound per-extension queues: an extension that never runs
+                // must not accumulate events without limit.
+                if queue.len() >= MAX_PENDING_EVENTS_PER_EXTENSION {
+                    queue.remove(0);
+                }
+                queue.push(event.clone());
             }
         }
         Ok(())
@@ -1068,6 +1116,18 @@ impl WasiExtensionManager {
                 .map_err(|_| "Extension state lock poisoned".to_string())?
                 .insert(extension.manifest.name.clone(), state.clone());
             self.persist_state(&extension.manifest.name, &state)?;
+        } else {
+            // A terminal response without state resets the slot to the
+            // stable default instead of leaving a stale transient phase
+            // behind: the next call must not start in a phase it cannot
+            // handle. Continuations disambiguate via `broker_response`
+            // events, never via a leftover phase string.
+            let stable = serde_json::json!({});
+            self.states
+                .lock()
+                .map_err(|_| "Extension state lock poisoned".to_string())?
+                .insert(extension.manifest.name.clone(), stable.clone());
+            self.persist_state(&extension.manifest.name, &stable)?;
         }
         let mut result = result;
         result.invoking_extension = extension.manifest.name.clone();
@@ -1369,5 +1429,70 @@ mod native_stack_tests {
             output.status,
             String::from_utf8_lossy(&output.stderr),
         );
+    }
+}
+
+#[cfg(test)]
+mod scope_safety_tests {
+    use super::*;
+
+    fn manager_with_extension() -> (WasiExtensionManager, String) {
+        let manager = WasiExtensionManager::new();
+        let extension = WasiExtension::load_from_bytes(b"\0asm\x01\0\0\0".to_vec()).unwrap();
+        let name = extension.manifest.name.clone();
+        manager.register_extension(extension).unwrap();
+        (manager, name)
+    }
+
+    #[test]
+    fn scope_switch_evicts_other_scope_queues() {
+        let (manager, _name) = manager_with_extension();
+        manager.set_session_scope("session-a").unwrap();
+        manager
+            .pending_broker_requests
+            .lock()
+            .unwrap()
+            .entry(Some("session-a".into()))
+            .or_default()
+            .push(HostBrokerRequest {
+                request: BrokerRequest {
+                    api_version: 1,
+                    capability: "process".into(),
+                    operation: "run".into(),
+                    arguments: serde_json::json!({}),
+                },
+                invoking_extension: "ext".into(),
+            });
+        manager.set_session_scope("session-b").unwrap();
+        let pending = manager.pending_broker_requests.lock().unwrap();
+        assert!(!pending.contains_key(&Some("session-a".into())));
+        assert!(pending.contains_key(&Some("session-b".into())));
+    }
+
+    #[test]
+    fn per_extension_event_queues_are_bounded() {
+        let (manager, name) = manager_with_extension();
+        manager.set_session_scope("session-a").unwrap();
+        manager.subscribe_event(&name, "topic".into()).unwrap();
+        for _ in 0..(MAX_PENDING_EVENTS_PER_EXTENSION + 10) {
+            manager
+                .publish_event("topic".into(), serde_json::json!({}))
+                .unwrap();
+        }
+        let pending = manager.pending_events.lock().unwrap();
+        let queue = &pending[&Some("session-a".into())][&name];
+        assert_eq!(queue.len(), MAX_PENDING_EVENTS_PER_EXTENSION);
+    }
+
+    #[test]
+    fn discovery_denies_manifest_less_modules() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.wasm");
+        std::fs::write(&path, b"\0asm\x01\0\0\0").unwrap();
+        let error = match WasiExtension::load_from_file(&path) {
+            Ok(_) => panic!("manifest-less module must be denied"),
+            Err(error) => error,
+        };
+        assert!(error.contains("extension_info"), "{error}");
     }
 }

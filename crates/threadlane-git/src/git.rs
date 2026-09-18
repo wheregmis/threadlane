@@ -1270,6 +1270,117 @@ pub fn remove_worktree(
     Ok(())
 }
 
+/// Reclaims a deterministic subagent worktree slot before provisioning.
+///
+/// A crashed or killed run leaves its path registered and its branch behind;
+/// retrying the same lane would fail `worktree add <existing-path>
+/// <existing-branch>` forever. Returns `true` when the slot is reusable
+/// as-is (same branch, clean), so the caller skips creation; otherwise the
+/// slot is cleared and the caller recreates it.
+///
+/// Safety: only paths under `.threadlane/worktrees/subagents` are ever
+/// cleared, and a branch checked out in any *other* live worktree is
+/// refused rather than attached twice.
+pub fn reclaim_subagent_worktree(
+    repo_path: &Path,
+    worktree_path: &Path,
+    branch_name: &str,
+) -> Result<bool, GitError> {
+    let managed = worktree_path
+        .components()
+        .any(|component| component.as_os_str() == ".threadlane");
+    if !managed {
+        return Err(GitError::new(
+            repo_path,
+            "refusing to reclaim a worktree outside .threadlane",
+        ));
+    }
+    let same_file = |registered: &Path| {
+        std::fs::canonicalize(registered).unwrap_or_else(|_| registered.to_path_buf())
+            == std::fs::canonicalize(worktree_path)
+                .unwrap_or_else(|_| worktree_path.to_path_buf())
+    };
+    let registered = list_worktrees(repo_path)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|worktree| same_file(&worktree.path));
+    match registered {
+        Some(info) if info.branch.as_deref() == Some(branch_name) => {
+            // Same lane's leftover: reuse when no *tracked* file is
+            // modified, clear and recreate otherwise. Untracked-only dirt
+            // does NOT block reuse: environment sidecars (`.tokensave/`,
+            // hook outputs) and harness bookkeeping land untracked in fresh
+            // checkouts (porcelain `??`), and leftovers from the dead
+            // attempt belong to the same retried task anyway.
+            let reusable = worktree_path.exists()
+                && inspect(worktree_path)
+                    .map(|status| {
+                        status.files.iter().all(|file| {
+                            file.index_status == '?' && file.worktree_status == '?'
+                        })
+                    })
+                    .unwrap_or(false);
+            if reusable {
+                return Ok(true);
+            }
+            if remove_worktree(repo_path, worktree_path, true).is_err() {
+                prune_worktrees(repo_path)?;
+                if worktree_path.exists() {
+                    std::fs::remove_dir_all(worktree_path).map_err(|error| {
+                        GitError::new(
+                            repo_path,
+                            format!("Failed to clear orphaned worktree: {error}"),
+                        )
+                    })?;
+                }
+            }
+        }
+        Some(_) => {
+            // Our deterministic path claimed by a foreign branch: clear it.
+            // The branch check below still guards liveness.
+            if remove_worktree(repo_path, worktree_path, true).is_err() {
+                prune_worktrees(repo_path)?;
+                if worktree_path.exists() {
+                    std::fs::remove_dir_all(worktree_path).map_err(|error| {
+                        GitError::new(
+                            repo_path,
+                            format!("Failed to clear orphaned worktree: {error}"),
+                        )
+                    })?;
+                }
+            }
+        }
+        None if worktree_path.exists() => {
+            // Stale directory without metadata (pruned record): clear it.
+            std::fs::remove_dir_all(worktree_path).map_err(|error| {
+                GitError::new(
+                    repo_path,
+                    format!("Failed to clear orphaned worktree: {error}"),
+                )
+            })?;
+        }
+        None => {}
+    }
+    // The branch must not be checked out anywhere else: that holder is a
+    // live sibling lane, and attaching twice corrupts both.
+    let elsewhere = list_worktrees(repo_path)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|worktree| {
+            worktree.branch.as_deref() == Some(branch_name) && !same_file(&worktree.path)
+        });
+    if let Some(holder) = elsewhere {
+        return Err(GitError::new(
+            repo_path,
+            format!(
+                "branch {branch_name} is already checked out at {}; refusing to attach a second worktree",
+                holder.path.display()
+            ),
+        ));
+    }
+    Ok(false)
+}
+
 /// Lists all worktrees in the repository.
 pub fn list_worktrees(repo_path: &Path) -> Result<Vec<GitWorktreeInfo>, GitError> {
     let output = command(repo_path, &["worktree", "list", "--porcelain"])?;

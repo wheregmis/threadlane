@@ -327,3 +327,112 @@ mod tests {
         assert!(script.contains("document.readyState"));
     }
 }
+
+/// Installs the click-to-annotate picker: hovering outlines the element
+/// under the cursor, clicking one records it to `window.__tlane_pick` and
+/// uninstalls. Returns `"ok"` immediately; the host polls
+/// [`annotate_poll_js`] for the pick. Escape cancels.
+pub fn annotate_install_js() -> String {
+    r##"(() => {
+  if (window.__tlane_annotating) return "already";
+  window.__tlane_annotating = true;
+  window.__tlane_pick = null;
+  const HOVER = "3px solid #f59e0b";
+  const PICK = "3px solid #22c55e";
+  let hovered = null;
+  const describe = (el) => {
+    const r = el.getBoundingClientRect();
+    const text = (el.innerText || el.value || el.getAttribute("aria-label") || el.getAttribute("alt") || "").trim().replace(/\s+/g, " ").slice(0, 200);
+    let selector = el.tagName.toLowerCase();
+    if (el.id) {
+      selector += "#" + el.id;
+    } else {
+      const parent = el.parentElement;
+      if (parent) {
+        const siblings = Array.from(parent.children).filter((child) => child.tagName === el.tagName);
+        if (siblings.length > 1) selector += ":nth-of-type(" + (siblings.indexOf(el) + 1) + ")";
+      }
+    }
+    return JSON.stringify({
+      tag: el.tagName.toLowerCase(),
+      text,
+      selector,
+      href: el.getAttribute("href") || "",
+      rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) },
+      url: location.href,
+      title: document.title,
+    });
+  };
+  const on_move = (event) => {
+    const el = document.elementFromPoint(event.clientX, event.clientY);
+    if (el === hovered || !el || el === document.documentElement || el === document.body) return;
+    if (hovered) hovered.style.outline = window.__tlane_prev_outline || "";
+    window.__tlane_prev_outline = el.style.outline;
+    hovered = el;
+    el.style.outline = HOVER;
+  };
+  const on_click = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const el = document.elementFromPoint(event.clientX, event.clientY);
+    if (el && el !== document.documentElement && el !== document.body) {
+      el.style.outline = PICK;
+      window.__tlane_pick = describe(el);
+    }
+    uninstall();
+    return false;
+  };
+  const on_key = (event) => {
+    if (event.key === "Escape") uninstall();
+  };
+  function uninstall() {
+    document.removeEventListener("mousemove", on_move, true);
+    document.removeEventListener("click", on_click, true);
+    document.removeEventListener("keydown", on_key, true);
+    if (hovered && !window.__tlane_pick) hovered.style.outline = window.__tlane_prev_outline || "";
+    hovered = null;
+    window.__tlane_annotating = false;
+  }
+  window.__tlane_uninstall = uninstall;
+  document.addEventListener("mousemove", on_move, true);
+  document.addEventListener("click", on_click, true);
+  document.addEventListener("keydown", on_key, true);
+  return "ok";
+})()"##
+    .to_string()
+}
+
+/// Returns the picker state as JSON: `{pick, active}`. `pick` is the
+/// recorded element (or null); `active` is false once the user cancelled
+/// with Escape, telling the host to stop polling.
+pub fn annotate_poll_js() -> String {
+    r#"(() => JSON.stringify({ pick: window.__tlane_pick || null, active: !!window.__tlane_annotating }))()"#.to_string()
+}
+
+/// Removes picker listeners and hover outlines without recording.
+pub fn annotate_uninstall_js() -> String {
+    r##"(() => { if (window.__tlane_uninstall) window.__tlane_uninstall(); return "ok"; })()"##
+        .to_string()
+}
+
+#[cfg(test)]
+mod annotate_tests {
+    use super::*;
+
+    #[test]
+    fn annotate_scripts_form_a_complete_protocol() {
+        let install = annotate_install_js();
+        let poll = annotate_poll_js();
+        let uninstall = annotate_uninstall_js();
+        // The picker records to a well-known slot the poll reads back.
+        for script in [&install, &poll, &uninstall] {
+            assert!(script.contains("__tlane_"), "picker slot missing: {script}");
+        }
+        assert!(install.contains("Escape"));
+        assert!(poll.contains("active"));
+        // No template placeholders left unsubstituted.
+        for script in [&install, &poll, &uninstall] {
+            assert!(!script.contains("__MAX__"), "unsubstituted placeholder");
+        }
+    }
+}

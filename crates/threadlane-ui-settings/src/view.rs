@@ -379,11 +379,12 @@ impl SettingsView {
     }
 
     /// Renders the muted "no items" placeholder shared by the extension,
-    /// skill, and ACP agent lists.
+    /// skill, and ACP agent lists. Compact margins so narrow panes keep
+    /// content width instead of huge side gutters.
     fn empty_state(message: &str, colors: gpui_component::ThemeColor) -> AnyElement {
         div()
-            .p_6()
-            .mx_6()
+            .p_4()
+            .mx_2()
             .rounded_lg()
             .border_1()
             .border_color(colors.border)
@@ -1351,14 +1352,15 @@ impl SettingsView {
             (
                 "Global",
                 vec![
+                    ("⌘ K", "Open Command Palette"),
                     ("⌘ ,", "Open Settings"),
                     ("⌘ B", "Toggle Left Sidebar"),
                     ("⌘ R", "Toggle Right Panel"),
                     ("⌘ J", "Toggle Terminal Panel"),
-                    ("⌘ E", "Toggle Code/Diff Editor"),
                     ("⌘ N", "New task"),
-                    ("⌘ P", "Open Project File Finder"),
-                    ("⌘ ⇧ O", "Attach Local Project"),
+                    ("⌘ L", "Focus composer"),
+                    ("⌘ 1 / 2 / 3", "Chat / Trajectory / Editor tab"),
+                    ("Escape", "Cancel active agent turn"),
                 ],
             ),
             (
@@ -1366,7 +1368,6 @@ impl SettingsView {
                 vec![
                     ("Enter", "Submit prompt to agent"),
                     ("⇧ Enter", "Insert newline in composer"),
-                    ("Escape", "Cancel active agent turn"),
                     ("/ (in empty composer)", "Open Slash Commands palette"),
                     ("@ (in composer)", "Reference file or context in prompt"),
                 ],

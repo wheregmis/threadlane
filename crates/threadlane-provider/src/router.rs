@@ -169,10 +169,13 @@ fn runtime_request_payload_source(request: &RuntimeRequest) -> PayloadSource {
     })
 }
 
-#[derive(Clone)]
 pub struct ProviderClient {
     openai: OpenAIClient,
-    openai_fallbacks: Vec<OpenAIClient>,
+    /// Backup-account clients, rebuilt from the live resolver whenever
+    /// credential rotation changes the backup set (login/logout), so
+    /// fallback retries never sign with removed accounts. Behind a mutex
+    /// because rotation arrives as `&self` through the shared provider port.
+    openai_fallbacks: std::sync::Mutex<Vec<OpenAIClient>>,
     antigravity: AntigravityClient,
     opencode: OpenCodeGoClient,
     opencode_api_key: Option<String>,
@@ -214,11 +217,84 @@ impl ProviderPort for ProviderClient {
     }
 
     fn refresh_openai_credentials(&self, api_key: String, account_id: Option<String>) {
-        self.openai.refresh_credentials(api_key, account_id);
+        self.openai.refresh_credentials(api_key.clone(), account_id.clone());
+        self.refresh_fallback_clients(&api_key);
+    }
+}
+
+/// Cloned clients share the primary credential cell but snapshot the
+/// fallback list: in-flight fan-out keeps working on the clients it
+/// started with while later rotations rebuild the roster.
+impl Clone for ProviderClient {
+    fn clone(&self) -> Self {
+        Self {
+            openai: self.openai.clone(),
+            openai_fallbacks: std::sync::Mutex::new(
+                self.openai_fallbacks
+                    .lock()
+                    .map(|fallbacks| fallbacks.clone())
+                    .unwrap_or_default(),
+            ),
+            antigravity: self.antigravity.clone(),
+            opencode: self.opencode.clone(),
+            opencode_api_key: self.opencode_api_key.clone(),
+            antigravity_credentials: self.antigravity_credentials.clone(),
+        }
     }
 }
 
 impl ProviderClient {
+    /// Snapshot of the current fallback roster for fan-out. Cloned out from
+    /// under a short lock so request I/O never holds the roster mutex.
+    fn fallback_clients(&self) -> Vec<OpenAIClient> {
+        self.openai_fallbacks
+            .lock()
+            .map(|fallbacks| fallbacks.clone())
+            .unwrap_or_default()
+    }
+
+    /// Rebuilds the fallback roster from the live account resolver after a
+    /// credential rotation, excluding the new primary key exactly like
+    /// construction. Unchanged rosters keep their clients (and live
+    /// websocket sessions); changed ones are replaced wholesale, which
+    /// retires stale keys and dead sessions with the old clients.
+    fn refresh_fallback_clients(&self, primary_api_key: &str) {
+        let fresh: Vec<OpenAIClient> = self
+            .openai
+            .codex_resolver()
+            .backup_accounts()
+            .into_iter()
+            .filter(|backup| backup.access_token != primary_api_key)
+            .map(|backup| {
+                OpenAIClient::new_with_resolver(
+                    backup.access_token,
+                    backup.account_id,
+                    self.openai.codex_resolver(),
+                )
+            })
+            .collect();
+        let changed = self
+            .openai_fallbacks
+            .lock()
+            .map(|current| {
+                let current_pairs: Vec<(String, Option<String>)> = current
+                    .iter()
+                    .map(OpenAIClient::credentials_pair)
+                    .collect();
+                let fresh_pairs: Vec<(String, Option<String>)> = fresh
+                    .iter()
+                    .map(OpenAIClient::credentials_pair)
+                    .collect();
+                current_pairs != fresh_pairs
+            })
+            .unwrap_or(true);
+        if changed {
+            if let Ok(mut fallbacks) = self.openai_fallbacks.lock() {
+                *fallbacks = fresh;
+            }
+        }
+    }
+
     pub fn new(api_key: impl Into<String>, account_id: Option<String>) -> Self {
         Self::new_with_resolver(
             api_key,
@@ -259,7 +335,7 @@ impl ProviderClient {
         }
         Self {
             openai: OpenAIClient::new_with_resolver(api_key, account_id, codex_accounts.clone()),
-            openai_fallbacks,
+            openai_fallbacks: std::sync::Mutex::new(openai_fallbacks),
             antigravity: AntigravityClient::new_with_credentials(antigravity_credentials.clone()),
             opencode,
             opencode_api_key,
@@ -310,10 +386,10 @@ impl ProviderClient {
     ) -> Self {
         Self {
             openai: OpenAIClient::new(api_key.into(), account_id),
-            openai_fallbacks: vec![OpenAIClient::new(
+            openai_fallbacks: std::sync::Mutex::new(vec![OpenAIClient::new(
                 fallback_api_key.into(),
                 fallback_account_id,
-            )],
+            )]),
             antigravity: AntigravityClient::new(),
             opencode: OpenCodeGoClient::new(),
             opencode_api_key: None,
@@ -329,10 +405,12 @@ impl ProviderClient {
     ) -> Self {
         Self {
             openai: OpenAIClient::new(api_key.into(), account_id),
-            openai_fallbacks: fallbacks
-                .into_iter()
-                .map(|(key, acc)| OpenAIClient::new(key, acc))
-                .collect(),
+            openai_fallbacks: std::sync::Mutex::new(
+                fallbacks
+                    .into_iter()
+                    .map(|(key, acc)| OpenAIClient::new(key, acc))
+                    .collect(),
+            ),
             antigravity: AntigravityClient::new(),
             opencode: OpenCodeGoClient::new(),
             opencode_api_key: None,
@@ -341,8 +419,8 @@ impl ProviderClient {
     }
 
     #[cfg(test)]
-    fn openai_fallback(&self) -> Option<&OpenAIClient> {
-        self.openai_fallbacks.first()
+    fn openai_fallback(&self) -> Option<OpenAIClient> {
+        self.fallback_clients().into_iter().next()
     }
 
     #[cfg(test)]
@@ -395,15 +473,16 @@ impl ProviderClient {
             return;
         }
 
-        if !self.openai_fallbacks.is_empty() {
+        let fallback_clients = self.fallback_clients();
+        if !fallback_clients.is_empty() {
             tracing::debug!(
                 provider = "openai",
-                fallback_count = self.openai_fallbacks.len(),
+                fallback_count = fallback_clients.len(),
                 "selected provider with fallbacks"
             );
-            let mut clients = Vec::with_capacity(1 + self.openai_fallbacks.len());
+            let mut clients = Vec::with_capacity(1 + fallback_clients.len());
             clients.push(self.openai.clone());
-            clients.extend(self.openai_fallbacks.clone());
+            clients.extend(fallback_clients);
 
             let tasks: Vec<
                 Box<dyn FnOnce(mpsc::Sender<StreamEvent>) -> BoxFuture<'static, ()> + Send>,
@@ -543,7 +622,18 @@ impl ProviderClient {
     }
 
     /// Generate a short session title using the provider selected by the model id.
+    ///
+    /// Antigravity models skip the side path entirely (it would consume an
+    /// OpenAI credential and 401 without one); `acp/*` models never reach
+    /// here with a provider key either (the UI routes them to the agent's
+    /// own title path first), so they skip too rather than failing obscurely.
     pub async fn generate_title(&self, model: &str, prompt: &str) -> Result<String, String> {
+        if is_antigravity_model(model) {
+            return Err("automatic titles are skipped for Antigravity models".into());
+        }
+        if model.starts_with("acp/") {
+            return Err("automatic titles are skipped for external agents".into());
+        }
         if !is_opencode_model(model) {
             return self.openai.generate_title(model, prompt).await;
         }
@@ -692,6 +782,112 @@ impl ProviderClient {
         } else {
             Ok(message)
         }
+    }
+
+    /// Suggests repository labels for a GitHub issue, without a session.
+    ///
+    /// Session-less like commit-message generation: a single streamed turn
+    /// against the selected model. Returns the subset of `available` the
+    /// model picked (matched case-insensitively, in repository order).
+    pub async fn generate_issue_labels(
+        &self,
+        model: &str,
+        title: &str,
+        body: &str,
+        available: &[String],
+    ) -> Result<Vec<String>, String> {
+        if available.is_empty() {
+            return Err("This repository has no labels to choose from".to_owned());
+        }
+        let model = model.to_owned();
+        let listing = available.join(", ");
+        let issue = format!("Title: {}\n\nBody:\n{}", title.trim(), body.trim());
+        let issue = issue.chars().take(6_000).collect::<String>();
+        let instructions = format!(
+            "You triage GitHub issues. Reply with ONLY a comma-separated list of repository labels \
+             that apply to the issue below, choosing exclusively from this list:\n{listing}\n\n\
+             Rules:\n\
+             - Output only label names from the list, comma-separated, nothing else.\n\
+             - Pick the 1-3 most relevant labels; prefer type labels (bug, enhancement, documentation, question) plus area labels when evident.\n\
+             - When nothing clearly applies, reply with the single most generic label."
+        );
+        let prompt = Arc::new(issue);
+        let instructions_str = instructions.clone();
+        let model_for_payload = model.clone();
+        let payload = PayloadSource::lazy(model.clone(), move |format| {
+            let prompt = Arc::clone(&prompt);
+            let model = model_for_payload.clone();
+            let instructions_str = instructions_str.clone();
+            Box::pin(async move {
+                match format {
+                    PayloadFormat::Codex => serde_json::json!({
+                        "model": model,
+                        "instructions": instructions_str,
+                        "input": [{
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": prompt.as_str()}]
+                        }],
+                        "store": false,
+                        "stream": true
+                    }),
+                    PayloadFormat::ChatCompletions => serde_json::json!({
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": instructions_str},
+                            {"role": "user", "content": prompt.as_str()}
+                        ],
+                        "max_tokens": 256,
+                        "stream": true
+                    }),
+                }
+            })
+        });
+        let (event_tx, mut event_rx) = mpsc::channel(128);
+        let client = self.clone();
+        let stream_task = tokio::spawn(async move {
+            client.stream_chat_completion(payload, None, event_tx).await;
+        });
+
+        let mut text = String::new();
+        let mut error = None;
+        while let Some(event) = event_rx.recv().await {
+            match event {
+                StreamEvent::ContentToken(token) => text.push_str(&token),
+                StreamEvent::Error(message) => error = Some(message),
+                StreamEvent::Finished { .. }
+                | StreamEvent::ReasoningToken(_)
+                | StreamEvent::ToolCallStart { .. }
+                | StreamEvent::ToolCallArgsDelta { .. } => {}
+            }
+        }
+        if stream_task.await.is_err() && error.is_none() {
+            return Err("label suggestion stream terminated unexpectedly".to_owned());
+        }
+        if let Some(error) = error {
+            return Err(error);
+        }
+        let picked: Vec<String> = text
+            .split([',', '\n'])
+            .map(str::trim)
+            .filter(|pick| !pick.is_empty())
+            .filter_map(|pick| {
+                available
+                    .iter()
+                    .find(|label| label.eq_ignore_ascii_case(pick))
+                    .cloned()
+            })
+            .collect();
+        if picked.is_empty() {
+            return Err("The model suggested no usable labels".to_owned());
+        }
+        let mut ordered: Vec<String> = available
+            .iter()
+            .filter(|label| picked.iter().any(|pick| pick == *label))
+            .cloned()
+            .collect();
+        ordered.dedup();
+        Ok(ordered)
     }
 }
 
@@ -1771,5 +1967,92 @@ mod tests {
         assert!(norm_very_long.chars().count() <= 72);
         assert!(norm_very_long.contains(": "));
         assert!(!norm_very_long.split(": ").nth(1).unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod rotation_tests {
+    use super::*;
+    use crate::credentials::{CodexAccountResolver, CodexBackupAccount};
+
+    #[derive(Debug, Default)]
+    struct MutableResolver {
+        backups: std::sync::Mutex<Vec<CodexBackupAccount>>,
+    }
+
+    #[async_trait::async_trait]
+    impl CodexAccountResolver for MutableResolver {
+        fn account_id_for_token(&self, _token: &str) -> Option<String> {
+            None
+        }
+
+        async fn valid_token_for_account(&self, _account_id: &str) -> Result<String, String> {
+            Err("nope".into())
+        }
+
+        fn backup_accounts(&self) -> Vec<CodexBackupAccount> {
+            self.backups.lock().unwrap().clone()
+        }
+    }
+
+    fn backup(token: &str, account: &str) -> CodexBackupAccount {
+        CodexBackupAccount {
+            access_token: token.into(),
+            account_id: Some(account.into()),
+        }
+    }
+
+    #[test]
+    fn rotation_rebuilds_fallbacks_when_backups_change() {
+        let resolver = Arc::new(MutableResolver::default());
+        *resolver.backups.lock().unwrap() =
+            vec![backup("backup-1", "acc-b1"), backup("backup-2", "acc-b2")];
+        let client = ProviderClient::new_with_resolver(
+            "primary",
+            None,
+            resolver.clone(),
+            None,
+            Arc::new(crate::credentials::NoopAntigravityCredentials),
+        );
+        assert_eq!(client.fallback_clients().len(), 2);
+
+        // Rotation with an unchanged backup set keeps the roster (and live
+        // websocket sessions) untouched.
+        client.refresh_openai_credentials("primary-rotated".into(), None);
+        let pairs: Vec<_> = client
+            .fallback_clients()
+            .iter()
+            .map(OpenAIClient::credentials_pair)
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("backup-1".to_string(), Some("acc-b1".to_string())),
+                ("backup-2".to_string(), Some("acc-b2".to_string())),
+            ]
+        );
+
+        // An account removed upstream disappears from the roster instead of
+        // signing retries with a dead key.
+        *resolver.backups.lock().unwrap() = vec![backup("backup-2", "acc-b2")];
+        client.refresh_openai_credentials("primary-rotated-again".into(), None);
+        let pairs: Vec<_> = client
+            .fallback_clients()
+            .iter()
+            .map(OpenAIClient::credentials_pair)
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![("backup-2".to_string(), Some("acc-b2".to_string()))]
+        );
+    }
+
+    #[tokio::test]
+    async fn titles_skip_antigravity_and_acp_without_touching_openai() {
+        let client = ProviderClient::new("", None);
+        let antigravity = client.generate_title("antigravity/gemini-3.6-flash", "hi").await;
+        assert!(antigravity.is_err());
+        let acp = client.generate_title("acp/agent", "hi").await;
+        assert!(acp.is_err());
     }
 }

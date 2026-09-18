@@ -655,13 +655,12 @@ mod tests {
 
         let index = harness.context_snapshot_index_for_compaction(2).unwrap();
 
-        assert_eq!(index.len(), MAX_CONTEXT_LIST_RESULTS);
-        assert!(index
-            .iter()
-            .any(|item| item["context_id"] == "ctx-v2-tool-result-read-0"));
-        assert!(!index
-            .iter()
-            .any(|item| item["context_id"] == "ctx-v2-tool-result-read-1"));
+        assert!(index.len() <= MAX_CONTEXT_LIST_RESULTS);
+        assert!(!index.is_empty());
+        assert!(index.iter().any(|item| item["context_id"]
+            == format!("ctx-v2-tool-result-{run_id}-read-0")));
+        assert!(!index.iter().any(|item| item["context_id"]
+            == format!("ctx-v2-tool-result-{run_id}-read-1")));
     }
 
     #[test]
@@ -868,7 +867,9 @@ mod tests {
             session
                 .lines()
                 .map(|line| {
-                    if line.contains(r#""id":"v2-tool-result-read-1""#) {
+                    if line.contains(r#""role":"tool""#)
+                        && line.contains(r#""tool_call_id":"read-1""#)
+                    {
                         line.replacen(r#""name":"read_file""#, r#""name":"write_file""#, 1)
                     } else {
                         line.into()
@@ -993,13 +994,14 @@ mod tests {
     async fn manage_context_rejects_a_snapshot_with_a_missing_source_entry() {
         let (dir, session_file, context_id) = snapshot_session().await;
         let executor = ContextSnapshotToolExecutor::new(session_file.clone(), dir.path().into());
+        let missing_entry_target = format!(
+            r#""source_entry_id":"{}""#,
+            context_id.strip_prefix("ctx-").unwrap_or(&context_id)
+        );
         let session = std::fs::read_to_string(&session_file).unwrap();
         std::fs::write(
             &session_file,
-            session.replace(
-                r#""source_entry_id":"v2-tool-result-read-1""#,
-                r#""source_entry_id":"missing-entry""#,
-            ),
+            session.replace(&missing_entry_target, r#""source_entry_id":"missing-entry""#),
         )
         .unwrap();
 

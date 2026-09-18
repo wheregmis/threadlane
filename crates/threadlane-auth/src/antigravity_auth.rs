@@ -174,14 +174,18 @@ pub async fn exchange_code_for_tokens(
     code: &str,
     code_verifier: &str,
 ) -> Result<AntigravityCredentials, String> {
-    exchange_code_for_tokens_in(
-        code,
-        code_verifier,
-        &AntigravityOAuthConfig::from_env(),
-        &CredentialStore::default(),
-    )
-    .await
-}
+    let code = code.to_string();
+    let code_verifier = code_verifier.to_string();
+    crate::on_reactor(async move {
+        exchange_code_for_tokens_in(
+            &code,
+            &code_verifier,
+            &AntigravityOAuthConfig::from_env(),
+            &CredentialStore::default(),
+        )
+        .await
+    })
+    .await}
 
 /// Exchanges an OAuth code with an explicit provider configuration,
 /// persisting the credentials to the injected store's location.
@@ -351,13 +355,14 @@ async fn refresh_antigravity_token(
     Ok(updated_creds)
 }
 
-pub async fn get_valid_antigravity_token() -> Result<String, String> {
-    get_valid_antigravity_token_in(
-        &AntigravityOAuthConfig::from_env(),
-        &CredentialStore::default(),
-    )
-    .await
-}
+pub async fn get_valid_antigravity_token() -> Result<String, String> {crate::on_reactor(async move {
+        get_valid_antigravity_token_in(
+            &AntigravityOAuthConfig::from_env(),
+            &CredentialStore::default(),
+        )
+        .await
+    })
+    .await}
 
 /// Returns a usable token from the injected store's location, refreshing with
 /// the explicit provider configuration when near expiry.
@@ -380,70 +385,71 @@ pub(crate) async fn get_valid_antigravity_token_in(
 }
 
 /// Helper function to listen locally for the OAuth callback code
-pub async fn listen_for_oauth_callback(expected_state: String) -> Result<String, String> {
-    let listener = TcpListener::bind("127.0.0.1:51121")
-        .map_err(|e| format!("Failed to bind loopback callback listener on port 51121: {e}"))?;
+pub async fn listen_for_oauth_callback(expected_state: String) -> Result<String, String> {crate::on_reactor(async move {
+        let listener = TcpListener::bind("127.0.0.1:51121")
+            .map_err(|e| format!("Failed to bind loopback callback listener on port 51121: {e}"))?;
 
-    listener
-        .set_nonblocking(true)
-        .map_err(|e| format!("Failed to set listener non-blocking: {e}"))?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|e| format!("Failed to set listener non-blocking: {e}"))?;
 
-    let start_time = current_timestamp();
-    loop {
-        if current_timestamp() - start_time > 300 {
-            return Err("OAuth callback timed out after 5 minutes".to_string());
-        }
+        let start_time = current_timestamp();
+        loop {
+            if current_timestamp() - start_time > 300 {
+                return Err("OAuth callback timed out after 5 minutes".to_string());
+            }
 
-        match listener.accept() {
-            Ok((mut stream, _)) => {
-                let mut buffer = [0u8; 2048];
-                if let Ok(bytes_read) = stream.read(&mut buffer) {
-                    let request_str = String::from_utf8_lossy(&buffer[..bytes_read]);
-                    if let Some(first_line) = request_str.lines().next() {
-                        if first_line.starts_with("GET /oauth-callback") {
-                            let path = first_line.split_whitespace().nth(1).unwrap_or("");
-                            if let Ok(parsed_url) =
-                                url::Url::parse(&format!("http://localhost:51121{path}"))
-                            {
-                                let mut code = None;
-                                let mut state = None;
-                                for (k, v) in parsed_url.query_pairs() {
-                                    if k == "code" {
-                                        code = Some(v.to_string());
-                                    } else if k == "state" {
-                                        state = Some(v.to_string());
-                                    }
-                                }
-
-                                let (res_code, html_response) = if let (Some(code), Some(st)) =
-                                    (code, state)
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let mut buffer = [0u8; 2048];
+                    if let Ok(bytes_read) = stream.read(&mut buffer) {
+                        let request_str = String::from_utf8_lossy(&buffer[..bytes_read]);
+                        if let Some(first_line) = request_str.lines().next() {
+                            if first_line.starts_with("GET /oauth-callback") {
+                                let path = first_line.split_whitespace().nth(1).unwrap_or("");
+                                if let Ok(parsed_url) =
+                                    url::Url::parse(&format!("http://localhost:51121{path}"))
                                 {
-                                    if st == expected_state {
-                                        (Ok(code), "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<!DOCTYPE html><html><body style='font-family:sans-serif;background:#0d1117;color:#58a6ff;padding:40px;text-align:center;'><h2>Google Antigravity Authentication Successful!</h2><p>You may now close this tab and return to Threadlane.</p></body></html>")
-                                    } else {
-                                        (Err("OAuth state mismatch".to_string()), "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<html><body><h2>Authentication Error</h2><p>State mismatch.</p></body></html>")
+                                    let mut code = None;
+                                    let mut state = None;
+                                    for (k, v) in parsed_url.query_pairs() {
+                                        if k == "code" {
+                                            code = Some(v.to_string());
+                                        } else if k == "state" {
+                                            state = Some(v.to_string());
+                                        }
                                     }
-                                } else {
-                                    (Err("Missing code or state in OAuth callback".to_string()), "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<html><body><h2>Authentication Error</h2><p>Missing parameters.</p></body></html>")
-                                };
 
-                                let _ = stream.write_all(html_response.as_bytes());
-                                let _ = stream.flush();
-                                return res_code;
+                                    let (res_code, html_response) = if let (Some(code), Some(st)) =
+                                        (code, state)
+                                    {
+                                        if st == expected_state {
+                                            (Ok(code), "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<!DOCTYPE html><html><body style='font-family:sans-serif;background:#0d1117;color:#58a6ff;padding:40px;text-align:center;'><h2>Google Antigravity Authentication Successful!</h2><p>You may now close this tab and return to Threadlane.</p></body></html>")
+                                        } else {
+                                            (Err("OAuth state mismatch".to_string()), "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<html><body><h2>Authentication Error</h2><p>State mismatch.</p></body></html>")
+                                        }
+                                    } else {
+                                        (Err("Missing code or state in OAuth callback".to_string()), "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<html><body><h2>Authentication Error</h2><p>Missing parameters.</p></body></html>")
+                                    };
+
+                                    let _ = stream.write_all(html_response.as_bytes());
+                                    let _ = stream.flush();
+                                    return res_code;
+                                }
                             }
                         }
                     }
                 }
-            }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-            }
-            Err(e) => {
-                return Err(format!("Error accepting callback connection: {e}"));
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                }
+                Err(e) => {
+                    return Err(format!("Error accepting callback connection: {e}"));
+                }
             }
         }
-    }
-}
+    })
+    .await}
 
 pub struct AntigravityAuthProvider;
 

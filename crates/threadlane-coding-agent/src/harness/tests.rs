@@ -1433,7 +1433,7 @@ async fn context_snapshot_capture_indexes_only_successful_local_read_results_onc
         harness
             .index_read_snapshot(&run_id, dir.path(), "read-1", &entry_id, output_chars)
             .unwrap(),
-        Some("ctx-v2-tool-result-read-1".into())
+        Some(format!("ctx-{entry_id}"))
     );
     assert_eq!(harness.context_snapshots("main").len(), 1);
     assert_eq!(
@@ -1443,7 +1443,7 @@ async fn context_snapshot_capture_indexes_only_successful_local_read_results_onc
     assert!(super::super::context_snapshots::resolve_context_snapshot(
         &path,
         dir.path(),
-        "ctx-v2-tool-result-read-1",
+        &format!("ctx-{entry_id}"),
     )
     .err()
     .unwrap()
@@ -1462,12 +1462,12 @@ async fn context_snapshot_capture_indexes_only_successful_local_read_results_onc
         harness
             .index_read_snapshot(&run_id, dir.path(), "read-1", &entry_id, output_chars)
             .unwrap(),
-        Some("ctx-v2-tool-result-read-1".into())
+        Some(format!("ctx-{entry_id}"))
     );
     let resolved = super::super::context_snapshots::resolve_context_snapshot(
         &path,
         dir.path(),
-        "ctx-v2-tool-result-read-1",
+        &format!("ctx-{entry_id}"),
     )
     .unwrap();
     assert_eq!(resolved.content, read_output);
@@ -2167,4 +2167,116 @@ fn sequential_single_call_turns_start_tools_on_lane() {
     assert_eq!(tools.len(), 2);
     assert_ne!(tools[0].assistant_entry_id, tools[1].assistant_entry_id);
     assert_eq!((tools[0].tool_index, tools[1].tool_index), (0, 0));
+}
+
+#[test]
+fn run_context_recapture_gets_a_distinct_record_id() {
+    let (_dir, path) = temp_session();
+    let mut harness = CodingSessionHarness::open(&path).unwrap();
+    harness
+        .begin_run("run-ctx", AgentMessage::user("go", vec![]))
+        .unwrap();
+    for _ in 0..2 {
+        harness
+            .capture_run_context(
+                "run-ctx",
+                "main",
+                "model".into(),
+                "provider".into(),
+                ReasoningEffort::Off,
+                false,
+                "work".into(),
+                crate::durable::durable_prompt_snapshot("prompt"),
+                "a".repeat(64),
+                Vec::new(),
+                Vec::new(),
+                None,
+                Vec::new(),
+                None,
+                None,
+            )
+            .unwrap();
+    }
+    let ids = harness
+        .store
+        .records()
+        .iter()
+        .filter_map(|record| match record {
+            HarnessRecord::RunContextCaptured { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(ids.len(), 2);
+    assert_ne!(ids[0], ids[1]);
+}
+
+#[test]
+fn tool_result_retry_with_new_content_gets_its_own_entry() {
+    let (_dir, path) = temp_session();
+    let mut harness = CodingSessionHarness::open(&path).unwrap();
+    harness
+        .begin_run("run-retry", AgentMessage::user("go", vec![]))
+        .unwrap();
+    let tool = |content: &str| AgentMessage::Tool {
+        tool_call_id: "call-1".into(),
+        name: "read_file".into(),
+        content: content.into(),
+        is_error: false,
+        terminate: false,
+        images: Vec::new(),
+    };
+    let first = harness.append_message(tool("output-one")).unwrap();
+    assert_eq!(first, "v2-tool-result-run-retry-call-1");
+    // Same content re-appended is idempotent ...
+    assert_eq!(harness.append_message(tool("output-one")).unwrap(), first);
+    // ... but new content is a new occurrence, never a DuplicateId.
+    let second = harness.append_message(tool("output-two")).unwrap();
+    assert_eq!(second, "v2-tool-result-run-retry-call-1-retry-1");
+}
+
+#[test]
+fn lane_append_collapses_only_consecutive_duplicates() {
+    let (_dir, path) = temp_session();
+    let mut harness = CodingSessionHarness::open(&path).unwrap();
+    let revive = || AgentMessage::user("revive prompt", vec![]);
+    let first = harness
+        .append_message_to_lane("child", "lane-run", revive())
+        .unwrap();
+    harness
+        .append_message_to_lane(
+            "child",
+            "lane-run",
+            AgentMessage::Assistant {
+                content: Some("ack".into()),
+                tool_calls: None,
+                stop_reason: None,
+                deferred_handle: None,
+            },
+        )
+        .unwrap();
+    // Identical prompt later on is a new turn, not a duplicate.
+    let third = harness
+        .append_message_to_lane("child", "lane-run", revive())
+        .unwrap();
+    assert_ne!(third, first);
+    // An immediate re-append of the same tail is still idempotent.
+    assert_eq!(
+        harness
+            .append_message_to_lane("child", "lane-run", revive())
+            .unwrap(),
+        third
+    );
+}
+
+#[test]
+fn harness_session_key_unifies_dot_spellings() {
+    let dir = tempfile::tempdir().unwrap();
+    let abs = dir.path().join("s.jsonl");
+    std::fs::write(&abs, "").unwrap();
+    let dotted = PathBuf::from(format!("{}/./s.jsonl", dir.path().display()));
+    // Same session file spelled with a redundant `.` component shares the hub.
+    assert_eq!(
+        super::harness_session_key(&abs),
+        super::harness_session_key(&dotted)
+    );
 }

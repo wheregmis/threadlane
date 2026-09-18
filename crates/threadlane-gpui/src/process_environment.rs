@@ -44,8 +44,11 @@ fn prepend_existing_paths<'a>(
         .map(PathBuf::from)
         .collect::<Vec<_>>();
 
+    // join_paths only fails on entries containing the separator, which
+    // split_paths can never yield — but a malformed $PATH must degrade to
+    // "keep current" rather than panic at launch.
     env::join_paths(additions.into_iter().chain(current_paths))
-        .expect("existing PATH entries must be valid path components")
+        .unwrap_or_else(|_| current.to_os_string())
 }
 
 #[cfg(all(test, target_os = "macos"))]

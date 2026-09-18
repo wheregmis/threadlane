@@ -23,6 +23,7 @@ threadlane-ui-mirror.workspace = true
 threadlane-ui-state.workspace = true
 threadlane-ui-theme.workspace = true
 tokio = { workspace = true, features = ["full"] }
+tracing.workspace = true
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

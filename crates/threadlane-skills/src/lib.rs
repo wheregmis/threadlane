@@ -155,9 +155,13 @@ impl SkillSettings {
         let bytes = serde_json::to_vec_pretty(&file)
             .map_err(|error| format!("Failed to encode skill settings: {error}"))?;
         // Atomic swap like the other project-scoped stores: a crash mid-write
-        // must not leave a torn skills.json behind.
+        // must not leave a torn skills.json behind (which would fall back to
+        // all-enabled and resurrect disabled skills).
         let temporary = path.with_extension("json.tmp");
         fs::write(&temporary, &bytes)
+            .map_err(|error| format!("Failed to write skill settings: {error}"))?;
+        File::open(&temporary)
+            .and_then(|handle| handle.sync_all())
             .map_err(|error| format!("Failed to write skill settings: {error}"))?;
         fs::rename(&temporary, &path)
             .map_err(|error| format!("Failed to write skill settings: {error}"))?;
@@ -1299,7 +1303,11 @@ fn parse_frontmatter_document(
         }
         return Err("Unclosed standalone YAML frontmatter delimiter '---'".to_string());
     };
-    let body_offset = body_offset.expect("closing delimiter sets body offset");
+    // Set together with `yaml_end` above; the else is unreachable, but
+    // user-controlled frontmatter must never panic the host.
+    let Some(body_offset) = body_offset else {
+        return Err("Unclosed standalone YAML frontmatter delimiter '---'".to_string());
+    };
     if body_offset > max_frontmatter_bytes {
         return Err(format!(
             "YAML frontmatter exceeds {max_frontmatter_bytes} bytes"

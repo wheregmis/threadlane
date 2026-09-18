@@ -70,13 +70,34 @@ struct HarnessSessionEntry {
     cancellation: Arc<AtomicBool>,
 }
 
+/// Canonical hub key for a session path: canonicalized parent + file name,
+/// mirroring the JSONL writer claim. The same session opened via `./a.jsonl`
+/// vs `a.jsonl` (or a symlinked parent) must share one hub, or abort flags
+/// and events are lost across handles.
+fn harness_session_key(path: &Path) -> PathBuf {
+    if let (Some(parent), Some(name)) = (
+        path.parent().filter(|p| !p.as_os_str().is_empty()),
+        path.file_name(),
+    ) {
+        if let Ok(canonical_parent) = parent.canonicalize() {
+            return canonical_parent.join(name);
+        }
+    }
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    std::env::current_dir()
+        .map(|cwd| cwd.join(path))
+        .unwrap_or_else(|_| path.to_path_buf())
+}
+
 fn harness_session_entry(path: &Path) -> HarnessSessionEntry {
     static SESSIONS: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, HarnessSessionEntry>>> =
         std::sync::OnceLock::new();
     let sessions = SESSIONS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
     let mut sessions = sessions.lock().unwrap_or_else(|error| error.into_inner());
     sessions
-        .entry(path.to_path_buf())
+        .entry(harness_session_key(path))
         .or_insert_with(|| HarnessSessionEntry {
             hub: HarnessEventHub::new(256),
             hooks: HookRegistry::default(),

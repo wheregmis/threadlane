@@ -26,7 +26,19 @@ pub struct QueuedMessage {
     pub(crate) from: String,
     pub(crate) body: String,
     pub(crate) seq: u64,
+    /// Internal control notices (e.g. the `hub kill` shutdown note). Folded
+    /// into live drains so the affected child sees them, but filtered out of
+    /// `hub revive` prompts so a killed lane is never resurrected with
+    /// "you are being shut down" as its task.
+    pub(crate) system_notice: bool,
 }
+
+/// Bound per-lane inbox depth: a parent spamming a settled lane must not grow
+/// memory without limit. Oldest messages are evicted with a warning.
+pub(crate) const MAX_HUB_INBOX_DEPTH: usize = 64;
+
+/// Bound retained broadcasts for not-yet-registered lanes.
+const MAX_PENDING_BROADCASTS: usize = 16;
 
 /// Lane roster entry for `hub list`.
 #[derive(Debug, Clone)]
@@ -51,7 +63,28 @@ struct HubInner {
     killed: HashSet<String>,
     /// Terminal outcomes by lane name, set on settle/kill.
     outcomes: HashMap<String, String>,
+    /// Recent `all` broadcasts retained for lanes that register late (a
+    /// parallel batch broadcasting before every peer started). Bounded.
+    pending_broadcasts: VecDeque<QueuedMessage>,
     next_seq: u64,
+}
+
+/// Push one message into a lane inbox, evicting the oldest on overflow so a
+/// spammy sender cannot grow a settled lane's queue without bound.
+fn push_to_inbox(inner: &mut HubInner, target: &str, message: QueuedMessage) {
+    let queue = inner.inbox.entry(target.to_string()).or_default();
+    if queue.len() >= MAX_HUB_INBOX_DEPTH {
+        if let Some(evicted) = queue.pop_front() {
+            log::warn!(
+                "hub inbox for {target} exceeded {MAX_HUB_INBOX_DEPTH} messages; evicted oldest (seq {})",
+                evicted.seq
+            );
+        }
+    }
+    queue.push_back(message);
+    if let Some(lane) = inner.lanes.get_mut(target) {
+        lane.unread += 1;
+    }
 }
 
 /// Shared mailbox + live-lane roster.
@@ -76,6 +109,8 @@ impl SubagentHub {
 
     /// Register a live lane (idempotent). Re-registering (e.g. revive)
     /// clears any stale kill flag and outcome for the lane and agent alias.
+    /// A brand-new lane replays retained `all` broadcasts so an early batch
+    /// broadcast is not lost to a peer that had not started yet.
     pub(crate) fn register(
         &self,
         lane_name: String,
@@ -85,7 +120,10 @@ impl SubagentHub {
         model: String,
     ) {
         {
-            let mut inner = self.inner.lock().unwrap();
+            // Poison-tolerant: a panicked holder must not cascade-panic
+            // every later register/send on the shared hub.
+            let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+            let is_new = !inner.lanes.contains_key(&lane_name);
             inner.killed.remove(&lane_name);
             inner.killed.remove(&agent);
             inner.outcomes.remove(&lane_name);
@@ -94,7 +132,7 @@ impl SubagentHub {
                 HubLaneInfo {
                     lane_name: lane_name.clone(),
                     run_id,
-                    agent,
+                    agent: agent.clone(),
                     task,
                     model,
                     live: true,
@@ -102,7 +140,16 @@ impl SubagentHub {
                     outcome: None,
                 },
             );
-            inner.inbox.entry(lane_name).or_default();
+            inner.inbox.entry(lane_name.clone()).or_default();
+            if is_new {
+                let broadcasts: Vec<QueuedMessage> =
+                    inner.pending_broadcasts.iter().cloned().collect();
+                for broadcast in broadcasts {
+                    if broadcast.from != lane_name && broadcast.from != agent {
+                        push_to_inbox(&mut inner, &lane_name, broadcast);
+                    }
+                }
+            }
         }
         self.wake.notify_waiters();
     }
@@ -256,8 +303,33 @@ impl SubagentHub {
     /// Unknown targets create a pending inbox so early sends to not-yet-
     /// started siblings are queued, not dropped. Callers validate names
     /// (sibling list / roster) before sending so typos still error there.
-    /// Returns the resolved recipient keys.
+    /// `all` additionally retains the broadcast for lanes that register
+    /// later, so a batch broadcasting before every peer started still
+    /// reaches the late joiner on register. Returns the resolved recipient
+    /// keys (`["all"]` when only retained as pending).
     pub(crate) fn send(&self, from: &str, to: &str, body: String) -> Result<Vec<String>, String> {
+        self.send_inner(from, to, body, false)
+    }
+
+    /// Send an internal control notice (e.g. the `hub kill` shutdown note).
+    /// Carried in-band so live drains observe it, but flagged so `hub revive`
+    /// never folds it into a follow-up prompt as task text.
+    pub(crate) fn send_system(
+        &self,
+        from: &str,
+        to: &str,
+        body: String,
+    ) -> Result<Vec<String>, String> {
+        self.send_inner(from, to, body, true)
+    }
+
+    fn send_inner(
+        &self,
+        from: &str,
+        to: &str,
+        body: String,
+        system_notice: bool,
+    ) -> Result<Vec<String>, String> {
         let body = body.trim().to_string();
         if body.is_empty() {
             return Err("message must be non-empty".into());
@@ -269,43 +341,51 @@ impl SubagentHub {
             .inner
             .lock()
             .map_err(|_| "Subagent hub is unavailable".to_string())?;
-        let targets: Vec<String> = if to == "all" {
+        let make_message = |inner: &mut HubInner| {
+            inner.next_seq += 1;
+            QueuedMessage {
+                from: from.to_string(),
+                body: body.clone(),
+                seq: inner.next_seq,
+                system_notice,
+            }
+        };
+        if to == "all" {
             // Registered lanes own exactly one inbox, keyed by lane name. Do
             // not address aliases or arbitrary pending inboxes here: doing so
             // duplicates sibling delivery and can echo to the sender.
-            inner
+            let targets: Vec<String> = inner
                 .lanes
                 .iter()
                 .filter_map(|(lane_name, info)| {
                     (info.live && lane_name.as_str() != from && info.agent != from)
                         .then(|| lane_name.clone())
                 })
-                .collect()
-        } else if let Some(resolved) = Self::resolve_key_locked(&inner, to) {
+                .collect();
+            // Retain for late joiners even when nobody is live yet.
+            let retained = make_message(&mut inner);
+            for target in &targets {
+                push_to_inbox(&mut inner, target, retained.clone());
+            }
+            if inner.pending_broadcasts.len() >= MAX_PENDING_BROADCASTS {
+                inner.pending_broadcasts.pop_front();
+            }
+            inner.pending_broadcasts.push_back(retained);
+            if targets.is_empty() {
+                return Ok(vec!["all".to_string()]);
+            }
+            return Ok(targets);
+        }
+        let targets: Vec<String> = if let Some(resolved) = Self::resolve_key_locked(&inner, to) {
             vec![resolved]
         } else {
             // Pending inbox for a not-yet-started sibling; the recipient
             // drains it under this key once it starts.
             vec![to.to_string()]
         };
-        if targets.is_empty() {
-            return Err("no message recipients".into());
-        }
         for target in &targets {
-            inner.next_seq += 1;
-            let seq = inner.next_seq;
-            inner
-                .inbox
-                .entry(target.clone())
-                .or_default()
-                .push_back(QueuedMessage {
-                    from: from.to_string(),
-                    body: body.clone(),
-                    seq,
-                });
-            if let Some(lane) = inner.lanes.get_mut(target) {
-                lane.unread += 1;
-            }
+            let message = make_message(&mut inner);
+            push_to_inbox(&mut inner, target, message);
         }
         Ok(targets)
     }
@@ -402,8 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn broadcast_skips_sender_and_queues_unknown() {
-        let hub = SubagentHub::new();
+    fn broadcast_skips_sender_and_queues_unknown() {        let hub = SubagentHub::new();
         hub.register(
             "lane-a".into(),
             "run-a".into(),
@@ -426,6 +505,68 @@ mod tests {
         assert_eq!(targets, vec!["ghost".to_string()]);
         assert_eq!(hub.drain("ghost").len(), 1);
         assert!(hub.send("lane-a", "lane-b", "   ".into()).is_err());
+    }
+
+    #[test]
+    fn broadcast_reaches_lanes_that_register_late() {
+        let hub = SubagentHub::new();
+        hub.register(
+            "lane-a".into(),
+            "run-a".into(),
+            "a".into(),
+            "t".into(),
+            "m".into(),
+        );
+        // Batch peer broadcasts before lane-b starts; nobody live but the
+        // sender, so the broadcast is retained rather than dropped.
+        let targets = hub.send("lane-a", "all", "early hello".into()).unwrap();
+        assert_eq!(targets, vec!["all".to_string()]);
+        hub.register(
+            "lane-b".into(),
+            "run-b".into(),
+            "b".into(),
+            "t".into(),
+            "m".into(),
+        );
+        let inbox = hub.drain("lane-b");
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].body, "early hello");
+        // The sender never receives its own broadcast, even via replay.
+        assert!(hub.drain("lane-a").is_empty());
+    }
+
+    #[test]
+    fn inbox_depth_is_bounded_with_oldest_evicted() {
+        let hub = SubagentHub::new();
+        for index in 0..(MAX_HUB_INBOX_DEPTH + 6) {
+            hub.send("parent", "ghost", format!("m-{index}")).unwrap();
+        }
+        let inbox = hub.drain("ghost");
+        assert_eq!(inbox.len(), MAX_HUB_INBOX_DEPTH);
+        assert_eq!(inbox[0].body, "m-6");
+    }
+
+    #[test]
+    fn system_notices_are_flagged_for_revive_filtering() {
+        let hub = SubagentHub::new();
+        hub.register(
+            "lane-a".into(),
+            "run-a".into(),
+            "a".into(),
+            "t".into(),
+            "m".into(),
+        );
+        hub.send("parent", "lane-a", "real note".into()).unwrap();
+        hub.send_system("parent", "lane-a", "shutting down".into())
+            .unwrap();
+        let inbox = drain_lane_inbox(&hub, "lane-a", "a");
+        assert_eq!(inbox.len(), 2);
+        let kept: Vec<_> = inbox
+            .into_iter()
+            .filter(|message| !message.system_notice)
+            .collect();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].body, "real note");
     }
 
     #[tokio::test]
@@ -991,7 +1132,7 @@ impl HubToolExecutor {
         if !self.hub.flag_killed(&lane.lane_name, &lane.agent) {
             return Err(format!("Lane {} is no longer tracked.", lane.lane_name));
         }
-        let _ = self.hub.send(
+        let _ = self.hub.send_system(
             "parent",
             &lane.lane_name,
             "You are being shut down via `hub kill`. Stop after your current step; do not start new work.".to_string(),

@@ -884,22 +884,30 @@ impl OpenAIClient {
         (credentials.api_key, credentials.account_id)
     }
 
+    /// The account resolver backing this client, for rebuilding fallback
+    /// rosters from live account data on rotation.
+    pub(crate) fn codex_resolver(&self) -> SharedCodexResolver {
+        self.codex_accounts.clone()
+    }
+
     /// Rotate the credential used for subsequent OpenAI-branch requests.
     /// Called when the session model changes providers mid-task (slash
     /// `/model`, picker rebuilds skip this by constructing fresh clients,
-    /// prewalk handoffs). A changed account identity also drops the cached
-    /// Codex websocket, whose handshake embeds the previous Bearer token.
+    /// prewalk handoffs). A changed account identity OR a changed key drops
+    /// the cached Codex websocket, whose handshake embeds the previous
+    /// Bearer token.
     pub(crate) fn refresh_credentials(&self, api_key: String, account_id: Option<String>) {
         let codex_account_id = (account_id.is_some() || api_key.starts_with("ey"))
             .then(|| self.codex_accounts.account_id_for_token(&api_key))
             .flatten();
-        let rotated_account = {
+        let rotated = {
             let mut guard = match self.credentials.lock() {
                 Ok(guard) => guard,
                 Err(_) => return,
             };
-            let rotated =
-                guard.account_id != account_id || guard.codex_account_id != codex_account_id;
+            let rotated = guard.api_key != api_key
+                || guard.account_id != account_id
+                || guard.codex_account_id != codex_account_id;
             *guard = OpenAICredentials {
                 api_key,
                 account_id,
@@ -907,7 +915,7 @@ impl OpenAIClient {
             };
             rotated
         };
-        if rotated_account {
+        if rotated {
             // Best-effort: the next request reconnects. Deliberately not
             // awaited — rotation must stay callable from sync contexts.
             if let Ok(mut state) = self.codex_ws.try_lock() {
@@ -1155,13 +1163,19 @@ impl OpenAIClient {
                     };
                 }
             };
-            if let Err(error) = state
-                .socket
-                .as_mut()
-                .expect("socket was connected")
-                .send(Message::Text(text.into()))
-                .await
-            {
+            if let Err(error) = match state.socket.as_mut() {
+                // A concurrent reset (credential rotation) may clear the
+                // socket between polls: fail over instead of panicking.
+                None => {
+                    state.reset().await;
+                    return WsResult::Failed {
+                        message: "Codex WebSocket reset during send".to_string(),
+                        emitted: false,
+                        fallback_allowed: true,
+                    };
+                }
+                Some(socket) => socket.send(Message::Text(text.into())).await,
+            } {
                 state.reset().await;
                 return WsResult::Failed {
                     message: format!("Codex WebSocket send error: {error}"),
@@ -1172,12 +1186,20 @@ impl OpenAIClient {
 
             let mut accumulator = ResponseAccumulator::default();
             let terminal_success = loop {
-                let message = match tokio::time::timeout(
-                    WS_RESPONSE_IDLE_TIMEOUT,
-                    state.socket.as_mut().expect("socket exists").next(),
-                )
-                .await
-                {
+                // The socket borrow cannot assume presence: rotation may
+                // reset it between polls (see the send site above).
+                let next = match state.socket.as_mut() {
+                    Some(socket) => socket.next(),
+                    None => {
+                        state.reset().await;
+                        return WsResult::Failed {
+                            message: "Codex WebSocket reset during response".to_string(),
+                            emitted: accumulator.emitted_model_event,
+                            fallback_allowed: true,
+                        };
+                    }
+                };
+                let message = match tokio::time::timeout(WS_RESPONSE_IDLE_TIMEOUT, next).await {
                     Ok(Some(Ok(message))) => message,
                     Ok(Some(Err(error))) => {
                         let emitted = accumulator.emitted_model_event;

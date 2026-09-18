@@ -258,8 +258,9 @@ impl RightPanelView {
         // Eager so agent browser commands always have a live view to act on,
         // even before the user opens the tab. Hidden until selected.
         // GPUI test windows have no native handle for Wry; Git UI tests do not use the browser.
+        let browser_model = model.clone();
         let browser = (!cfg!(test)).then(|| {
-            let browser = cx.new(|cx| BrowserView::new(window, cx));
+            let browser = cx.new(|cx| BrowserView::new(browser_model.clone(), window, cx));
             browser.update(cx, |browser, cx| browser.set_visible(false, cx));
             browser
         });
@@ -1104,7 +1105,8 @@ impl RightPanelView {
         if let Some(browser) = &self.browser {
             return browser.clone();
         }
-        let browser = cx.new(|cx| BrowserView::new(window, cx));
+        let browser_model = self.model.clone();
+        let browser = cx.new(|cx| BrowserView::new(browser_model, window, cx));
         self.browser = Some(browser.clone());
         browser
     }
@@ -1726,7 +1728,15 @@ impl RightPanelView {
                 Button::new(SharedString::from(format!("review-file-btn-{path}")))
                     .label(path.clone())
                     .icon(IconName::File)
-                    .tooltip(format!("Review {path} · {status} · +{} −{}", file.additions, file.deletions))
+                    .tooltip(format!(
+                        "Review {path} · {status} · +{} −{}{}",
+                        file.additions,
+                        file.deletions,
+                        absolute_path
+                            .as_deref()
+                            .map(|abs| format!("\n{abs}"))
+                            .unwrap_or_default()
+                    ))
                     .ghost()
                     .small()
                     .flex_1()

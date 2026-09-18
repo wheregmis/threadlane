@@ -34,6 +34,14 @@ pub struct AppState {
     pub is_generating: bool,
     composer_text: String,
     pub session_status: Option<String>,
+    /// Bumped whenever an out-of-band mutation (issue create/close, label
+    /// edit) changes GitHub list contents. The GitHub view observes this
+    /// and refetches; dialogs cannot reach the view entity directly.
+    pub github_list_revision: u64,
+    /// Composer inserts requested from other surfaces (browser annotations).
+    /// The chat view drains these into the composer input on its next model
+    /// observation, preserving whatever the user already typed.
+    pub requested_composer_inserts: Vec<RequestedComposerInsert>,
     pending_composer_messages: HashMap<String, PendingComposerMessage>,
     session_token_usage: HashMap<SessionProjectionKey, TokenUsage>,
     trajectory_by_session: HashMap<SessionProjectionKey, Vec<TrajectoryEntry>>,
@@ -167,7 +175,11 @@ impl AppState {
                 if is_attachable_project_root(&curr) {
                     let project = AttachedProject::from_path(curr);
                     registry_projects.push(project.clone());
-                    let _ = threadlane_project::save_project_registry(&registry_projects);
+                    if let Err(error) =
+                        threadlane_project::save_project_registry(&registry_projects)
+                    {
+                        tracing::warn!("failed to persist project registry: {error}");
+                    }
                 }
             }
         }
@@ -267,6 +279,8 @@ impl AppState {
             is_generating: false,
             composer_text: String::new(),
             session_status,
+            github_list_revision: 0,
+            requested_composer_inserts: Vec::new(),
             pending_composer_messages: HashMap::new(),
             session_token_usage: HashMap::new(),
             trajectory_by_session: HashMap::new(),
@@ -413,9 +427,14 @@ impl AppState {
             self.openai_key = key;
             self.auth_status_msg = Some("OpenAI API key saved successfully!".into());
         } else {
-            let _ = threadlane_auth::openai_auth::remove_credentials();
+            if let Err(error) = threadlane_auth::openai_auth::remove_credentials() {
+                tracing::warn!("failed to remove OpenAI credentials: {error}");
+                self.auth_status_msg =
+                    Some(format!("OpenAI API key removal may be incomplete: {error}"));
+            } else {
+                self.auth_status_msg = Some("OpenAI API key removed.".into());
+            }
             self.openai_key.clear();
-            self.auth_status_msg = Some("OpenAI API key removed.".into());
         }
         self.invalidate_idle_runtimes();
         self.reconcile_selected_model();
@@ -429,9 +448,14 @@ impl AppState {
             self.opencode_key = key;
             self.auth_status_msg = Some("Opencode API key saved successfully!".into());
         } else {
-            let _ = threadlane_auth::opencode_auth::clear_opencode_api_key();
+            if let Err(error) = threadlane_auth::opencode_auth::clear_opencode_api_key() {
+                tracing::warn!("failed to remove Opencode API key: {error}");
+                self.auth_status_msg =
+                    Some(format!("Opencode API key removal may be incomplete: {error}"));
+            } else {
+                self.auth_status_msg = Some("Opencode API key removed.".into());
+            }
             self.opencode_key.clear();
-            self.auth_status_msg = Some("Opencode API key removed.".into());
         }
         self.invalidate_idle_runtimes();
         self.reconcile_selected_model();
@@ -837,30 +861,40 @@ impl AppState {
                 let worktree_threadlane = worktree_dir.join(".threadlane");
                 if worktree_threadlane.exists() {
                     if let Err(error) = std::fs::remove_dir_all(&worktree_threadlane) {
-                        let _ = Self::remove_file_if_present(&archive_file);
+                        if let Err(error) = Self::remove_file_if_present(&archive_file) {
+                            tracing::warn!("session teardown rollback failed: {error}");
+                        }
                         return Err(error.to_string());
                     }
                 }
                 if let Err(error) = threadlane_git::remove_worktree(&work_dir, &worktree_dir, false)
                 {
-                    let _ = Self::remove_file_if_present(&archive_file);
+                    if let Err(cleanup_error) = Self::remove_file_if_present(&archive_file) {
+                        tracing::warn!("session teardown rollback failed: {cleanup_error}");
+                    }
                     return Err(error.to_string());
                 }
                 let stub = canonical_session_file(&work_dir, &session_id);
                 Self::remove_file_if_present(&stub)?;
-                let _ = threadlane_git::prune_worktrees(&work_dir);
+                if let Err(error) = threadlane_git::prune_worktrees(&work_dir) {
+                    tracing::warn!("worktree prune failed: {error}");
+                }
             } else {
                 if session_file.exists() {
                     if std::fs::rename(&session_file, &archive_file).is_err() {
                         std::fs::copy(&session_file, &archive_file)
                             .map_err(|error| error.to_string())?;
-                        let _ = Self::remove_file_if_present(&session_file);
+                        if let Err(error) = Self::remove_file_if_present(&session_file) {
+                            tracing::warn!("session teardown rollback failed: {error}");
+                        }
                     }
                 }
                 let stub = canonical_session_file(&work_dir, &session_id);
                 Self::remove_file_if_present(&stub)?;
                 if delete_worktree {
-                    let _ = threadlane_git::prune_worktrees(&work_dir);
+                    if let Err(error) = threadlane_git::prune_worktrees(&work_dir) {
+                    tracing::warn!("worktree prune failed: {error}");
+                }
                 }
             }
         } else {
@@ -884,16 +918,46 @@ impl AppState {
         {
             return Err("Stop the running generation before deleting this session".into());
         }
+        // Archive the transcript first: deletion destroys the JSONL, and a
+        // failed delete must never lose history silently.
+        let archive_dir = work_dir.join(".threadlane/sessions/archive");
+        std::fs::create_dir_all(&archive_dir).map_err(|error| error.to_string())?;
+        let file_name = session_file
+            .file_name()
+            .ok_or_else(|| "Session file has no file name".to_string())?;
+        let archive_file = archive_dir.join(file_name);
+        if session_file.exists() {
+            std::fs::copy(&session_file, &archive_file).map_err(|error| error.to_string())?;
+        }
         if let Some(worktree_dir) = self.session_worktree_path(&work_dir, &session_id) {
             if delete_worktree && worktree_dir.exists() {
+                // Same dirtiness guard as archiving: untracked app-owned
+                // bookkeeping never blocks, every other change refuses the
+                // destroy rather than eating uncommitted work.
+                let dirty = threadlane_git::inspect(&worktree_dir)
+                    .map_err(|error| error.to_string())?
+                    .files
+                    .iter()
+                    .any(|file| {
+                        !(file.is_untracked() && file.path.starts_with(".threadlane/"))
+                    });
+                if dirty {
+                    return Err(
+                        "Commit or discard worktree changes before deleting this session".into(),
+                    );
+                }
                 threadlane_git::remove_worktree(&work_dir, &worktree_dir, true)
                     .map_err(|error| error.to_string())?;
-                let _ = threadlane_git::prune_worktrees(&work_dir);
+                if let Err(error) = threadlane_git::prune_worktrees(&work_dir) {
+                    tracing::warn!("worktree prune failed: {error}");
+                }
             }
             Self::remove_file_if_present(&canonical_session_file(&work_dir, &session_id))?;
             Self::remove_file_if_present(&session_file)?;
             if delete_worktree {
-                let _ = threadlane_git::prune_worktrees(&work_dir);
+                if let Err(error) = threadlane_git::prune_worktrees(&work_dir) {
+                    tracing::warn!("worktree prune failed: {error}");
+                }
             }
         } else {
             std::fs::remove_file(session_file).map_err(|error| error.to_string())?;
@@ -1268,7 +1332,9 @@ impl AppState {
         self.pr_review_tracking
             .insert(work_dir.clone(), candidate_store);
         if let Some(store) = self.pr_review_tracking.get(&work_dir) {
-            let _ = threadlane_git::save_pr_review_tracking(&work_dir, store);
+            if let Err(error) = threadlane_git::save_pr_review_tracking(&work_dir, store) {
+                tracing::warn!("failed to persist PR review tracking: {error}");
+            }
         }
         self.push_optimistic_follow_up(&session_id, prompt.clone(), "pr-review");
         Some(prompt)
@@ -1323,7 +1389,9 @@ impl AppState {
             .entry(work_dir.clone())
             .or_insert_with(|| threadlane_git::load_pr_review_tracking(&work_dir));
         threadlane_git::mark_feedback_seen(store, &branch, &feedback_items);
-        let _ = threadlane_git::save_pr_review_tracking(&work_dir, store);
+        if let Err(error) = threadlane_git::save_pr_review_tracking(&work_dir, store) {
+            tracing::warn!("failed to persist PR review tracking: {error}");
+        }
         Ok(prompt)
     }
 
@@ -1483,7 +1551,13 @@ impl AppState {
                         &value,
                         None,
                     ) {
-                        let _ = threadlane_git::remove_worktree(&work_dir, &worktree_dir, true);
+                        if let Err(cleanup_error) =
+                            threadlane_git::remove_worktree(&work_dir, &worktree_dir, true)
+                        {
+                            tracing::warn!(
+                                "session setup rollback: worktree remove failed: {cleanup_error}"
+                            );
+                        }
                         return Err(format!("failed to persist worktree metadata: {error}"));
                     }
                 }
@@ -1570,9 +1644,18 @@ impl AppState {
         }
 
         let cleanup = |work_dir: &Path, worktree_dir: &Path, session_file: &Path| {
-            let _ = threadlane_git::remove_worktree(work_dir, worktree_dir, true);
-            let _ = std::fs::remove_dir_all(worktree_dir);
-            let _ = Self::remove_file_if_present(session_file);
+            // Best-effort rollback of exactly what this setup created
+            // (pre-existence is checked above, so nothing here is user
+            // work); failures warn instead of masking the primary error.
+            if let Err(error) = threadlane_git::remove_worktree(work_dir, worktree_dir, true) {
+                tracing::warn!("issue setup rollback: worktree remove failed: {error}");
+            }
+            if let Err(error) = std::fs::remove_dir_all(worktree_dir) {
+                tracing::warn!("issue setup rollback: worktree dir remove failed: {error}");
+            }
+            if let Err(error) = Self::remove_file_if_present(session_file) {
+                tracing::warn!("issue setup rollback: session file remove failed: {error}");
+            }
         };
         if let Err(error) = threadlane_git::create_worktree(&work_dir, &worktree_dir, &branch) {
             cleanup(&work_dir, &worktree_dir, &session_file);
@@ -3472,25 +3555,27 @@ impl AppState {
                     }
                     self.record_trajectory(&session_id, &event);
                     self.record_subagent_activity(&event);
-                    let key = self
-                        .active_session_projection_key()
-                        .expect("active stream event must have a projection key");
-                    let metrics = self.session_metrics.entry(key.clone()).or_default();
-                    match &event {
-                        AgentEvent::AgentStart | AgentEvent::SubagentStarted { .. } => {
-                            metrics.turns = metrics.turns.saturating_add(1)
+                    // Metrics are best-effort: an event without a projection
+                    // key (session switched mid-pump) still flows through
+                    // the updates below, it just skips usage accounting.
+                    if let Some(key) = self.active_session_projection_key() {
+                        let metrics = self.session_metrics.entry(key.clone()).or_default();
+                        match &event {
+                            AgentEvent::AgentStart | AgentEvent::SubagentStarted { .. } => {
+                                metrics.turns = metrics.turns.saturating_add(1)
+                            }
+                            AgentEvent::ToolExecutionStart { .. }
+                            | AgentEvent::SubagentUpdate {
+                                update: SubagentProgressUpdate::ToolStarted { .. },
+                                ..
+                            } => metrics.tool_calls = metrics.tool_calls.saturating_add(1),
+                            AgentEvent::AgentEnd { usage }
+                            | AgentEvent::SubagentUpdate {
+                                update: SubagentProgressUpdate::Usage { usage },
+                                ..
+                            } => metrics.accumulate_usage(usage),
+                            _ => {}
                         }
-                        AgentEvent::ToolExecutionStart { .. }
-                        | AgentEvent::SubagentUpdate {
-                            update: SubagentProgressUpdate::ToolStarted { .. },
-                            ..
-                        } => metrics.tool_calls = metrics.tool_calls.saturating_add(1),
-                        AgentEvent::AgentEnd { usage }
-                        | AgentEvent::SubagentUpdate {
-                            update: SubagentProgressUpdate::Usage { usage },
-                            ..
-                        } => metrics.accumulate_usage(usage),
-                        _ => {}
                     }
                     match adapt_agent_event(event) {
                         ChatAgentUpdate::TextDelta(delta) => {
@@ -3623,8 +3708,14 @@ impl AppState {
                             self.active_plan = plan;
                         }
                         ChatAgentUpdate::Usage(usage) => {
-                            let entry = self.session_token_usage.entry(key.clone()).or_default();
-                            entry.accumulate(&usage);
+                            // Best-effort like the metrics above: usage
+                            // without a projection key is dropped, never
+                            // panicked on.
+                            if let Some(key) = self.active_session_projection_key() {
+                                let entry =
+                                    self.session_token_usage.entry(key.clone()).or_default();
+                                entry.accumulate(&usage);
+                            }
                         }
                         ChatAgentUpdate::PermissionRequested(request) => {
                             changed = true;

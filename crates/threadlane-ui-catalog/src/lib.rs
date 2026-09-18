@@ -304,7 +304,7 @@ pub async fn refresh_antigravity_models() {
                 provider: ModelProvider::Antigravity,
             }),
     );
-    synthesize_live_antigravity_models(&mut models, &ids);
+    synthesize_live_antigravity_models(&mut models, &ids, None);
     threadlane_provider::model_registry::update_discovered_models(
         "antigravity",
         antigravity_capabilities(&models, &live),
@@ -345,6 +345,11 @@ fn retain_available_antigravity_models(
     models: &mut Vec<ModelOption>,
     project_root: Option<&std::path::Path>,
 ) {
+    // Prune and synthesize only on fresh live data: a stale inventory must
+    // not retire static entries (stale served, never wiped).
+    if threadlane_provider::model_registry::discovered_is_stale() {
+        return;
+    }
     let available = live_antigravity_runtime_ids();
     if available.is_empty() {
         return;
@@ -360,7 +365,7 @@ fn retain_available_antigravity_models(
             true
         }
     });
-    synthesize_live_antigravity_models(models, &available);
+    synthesize_live_antigravity_models(models, &available, project_root);
 }
 
 fn live_antigravity_runtime_ids() -> HashSet<String> {
@@ -373,7 +378,11 @@ fn live_antigravity_runtime_ids() -> HashSet<String> {
 
 /// Add live agent models that existing logical entries do not already route to.
 /// Add tiered entries first so their per-effort variants don't become duplicate rows.
-fn synthesize_live_antigravity_models(models: &mut Vec<ModelOption>, available: &HashSet<String>) {
+fn synthesize_live_antigravity_models(
+    models: &mut Vec<ModelOption>,
+    available: &HashSet<String>,
+    project_root: Option<&std::path::Path>,
+) {
     let mut runtime_ids: Vec<_> = available.iter().collect();
     runtime_ids.sort_by(|a, b| {
         b.ends_with("-tiered")
@@ -382,7 +391,7 @@ fn synthesize_live_antigravity_models(models: &mut Vec<ModelOption>, available: 
     });
     for runtime_id in runtime_ids {
         if models.iter().any(|model| {
-            threadlane_provider::model_registry::supported_efforts_for(&model.id, None)
+            threadlane_provider::model_registry::supported_efforts_for(&model.id, project_root)
                 .iter()
                 .any(|effort| {
                     threadlane_provider::antigravity::runtime_model_for(
@@ -971,6 +980,7 @@ mod tests {
             ]
             .into_iter()
             .collect(),
+            None,
         );
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "antigravity/gemini-3.6-flash");

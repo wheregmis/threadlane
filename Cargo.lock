@@ -8402,6 +8402,7 @@ dependencies = [
  "tempfile",
  "threadlane-auth",
  "threadlane-project",
+ "tracing",
 ]
 
 [[package]]
@@ -8619,6 +8620,7 @@ dependencies = [
  "threadlane-ui-state",
  "threadlane-ui-theme",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -8641,8 +8643,11 @@ dependencies = [
  "gpui-pre",
  "rfd",
  "serde_json",
+ "threadlane-coding-agent",
  "threadlane-git",
  "threadlane-ui-state",
+ "threadlane-ui-theme",
+ "tokio",
 ]
 
 [[package]]
@@ -8681,6 +8686,7 @@ dependencies = [
  "threadlane-ui-state",
  "threadlane-ui-theme",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -8813,6 +8819,7 @@ dependencies = [
  "tempfile",
  "threadlane-project",
  "threadlane-protocol",
+ "tracing",
  "wasmi",
 ]
 

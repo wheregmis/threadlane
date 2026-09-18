@@ -1,7 +1,7 @@
 use super::*;
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::tempdir;
 
@@ -1134,4 +1134,133 @@ fn worktree_lifecycle_and_listing() {
 
     remove_worktree(dir.path(), &worktree_dir, true).unwrap();
     assert!(!worktree_dir.exists());
+}
+
+fn canonical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn init_repo(dir: &Path) {
+    run_git(dir, &["init", "-b", "main"]);
+    run_git(dir, &["config", "user.email", "test@example.com"]);
+    run_git(dir, &["config", "user.name", "Test"]);
+    run_git(dir, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(dir.join("README.md"), "hi").unwrap();
+    run_git(dir, &["add", "."]);
+    run_git(dir, &["commit", "-m", "init"]);
+}
+
+#[test]
+fn orphaned_subagent_worktree_is_reused_when_clean() {
+    use crate::git::{create_worktree, list_worktrees, reclaim_subagent_worktree};
+    let dir = tempdir().unwrap();
+    init_repo(dir.path());
+    let slot = dir
+        .path()
+        .join(".threadlane/worktrees/subagents/lane-1");
+    let branch = "threadlane/subagent-lane-1";
+    create_worktree(dir.path(), &slot, branch).unwrap();
+    // Simulate the crash: path+branch left behind, work clean.
+    assert!(reclaim_subagent_worktree(dir.path(), &slot, branch).unwrap());
+    assert!(list_worktrees(dir.path())
+        .unwrap()
+        .iter()
+        .any(|worktree| canonical(&worktree.path) == canonical(&slot)));
+}
+
+#[test]
+fn dirty_orphan_is_cleared_for_recreation() {
+    use crate::git::{create_worktree, list_worktrees, reclaim_subagent_worktree};
+    let dir = tempdir().unwrap();
+    init_repo(dir.path());
+    let slot = dir
+        .path()
+        .join(".threadlane/worktrees/subagents/lane-2");
+    let branch = "threadlane/subagent-lane-2";
+    create_worktree(dir.path(), &slot, branch).unwrap();
+    std::fs::write(slot.join("README.md"), "modified in dead run").unwrap();
+    assert!(!reclaim_subagent_worktree(dir.path(), &slot, branch).unwrap());
+    // Slot cleared: provisioning recreates without "already used".
+    create_worktree(dir.path(), &slot, branch).unwrap();
+    assert!(list_worktrees(dir.path())
+        .unwrap()
+        .iter()
+        .any(|worktree| canonical(&worktree.path) == canonical(&slot)));
+}
+
+#[test]
+fn branch_checked_out_elsewhere_is_refused() {
+    use crate::git::{create_worktree, reclaim_subagent_worktree};
+    let dir = tempdir().unwrap();
+    init_repo(dir.path());
+    let elsewhere = dir.path().join("elsewhere");
+    let branch = "threadlane/subagent-lane-3";
+    create_worktree(dir.path(), &elsewhere, branch).unwrap();
+    let slot = dir
+        .path()
+        .join(".threadlane/worktrees/subagents/lane-3");
+    let error = reclaim_subagent_worktree(dir.path(), &slot, branch).unwrap_err();
+    assert!(
+        error.to_string().contains("already checked out"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn reclaim_refuses_paths_outside_threadlane() {
+    use crate::git::reclaim_subagent_worktree;
+    let dir = tempdir().unwrap();
+    init_repo(dir.path());
+    let outside = dir.path().join("outside");
+    let error =
+        reclaim_subagent_worktree(dir.path(), &outside, "threadlane/subagent-x").unwrap_err();
+    assert!(error.to_string().contains("outside .threadlane"));
+}
+
+#[test]
+fn pr_list_skips_bad_entries_and_keeps_the_rest() {
+    use crate::github::{rate_limit_message, summarize_pr_list};
+    let good = serde_json::json!({
+        "number": 7,
+        "title": "Good",
+        "url": "https://github.com/o/r/pull/7",
+        "state": "OPEN",
+        "isDraft": false,
+        "headRefName": "feat",
+        "baseRefName": "main",
+        "updatedAt": "2026-09-01T00:00:00Z",
+    });
+    let no_number = serde_json::json!({"title": "No number", "url": ""});
+    let bad_url = serde_json::json!({
+        "number": 8,
+        "title": "Bad url",
+        "url": "not-a-url",
+        "state": "OPEN",
+    });
+    let rows = summarize_pr_list(vec![good, no_number, bad_url]);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].number, 7);
+    assert_eq!(rows[0].title, "Good");
+}
+
+#[test]
+fn rate_limit_messages_are_detected() {
+    assert!(rate_limit_message("API rate limit exceeded for user ID 1.").is_some());
+    assert!(rate_limit_message("You have exceeded a secondary rate limit.").is_some());
+    assert!(rate_limit_message("HTTP 403: rate limit exceeded").is_some());
+    assert!(rate_limit_message("gh: Not Found (HTTP 404)").is_none());
+    assert!(rate_limit_message("").is_none());
+    let guidance = rate_limit_message("API rate limit exceeded for user ID 1.").unwrap();
+    assert!(guidance.contains("Retry") || guidance.contains("retry") || guidance.contains("Wait"));
+}
+
+#[test]
+fn issue_mutations_validate_before_spawning_gh() {
+    let dir = tempdir().unwrap();
+    assert!(create_github_issue(dir.path(), "", "body").is_err());
+    assert!(create_github_issue(dir.path(), "   ", "body").is_err());
+    assert!(set_github_issue_state(dir.path(), 0, true).is_err());
+    assert!(delete_github_issue(dir.path(), 0).is_err());
+    // Empty label edits are no-ops without spawning gh.
+    assert!(edit_github_issue_labels(dir.path(), 1, &[], &[]).is_ok());
 }

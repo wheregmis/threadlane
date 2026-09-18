@@ -191,6 +191,10 @@ pub struct WorkspaceView {
     panel_layout: Option<(gpui::Size<Pixels>, Pixels, [bool; 3])>,
     git_event_tx: tokio::sync::mpsc::UnboundedSender<GitEvent>,
     updater_tx: tokio::sync::mpsc::UnboundedSender<UpdaterEvent>,
+    /// Two-step close confirm for shells holding output: (project, tab).
+    /// A misclick arms instead of destroying build/test scrollback; the
+    /// second click confirms.
+    pending_terminal_close: Option<(PathBuf, usize)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -451,10 +455,10 @@ impl WorkspaceView {
                 panel_layout: None,
                 git_event_tx,
                 updater_tx,
+                pending_terminal_close: None,
                 _subscriptions: vec![sub, right_panel_sub],
             }
         });
-
         view.update(cx, |view, cx| {
             let hydration_requests = view.model.update(cx, |state, _cx| {
                 std::mem::take(&mut state.pending_hydrations)
@@ -667,7 +671,19 @@ impl WorkspaceView {
     }
 
     fn close_terminal_tab(&mut self, project: &PathBuf, tab: usize, cx: &mut Context<Self>) {
-        if let Some(group) = self.terminal_groups.get_mut(project) {
+        // Two-step confirm when the shell holds output: the first click arms,
+        // the second destroys. A clean shell closes immediately.
+        let dirty = self
+            .terminal_groups
+            .get(project)
+            .and_then(|group| group.tabs.get(tab))
+            .is_some_and(|terminal| terminal.read(cx).has_output());
+        if dirty && self.pending_terminal_close != Some((project.clone(), tab)) {
+            self.pending_terminal_close = Some((project.clone(), tab));
+            cx.notify();
+            return;
+        }
+        self.pending_terminal_close = None;        if let Some(group) = self.terminal_groups.get_mut(project) {
             if tab >= group.tabs.len() {
                 return;
             }
@@ -1132,12 +1148,12 @@ impl WorkspaceView {
         let model = self.model.clone();
         let state = model.read(cx);
 
-        let commands: [(&str, &str, &str, IconName, &[&str], &str); 21] = [
+        let commands: [(&str, &str, &str, Icon, &[&str], &str); 21] = [
             (
                 "New Task",
                 "Start a fresh session",
                 "new",
-                IconName::Plus,
+                Icon::from(IconName::Plus),
                 &["task", "fresh", "session", "new"],
                 "⌘N",
             ),
@@ -1145,7 +1161,7 @@ impl WorkspaceView {
                 "Go to Task…",
                 "Jump to a recent task or session",
                 "go_task",
-                IconName::Search,
+                Icon::from(IconName::Search),
                 &["go", "task", "jump", "find", "session", "recent"],
                 "",
             ),
@@ -1153,7 +1169,7 @@ impl WorkspaceView {
                 "Open File…",
                 "Browse project files in the right panel",
                 "open_file",
-                IconName::File,
+                Icon::from(IconName::File),
                 &["open", "file", "browse", "tree", "explorer"],
                 "",
             ),
@@ -1161,7 +1177,7 @@ impl WorkspaceView {
                 "Run Terminal Command…",
                 "Open or focus the integrated terminal",
                 "run_terminal",
-                IconName::SquareTerminal,
+                Icon::from(IconName::SquareTerminal),
                 &["run", "terminal", "command", "shell", "exec"],
                 "⌘J",
             ),
@@ -1169,7 +1185,7 @@ impl WorkspaceView {
                 "Open Issue/PR…",
                 "Browse GitHub issues and pull requests",
                 "open_issue",
-                IconName::Github,
+                Icon::from(IconName::Github),
                 &["issue", "pr", "pull", "request", "github", "browse"],
                 "",
             ),
@@ -1177,7 +1193,7 @@ impl WorkspaceView {
                 "Switch Worktree…",
                 "Toggle between local and worktree mode",
                 "switch_worktree",
-                IconName::FolderOpen,
+                Icon::from(IconName::FolderOpen),
                 &["switch", "worktree", "mode", "local", "branch"],
                 "",
             ),
@@ -1185,7 +1201,7 @@ impl WorkspaceView {
                 "Ask Agent to…",
                 "Focus the composer to prompt the agent",
                 "ask_agent",
-                IconName::Bot,
+                Icon::from(IconName::Bot),
                 &["ask", "agent", "prompt", "chat", "ai", "help"],
                 "⌘L",
             ),
@@ -1193,7 +1209,7 @@ impl WorkspaceView {
                 "Add Project",
                 "Attach a project folder to your workspace",
                 "attach",
-                IconName::FolderOpen,
+                Icon::from(IconName::FolderOpen),
                 &["folder", "workspace", "attach", "open", "project"],
                 "",
             ),
@@ -1201,7 +1217,7 @@ impl WorkspaceView {
                 "Goal Planning (/goal)",
                 "Autonomous goal loop extension",
                 "goal",
-                IconName::Bot,
+                Icon::from(IconName::Bot),
                 &["goal", "planning", "loop", "agent", "autonomous"],
                 "",
             ),
@@ -1209,7 +1225,7 @@ impl WorkspaceView {
                 "Model Selection (/model)",
                 "Switch model or provider",
                 "model",
-                IconName::Cpu,
+                Icon::from(IconName::Cpu),
                 &["model", "llm", "switch", "provider", "select"],
                 "",
             ),
@@ -1217,7 +1233,7 @@ impl WorkspaceView {
                 "Compact History (/compact)",
                 "Compact context conversation",
                 "compact",
-                IconName::Minimize,
+                Icon::from(IconName::Minimize),
                 &["compact", "history", "context", "clean"],
                 "",
             ),
@@ -1225,7 +1241,7 @@ impl WorkspaceView {
                 "Git Review & Commit",
                 "Review changed files and commit",
                 "git",
-                IconName::Github,
+                Icon::default().path("icons/git/commit.svg"),
                 &["git", "diff", "review", "commit", "stage"],
                 "",
             ),
@@ -1233,7 +1249,7 @@ impl WorkspaceView {
                 "GitHub",
                 "Browse project issues and pull requests",
                 "github",
-                IconName::Github,
+                Icon::default().path("icons/git/comments.svg"),
                 &["github", "issues", "pull requests", "repository"],
                 "",
             ),
@@ -1241,7 +1257,7 @@ impl WorkspaceView {
                 "Git: Switch Branch",
                 "Switch or checkout a Git branch",
                 "git_branch",
-                IconName::Github,
+                Icon::default().path("icons/git/branch.svg"),
                 &["git", "branch", "switch", "checkout"],
                 "",
             ),
@@ -1249,7 +1265,7 @@ impl WorkspaceView {
                 "Git: New Branch",
                 "Create a new branch from current HEAD",
                 "git_new_branch",
-                IconName::Plus,
+                Icon::from(IconName::Plus),
                 &["git", "branch", "new", "create"],
                 "",
             ),
@@ -1257,7 +1273,7 @@ impl WorkspaceView {
                 "Git: Merge Branch",
                 "Merge another branch into current branch",
                 "git_merge",
-                IconName::Redo,
+                Icon::from(IconName::Redo),
                 &["git", "merge", "branch", "integrate"],
                 "",
             ),
@@ -1265,7 +1281,7 @@ impl WorkspaceView {
                 "Git: Restore Stashed Changes",
                 "Restore changes previously stashed on this branch",
                 "git_stash_pop",
-                IconName::Undo2,
+                Icon::from(IconName::Undo2),
                 &["git", "stash", "pop", "restore", "unstash"],
                 "",
             ),
@@ -1273,7 +1289,7 @@ impl WorkspaceView {
                 "Git: Pull Origin",
                 "Pull latest commits from remote origin",
                 "git_pull",
-                IconName::Redo,
+                Icon::from(IconName::Redo),
                 &["git", "pull", "origin", "fetch", "sync"],
                 "",
             ),
@@ -1281,7 +1297,7 @@ impl WorkspaceView {
                 "Toggle Sidebar",
                 "Show or hide your projects and tasks",
                 "sidebar",
-                IconName::PanelLeft,
+                Icon::from(IconName::PanelLeft),
                 &["sidebar", "toggle", "hide", "show", "projects"],
                 "⌘B",
             ),
@@ -1289,7 +1305,7 @@ impl WorkspaceView {
                 "Toggle Right Panel",
                 "Show review / files / terminal",
                 "panel",
-                IconName::PanelRight,
+                Icon::from(IconName::PanelRight),
                 &["panel", "right", "terminal", "review", "toggle"],
                 "⌘R",
             ),
@@ -1297,7 +1313,7 @@ impl WorkspaceView {
                 "Settings",
                 "Configure API keys and providers",
                 "settings",
-                IconName::Settings,
+                Icon::from(IconName::Settings),
                 &["settings", "keys", "provider", "preferences", "config"],
                 "⌘,",
             ),
@@ -2015,19 +2031,36 @@ impl Render for WorkspaceView {
                         .child({
                             let close_p = terminal_project.clone();
                             let close_v = cx.entity().clone();
-                            Button::new(SharedString::from(format!("terminal-tab-close-{tab}")))
-                                .icon(IconName::Close)
-                                .accessibility_label("Close shell")
-                            .tooltip("Close shell")
-                                .ghost()
-                                .xsmall()
-                                .on_click(move |_event, _window, cx| {
-                                    if let Some(project) = &close_p {
-                                        close_v.update(cx, |this, cx| {
-                                            this.close_terminal_tab(project, tab, cx)
-                                        });
-                                    }
-                                })
+                            let armed = terminal_project.as_ref().is_some_and(|project| {
+                                self.pending_terminal_close == Some((project.clone(), tab))
+                            });
+                            let close_button = Button::new(SharedString::from(format!(
+                                "terminal-tab-close-{tab}"
+                            )))
+                            .ghost()
+                            .xsmall()
+                            .accessibility_label(if armed {
+                                "Confirm close shell with output"
+                            } else {
+                                "Close shell"
+                            })
+                            .tooltip(if armed {
+                                "Shell holds output — click again to close it"
+                            } else {
+                                "Close shell"
+                            });
+                            let close_button = if armed {
+                                close_button.label("Sure?").danger()
+                            } else {
+                                close_button.icon(IconName::Close)
+                            };
+                            close_button.on_click(move |_event, _window, cx| {
+                                if let Some(project) = &close_p {
+                                    close_v.update(cx, |this, cx| {
+                                        this.close_terminal_tab(project, tab, cx)
+                                    });
+                                }
+                            })
                         })
                 });
 

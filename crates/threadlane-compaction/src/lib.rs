@@ -10,6 +10,7 @@
 
 use threadlane_context::ContextBudget;
 use threadlane_protocol::AgentMessage;
+use threadlane_protocol::ImageAttachment;
 
 use serde::{Deserialize, Serialize};
 
@@ -408,10 +409,11 @@ pub fn compact_messages_with_strategy(
     messages: &[AgentMessage],
     target_tokens: usize,
     strategy: CompactionStrategy,
+    config: &CompactionParams,
 ) -> Vec<AgentMessage> {
     match strategy {
         CompactionStrategy::TokenBudget => {
-            compact_messages_to_token_budget(messages, target_tokens)
+            compact_messages_to_token_budget_with_config(messages, target_tokens, config)
         }
         CompactionStrategy::SemanticKeyframes => {
             if messages.len() <= 2 {
@@ -433,11 +435,12 @@ pub fn compact_messages_with_strategy(
             }
             let keyframe_tokens: usize = keyframes
                 .iter()
-                .map(|m| estimate_message_tokens(m, &CompactionParams::default()))
+                .map(|m| estimate_message_tokens(m, config))
                 .sum();
             let remaining_budget = target_tokens.saturating_sub(keyframe_tokens);
 
-            let recent = compact_messages_to_token_budget(messages, remaining_budget);
+            let recent =
+                compact_messages_to_token_budget_with_config(messages, remaining_budget, config);
             let mut result = keyframes;
             let mut result_json: std::collections::HashSet<String> = result
                 .iter()
@@ -456,12 +459,19 @@ pub fn compact_messages_with_strategy(
 }
 
 /// Squeezes historical tool outputs older than `keep_recent_tool_turns` to save input tokens.
+///
+/// User-attached images age out the same way: only the most recent
+/// `USER_IMAGE_KEEP_RECENT` user turn keeps its attachments (the current
+/// request still needs them); older ones keep their text with images
+/// cleared, exactly like pruned tool outputs.
 pub fn prune_historical_tool_outputs(
     messages: &[AgentMessage],
     keep_recent_tool_turns: usize,
 ) -> Vec<AgentMessage> {
     const INLINE_TOOL_OUTPUT_LIMIT: usize = 200;
+    const USER_IMAGE_KEEP_RECENT: usize = 1;
     let mut tool_seen_count = 0;
+    let mut user_image_seen_count = 0;
     let mut result = Vec::with_capacity(messages.len());
 
     let mut keep_full = vec![false; messages.len()];
@@ -469,6 +479,14 @@ pub fn prune_historical_tool_outputs(
         if matches!(msg, AgentMessage::Tool { .. }) {
             tool_seen_count += 1;
             if tool_seen_count <= keep_recent_tool_turns {
+                keep_full[i] = true;
+            }
+        } else if matches!(
+            msg,
+            AgentMessage::UserWithImages { images, .. } if !images.is_empty()
+        ) {
+            user_image_seen_count += 1;
+            if user_image_seen_count <= USER_IMAGE_KEEP_RECENT {
                 keep_full[i] = true;
             }
         }
@@ -506,6 +524,18 @@ pub fn prune_historical_tool_outputs(
                     });
                 }
             }
+            AgentMessage::UserWithImages { content, images } => {
+                if keep_full[i] || images.is_empty() {
+                    result.push(msg.clone());
+                } else {
+                    // Historical user attachments: text stays, images age
+                    // out with the turn they illustrated.
+                    result.push(AgentMessage::UserWithImages {
+                        content: content.clone(),
+                        images: Vec::new(),
+                    });
+                }
+            }
             _ => result.push(msg.clone()),
         }
     }
@@ -518,12 +548,14 @@ pub fn prune_historical_tool_outputs(
 pub fn prepare_token_optimal_context(
     messages: &[AgentMessage],
     target_tokens: usize,
+    config: &CompactionParams,
 ) -> Vec<AgentMessage> {
     let pruned = prune_historical_tool_outputs(messages, 3);
     compact_messages_with_strategy(
         &pruned,
         target_tokens,
         CompactionStrategy::SemanticKeyframes,
+        config,
     )
 }
 
@@ -1152,7 +1184,7 @@ mod tests {
         ];
 
         let compacted =
-            compact_messages_with_strategy(&msgs, 200, CompactionStrategy::SemanticKeyframes);
+            compact_messages_with_strategy(&msgs, 200, CompactionStrategy::SemanticKeyframes, &CompactionParams::default());
         assert!(!compacted.is_empty());
         assert_eq!(compacted[0].role_str(), "system");
     }
@@ -1202,7 +1234,7 @@ mod tests {
             .count();
         assert_eq!(truncated_count, 7);
 
-        let optimal = prepare_token_optimal_context(&msgs, 10_000);
+        let optimal = prepare_token_optimal_context(&msgs, 10_000, &CompactionParams::default());
         assert!(!optimal.is_empty());
         assert_eq!(optimal[0].role_str(), "system");
     }
@@ -1265,5 +1297,53 @@ mod tests {
         let checkpoint = build_checkpoint(&messages, &config);
         assert!(!checkpoint.contains("Tried and failed"));
         assert!(checkpoint.starts_with("Context checkpoint from"));
+    }
+}
+
+#[cfg(test)]
+mod image_accounting_tests {
+    use super::*;
+
+    fn imaged_user(content: &str) -> AgentMessage {
+        AgentMessage::UserWithImages {
+            content: content.into(),
+            images: vec![ImageAttachment {
+                display_name: "shot.png".into(),
+                data_url: format!("data:image/png;base64,{}", "QUJD".repeat(10_000)),
+            }],
+        }
+    }
+
+    #[test]
+    fn image_bytes_are_not_double_counted() {
+        let config = CompactionParams {
+            estimated_image_tokens: 1_200,
+            ..CompactionParams::default()
+        };
+        let message = imaged_user("look");
+        let tokens = estimate_message_tokens(&message, &config);
+        // 40k of base64 must not inflate the estimate: text + one image rate.
+        assert!(tokens < 10_000, "double-counted image bytes: {tokens}");
+        assert!(tokens >= 1_200);
+    }
+
+    #[test]
+    fn only_the_latest_user_images_survive_pruning() {
+        let messages = vec![
+            imaged_user("first"),
+            AgentMessage::User {
+                content: "middle".into(),
+            },
+            imaged_user("latest"),
+        ];
+        let pruned = prune_historical_tool_outputs(&messages, 3);
+        let images: Vec<usize> = pruned
+            .iter()
+            .filter_map(|message| match message {
+                AgentMessage::UserWithImages { images, .. } => Some(images.len()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(images, vec![0, 1], "older user images age out, latest stays");
     }
 }

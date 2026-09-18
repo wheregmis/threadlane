@@ -835,8 +835,19 @@ fn resolve_runtime_model(model_id: &str, effort: &str) -> String {
 /// Models that reject tool-call replay without a thoughtSignature (400
 /// INVALID_ARGUMENT, verified live). Calls lacking one are dropped before
 /// the request is sent; replaying them would fail the whole turn.
+///
+/// Advertise-driven first: when the `fetchAvailableModels` inventory knows
+/// this runtime id, thinking support (any effort beyond `off`) decides.
+/// Otherwise a fallback heuristic scoped to the Gemini family applies, so a
+/// hypothetical `claude-*-tiered` id never drops valid calls.
 fn requires_thought_signature(runtime_model: &str) -> bool {
-    runtime_model.starts_with("gemini-3.6-") || runtime_model.ends_with("-tiered")
+    if let Some(live) = LIVE_MODELS.get().and_then(|lock| lock.read().ok()) {
+        if let Some(entry) = live.iter().find(|model| model.id == runtime_model) {
+            return entry.supported_efforts.iter().any(|effort| effort != "off");
+        }
+    }
+    runtime_model.starts_with("gemini-3.6-")
+        || (runtime_model.starts_with("gemini-") && runtime_model.ends_with("-tiered"))
 }
 
 fn convert_openai_payload(payload: &Value) -> Result<(String, Value), String> {
@@ -861,6 +872,10 @@ fn convert_openai_payload(payload: &Value) -> Result<(String, Value), String> {
     let mut contents = Vec::new();
     let mut call_names = HashMap::new();
     let mut unreplayable_call_ids = HashSet::new();
+    // Signature-less calls with an empty id cannot join the set above; count
+    // them so the matching responses (which also carry an empty id) are still
+    // recognized instead of leaking as orphaned functionResponses.
+    let mut unreplayable_unnamed_calls = 0usize;
     for message in messages {
         let role = message
             .get("role")
@@ -880,9 +895,32 @@ fn convert_openai_payload(payload: &Value) -> Result<(String, Value), String> {
                 .get("tool_call_id")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            if unreplayable_call_ids.contains(call_id) {
-                continue;
-            }
+            let dropped = if call_id.is_empty() {
+                if unreplayable_unnamed_calls > 0 {
+                    unreplayable_unnamed_calls -= 1;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                // Sticky: a retried call_id whose replay was refused must not
+                // resurrect an orphaned functionResponse later.
+                unreplayable_call_ids.contains(call_id)
+            };
+            if dropped {
+                // The matching call was dropped (no thought signature). Never
+                // emit an orphaned functionResponse; preserve the output as
+                // plain user text so no tool result is silently lost.
+                let output = message_text(message.get("content")).unwrap_or_default();
+                let name = message
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .or_else(|| call_names.get(call_id).map(String::as_str))
+                    .unwrap_or("tool");
+                vec![json!({
+                    "text": format!("[tool result for '{name}' kept as text: its call was not replayed because the model requires a thought signature]\n{output}")
+                })]
+            } else {
             let name = message
                 .get("name")
                 .and_then(Value::as_str)
@@ -896,6 +934,7 @@ fn convert_openai_payload(payload: &Value) -> Result<(String, Value), String> {
                 response["id"] = Value::String(sanitize_call_id(call_id, name));
             }
             vec![json!({ "functionResponse": response })]
+            }
         } else {
             content_parts(message.get("content"))
         };
@@ -915,7 +954,9 @@ fn convert_openai_payload(payload: &Value) -> Result<(String, Value), String> {
                     .or_else(|| call.get("thought_signature"))
                     .and_then(Value::as_str);
                 if requires_thought_signature(&runtime_model) && thought_signature.is_none() {
-                    if !id.is_empty() {
+                    if id.is_empty() {
+                        unreplayable_unnamed_calls += 1;
+                    } else {
                         unreplayable_call_ids.insert(id.to_string());
                     }
                     continue;
@@ -1085,16 +1126,46 @@ fn content_parts(content: Option<&Value>) -> Vec<Value> {
                         .get("image_url")
                         .and_then(|value| value.get("url").or(Some(value)))
                         .and_then(Value::as_str)?;
-                    let (metadata, data) = url.strip_prefix("data:")?.split_once(',')?;
-                    let mime_type = metadata.split(';').next().unwrap_or("image/png");
+                    if let Some(rest) = url.strip_prefix("data:") {
+                        let (metadata, data) = rest.split_once(',')?;
+                        let mime_type = metadata.split(';').next().unwrap_or("image/png");
+                        return Some(json!({
+                            "inlineData": { "mimeType": mime_type, "data": data }
+                        }));
+                    }
+                    if url.starts_with("http://") || url.starts_with("https://") {
+                        // Remote images cannot ride inlineData; pass the URI
+                        // through as fileData instead of silently dropping it.
+                        return Some(json!({
+                            "fileData": {
+                                "mimeType": guess_remote_image_mime(url),
+                                "fileUri": url
+                            }
+                        }));
+                    }
+                    // Never silently drop: surface an explicit placeholder so
+                    // the turn shows what was omitted instead of going text-only.
                     return Some(json!({
-                        "inlineData": { "mimeType": mime_type, "data": data }
+                        "text": "[image omitted: unsupported image URL; only data: and http(s): URLs are supported]"
                     }));
                 }
                 None
             })
             .collect(),
         _ => Vec::new(),
+    }
+}
+
+fn guess_remote_image_mime(url: &str) -> &'static str {
+    let path = url.split('?').next().unwrap_or(url).to_ascii_lowercase();
+    if path.ends_with(".jpg") || path.ends_with(".jpeg") {
+        "image/jpeg"
+    } else if path.ends_with(".webp") {
+        "image/webp"
+    } else if path.ends_with(".gif") {
+        "image/gif"
+    } else {
+        "image/png"
     }
 }
 
@@ -1731,6 +1802,96 @@ mod tests {
         assert!(requires_thought_signature("gemini-3.7-flash-tiered"));
         assert!(!requires_thought_signature("gemini-2.5-flash"));
         assert!(!requires_thought_signature("claude-sonnet-4-6"));
+        // The fallback heuristic is scoped to the Gemini family: a
+        // non-Gemini `-tiered` id must never drop valid calls.
+        assert!(!requires_thought_signature("claude-sonnet-4-6-tiered"));
+    }
+
+    #[test]
+    fn advertised_inventory_drives_thought_signature_gate() {
+        // Fake runtime ids (no other test resolves these) so the shared
+        // OnceLock cannot leak into neighboring tests.
+        let lock = LIVE_MODELS.get_or_init(Default::default);
+        lock.write()
+            .unwrap()
+            .retain(|entry| !entry.id.starts_with("test-gate-"));
+        lock.write().unwrap().extend([
+            AntigravityModelInfo {
+                id: "test-gate-future-thinker".into(),
+                display_name: "Future Thinker".into(),
+                supported_efforts: vec!["low".into(), "high".into()],
+                thinking_budget: None,
+            },
+            AntigravityModelInfo {
+                id: "test-gate-plain".into(),
+                display_name: "Plain".into(),
+                supported_efforts: vec!["off".into()],
+                thinking_budget: None,
+            },
+        ]);
+        // A future thinking model unknown to the string heuristic still
+        // requires the signature once advertised ...
+        assert!(requires_thought_signature("test-gate-future-thinker"));
+        // ... while an advertised non-thinking id never does, even with a
+        // `-tiered` suffix that would trip the fallback.
+        assert!(!requires_thought_signature("test-gate-plain"));
+    }
+
+    #[test]
+    fn dropped_call_keeps_its_response_as_text() {
+        let payload = json!({
+            "model": "antigravity/gemini-3.6-flash",
+            "reasoning_effort": "high",
+            "messages": [
+                { "role": "assistant", "content": null, "tool_calls": [{
+                    "id": "call-9",
+                    "type": "function",
+                    "function": { "name": "read_file", "arguments": "{}" }
+                }]},
+                { "role": "tool", "tool_call_id": "call-9", "name": "read_file",
+                  "content": "file bytes here" },
+            ],
+        });
+        let (_, request) = convert_openai_payload(&payload).expect("converts");
+        let contents = request.get("contents").and_then(Value::as_array).unwrap();
+        assert!(
+            !contents.iter().flat_map(|c| c.get("parts").and_then(Value::as_array).cloned().unwrap_or_default())
+                .any(|part| part.get("functionResponse").is_some()),
+            "no orphaned functionResponse without its call"
+        );
+        assert!(
+            contents.iter().flat_map(|c| c.get("parts").and_then(Value::as_array).cloned().unwrap_or_default())
+                .filter_map(|part| part.get("text").and_then(Value::as_str).map(str::to_string))
+                .any(|text| text.contains("file bytes here")),
+            "dropped tool output is preserved as text"
+        );
+    }
+
+    #[test]
+    fn remote_and_bad_images_are_never_silently_dropped() {
+        let payload = json!({
+            "model": "antigravity/gemini-2.5-flash",
+            "reasoning_effort": "off",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": "look" },
+                    { "type": "image_url", "image_url": { "url": "https://example.com/pic.jpg" } },
+                    { "type": "image_url", "image_url": { "url": "not-a-url" } },
+                ],
+            }],
+        });
+        // gemini-2.5-flash may resolve differently; only content_parts matters.
+        let parts = content_parts(payload["messages"][0].get("content"));
+        assert_eq!(parts.len(), 3);
+        assert_eq!(
+            parts[1].get("fileData").and_then(|f| f.get("fileUri")).and_then(Value::as_str),
+            Some("https://example.com/pic.jpg")
+        );
+        assert!(
+            parts[2].get("text").and_then(Value::as_str).is_some_and(|t| t.contains("omitted")),
+            "unsupported image URL surfaces a placeholder, not silence"
+        );
     }
 
     #[test]
@@ -1840,8 +2001,13 @@ mod tests {
 
         let (_, request) = convert_openai_payload(&payload).unwrap();
 
-        assert_eq!(request["contents"].as_array().unwrap().len(), 1);
-        assert_eq!(request["contents"][0]["parts"][0]["text"], "Continue");
+        // The signature-less call is dropped, but its response is preserved
+        // as plain text (never an orphaned functionResponse, never lost).
+        let contents = request["contents"].as_array().unwrap();
+        assert_eq!(contents.len(), 2);
+        let kept = contents[0]["parts"][0]["text"].as_str().unwrap();
+        assert!(kept.contains("legacy output"), "unexpected kept text: {kept}");
+        assert_eq!(request["contents"][1]["parts"][0]["text"], "Continue");
     }
 
     #[test]

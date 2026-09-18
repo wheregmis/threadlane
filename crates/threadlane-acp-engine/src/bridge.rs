@@ -65,6 +65,15 @@ fn tool_display_name(call: &AcpToolCall) -> String {
     .to_string()
 }
 
+/// Cap flattened ACP tool text: a multi-MB read diff must not bloat the
+/// transcript JSONL or the model context. Image payloads are filtered before
+/// this (never flattened as base64); the remainder is truncated with a note.
+const MAX_ACP_TOOL_TEXT_CHARS: usize = 32_000;
+
+/// Cap rewritten question guidance so a hostile `rawInput` cannot bloom the
+/// transcript.
+const MAX_QUESTION_GUIDANCE_CHARS: usize = 4_000;
+
 /// Flattens ACP tool content into displayable text.
 fn tool_content_text(call: &AcpToolCall) -> String {
     let Some(items) = call.content.as_ref() else {
@@ -72,6 +81,21 @@ fn tool_content_text(call: &AcpToolCall) -> String {
     };
     let mut out = String::new();
     for item in items {
+        // Image payloads never belong in text: skip them rather than dumping
+        // base64 into the transcript.
+        if item
+            .get("type")
+            .and_then(|kind| kind.as_str())
+            .is_some_and(|kind| {
+                matches!(
+                    kind,
+                    "image" | "image_url" | "input_image" | "image_content"
+                )
+            })
+            || item.get("image_url").is_some()
+        {
+            continue;
+        }
         // Content entries wrap a block under `content`; diffs and terminals
         // carry their own shapes, which are surfaced as their raw JSON rather
         // than dropped.
@@ -94,7 +118,17 @@ fn tool_content_text(call: &AcpToolCall) -> String {
         }
         out.push_str(&text);
     }
-    out
+    truncate_with_note(out, MAX_ACP_TOOL_TEXT_CHARS)
+}
+
+/// Truncates to `max` chars (by char boundary), noting how much was cut so
+/// the omission is visible instead of silent.
+fn truncate_with_note(text: String, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text;
+    }
+    let kept: String = text.chars().take(max).collect();
+    format!("{kept}\n…[truncated {} characters]", text.chars().count() - max)
 }
 
 fn plan_status(status: AcpPlanEntryStatus) -> PlanItemStatus {
@@ -102,6 +136,9 @@ fn plan_status(status: AcpPlanEntryStatus) -> PlanItemStatus {
         AcpPlanEntryStatus::Pending => PlanItemStatus::Pending,
         AcpPlanEntryStatus::InProgress => PlanItemStatus::InProgress,
         AcpPlanEntryStatus::Completed => PlanItemStatus::Completed,
+        // Unknown newer-agent states degrade neutrally rather than claiming
+        // active work or completion.
+        AcpPlanEntryStatus::Unknown => PlanItemStatus::Pending,
     }
 }
 
@@ -219,6 +256,22 @@ fn tool_update_events(call: AcpToolCall) -> Vec<AgentEvent> {
                 result: AgentToolResult::external(call.tool_call_id, name, output, true),
             }]
         }
+        // An unrecognized status (e.g. a newer agent's `cancelled`) still
+        // terminates the tool row: without an End the Start dangles and the
+        // trajectory diverges. The output says what happened so the row is
+        // honest about the unknown lifecycle.
+        Some(AcpToolCallStatus::Unknown) => {
+            let output = if content.is_empty() {
+                "(the agent reported an unrecognized terminal status)".to_string()
+            } else {
+                content
+            };
+            vec![AgentEvent::ToolExecutionEnd {
+                tool_call_id: call.tool_call_id.clone(),
+                name: name.clone(),
+                result: AgentToolResult::external(call.tool_call_id, name, output, false),
+            }]
+        }
         // Pending/in-progress updates only matter when they carry new output.
         _ if !content.is_empty() => vec![AgentEvent::ToolExecutionUpdate {
             tool_call_id: call.tool_call_id,
@@ -242,8 +295,23 @@ fn text_of(block: &AcpContentBlock) -> Option<String> {
 /// own dismissed wording — so genuine user dismissals answered through the
 /// permission prompt (which resolve as allow/deny option ids, not this text)
 /// and unrelated tool failures pass through untouched.
+/// Whether a failed tool result is an unseen interactive question prompt.
+///
+/// Matches the `question`/`ask_user` family by name (case-insensitive) plus a
+/// case-insensitive dismissal mention — or an empty/generic failure, which is
+/// what the unseen prompt degrades to when the agent reports no text.
+/// Genuine user dismissals answered through the permission prompt resolve as
+/// allow/deny option ids, not this text, so they pass through untouched.
 fn is_unseen_question_dismissal(name: &str, output: &str) -> bool {
-    name.eq_ignore_ascii_case("question") && output.contains("dismissed this question")
+    let is_question_tool = name.eq_ignore_ascii_case("question")
+        || name.eq_ignore_ascii_case("askuser")
+        || name.eq_ignore_ascii_case("ask_user")
+        || name.eq_ignore_ascii_case("prompt_user");
+    if !is_question_tool {
+        return false;
+    }
+    let folded = output.to_ascii_lowercase();
+    folded.contains("dismiss") || matches!(output.trim(), "" | "Tool call failed.")
 }
 
 /// Rewrites an unseen question dismissal into something actionable.
@@ -278,12 +346,13 @@ fn unseen_question_guidance(call: &AcpToolCall, output: &str) -> String {
             }
         }
     }
-    guidance
+    truncate_with_note(guidance, MAX_QUESTION_GUIDANCE_CHARS)
 }
 
 /// Extracts `(header, question, options)` triples from an ACP `question`
 /// tool's `rawInput`, tolerating opencode's `{label, description}` option
-/// objects as well as plain-string options. Malformed entries are skipped.
+/// objects as well as plain-string options, `title` as the question text,
+/// and `text`/`name`/`value` option keys. Malformed entries are skipped.
 fn question_items_in(raw_input: &Option<serde_json::Value>) -> Vec<(String, String, Vec<String>)> {
     let Some(questions) = raw_input
         .as_ref()
@@ -297,6 +366,7 @@ fn question_items_in(raw_input: &Option<serde_json::Value>) -> Vec<(String, Stri
         .filter_map(|item| {
             let question = item
                 .get("question")
+                .or_else(|| item.get("title"))
                 .and_then(serde_json::Value::as_str)
                 .map(str::trim)
                 .filter(|text| !text.is_empty())?
@@ -317,6 +387,9 @@ fn question_items_in(raw_input: &Option<serde_json::Value>) -> Vec<(String, Stri
                         .filter_map(|option| {
                             option
                                 .get("label")
+                                .or_else(|| option.get("text"))
+                                .or_else(|| option.get("name"))
+                                .or_else(|| option.get("value"))
                                 .and_then(serde_json::Value::as_str)
                                 .or_else(|| option.as_str())
                                 .map(str::trim)
@@ -619,5 +692,102 @@ mod tests {
             payload: json!({}),
         })
         .is_empty());
+    }
+}
+
+#[cfg(test)]
+mod forward_compat_tests {
+    use super::*;
+
+    fn tool_call(value: serde_json::Value) -> AcpToolCall {
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn plan(value: serde_json::Value) -> AcpSessionUpdate {
+        let entries: Vec<AcpPlanEntry> = value
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|item| serde_json::from_value(item).ok())
+            .collect();
+        AcpSessionUpdate::Plan(entries)
+    }
+
+    #[test]
+    fn newer_plan_states_survive_decode() {
+        // Mirrors the decoder's per-entry leniency: known, newer-agent, and
+        // malformed entries side by side.
+        let raw = vec![
+            serde_json::json!({"content": "done", "priority": "high", "status": "completed"}),
+            serde_json::json!({"content": "new hotness", "priority": "urgent", "status": "cancelled"}),
+            serde_json::json!({"content": "broken", "status": "pending"}),
+        ];
+        let update = plan(serde_json::Value::Array(raw));
+        let events = agent_events_for(update);
+        assert_eq!(events.len(), 1);
+        let AgentEvent::PlanUpdated { plan } = &events[0] else {
+            panic!("expected a plan update");
+        };
+        // Unknown priority/status degrade; the malformed entry skips alone.
+        assert_eq!(plan.items.len(), 2);
+        assert_eq!(plan.items[1].status, PlanItemStatus::Pending);
+    }
+
+    #[test]
+    fn unknown_terminal_status_ends_the_tool() {
+        let events = agent_events_for(AcpSessionUpdate::ToolCallUpdate(tool_call(
+            serde_json::json!({
+                "toolCallId": "t-9",
+                "title": "Migrate",
+                "status": "cancelled",
+            }),
+        )));
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0],
+            AgentEvent::ToolExecutionEnd { .. }
+        ));
+    }
+
+    #[test]
+    fn tool_text_filters_images_and_truncates() {
+        let big = "x".repeat(40_000);
+        let events = agent_events_for(AcpSessionUpdate::ToolCallUpdate(tool_call(
+            serde_json::json!({
+                "toolCallId": "t-8",
+                "title": "Shot",
+                "status": "completed",
+                "content": [
+                    {"type": "image", "data": "aGVsbG8="},
+                    {"type": "text", "text": big},
+                ],
+            }),
+        )));
+        let AgentEvent::ToolExecutionEnd { result, .. } = &events[0] else {
+            panic!("expected a tool end");
+        };
+        assert!(!result.content.contains("aGVsbG8="));
+        assert!(result.content.contains("truncated"));
+        assert!(result.content.chars().count() < 40_000);
+    }
+
+    #[test]
+    fn question_rewrite_covers_alias_shapes_and_empty_failures() {
+        // AskUser title with an empty failure still rewrites.
+        assert!(is_unseen_question_dismissal("AskUser", ""));
+        assert!(is_unseen_question_dismissal("ask_user", "Tool call failed."));
+        assert!(is_unseen_question_dismissal("question", "Dismissed!"));
+        assert!(!is_unseen_question_dismissal("read_file", ""));
+        // Title-shaped questions and text/name/value options parse.
+        let items = question_items_in(&Some(serde_json::json!({
+            "questions": [{
+                "title": "Pick one",
+                "options": [{"text": "A"}, {"name": "B"}, {"value": "C"}, "D"],
+            }],
+        })));
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].1, "Pick one");
+        assert_eq!(items[0].2, vec!["A", "B", "C", "D"]);
     }
 }

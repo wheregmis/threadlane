@@ -25,9 +25,10 @@ mod test_support;
 pub use app_state::AppState;
 pub use events::{next_event_batch, next_event_batch_capped};
 pub use types::{
-    hash_session_identity, ChatMessageInfo, ChatStreamEvent, MessageRole, RequestedEditorTarget,
-    SessionAttention, SessionHealth, SessionHydrationRequest, SessionInfo, SubagentActivityInfo,
-    SubagentActivityStatus, ToolActivityInfo, TrajectoryEntry, WorkMode, WorkspacePage,
+    hash_session_identity, ChatMessageInfo, ChatStreamEvent, MessageRole, RequestedComposerInsert,
+    RequestedEditorTarget, SessionAttention, SessionHealth, SessionHydrationRequest, SessionInfo,
+    SubagentActivityInfo, SubagentActivityStatus, ToolActivityInfo, TrajectoryEntry, WorkMode,
+    WorkspacePage,
 };
 
 #[cfg(any(test, feature = "test-support"))]

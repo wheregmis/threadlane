@@ -33,10 +33,20 @@ impl SessionRemovalKind {
         }
     }
 
-    fn description(self, session_id: &str) -> String {
-        match self {
-            Self::Archive => format!("This removes session {session_id} from the active list."),
-            Self::Remove => format!("This permanently removes session {session_id}."),
+    fn description(self, title: &str, project: &str, worktree_note: Option<&str>) -> String {
+        let base = match self {
+            // Archive hides the session from the list but keeps its
+            // transcript in the archive; Remove destroys it permanently.
+            Self::Archive => format!(
+                "“{title}” ({project}) will leave the active list. Its transcript stays in the archive."
+            ),
+            Self::Remove => format!(
+                "“{title}” ({project}) will be permanently deleted, transcript included."
+            ),
+        };
+        match worktree_note {
+            Some(note) => format!("{base}\n{note}"),
+            None => base,
         }
     }
 
@@ -101,9 +111,35 @@ fn open_session_removal_dialog(
             let work_dir = work_dir.clone();
             let session_id = session_id.clone();
             let delete_worktree = delete_worktree.clone();
+            // Identify by title + project, never a raw session id; spell
+            // out the worktree effect and the Archive-vs-Remove distinction.
+            let (title, project_name) = model
+                .read(_cx)
+                .projects
+                .iter()
+                .find(|project| project.work_dir == work_dir)
+                .and_then(|project| {
+                    project
+                        .sessions
+                        .iter()
+                        .find(|session| session.id == session_id)
+                        .map(|session| (session.title.clone(), project.name.clone()))
+                })
+                .unwrap_or_else(|| ("Untitled session".into(), "project".into()));
+            let worktree_note = is_worktree.then(|| {
+                let branch = git_branch
+                    .as_deref()
+                    .map(|branch| format!(" on branch '{branch}'"))
+                    .unwrap_or_default();
+                if delete_worktree.get() {
+                    format!("Its worktree{branch} will be deleted too. Uncheck below to keep it.")
+                } else {
+                    format!("Its worktree{branch} will be kept.")
+                }
+            });
             let mut alert = alert
                 .title(kind.title())
-                .description(kind.description(&session_id))
+                .description(kind.description(&title, &project_name, worktree_note.as_deref()))
                 .button_props(kind.button_props());
 
             if is_worktree {
@@ -569,7 +605,7 @@ impl SidebarView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search tasks…"));
+        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search sessions…"));
 
         let sub1 = cx.observe(&model, |this, model, cx| {
             let fingerprint = sidebar_fingerprint(model.read(cx), now_unix_secs());
@@ -1014,6 +1050,15 @@ impl SidebarView {
             .map(|project| project.name.clone())
             .unwrap_or_else(|| "Project".to_string());
 
+        // Full-row screen-reader label: the inner title button only carries
+        // the title, so status, project, and recency live here. Keyboard
+        // users operate the row through its focusable title button (Tab,
+        // Enter to select); this label makes the row itself announce.
+        let session_row_label = format!(
+            "{}, project {}, {}, {}",
+            session_title, project, attention.label(), time_ago,
+        );
+
         let pr_info = session_pr_info(session, &self.model.read(cx).git_prs).cloned();
 
         let pr_meta = pr_info.map(|pr| {
@@ -1128,6 +1173,8 @@ impl SidebarView {
             .id(SharedString::from(format!("session-card-{}", session.id)))
             .group("session-card")
             .tooltip(move |window, cx| Tooltip::new(session_tooltip.clone()).build(window, cx))
+            .role(Role::ListItem)
+            .aria_label(session_row_label.clone())
             .relative()
             .flex()
             .items_stretch()
@@ -1264,6 +1311,10 @@ impl SidebarView {
                                         .opacity(0.0)
                                         .group_hover("session-card", |style| style.opacity(1.0))
                                         .focus_visible(|style| style.opacity(1.0))
+                                        // Touch and no-hover users never get
+                                        // group_hover: the selected row always
+                                        // shows its archive action.
+                                        .when(is_active, |button| button.opacity(1.0))
                                         .tooltip("Archive session")
                                         // The card selects a session on mouse-down. Keep action buttons from
                                         // bubbling that event, otherwise archiving first selects the row and
@@ -1398,22 +1449,32 @@ impl SidebarView {
                             else {
                                 return;
                             };
-                            let result = build_diagnostic_export(
-                                &source,
-                                &session_id,
-                                &title,
-                                &work_dir,
-                                runtime.as_deref(),
-                                trajectory,
-                                true,
-                            )
-                            .and_then(|value| {
-                                serde_json::to_vec_pretty(&value).map_err(|error| error.to_string())
-                            })
-                            .and_then(|bytes| {
-                                std::fs::write(destination.path(), bytes)
-                                    .map_err(|error| error.to_string())
-                            });
+                            // Blocking file + JSON work hops to the background
+                            // executor: session logs can be tens of MB, and
+                            // this continuation already left the UI thread.
+                            let destination_path = destination.path().to_path_buf();
+                            let result = cx
+                                .background_executor()
+                                .spawn(async move {
+                                    build_diagnostic_export(
+                                        &source,
+                                        &session_id,
+                                        &title,
+                                        &work_dir,
+                                        runtime.as_deref(),
+                                        trajectory,
+                                        true,
+                                    )
+                                    .and_then(|value| {
+                                        serde_json::to_vec_pretty(&value)
+                                            .map_err(|error| error.to_string())
+                                    })
+                                    .and_then(|bytes| {
+                                        std::fs::write(&destination_path, bytes)
+                                            .map_err(|error| error.to_string())
+                                    })
+                                })
+                                .await;
                             let _ = model.update(cx, |state, cx| {
                                 state.session_status = Some(match result {
                                     Ok(()) => "Session diagnostics exported".into(),
@@ -1452,22 +1513,29 @@ impl SidebarView {
                             else {
                                 return;
                             };
-                            let result = build_diagnostic_export(
-                                &source,
-                                &session_id,
-                                &title,
-                                &work_dir,
-                                runtime.as_deref(),
-                                trajectory,
-                                false,
-                            )
-                            .and_then(|value| {
-                                serde_json::to_vec_pretty(&value).map_err(|error| error.to_string())
-                            })
-                            .and_then(|bytes| {
-                                std::fs::write(destination.path(), bytes)
-                                    .map_err(|error| error.to_string())
-                            });
+                            let destination_path = destination.path().to_path_buf();
+                            let result = cx
+                                .background_executor()
+                                .spawn(async move {
+                                    build_diagnostic_export(
+                                        &source,
+                                        &session_id,
+                                        &title,
+                                        &work_dir,
+                                        runtime.as_deref(),
+                                        trajectory,
+                                        false,
+                                    )
+                                    .and_then(|value| {
+                                        serde_json::to_vec_pretty(&value)
+                                            .map_err(|error| error.to_string())
+                                    })
+                                    .and_then(|bytes| {
+                                        std::fs::write(&destination_path, bytes)
+                                            .map_err(|error| error.to_string())
+                                    })
+                                })
+                                .await;
                             let _ = model.update(cx, |state, cx| {
                                 state.session_status = Some(match result {
                                     Ok(()) => "Trajectory exported".into(),

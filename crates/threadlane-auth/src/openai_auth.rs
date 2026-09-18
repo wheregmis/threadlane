@@ -712,8 +712,11 @@ fn codex_token_needs_refresh(account: &CodexAccount, now: u64) -> bool {
 /// Resolve the account captured when a provider was created, even if the user
 /// switches the active account while that provider is running.
 pub async fn get_valid_codex_account_token(id: &str) -> Result<String, String> {
-    get_valid_codex_account_token_in(id, &CredentialStore::default()).await
-}
+    let id = id.to_string();
+    crate::on_reactor(async move {
+        get_valid_codex_account_token_in(&id, &CredentialStore::default()).await
+    })
+    .await}
 
 /// Resolves a usable token for `id` from the injected store's location,
 /// refreshing with the default [`CodexOAuthConfig`] when near expiry.
@@ -769,8 +772,11 @@ async fn resolve_codex_account_token(
 }
 
 pub async fn refresh_codex_account_token(account: &CodexAccount) -> Result<CodexAccount, String> {
-    refresh_codex_account_token_in(account, &CredentialStore::default()).await
-}
+    let account = account.clone();
+    crate::on_reactor(async move {
+        refresh_codex_account_token_in(&account, &CredentialStore::default()).await
+    })
+    .await}
 
 /// Refreshes `account` with the default [`CodexOAuthConfig`], committing the
 /// rotated tokens to the injected store's location.
@@ -778,9 +784,13 @@ pub async fn refresh_codex_account_token_in(
     account: &CodexAccount,
     locations: &CredentialStore,
 ) -> Result<CodexAccount, String> {
-    let config = CodexOAuthConfig::default();
-    refresh_codex_account_token_at(account, &config, locations).await
-}
+    let account = account.clone();
+    let locations = locations.clone();
+    crate::on_reactor(async move {
+        let config = CodexOAuthConfig::default();
+        refresh_codex_account_token_at(&account, &config, &locations).await
+    })
+    .await}
 
 async fn refresh_codex_account_token_at(
     account: &CodexAccount,
@@ -911,119 +921,124 @@ pub(crate) fn build_browser_oauth_url_with(
     url.to_string()
 }
 
-pub async fn listen_for_browser_oauth_callback(expected_state: String) -> Result<String, String> {
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
+pub async fn listen_for_browser_oauth_callback(expected_state: String) -> Result<String, String> {crate::on_reactor(async move {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
 
-    let listener = TcpListener::bind("127.0.0.1:1455")
-        .map_err(|e| format!("Failed to bind loopback callback listener on port 1455: {e}"))?;
+        let listener = TcpListener::bind("127.0.0.1:1455")
+            .map_err(|e| format!("Failed to bind loopback callback listener on port 1455: {e}"))?;
 
-    listener
-        .set_nonblocking(true)
-        .map_err(|e| format!("Failed to set listener non-blocking: {e}"))?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|e| format!("Failed to set listener non-blocking: {e}"))?;
 
-    let start_time = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-
-    loop {
-        let now = std::time::SystemTime::now()
+        let start_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        if now.saturating_sub(start_time) > 300 {
-            return Err("OAuth callback timed out after 5 minutes".to_string());
-        }
 
-        match listener.accept() {
-            Ok((mut stream, _)) => {
-                let mut buffer = [0u8; 4096];
-                if let Ok(bytes_read) = stream.read(&mut buffer) {
-                    let request_str = String::from_utf8_lossy(&buffer[..bytes_read]);
-                    if let Some(first_line) = request_str.lines().next() {
-                        if first_line.starts_with("GET /auth/callback")
-                            || first_line.starts_with("GET /")
-                        {
-                            let path = first_line.split_whitespace().nth(1).unwrap_or("");
-                            if let Ok(parsed_url) =
-                                url::Url::parse(&format!("http://localhost:1455{path}"))
+        loop {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            if now.saturating_sub(start_time) > 300 {
+                return Err("OAuth callback timed out after 5 minutes".to_string());
+            }
+
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let mut buffer = [0u8; 4096];
+                    if let Ok(bytes_read) = stream.read(&mut buffer) {
+                        let request_str = String::from_utf8_lossy(&buffer[..bytes_read]);
+                        if let Some(first_line) = request_str.lines().next() {
+                            if first_line.starts_with("GET /auth/callback")
+                                || first_line.starts_with("GET /")
                             {
-                                let mut code = None;
-                                let mut state = None;
-                                let mut error = None;
-                                let mut error_desc = None;
-                                for (k, v) in parsed_url.query_pairs() {
-                                    if k == "code" {
-                                        code = Some(v.to_string());
-                                    } else if k == "state" {
-                                        state = Some(v.to_string());
-                                    } else if k == "error" {
-                                        error = Some(v.to_string());
-                                    } else if k == "error_description" {
-                                        error_desc = Some(v.to_string());
-                                    }
-                                }
-
-                                if let Some(err) = error {
-                                    let desc = error_desc.unwrap_or_else(|| err.clone());
-                                    let html = format!("HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<!DOCTYPE html><html><body style='font-family:sans-serif;background:#0d1117;color:#f85149;padding:40px;text-align:center;'><h2>Authentication Error</h2><p>{desc}</p></body></html>");
-                                    let _ = stream.write_all(html.as_bytes());
-                                    let _ = stream.flush();
-                                    return Err(format!("OAuth error: {desc}"));
-                                }
-
-                                let (res_code, html_response) = if let (Some(code), Some(st)) =
-                                    (code, state)
+                                let path = first_line.split_whitespace().nth(1).unwrap_or("");
+                                if let Ok(parsed_url) =
+                                    url::Url::parse(&format!("http://localhost:1455{path}"))
                                 {
-                                    if st == expected_state {
-                                        (
-                                            Ok(code),
-                                            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<!DOCTYPE html><html><body style='font-family:sans-serif;background:#0d1117;color:#10a37f;padding:40px;text-align:center;'><h2>ChatGPT Authentication Successful!</h2><p>You may now close this tab and return to Threadlane.</p></body></html>",
-                                        )
+                                    let mut code = None;
+                                    let mut state = None;
+                                    let mut error = None;
+                                    let mut error_desc = None;
+                                    for (k, v) in parsed_url.query_pairs() {
+                                        if k == "code" {
+                                            code = Some(v.to_string());
+                                        } else if k == "state" {
+                                            state = Some(v.to_string());
+                                        } else if k == "error" {
+                                            error = Some(v.to_string());
+                                        } else if k == "error_description" {
+                                            error_desc = Some(v.to_string());
+                                        }
+                                    }
+
+                                    if let Some(err) = error {
+                                        let desc = error_desc.unwrap_or_else(|| err.clone());
+                                        let html = format!("HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<!DOCTYPE html><html><body style='font-family:sans-serif;background:#0d1117;color:#f85149;padding:40px;text-align:center;'><h2>Authentication Error</h2><p>{desc}</p></body></html>");
+                                        let _ = stream.write_all(html.as_bytes());
+                                        let _ = stream.flush();
+                                        return Err(format!("OAuth error: {desc}"));
+                                    }
+
+                                    let (res_code, html_response) = if let (Some(code), Some(st)) =
+                                        (code, state)
+                                    {
+                                        if st == expected_state {
+                                            (
+                                                Ok(code),
+                                                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<!DOCTYPE html><html><body style='font-family:sans-serif;background:#0d1117;color:#10a37f;padding:40px;text-align:center;'><h2>ChatGPT Authentication Successful!</h2><p>You may now close this tab and return to Threadlane.</p></body></html>",
+                                            )
+                                        } else {
+                                            (
+                                                Err("OAuth state mismatch".to_string()),
+                                                "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<html><body><h2>Authentication Error</h2><p>State mismatch.</p></body></html>",
+                                            )
+                                        }
                                     } else {
                                         (
-                                            Err("OAuth state mismatch".to_string()),
-                                            "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<html><body><h2>Authentication Error</h2><p>State mismatch.</p></body></html>",
+                                            Err("Missing code or state in OAuth callback".to_string()),
+                                            "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<html><body><h2>Authentication Error</h2><p>Missing parameters.</p></body></html>",
                                         )
-                                    }
-                                } else {
-                                    (
-                                        Err("Missing code or state in OAuth callback".to_string()),
-                                        "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<html><body><h2>Authentication Error</h2><p>Missing parameters.</p></body></html>",
-                                    )
-                                };
+                                    };
 
-                                let _ = stream.write_all(html_response.as_bytes());
-                                let _ = stream.flush();
-                                return res_code;
+                                    let _ = stream.write_all(html_response.as_bytes());
+                                    let _ = stream.flush();
+                                    return res_code;
+                                }
                             }
                         }
                     }
                 }
-            }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-            }
-            Err(e) => {
-                return Err(format!("Failed to accept callback connection: {e}"));
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                }
+                Err(e) => {
+                    return Err(format!("Failed to accept callback connection: {e}"));
+                }
             }
         }
-    }
-}
+    })
+    .await}
 
 pub async fn exchange_browser_code_for_tokens(
     code: &str,
     code_verifier: &str,
 ) -> Result<CodexAccount, String> {
-    exchange_browser_code_for_tokens_in(
-        code,
-        code_verifier,
-        &CodexOAuthConfig::default(),
-        &CredentialStore::default(),
-    )
-    .await
-}
+    let code = code.to_string();
+    let code_verifier = code_verifier.to_string();
+    crate::on_reactor(async move {
+        exchange_browser_code_for_tokens_in(
+            &code,
+            &code_verifier,
+            &CodexOAuthConfig::default(),
+            &CredentialStore::default(),
+        )
+        .await
+    })
+    .await}
 
 /// Exchanges a browser OAuth code with an explicit provider configuration,
 /// persisting the account to the injected store's location.
@@ -1089,49 +1104,57 @@ pub(crate) async fn exchange_browser_code_for_tokens_in(
     Err("Code exchange returned no access token".into())
 }
 
-pub async fn start_device_login() -> Result<DeviceCodeResponse, String> {
-    start_device_login_with(&CodexOAuthConfig::default()).await
-}
+pub async fn start_device_login() -> Result<DeviceCodeResponse, String> {crate::on_reactor(async move {
+        start_device_login_with(&CodexOAuthConfig::default()).await
+    })
+    .await}
 
 /// Starts device login against an explicit provider configuration.
 pub async fn start_device_login_with(
     config: &CodexOAuthConfig,
 ) -> Result<DeviceCodeResponse, String> {
-    let client = reqwest::Client::new();
-    let res = client
-        .post(&config.device_usercode_url)
-        .json(&serde_json::json!({
-            "client_id": config.client_id,
-        }))
-        .send()
-        .await
-        .map_err(|e| format!("Failed to initiate ChatGPT device login: {e}"))?;
+    let config = config.clone();
+    crate::on_reactor(async move {
+        let client = reqwest::Client::new();
+        let res = client
+            .post(&config.device_usercode_url)
+            .json(&serde_json::json!({
+                "client_id": config.client_id,
+            }))
+            .send()
+            .await
+            .map_err(|e| format!("Failed to initiate ChatGPT device login: {e}"))?;
 
-    if !res.status().is_success() {
-        let status = res.status();
-        return Err(format!("Device login initiation failed ({status})"));
-    }
+        if !res.status().is_success() {
+            let status = res.status();
+            return Err(format!("Device login initiation failed ({status})"));
+        }
 
-    let text = res
-        .text()
-        .await
-        .map_err(|e| format!("Failed to read device code body: {e}"))?;
+        let text = res
+            .text()
+            .await
+            .map_err(|e| format!("Failed to read device code body: {e}"))?;
 
-    crate::parse_oauth_response(&text)
-}
+        crate::parse_oauth_response(&text)
+    })
+    .await}
 
 pub async fn poll_device_token(
     device_auth_id: &str,
     user_code: &str,
 ) -> Result<OAuthTokens, String> {
-    poll_device_token_in(
-        device_auth_id,
-        user_code,
-        &CodexOAuthConfig::default(),
-        &CredentialStore::default(),
-    )
-    .await
-}
+    let device_auth_id = device_auth_id.to_string();
+    let user_code = user_code.to_string();
+    crate::on_reactor(async move {
+        poll_device_token_in(
+            &device_auth_id,
+            &user_code,
+            &CodexOAuthConfig::default(),
+            &CredentialStore::default(),
+        )
+        .await
+    })
+    .await}
 
 /// Polls the device endpoint from an explicit provider configuration,
 /// persisting the tokens to the injected store's location.
@@ -1141,10 +1164,16 @@ pub async fn poll_device_token_in(
     config: &CodexOAuthConfig,
     locations: &CredentialStore,
 ) -> Result<OAuthTokens, String> {
-    let tokens = poll_device_token_without_saving(device_auth_id, user_code, config).await?;
-    save_credentials_in(&tokens, locations)?;
-    Ok(tokens)
-}
+    let device_auth_id = device_auth_id.to_string();
+    let user_code = user_code.to_string();
+    let config = config.clone();
+    let locations = locations.clone();
+    crate::on_reactor(async move {
+        let tokens = poll_device_token_without_saving(&device_auth_id, &user_code, &config).await?;
+        save_credentials_in(&tokens, &locations)?;
+        Ok(tokens)
+    })
+    .await}
 
 fn device_token_error(status: reqwest::StatusCode, body: &str) -> Option<String> {
     let value: Value = serde_json::from_str(body).unwrap_or(Value::Null);

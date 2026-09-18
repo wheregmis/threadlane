@@ -9,7 +9,7 @@ use super::subagents::{
     NEXT_SUBAGENT_UI_RUN_ID,
 };
 use threadlane_compaction::CompactionParams;
-use threadlane_context::{context_budget, BudgetConfig};
+use threadlane_context::{context_budget_for_project, BudgetConfig};
 use threadlane_skills::agents::AgentDefinition;
 use crate::commands::{execute_slash_command, parse_slash_command};
 use log::warn;
@@ -138,6 +138,21 @@ pub(crate) fn compaction_retained_tail(messages: &[AgentMessage]) -> Vec<AgentMe
 
 impl CodingAgent {
     fn install_run_trace_recorders(&mut self, path: PathBuf, run_id: String) -> Result<(), String> {
+        // Refresh the armed prewalk's todo gate from the live toolset at every
+        // run boundary: the snapshot taken at arming goes stale when the
+        // schema changes underneath it (e.g. a `/model` switch), and a stale
+        // `requires_todo=true` would deadlock the handoff waiting for an
+        // `update_plan` tool that no longer exists.
+        let live_requires_todo = self
+            .agent
+            .configured_tool_definitions()
+            .iter()
+            .any(|tool| tool.name == threadlane_orchestrator::PREWALK_TODO_TOOL);
+        if let Ok(mut guard) = self.prewalk.lock() {
+            if let Some(state) = guard.as_mut() {
+                state.refresh_requires_todo(live_requires_todo);
+            }
+        }
         let trace_harness = Arc::new(tokio::sync::Mutex::new(CodingSessionHarness::open(&path)?));
         let provider_harness = trace_harness.clone();
         let provider_run_id = run_id.clone();
@@ -258,7 +273,7 @@ impl CodingAgent {
                 // workspace-mutating edit/write behind an open gate switches
                 // one-shot to the fast model. No explicit handoff tool.
                 let handoff = {
-                    let mut guard = prewalk.lock().unwrap();
+                    let mut guard = prewalk.lock().unwrap_or_else(|error| error.into_inner());
                     match guard.as_mut() {
                         None => None,
                         Some(state)
@@ -419,20 +434,20 @@ impl CodingAgent {
                     };
                     let parent_leaf =
                         self.prompt_parent_leaf(AgentMessage::user(prompt, Vec::new()), true);
-                    *self.dispatch_parent_leaf.lock().unwrap() = parent_leaf;
+                    *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = parent_leaf;
                     let result = match (self.agent_runner)(vec![task], false, None).await {
                         Ok(result) => result,
                         Err(err) => {
-                            *self.dispatch_parent_leaf.lock().unwrap() = None;
+                            *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = None;
                             return Err(format!("Subagent Error: {err}"));
                         }
                     };
                     let output = result["output"].as_str().unwrap_or_default().to_string();
                     if let Err(error) = self.commit_completed_subagent_lanes() {
-                        *self.dispatch_parent_leaf.lock().unwrap() = None;
+                        *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = None;
                         return Err(format!("Subagent Sync Error: {error}"));
                     }
-                    *self.dispatch_parent_leaf.lock().unwrap() = None;
+                    *self.dispatch_parent_leaf.lock().unwrap_or_else(|error| error.into_inner()) = None;
 
                     if let Some(harness) = self.harness.as_mut() {
                         let _ = harness.append_message_to_lane(
@@ -561,7 +576,12 @@ impl CodingAgent {
             .unwrap_or_default();
         let system_prompt = durable_prompt_snapshot(&self.agent.system_prompt());
         let context_window_limit = Some(
-            context_budget(&model, &BudgetConfig::from(self.agent.config())).limit,
+            context_budget_for_project(
+                &model,
+                &BudgetConfig::from(self.agent.config()),
+                Some(&self.work_dir),
+            )
+            .limit,
         );
         let work_dir = self.work_dir.to_string_lossy().into_owned();
         let Some(journal) = self.harness.as_mut() else {
@@ -714,7 +734,12 @@ impl CodingAgent {
                 })
                 .unwrap_or_default();
             let context_window_limit = Some(
-                context_budget(&model, &BudgetConfig::from(self.agent.config())).limit,
+                context_budget_for_project(
+                    &model,
+                    &BudgetConfig::from(self.agent.config()),
+                    Some(&self.work_dir),
+                )
+                .limit,
             );
             journal.capture_run_context(
                 run_id,

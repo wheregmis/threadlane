@@ -440,6 +440,12 @@ impl TerminalView {
         &self.project
     }
 
+    /// Whether the visible screen holds any output. Used to confirm closing
+    /// a shell that would discard scrollback/build output with one misclick.
+    pub fn has_output(&self) -> bool {
+        !self.screen.contents().trim().is_empty()
+    }
+
     fn start(&mut self) {
         let result = start_parser_worker(self.rows, self.cols, self.event_tx.clone())
             .map_err(|e| e.to_string())
@@ -1007,19 +1013,32 @@ impl Render for TerminalView {
         let autoscroll_pill = if self.scrollback_offset > 0 {
             let scroll_to_bottom_handle = terminal_actions.clone();
             Some(
-                div().absolute().bottom(px(14.0)).right(px(24.0)).child(
-                    Button::new("terminal-autoscroll-pill")
-                        .label(format!(
-                            "↓ Scroll to Bottom ({} lines up)",
-                            self.scrollback_offset
-                        ))
-                        .icon(IconName::ChevronDown)
-                        .tooltip("Jump to live output")
-                        .xsmall()
-                        .on_click(move |_event, _window, cx| {
-                            scroll_to_bottom_handle.update(cx, |t, cx| t.scroll_to_bottom(cx));
-                        }),
-                ),
+                // Lifted clear of the last output lines with a scrimmed,
+                // outlined pill so it never covers PTY text nor mis-taps
+                // during selection.
+                div()
+                    .absolute()
+                    .bottom(px(28.0))
+                    .right(px(12.0))
+                    .rounded_full()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.title_bar)
+                    .shadow_md()
+                    .child(
+                        Button::new("terminal-autoscroll-pill")
+                            .label(format!(
+                                "↓ Scroll to Bottom ({} lines up)",
+                                self.scrollback_offset
+                            ))
+                            .icon(IconName::ChevronDown)
+                            .tooltip("Jump to live output")
+                            .xsmall()
+                            .ghost()
+                            .on_click(move |_event, _window, cx| {
+                                scroll_to_bottom_handle.update(cx, |t, cx| t.scroll_to_bottom(cx));
+                            }),
+                    ),
             )
         } else {
             None

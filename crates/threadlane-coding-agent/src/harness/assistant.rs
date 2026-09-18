@@ -91,7 +91,33 @@ impl CodingSessionHarness {
                         })
                 })
                 .unwrap_or_else(|| format!("v2-entry-{seq}")),
-            AgentMessage::Tool { tool_call_id, .. } => format!("v2-tool-result-{tool_call_id}"),
+            AgentMessage::Tool { tool_call_id, .. } => {
+                // Key by (run, call): the same call id retried with different
+                // content (abort replay, provider retry) is a new occurrence
+                // with its own entry, never a DuplicateId on the first one.
+                let base = match main_lane.and_then(|lane| lane.open_operation.clone()) {
+                    Some(run) => format!("v2-tool-result-{run}-{tool_call_id}"),
+                    None => format!("v2-tool-result-{tool_call_id}"),
+                };
+                if entry_ids.contains(base.as_str())
+                    && !self
+                        .store
+                        .entries()
+                        .iter()
+                        .any(|entry| entry.id == base && entry.message == message)
+                {
+                    let mut ordinal = 1u32;
+                    loop {
+                        let candidate = format!("{base}-retry-{ordinal}");
+                        if !entry_ids.contains(candidate.as_str()) {
+                            break candidate;
+                        }
+                        ordinal += 1;
+                    }
+                } else {
+                    base
+                }
+            }
             _ => format!("v2-entry-{seq}"),
         };
         // Tool completions are recorded both by the execution lifecycle and
@@ -145,10 +171,20 @@ impl CodingSessionHarness {
             message,
             AgentMessage::User { .. } | AgentMessage::Assistant { .. }
         ) {
-            if let Some(entry) = self.store.entries().iter().rev().find(|entry| {
-                entry.lane == lane && entry.id.starts_with(&prefix) && entry.message == message
-            }) {
-                return Ok(entry.id.clone());
+            // Collapse only a consecutive re-append of the identical message
+            // (retry idempotency, mirroring the main lane's exact-id check
+            // below). An identical message later on is a legitimate new turn
+            // (e.g. a repeated revive prompt), never a duplicate.
+            if let Some(latest) = self
+                .store
+                .entries()
+                .iter()
+                .rev()
+                .find(|entry| entry.lane == lane && entry.id.starts_with(&prefix))
+            {
+                if latest.message == message {
+                    return Ok(latest.id.clone());
+                }
             }
         }
         let ordinal = self

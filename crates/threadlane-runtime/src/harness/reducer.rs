@@ -12,22 +12,6 @@ thread_local! {
 
 pub struct Reducer;
 
-pub(crate) fn validate_candidate_entry<S: SessionStore>(
-    store: &S,
-    entry: &Entry,
-) -> Result<(), ReduceError> {
-    let context = ReductionContext::from_store(store)?;
-    context.entry_guard(entry)
-}
-
-pub(crate) fn validate_candidate_record<S: SessionStore>(
-    store: &S,
-    record: &Record,
-) -> Result<(), ReduceError> {
-    let context = ReductionContext::from_store(store)?;
-    context.record_guard(record)
-}
-
 /// Compact per-entry summary retained by [`ReductionContext`] so record
 /// guards can validate against historical entries without borrowing into a
 /// store's message payloads.
@@ -255,7 +239,7 @@ impl ReductionContext {
         Ok(ctx)
     }
 
-    fn from_store<S: SessionStore>(store: &S) -> Result<Self, ReduceError> {
+    pub(crate) fn from_store<S: SessionStore>(store: &S) -> Result<Self, ReduceError> {
         Self::build(store.entries(), store.records(), store.facts(), &|lane| {
             store.preferred_leaf(lane)
         })

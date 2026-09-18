@@ -2434,3 +2434,66 @@ mod tests {
         assert!(!older.has_older);
     }
 }
+
+#[cfg(test)]
+mod session_line_tests {
+    use super::*;
+    use threadlane_protocol::AgentMessage;
+
+    /// Pins untagged classification: permissive shapes must never swallow
+    /// `session_metadata`/`session_plan` lines, and legacy nodes must land
+    /// on `Legacy` (never `Entry`, which would drop the seq default).
+    ///
+    /// The order is load-bearing: `Entry` precedes `Legacy` because legacy
+    /// nodes are the more permissive shape (defaulted timestamp/seq) and
+    /// would otherwise swallow real entries; `Known` is disjoint via its
+    /// `type` tag and order-independent.
+    #[test]
+    fn each_line_shape_classifies_exactly_once() {
+        let entry = crate::harness::Entry::new(
+            "e-1",
+            None,
+            "main",
+            1,
+            1,
+            AgentMessage::user("hi", Vec::new()),
+            false,
+        );
+        let record = Record::FactSet {
+            id: "fact-1".into(),
+            seq: 2,
+            lane: "main".into(),
+            timestamp: 2,
+            run_id: None,
+            key: "name".into(),
+            value: "demo".into(),
+        };
+        let lines = [
+            serde_json::to_string(&entry).unwrap(),
+            serde_json::to_string(&record).unwrap(),
+            r#"{"type":"session_metadata","name":"demo","model":"m"}"#.to_string(),
+            r#"{"type":"session_plan","items":[]}"#.to_string(),
+            format!(
+                r#"{{"id":"legacy-1","message":{}}}"#,
+                serde_json::to_string(&AgentMessage::user("old", Vec::new())).unwrap()
+            ),
+        ]
+        .join("\n");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("classify.jsonl");
+        std::fs::write(&path, lines).unwrap();
+        let parsed: Vec<SessionLine> = read_strict(&path).unwrap();
+        assert_eq!(parsed.len(), 5);
+        assert!(matches!(parsed[0], SessionLine::Entry(_)));
+        assert!(matches!(parsed[1], SessionLine::Record(_)));
+        assert!(matches!(
+            parsed[2],
+            SessionLine::Known(KnownSessionRecord::Metadata { .. })
+        ));
+        assert!(matches!(
+            parsed[3],
+            SessionLine::Known(KnownSessionRecord::Plan { .. })
+        ));
+        assert!(matches!(parsed[4], SessionLine::Legacy(_)));
+    }
+}

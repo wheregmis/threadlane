@@ -294,12 +294,41 @@ impl ChatListView {
             cx.new(|cx| InputState::new(window, cx).placeholder("Search trajectory…"));
         let mut stream_rx = model
             .update(cx, |state, _cx| state.stream_rx.take())
-            .expect("chat stream receiver was already taken");
+            .unwrap_or_else(|| {
+                // A second view construction must not panic the UI: fall
+                // back to a detached channel (no stream events arrive).
+                tracing::warn!("chat stream receiver was already taken; using a detached channel");
+                tokio::sync::mpsc::unbounded_channel().1
+            });
 
         let editor = cx.new(|cx| EditorView::new(model.clone(), window, cx));
 
         let sub1 = cx.observe_in(&model, window, |this, model, window, cx| {
             this.sync_composer_draft(window, cx);
+            // Cross-surface composer inserts (browser annotations): append
+            // without disturbing already-typed input or staged attachments.
+            let inserts = model.update(cx, |state, _cx| {
+                std::mem::take(&mut state.requested_composer_inserts)
+            });
+            for insert in inserts {
+                if !insert.text.is_empty() {
+                    this.input_state.update(cx, |input, cx| {
+                        let existing = input.value().to_string();
+                        let separator =
+                            if existing.is_empty() || existing.ends_with('\n') {
+                                ""
+                            } else {
+                                "\n"
+                            };
+                        input.set_value(
+                            format!("{existing}{separator}{}", insert.text),
+                            window,
+                            cx,
+                        );
+                    });
+                }
+                this.pasted_images.extend(insert.images);
+            }
             if let Some(target) =
                 model.update(cx, |state, _cx| state.requested_editor_target.take())
             {
@@ -1420,18 +1449,20 @@ impl ChatListView {
                 .child(format!("Turn {turn}"))
                 .into_any_element(),
             TrajectoryRow::Entry(all_index) => {
-                let entry = &self
-                    .trajectory_cache
-                    .as_ref()
-                    .expect("trajectory cache")
-                    .all_entries[all_index];
+                // Stale indices (cache rebuilt mid-render) render nothing
+                // instead of panicking the paint.
+                let Some(cache) = self.trajectory_cache.as_ref() else {
+                    return Empty.into_any_element();
+                };
+                let Some(entry) = cache.all_entries.get(all_index) else {
+                    return Empty.into_any_element();
+                };
                 let selected = Some(all_index) == self.selected_trajectory_index;
-                let preview = self
-                    .trajectory_cache
-                    .as_ref()
-                    .expect("trajectory cache")
-                    .previews[all_index]
-                    .clone();
+                let preview = cache
+                    .previews
+                    .get(all_index)
+                    .cloned()
+                    .unwrap_or_default();
                 let (badge_bg, badge_fg, badge_label): (Hsla, Hsla, SharedString) =
                     match entry.category.as_str() {
                         "Tool" | "Tool runtime" => {
@@ -1819,7 +1850,17 @@ impl ChatListView {
                     .map(|entry| (revision, index, format_trajectory_raw_json(entry)));
             }
         }
-        let cache = self.trajectory_cache.as_ref().expect("trajectory cache");
+        let Some(cache) = self.trajectory_cache.as_ref() else {
+            return div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_sm()
+                .text_color(cx.theme().colors.muted_foreground)
+                .child("Trajectory unavailable.")
+                .into_any_element();
+        };
         let all_entries = &cache.all_entries;
         let categories = Arc::clone(&cache.categories);
         let lanes = Arc::clone(&cache.lanes);
@@ -3538,6 +3579,15 @@ impl ChatListView {
             answers,
             dismissed: false,
         };
+        // The Send button is disabled while empty, but never resolve a
+        // totally unanswered card through any other path either: an empty
+        // answer is indistinguishable from a real one downstream.
+        if answer.answers.iter().all(|item| {
+            item.selected.is_empty()
+                && item.custom_text.as_deref().is_none_or(|text| text.is_empty())
+        }) {
+            return;
+        }
         let request_id = request.id.clone();
         self.question_selections
             .retain(|key, _| !key.starts_with(&format!("{request_id}\0")));
@@ -4024,6 +4074,24 @@ impl ChatListView {
             })
             .collect::<Vec<_>>();
 
+        // Sending with zero selections and zero custom text resolves an
+        // empty answer (indistinguishable from a real one downstream), so
+        // the Send button stays disabled until something is answered.
+        // Toggling options calls cx.notify, and inputs notify on edit, so
+        // this recomputes as the user answers.
+        let has_answer = request.questions.iter().any(|item| {
+            let key = Self::question_selection_key(&request.id, &item.id);
+            let selected = self
+                .question_selections
+                .get(&key)
+                .is_some_and(|selected| !selected.is_empty());
+            let custom = self
+                .question_inputs
+                .get(&key)
+                .is_some_and(|input| !input.read(cx).value().trim().is_empty());
+            selected || custom
+        });
+
         Some(
             div()
                 .w_full()
@@ -4092,7 +4160,12 @@ impl ChatListView {
                                         .label("Send answers")
                                         .small()
                                         .primary()
-                                        .tooltip("Send the selected answers")
+                                        .disabled(!has_answer)
+                                        .tooltip(if has_answer {
+                                            "Send the selected answers"
+                                        } else {
+                                            "Select an option or type a custom answer first"
+                                        })
                                         .on_click(cx.listener(|this, _event, _window, cx| {
                                             this.submit_active_question(cx);
                                         })),
@@ -4397,9 +4470,11 @@ impl ChatListView {
             .isolation
             .as_ref()
             .map(|isolation| (isolation.workspace.clone(), isolation.branch.clone()));
-        let branch_controls = workspace.map(|(worktree, branch)| {
+        let branch_controls = workspace.and_then(|(worktree, branch)| {
+            // No active project (or a deleted work dir) hides the worktree
+            // controls instead of panicking the render.
             let inspect_model = self.model.clone();
-            let inspect_root = self.model.read(cx).active_git_work_dir().unwrap();
+            let inspect_root = self.model.read(cx).active_git_work_dir()?;
             let inspect_branch = branch.clone();
             let apply_model = self.model.clone();
             let apply_root = inspect_root.clone();
@@ -4412,7 +4487,8 @@ impl ChatListView {
             let terminal_model = self.model.clone();
             let terminal_worktree = worktree.clone();
             let worktree_available = worktree.is_dir();
-            div()
+            Some(
+                div()
                 .flex()
                 .flex_col()
                 .gap_2()
@@ -4577,7 +4653,8 @@ impl ChatListView {
                                     .detach();
                                 }),
                         ),
-                )
+                ),
+            )
         });
         div()
             .w_full()
@@ -4927,12 +5004,20 @@ impl ChatListView {
         .unwrap_or_else(|| "Select project".to_string());
 
         let project_chip_model = self.model.clone();
+        let project_chip_tooltip = active_work_dir
+            .as_ref()
+            .map(|dir| dir.display().to_string())
+            .unwrap_or_else(|| selected_project_name.clone());
         let project_chip = Button::new("composer-project-chip")
             .icon(IconName::Folder)
             .label(selected_project_name)
             .dropdown_caret(true)
             .outline()
             .xsmall()
+            // Duplicate folder names are indistinguishable by label alone:
+            // cap the width, keep the full path in the tooltip.
+            .max_w(px(160.0))
+            .tooltip(format!("Project: {project_chip_tooltip}"))
             .dropdown_menu(move |menu, _window, _cx| {
                 let mut menu = menu;
                 for (name, work_dir) in projects_list.clone() {
@@ -5150,6 +5235,10 @@ impl ChatListView {
             .dropdown_caret(true)
             .ghost()
             .disabled(!has_models)
+            // Long agent model names ("Claude Code · Opus 4.8 with 1M
+            // context") must not squeeze Send off the composer row: cap the
+            // width, the full label stays in the tooltip.
+            .max_w(px(200.0))
             .tooltip(if has_models {
                 format!("Model: {model_label}")
             } else {
@@ -5418,7 +5507,9 @@ impl ChatListView {
                             .when(!has_commands, |list| {
                                 list.child(
                                     div()
-                                        .h(px(36.0))
+                                        // Same row height as command rows so
+                                        // filtering to empty doesn't jump.
+                                        .h(px(30.0))
                                         .flex()
                                         .items_center()
                                         .px_2()
@@ -5454,8 +5545,9 @@ impl ChatListView {
                                     .cursor_pointer()
                                     .child(
                                         div()
-                                            .w(px(112.0))
+                                            .w(px(160.0))
                                             .flex_none()
+                                            .truncate()
                                             .font_weight(if is_active {
                                                 FontWeight::BOLD
                                             } else {
@@ -5703,6 +5795,16 @@ impl ChatListView {
                                 .text_xs()
                                 .text_color(theme.foreground)
                                 .truncate()
+                                // Full draft in the tooltip: restoring blind
+                                // just to read it, then re-stashing, is gone.
+                                .id("stashed-draft-preview")
+                                .tooltip({
+                                    let tip = format!("Stashed draft:\n{draft}");
+                                    move |window, cx| {
+                                        gpui_component::tooltip::Tooltip::new(tip.clone())
+                                            .build(window, cx)
+                                    }
+                                })
                                 .child(format!("Stashed draft: \"{preview_text}\"")),
                         ),
                 )
@@ -6354,63 +6456,9 @@ impl Render for ChatListView {
                             .child(Spinner::new().small()).child("Loading conversation…")
                             .into_any_element()
                     } else if messages.is_empty() {
-                        div()
-                            .flex_1()
-                            .min_h_0()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .px_4()
-                            .child(
-                                div()
-                                    .w_full()
-                                    .max_w(px(440.0))
-                                    .flex()
-                                    .flex_col()
-                                    .items_center()
-                                    .gap_3()
-                                    .px_6()
-                                    .py_8()
-                                    .rounded_xl()
-                                    .border_1()
-                                    .border_color(theme.border)
-                                    .bg(theme.title_bar)
-                                    .child(
-                                        div()
-                                            .size(px(40.0))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .rounded_full()
-                                            .bg(theme.primary.opacity(0.12))
-                                            .text_color(theme.primary)
-                                            .child(IconName::Bot),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_base()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(theme.foreground)
-                                            .child("Ready when you are"),
-                                    )
-                                    .child(
-                                        div()
-                                            .max_w(px(320.0))
-                                            .text_center()
-                                            .text_sm()
-                                            .text_color(theme.muted_foreground)
-                                            .child(
-                                                "Describe what you want to build, investigate, or fix. Threadlane can use your project context and tools to help.",
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(theme.muted_foreground)
-                                            .child("Press Enter to send · Shift+Enter for a new line"),
-                                    ),
-                            )
-                            .into_any_element()
+                        // One empty state: an empty transcript renders the
+                        // same new-task hero wherever it appears.
+                        self.render_new_task(cx)
                     } else {
                         div()
                             .id("chat-transcript-container")

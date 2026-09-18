@@ -747,8 +747,14 @@ pub(crate) async fn revive_subagent_lane(
         .clone()
         .ok_or_else(|| "revive requires session persistence".to_string())?;
     // Fold queued inbox notes into the follow-up prompt so a `hub send`
-    // issued while the lane was settled is not lost.
+    // issued while the lane was settled is not lost. Internal control
+    // notices (e.g. the `hub kill` shutdown note) are dropped: reviving a
+    // lane must not resurrect "you are being shut down" as its task.
     let queued = super::mailbox::drain_lane_inbox(&context.hub, &req.lane_name, &req.agent);
+    let queued: Vec<_> = queued
+        .into_iter()
+        .filter(|message| !message.system_notice)
+        .collect();
     let mut prompt = req.message.clone();
     if !queued.is_empty() {
         let notes = queued
@@ -949,8 +955,16 @@ async fn isolated_subagent_workspace(
         if status.has_changes {
             return Err("Parallel isolated subagents require a clean parent worktree (commit or stash staged, unstaged, and untracked changes first)".into());
         }
-        threadlane_git::create_worktree(&parent_work_dir, &worktree, &branch)
-            .map_err(|error| error.to_string())?;
+        // Orphan recovery: a crashed/killed run leaves its deterministic
+        // path+branch behind, and retrying the lane would fail `worktree
+        // add` forever. Reclaim (reuse when clean) before creating.
+        let reusable =
+            threadlane_git::reclaim_subagent_worktree(&parent_work_dir, &worktree, &branch)
+                .map_err(|error| error.to_string())?;
+        if !reusable {
+            threadlane_git::create_worktree(&parent_work_dir, &worktree, &branch)
+                .map_err(|error| error.to_string())?;
+        }
         Ok((worktree, branch))
     })
     .await
@@ -1289,31 +1303,32 @@ pub(crate) async fn run_subagent_task(
     // Inbox follow-up loop (parent `hub send` / late sibling messages).
     // Bounded to 3 extra turns so a chatty peer cannot loop the child.
     // A `hub kill` landing mid-loop stops further follow-ups.
-    if peer_info.is_some() {
-        let own_agent = peer_info
-            .as_ref()
-            .map(|(_, agent)| agent.clone())
-            .unwrap_or_default();
-        for _ in 0..3 {
-            if context.hub.is_killed(&lane_name, &own_agent) {
-                break;
-            }
-            let pending = super::mailbox::drain_lane_inbox(&context.hub, &lane_name, &own_agent);
-            if pending.is_empty() {
-                break;
-            }
-            let body = pending
-                .iter()
-                .map(|message| format!("[inbox from {}] {}", message.from, message.body))
-                .collect::<Vec<_>>()
-                .join("\n");
-            agent.steer(AgentMessage::user(
-                format!("Live messages for you (from parent hub / sibling peers). Incorporate them into your next steps, then continue your assigned task:\n{body}"),
-                Vec::new(),
-            ));
-            agent.run_steer().await;
-            while agent_work.run_executor(&mut agent, None).await {}
+    // Runs for every child, not just batches with siblings: a solo worker
+    // or `wait=false` background lane is steered through the same parent
+    // queue, and without siblings there is no `peer_info` to gate on.
+    let own_agent = peer_info
+        .as_ref()
+        .map(|(_, agent)| agent.clone())
+        .unwrap_or_else(|| config.name.clone());
+    for _ in 0..3 {
+        if context.hub.is_killed(&lane_name, &own_agent) {
+            break;
         }
+        let pending = super::mailbox::drain_lane_inbox(&context.hub, &lane_name, &own_agent);
+        if pending.is_empty() {
+            break;
+        }
+        let body = pending
+            .iter()
+            .map(|message| format!("[inbox from {}] {}", message.from, message.body))
+            .collect::<Vec<_>>()
+            .join("\n");
+        agent.steer(AgentMessage::user(
+            format!("Live messages for you (from parent hub / sibling peers). Incorporate them into your next steps, then continue your assigned task:\n{body}"),
+            Vec::new(),
+        ));
+        agent.run_steer().await;
+        while agent_work.run_executor(&mut agent, None).await {}
     }
 
     let mut checkpoint_cursor = checkpoint_task
