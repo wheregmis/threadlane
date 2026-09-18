@@ -14,10 +14,9 @@
 //! alongside text metadata; the full file also lands in
 //! `<work_dir>/.threadlane/previews/` for the user, with a `latest.json`
 //! sidecar in the global previews dir so the GPUI mirror popup keeps showing
-//! the last capture plus action line. There is no live video poller: the
-//! driver's own agent-cursor overlay shows live input, and the mirror falls
-//! back to the last screenshot. Every screenshot and act still publishes a
-//! [`threadlane_protocol::live`] overlay so the user sees where a click lands.
+//! the last capture plus action line. The live mirror retains a virtual
+//! pointer for successful coordinate actions independently of the user's
+//! system mouse. Action markers use the same screenshot-to-display projection.
 //!
 //! When no driver binary is installed every tool fails closed with an install
 //! hint instead of touching OS input APIs directly.
@@ -1518,7 +1517,7 @@ impl ComputerToolExecutor {
         };
         let window_id = raw_target;
         let outcome = self.perform_act(&intent, pid, window_id).await?;
-        publish_act_overlay(&intent, &title);
+        publish_act_overlay(&intent, window_id, &title);
         let mirror_dir = global_previews_dir().unwrap_or_else(|| previews_dir(work_dir));
         write_mirror_sidecar(&mirror_dir, None, &format!("{title} — {outcome}"));
         Ok(outcome)
@@ -1742,19 +1741,21 @@ fn cua_call_is_read_only(tool: &str, args: &serde_json::Value) -> bool {
     }
 }
 
-/// Publish the mirror overlay for an act. Positions are known only for
-/// desktop-scope (display pixel) acts; window-local ones ride label-only.
-fn publish_act_overlay(intent: &ComputerAct, label: &str) {
+/// Publish the action marker and retain a virtual pointer independently of
+/// the user's system mouse. Window-local points need matching frame geometry.
+fn publish_act_overlay(intent: &ComputerAct, window_id: Option<i64>, label: &str) {
     use threadlane_protocol::live::{publish_overlay, LiveOverlayKind};
     match intent {
-        ComputerAct::Click { x, y, .. } => {
-            publish_overlay(LiveOverlayKind::Click, Some((*x, *y)), None, label);
-        }
-        ComputerAct::DoubleClick { x, y, .. } => {
-            publish_overlay(LiveOverlayKind::DoubleClick, Some((*x, *y)), None, label);
-        }
-        ComputerAct::Move { x, y } => {
-            publish_overlay(LiveOverlayKind::Move, Some((*x, *y)), None, label);
+        ComputerAct::Click { x, y, .. }
+        | ComputerAct::DoubleClick { x, y, .. }
+        | ComputerAct::Move { x, y } => {
+            let point = crate::mirror::record_pointer(window_id, (*x, *y));
+            let kind = match intent {
+                ComputerAct::Click { .. } => LiveOverlayKind::Click,
+                ComputerAct::DoubleClick { .. } => LiveOverlayKind::DoubleClick,
+                _ => LiveOverlayKind::Move,
+            };
+            publish_overlay(kind, point, None, label);
         }
         ComputerAct::Scroll { dx, dy } => {
             publish_overlay(LiveOverlayKind::Scroll, None, Some((*dx, *dy)), label);

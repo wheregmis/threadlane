@@ -58,6 +58,54 @@ impl FeedTarget {
     }
 }
 
+/// The agent's last successful coordinate action, never the human's mouse.
+#[derive(Clone, Copy)]
+struct AgentPointer {
+    target: FeedTarget,
+    point: (f64, f64),
+}
+
+impl AgentPointer {
+    fn screen_point(self, frame: &LiveFrame, source_width: u32) -> Option<(f64, f64)> {
+        if frame.target != self.target.stream_target() || source_width == 0 {
+            return None;
+        }
+        // Actions use driver screenshot pixels, not the downscaled mirror
+        // pixels or logical display points (notably different on Retina).
+        let scale = frame.points_width / f64::from(source_width);
+        Some((
+            frame.origin_points.0 + self.point.0 * scale,
+            frame.origin_points.1 + self.point.1 * scale,
+        ))
+    }
+}
+
+fn pointer_position(slot: &FeedSlot) -> Option<(f64, f64)> {
+    let pointer = slot
+        .pointer
+        .filter(|pointer| Some(pointer.target) == slot.target)?;
+    let frame = computer_live::latest_frame()?;
+    let (target, width) = slot.source_width?;
+    if target != frame.target {
+        return None;
+    }
+    pointer.screen_point(&frame, width)
+}
+
+/// Record only approved, successful actions. Keep window coordinates local
+/// until projection so moving the window also moves its virtual pointer.
+pub(crate) fn record_pointer(window_id: Option<i64>, point: (f64, f64)) -> Option<(f64, f64)> {
+    let pointer = AgentPointer {
+        target: window_id.map_or(FeedTarget::Display, |window_id| FeedTarget::Window {
+            window_id,
+        }),
+        point,
+    };
+    let mut slot = lock_slot();
+    slot.pointer = Some(pointer);
+    pointer_position(&slot)
+}
+
 struct FeedSlot {
     target: Option<FeedTarget>,
     last_use_ms: u128,
@@ -66,6 +114,8 @@ struct FeedSlot {
     last_pixels: Option<(StreamTarget, u32, u32, Vec<u8>)>,
     /// Cached logical display width in points + when it was read.
     geometry: Option<(f64, u128)>,
+    pointer: Option<AgentPointer>,
+    source_width: Option<(StreamTarget, u32)>,
 }
 
 impl Default for FeedSlot {
@@ -76,6 +126,8 @@ impl Default for FeedSlot {
             task_running: false,
             last_pixels: None,
             geometry: None,
+            pointer: None,
+            source_width: None,
         }
     }
 }
@@ -110,6 +162,7 @@ fn ensure_feed(target: FeedTarget) {
     slot.last_use_ms = now;
     if slot.target != Some(target) {
         slot.target = Some(target);
+        slot.pointer = None;
     }
     if slot.task_running {
         return;
@@ -178,13 +231,16 @@ async fn feed_poll_loop() {
     let mut last_ok_ms = computer_live::now_ms();
     loop {
         tokio::time::sleep(Duration::from_millis(FEED_INTERVAL_MS)).await;
-        let (target, watchers) = {
+        let target = {
             let slot = lock_slot();
             let Some(target) = slot.target else {
                 return;
             };
             let watchers = computer_live::watcher_count();
-            if should_exit(watchers, computer_live::now_ms().saturating_sub(slot.last_use_ms)) {
+            if should_exit(
+                watchers,
+                computer_live::now_ms().saturating_sub(slot.last_use_ms),
+            ) {
                 // Re-check under a fresh lock: a computer call may have landed
                 // since the snapshot, and it must find either a live task or
                 // a free slot — never a running flag with nobody behind it.
@@ -210,39 +266,39 @@ async fn feed_poll_loop() {
                 });
                 return;
             }
-            (target, watchers)
+            target
         };
         let started = computer_live::now_ms();
         let mut error = None;
         match capture_frame(target).await {
             Ok(Some(frame)) => {
                 last_ok_ms = started;
-                let unchanged = lock_slot().last_pixels.as_ref().is_some_and(
-                    |(prev_target, w, h, pixels)| {
-                        *prev_target == frame.target
-                            && *w == frame.width
-                            && *h == frame.height
-                            && *pixels == frame.bgra
-                    },
-                );
+                lock_slot().source_width = Some((frame.target, frame.source_width));
+                let unchanged =
+                    lock_slot()
+                        .last_pixels
+                        .as_ref()
+                        .is_some_and(|(prev_target, w, h, pixels)| {
+                            *prev_target == frame.target
+                                && *w == frame.width
+                                && *h == frame.height
+                                && *pixels == frame.bgra
+                        })
+                        && computer_live::latest_frame().is_some_and(|previous| {
+                            previous.target == frame.target
+                                && previous.origin_points == frame.origin_points
+                                && previous.points_width == frame.points_width
+                        });
                 if !unchanged {
                     computer_live::publish_frame(frame_snapshot(&frame));
-                    lock_slot().last_pixels = Some((
-                        frame.target,
-                        frame.width,
-                        frame.height,
-                        frame.bgra.clone(),
-                    ));
+                    lock_slot().last_pixels =
+                        Some((frame.target, frame.width, frame.height, frame.bgra.clone()));
                 }
             }
             Ok(None) => {}
             Err(message) => error = Some(format!("{}: {message}", target.label())),
         }
-        let pointer = if watchers > 0 {
-            cursor_position().await
-        } else {
-            None
-        };
+        let pointer = pointer_position(&lock_slot());
         computer_live::set_status(LiveStatus {
             running: true,
             target: Some(target.stream_target()),
@@ -256,6 +312,7 @@ async fn feed_poll_loop() {
 
 struct CapturedFrame {
     target: StreamTarget,
+    source_width: u32,
     width: u32,
     height: u32,
     bgra: Vec<u8>,
@@ -402,20 +459,6 @@ async fn display_geometry() -> f64 {
     width
 }
 
-async fn cursor_position() -> Option<(f64, f64)> {
-    driver_call("get_cursor_position", serde_json::json!({}))
-        .await
-        .ok()?
-        .structured
-        .as_ref()
-        .and_then(|structured| {
-            Some((
-                structured.get("x")?.as_f64()?,
-                structured.get("y")?.as_f64()?,
-            ))
-        })
-}
-
 /// Decode a PNG screenshot to bounded opaque BGRA (B, G, R, 255): the layout
 /// gpui uploads untouched. Pure for testability; failures are feed errors,
 // not panics.
@@ -447,9 +490,15 @@ fn png_to_frame(
     points_width: f64,
 ) -> Result<Option<CapturedFrame>, String> {
     let png = std::fs::read(path).map_err(|error| format!("Frame file missing: {error}"))?;
+    let source_width =
+        image::ImageReader::with_format(std::io::Cursor::new(&png), image::ImageFormat::Png)
+            .into_dimensions()
+            .map_err(|error| format!("Frame dimensions invalid: {error}"))?
+            .0;
     let (bgra, width, height) = png_to_bgra(&png, LIVE_FRAME_MAX_WIDTH)?;
     Ok(Some(CapturedFrame {
         target,
+        source_width,
         width,
         height,
         bgra,
@@ -472,6 +521,79 @@ mod tests {
         assert!(should_exit(0, FEED_IDLE_MS + 1));
         assert!(!should_exit(1, FEED_IDLE_MS + 1));
         assert!(should_exit(1, FEED_WATCHED_IDLE_MS + 1));
+    }
+
+    #[test]
+    fn virtual_pointer_scales_driver_pixels_and_tracks_only_its_target() {
+        let mut pointer = AgentPointer {
+            target: FeedTarget::Window { window_id: 7 },
+            point: (40.0, 60.0),
+        };
+        let mut frame = LiveFrame {
+            seq: 0,
+            ts_ms: 0,
+            target: StreamTarget::Window(7),
+            width: 200,
+            height: 150,
+            bgra: Vec::new(),
+            origin_points: (100.0, 50.0),
+            points_width: 400.0,
+        };
+        // An 800px driver screenshot, a 400pt window, and a 200px mirror.
+        let point = pointer.screen_point(&frame, 800).unwrap();
+        assert_eq!(point, (120.0, 80.0));
+        assert_eq!(frame.project(point.0, point.1), Some((10.0, 15.0)));
+        frame.origin_points = (-500.0, 200.0);
+        assert_eq!(pointer.screen_point(&frame, 800), Some((-480.0, 230.0)));
+        assert_eq!(pointer.screen_point(&frame, 0), None);
+        frame.target = StreamTarget::Window(8);
+        assert_eq!(pointer.screen_point(&frame, 800), None);
+        frame.target = StreamTarget::Display;
+        assert_eq!(pointer.screen_point(&frame, 800), None);
+        pointer.target = FeedTarget::Display;
+        frame.origin_points = (0.0, 0.0);
+        assert_eq!(pointer.screen_point(&frame, 800), Some((20.0, 30.0)));
+        assert_eq!(pointer.screen_point(&frame, 400), Some((40.0, 60.0)));
+    }
+
+    #[tokio::test]
+    async fn virtual_pointer_waits_for_geometry_and_clears_on_retarget() {
+        *lock_slot() = FeedSlot::default();
+        ensure_feed_window(7);
+        assert_eq!(record_pointer(Some(7), (40.0, 60.0)), None);
+        let frame = LiveFrame {
+            seq: 0,
+            ts_ms: 0,
+            target: StreamTarget::Window(7),
+            width: 200,
+            height: 150,
+            bgra: Vec::new(),
+            origin_points: (100.0, 50.0),
+            points_width: 400.0,
+        };
+        computer_live::publish_frame(frame);
+        assert_eq!(pointer_position(&lock_slot()), None);
+        lock_slot().source_width = Some((StreamTarget::Window(7), 800));
+        assert_eq!(pointer_position(&lock_slot()), Some((120.0, 80.0)));
+        ensure_feed_window(8);
+        assert!(lock_slot().pointer.is_none());
+        assert_eq!(pointer_position(&lock_slot()), None);
+        // A point for a different target must never become the new pointer.
+        assert_eq!(record_pointer(Some(7), (40.0, 60.0)), None);
+    }
+
+    #[test]
+    fn capture_retains_driver_width_before_mirror_downscaling() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("frame.png");
+        let source_width = LIVE_FRAME_MAX_WIDTH * 2;
+        image::RgbaImage::new(source_width, 4).save(&path).unwrap();
+        let frame = png_to_frame(&path, StreamTarget::Display, (0.0, 0.0), 1440.0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(frame.source_width, source_width);
+        assert_eq!(frame.width, LIVE_FRAME_MAX_WIDTH);
+        assert_eq!(frame.points_width, 1440.0);
     }
 
     #[test]
@@ -498,10 +620,7 @@ mod tests {
     #[test]
     fn frame_targets_label() {
         assert_eq!(FeedTarget::Display.label(), "the main display");
-        assert_eq!(
-            FeedTarget::Window { window_id: 7 }.label(),
-            "window 7"
-        );
+        assert_eq!(FeedTarget::Window { window_id: 7 }.label(), "window 7");
     }
 
     #[test]
