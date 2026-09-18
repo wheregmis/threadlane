@@ -1145,6 +1145,124 @@ pub fn comment_on_github_issue(
     )
 }
 
+/// Creates a GitHub issue, returning its number.
+pub fn create_github_issue(
+    work_dir: &Path,
+    title: &str,
+    body: &str,
+) -> Result<u64, GitError> {
+    let title = validated_text(title, "issue title").map_err(|message| GitError::new(work_dir, message))?;
+    invalidate_github_cache(work_dir);
+    let output = execute_gh(
+        work_dir,
+        &[
+            "issue".into(),
+            "create".into(),
+            "--title".into(),
+            title,
+            "--body".into(),
+            body.to_string(),
+            "--json".into(),
+            "number,url".into(),
+        ],
+    )?;
+    serde_json::from_str::<serde_json::Value>(&output)
+        .ok()
+        .and_then(|value| value["number"].as_u64())
+        .filter(|number| *number > 0)
+        .ok_or_else(|| GitError::new(work_dir, "could not parse created issue number"))
+}
+
+/// Closes (`close=true`) or reopens an issue.
+pub fn set_github_issue_state(
+    work_dir: &Path,
+    number: u64,
+    close: bool,
+) -> Result<(), GitError> {
+    validate_github_number(number, "issue").map_err(|message| GitError::new(work_dir, message))?;
+    invalidate_github_cache(work_dir);
+    execute_gh(
+        work_dir,
+        &[
+            "issue".into(),
+            (if close { "close" } else { "reopen" }).into(),
+            number.to_string(),
+        ],
+    )?;
+    Ok(())
+}
+
+/// Permanently deletes an issue. There is no undo; callers confirm first.
+pub fn delete_github_issue(work_dir: &Path, number: u64) -> Result<(), GitError> {
+    validate_github_number(number, "issue").map_err(|message| GitError::new(work_dir, message))?;
+    invalidate_github_cache(work_dir);
+    execute_gh(
+        work_dir,
+        &[
+            "issue".into(),
+            "delete".into(),
+            number.to_string(),
+            "--yes".into(),
+        ],
+    )?;
+    Ok(())
+}
+
+/// Repository labels available for issues.
+pub fn list_github_labels(work_dir: &Path) -> Result<Vec<GitHubLabel>, GitError> {
+    let output = execute_gh(
+        work_dir,
+        &[
+            "label".into(),
+            "list".into(),
+            "--json".into(),
+            "name,color,description".into(),
+        ],
+    )?;
+    serde_json::from_str::<Vec<serde_json::Value>>(&output)
+        .map(|values| {
+            values
+                .iter()
+                .map(|label| GitHubLabel {
+                    name: label["name"].as_str().unwrap_or("").to_owned(),
+                    color: label["color"].as_str().unwrap_or("").to_owned(),
+                    description: label["description"].as_str().map(str::to_owned),
+                })
+                .filter(|label| !label.name.is_empty())
+                .collect()
+        })
+        .map_err(|error| GitError::new(work_dir, format!("could not parse label list: {error}")))
+}
+
+/// Adds and/or removes issue labels.
+pub fn edit_github_issue_labels(
+    work_dir: &Path,
+    number: u64,
+    add: &[String],
+    remove: &[String],
+) -> Result<(), GitError> {
+    validate_github_number(number, "issue").map_err(|message| GitError::new(work_dir, message))?;
+    if add.is_empty() && remove.is_empty() {
+        return Ok(());
+    }
+    invalidate_github_cache(work_dir);
+    let mut args = vec![
+        "issue".into(),
+        "edit".into(),
+        number.to_string(),
+    ];
+    if !add.is_empty() {
+        args.push("--add-label".into());
+        args.push(add.join(","));
+    }
+    if !remove.is_empty() {
+        args.push("--remove-label".into());
+        args.push(remove.join(","));
+    }
+    execute_gh(work_dir, &args)?;
+    Ok(())
+}
+
 pub fn comment_on_pull_request(
     work_dir: &Path,
     number: u64,

@@ -783,6 +783,112 @@ impl ProviderClient {
             Ok(message)
         }
     }
+
+    /// Suggests repository labels for a GitHub issue, without a session.
+    ///
+    /// Session-less like commit-message generation: a single streamed turn
+    /// against the selected model. Returns the subset of `available` the
+    /// model picked (matched case-insensitively, in repository order).
+    pub async fn generate_issue_labels(
+        &self,
+        model: &str,
+        title: &str,
+        body: &str,
+        available: &[String],
+    ) -> Result<Vec<String>, String> {
+        if available.is_empty() {
+            return Err("This repository has no labels to choose from".to_owned());
+        }
+        let model = model.to_owned();
+        let listing = available.join(", ");
+        let issue = format!("Title: {}\n\nBody:\n{}", title.trim(), body.trim());
+        let issue = issue.chars().take(6_000).collect::<String>();
+        let instructions = format!(
+            "You triage GitHub issues. Reply with ONLY a comma-separated list of repository labels \
+             that apply to the issue below, choosing exclusively from this list:\n{listing}\n\n\
+             Rules:\n\
+             - Output only label names from the list, comma-separated, nothing else.\n\
+             - Pick the 1-3 most relevant labels; prefer type labels (bug, enhancement, documentation, question) plus area labels when evident.\n\
+             - When nothing clearly applies, reply with the single most generic label."
+        );
+        let prompt = Arc::new(issue);
+        let instructions_str = instructions.clone();
+        let model_for_payload = model.clone();
+        let payload = PayloadSource::lazy(model.clone(), move |format| {
+            let prompt = Arc::clone(&prompt);
+            let model = model_for_payload.clone();
+            let instructions_str = instructions_str.clone();
+            Box::pin(async move {
+                match format {
+                    PayloadFormat::Codex => serde_json::json!({
+                        "model": model,
+                        "instructions": instructions_str,
+                        "input": [{
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": prompt.as_str()}]
+                        }],
+                        "store": false,
+                        "stream": true
+                    }),
+                    PayloadFormat::ChatCompletions => serde_json::json!({
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": instructions_str},
+                            {"role": "user", "content": prompt.as_str()}
+                        ],
+                        "max_tokens": 256,
+                        "stream": true
+                    }),
+                }
+            })
+        });
+        let (event_tx, mut event_rx) = mpsc::channel(128);
+        let client = self.clone();
+        let stream_task = tokio::spawn(async move {
+            client.stream_chat_completion(payload, None, event_tx).await;
+        });
+
+        let mut text = String::new();
+        let mut error = None;
+        while let Some(event) = event_rx.recv().await {
+            match event {
+                StreamEvent::ContentToken(token) => text.push_str(&token),
+                StreamEvent::Error(message) => error = Some(message),
+                StreamEvent::Finished { .. }
+                | StreamEvent::ReasoningToken(_)
+                | StreamEvent::ToolCallStart { .. }
+                | StreamEvent::ToolCallArgsDelta { .. } => {}
+            }
+        }
+        if stream_task.await.is_err() && error.is_none() {
+            return Err("label suggestion stream terminated unexpectedly".to_owned());
+        }
+        if let Some(error) = error {
+            return Err(error);
+        }
+        let picked: Vec<String> = text
+            .split([',', '\n'])
+            .map(str::trim)
+            .filter(|pick| !pick.is_empty())
+            .filter_map(|pick| {
+                available
+                    .iter()
+                    .find(|label| label.eq_ignore_ascii_case(pick))
+                    .cloned()
+            })
+            .collect();
+        if picked.is_empty() {
+            return Err("The model suggested no usable labels".to_owned());
+        }
+        let mut ordered: Vec<String> = available
+            .iter()
+            .filter(|label| picked.iter().any(|pick| pick == *label))
+            .cloned()
+            .collect();
+        ordered.dedup();
+        Ok(ordered)
+    }
 }
 
 /// Formats and truncates a Conventional Commit message to at most `max_chars` Unicode characters,

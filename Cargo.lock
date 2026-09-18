@@ -8658,9 +8658,11 @@ dependencies = [
  "gpui-pre",
  "rfd",
  "serde_json",
+ "threadlane-coding-agent",
  "threadlane-git",
  "threadlane-ui-state",
  "threadlane-ui-theme",
+ "tokio",
 ]
 
 [[package]]

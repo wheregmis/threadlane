@@ -1253,3 +1253,14 @@ fn rate_limit_messages_are_detected() {
     let guidance = rate_limit_message("API rate limit exceeded for user ID 1.").unwrap();
     assert!(guidance.contains("Retry") || guidance.contains("retry") || guidance.contains("Wait"));
 }
+
+#[test]
+fn issue_mutations_validate_before_spawning_gh() {
+    let dir = tempdir().unwrap();
+    assert!(create_github_issue(dir.path(), "", "body").is_err());
+    assert!(create_github_issue(dir.path(), "   ", "body").is_err());
+    assert!(set_github_issue_state(dir.path(), 0, true).is_err());
+    assert!(delete_github_issue(dir.path(), 0).is_err());
+    // Empty label edits are no-ops without spawning gh.
+    assert!(edit_github_issue_labels(dir.path(), 1, &[], &[]).is_ok());
+}

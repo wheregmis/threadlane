@@ -34,6 +34,10 @@ pub struct AppState {
     pub is_generating: bool,
     composer_text: String,
     pub session_status: Option<String>,
+    /// Bumped whenever an out-of-band mutation (issue create/close, label
+    /// edit) changes GitHub list contents. The GitHub view observes this
+    /// and refetches; dialogs cannot reach the view entity directly.
+    pub github_list_revision: u64,
     pending_composer_messages: HashMap<String, PendingComposerMessage>,
     session_token_usage: HashMap<SessionProjectionKey, TokenUsage>,
     trajectory_by_session: HashMap<SessionProjectionKey, Vec<TrajectoryEntry>>,
@@ -271,6 +275,7 @@ impl AppState {
             is_generating: false,
             composer_text: String::new(),
             session_status,
+            github_list_revision: 0,
             pending_composer_messages: HashMap::new(),
             session_token_usage: HashMap::new(),
             trajectory_by_session: HashMap::new(),

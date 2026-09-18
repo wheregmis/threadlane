@@ -422,7 +422,20 @@ pub struct GitHubView {
     issue_comment_draft: String,
     pr_review_draft: String,
     linked_sessions_fingerprint: u64,
+    last_github_list_revision: u64,
+    /// Feedback line for issue mutations (create/close/labels) and their
+    /// in-flight state. Surfaced under the detail header buttons.
+    issue_action_status: Option<String>,
+    issue_action_pending: bool,
+    /// Model-side completions (label suggestions) arrive from Tokio workers
+    /// that cannot touch entities; the constructor pumps them into the view.
+    issue_action_tx: tokio::sync::mpsc::UnboundedSender<IssueActionEvent>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// Completion of a model-side issue action, pumped into the view.
+enum IssueActionEvent {
+    Finished(Result<String, String>),
 }
 
 impl GitHubView {
@@ -454,6 +467,7 @@ impl GitHubView {
         let model_subscription = cx.observe(&model, |this, model, cx| {
             let state = model.read(cx);
             let linked_sessions_fingerprint = github_link_fingerprint(state);
+            let github_list_revision = state.github_list_revision;
             let attached: Vec<PathBuf> =
                 state.projects.iter().map(|p| p.work_dir.clone()).collect();
             let scope_valid = match &this.scope {
@@ -491,6 +505,12 @@ impl GitHubView {
             if this.linked_sessions_fingerprint != linked_sessions_fingerprint {
                 this.linked_sessions_fingerprint = linked_sessions_fingerprint;
                 cx.notify();
+            }
+            // Out-of-band GitHub mutations (issue create dialog) bump the
+            // revision; refetch the list to show the new row.
+            if this.last_github_list_revision != github_list_revision {
+                this.last_github_list_revision = github_list_revision;
+                this.fetch_list(cx);
             }
         });
         let input_subscription = cx.subscribe_in(
@@ -590,6 +610,35 @@ impl GitHubView {
             issue_comment_draft: String::new(),
             pr_review_draft: String::new(),
             linked_sessions_fingerprint,
+            last_github_list_revision: 0,
+            issue_action_status: None,
+            issue_action_pending: false,
+            issue_action_tx: {
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+                // Model-side completions arrive from Tokio workers that
+                // cannot touch entities; pump them into the view here.
+                cx.spawn(async move |this, cx| {
+                    while let Some(event) = rx.recv().await {
+                        let IssueActionEvent::Finished(outcome) = event;
+                        let _ = this.update(cx, |this, cx| {
+                            this.issue_action_pending = false;
+                            match outcome {
+                                Ok(note) => {
+                                    this.issue_action_status = Some(note);
+                                    this.fetch_list(cx);
+                                    this.fetch_detail(cx);
+                                }
+                                Err(error) => {
+                                    this.issue_action_status = Some(error);
+                                }
+                            }
+                            cx.notify();
+                        });
+                    }
+                })
+                .detach();
+                tx
+            },
             _subscriptions: vec![
                 model_subscription,
                 input_subscription,
@@ -1540,8 +1589,155 @@ impl GitHubView {
         cx.notify();
     }
 
-    fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let len = match self.tab {
+    /// Runs an issue mutation on the background executor, then refreshes
+    /// the list and detail. `describe` names the action for status feedback.
+    fn run_issue_mutation(
+        &mut self,
+        _number: u64,
+        describe: String,
+        action: impl FnOnce(PathBuf) -> Result<String, threadlane_git::GitError> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project) = self
+            .selected_issue
+            .as_ref()
+            .map(|key| key.project.clone())
+            .or_else(|| self.project_work_dir.clone())
+        else {
+            self.issue_action_status = Some("Select an issue first.".into());
+            cx.notify();
+            return;
+        };
+        self.issue_action_pending = true;
+        self.issue_action_status = Some(format!("{describe}…"));
+        cx.notify();
+        let view = cx.entity().downgrade();
+        cx.spawn(async move |_this, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async move { action(project).map_err(|error| error.message) })
+                .await;
+            let _ = view.update(cx, |this, cx| {
+                this.issue_action_pending = false;
+                match outcome {
+                    Ok(note) => {
+                        this.issue_action_status = Some(note);
+                        this.fetch_list(cx);
+                        this.fetch_detail(cx);
+                    }
+                    Err(error) => {
+                        this.issue_action_status =
+                            Some(format!("{describe} failed: {error}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn close_or_reopen_selected_issue(&mut self, close: bool, cx: &mut Context<Self>) {
+        let Some(number) = self.selected_issue.as_ref().map(|key| key.number) else {
+            return;
+        };
+        let describe = if close { "Closing issue" } else { "Reopening issue" }.to_string();
+        let note = if close {
+            format!("Closed issue #{number}.")
+        } else {
+            format!("Reopened issue #{number}.")
+        };
+        self.run_issue_mutation(
+            number,
+            describe,
+            move |project| {
+                threadlane_git::set_github_issue_state(&project, number, close)?;
+                Ok(note)
+            },
+            cx,
+        );
+    }
+
+    fn delete_selected_issue(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(key) = self.selected_issue.clone() else {
+            return;
+        };
+        let number = key.number;
+        let view = cx.entity().downgrade();
+        cx.spawn(async move |_this, cx| {
+            let confirmed = rfd::AsyncMessageDialog::new()
+                .set_title("Delete issue?")
+                .set_description(format!(
+                    "Permanently delete issue #{number}? This cannot be undone."
+                ))
+                .set_buttons(rfd::MessageButtons::YesNo)
+                .show()
+                .await;
+            if !matches!(confirmed, rfd::MessageDialogResult::Yes) {
+                return;
+            }
+            let _ = view.update(cx, |this, cx| {
+                this.run_issue_mutation(
+                    number,
+                    "Deleting issue".to_string(),
+                    move |project| {
+                        threadlane_git::delete_github_issue(&project, number)?;
+                        Ok(format!("Deleted issue #{number}."))
+                    },
+                    cx,
+                );
+            });
+        })
+        .detach();
+    }
+
+    fn suggest_issue_labels(&mut self, cx: &mut Context<Self>) {
+        let (Some(key), Some(detail)) = (self.selected_issue.clone(), self.issue_detail.clone())
+        else {
+            return;
+        };
+        if detail.summary.issue.number != key.number {
+            return;
+        }
+        let number = key.number;
+        let title = detail.summary.title.clone();
+        let body = detail.body.clone();
+        let model = self.model.read(cx).selected_model.clone();
+        if model.is_empty() {
+            self.issue_action_status = Some("Select a model in chat before suggesting labels.".into());
+            cx.notify();
+            return;
+        }
+        let (api_key, account_id) =
+            threadlane_coding_agent::credentials::provider_credentials(&model);
+        let Ok(executor) = threadlane_ui_state::chat::executor() else {
+            self.issue_action_status = Some("Unable to start the model runtime.".into());
+            cx.notify();
+            return;
+        };
+        self.issue_action_pending = true;
+        self.issue_action_status = Some("Suggesting labels…".into());
+        cx.notify();
+        let tx = self.issue_action_tx.clone();
+        executor.spawn(async move {
+            let outcome = async {
+                let labels = threadlane_git::list_github_labels(&key.project)
+                    .map_err(|error| error.message)?;
+                let available: Vec<String> =
+                    labels.iter().map(|label| label.name.clone()).collect();
+                let picked =
+                    threadlane_coding_agent::credentials::provider_client_for(api_key, account_id)
+                        .generate_issue_labels(&model, &title, &body, &available)
+                        .await?;
+                threadlane_git::edit_github_issue_labels(&key.project, number, &picked, &[])
+                    .map_err(|error| error.message)?;
+                Ok(format!("Applied labels: {}.", picked.join(", ")))
+            }
+            .await;
+            let _ = tx.send(IssueActionEvent::Finished(outcome));
+        });
+    }
+
+    fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {        let len = match self.tab {
             GitHubTab::Issues => self.issues.len(),
             GitHubTab::PullRequests => self.pull_requests.len(),
         };
@@ -1846,6 +2042,34 @@ impl GitHubView {
                             .disabled(self.scope_targets(cx).is_empty() || self.list_loading)
                             .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
                     )
+                    .children((self.tab == GitHubTab::Issues).then(|| {
+                        // New issues target exactly one project: enable only
+                        // when the scope resolves to a single work dir.
+                        let targets = self.scope_targets(cx);
+                        let single = targets.len() == 1;
+                        let work_dir = targets.into_iter().next().map(|(_, dir)| dir);
+                        let create_model = self.model.clone();
+                        Button::new("github-new-issue")
+                            .label("New issue")
+                            .ghost()
+                            .small()
+                            .disabled(!single)
+                            .tooltip(if single {
+                                "Create an issue in this project"
+                            } else {
+                                "Scope to one project to create an issue"
+                            })
+                            .on_click(cx.listener(move |_, _, window, cx| {
+                                if let Some(work_dir) = work_dir.clone() {
+                                    open_issue_create_dialog(
+                                        create_model.clone(),
+                                        work_dir,
+                                        window,
+                                        cx,
+                                    );
+                                }
+                            }))
+                    }))
                     .children(self.list_loading.then(|| {
                         div()
                             .flex()
@@ -3588,6 +3812,69 @@ impl GitHubView {
                                     cx,
                                 );
                             })
+                    }))
+                    .children((self.tab == GitHubTab::Issues).then(|| {
+                        let is_closed = self
+                            .issue_detail
+                            .as_ref()
+                            .filter(|detail| {
+                                self.selected_issue.as_ref().is_some_and(|selected| {
+                                    selected.number == detail.summary.issue.number
+                                })
+                            })
+                            .is_some_and(|detail| {
+                                detail.summary.state.eq_ignore_ascii_case("closed")
+                            });
+                        let pending = self.issue_action_pending;
+                        div()
+                            .flex()
+                            .items_center()
+                            .flex_wrap()
+                            .gap_2()
+                            .child(
+                                Button::new("github-issue-close-reopen")
+                                    .label(if is_closed { "Reopen" } else { "Close" })
+                                    .ghost()
+                                    .small()
+                                    .disabled(pending)
+                                    .tooltip(if is_closed {
+                                        "Reopen this issue"
+                                    } else {
+                                        "Close this issue"
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.close_or_reopen_selected_issue(!is_closed, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("github-issue-suggest-labels")
+                                    .label("Suggest labels")
+                                    .ghost()
+                                    .small()
+                                    .disabled(pending)
+                                    .tooltip("Ask the model to pick repository labels (no session)")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.suggest_issue_labels(cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("github-issue-delete")
+                                    .label("Delete")
+                                    .ghost()
+                                    .small()
+                                    .disabled(pending)
+                                    .tooltip("Permanently delete this issue")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.delete_selected_issue(window, cx);
+                                    })),
+                            )
+                    }))
+                    .children(self.issue_action_status.as_ref().map(|status| {
+                        div()
+                            .mt_2()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(status.clone())
                     })),
             );
         div()
