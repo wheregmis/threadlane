@@ -54,7 +54,7 @@ impl CodingSessionHarness {
                     call_id: tool_call_id.into(),
                     name: tool_name.into(),
                     effective_args,
-                    result_entry_id: format!("v2-tool-result-{tool_call_id}"),
+                    result_entry_id: format!("v2-tool-result-{run_id}-{tool_call_id}"),
                     replay: match threadlane_runtime::classify_tool_replay_safety(tool_name) {
                         threadlane_runtime::ToolReplaySafety::Safe => HarnessToolReplaySafety::Safe,
                         threadlane_runtime::ToolReplaySafety::Never => {
@@ -315,8 +315,11 @@ impl CodingSessionHarness {
             return Err(format!("run {run_id} has an incomplete tool batch"));
         }
         for (index, call) in tool_calls.iter().enumerate() {
+            // Latest occurrence wins: a retried call id carries its newest
+            // output in the last entry, not the first.
             let (_, name, result_entry) = tool_entries
                 .iter()
+                .rev()
                 .find(|(id, _, _)| id == &call.id)
                 .expect("tool batch completeness was checked");
             let persisted_result = self

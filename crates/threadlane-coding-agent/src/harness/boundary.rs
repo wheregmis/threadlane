@@ -21,13 +21,26 @@ impl CodingSessionHarness {
     ) -> Result<(), String> {
         self.ensure_fresh()?;
         let trace = |value: String| TraceString::new(value);
+        // Recaptures (retry / model-switch) must not collide with the first
+        // snapshot: suffix the record id by per-run capture ordinal, or the
+        // second capture faults with DuplicateId and blocks the retry.
+        let capture = self
+            .store
+            .store()
+            .records()
+            .iter()
+            .filter(|record| {
+                matches!(record, HarnessRecord::RunContextCaptured { run_id: record_run, .. } if record_run == run_id)
+            })
+            .count()
+            + 1;
         let record = HarnessRecord::RunContextCaptured {
-            id: format!("run-context-{run_id}"),
+            id: format!("run-context-{run_id}-{capture}"),
             seq: harness_next_seq(self.store.store()),
             lane: lane.into(),
             timestamp: timestamp(),
             run_id: run_id.into(),
-            attempt: None,
+            attempt: Some(capture as u32),
             model: trace(model)?,
             provider: trace(provider)?,
             reasoning_effort,
