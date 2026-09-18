@@ -38,6 +38,10 @@ pub struct AppState {
     /// edit) changes GitHub list contents. The GitHub view observes this
     /// and refetches; dialogs cannot reach the view entity directly.
     pub github_list_revision: u64,
+    /// Composer inserts requested from other surfaces (browser annotations).
+    /// The chat view drains these into the composer input on its next model
+    /// observation, preserving whatever the user already typed.
+    pub requested_composer_inserts: Vec<RequestedComposerInsert>,
     pending_composer_messages: HashMap<String, PendingComposerMessage>,
     session_token_usage: HashMap<SessionProjectionKey, TokenUsage>,
     trajectory_by_session: HashMap<SessionProjectionKey, Vec<TrajectoryEntry>>,
@@ -276,6 +280,7 @@ impl AppState {
             composer_text: String::new(),
             session_status,
             github_list_revision: 0,
+            requested_composer_inserts: Vec::new(),
             pending_composer_messages: HashMap::new(),
             session_token_usage: HashMap::new(),
             trajectory_by_session: HashMap::new(),

@@ -309,6 +309,15 @@ pub enum RequestedEditorTarget {
     },
 }
 
+/// Text (and optional images) another surface asked to append to the
+/// composer, e.g. a browser annotation. Applied by the chat view without
+/// disturbing already-typed input.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequestedComposerInsert {
+    pub text: String,
+    pub images: Vec<threadlane_protocol::ImageAttachment>,
+}
+
 #[derive(Clone, Debug)]
 pub struct PendingComposerMessage {
     pub text: String,

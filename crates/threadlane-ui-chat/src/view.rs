@@ -305,6 +305,30 @@ impl ChatListView {
 
         let sub1 = cx.observe_in(&model, window, |this, model, window, cx| {
             this.sync_composer_draft(window, cx);
+            // Cross-surface composer inserts (browser annotations): append
+            // without disturbing already-typed input or staged attachments.
+            let inserts = model.update(cx, |state, _cx| {
+                std::mem::take(&mut state.requested_composer_inserts)
+            });
+            for insert in inserts {
+                if !insert.text.is_empty() {
+                    this.input_state.update(cx, |input, cx| {
+                        let existing = input.value().to_string();
+                        let separator =
+                            if existing.is_empty() || existing.ends_with('\n') {
+                                ""
+                            } else {
+                                "\n"
+                            };
+                        input.set_value(
+                            format!("{existing}{separator}{}", insert.text),
+                            window,
+                            cx,
+                        );
+                    });
+                }
+                this.pasted_images.extend(insert.images);
+            }
             if let Some(target) =
                 model.update(cx, |state, _cx| state.requested_editor_target.take())
             {
