@@ -1718,6 +1718,9 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         self.right_panel_visible = !self.right_panel_visible;
+        self.right_panel.update(cx, |panel, cx| {
+            panel.set_visible(self.right_panel_visible, cx);
+        });
         if !self.right_panel_visible {
             self.chat_list.update(cx, |chat, cx| chat.focus_composer(window, cx));
         }
@@ -1927,6 +1930,9 @@ impl Render for WorkspaceView {
         });
 
         let chat_page_content = {
+        self.right_panel.update(cx, |panel, cx| {
+            panel.set_visible(self.right_panel_visible, cx);
+        });
             let upper_content = if review_focus {
                 div().flex().flex_col().size_full()
                     .child(Button::new("review-back-to-chat").label("Back to conversation").ghost().small()

@@ -37,6 +37,7 @@ pub use super::types::{
 pub struct RightPanelView {
     model: Entity<AppState>,
     active_surface: Option<Surface>,
+    visible: bool,
     project: Option<PathBuf>,
     worktree_unavailable: bool,
     tree_state: Entity<TreeState>,
@@ -268,6 +269,7 @@ impl RightPanelView {
         let mut panel = Self {
             model,
             active_surface: None,
+            visible: false,
             project: None,
             worktree_unavailable: false,
             tree_state,
@@ -1136,11 +1138,17 @@ impl RightPanelView {
         browser
     }
 
+    /// Native browser views must be hidden explicitly when the panel leaves the layout.
+    pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        self.visible = visible;
+        self.sync_browser_visibility(cx);
+    }
+
     fn sync_browser_visibility(&mut self, cx: &mut Context<Self>) {
         let Some(browser) = self.browser.clone() else {
             return;
         };
-        let visible = self.active_surface == Some(Surface::Browser);
+        let visible = self.visible && self.active_surface == Some(Surface::Browser);
         browser.update(cx, |browser, cx| browser.set_visible(visible, cx));
     }
 
@@ -1237,7 +1245,7 @@ impl RightPanelView {
 
     fn render_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let browser = self.ensure_browser(window, cx);
-        browser.update(cx, |browser, cx| browser.set_visible(true, cx));
+        self.sync_browser_visibility(cx);
         div().flex_1().min_h_0().child(browser).into_any_element()
     }
 

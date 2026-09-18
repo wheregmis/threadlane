@@ -40,6 +40,7 @@ pub struct BrowserView {
     next_tab_id: usize,
     annotating: bool,
     annotate_task: Option<Task<()>>,
+    visible: bool,
 }
 
 impl BrowserView {
@@ -71,6 +72,7 @@ impl BrowserView {
             next_tab_id: 1,
             annotating: false,
             annotate_task: None,
+            visible: false,
         };
         this.open_tab(DEFAULT_URL, window, cx);
         this
@@ -198,7 +200,7 @@ impl BrowserView {
         for (index, tab) in self.tabs.iter().enumerate() {
             if let Some(webview) = tab.webview.clone() {
                 webview.update(cx, |view, _| {
-                    if index == self.active_tab {
+                    if self.visible && index == self.active_tab {
                         view.show();
                     } else {
                         view.hide();
@@ -378,11 +380,8 @@ impl BrowserView {
     }
 
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
-        if visible {
-            self.sync_active_visibility(cx);
-        } else if let Some(webview) = self.active_webview() {
-            webview.update(cx, |view, _| view.hide());
-        }
+        self.visible = visible;
+        self.sync_active_visibility(cx);
     }
 
     pub fn is_annotating(&self) -> bool {
