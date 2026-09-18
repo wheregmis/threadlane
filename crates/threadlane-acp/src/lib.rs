@@ -583,6 +583,11 @@ pub enum AcpToolCallStatus {
     InProgress,
     Completed,
     Failed,
+    /// Newer agents may report lifecycle states this client does not know
+    /// (e.g. `cancelled`). Decodes leniently so an unknown status never fails
+    /// the surrounding update; the bridge treats it as terminal.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -637,6 +642,10 @@ pub enum AcpPlanEntryPriority {
     High,
     Medium,
     Low,
+    /// Forward-compat: a newer agent's priority (e.g. `urgent`) degrades
+    /// rather than failing the whole plan.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -645,6 +654,10 @@ pub enum AcpPlanEntryStatus {
     Pending,
     InProgress,
     Completed,
+    /// Forward-compat: unknown lifecycle states (e.g. `cancelled`) degrade
+    /// rather than failing the whole plan.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -700,10 +713,20 @@ impl AcpSessionUpdate {
             "tool_call_update" => serde_json::from_value(value.clone())
                 .ok()
                 .map(Self::ToolCallUpdate),
-            "plan" => value
-                .get("entries")
-                .and_then(|entries| serde_json::from_value(entries.clone()).ok())
-                .map(Self::Plan),
+            "plan" => value.get("entries").and_then(|entries| {
+                // Per-entry leniency: one malformed entry (or a field shape
+                // from a newer agent) skips just that entry instead of
+                // dropping the whole plan.
+                entries
+                    .as_array()
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| serde_json::from_value(item.clone()).ok())
+                            .collect::<Vec<AcpPlanEntry>>()
+                    })
+                    .map(Self::Plan)
+            }),
             "available_commands_update" => value
                 .get("availableCommands")
                 .and_then(|commands| serde_json::from_value(commands.clone()).ok())
@@ -2303,6 +2326,22 @@ mod tests {
         };
         assert_eq!(entries.len(), 1);
 
+        // A newer agent's priority/status plus one malformed entry: the plan
+        // survives with per-entry degradation, not a whole-drop to Other.
+        let mixed = AcpSessionUpdate::from_value(json!({
+            "sessionUpdate": "plan",
+            "entries": [
+                { "content": "done", "priority": "high", "status": "completed" },
+                { "content": "new hotness", "priority": "urgent", "status": "cancelled" },
+                { "content": "broken", "status": "pending" },
+            ],
+        }));
+        let AcpSessionUpdate::Plan(entries) = mixed else {
+            panic!("expected a plan update, not Other");
+        };
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[1].status, AcpPlanEntryStatus::Unknown);
+
         let mode = AcpSessionUpdate::from_value(json!({
             "sessionUpdate": "current_mode_update",
             "currentModeId": "ask",
@@ -2436,7 +2475,14 @@ mod tests {
         .unwrap();
         assert_eq!(call.tool_call_id, "call_1");
         assert_eq!(call.kind, None);
-        assert_eq!(call.status, None);
+        // Unknown statuses decode as Unknown (not missing) so the bridge can
+        // still terminate the tool row instead of dangling it.
+        assert_eq!(call.status, Some(AcpToolCallStatus::Unknown));
+        let missing: AcpToolCall = serde_json::from_value(json!({
+            "toolCallId": "call_2",
+        }))
+        .unwrap();
+        assert_eq!(missing.status, None);
     }
 
     #[test]
