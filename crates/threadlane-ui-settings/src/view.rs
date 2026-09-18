@@ -1351,14 +1351,15 @@ impl SettingsView {
             (
                 "Global",
                 vec![
+                    ("⌘ K", "Open Command Palette"),
                     ("⌘ ,", "Open Settings"),
                     ("⌘ B", "Toggle Left Sidebar"),
                     ("⌘ R", "Toggle Right Panel"),
                     ("⌘ J", "Toggle Terminal Panel"),
-                    ("⌘ E", "Toggle Code/Diff Editor"),
                     ("⌘ N", "New task"),
-                    ("⌘ P", "Open Project File Finder"),
-                    ("⌘ ⇧ O", "Attach Local Project"),
+                    ("⌘ L", "Focus composer"),
+                    ("⌘ 1 / 2 / 3", "Chat / Trajectory / Editor tab"),
+                    ("Escape", "Cancel active agent turn"),
                 ],
             ),
             (
@@ -1366,7 +1367,6 @@ impl SettingsView {
                 vec![
                     ("Enter", "Submit prompt to agent"),
                     ("⇧ Enter", "Insert newline in composer"),
-                    ("Escape", "Cancel active agent turn"),
                     ("/ (in empty composer)", "Open Slash Commands palette"),
                     ("@ (in composer)", "Reference file or context in prompt"),
                 ],

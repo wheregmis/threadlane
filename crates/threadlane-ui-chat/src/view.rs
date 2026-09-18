@@ -3538,6 +3538,15 @@ impl ChatListView {
             answers,
             dismissed: false,
         };
+        // The Send button is disabled while empty, but never resolve a
+        // totally unanswered card through any other path either: an empty
+        // answer is indistinguishable from a real one downstream.
+        if answer.answers.iter().all(|item| {
+            item.selected.is_empty()
+                && item.custom_text.as_deref().is_none_or(|text| text.is_empty())
+        }) {
+            return;
+        }
         let request_id = request.id.clone();
         self.question_selections
             .retain(|key, _| !key.starts_with(&format!("{request_id}\0")));
@@ -4013,6 +4022,24 @@ impl ChatListView {
             })
             .collect::<Vec<_>>();
 
+        // Sending with zero selections and zero custom text resolves an
+        // empty answer (indistinguishable from a real one downstream), so
+        // the Send button stays disabled until something is answered.
+        // Toggling options calls cx.notify, and inputs notify on edit, so
+        // this recomputes as the user answers.
+        let has_answer = request.questions.iter().any(|item| {
+            let key = Self::question_selection_key(&request.id, &item.id);
+            let selected = self
+                .question_selections
+                .get(&key)
+                .is_some_and(|selected| !selected.is_empty());
+            let custom = self
+                .question_inputs
+                .get(&key)
+                .is_some_and(|input| !input.read(cx).value().trim().is_empty());
+            selected || custom
+        });
+
         Some(
             div()
                 .w_full()
@@ -4081,7 +4108,12 @@ impl ChatListView {
                                         .label("Send answers")
                                         .small()
                                         .primary()
-                                        .tooltip("Send the selected answers")
+                                        .disabled(!has_answer)
+                                        .tooltip(if has_answer {
+                                            "Send the selected answers"
+                                        } else {
+                                            "Select an option or type a custom answer first"
+                                        })
                                         .on_click(cx.listener(|this, _event, _window, cx| {
                                             this.submit_active_question(cx);
                                         })),
