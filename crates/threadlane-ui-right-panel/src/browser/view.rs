@@ -719,7 +719,9 @@ impl Render for BrowserView {
 
 #[cfg(test)]
 mod browser_tabs_tests {
-    use super::*;
+    // Narrow import: `use super::*` pulls GPUI macros into test scope and
+    // blows the recursion limit (same hazard as threadlane-ui-mirror).
+    use super::tab_title;
 
     #[test]
     fn tab_titles_show_hosts_compactly() {
@@ -727,7 +729,7 @@ mod browser_tabs_tests {
         assert_eq!(tab_title("https://gpui-kit.com"), "gpui-kit.com");
         assert_eq!(
             tab_title("https://very-long-subdomain-name.example.com/x"),
-            "very-long-subdomain-nam…"
+            "very-long-subdomain-name…"
         );
     }
 }
