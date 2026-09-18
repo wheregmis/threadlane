@@ -33,6 +33,8 @@ pub(crate) const ASK_QUESTION_TOOL_NAME: &str = "ask_question";
 const MAX_QUESTIONS: usize = 4;
 const MAX_OPTIONS: usize = 6;
 const MAX_TEXT_CHARS: usize = 500;
+const MAX_HEADER_CHARS: usize = 120;
+const MAX_OPTION_CHARS: usize = 200;
 
 /// Cloneable handle used to ask questions and resolve pending requests.
 #[derive(Clone)]
@@ -70,7 +72,17 @@ impl QuestionManager {
 
 impl QuestionHandle {
     pub fn set_interactive(&self, interactive: bool) {
-        self.inner.interactive.store(interactive, Ordering::SeqCst);
+        self.inner
+            .interactive
+            .store(interactive, Ordering::SeqCst);
+        if !interactive {
+            // Going headless mid-flight must not strand turns on questions
+            // nobody will ever answer: drop the senders so every waiter
+            // resolves with the dismissed path instead of hanging.
+            if let Ok(mut pending) = self.inner.pending.lock() {
+                pending.clear();
+            }
+        }
     }
 
     /// Resolves a pending question request. Returns false when no request
@@ -89,6 +101,11 @@ impl QuestionHandle {
     }
 
     /// Publishes a [`QuestionRequest`] and waits for the user's answer.
+    ///
+    /// A drop guard removes the pending entry when the wait is abandoned
+    /// (turn abort), so aborted asks never leak `q_*` entries. No wall-clock
+    /// timeout: a slow user deliberating is legitimate, and cancellation
+    /// travels through turn abort / `set_interactive(false)`.
     pub(crate) async fn ask(
         &self,
         event_tx: &broadcast::Sender<AgentEvent>,
@@ -104,7 +121,10 @@ impl QuestionHandle {
             .lock()
             .map(|mut pending| pending.insert(request_id.clone(), sender))
             .map_err(|_| "Question state is unavailable".to_string())?;
-        let request = QuestionRequest {
+        let guard = PendingAskGuard {
+            handle: self.clone(),
+            request_id: request_id.clone(),
+        };        let request = QuestionRequest {
             id: request_id.clone(),
             questions,
         };
@@ -112,11 +132,6 @@ impl QuestionHandle {
             .send(AgentEvent::QuestionRequested { request })
             .is_err()
         {
-            self.inner
-                .pending
-                .lock()
-                .map(|mut pending| pending.remove(&request_id))
-                .ok();
             return Err(
                 "ask_question is unavailable: no event listener is attached. Ask the question in plain text instead.".into(),
             );
@@ -124,12 +139,38 @@ impl QuestionHandle {
         let answer = receiver.await.map_err(|_| {
             "The question was dismissed before an answer arrived. Continue with your best judgment or ask again in plain text.".to_string()
         });
+        // Disarm the guard before explicit removal: completion owns the
+        // entry now, and only abandoned waits should clean up.
+        guard.disarm();
         self.inner
             .pending
             .lock()
             .map(|mut pending| pending.remove(&request_id))
             .ok();
         answer
+    }
+}
+
+/// Removes a pending ask when its wait future is dropped before completion
+/// (turn abort). Prevents abandoned `q_*` entries from accumulating.
+struct PendingAskGuard {
+    handle: QuestionHandle,
+    request_id: String,
+}
+
+impl PendingAskGuard {
+    fn disarm(self) {
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for PendingAskGuard {
+    fn drop(&mut self) {
+        // Only abandoned waits reach here (completion disarms via forget):
+        // remove the orphaned entry so aborted asks never leak `q_*` keys.
+        if let Ok(mut pending) = self.handle.inner.pending.lock() {
+            pending.remove(&self.request_id);
+        }
     }
 }
 
@@ -165,6 +206,7 @@ fn parse_ask_question(args: &str) -> Result<Vec<QuestionItem>, String> {
         ));
     }
     let mut questions = Vec::with_capacity(parsed.questions.len());
+    let mut seen_ids = std::collections::HashSet::new();
     for (index, item) in parsed.questions.into_iter().enumerate() {
         let question = item.question.unwrap_or_default().trim().to_string();
         if question.is_empty() {
@@ -185,9 +227,33 @@ fn parse_ask_question(args: &str) -> Result<Vec<QuestionItem>, String> {
                 index + 1
             ));
         }
+        for option in &item.options {
+            if option.chars().count() > MAX_OPTION_CHARS {
+                return Err(format!(
+                    "Question {} options may contain at most {MAX_OPTION_CHARS} characters each",
+                    index + 1
+                ));
+            }
+        }
+        if item.options.is_empty() && !item.allow_custom {
+            return Err(format!(
+                "Question {} offers no options and disallows custom text, so it cannot be answered",
+                index + 1
+            ));
+        }
+        let id = item.id.unwrap_or_else(|| format!("q{}", index + 1));
+        if !seen_ids.insert(id.clone()) {
+            return Err(format!("Question {} reuses id `{id}`", index + 1));
+        }
         let header = item.header.unwrap_or_default().trim().to_string();
+        if header.chars().count() > MAX_HEADER_CHARS {
+            return Err(format!(
+                "Question {} headers may contain at most {MAX_HEADER_CHARS} characters",
+                index + 1
+            ));
+        }
         questions.push(QuestionItem {
-            id: item.id.unwrap_or_else(|| format!("q{}", index + 1)),
+            id,
             header: if header.is_empty() {
                 format!("Question {}", index + 1)
             } else {
@@ -313,7 +379,10 @@ mod tests {
 
     #[test]
     fn parse_fills_ids_and_headers() {
-        let items = parse_ask_question(r#"{"questions": [{"question": "Which scope?"}]}"#).unwrap();
+        let items = parse_ask_question(
+            r#"{"questions": [{"question": "Which scope?", "options": ["all"]}]}"#,
+        )
+        .unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].id, "q1");
         assert_eq!(items[0].header, "Question 1");
@@ -411,5 +480,96 @@ mod tests {
     fn dismissed_answer_formats_as_guidance() {
         let text = format_answer(&QuestionAnswer::dismissed("q_9"));
         assert!(text.contains("dismissed"), "{text}");
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    #[test]
+    fn parse_rejects_unanswerable_duplicate_and_oversized_fields() {
+        // No options and no custom text: unanswerable.
+        assert!(parse_ask_question(
+            r#"{"questions": [{"question": "pick?", "options": [], "allow_custom": false}]}"#
+        )
+        .is_err());
+        // Duplicate ids.
+        assert!(parse_ask_question(
+            r#"{"questions": [{"question": "a", "id": "x"}, {"question": "b", "id": "x"}]}"#
+        )
+        .is_err());
+        // Oversized header / option.
+        let long_header = "h".repeat(MAX_HEADER_CHARS + 1);
+        assert!(parse_ask_question(
+            &serde_json::json!({"questions": [{"question": "a", "header": long_header}]}).to_string()
+        )
+        .is_err());
+        let long_option = "o".repeat(MAX_OPTION_CHARS + 1);
+        assert!(parse_ask_question(
+            &serde_json::json!({"questions": [{"question": "a", "options": [long_option]}]})
+                .to_string()
+        )
+        .is_err());
+        // Sane inputs still pass.
+        assert!(parse_ask_question(
+            r#"{"questions": [{"question": "a", "options": ["x"], "allow_custom": false}]}"#
+        )
+        .is_ok());
+    }
+
+    #[tokio::test]
+    async fn going_headless_mid_flight_releases_waiters() {
+        let manager = QuestionManager::new();
+        let handle = manager.handle();
+        handle.set_interactive(true);
+        let event_tx = broadcast::channel(16).0;
+        let waiter = tokio::spawn({
+            let handle = handle.clone();
+            async move {
+                handle
+                    .ask(
+                        &event_tx,
+                        vec![QuestionItem {
+                            id: "q1".into(),
+                            header: "Scope".into(),
+                            question: "Which scope?".into(),
+                            options: vec!["a".into()],
+                            allow_custom: false,
+                        }],
+                    )
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        handle.set_interactive(false);
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+            .await
+            .expect("waiter must resolve, not hang")
+            .unwrap();
+        assert!(outcome.is_err(), "released wait resolves dismissed");
+    }
+
+    #[tokio::test]
+    async fn abandoned_ask_leaves_no_pending_entry() {
+        let manager = QuestionManager::new();
+        let handle = manager.handle();
+        handle.set_interactive(true);
+        // No subscribers: broadcast::Sender with no receivers errors on send,
+        // so ask() fails after inserting pending — the guard must clean up.
+        let (event_tx, _) = broadcast::channel::<AgentEvent>(16);
+        let _ = handle
+            .ask(
+                &event_tx,
+                vec![QuestionItem {
+                    id: "q1".into(),
+                    header: "Scope".into(),
+                    question: "Which scope?".into(),
+                    options: vec!["a".into()],
+                    allow_custom: false,
+                }],
+            )
+            .await;
+        assert!(handle.inner.pending.lock().unwrap().is_empty());
     }
 }

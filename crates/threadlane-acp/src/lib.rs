@@ -1820,9 +1820,13 @@ impl AcpManager {
 
     /// Probes every enabled agent by completing an ACP handshake and then
     /// terminating the process. Disabled agents are reported without spawning.
+    ///
+    /// Probes run concurrently: sequential handshakes stall N agents x 10s
+    /// timeout each. Output order still follows configuration order.
     pub async fn discover_and_connect(&self) -> Vec<AcpAgentRecord> {
         let global_dir = self.global_dir.clone();
         let project_root = self.project_root.clone();
+        let probe_cwd = project_root.clone();
         let configs = tokio::task::spawn_blocking(move || {
             Self::merge_configs(
                 AcpSettings::load_global(global_dir.as_deref()),
@@ -1831,15 +1835,27 @@ impl AcpManager {
         })
         .await
         .unwrap_or_default();
-        let mut records = Vec::new();
-        for config in configs {
-            let status = if config.enabled {
-                Self::probe(&config, self.project_root.as_deref()).await
-            } else {
-                AcpAgentStatus::Disconnected
-            };
-            records.push(AcpAgentRecord { config, status });
+        let mut joining = tokio::task::JoinSet::new();
+        for (index, config) in configs.into_iter().enumerate() {
+            let cwd = probe_cwd.clone();
+            joining.spawn(async move {
+                let status = if config.enabled {
+                    Self::probe(&config, cwd.as_deref()).await
+                } else {
+                    AcpAgentStatus::Disconnected
+                };
+                (index, AcpAgentRecord { config, status })
+            });
         }
+        let mut ordered: Vec<(usize, AcpAgentRecord)> = Vec::new();
+        while let Some(outcome) = joining.join_next().await {
+            if let Ok(entry) = outcome {
+                ordered.push(entry);
+            }
+        }
+        ordered.sort_by_key(|(index, _)| *index);
+        let records: Vec<AcpAgentRecord> =
+            ordered.into_iter().map(|(_, record)| record).collect();
 
         *self.agents.lock().await = records.clone();
         records
@@ -1860,37 +1876,59 @@ impl AcpManager {
     /// and each session's `AcpEngine` still opens its own conversation when
     /// the user picks the agent or sends the first turn.
     pub async fn preload_models(&self) -> Vec<AcpPreloadedModels> {
-        let mut preloaded = Vec::new();
-        for config in self.configs().into_iter().filter(|config| config.enabled) {
-            let handler: Arc<dyn AcpClientHandler> = Arc::new(AcpProbeClient);
-            // The session is discarded after the snapshot; root it at the
-            // project when there is one so project-scoped agents resolve the
-            // same working directory a real turn would use.
-            let cwd = self
-                .project_root
-                .clone()
-                .or_else(|| self.global_dir.clone())
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-            match AcpSession::start(&config, &cwd, handler).await {
-                Ok(session) => {
-                    let entry = AcpPreloadedModels {
+        // The session is discarded after the snapshot; root it at the
+        // project when there is one so project-scoped agents resolve the
+        // same working directory a real turn would use. Without a project,
+        // use the system temp dir rather than the global config dir, so a
+        // probe never snapshots indexes against `~/.threadlane`.
+        let cwd = self
+            .project_root
+            .clone()
+            .unwrap_or_else(|| std::env::temp_dir());
+        let cwd = if cwd.is_dir() {
+            cwd
+        } else {
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        };
+        let mut joining = tokio::task::JoinSet::new();
+        for (index, config) in self
+            .configs()
+            .into_iter()
+            .enumerate()
+            .filter(|(_, config)| config.enabled)
+        {
+            let cwd = cwd.clone();
+            joining.spawn(async move {
+                let handler: Arc<dyn AcpClientHandler> = Arc::new(AcpProbeClient);
+                let entry = match AcpSession::start(&config, &cwd, handler).await {
+                    Ok(session) => {
+                        let entry = AcpPreloadedModels {
+                            agent_id: config.id.clone(),
+                            agent_name: session.agent().agent_display_name(),
+                            options: session.config_options(),
+                            error: None,
+                        };
+                        session.shutdown().await;
+                        entry
+                    }
+                    Err(error) => AcpPreloadedModels {
                         agent_id: config.id.clone(),
-                        agent_name: session.agent().agent_display_name(),
-                        options: session.config_options(),
-                        error: None,
-                    };
-                    session.shutdown().await;
-                    preloaded.push(entry);
-                }
-                Err(error) => preloaded.push(AcpPreloadedModels {
-                    agent_id: config.id.clone(),
-                    agent_name: config.name.clone(),
-                    options: Vec::new(),
-                    error: Some(error),
-                }),
+                        agent_name: config.name.clone(),
+                        options: Vec::new(),
+                        error: Some(error),
+                    },
+                };
+                (index, entry)
+            });
+        }
+        let mut ordered = Vec::new();
+        while let Some(outcome) = joining.join_next().await {
+            if let Ok(entry) = outcome {
+                ordered.push(entry);
             }
         }
-        preloaded
+        ordered.sort_by_key(|(index, _)| *index);
+        ordered.into_iter().map(|(_, entry)| entry).collect()
     }
 
     /// Completes a handshake and terminates the process.

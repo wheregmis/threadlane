@@ -144,6 +144,9 @@ impl Drop for CancelOnDrop {
             .send_modify(|turn| turn.cancelled = true);
         let session = self.session.clone();
         // Drop is synchronous, so the notification has to outlive this frame.
+        // Prefer the ambient reactor; without one (e.g. a GPUI background
+        // thread) fall back to a short-lived thread with its own runtime so
+        // the cancel is still delivered instead of silently dropped.
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
                 handle.spawn(async move {
@@ -152,7 +155,27 @@ impl Drop for CancelOnDrop {
                     }
                 });
             }
-            Err(_) => warn!("Cancelled an ACP turn with no runtime to send session/cancel on"),
+            Err(_) => {
+                std::thread::spawn(move || {
+                    match tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    {
+                        Ok(runtime) => {
+                            runtime.block_on(async {
+                                let _ = tokio::time::timeout(
+                                    Duration::from_secs(10),
+                                    session.cancel(),
+                                )
+                                .await;
+                            });
+                        }
+                        Err(error) => {
+                            warn!("Cancelled an ACP turn with no runtime to send session/cancel on: {error}")
+                        }
+                    }
+                });
+            }
         }
     }
 }
@@ -239,13 +262,27 @@ impl AcpEngine {
 
         // Applied per turn rather than at session start: the picker can change
         // between turns, and the agent keeps the setting on its own session.
-        if let Some(value) = acp_effort_value(effort) {
-            if let Err(error) = session
-                .set_config_option(ACP_CONFIG_CATEGORY_EFFORT, value)
-                .await
-            {
-                // An agent that does not expose effort is not a broken turn.
-                warn!("Could not set ACP reasoning effort to '{value}': {error}");
+        // Resolved against the advertised choices (not a hardcoded
+        // low/medium/high vocabulary): agents offer minimal/none, 1-5, or
+        // mixed-case labels, and sending an unoffered value warns every turn
+        // while changing nothing.
+        {
+            let options = session.config_options();
+            if let Some(option) = config_option_for(&options, ACP_CONFIG_CATEGORY_EFFORT) {
+                match resolve_acp_effort_value(option, effort) {
+                    Some(value) => {
+                        if let Err(error) =
+                            session.set_config_option_by_id(&option.id, &value).await
+                        {
+                            // An agent that refuses effort is not a broken turn.
+                            warn!("Could not set ACP reasoning effort to '{value}': {error}");
+                        }
+                    }
+                    None => warn!(
+                        "ACP agent offers no effort choice matching '{}'; leaving its effort untouched",
+                        effort.label()
+                    ),
+                }
             }
         }
 
@@ -339,16 +376,42 @@ impl AcpEngine {
 
     /// Finish cancellation before opening another operation, so late
     /// permission observations retain their originating run and recorder.
+    ///
+    /// Bounded: an agent that ignores `session/cancel` must not brick the
+    /// session forever. On timeout the session is shut down (subprocess
+    /// killed) so the next turn starts fresh instead of blocking forever.
     pub async fn finish_pending_turn(&mut self, agent_id: &str) {
-        let Some(active) = self
+        let timed_out = match self
             .active
             .as_mut()
             .filter(|active| active.agent_id == agent_id)
-        else {
-            return;
+            .and_then(|active| active.pending_prompt.as_mut())
+        {
+            None => return,
+            // `pending` is a JoinHandle: aborting is prompt, so 15s is ample
+            // for a cooperative agent and a firm ceiling for a stuck one.
+            Some(pending) => tokio::time::timeout(Duration::from_secs(15), pending)
+                .await
+                .is_err(),
         };
-        if let Some(pending) = active.pending_prompt.as_mut() {
-            let _ = pending.await;
+        if timed_out {
+            warn!("ACP turn for '{agent_id}' ignored session/cancel; shutting down the session");
+            if let Some(active) = self
+                .active
+                .as_mut()
+                .filter(|active| active.agent_id == agent_id)
+            {
+                active.pending_prompt = None;
+                while active.updates.try_recv().is_ok() {}
+            }
+            self.shutdown().await;
+            return;
+        }
+        if let Some(active) = self
+            .active
+            .as_mut()
+            .filter(|active| active.agent_id == agent_id)
+        {
             active.pending_prompt = None;
             while active.updates.try_recv().is_ok() {}
         }
@@ -613,22 +676,55 @@ impl AcpClientHandler for AcpTitleClient {
 /// the agent offers rather than being silently ignored; an agent that exposes
 /// no effort setting at all rejects the change, which the caller treats as
 /// informational.
-fn acp_effort_value(effort: ReasoningEffort) -> Option<&'static str> {
-    match effort {
-        ReasoningEffort::Off | ReasoningEffort::Minimal | ReasoningEffort::Low => Some("low"),
-        ReasoningEffort::Medium => Some("medium"),
-        ReasoningEffort::High => Some("high"),
-        ReasoningEffort::XHigh => Some("xhigh"),
-        ReasoningEffort::Max => Some("max"),
-        ReasoningEffort::Other(value) => {
-            let normalized = value.trim().to_ascii_lowercase();
-            if normalized.is_empty() || normalized == "off" || normalized == "none" {
-                Some("low")
-            } else {
-                Some(value)
-            }
-        }
+/// Maps a picker effort onto the agent's advertised effort choices.
+///
+/// Candidates are matched case-insensitively against choice values and names,
+/// so `Low`, `minimal`, `none`, and numeric `1`-`5` vocabularies resolve
+/// without warnings. Returns the advertised value to send, or `None` when the
+/// agent's vocabulary covers nothing near the requested effort.
+fn resolve_acp_effort_value(
+    option: &AcpConfigOption,
+    effort: ReasoningEffort,
+) -> Option<String> {
+    if option.options.is_empty() {
+        return None;
     }
+    // Ordered preference per level: exact advertised spellings first, then
+    // the numeric slot for 1-5 vocabularies, then the nearest lower level so
+    // an agent with a narrow vocabulary still gets a valid setting.
+    let candidates: &[&str] = match effort {
+        ReasoningEffort::Off => &["off", "none", "disabled", "0", "minimal", "low", "1"],
+        ReasoningEffort::Minimal => &["minimal", "low", "1", "off", "none"],
+        ReasoningEffort::Low => &["low", "2", "minimal", "1", "medium", "3"],
+        ReasoningEffort::Medium => &["medium", "3", "low", "2", "high", "4"],
+        ReasoningEffort::High => &["high", "4", "medium", "3", "xhigh", "5"],
+        ReasoningEffort::XHigh => &["xhigh", "x-high", "5", "high", "4", "max"],
+        ReasoningEffort::Max => &["max", "5", "xhigh", "x-high", "high", "4"],
+        ReasoningEffort::Other(value) => {
+            let normalized = value.trim();
+            if normalized.is_empty() {
+                return None;
+            }
+            if let Some(choice) = option.options.iter().find(|choice| {
+                choice.value.eq_ignore_ascii_case(normalized)
+                    || choice.name.eq_ignore_ascii_case(normalized)
+            }) {
+                return Some(choice.value.clone());
+            }
+            // Custom effort levels are provider-defined; pass through only
+            // when advertised (matched above). Anything else would warn.
+            return None;
+        }
+    };
+    candidates
+        .iter()
+        .find_map(|candidate| {
+            option.options.iter().find(|choice| {
+                choice.value.eq_ignore_ascii_case(candidate)
+                    || choice.name.eq_ignore_ascii_case(candidate)
+            })
+        })
+        .map(|choice| choice.value.clone())
 }
 
 /// Builds the prompt, attaching images only when the agent takes them.
@@ -723,8 +819,8 @@ fn forward_update(
             }),
             AgentEvent::ToolExecutionEnd {
                 tool_call_id,
+                name,
                 result,
-                ..
             } => {
                 if let Some(tool) = tools
                     .iter_mut()
@@ -732,6 +828,17 @@ fn forward_update(
                     .find(|tool| tool.tool_call_id == *tool_call_id)
                 {
                     tool.result = Some(result.clone());
+                } else {
+                    // End without a Start (reordered updates, crash after
+                    // partials): retain a synthetic activity so the durable
+                    // journal keeps the result instead of dropping it.
+                    tools.push(AcpTurnToolActivity {
+                        preamble: std::mem::take(reply),
+                        tool_call_id: tool_call_id.clone(),
+                        name: name.clone(),
+                        arguments: String::new(),
+                        result: Some(result.clone()),
+                    });
                 }
             }
             _ => {}
@@ -1129,5 +1236,114 @@ mod tests {
         // An unrelated failure must not get the PATH advice bolted onto it.
         let other = start_failure_message("claude_code", Path::new("/work"), "handshake timed out");
         assert!(!other.contains("absolute path"));
+    }
+}
+
+#[cfg(test)]
+mod forward_update_tests {
+    use super::*;
+    use threadlane_acp::AcpToolCallStatus;
+
+    #[test]
+    fn orphan_tool_end_is_retained_for_the_journal() {
+        let (event_tx, _) = broadcast::channel(16);
+        let mut reply = String::from("thinking aloud");
+        let mut tools = Vec::new();
+        let mut plan = None;
+        // Completed update with no preceding Start (reordered delivery).
+        let call: AcpToolCall = serde_json::from_value(serde_json::json!({
+            "toolCallId": "t-1",
+            "title": "Read",
+            "status": "completed",
+            "content": [{"type": "text", "text": "file bytes"}],
+        }))
+        .unwrap();
+        forward_update(
+            AcpSessionNotification {
+                session_id: "s".into(),
+                update: AcpSessionUpdate::ToolCallUpdate(call),
+            },
+            "s",
+            &event_tx,
+            &mut reply,
+            &mut tools,
+            &mut plan,
+        );
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].tool_call_id, "t-1");
+        assert!(tools[0].result.is_some());
+        // The stranded preamble is preserved on the synthetic activity.
+        assert_eq!(tools[0].preamble, "thinking aloud");
+    }
+}
+
+#[cfg(test)]
+mod effort_tests {
+    use super::*;
+
+    fn effort_option() -> AcpConfigOption {
+        serde_json::from_value(serde_json::json!({
+            "id": "effort",
+            "name": "Thinking",
+            "category": "thought_level",
+            "currentValue": "medium",
+            "options": [
+                {"value": "minimal", "name": "Minimal"},
+                {"value": "low", "name": "Low"},
+                {"value": "medium", "name": "Medium"},
+                {"value": "high", "name": "High"},
+            ],
+        }))
+        .unwrap()
+    }
+
+    fn numeric_option() -> AcpConfigOption {
+        serde_json::from_value(serde_json::json!({
+            "id": "effort",
+            "name": "Thinking",
+            "category": "thought_level",
+            "currentValue": "3",
+            "options": [
+                {"value": "1", "name": "1"},
+                {"value": "2", "name": "2"},
+                {"value": "3", "name": "3"},
+                {"value": "4", "name": "4"},
+                {"value": "5", "name": "5"},
+            ],
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn effort_resolves_against_advertised_choices() {
+        let option = effort_option();
+        assert_eq!(
+            resolve_acp_effort_value(&option, ReasoningEffort::Low).as_deref(),
+            Some("low")
+        );
+        assert_eq!(
+            resolve_acp_effort_value(&option, ReasoningEffort::Max).as_deref(),
+            Some("high")
+        );
+        assert_eq!(
+            resolve_acp_effort_value(&option, ReasoningEffort::Off).as_deref(),
+            Some("minimal")
+        );
+        // Numeric vocabularies map by slot.
+        let numeric = numeric_option();
+        assert_eq!(
+            resolve_acp_effort_value(&numeric, ReasoningEffort::Medium).as_deref(),
+            Some("3")
+        );
+        assert_eq!(
+            resolve_acp_effort_value(&numeric, ReasoningEffort::Max).as_deref(),
+            Some("5")
+        );
+        // Empty vocabulary: nothing to send.
+        let empty: AcpConfigOption = serde_json::from_value(serde_json::json!({
+            "id": "effort", "name": "Thinking", "currentValue": "x", "options": [],
+        }))
+        .unwrap();
+        assert_eq!(resolve_acp_effort_value(&empty, ReasoningEffort::Low), None);
     }
 }
