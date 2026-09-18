@@ -3764,3 +3764,85 @@ async fn one_time_permission_rejects_stale_and_persistent_decisions() {
     assert_eq!(pending.await.unwrap(), Some(PermissionDecision::AllowOnce));
     assert!(!state.pending_permissions.contains_key(session_id));
 }
+
+fn worktree_session_state(work_dir: &Path, session_id: &str, worktree_dir: &Path) -> AppState {
+    let mut state = issue_work_state(work_dir);
+    state.projects[0].sessions.push(SessionInfo {
+        id: session_id.into(),
+        title: "Session".into(),
+        work_dir: work_dir.to_path_buf(),
+        runtime_work_dir: worktree_dir.to_path_buf(),
+        session_file: work_dir.join(format!(".threadlane/sessions/{session_id}.jsonl")),
+        updated_at: 0,
+        health: SessionHealth::Healthy,
+        git_branch: None,
+        github_issue: None,
+        is_worktree: true,
+        worktree_available: true,
+    });
+    state
+}
+
+#[test]
+fn remove_session_archives_transcript_before_delete() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(project.join(".threadlane/sessions")).unwrap();
+    let project = project.canonicalize().unwrap();
+    let mut state = issue_work_state(&project);
+    let session_id = "session_gone";
+    let session_file = project.join(format!(".threadlane/sessions/{session_id}.jsonl"));
+    std::fs::write(&session_file, "{\"id\":\"x\"}\n").unwrap();
+
+    state
+        .remove_session(project.clone(), session_id.into(), false)
+        .unwrap();
+    assert!(!session_file.exists());
+    let archived = project.join(format!(".threadlane/sessions/archive/{session_id}.jsonl"));
+    assert_eq!(std::fs::read_to_string(&archived).unwrap(), "{\"id\":\"x\"}\n");
+}
+
+#[test]
+fn remove_session_refuses_dirty_worktree_but_allows_clean() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = init_test_repo(&dir);
+    std::fs::write(project.join("base.txt"), "base\n").unwrap();
+    run_git(&project, &["add", "."]);
+    run_git(&project, &["commit", "-m", "initial"]);
+
+    let session_id = "session_wt";
+    let worktree_dir = project.join(format!(".threadlane/worktrees/{session_id}"));
+    run_git(
+        &project,
+        &[
+            "worktree",
+            "add",
+            worktree_dir.to_str().unwrap(),
+            "-b",
+            "worktree/session_wt",
+        ],
+    );
+    let session_file = project.join(format!(".threadlane/sessions/{session_id}.jsonl"));
+    std::fs::create_dir_all(session_file.parent().unwrap()).unwrap();
+    std::fs::write(&session_file, "{\"id\":\"y\"}\n").unwrap();
+    let mut state = worktree_session_state(&project, session_id, &worktree_dir);
+
+    // Dirty tracked file: refuse, keep everything.
+    std::fs::write(worktree_dir.join("base.txt"), "dirty\n").unwrap();
+    let error = state
+        .remove_session(project.clone(), session_id.into(), true)
+        .unwrap_err();
+    assert!(error.contains("Commit or discard"), "{error}");
+    assert!(worktree_dir.exists());
+    assert!(session_file.exists());
+
+    // Clean again: delete proceeds, transcript archived.
+    run_git(&worktree_dir, &["checkout", "--", "."]);
+    state
+        .remove_session(project.clone(), session_id.into(), true)
+        .unwrap();
+    assert!(!worktree_dir.exists());
+    assert!(!session_file.exists());
+    let archived = project.join(format!(".threadlane/sessions/archive/{session_id}.jsonl"));
+    assert_eq!(std::fs::read_to_string(&archived).unwrap(), "{\"id\":\"y\"}\n");
+}

@@ -114,10 +114,44 @@ fn current_app_bundle() -> Result<PathBuf, String> {
     let executable = std::env::current_exe()
         .map_err(|error| format!("Failed to locate the current executable: {error}"))?;
 
-    app_bundle_for_executable(&executable).ok_or_else(|| {
+    let bundle = app_bundle_for_executable(&executable).ok_or_else(|| {
         "Installing updates is only available from a packaged Threadlane.app. cargo run can check and download updates, but cannot replace target/debug."
             .to_string()
-    })
+    })?;
+    // Any `*.app` ancestor resolves above — including a hostile bundle or a
+    // throwaway profiling build. Verify the bundle identity before letting
+    // an update overwrite it.
+    match bundle_identifier(&bundle) {
+        Some(id) if is_allowed_bundle_id(&id) => Ok(bundle),
+        Some(id) => Err(format!(
+            "Refusing to install an update into {bundle} (bundle id '{id}'): updates only install into dev.threadlane.app bundles.",
+            bundle = bundle.display()
+        )),
+        None => Err(format!(
+            "Refusing to install an update into {bundle}: no readable bundle identifier (Contents/Info.plist).",
+            bundle = bundle.display()
+        )),
+    }
+}
+
+/// Production (`dev.threadlane.app`) plus dotted dev variants such as the
+/// `dev.threadlane.sourceprofile` profiling builds. Anything else —
+/// `/tmp/Evil.app`, unrelated apps — is refused.
+fn is_allowed_bundle_id(id: &str) -> bool {
+    id == "dev.threadlane.app" || id.starts_with("dev.threadlane.")
+}
+
+/// Reads `CFBundleIdentifier` from a bundle's `Info.plist` without a plist
+/// dependency: our own generated plist uses the canonical long form.
+fn bundle_identifier(app_bundle: &Path) -> Option<String> {
+    let plist =
+        std::fs::read_to_string(app_bundle.join("Contents").join("Info.plist")).ok()?;
+    let key = "<key>CFBundleIdentifier</key>";
+    let after_key = plist.find(key).map(|index| &plist[index + key.len()..])?;
+    let value = after_key.trim_start().strip_prefix("<string>")?;
+    let end = value.find("</string>")?;
+    let id = value[..end].trim();
+    (!id.is_empty()).then(|| id.to_string())
 }
 
 fn app_bundle_for_executable(executable: &Path) -> Option<PathBuf> {
@@ -162,5 +196,35 @@ mod tests {
             app_bundle_for_executable(Path::new("/workspace/target/debug/threadlane")),
             None
         );
+    }
+
+    #[test]
+    fn bundle_identity_allowlist() {
+        assert!(is_allowed_bundle_id("dev.threadlane.app"));
+        assert!(is_allowed_bundle_id("dev.threadlane.sourceprofile"));
+        assert!(!is_allowed_bundle_id("com.evil.app"));
+        assert!(!is_allowed_bundle_id(""));
+        assert!(!is_allowed_bundle_id("dev.threadlane"));
+    }
+
+    #[test]
+    fn bundle_identifier_parses_our_info_plist() {
+        let dir = std::env::temp_dir().join(format!(
+            "threadlane-updater-test-{}",
+            std::process::id()
+        ));
+        let bundle = dir.join("Threadlane.app");
+        std::fs::create_dir_all(bundle.join("Contents")).unwrap();
+        std::fs::write(
+            bundle.join("Contents").join("Info.plist"),
+            "<?xml version=\"1.0\"?>\n<plist><dict>\n<key>CFBundleIdentifier</key>\n<string>dev.threadlane.app</string>\n</dict></plist>",
+        )
+        .unwrap();
+        assert_eq!(
+            bundle_identifier(&bundle).as_deref(),
+            Some("dev.threadlane.app")
+        );
+        assert_eq!(bundle_identifier(&dir.join("Missing.app")), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -884,8 +884,34 @@ impl AppState {
         {
             return Err("Stop the running generation before deleting this session".into());
         }
+        // Archive the transcript first: deletion destroys the JSONL, and a
+        // failed delete must never lose history silently.
+        let archive_dir = work_dir.join(".threadlane/sessions/archive");
+        std::fs::create_dir_all(&archive_dir).map_err(|error| error.to_string())?;
+        let file_name = session_file
+            .file_name()
+            .ok_or_else(|| "Session file has no file name".to_string())?;
+        let archive_file = archive_dir.join(file_name);
+        if session_file.exists() {
+            std::fs::copy(&session_file, &archive_file).map_err(|error| error.to_string())?;
+        }
         if let Some(worktree_dir) = self.session_worktree_path(&work_dir, &session_id) {
             if delete_worktree && worktree_dir.exists() {
+                // Same dirtiness guard as archiving: untracked app-owned
+                // bookkeeping never blocks, every other change refuses the
+                // destroy rather than eating uncommitted work.
+                let dirty = threadlane_git::inspect(&worktree_dir)
+                    .map_err(|error| error.to_string())?
+                    .files
+                    .iter()
+                    .any(|file| {
+                        !(file.is_untracked() && file.path.starts_with(".threadlane/"))
+                    });
+                if dirty {
+                    return Err(
+                        "Commit or discard worktree changes before deleting this session".into(),
+                    );
+                }
                 threadlane_git::remove_worktree(&work_dir, &worktree_dir, true)
                     .map_err(|error| error.to_string())?;
                 let _ = threadlane_git::prune_worktrees(&work_dir);
@@ -1478,7 +1504,13 @@ impl AppState {
                         &value,
                         None,
                     ) {
-                        let _ = threadlane_git::remove_worktree(&work_dir, &worktree_dir, true);
+                        if let Err(cleanup_error) =
+                            threadlane_git::remove_worktree(&work_dir, &worktree_dir, true)
+                        {
+                            tracing::warn!(
+                                "session setup rollback: worktree remove failed: {cleanup_error}"
+                            );
+                        }
                         return Err(format!("failed to persist worktree metadata: {error}"));
                     }
                 }
@@ -1565,9 +1597,18 @@ impl AppState {
         }
 
         let cleanup = |work_dir: &Path, worktree_dir: &Path, session_file: &Path| {
-            let _ = threadlane_git::remove_worktree(work_dir, worktree_dir, true);
-            let _ = std::fs::remove_dir_all(worktree_dir);
-            let _ = Self::remove_file_if_present(session_file);
+            // Best-effort rollback of exactly what this setup created
+            // (pre-existence is checked above, so nothing here is user
+            // work); failures warn instead of masking the primary error.
+            if let Err(error) = threadlane_git::remove_worktree(work_dir, worktree_dir, true) {
+                tracing::warn!("issue setup rollback: worktree remove failed: {error}");
+            }
+            if let Err(error) = std::fs::remove_dir_all(worktree_dir) {
+                tracing::warn!("issue setup rollback: worktree dir remove failed: {error}");
+            }
+            if let Err(error) = Self::remove_file_if_present(session_file) {
+                tracing::warn!("issue setup rollback: session file remove failed: {error}");
+            }
         };
         if let Err(error) = threadlane_git::create_worktree(&work_dir, &worktree_dir, &branch) {
             cleanup(&work_dir, &worktree_dir, &session_file);
