@@ -47,10 +47,29 @@ pub fn download(info: UpdateReleaseInfo, tx: Sender<UpdaterEvent>) {
 }
 
 pub fn install(info: UpdateReleaseInfo, bytes: Arc<Vec<u8>>, tx: Sender<UpdaterEvent>) {
+    // Publish Installing first so the state-held ReadyToInstall (and its Arc
+    // clone of these bytes) is dropped by the event pump. The spawned thread
+    // then retries try_unwrap briefly, so the tens-of-MB buffer moves without
+    // copying in the common case instead of cloning on contention.
     let _ = tx.send(UpdaterEvent::Status(UpdateStatus::Installing));
     std::thread::spawn(move || {
-        let bytes = Arc::try_unwrap(bytes).unwrap_or_else(|bytes| (*bytes).clone());
-        if let Err(error) = threadlane_updater::install_and_relaunch(info, bytes) {
+        let mut bytes = bytes;
+        for _ in 0..20 {
+            match Arc::try_unwrap(bytes) {
+                Ok(owned) => {
+                    if let Err(error) = threadlane_updater::install_and_relaunch(info, owned) {
+                        let _ = tx.send(UpdaterEvent::Status(UpdateStatus::Error(error)));
+                    }
+                    return;
+                }
+                Err(arc) => {
+                    bytes = arc;
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
+        }
+        let owned = Arc::unwrap_or_clone(bytes);
+        if let Err(error) = threadlane_updater::install_and_relaunch(info, owned) {
             let _ = tx.send(UpdaterEvent::Status(UpdateStatus::Error(error)));
         }
     });

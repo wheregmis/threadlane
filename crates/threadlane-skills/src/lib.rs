@@ -154,10 +154,20 @@ impl SkillSettings {
         };
         let bytes = serde_json::to_vec_pretty(&file)
             .map_err(|error| format!("Failed to encode skill settings: {error}"))?;
-        let mut handle = File::create(&path)
+        // Atomic write: tmp + fsync + rename, so a concurrent writer or a
+        // crash mid-write can never leave a truncated skills.json behind
+        // (which would fall back to all-enabled and resurrect disabled skills).
+        let tmp_path = path.with_extension("json.tmp");
+        let mut handle = File::create(&tmp_path)
             .map_err(|error| format!("Failed to write skill settings: {error}"))?;
         handle
             .write_all(&bytes)
+            .map_err(|error| format!("Failed to write skill settings: {error}"))?;
+        handle
+            .sync_all()
+            .map_err(|error| format!("Failed to write skill settings: {error}"))?;
+        drop(handle);
+        fs::rename(&tmp_path, &path)
             .map_err(|error| format!("Failed to write skill settings: {error}"))?;
         Ok(())
     }
