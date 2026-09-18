@@ -425,13 +425,8 @@ impl BrowserView {
                 let Some(poll) = poll else { break };
                 let Ok(raw) = poll.await else { break };
                 let payload = unwrap_callback_payload(&raw);
-                let parsed: Option<serde_json::Value> =
-                    serde_json::from_str::<serde_json::Value>(&payload)
-                        .ok()
-                        .and_then(|outer| {
-                        // wry JSON-serializes the script's return string.
-                        outer.as_str().and_then(|inner| serde_json::from_str(inner).ok())
-                    });
+                // The callback wrapper has already been removed above.
+                let parsed = serde_json::from_str::<serde_json::Value>(&payload).ok();
                 let (pick, active) = match parsed {
                     Some(serde_json::Value::Object(mut map)) => {
                         (map.remove("pick"), map.remove("active"))

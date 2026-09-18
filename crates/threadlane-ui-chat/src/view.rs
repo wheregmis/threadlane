@@ -955,14 +955,8 @@ impl ChatListView {
             .debug_selector(|| "chat-environment".into())
             .w(rems(18.0))
             .flex_none()
-            .p_3()
-            .m_3()
-            .ml_0()
-            .self_start()
-            .rounded(theme.radius)
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.sidebar)
+            .pt_5()
+            .pl_3()
             .flex()
             .flex_col()
             .gap_2()
@@ -5033,7 +5027,7 @@ impl ChatListView {
             // cap the width, keep the full path in the tooltip.
             .max_w(px(160.0))
             .tooltip(format!("Project: {project_chip_tooltip}"))
-            .dropdown_menu(move |menu, window, _cx| {
+            .dropdown_menu_with_anchor(gpui::Anchor::BottomLeft, move |menu, window, _cx| {
                 let mut menu = menu;
                 for (name, work_dir) in projects_list.clone() {
                     let model = project_chip_model.clone();
@@ -5095,7 +5089,7 @@ impl ChatListView {
             .dropdown_caret(true)
             .outline()
             .xsmall()
-            .dropdown_menu(move |menu, window, _cx| {
+            .dropdown_menu_with_anchor(gpui::Anchor::BottomLeft, move |menu, window, _cx| {
                 let menu = menu.check_side(gpui_component::Side::Right);
                 let local_model = work_mode_model.clone();
                 let wt_model = work_mode_model.clone();
@@ -5267,7 +5261,7 @@ impl ChatListView {
         };
         let selected_model_for_picker = selected_model.clone();
         let submenu_click_model = self.model.clone();
-        let model_picker = model_picker.dropdown_menu(move |menu, window, _cx| {
+        let model_picker = model_picker.dropdown_menu_with_anchor(gpui::Anchor::BottomLeft, move |menu, window, _cx| {
             let menu = menu.check_side(gpui_component::Side::Right);
             let mut previous_provider = None;
             let menu = model_options.iter().cloned().fold(
@@ -5421,7 +5415,7 @@ impl ChatListView {
             .tooltip(format!("Reasoning effort: {}", reasoning_effort.label()))
             .dropdown_caret(true)
             .ghost()
-            .dropdown_menu(move |menu, window, _cx| {
+            .dropdown_menu_with_anchor(gpui::Anchor::BottomLeft, move |menu, window, _cx| {
                 let menu = menu.check_side(gpui_component::Side::Right);
                 effort_options
                     .clone()
@@ -5641,7 +5635,7 @@ impl ChatListView {
                     .text_color(theme.muted_foreground)
                     .tooltip(meter.detail_label.clone())
                     .when_some(meter.percent, |toggle, percent| toggle.child(
-                        ProgressCircle::new("context-meter-circle")
+                        ProgressCircle::new("context-meter-circle").relative()
                             .value(percent.clamp(0.0, 100.0) as f32)
                             .color(meter_color)
                             .size(px(24.0)),
@@ -6450,8 +6444,8 @@ impl Render for ChatListView {
             .bg(theme.background)
             .on_key_down(cx.listener(Self::handle_key_down))
             .child(self.render_header(cx))
-            .child(div().flex().flex_1().min_h_0().min_w_0()
-                .child(div().flex().flex_col().flex_1().min_h_0().min_w_0()
+            .child(div().flex().flex_1().min_h_0().min_w_0().justify_center()
+                .child(div().flex().flex_col().w_full().max_w(rems(CHAT_CONTENT_MAX_WIDTH)).min_h_0().min_w_0()
             .children(
                 (self.current_tab == CentralTab::Chat && is_generating)
                     .then(|| self.render_progress_summary(cx)),
