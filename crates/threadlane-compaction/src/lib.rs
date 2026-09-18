@@ -98,17 +98,30 @@ pub fn provider_normalized_message(message: &AgentMessage) -> Option<AgentMessag
 }
 
 pub fn estimate_message_tokens(message: &AgentMessage, config: &CompactionParams) -> usize {
-    let serialized_tokens = serialized_message(message).len().div_ceil(4);
-    let image_tokens = match message {
-        AgentMessage::UserWithImages { images, .. } => {
-            images.len().saturating_mul(config.estimated_image_tokens)
-        }
-        AgentMessage::Tool { images, .. } => {
-            images.len().saturating_mul(config.estimated_image_tokens)
-        }
-        _ => 0,
+    let (image_data_bytes, image_count) = match message {
+        AgentMessage::UserWithImages { images, .. } => (
+            images.iter().map(|image| image.data_url.len()).sum(),
+            images.len(),
+        ),
+        AgentMessage::Tool { images, .. } => (
+            images.iter().map(|image| image.data_url.len()).sum(),
+            images.len(),
+        ),
+        _ => (0usize, 0usize),
     };
-    serialized_tokens.saturating_add(image_tokens)
+    // Inline image payloads (base64 data URLs persisted with the message so
+    // reloads reproduce provider context) are not text tokens: providers bill
+    // images separately. Charging the raw bytes here made one screenshot read
+    // as ~230k tokens, tripping a compaction that could never retain the
+    // recent image message under any tail target — so `compact_for_budget`
+    // returned None and the turn failed with "could not drop historical
+    // messages". Count the surrounding JSON only, plus the configured
+    // per-image charge.
+    let serialized_tokens = serialized_message(message)
+        .len()
+        .saturating_sub(image_data_bytes)
+        .div_ceil(4);
+    serialized_tokens.saturating_add(image_count.saturating_mul(config.estimated_image_tokens))
 }
 
 fn estimate_context_tokens(messages: &[AgentMessage], config: &CompactionParams) -> usize {
@@ -801,22 +814,100 @@ mod tests {
     }
 
     #[test]
-    fn request_estimator_includes_serialized_messages_tool_schema_and_configured_images() {
+    fn request_estimator_charges_text_and_configured_images_not_image_bytes() {
         let config = CompactionParams {
             estimated_image_tokens: 77,
             ..CompactionParams::default()
         };
+        let data_url = "data:image/png;base64,AA==";
         let messages = vec![AgentMessage::UserWithImages {
             content: "x".repeat(400),
             images: vec![ImageAttachment {
                 display_name: "image.png".into(),
-                data_url: "data:image/png;base64,AA==".into(),
+                data_url: data_url.into(),
             }],
         }];
-        let serialized_message_tokens = serde_json::to_vec(&messages[0]).unwrap().len().div_ceil(4);
+        // The inline payload is not text: only the surrounding JSON counts,
+        // plus the configured per-image charge.
+        let serialized_message_tokens = (serde_json::to_vec(&messages[0]).unwrap().len()
+            - data_url.len())
+        .div_ceil(4);
         assert_eq!(
             estimate_request_tokens(&messages, Some(&"t".repeat(400)), &config),
             serialized_message_tokens + 100 + 77
+        );
+    }
+
+    #[test]
+    fn screenshot_sized_images_do_not_trip_compaction() {
+        // Regression for a failed computer-use turn: a `computer_ax` result
+        // carrying a ~900KB inline PNG screenshot estimated ~230k tokens
+        // (full base64 / 4), exceeding every budget trigger while the recent
+        // image message alone exceeded every retained tail — so
+        // `compact_for_budget` returned None ("could not drop historical
+        // messages") and the turn died before acting.
+        let config = CompactionParams::default();
+        let big_png = format!("data:image/png;base64,{}", "QUJD".repeat(225_000));
+        assert!(big_png.len() > 900_000);
+        let messages = vec![
+            AgentMessage::User {
+                content: "older request".into(),
+            },
+            AgentMessage::Assistant {
+                content: Some("older response".into()),
+                tool_calls: None,
+                stop_reason: None,
+                deferred_handle: None,
+            },
+            AgentMessage::Tool {
+                tool_call_id: "call_0".into(),
+                name: "computer_windows".into(),
+                content: "result".repeat(1_000),
+                is_error: false,
+                terminate: false,
+                images: Vec::new(),
+            },
+            AgentMessage::User {
+                content: "Can you open youtube in my safari?".into(),
+            },
+            AgentMessage::Assistant {
+                content: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: "call_1".into(),
+                    r#type: "function".into(),
+                    function: ToolCallFunction {
+                        name: "computer_ax".into(),
+                        arguments: "{}".into(),
+                    },
+                    thought_signature: None,
+                }]),
+                stop_reason: None,
+                deferred_handle: None,
+            },
+            AgentMessage::Tool {
+                tool_call_id: "call_1".into(),
+                name: "computer_ax".into(),
+                content: "tree".repeat(2_500),
+                is_error: false,
+                terminate: false,
+                images: vec![ImageAttachment {
+                    display_name: "computer-1.png".into(),
+                    data_url: big_png,
+                }],
+            },
+        ];
+        let estimate = estimate_request_tokens(&messages, None, &config);
+        assert!(
+            estimate < config.auto_compaction_threshold_tokens,
+            "screenshot history must stay under the compaction trigger, got {estimate}"
+        );
+        // And a tight tail budget still compacts text history around the
+        // image instead of failing closed on it.
+        let prepared = compact_for_budget(&messages, None, 1_000, &config)
+            .expect("image-heavy history must still compact");
+        assert!(
+            prepared.compacted_messages > 0,
+            "compaction should drop messages, not no-op"
         );
     }
 
