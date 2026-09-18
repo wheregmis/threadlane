@@ -278,6 +278,19 @@ impl CodingAgent {
         self.agent_work
             .set_acp_model(threadlane_acp_engine::is_acp_model(model));
         self.refresh_provider_credentials();
+        // A model switch can flip the core tool schema, which decides whether
+        // `update_plan` exists. Re-resolve the armed prewalk's todo gate from
+        // the live toolset so the directive and gate stop lying.
+        let requires_todo = self
+            .agent
+            .configured_tool_definitions()
+            .iter()
+            .any(|tool| tool.name == threadlane_orchestrator::PREWALK_TODO_TOOL);
+        if let Ok(mut guard) = self.prewalk.lock() {
+            if let Some(state) = guard.as_mut() {
+                state.refresh_requires_todo(requires_todo);
+            }
+        }
         Ok(())
     }
 
@@ -1612,6 +1625,7 @@ impl CodingAgent {
                 &effective_input,
                 orchestrator_mode,
                 &active_model,
+                active_effort,
                 &fast_model,
                 fast_reasoning,
                 requires_todo,

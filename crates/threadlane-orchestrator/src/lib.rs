@@ -64,6 +64,18 @@ impl PrewalkState {
     pub fn todo_gate_open(&self) -> bool {
         self.todo_seen || !self.requires_todo
     }
+
+    /// Re-resolve whether `update_plan` is in the live toolset (e.g. after a
+    /// `/model` switch that flips the core tool schema). The snapshot taken
+    /// at arming must not lie to the gate or the architect directive forever.
+    /// Returns true when the value changed.
+    pub fn refresh_requires_todo(&mut self, requires_todo: bool) -> bool {
+        if self.requires_todo == requires_todo {
+            return false;
+        }
+        self.requires_todo = requires_todo;
+        true
+    }
 }
 
 pub const ARCHITECT_PROTOCOL_HEADER: &str =
@@ -126,12 +138,15 @@ impl Orchestrator {
         prompt: &str,
         mode: OrchestratorMode,
         active_model: &str,
+        active_reasoning: Option<ReasoningEffort>,
         fast_model: &str,
         fast_reasoning: Option<ReasoningEffort>,
         requires_todo: bool,
     ) -> OrchestratorDecision {
-        // Noop guard: same target is not a handoff.
-        if active_model == fast_model {
+        // Noop guard: same model AND effort is not a handoff. Effort matters:
+        // arming frontier planning when only the effort differs burns a
+        // frontier turn that the handoff then disarms with a notice.
+        if prewalk_would_be_noop(active_model, active_reasoning, fast_model, fast_reasoning) {
             return OrchestratorDecision::DirectExecution;
         }
         // `Auto` is deprecated and inert; only `Always` arms automatically.
@@ -303,6 +318,7 @@ mod tests {
                 "fix the bug in lib.rs",
                 OrchestratorMode::Auto,
                 "pro",
+                None,
                 "flash",
                 None,
                 true
@@ -314,6 +330,7 @@ mod tests {
                 "fix the bug",
                 OrchestratorMode::Off,
                 "pro",
+                None,
                 "flash",
                 None,
                 true
@@ -325,6 +342,7 @@ mod tests {
                 "fix the bug",
                 OrchestratorMode::Always,
                 "same",
+                None,
                 "same",
                 None,
                 true
@@ -332,7 +350,37 @@ mod tests {
             OrchestratorDecision::DirectExecution
         );
         assert_eq!(
-            Orchestrator::evaluate("   ", OrchestratorMode::Always, "pro", "flash", None, true),
+            Orchestrator::evaluate("   ", OrchestratorMode::Always, "pro", None, "flash", None, true),
+            OrchestratorDecision::DirectExecution
+        );
+    }
+
+    #[test]
+    fn same_model_different_effort_is_direct() {
+        // Same model but a different effort IS a handoff ...
+        assert!(matches!(
+            Orchestrator::evaluate(
+                "fix the bug",
+                OrchestratorMode::Always,
+                "same",
+                Some(ReasoningEffort::Low),
+                "same",
+                Some(ReasoningEffort::High),
+                true,
+            ),
+            OrchestratorDecision::EngagePrewalk { .. }
+        ));
+        // ... while a fully identical target is a noop Direct.
+        assert_eq!(
+            Orchestrator::evaluate(
+                "fix the bug",
+                OrchestratorMode::Always,
+                "same",
+                Some(ReasoningEffort::Low),
+                "same",
+                Some(ReasoningEffort::Low),
+                true,
+            ),
             OrchestratorDecision::DirectExecution
         );
     }
@@ -343,6 +391,7 @@ mod tests {
             "Fix the concurrency bug in session store",
             OrchestratorMode::Always,
             "gemini-pro",
+            None,
             "gemini-flash",
             Some(ReasoningEffort::Low),
             true,
