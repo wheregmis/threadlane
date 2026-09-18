@@ -665,7 +665,7 @@ impl SidebarView {
                     .child(
                         div()
                             .px_1p5()
-                            .py(px(0.5))
+                            .py(rems(0.03125))
                             .rounded_sm()
                             .bg(theme.muted)
                             .text_xs()
@@ -948,7 +948,7 @@ impl SidebarView {
                     .items_center()
                     .gap(rems(0.21875))
                     .px_1p5()
-                    .py(px(0.5))
+                    .py(rems(0.03125))
                     .rounded_full()
                     .bg(theme.warning.opacity(0.15))
                     .text_color(theme.warning)
@@ -968,7 +968,7 @@ impl SidebarView {
                     .items_center()
                     .gap(rems(0.21875))
                     .px_1p5()
-                    .py(px(0.5))
+                    .py(rems(0.03125))
                     .rounded_full()
                     .bg(theme.muted)
                     .text_color(theme.foreground)
@@ -1179,7 +1179,7 @@ impl SidebarView {
             .flex()
             .items_stretch()
             .w_full()
-            .my(px(1.5))
+            .my(rems(0.09375))
             .rounded_md()
             .bg(bg_color)
             .border_1()
@@ -1677,7 +1677,7 @@ impl SidebarView {
                         .text_color(theme.muted_foreground.opacity(0.8))
                         .child(group.label()),
                 )
-                .child(div().h(px(1.0)).flex_1().bg(theme.border.opacity(0.35)))
+                .child(div().h(rems(0.0625)).flex_1().bg(theme.border.opacity(0.35)))
                 .into_any_element(),
             Some(HistoryRow::Session(session, attention)) => {
                 let state = self.model.read(cx);

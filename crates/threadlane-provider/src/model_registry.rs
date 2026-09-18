@@ -176,14 +176,42 @@ pub(crate) fn builtin_models() -> Vec<ModelInfo> {
         models.push(builtin_entry(id, label, "antigravity", context));
     }
     for (id, label) in [
-        ("opencode-go/mimo-v2.5-pro", "MiMo V2.5 Pro"),
-        ("opencode-go/mimo-v2.5", "MiMo V2.5"),
-        ("opencode-go/qwen3.8-max", "Qwen 3.8 Max"),
+        ("opencode-go/grok-4.6", "Grok 4.6"),
+        ("opencode-go/glm-5.3-flash", "GLM-5.3-Flash"),
+        ("opencode-go/glm-5.3", "GLM-5.3"),
+        ("opencode-go/glm-5.2", "GLM-5.2"),
+        ("opencode-go/glm-5.1", "GLM-5.1"),
+        ("opencode-go/gpt-5.6-luna", "GPT 5.6 Luna"),
+        ("opencode-go/kimi-k3", "Kimi K3"),
+        ("opencode-go/kimi-k2.7-code", "Kimi K2.7 Code"),
+        ("opencode-go/kimi-k2.6", "Kimi K2.6"),
+        ("opencode-go/longcat-2.0", "LongCat-2.0"),
+        ("opencode-go/mimo-v2.5", "MiMo-V2.5"),
+        ("opencode-go/mimo-v2.5-pro", "MiMo-V2.5-Pro"),
         ("opencode-go/minimax-m3", "MiniMax M3"),
         ("opencode-go/minimax-m2.7", "MiniMax M2.7"),
+        (
+            "opencode-go/muse-spark-1.3-contributor",
+            "Muse Spark 1.3 Contributor (limited regions)",
+        ),
+        (
+            "opencode-go/muse-spark-1.2-contributor",
+            "Muse Spark 1.2 Contributor (limited regions)",
+        ),
+        ("opencode-go/qwen3.8-max", "Qwen3.8 Max"),
+        ("opencode-go/qwen3.8-flash", "Qwen3.8 Flash"),
+        ("opencode-go/qwen3.7-max", "Qwen3.7 Max"),
+        ("opencode-go/qwen3.7-plus", "Qwen3.7 Plus"),
+        ("opencode-go/qwen3.6-plus", "Qwen3.6 Plus"),
+        ("opencode-go/deepseek-v4.1-flash", "DeepSeek V4.1 Flash"),
         ("opencode-go/deepseek-v4-pro", "DeepSeek V4 Pro"),
         ("opencode-go/deepseek-v4-flash", "DeepSeek V4 Flash"),
-        ("opencode-go/hy3", "HY 3"),
+        (
+            "opencode-go/deepseek-v4-flash-vision-exp",
+            "DeepSeek V4 Flash Vision Exp",
+        ),
+        ("opencode-go/hy4-preview", "Hy4 preview"),
+        ("opencode-go/hy3", "Hy3"),
     ] {
         models.push(builtin_entry(id, label, "opencode", 128_000));
     }

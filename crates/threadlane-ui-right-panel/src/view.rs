@@ -1970,7 +1970,7 @@ impl RightPanelView {
         let sync_button = if can_publish {
             Button::new("git-sync-action-btn")
                 .icon(IconName::ArrowUp)
-                .label("Publish Branch")
+                .label("Publish branch")
                 .small()
                 .tooltip("Publish this branch to origin")
                 .on_click(cx.listener(|this, _event, window, cx| {
@@ -2472,7 +2472,7 @@ impl RightPanelView {
                         )
                         .child(
                             Button::new("git-stage-all-btn")
-                                .label("Stage All")
+                                .label("Stage all")
                                 .ghost()
                                 .xsmall()
                                 .disabled(self.git_busy || unstaged_count == 0)
@@ -2484,7 +2484,7 @@ impl RightPanelView {
                         .when(has_staged, |row| {
                             row.child(
                                 Button::new("git-unstage-all-btn")
-                                    .label("Unstage All")
+                                    .label("Unstage all")
                                     .ghost()
                                     .xsmall()
                                     .disabled(self.git_busy)
@@ -2808,7 +2808,7 @@ impl RightPanelView {
                                             .text_xs()
                                             .font_weight(FontWeight::BOLD)
                                             .text_color(theme.foreground)
-                                            .child("Stashed Changes"),
+                                            .child("Stashed changes"),
                                     )
                                     .child(
                                         div()
@@ -2961,7 +2961,7 @@ impl RightPanelView {
                             )
                             .child(
                                 Button::new("restore-stash-btn")
-                                    .label("Restore Stash")
+                                    .label("Restore stash")
                                     .outline()
                                     .xsmall()
                                     .tooltip("Restore the stashed changes")
@@ -3531,7 +3531,7 @@ impl RightPanelView {
                     .child(
                         Button::new("open-new-branch-modal-btn")
                             .icon(IconName::Plus)
-                            .label("New Branch…")
+                            .label("New branch…")
                             .outline()
                             .small()
                             .tooltip("Create a new branch…")
@@ -3887,7 +3887,7 @@ impl RightPanelView {
                     )
                     .child(
                         Button::new("submit-new-branch-btn")
-                            .label("Create Branch")
+                            .label("Create branch")
                             .primary()
                             .small()
                             .disabled(!can_create)
@@ -4212,7 +4212,7 @@ impl RightPanelView {
                             )
                             .child(
                                 Button::new("submit-switch-dialog-btn")
-                                    .label("Switch Branch")
+                                    .label("Switch branch")
                                     .primary()
                                     .small()
                                     .disabled(self.git_busy)

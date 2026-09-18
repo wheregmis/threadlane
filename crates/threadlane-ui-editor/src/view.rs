@@ -638,7 +638,7 @@ impl EditorView {
         let view_entity = cx.entity().clone();
 
         div()
-            .h(px(34.0))
+            .h(rems(2.125))
             .w_full()
             .flex_none()
             .flex()
@@ -686,7 +686,7 @@ impl EditorView {
 
                         div()
                             .id(SharedString::from(format!("editor-tab-{}", idx)))
-                            .h(px(26.0))
+                            .h(rems(1.625))
                             .flex_none()
                             .flex()
                             .items_center()
@@ -760,7 +760,7 @@ impl EditorView {
                             )
                             .child(if tab.is_dirty && !tab.is_diff {
                                 div()
-                                    .size(px(6.0))
+                                    .size(rems(0.375))
                                     .rounded_full()
                                     .bg(theme.accent)
                                     .into_any_element()
@@ -836,7 +836,7 @@ impl EditorView {
             .p_6()
             .child(
                 div()
-                    .size(px(48.0))
+                    .size_12()
                     .rounded_full()
                     .bg(theme.muted.opacity(0.5))
                     .flex()
@@ -855,7 +855,7 @@ impl EditorView {
             )
             .child(
                 div()
-                    .max_w(px(380.0))
+                    .max_w(rems(23.75))
                     .text_center()
                     .text_xs()
                     .text_color(theme.muted_foreground)

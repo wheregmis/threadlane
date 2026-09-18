@@ -1000,7 +1000,7 @@ impl Render for TerminalView {
                 )
                 .child(
                     Button::new("terminal-restart-banner-btn")
-                        .label("Restart Shell")
+                        .label("Restart shell")
                         .icon(IconName::Redo)
                         .ghost()
                         .xsmall()
@@ -1018,8 +1018,8 @@ impl Render for TerminalView {
                 // during selection.
                 div()
                     .absolute()
-                    .bottom(px(28.0))
-                    .right(px(12.0))
+                    .bottom_7()
+                    .right_3()
                     .rounded_full()
                     .border_1()
                     .border_color(theme.border)

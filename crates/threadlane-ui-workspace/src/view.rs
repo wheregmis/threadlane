@@ -1370,7 +1370,7 @@ impl WorkspaceView {
             commands_group = commands_group.item(item);
         }
 
-        let mut recent_group = CommandGroup::new().label("Recently Used");
+        let mut recent_group = CommandGroup::new().label("Recently used");
         for action_key in &self.recent_palette_actions {
             if let Some((name, _, _, icon, keywords, _)) = commands
                 .iter()
@@ -2279,7 +2279,7 @@ impl Render for WorkspaceView {
                 Button::new("command-palette-btn")
                         .accessibility_label("Command palette")
                     .icon(IconName::SquareTerminal)
-                    .tooltip("Command Palette (Cmd+K)")
+                    .tooltip("Command palette (Cmd+K)")
                     .ghost()
                     .selected(self.command_palette_open)
                     .xsmall()

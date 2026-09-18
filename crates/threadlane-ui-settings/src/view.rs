@@ -968,7 +968,7 @@ impl SettingsView {
                                     .gap_3()
                                     .child(
                                         div()
-                                            .size(px(36.0))
+                                            .size_9()
                                             .rounded_lg()
                                             .bg(theme.muted)
                                             .flex()
@@ -984,7 +984,7 @@ impl SettingsView {
                                                     .text_sm()
                                                     .font_weight(FontWeight::MEDIUM)
                                                     .text_color(theme.foreground)
-                                                    .child("Application Details"),
+                                                    .child("Application details"),
                                             )
                                             .child(
                                                 div()
@@ -1013,7 +1013,7 @@ impl SettingsView {
                                 div()
                                     .text_xs()
                                     .text_color(theme.muted_foreground)
-                                    .child("Active Workspace")
+                                    .child("Active workspace")
                                     .child(
                                         div()
                                             .mt_1()
@@ -1027,7 +1027,7 @@ impl SettingsView {
                                 div()
                                     .text_xs()
                                     .text_color(theme.muted_foreground)
-                                    .child("Attached Projects")
+                                    .child("Attached projects")
                                     .child(
                                         div()
                                             .mt_1()
@@ -1063,7 +1063,7 @@ impl SettingsView {
                                             .text_sm()
                                             .font_weight(FontWeight::MEDIUM)
                                             .text_color(theme.foreground)
-                                            .child("Application Updates"),
+                                            .child("Application updates"),
                                     )
                                     .child(
                                         Tag::new()
@@ -1190,7 +1190,7 @@ impl SettingsView {
                             .child(div().w_full().flex().flex_col().gap_3()
                             .child(
                                 div()
-                                    .h(px(80.0))
+                                    .h_20()
                                     .rounded_lg()
                                     .border_1()
                                     .border_color(theme.border)
@@ -1205,26 +1205,26 @@ impl SettingsView {
                                             .gap_1_5()
                                             .child(
                                                 div()
-                                                    .size(px(8.0))
+                                                    .size_2()
                                                     .rounded_full()
                                                     .bg(preview_dot_close()),
                                             )
                                             .child(
                                                 div()
-                                                    .size(px(8.0))
+                                                    .size_2()
                                                     .rounded_full()
                                                     .bg(preview_dot_minimize()),
                                             )
                                             .child(
                                                 div()
-                                                    .size(px(8.0))
+                                                    .size_2()
                                                     .rounded_full()
                                                     .bg(preview_dot_zoom()),
                                             ),
                                     )
                                     .child(
                                         div()
-                                            .h(px(16.0))
+                                            .h_4()
                                             .w_3_4()
                                             .rounded_md()
                                             .bg(preview_dark_well()),
@@ -1286,7 +1286,7 @@ impl SettingsView {
                             .child(div().w_full().flex().flex_col().gap_3()
                             .child(
                                 div()
-                                    .h(px(80.0))
+                                    .h_20()
                                     .rounded_lg()
                                     .border_1()
                                     .border_color(theme.border)
@@ -1301,26 +1301,26 @@ impl SettingsView {
                                             .gap_1_5()
                                             .child(
                                                 div()
-                                                    .size(px(8.0))
+                                                    .size_2()
                                                     .rounded_full()
                                                     .bg(preview_dot_close()),
                                             )
                                             .child(
                                                 div()
-                                                    .size(px(8.0))
+                                                    .size_2()
                                                     .rounded_full()
                                                     .bg(preview_dot_minimize()),
                                             )
                                             .child(
                                                 div()
-                                                    .size(px(8.0))
+                                                    .size_2()
                                                     .rounded_full()
                                                     .bg(preview_dot_zoom()),
                                             ),
                                     )
                                     .child(
                                         div()
-                                            .h(px(16.0))
+                                            .h_4()
                                             .w_3_4()
                                             .rounded_md()
                                             .bg(preview_light_well()),
@@ -1476,8 +1476,8 @@ impl SettingsView {
             .gap_4()
             .child(
                 div()
-                    .w(px(36.0))
-                    .h(px(36.0))
+                    .w_9()
+                    .h_9()
                     .flex_none()
                     .rounded_lg()
                     .bg(theme.muted)
@@ -1635,8 +1635,8 @@ impl SettingsView {
             .gap_4()
             .child(
                 div()
-                    .w(px(36.0))
-                    .h(px(36.0))
+                    .w_9()
+                    .h_9()
                     .flex_none()
                     .rounded_lg()
                     .bg(theme.muted)
@@ -1800,8 +1800,8 @@ impl SettingsView {
             .gap_4()
             .child(
                 div()
-                    .w(px(36.0))
-                    .h(px(36.0))
+                    .w_9()
+                    .h_9()
                     .flex_none()
                     .rounded_lg()
                     .bg(theme.muted)
@@ -1936,8 +1936,8 @@ impl SettingsView {
                             .gap_4()
                             .child(
                                 div()
-                                    .w(px(36.0))
-                                    .h(px(36.0))
+                                    .w_9()
+                                    .h_9()
                                     .flex_none()
                                     .rounded_lg()
                                     .bg(theme.muted)
@@ -2001,7 +2001,7 @@ impl SettingsView {
                             .child(
                                 Button::new("add-chatgpt-account-btn")
                                     .icon(IconName::Plus)
-                                    .label("Add Account")
+                                    .label("Add account")
                                     .outline()
                                     .on_click({
                                         let view = view.clone();
@@ -2030,7 +2030,7 @@ impl SettingsView {
             .child(
                 div()
                     .mt_3()
-                    .pl(px(52.0))
+                    .pl(rems(3.25))
                     .flex()
                     .flex_col()
                     .gap_2()
@@ -2066,8 +2066,8 @@ impl SettingsView {
                                     .gap_3()
                                     .child(
                                         div()
-                                            .w(px(28.0))
-                                            .h(px(28.0))
+                                            .w_7()
+                                            .h_7()
                                             .rounded_full()
                                             .bg(theme.title_bar)
                                             .flex()
@@ -2132,7 +2132,7 @@ impl SettingsView {
                                      .children((!is_active).then(|| {
                                         Button::new(format!("make-active-{}", acc_id))
                                             .icon(IconName::Check)
-                                            .label("Set Active")
+                                            .label("Set active")
                                             .outline()
                                              .on_click(move |_event, _window, cx| {
                                                  let acc_id = acc_id_make_active.clone();
@@ -2176,7 +2176,7 @@ impl SettingsView {
                 el.child(
                     div()
                         .mt_3()
-                        .pl(px(52.0))
+                        .pl(rems(3.25))
                         .child(
                             div()
                                 .p_2()
@@ -2483,7 +2483,7 @@ impl SettingsView {
                     .gap_3()
                     .child(
                         div()
-                            .size(px(32.0))
+                            .size_8()
                             .flex_none()
                             .rounded_md()
                             .bg(theme.muted)
@@ -2570,8 +2570,8 @@ impl SettingsView {
                         .icon(IconName::Delete)
                         .tooltip("Remove extension")
                         .ghost()
-                        .w(px(32.0))
-                        .h(px(32.0))
+                        .w_8()
+                        .h_8()
                         .on_click(move |_event, _window, cx| {
                             let _ = remove_view.update(cx, |this, cx| {
                                 let result = threadlane_wasi::settings::remove_extension(
@@ -2669,7 +2669,7 @@ impl SettingsView {
                     .gap_3()
                     .child(
                         div()
-                            .size(px(32.0))
+                            .size_8()
                             .flex_none()
                             .rounded_md()
                             .bg(theme.muted)
@@ -2824,7 +2824,7 @@ impl SettingsView {
                             .gap_3()
                             .child(
                                 div()
-                                    .size(px(32.0))
+                                    .size_8()
                                     .flex_none()
                                     .rounded_md()
                                     .bg(theme.muted)
@@ -2983,7 +2983,7 @@ impl SettingsView {
                     .gap_3()
                     .child(
                         div()
-                            .size(px(32.0))
+                            .size_8()
                             .flex_none()
                             .rounded_md()
                             .bg(theme.muted)
@@ -3077,8 +3077,8 @@ impl SettingsView {
                             .icon(IconName::Delete)
                             .tooltip("Remove ACP agent")
                             .ghost()
-                            .w(px(32.0))
-                            .h(px(32.0))
+                            .w_8()
+                            .h_8()
                             .on_click(move |_event, _window, cx| {
                                 let _ = remove_view.update(cx, |this, cx| {
                                     let project = this.active_project(cx);
