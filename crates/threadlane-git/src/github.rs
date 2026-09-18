@@ -163,6 +163,10 @@ fn gh_failure(
     stderr: &str,
     stored_token: Option<&str>,
 ) -> GitError {
+    if let Some(guidance) = rate_limit_message(stderr) {
+        note_rate_limit();
+        return GitError::new(work_dir, guidance);
+    }
     let stderr = gh_failure_message(stderr, stored_token);
     GitError::new(
         work_dir,
@@ -512,7 +516,9 @@ fn inspect_pr_uncached(
     })?;
 
     // `gh pr view --json comments` exposes issue comments only. Inline
-    // review comments live on the REST review-comments endpoint.
+    // review comments live on the REST review-comments endpoint. Every
+    // failure stage warns with context: a silent skip leaves
+    // `review_comments_complete` false with no trace of why.
     if let Ok((repository, number)) = parse_pull_request_url(&info.url) {
         let api_path = format!(
             "repos/{}/{}/pulls/{number}/comments",
@@ -520,12 +526,23 @@ fn inspect_pr_uncached(
         );
         let api_args = github_api_args(&repository.host, &[&api_path, "--paginate", "--slurp"]);
         let api_args = api_args.iter().map(String::as_str).collect::<Vec<_>>();
-        if let Ok(review_output) = gh_command(work_dir, &api_args).output() {
-            if review_output.status.success() {
+        match gh_command(work_dir, &api_args).output() {
+            Err(error) => tracing::warn!(
+                "review comments for PR #{number} unavailable (could not start gh): {error}"
+            ),
+            Ok(review_output) if !review_output.status.success() => tracing::warn!(
+                "review comments for PR #{number} unavailable: {}",
+                String::from_utf8_lossy(&review_output.stderr).trim()
+            ),
+            Ok(review_output) => {
                 let pages = String::from_utf8_lossy(&review_output.stdout);
-                let _ = enrich_pr_review_comments(&mut info, &pages);
+                if let Err(error) = enrich_pr_review_comments(&mut info, &pages) {
+                    tracing::warn!("review comments for PR #{number} failed to parse: {error}");
+                }
             }
         }
+    } else {
+        tracing::warn!("cannot fetch review comments: unparseable PR url '{}'", info.url);
     }
 
     if info.number == 0 {
@@ -745,6 +762,9 @@ pub(crate) fn review_comment_payloads(
 }
 
 fn execute_gh(work_dir: &Path, args: &[String]) -> Result<String, GitError> {
+    if let Some(limited) = rate_limit_hold() {
+        return Err(GitError::new(work_dir, limited));
+    }
     let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
     let (mut command, stored_token) = gh_command_with_captured_token(work_dir, &refs);
     let output = command
@@ -754,12 +774,88 @@ fn execute_gh(work_dir: &Path, args: &[String]) -> Result<String, GitError> {
         return Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned());
     }
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    // One transparent retry on rate limiting: a transient 429/secondary
+    // limit should not fail the whole list when a short wait recovers.
+    if rate_limit_message(&stderr).is_some() {
+        note_rate_limit();
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        return execute_gh_once(work_dir, args);
+    }
     Err(gh_failure(
         work_dir,
         output.status,
         &stderr,
         stored_token.as_deref(),
     ))
+}
+
+/// Single `gh` invocation without rate-limit retry (the retry tail of
+/// [`execute_gh`]).
+fn execute_gh_once(work_dir: &Path, args: &[String]) -> Result<String, GitError> {
+    let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let (mut command, stored_token) = gh_command_with_captured_token(work_dir, &refs);
+    let output = command
+        .output()
+        .map_err(|error| GitError::new(work_dir, format!("could not start gh: {error}")))?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    if rate_limit_message(&stderr).is_some() {
+        note_rate_limit();
+    }
+    Err(gh_failure(
+        work_dir,
+        output.status,
+        &stderr,
+        stored_token.as_deref(),
+    ))
+}
+
+/// Matches `gh` rate-limit failures (primary 429, secondary limits, 403
+/// quota responses). Case-insensitive; anchored on "rate limit" phrasing so
+/// unrelated 4xx text never matches.
+pub(crate) fn rate_limit_message(stderr: &str) -> Option<String> {
+    let folded = stderr.to_ascii_lowercase();
+    let limited = folded.contains("api rate limit exceeded")
+        || folded.contains("secondary rate limit")
+        || folded.contains("exceeded a rate limit")
+        || folded.contains("rate limit exceeded");
+    if !limited {
+        return None;
+    }
+    // Surface gh's own reset hint when it carries one.
+    let reset = stderr
+        .lines()
+        .find(|line| line.to_ascii_lowercase().contains("reset"))
+        .map(str::trim)
+        .unwrap_or("GitHub API rate limit reached");
+    Some(format!(
+        "{reset}. Wait a minute, then retry — repeated calls only extend the limit."
+    ))
+}
+
+fn rate_limit_hold() -> Option<String> {
+    let held = rate_limit_until()
+        .lock()
+        .ok()
+        .and_then(|guard| *guard)
+        .is_some_and(|deadline| std::time::Instant::now() < deadline);
+    held.then(|| {
+        "GitHub API rate limit reached recently; holding for a minute instead of hammering. Retry shortly.".to_string()
+    })
+}
+
+fn note_rate_limit() {
+    if let Ok(mut guard) = rate_limit_until().lock() {
+        *guard = Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
+    }
+}
+
+fn rate_limit_until() -> &'static std::sync::Mutex<Option<std::time::Instant>> {
+    use std::sync::OnceLock;
+    static UNTIL: OnceLock<std::sync::Mutex<Option<std::time::Instant>>> = OnceLock::new();
+    UNTIL.get_or_init(|| std::sync::Mutex::new(None))
 }
 
 fn execute_gh_json(
@@ -828,11 +924,14 @@ pub fn list_github_issues(
     })?;
     let rows = values
         .into_iter()
-        .map(|value| parse_github_issue_json(&value.to_string()).map(|detail| detail.summary))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| {
-            GitError::new(work_dir, format!("could not parse GitHub issue: {error}"))
-        })?;
+        .filter_map(|value| match parse_github_issue_json(&value.to_string()) {
+            Ok(detail) => Some(detail.summary),
+            Err(error) => {
+                tracing::warn!("skipping unparseable issue entry: {error}");
+                None
+            }
+        })
+        .collect::<Vec<_>>();
     if let Ok(mut cache) = cache.lock() {
         cache.insert(key, (now, rows.clone()));
     }
@@ -891,12 +990,43 @@ pub fn list_github_pull_requests(
             format!("could not parse GitHub pull request list: {error}"),
         )
     })?;
-    let rows = values
+    let rows = summarize_pr_list(values);
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(key, (now, rows.clone()));
+    }
+    Ok(rows)
+}
+
+/// Maps raw `gh pr list` entries onto summaries, skipping malformed ones.
+///
+/// One bad entry (empty url, number 0, deleted repo, unparseable shape) must
+/// never poison the whole list: it is warned about and dropped, the rest
+/// survive. Pure for testing; the `gh` call stays in the caller.
+pub(crate) fn summarize_pr_list(values: Vec<serde_json::Value>) -> Vec<GitHubPullRequestSummary> {
+    values
         .into_iter()
-        .map(|value| {
-            let pr = parse_gh_pr_json(&value.to_string())?;
-            let repository = parse_github_repository(&pr.url)?;
-            Ok(GitHubPullRequestSummary {
+        .filter_map(|value| {
+            let pr = match parse_gh_pr_json(&value.to_string()) {
+                Ok(pr) => pr,
+                Err(error) => {
+                    tracing::warn!("skipping unparseable pull request entry: {error}");
+                    return None;
+                }
+            };
+            // Defaults (number 0, empty url) mark a malformed entry: skip it
+            // rather than poisoning the whole list.
+            if pr.number == 0 || pr.url.is_empty() {
+                tracing::warn!("skipping pull request entry with no number/url");
+                return None;
+            }
+            let repository = match parse_github_repository(&pr.url) {
+                Ok(repository) => repository,
+                Err(error) => {
+                    tracing::warn!("skipping pull request with bad url '{}': {error}", pr.url);
+                    return None;
+                }
+            };
+            Some(GitHubPullRequestSummary {
                 repository,
                 number: pr.number,
                 title: pr.title,
@@ -911,17 +1041,7 @@ pub fn list_github_pull_requests(
                 checks: pr.checks,
             })
         })
-        .collect::<Result<Vec<_>, String>>()
-        .map_err(|message| {
-            GitError::new(
-                work_dir,
-                format!("could not parse GitHub pull request: {message}"),
-            )
-        })?;
-    if let Ok(mut cache) = cache.lock() {
-        cache.insert(key, (now, rows.clone()));
-    }
-    Ok(rows)
+        .collect::<Vec<_>>()
 }
 
 pub fn inspect_pr_number(work_dir: &Path, number: u64) -> Result<GitHubPrInfo, GitError> {

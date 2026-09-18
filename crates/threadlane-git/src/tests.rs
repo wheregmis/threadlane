@@ -1216,3 +1216,40 @@ fn reclaim_refuses_paths_outside_threadlane() {
         reclaim_subagent_worktree(dir.path(), &outside, "threadlane/subagent-x").unwrap_err();
     assert!(error.to_string().contains("outside .threadlane"));
 }
+
+#[test]
+fn pr_list_skips_bad_entries_and_keeps_the_rest() {
+    use crate::github::{rate_limit_message, summarize_pr_list};
+    let good = serde_json::json!({
+        "number": 7,
+        "title": "Good",
+        "url": "https://github.com/o/r/pull/7",
+        "state": "OPEN",
+        "isDraft": false,
+        "headRefName": "feat",
+        "baseRefName": "main",
+        "updatedAt": "2026-09-01T00:00:00Z",
+    });
+    let no_number = serde_json::json!({"title": "No number", "url": ""});
+    let bad_url = serde_json::json!({
+        "number": 8,
+        "title": "Bad url",
+        "url": "not-a-url",
+        "state": "OPEN",
+    });
+    let rows = summarize_pr_list(vec![good, no_number, bad_url]);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].number, 7);
+    assert_eq!(rows[0].title, "Good");
+}
+
+#[test]
+fn rate_limit_messages_are_detected() {
+    assert!(rate_limit_message("API rate limit exceeded for user ID 1.").is_some());
+    assert!(rate_limit_message("You have exceeded a secondary rate limit.").is_some());
+    assert!(rate_limit_message("HTTP 403: rate limit exceeded").is_some());
+    assert!(rate_limit_message("gh: Not Found (HTTP 404)").is_none());
+    assert!(rate_limit_message("").is_none());
+    let guidance = rate_limit_message("API rate limit exceeded for user ID 1.").unwrap();
+    assert!(guidance.contains("Retry") || guidance.contains("retry") || guidance.contains("Wait"));
+}

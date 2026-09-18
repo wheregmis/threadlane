@@ -8417,6 +8417,7 @@ dependencies = [
  "tempfile",
  "threadlane-auth",
  "threadlane-project",
+ "tracing",
 ]
 
 [[package]]
