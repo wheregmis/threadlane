@@ -1,41 +1,52 @@
-//! Native computer-use tools: window introspection, screenshots, input control.
+//! Computer use through the CUA driver (`cua-driver`), not raw OS APIs.
 //!
-//! Approval-gated through [`crate::ComputerApproval`]: screenshots and input
-//! actions require user approval before executing. The first action prompts
-//! with Once/Always scopes and an Always grant is remembered per project;
-//! unattended sessions deny by default, matching the ACP reject-by-default
-//! policy. macOS-only; other platforms get a helpful error.
+//! Every window list, screenshot, accessibility snapshot, and input action
+//! runs through [`crate::driver::driver_call`] (`cua-driver mcp --direct`
+//! over MCP stdio). Approval-gated through [`crate::ComputerApproval`]:
+//! screenshots, accessibility snapshots *with* pixels, and all input or
+//! mutating calls require user approval before executing; read-only discovery
+//! (window lists, permission status, tree-only snapshots) does not. The first
+//! gated action prompts with Once/Always scopes and an Always grant is
+//! remembered per project; unattended sessions deny by default, matching the
+//! ACP reject-by-default policy.
 //!
-//! Screenshots reach the model as JPEG images attached to the tool result
+//! Screenshots reach the model as images attached to the tool result
 //! alongside text metadata; the full file also lands in
-//! `<work_dir>/.threadlane/previews/` for the user.
+//! `<work_dir>/.threadlane/previews/` for the user, with a `latest.json`
+//! sidecar in the global previews dir so the GPUI mirror popup keeps showing
+//! the last capture plus action line. There is no live video poller: the
+//! driver's own agent-cursor overlay shows live input, and the mirror falls
+//! back to the last screenshot. Every screenshot and act still publishes a
+//! [`threadlane_protocol::live`] overlay so the user sees where a click lands.
 //!
-//! Every screenshot and act also feeds the in-process live mirror
-//! ([`threadlane_protocol::live`]): the poller in [`crate::stream`] streams
-//! the target as video while the GPUI popup watches, and acts publish
-//! overlays so the user sees where a click lands.
+//! When no driver binary is installed every tool fails closed with an install
+//! hint instead of touching OS input APIs directly.
 
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 use threadlane_protocol::{AgentToolDefinition, ImageAttachment, ToolExecutor, ToolOutput};
 
+use crate::driver::{driver_available, driver_call, driver_version, DriverResult, DRIVER_MISSING_HINT};
 use crate::{ComputerApproval, ComputerDecision};
 
+pub const COMPUTER_STATUS_TOOL: &str = "computer_status";
 pub const COMPUTER_WINDOWS_TOOL: &str = "computer_windows";
 pub const COMPUTER_SCREENSHOT_TOOL: &str = "computer_screenshot";
 pub const COMPUTER_ACT_TOOL: &str = "computer_act";
-pub const COMPUTER_STATUS_TOOL: &str = "computer_status";
-
-pub const COMPUTER_UNAVAILABLE: &str = "Native computer use is available on macOS only.";
+/// Accessibility snapshot of one window: element tree plus a grounding
+/// screenshot. The cheap re-index path before element actions.
+pub const COMPUTER_AX_TOOL: &str = "computer_ax";
+/// Full-catalog passthrough: any `cua-driver` MCP tool by name. Read-only
+/// discovery skips approval; everything else prompts like `computer_act`.
+pub const CUA_CALL_TOOL: &str = "cua_call";
 
 const MAX_TYPE_CHARS: usize = 4_000;
 /// Screenshots larger than this ride as metadata only, never pixels.
-pub(crate) const MAX_IMAGE_BYTES: usize = 2_000_000;
-/// Capture width bound: enough for UI legibility, small enough for context.
-pub(crate) const SCREENSHOT_WIDTH: u32 = 1_560;
-pub(crate) const SCREENSHOT_JPEG_QUALITY: u8 = 70;
+pub const MAX_IMAGE_BYTES: usize = 2_000_000;
+/// Tree text beyond this is truncated with a note (the driver already caps
+/// the AX walk; this bounds the model-visible Markdown rendering).
+const MAX_TREE_CHARS: usize = 24_000;
 
 pub struct ComputerToolExecutor {
     permissions: Option<Arc<dyn ComputerApproval>>,
@@ -63,7 +74,7 @@ fn computer_tool_definitions() -> Arc<[AgentToolDefinition]> {
     vec![
         AgentToolDefinition::new(
             COMPUTER_STATUS_TOOL,
-            "Report native computer-use availability: OS, window listing, screenshot, and input support. Call this before computer_windows/computer_screenshot/computer_act on a new machine.",
+            "Report computer-use availability: CUA driver version, OS permission status, and window/screenshot/input support. Call this before computer_windows/computer_screenshot/computer_act on a new machine.",
             serde_json::json!({
                 "type": "object",
                 "properties": {},
@@ -72,16 +83,21 @@ fn computer_tool_definitions() -> Arc<[AgentToolDefinition]> {
         ),
         AgentToolDefinition::new(
             COMPUTER_WINDOWS_TOOL,
-            "List on-screen windows: id, app, title, and bounds in display pixels. Coordinates from this list feed computer_act and computer_screenshot.",
+            "List top-level windows: id, app, title, pid, and bounds. Window ids and pids from this list feed computer_screenshot, computer_ax, and computer_act.",
             serde_json::json!({
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "on_screen_only": {
+                        "type": "boolean",
+                        "description": "Drop windows not on the current Space. Default true."
+                    }
+                },
                 "additionalProperties": false
             }),
         ),
         AgentToolDefinition::new(
             COMPUTER_SCREENSHOT_TOOL,
-            "Capture the main display (or one window by id from computer_windows). You receive the image plus its path and dimensions; the user sees the same file and must approve each capture. Prefer the embedded browser tools for web pages.",
+            "Capture the main display (or one window by id from computer_windows). You receive the image plus its path and dimensions; the user sees the same file and must approve each capture. Read click positions off the returned image. Prefer the embedded browser tools for web pages.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -94,8 +110,24 @@ fn computer_tool_definitions() -> Arc<[AgentToolDefinition]> {
             }),
         ),
         AgentToolDefinition::new(
+            COMPUTER_AX_TOOL,
+            "Accessibility snapshot of one window (pid + window_id from computer_windows): interactive element tree plus a grounding screenshot. Ground on both and cross-check — the tree lies on some surfaces (custom-drawn canvases, virtualized rows). Pass element indices from a fresh snapshot to cua_call element actions; indices expire on the next snapshot of the same window. Set include_screenshot:false for the cheap tree-only re-index before acting.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pid": { "type": "integer", "description": "Owner pid from computer_windows." },
+                    "window_id": { "type": "integer", "description": "Window id from computer_windows." },
+                    "query": { "type": "string", "description": "Case-insensitive filter: matching rows plus ancestors, indices unchanged." },
+                    "max_elements": { "type": "integer", "description": "Cap the AX walk (default 2000). Lower for huge Electron trees." },
+                    "include_screenshot": { "type": "boolean", "description": "Default true. False returns the tree only (no approval needed)." }
+                },
+                "required": ["pid", "window_id"],
+                "additionalProperties": false
+            }),
+        ),
+        AgentToolDefinition::new(
             COMPUTER_ACT_TOOL,
-            "Control mouse and keyboard: click, double_click, move, scroll, type, press. Every call asks the user for approval first; denied actions must not be retried verbatim. Coordinates are display pixels from computer_windows.",
+            "Control mouse and keyboard: click, double_click, move, scroll, type, press. Every call asks the user for approval first; denied actions must not be retried verbatim. Delivery is background-first via the CUA driver (cursor and focus usually untouched). Coordinates are screenshot pixels: targeted coordinates are window-local (read off a window screenshot/ax snapshot), untargeted ones are display pixels.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -104,8 +136,8 @@ fn computer_tool_definitions() -> Arc<[AgentToolDefinition]> {
                         "enum": ["click", "double_click", "move", "scroll", "type", "press"],
                         "description": "click/double_click/move need x,y. scroll needs dx/dy in pixels. type needs text. press needs key."
                     },
-                    "x": { "type": "number", "description": "Display x pixel." },
-                    "y": { "type": "number", "description": "Display y pixel." },
+                    "x": { "type": "number", "description": "Screenshot x pixel (window-local when target is set, display pixel otherwise)." },
+                    "y": { "type": "number", "description": "Screenshot y pixel." },
                     "dx": { "type": "number", "description": "Horizontal scroll pixels (positive = right)." },
                     "dy": { "type": "number", "description": "Vertical scroll pixels (positive = down)." },
                     "text": { "type": "string", "description": "Text for the type action." },
@@ -120,10 +152,30 @@ fn computer_tool_definitions() -> Arc<[AgentToolDefinition]> {
                     },
                     "target": {
                         "type": "integer",
-                        "description": "Optional window id from computer_windows. Coordinates become window-relative and input goes straight to that app without moving your cursor or stealing focus. Omit for foreground control with display coordinates."
+                        "description": "Optional window id from computer_windows. Coordinates become window-local and input is delivered to that app in the background. Omit for foreground display coordinates."
                     }
                 },
                 "required": ["action"],
+                "additionalProperties": false
+            }),
+        ),
+        AgentToolDefinition::new(
+            CUA_CALL_TOOL,
+            "Full CUA driver catalog passthrough: call any driver tool not covered above (element clicks via element_token, drag, hotkey, set_value, invoke_menu, clipboard_read/write, launch_app, bring_to_front, set_window_frame, verify_state, zoom, browser_* page tools, recording, sessions). Read-only discovery skips approval; everything else prompts first and denied actions must not be retried verbatim. Get element_token/snapshot_id from computer_ax; get pid/window_id from computer_windows.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "tool": {
+                        "type": "string",
+                        "description": "Driver tool name: click, double_click, drag, move_cursor, scroll, type_text, set_value, press_key, hotkey, right_click, get_window_state, get_accessibility_tree, get_desktop_state, zoom, clipboard_read, clipboard_write, launch_app, kill_app, bring_to_front, set_window_frame, invoke_menu, verify_state, browser_navigate, browser_click, browser_type, browser_pointer, browser_dialog, browser_download, browser_set_input_files, browser_prepare, get_browser_state, get_screen_size, get_cursor_position, check_permissions, start_session, end_session, list_sessions, start_recording, stop_recording, and more (cua-driver list-tools)."
+                    },
+                    "arguments": {
+                        "type": "object",
+                        "description": "Tool arguments object (element_token + snapshot_id for element actions, pid/window_id for window actions).",
+                        "additionalProperties": true
+                    }
+                },
+                "required": ["tool"],
                 "additionalProperties": false
             }),
         ),
@@ -131,89 +183,8 @@ fn computer_tool_definitions() -> Arc<[AgentToolDefinition]> {
     .into()
 }
 
-/// Validated `computer_act` target: a window id whose coordinates are
-/// window-relative and whose input is background-delivered.
-/// Resolved delivery: screen-space intent plus where to post it.
-#[derive(Debug, PartialEq)]
-pub struct TargetedAct {
-    pub(crate) intent: ComputerAct,
-    /// Target process id for background delivery; None posts to the HID
-    /// stream (foreground: moves the cursor, steals focus).
-    pub(crate) pid: Option<i32>,
-    pub(crate) app: Option<String>,
-}
-
-pub(crate) fn parse_act_target(args: &str) -> Result<Option<i64>, String> {
-    let parsed: serde_json::Value = serde_json::from_str(args)
-        .map_err(|error| format!("Invalid {COMPUTER_ACT_TOOL} arguments: {error}"))?;
-    match parsed.get("target") {
-        None => Ok(None),
-        // Window id 0 is kCGNullWindowID and never names a window; a zero
-        // target is always a caller defaulting the field, not a real target.
-        Some(value) => value
-            .as_i64()
-            .filter(|id| *id > 0)
-            .map(Some)
-            .ok_or_else(|| {
-                "`computer_act` target must be a window id from computer_windows.".to_string()
-            }),
-    }
-}
-
-/// Resolve a parsed intent against an optional target window: window-relative
-/// coordinates shift to screen space and delivery becomes background
-/// (`post_to_pid`, cursor untouched). Untargeted intents keep display
-/// coordinates and HID delivery.
-#[cfg(target_os = "macos")]
-fn resolve_target(intent: ComputerAct, target: Option<i64>) -> Result<TargetedAct, String> {
-    let Some(id) = target else {
-        return Ok(TargetedAct {
-            intent,
-            pid: None,
-            app: None,
-        });
-    };
-    let (pid, owner, (origin_x, origin_y)) = mac::find_window(id as i32).ok_or_else(|| {
-        format!("Window {id} is gone; re-list with computer_windows and pick a live id.")
-    })?;
-    let shift = |x: f64, y: f64| (x + origin_x, y + origin_y);
-    let intent = match intent {
-        ComputerAct::Click { x, y, modifiers } => {
-            let (x, y) = shift(x, y);
-            ComputerAct::Click { x, y, modifiers }
-        }
-        ComputerAct::DoubleClick { x, y, modifiers } => {
-            let (x, y) = shift(x, y);
-            ComputerAct::DoubleClick { x, y, modifiers }
-        }
-        ComputerAct::Move { x, y } => {
-            let (x, y) = shift(x, y);
-            ComputerAct::Move { x, y }
-        }
-        // Scroll deltas, text, and keys are coordinate-free.
-        intent => intent,
-    };
-    Ok(TargetedAct {
-        intent,
-        pid: Some(pid),
-        app: Some(owner),
-    })
-}
-
-#[cfg(not(target_os = "macos"))]
-fn resolve_target(intent: ComputerAct, target: Option<i64>) -> Result<TargetedAct, String> {
-    if target.is_some() {
-        return Err(COMPUTER_UNAVAILABLE.to_string());
-    }
-    Ok(TargetedAct {
-        intent,
-        pid: None,
-        app: None,
-    })
-}
-
 /// Validated `computer_act` intent. Pure and cross-platform for testability;
-/// execution is macOS-only.
+/// execution goes through the CUA driver.
 #[derive(Debug, PartialEq)]
 pub enum ComputerAct {
     Click {
@@ -320,7 +291,7 @@ fn parse_modifiers(args: &serde_json::Value) -> Result<Vec<String>, String> {
         .collect()
 }
 
-pub(crate) fn parse_computer_act(args: &str) -> Result<ComputerAct, String> {
+pub fn parse_computer_act(args: &str) -> Result<ComputerAct, String> {
     let parsed: serde_json::Value = serde_json::from_str(args)
         .map_err(|error| format!("Invalid {COMPUTER_ACT_TOOL} arguments: {error}"))?;
     let action = parsed
@@ -387,7 +358,7 @@ pub(crate) fn parse_computer_act(args: &str) -> Result<ComputerAct, String> {
                 .filter(|key| !key.is_empty())
                 .ok_or_else(|| "`computer_act` press requires `key`.".to_string())?;
             // Named keys (Enter, Escape, …) or one character for combos
-            // (cmd+L, ctrl+C): single characters ride the unicode path.
+            // (cmd+L, ctrl+C): single characters ride press_key directly.
             let is_character = key.chars().count() == 1;
             if !is_character && !VALID_KEYS.contains(&key) {
                 return Err(format!(
@@ -404,6 +375,55 @@ pub(crate) fn parse_computer_act(args: &str) -> Result<ComputerAct, String> {
             "`computer_act` action must be one of click, double_click, move, scroll, type, press."
                 .into(),
         ),
+    }
+}
+
+pub fn parse_act_target(args: &str) -> Result<Option<i64>, String> {
+    let parsed: serde_json::Value = serde_json::from_str(args)
+        .map_err(|error| format!("Invalid {COMPUTER_ACT_TOOL} arguments: {error}"))?;
+    match parsed.get("target") {
+        None => Ok(None),
+        // Window id 0 is kCGNullWindowID and never names a window; a zero
+        // target is always a caller defaulting the field, not a real target.
+        Some(value) => value
+            .as_i64()
+            .filter(|id| *id > 0)
+            .map(Some)
+            .ok_or_else(|| {
+                "`computer_act` target must be a window id from computer_windows.".to_string()
+            }),
+    }
+}
+
+/// Driver modifier names: ours match except `alt`, which the driver spells
+/// `option`.
+fn driver_modifiers(modifiers: &[String]) -> Vec<String> {
+    modifiers
+        .iter()
+        .map(|modifier| {
+            if modifier == "alt" {
+                "option".to_string()
+            } else {
+                modifier.clone()
+            }
+        })
+        .collect()
+}
+
+/// Driver key names are lowercase (`return`, `escape`, …); single characters
+/// pass through lowercased.
+fn driver_key(key: &str) -> String {
+    match key {
+        "Enter" => "return".to_string(),
+        "Escape" => "escape".to_string(),
+        "Tab" => "tab".to_string(),
+        "Space" => "space".to_string(),
+        "Backspace" | "Delete" => "delete".to_string(),
+        "Up" => "up".to_string(),
+        "Down" => "down".to_string(),
+        "Left" => "left".to_string(),
+        "Right" => "right".to_string(),
+        single => single.to_lowercase(),
     }
 }
 
@@ -428,873 +448,212 @@ impl ToolExecutor for ComputerToolExecutor {
         work_dir: Option<&Path>,
     ) -> Option<Result<String, String>> {
         match name {
-            COMPUTER_STATUS_TOOL => Some(Ok(computer_status())),
-            COMPUTER_WINDOWS_TOOL => {
-                #[cfg(target_os = "macos")]
-                {
-                    Some(list_windows())
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    let _ = args;
-                    Some(Err(COMPUTER_UNAVAILABLE.to_string()))
-                }
-            }
-            COMPUTER_SCREENSHOT_TOOL => {
-                #[cfg(target_os = "macos")]
-                {
-                    Some(self.screenshot(args, work_dir).await)
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    let _ = (args, work_dir);
-                    Some(Err(COMPUTER_UNAVAILABLE.to_string()))
-                }
-            }
-            COMPUTER_ACT_TOOL => {
-                #[cfg(target_os = "macos")]
-                {
-                    Some(self.act(args, work_dir).await)
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    let _ = (args, work_dir);
-                    Some(Err(COMPUTER_UNAVAILABLE.to_string()))
-                }
-            }
+            COMPUTER_STATUS_TOOL => Some(Ok(computer_status().await)),
+            COMPUTER_WINDOWS_TOOL => Some(list_windows(args).await),
+            COMPUTER_SCREENSHOT_TOOL => Some(
+                self.screenshot_with_output(args, work_dir)
+                    .await
+                    .map(|output| output.content),
+            ),
+            COMPUTER_AX_TOOL => Some(
+                self.ax_with_output(args, work_dir)
+                    .await
+                    .map(|output| output.content),
+            ),
+            COMPUTER_ACT_TOOL => Some(self.act(args, work_dir).await),
+            CUA_CALL_TOOL => Some(
+                self.cua_call_with_output(args, work_dir)
+                    .await
+                    .map(|output| output.content),
+            ),
             _ => None,
         }
     }
 
-    /// Screenshots ride the rich path so pixels reach the provider payload;
-    /// every other tool keeps the default string mapping.
-    #[cfg(target_os = "macos")]
+    /// Image-bearing tools ride the rich path so pixels reach the provider
+    /// payload; every other tool keeps the default string mapping.
     async fn execute_tool_with_output_in_workspace(
         &self,
         name: &str,
         args: &str,
         work_dir: Option<&Path>,
     ) -> Option<Result<ToolOutput, String>> {
-        if name == COMPUTER_SCREENSHOT_TOOL {
-            return Some(self.screenshot_with_image(args, work_dir).await);
-        }
-        self.execute_tool_in_workspace(name, args, work_dir)
-            .await
-            .map(|result| result.map(ToolOutput::from))
-    }
-}
-
-fn computer_status() -> String {
-    #[cfg(target_os = "macos")]
-    {
-        "Native computer use is available on this Mac: computer_windows lists on-screen windows, computer_screenshot captures the display or one window, computer_act clicks/types/presses keys. Every screenshot and input action asks for approval first; macOS may also prompt for Screen Recording and Accessibility on first use (System Settings → Privacy & Security)."
-            .to_string()
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        COMPUTER_UNAVAILABLE.to_string()
-    }
-}
-
-#[cfg(target_os = "macos")]
-mod mac {
-    use super::*;
-    use core_foundation::base::TCFType;
-    use core_foundation::boolean::CFBoolean;
-    use core_foundation::dictionary::CFDictionary;
-    use core_foundation::number::CFNumber;
-    use core_foundation::string::{CFString, CFStringRef};
-
-    pub(super) fn previews_dir(work_dir: Option<&Path>) -> PathBuf {
-        work_dir
-            .unwrap_or_else(|| Path::new("."))
-            .join(".threadlane")
-            .join("previews")
-    }
-
-    pub(super) fn list_windows() -> Result<String, String> {
-        let own_pid = std::process::id() as i32;
-        let mut rows = Vec::new();
-        for window in window_infos()?
-            .into_iter()
-            .filter(|window| window.onscreen && window.pid != own_pid && window.id >= 0)
-        {
-            rows.push(format!(
-                "id={} app={:?} title={:?} pid={} layer={} alpha={:.2} x={:.0} y={:.0} w={:.0} h={:.0}",
-                window.id,
-                window.owner,
-                window.title,
-                window.pid,
-                window.layer,
-                window.alpha,
-                window.bounds.0,
-                window.bounds.1,
-                window.bounds.2,
-                window.bounds.3
-            ));
-            if rows.len() >= 50 {
-                break;
-            }
-        }
-        if rows.is_empty() {
-            return Ok("No on-screen windows found.".to_string());
-        }
-        Ok(format!(
-            "On-screen windows (display pixels; Threadlane's own windows are hidden — never act on them):\n{}",
-            rows.join("\n")
-        ))
-    }
-
-    /// On-screen window ids excluding our own PID, for recursion-free capture.
-    /// Hide our own windows: the agent must never drive Threadlane itself,
-    /// or approvals and focus chase each other in a loop.
-    pub(super) fn capture_window_ids() -> Vec<i32> {
-        let own_pid = std::process::id() as i32;
-        window_infos()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|window| window.onscreen && window.pid != own_pid && window.id >= 0)
-            .map(|window| window.id)
-            .collect()
-    }
-
-    /// Resolve a target window id to (pid, owner, bounds origin) for
-    /// background delivery. Our own windows stay unaddressable even if a
-    /// stale id names one.
-    pub(super) fn find_window(id: i32) -> Option<(i32, String, (f64, f64))> {
-        let own_pid = std::process::id() as i32;
-        window_infos().ok()?.into_iter().find_map(|window| {
-            (window.id == id && window.onscreen && window.pid != own_pid).then(|| {
-                (
-                    window.pid,
-                    window.owner.clone(),
-                    (window.bounds.0, window.bounds.1),
-                )
-            })
-        })
-    }
-
-    /// One WindowServer composite of a target: full-resolution pixels plus
-    /// the screen-space geometry needed to scale and map them. Both tiers
-    /// (live BGRA for the mirror, JPEG for the model) derive from one
-    /// composite, so a poll costs one WindowServer round trip.
-    pub struct Composite {
-        image: core_graphics::image::CGImage,
-        resolution: CaptureResolution,
-        /// Top-left of the captured region in display points.
-        pub origin_points: (f64, f64),
-        /// Captured region size in display points.
-        pub points_size: (f64, f64),
-    }
-
-    impl Composite {
-        /// Downscale to at most `max_width` pixels wide as opaque
-        /// little-endian BGRA (B, G, R, A in memory with A at 255, give or
-        /// take CoreGraphics' resampling rounding), the layout gpui uploads
-        /// untouched. CoreGraphics resamples in one pass; no Rust
-        /// per-pixel loop. Model-tier (best-resolution) composites use
-        /// proper filtering so hairlines and small text survive the ~2×
-        /// reduction; the live tier takes the cheaper low-quality resample.
-        /// A refused bitmap context is an error, never a panic: the poller
-        /// must survive it and the one-shot path must fall back.
-        pub fn bgra(&self, max_width: u32) -> Result<(Vec<u8>, u32, u32), String> {
-            use core_graphics::context::CGInterpolationQuality;
-            let interpolation = match self.resolution {
-                CaptureResolution::Best => CGInterpolationQuality::CGInterpolationQualityDefault,
-                CaptureResolution::Nominal => CGInterpolationQuality::CGInterpolationQualityLow,
-            };
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                scale_bgra(&self.image, max_width, interpolation)
-            }))
-            .unwrap_or_else(|_| Err("CoreGraphics refused the bitmap context.".to_string()))
-        }
-
-        /// Bounded JPEG for the model from the same composite.
-        pub fn jpeg(&self, max_width: u32, quality: u8) -> Result<(Vec<u8>, u32, u32), String> {
-            let (bgra, width, height) = self.bgra(max_width)?;
-            let jpeg = crate::stream::encode_bgra_jpeg(&bgra, width, height, quality)?;
-            Ok((jpeg, width, height))
-        }
-    }
-
-    /// Whether this process may read other apps' pixels. Never prompts.
-    /// Without the grant a composite is not blank but hollow — other apps'
-    /// windows are silently omitted — so ask first instead of inspecting.
-    pub fn screen_capture_granted() -> bool {
-        #[link(name = "CoreGraphics", kind = "framework")]
-        extern "C" {
-            fn CGPreflightScreenCaptureAccess() -> bool;
-        }
-        unsafe { CGPreflightScreenCaptureAccess() }
-    }
-
-    pub const SCREEN_RECORDING_HINT: &str = "Screen Recording permission is missing: grant it to this app in System Settings → Privacy & Security, then retry.";
-
-    /// Pixel density of a composite. The WindowServer round trip costs the
-    /// same either way (~22ms measured); everything downstream is 4× cheaper
-    /// at nominal, which is why the live mirror uses it while the model keeps
-    /// full resolution for legible text in small windows.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub enum CaptureResolution {
-        /// Display points, 1:1 — no scale bookkeeping, no Retina backing.
-        Nominal,
-        /// The display's best (Retina 2×) backing.
-        Best,
-    }
-
-    /// Composite `target` through the WindowServer: every on-screen window
-    /// except ours for the display, or one window cropped to its bounds so
-    /// the model sees just what it drives and coordinates stay window-local.
-    /// Unlike `screencapture` this never includes Threadlane's own windows,
-    /// so a mirror popup cannot recurse. Fails closed without Screen
-    /// Recording access so callers fall back to `screencapture`, which owns
-    /// the TCC prompt.
-    pub fn composite_target(
-        target: crate::stream::StreamTarget,
-        resolution: CaptureResolution,
-    ) -> Result<Composite, String> {
-        use core_foundation::array::CFArray;
-        use core_graphics::display::CGDisplay;
-        use core_graphics::geometry::{CGPoint, CGRect, CGSize};
-        use core_graphics::window::{
-            create_image_from_array, kCGWindowImageDefault, kCGWindowImageNominalResolution,
-        };
-
-        if !screen_capture_granted() {
-            return Err(SCREEN_RECORDING_HINT.to_string());
-        }
-        let (ids, rect) = match target {
-            crate::stream::StreamTarget::Display => {
-                let ids = capture_window_ids();
-                if ids.is_empty() {
-                    return Err("No capturable windows.".to_string());
-                }
-                (ids, CGDisplay::main().bounds())
-            }
-            crate::stream::StreamTarget::Window(id) => {
-                let id = id as i32;
-                // Our own windows stay unaddressable here too, or a stale
-                // id could point the mirror at itself.
-                let own_pid = std::process::id() as i32;
-                let bounds = window_infos()
-                    .ok()
-                    .and_then(|infos| {
-                        infos.into_iter().find_map(|window| {
-                            (window.id == id && window.onscreen && window.pid != own_pid)
-                                .then_some(window.bounds)
-                        })
-                    })
-                    .ok_or_else(|| {
-                        format!(
-                            "Window {id} is gone; re-list with computer_windows and pick a live id."
-                        )
-                    })?;
-                if bounds.2 < 1.0 || bounds.3 < 1.0 {
-                    return Err(format!("Window {id} has no visible area."));
-                }
-                (
-                    vec![id],
-                    CGRect::new(
-                        &CGPoint::new(bounds.0, bounds.1),
-                        &CGSize::new(bounds.2, bounds.3),
-                    ),
-                )
-            }
-        };
-        // Plain window numbers with no CF callbacks, exactly like the system
-        // `create_window_list` array: WindowServer reads each element as a
-        // `CGWindowID` cast to `void*`, not a CFNumber object. The elements
-        // must be pointer-sized — `CFArrayCreate` copies `len` pointers out
-        // of the buffer, so a `u32` slice would pair up ids and read past
-        // its end.
-        let raw: Vec<usize> = ids.iter().map(|id| *id as u32 as usize).collect();
-        let array = CFArray::from_copyable(&raw).to_untyped();
-        let option = match resolution {
-            CaptureResolution::Nominal => kCGWindowImageNominalResolution,
-            CaptureResolution::Best => kCGWindowImageDefault,
-        };
-        let image = create_image_from_array(rect, array, option)
-            .ok_or_else(|| "Window composite failed.".to_string())?;
-        if image.width() == 0 || image.height() == 0 {
-            return Err("Window composite is empty.".to_string());
-        }
-        Ok(Composite {
-            image,
-            resolution,
-            origin_points: (rect.origin.x, rect.origin.y),
-            points_size: (rect.size.width, rect.size.height),
-        })
-    }
-
-    /// Draw `image` into a bounded bitmap context and hand back its bytes:
-    /// opaque BGRA, rows top-down, `width × 4` bytes per row. The context is
-    /// first filled with a dark backdrop: windows-only composites leave
-    /// uncovered desktop transparent, and gpui blends with straight alpha,
-    /// so opaque output is the only layout both tiers agree on. Panics if
-    /// CoreGraphics refuses the context (`create_bitmap_context` asserts);
-    /// callers catch that.
-    fn scale_bgra(
-        image: &core_graphics::image::CGImage,
-        max_width: u32,
-        interpolation: core_graphics::context::CGInterpolationQuality,
-    ) -> Result<(Vec<u8>, u32, u32), String> {
-        use core_graphics::base::{kCGBitmapByteOrder32Little, kCGImageAlphaPremultipliedFirst};
-        use core_graphics::context::{CGContext, CGInterpolationQuality};
-        use core_graphics::geometry::{CGPoint, CGRect, CGSize};
-
-        let source_width = u32::try_from(image.width()).unwrap_or(u32::MAX);
-        let source_height = u32::try_from(image.height()).unwrap_or(u32::MAX);
-        if source_width == 0 || source_height == 0 {
-            return Err("Window composite is empty.".to_string());
-        }
-        let width = source_width.min(max_width.max(1));
-        let height =
-            ((u64::from(source_height) * u64::from(width)) / u64::from(source_width)).max(1) as u32;
-        let bytes_per_row = width as usize * 4;
-        // The composite's own profile: a DeviceRGB/sRGB context would colour
-        // match every pixel (+25ms measured) for a picture that is, by
-        // definition, already what the screen shows.
-        let color_space = image.color_space();
-        let mut context = CGContext::create_bitmap_context(
-            None,
-            width as usize,
-            height as usize,
-            8,
-            bytes_per_row,
-            &color_space,
-            kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little,
-        );
-        let rect = CGRect::new(
-            &CGPoint::new(0.0, 0.0),
-            &CGSize::new(f64::from(width), f64::from(height)),
-        );
-        context.set_rgb_fill_color(0.08, 0.08, 0.09, 1.0);
-        context.fill_rect(rect);
-        context.set_interpolation_quality(if width < source_width {
-            interpolation
-        } else {
-            CGInterpolationQuality::CGInterpolationQualityNone
-        });
-        context.draw_image(rect, image);
-        context.flush();
-        let stride = context.bytes_per_row();
-        let rows = height as usize;
-        let data = context.data();
-        if data.len() < stride * rows {
-            return Err("Bitmap context is short.".to_string());
-        }
-        let mut bgra = Vec::with_capacity(bytes_per_row * rows);
-        if stride == bytes_per_row {
-            bgra.extend_from_slice(&data[..bytes_per_row * rows]);
-        } else {
-            for row in 0..rows {
-                bgra.extend_from_slice(&data[row * stride..row * stride + bytes_per_row]);
-            }
-        }
-        Ok((bgra, width, height))
-    }
-
-    /// Current pointer position in display points (top-left origin), for the
-    /// mirror's cursor overlay. `None` without an event source.
-    pub fn pointer_location() -> Option<(f64, f64)> {
-        use core_graphics::event::CGEvent;
-        use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
-
-        let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState).ok()?;
-        let location = CGEvent::new(source).ok()?.location();
-        Some((location.x, location.y))
-    }
-
-    /// Display points per served image pixel: window bounds and input
-    /// events live in points while screenshots are downscaled pixels.
-    /// Kept for callers that only know the served width; prefer passing the
-    /// exact source width through capture results instead.
-    pub(super) fn display_scale_for(served_width: u32) -> f64 {
-        use core_graphics::display::CGDisplay;
-        if served_width == 0 {
-            return 1.0;
-        }
-        let points = CGDisplay::main().bounds().size.width;
-        if points <= 0.0 {
-            return 1.0;
-        }
-        points / f64::from(served_width)
-    }
-
-    /// Read one window dictionary by comparing key names. Comparing
-    /// content (not pointers) keeps this independent of CF key-callback
-    /// details; the kCGWindow* names are stable API.
-    pub(super) struct WindowInfo {
-        pub(super) id: i32,
-        owner: String,
-        title: String,
-        pid: i32,
-        layer: i32,
-        alpha: f64,
-        pub(super) bounds: (f64, f64, f64, f64),
-        onscreen: bool,
-    }
-    fn cf_string(ptr: *const std::ffi::c_void) -> String {
-        unsafe { CFString::wrap_under_get_rule(ptr as CFStringRef) }.to_string()
-    }
-
-    fn cf_number(value: &core_foundation::base::CFType) -> Option<CFNumber> {
-        value.downcast::<CFNumber>()
-    }
-
-    fn read_dictionary(dict: &CFDictionary) -> WindowInfo {
-        let mut strings = std::collections::HashMap::new();
-        let mut numbers = std::collections::HashMap::new();
-        let mut onscreen = false;
-        let mut bounds = (0.0, 0.0, 0.0, 0.0);
-        let (keys, values) = dict.get_keys_and_values();
-        for (key, value) in keys.iter().zip(values.iter()) {
-            let name = cf_string(*key);
-            let value = unsafe { core_foundation::base::CFType::wrap_under_get_rule(*value) };
-            if name == "kCGWindowBounds" {
-                if let Some(rect) = value.downcast::<CFDictionary>() {
-                    let (rect_keys, rect_values) = rect.get_keys_and_values();
-                    let mut components = std::collections::HashMap::new();
-                    for (rect_key, rect_value) in rect_keys.iter().zip(rect_values.iter()) {
-                        let rect_value = unsafe {
-                            core_foundation::base::CFType::wrap_under_get_rule(*rect_value)
-                        };
-                        if let Some(number) = cf_number(&rect_value) {
-                            if let Some(component) = number.to_f64() {
-                                components.insert(cf_string(*rect_key), component);
-                            }
-                        }
-                    }
-                    bounds = (
-                        components.get("X").copied().unwrap_or(0.0),
-                        components.get("Y").copied().unwrap_or(0.0),
-                        components.get("Width").copied().unwrap_or(0.0),
-                        components.get("Height").copied().unwrap_or(0.0),
-                    );
-                }
-                continue;
-            }
-            if name == "kCGWindowIsOnscreen" {
-                onscreen = value
-                    .downcast::<CFBoolean>()
-                    .is_some_and(|flag| flag == CFBoolean::true_value());
-                continue;
-            }
-            if let Some(text) = value.downcast::<CFString>() {
-                strings.insert(name, text.to_string());
-                continue;
-            }
-            if let Some(number) = cf_number(&value) {
-                numbers.insert(name, number);
-                continue;
-            }
-        }
-        let integer = |name: &str, fallback: i32| {
-            numbers
-                .get(name)
-                .and_then(|number| {
-                    number
-                        .to_i32()
-                        .or_else(|| number.to_f64().map(|value| value as i32))
-                })
-                .unwrap_or(fallback)
-        };
-        WindowInfo {
-            id: integer("kCGWindowNumber", -1),
-            owner: strings
-                .get("kCGWindowOwnerName")
-                .cloned()
-                .unwrap_or_default(),
-            title: strings.get("kCGWindowName").cloned().unwrap_or_default(),
-            pid: integer("kCGWindowOwnerPID", -1),
-            layer: integer("kCGWindowLayer", -1),
-            alpha: numbers
-                .get("kCGWindowAlpha")
-                .and_then(|number| number.to_f64())
-                .unwrap_or(1.0),
-            bounds,
-            onscreen,
-        }
-    }
-
-    pub(super) fn window_infos() -> Result<Vec<WindowInfo>, String> {
-        use core_foundation::base::{CFIndex, TCFType};
-        use core_foundation::dictionary::CFDictionary;
-        use core_graphics::window::{
-            copy_window_info, kCGNullWindowID, kCGWindowListExcludeDesktopElements,
-            kCGWindowListOptionOnScreenOnly,
-        };
-
-        let info = copy_window_info(
-            kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
-            kCGNullWindowID,
-        )
-        .ok_or_else(|| "Could not list windows.".to_string())?;
-        let mut windows = Vec::new();
-        for index in 0..info.len().min(50) {
-            let Some(item) = info.get(index as CFIndex) else {
-                continue;
-            };
-            let raw: *const std::ffi::c_void = *item;
-            let dict = unsafe { core_foundation::base::CFType::wrap_under_get_rule(raw) };
-            let Some(dict) = dict.downcast::<CFDictionary>() else {
-                continue;
-            };
-            windows.push(read_dictionary(&dict));
-        }
-        Ok(windows)
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn list_windows() -> Result<String, String> {
-    mac::list_windows()
-}
-
-#[cfg(target_os = "macos")]
-impl ComputerToolExecutor {
-    async fn screenshot(&self, args: &str, work_dir: Option<&Path>) -> Result<String, String> {
-        Ok(self.screenshot_with_image(args, work_dir).await?.content)
-    }
-
-    async fn screenshot_with_image(
-        &self,
-        args: &str,
-        work_dir: Option<&Path>,
-    ) -> Result<ToolOutput, String> {
-        let window_id: Option<i64> = serde_json::from_str::<serde_json::Value>(args)
-            .ok()
-            .and_then(|value| value.get("window_id")?.as_i64());
-        let target = match window_id {
-            Some(id) => format!("window {id}"),
-            None => "the main display".to_string(),
-        };
-        self.approve(
-            format!("Screenshot {target}"),
-            format!("Capture {target}. You will see the image; the agent receives it too."),
-        )
-        .await?;
-        let dir = mac::previews_dir(work_dir);
-        std::fs::create_dir_all(&dir)
-            .map_err(|error| format!("Could not create preview dir: {error}"))?;
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_millis())
-            .unwrap_or(0);
-        let path = dir.join(format!("computer-{stamp}.jpg"));
-        // The live mirror is global (one popup, many project sessions) while
-        // history stays per-project.
-        let mirror_dir = resolve_previews_dir(work_dir).unwrap_or_else(|| dir.clone());
-        // Live stream first: a fresh frame for this exact target is instant
-        // and already excludes our own windows. Otherwise fall back to
-        // one-shot capture (which also warms the stream for next time).
-        let target = match window_id {
-            Some(id) => crate::stream::StreamTarget::Window(id as u32),
-            None => crate::stream::StreamTarget::Display,
-        };
-        crate::stream::ensure_stream(target);
-        if let Some(frame) = crate::stream::fresh_frame(target) {
-            // Only the JPEG encode is paid here, off the async executor.
-            let (width, height, src_points_width) =
-                (frame.width, frame.height, frame.src_points_width);
-            let jpeg = tokio::task::spawn_blocking(move || {
-                crate::stream::encode_bgra_jpeg(
-                    &frame.bgra,
-                    frame.width,
-                    frame.height,
-                    SCREENSHOT_JPEG_QUALITY,
-                )
-            })
-            .await
-            .map_err(|error| format!("Screenshot encode failed: {error}"))??;
-            std::fs::write(&path, &jpeg)
-                .map_err(|error| format!("Could not save screenshot: {error}"))?;
-            write_mirror_sidecar(
-                &mirror_dir,
-                Some(&path),
-                &format!("Screenshot {} (live)", target.label()),
-            );
-            note_screenshot(target);
-            return Ok(attach_jpeg(
-                &path,
-                &jpeg,
-                &format!("{width}x{height}"),
-                Some(target),
-                src_points_width / f64::from(width.max(1)),
-            ));
-        }
-        // One-shot capture, target-aware: a window id composites just that
-        // window so the model sees what it drives instead of a full display
-        // with Threadlane mixed in. Falls back to `screencapture` (which owns
-        // the TCC prompt) when the composite is unavailable or blank.
-        // Each arm yields (bytes, dims text, source points width) so clicks
-        // convert image pixels back to display points exactly.
-        // The composite, downscale, and encode are all CPU work; keep them
-        // off the async executor like every other capture path.
-        let composited = tokio::task::spawn_blocking(move || {
-            capture_composited_for_target(target, SCREENSHOT_WIDTH, SCREENSHOT_JPEG_QUALITY)
-        })
-        .await
-        .map_err(|error| format!("Screenshot task failed: {error}"))
-        .and_then(|result| result);
-        let (bytes, dims, src_points_width) = match composited {
-            Ok((bytes, width, height, src_points_width)) => {
-                std::fs::write(&path, &bytes)
-                    .map_err(|error| format!("Could not save screenshot: {error}"))?;
-                (bytes, format!("{width}x{height}"), src_points_width)
-            }
-            Err(_) => {
-                let bytes = tokio::task::spawn_blocking({
-                    let path = path.clone();
-                    move || capture_jpeg(window_id, &path)
-                })
+        match name {
+            COMPUTER_SCREENSHOT_TOOL => Some(self.screenshot_with_output(args, work_dir).await),
+            COMPUTER_AX_TOOL => Some(self.ax_with_output(args, work_dir).await),
+            CUA_CALL_TOOL => Some(self.cua_call_with_output(args, work_dir).await),
+            _ => self
+                .execute_tool_in_workspace(name, args, work_dir)
                 .await
-                .map_err(|error| format!("Screenshot task failed: {error}"))??;
-                let dims = jpeg_dimensions(&path).unwrap_or_else(|| "unknown size".to_string());
-                let served_width = dims
-                    .split('x')
-                    .next()
-                    .and_then(|width| width.parse::<u32>().ok())
-                    .unwrap_or(SCREENSHOT_WIDTH);
-                // screencapture covers the display: fall back to display scale
-                // (source points = served pixels × scale).
-                let src_points_width = served_width as f64 * mac::display_scale_for(served_width);
-                (bytes, dims, src_points_width)
-            }
-        };
-        write_mirror_sidecar(
-            &mirror_dir,
-            Some(&path),
-            &format!("Screenshot {}", target.label()),
-        );
-        note_screenshot(target);
-        let served_width = dims
-            .split('x')
-            .next()
-            .and_then(|width| width.parse::<u32>().ok())
-            .unwrap_or(SCREENSHOT_WIDTH);
-        Ok(attach_jpeg(
-            &path,
-            &bytes,
-            &dims,
-            Some(target),
-            src_points_width / f64::from(served_width.max(1)),
-        ))
-    }
-
-    async fn act(&self, args: &str, work_dir: Option<&Path>) -> Result<String, String> {
-        let intent = parse_computer_act(args)?;
-        let raw_target = parse_act_target(args)?;
-        // Convert image-pixel coordinates to display points using the scale
-        // recorded when this target was last screenshotted. Without a scale
-        // reference the model is acting blind: proceed unscaled but say so.
-        let scale_target = match raw_target {
-            Some(id) => Some(crate::stream::StreamTarget::Window(id as u32)),
-            None => Some(crate::stream::StreamTarget::Display),
-        };
-        let scale = scale_target
-            .and_then(crate::stream::served_scale)
-            .unwrap_or(1.0);
-        let scale_note =
-            if scale_target.is_some_and(|target| crate::stream::served_scale(target).is_none()) {
-                " (no scale reference on file — screenshot the target first for precise clicks)"
-            } else {
-                ""
-            };
-        let mut intent = intent;
-        match &mut intent {
-            ComputerAct::Click { x, y, .. }
-            | ComputerAct::DoubleClick { x, y, .. }
-            | ComputerAct::Move { x, y } => {
-                *x *= scale;
-                *y *= scale;
-            }
-            // Scroll deltas are wheel units, not screen positions.
-            ComputerAct::Scroll { .. } | ComputerAct::Type { .. } | ComputerAct::Press { .. } => {}
+                .map(|result| result.map(ToolOutput::from)),
         }
-        let targeted = resolve_target(intent, raw_target)?;
-        let mut title = targeted.intent.approval_title();
-        if let Some(app) = &targeted.app {
-            title = format!("{title} in {app}");
-        }
-        let delivery = if targeted.pid.is_some() {
-            "Background delivery: your cursor and focus stay untouched."
-        } else {
-            "Foreground delivery: the cursor will move and focus may change."
-        };
-        self.approve(
-            title.clone(),
-            format!("{title} on this Mac. {delivery} Deny if the target looks wrong."),
-        )
-        .await?;
-        // Keep the live mirror rolling through act sequences and show the
-        // user where this one lands as it happens.
-        let mirror_dir = resolve_previews_dir(work_dir);
-        crate::stream::touch_or_start(scale_target.unwrap_or(crate::stream::StreamTarget::Display));
-        publish_act_overlay(&targeted.intent, &title);
-        let outcome =
-            tokio::task::spawn_blocking(move || perform_act(&targeted.intent, targeted.pid))
-                .await
-                .map_err(|error| format!("Input task failed: {error}"))?;
-        if let Ok(outcome) = &outcome {
-            if let Some(mirror_dir) = &mirror_dir {
-                write_mirror_sidecar(
-                    mirror_dir,
-                    None,
-                    &format!("{title} — {outcome}{scale_note}"),
-                );
-            }
-        }
-        outcome.map(|outcome| format!("{outcome}{scale_note}"))
     }
 }
 
-/// Flash the mirror: the model just took a picture of `target`.
-#[cfg(target_os = "macos")]
-fn note_screenshot(target: crate::stream::StreamTarget) {
-    threadlane_protocol::live::publish_overlay(
-        threadlane_protocol::live::LiveOverlayKind::Screenshot,
-        None,
-        None,
-        format!("Screenshot {}", target.label()),
-    );
-}
-
-/// Publish the mirror overlay for an act in screen space, after target
-/// resolution so window-relative coordinates already carry the window
-/// origin.
-#[cfg(target_os = "macos")]
-fn publish_act_overlay(intent: &ComputerAct, label: &str) {
-    use threadlane_protocol::live::{publish_overlay, LiveOverlayKind};
-    match intent {
-        ComputerAct::Click { x, y, .. } => {
-            publish_overlay(LiveOverlayKind::Click, Some((*x, *y)), None, label)
-        }
-        ComputerAct::DoubleClick { x, y, .. } => {
-            publish_overlay(LiveOverlayKind::DoubleClick, Some((*x, *y)), None, label)
-        }
-        ComputerAct::Move { x, y } => {
-            publish_overlay(LiveOverlayKind::Move, Some((*x, *y)), None, label)
-        }
-        // Wheel events land under the pointer.
-        ComputerAct::Scroll { dx, dy } => publish_overlay(
-            LiveOverlayKind::Scroll,
-            mac::pointer_location(),
-            Some((*dx, *dy)),
-            label,
-        ),
-        ComputerAct::Type { .. } => publish_overlay(LiveOverlayKind::Type, None, None, label),
-        ComputerAct::Press { .. } => publish_overlay(LiveOverlayKind::Press, None, None, label),
+async fn computer_status() -> String {
+    let Some(version) = driver_version().await else {
+        return DRIVER_MISSING_HINT.to_string();
     };
+    // Read-only probe: prompt:false never raises a system dialog.
+    let permissions = driver_call("check_permissions", serde_json::json!({"prompt": false}))
+        .await
+        .ok();
+    let permission_line = permissions
+        .as_ref()
+        .and_then(|result| result.structured.clone())
+        .map(|structured| {
+            let flag = |name: &str| {
+                structured
+                    .get(name)
+                    .and_then(|value| value.as_bool())
+                    .map(|granted| {
+                        if granted {
+                            "granted".to_string()
+                        } else {
+                            "missing".to_string()
+                        }
+                    })
+                    .unwrap_or_else(|| "unknown".to_string())
+            };
+            let source = structured
+                .get("source")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown identity");
+            format!(
+                "Accessibility {}, Screen Recording {} ({}).",
+                flag("accessibility"),
+                flag("screen_recording"),
+                source
+            )
+        })
+        .unwrap_or_else(|| "Permission status unavailable.".to_string());
+    format!(
+        "Computer use is available through the CUA driver ({version}): computer_windows lists top-level windows, computer_ax snapshots one window's accessibility tree plus screenshot, computer_screenshot captures the display or one window, computer_act clicks/types/presses keys background-first, cua_call reaches the rest of the driver catalog. {permission_line} Every screenshot and input action asks for approval first; if a macOS permission is missing, grant it in System Settings → Privacy & Security, then retry."
+    )
 }
 
-/// Build the screenshot tool output: text metadata plus the JPEG for the
-/// model, unless it exceeds the model byte cap (metadata only then) or is
-/// pixel-identical to what the model last received for the target (a
-/// one-line unchanged note, no re-attached image).
-#[cfg(target_os = "macos")]
-fn attach_jpeg(
-    path: &Path,
-    bytes: &[u8],
-    dims: &str,
-    target: Option<crate::stream::StreamTarget>,
-    points_per_pixel: f64,
-) -> ToolOutput {
-    let content = format!(
-        "Screenshot saved to {} ({} pixels, {} bytes). Display points = image pixels × {:.3}.",
-        path.display(),
-        dims,
-        bytes.len(),
-        points_per_pixel
-    );
-    if bytes.len() > MAX_IMAGE_BYTES {
-        return ToolOutput {
-            content: format!(
-                "{content} Image exceeded the {MAX_IMAGE_BYTES}-byte model limit, so only metadata is attached."
-            ),
-            images: Vec::new(),
+/// One live `list_windows` row: (window_id, pid, app, title).
+fn driver_window_rows(
+    structured: Option<&serde_json::Value>,
+) -> Vec<(i64, i64, String, String)> {
+    let Some(windows) = structured
+        .and_then(|structured| structured.get("windows"))
+        .and_then(|windows| windows.as_array())
+    else {
+        return Vec::new();
+    };
+    windows
+        .iter()
+        .filter_map(|window| {
+            Some((
+                window.get("window_id")?.as_i64()?,
+                window.get("pid")?.as_i64()?,
+                window
+                    .get("app_name")
+                    .and_then(|app| app.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                window
+                    .get("title")
+                    .and_then(|title| title.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            ))
+        })
+        .collect()
+}
+
+async fn list_windows(args: &str) -> Result<String, String> {
+    if !driver_available() {
+        return Err(DRIVER_MISSING_HINT.to_string());
+    }
+    let on_screen_only = serde_json::from_str::<serde_json::Value>(args)
+        .ok()
+        .and_then(|value| value.get("on_screen_only")?.as_bool())
+        .unwrap_or(true);
+    let result = driver_call(
+        "list_windows",
+        serde_json::json!({"on_screen_only": on_screen_only}),
+    )
+    .await?;
+    let structured = result.structured.clone().unwrap_or(serde_json::Value::Null);
+    let windows = structured
+        .get("windows")
+        .and_then(|windows| windows.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut rows = Vec::new();
+    for window in windows.iter().take(50) {
+        let field = |name: &str| {
+            window
+                .get(name)
+                .map(|value| value.to_string().trim_matches('"').to_string())
+                .unwrap_or_default()
         };
-    }
-    if let Some(since_ms) = target.and_then(|target| {
-        crate::stream::frame_unchanged_since_with_scale(target, bytes, Some(points_per_pixel))
-    }) {
-        return ToolOutput {
-            content: format!(
-                "{content} Unchanged since {} — same pixels as the screenshot you already have, so no new image is attached.",
-                crate::stream::ago_ms(since_ms)
-            ),
-            images: Vec::new(),
+        let bounds = window.get("bounds");
+        let coord = |name: &str| {
+            bounds
+                .and_then(|bounds| bounds.get(name))
+                .and_then(|value| value.as_f64())
+                .unwrap_or(0.0)
         };
+        rows.push(format!(
+            "id={} app={:?} title={:?} pid={} x={:.0} y={:.0} w={:.0} h={:.0} z={} on_screen={}",
+            field("window_id"),
+            field("app_name"),
+            field("title"),
+            field("pid"),
+            coord("x"),
+            coord("y"),
+            coord("width"),
+            coord("height"),
+            field("z_index"),
+            field("is_on_screen"),
+        ));
     }
-    use base64::Engine as _;
-    let data_url = format!(
-        "data:image/jpeg;base64,{}",
-        base64::engine::general_purpose::STANDARD.encode(bytes)
-    );
-    ToolOutput {
-        content,
-        images: vec![ImageAttachment {
-            display_name: path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "screenshot.jpg".into()),
-            data_url,
-        }],
+    if rows.is_empty() {
+        return Ok("No top-level windows found.".to_string());
     }
+    Ok(format!(
+        "Top-level windows (Threadlane's own windows are hidden from some drivers — never act on them):\n{}",
+        rows.join("\n")
+    ))
 }
 
-/// Target-aware one-shot JPEG for the model: a single window by id, or the
-/// display minus our own windows. Returns (jpeg bytes, served width, served
-/// height, source points width).
-#[cfg(target_os = "macos")]
-pub(crate) fn capture_composited_for_target(
-    target: crate::stream::StreamTarget,
-    max_width: u32,
-    quality: u8,
-) -> Result<(Vec<u8>, u32, u32, f64), String> {
-    let composite = mac::composite_target(target, mac::CaptureResolution::Best)?;
-    let (jpeg, width, height) = composite.jpeg(max_width, quality)?;
-    Ok((jpeg, width, height, composite.points_size.0))
+/// Resolve a window id to its owner pid through a fresh driver listing.
+/// Window ids go stale on relaunch; the error tells the model to re-list.
+async fn resolve_window_pid(window_id: i64) -> Result<i64, String> {
+    if !driver_available() {
+        return Err(DRIVER_MISSING_HINT.to_string());
+    }
+    let result = driver_call("list_windows", serde_json::json!({})).await?;
+    driver_window_rows(result.structured.as_ref())
+        .into_iter()
+        .find(|(id, _, _, _)| *id == window_id)
+        .map(|(_, pid, _, _)| pid)
+        .ok_or_else(|| {
+            format!("Window {window_id} is gone; re-list with computer_windows and pick a live id.")
+        })
 }
 
-#[cfg(target_os = "macos")]
-pub(crate) use mac::{composite_target, pointer_location, CaptureResolution};
-
-/// Start the live feed on the main display for the user's own mirror, with
-/// no model in the loop: a developer hook (`THREADLANE_MIRROR_DEBUG`) for
-/// observing and profiling the video path. Frames stay in-process and are
-/// never attached to a tool result, so no permission gate applies. Like any
-/// watched stream it idles out after ten minutes without computer calls;
-/// relaunch to resume.
-#[cfg(target_os = "macos")]
-pub fn watch_display_for_debug() {
-    crate::stream::ensure_stream(crate::stream::StreamTarget::Display);
+fn previews_dir(work_dir: Option<&Path>) -> PathBuf {
+    work_dir
+        .unwrap_or_else(|| Path::new("."))
+        .join(".threadlane")
+        .join("previews")
 }
-
-#[cfg(not(target_os = "macos"))]
-pub fn watch_display_for_debug() {}
 
 /// Global live-mirror dir (`~/.threadlane/previews/`): the popup is global
 /// while sessions live in per-project worktrees, so `latest.json` lives
 /// here. Timestamped history files stay per-project.
-#[cfg(target_os = "macos")]
-pub(crate) fn global_previews_dir() -> Option<PathBuf> {
+pub fn global_previews_dir() -> Option<PathBuf> {
     threadlane_project::default_global_threadlane_dir().map(|dir| dir.join("previews"))
 }
 
-#[cfg(not(target_os = "macos"))]
-pub fn global_previews_dir() -> Option<PathBuf> {
-    None
-}
-
-/// Previews-dir resolution shared by capture (`screenshot`/`act`) and the
-/// chat mirror opener: the global mirror dir wins, otherwise the active
-/// project's `.threadlane/previews`. Returns `None` only when neither is
-/// available, in which case callers skip the `latest.json` sidecar (the
-/// capture itself still lands in its project dir).
+/// Resolves the shared mirror directory, falling back to the active project's
+/// preview directory when a global Threadlane directory is unavailable.
 pub fn resolve_previews_dir(work_dir: Option<&Path>) -> Option<PathBuf> {
-    global_previews_dir()
-        .or_else(|| work_dir.map(|root| root.join(".threadlane").join("previews")))
+    global_previews_dir().or_else(|| work_dir.map(|path| previews_dir(Some(path))))
 }
 
 /// Mirror-popup state for the GPUI frontend: the latest preview path (if any),
@@ -1314,274 +673,528 @@ fn write_mirror_sidecar(dir: &Path, path: Option<&Path>, action: &str) {
     let _ = std::fs::write(dir.join("latest.json"), sidecar.to_string());
 }
 
-/// Capture via the system `screencapture` CLI (blocking): it owns TCC prompts
-/// and encoding, so no new native deps are needed for pixels. Returns the
-/// normalized JPEG bytes; the file stays behind for the user.
-#[cfg(target_os = "macos")]
-fn capture_jpeg(window_id: Option<i64>, path: &Path) -> Result<Vec<u8>, String> {
-    let mut command = std::process::Command::new("/usr/sbin/screencapture");
-    command.args(["-x", "-t", "jpg"]);
-    match window_id {
-        Some(id) => {
-            command.args(["-o", "-l", &id.to_string()]);
-        }
-        None => {
-            command.arg("-m");
-        }
-    }
-    command.arg(path);
-    let output = command
-        .output()
-        .map_err(|error| format!("Could not start screencapture: {error}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(screenshot_error_hint(&stderr));
-    }
-    normalize_jpeg(path)?;
-    std::fs::read(path).map_err(|error| format!("Screenshot missing: {error}"))
+fn preview_path(dir: &Path, extension: &str) -> PathBuf {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    dir.join(format!("computer-{stamp}.{extension}"))
 }
 
-#[cfg(target_os = "macos")]
-fn screenshot_error_hint(stderr: &str) -> String {
-    if stderr.contains("not permitted")
-        || stderr.contains("permission")
-        || stderr.contains("Screen Recording")
-    {
-        "Screenshot blocked: grant Screen Recording to this app in System Settings → Privacy & Security, then retry."
-            .to_string()
-    } else {
-        format!("screencapture failed: {}", stderr.trim())
+/// Save one driver image block for the user and the model. Returns
+/// (file path, data-url image) unless the bytes exceed the model cap, in
+/// which case the model gets metadata only.
+fn persist_image(
+    mime: &str,
+    base64: &str,
+    dir: &Path,
+) -> Result<(PathBuf, Option<ImageAttachment>), String> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(base64.trim())
+        .map_err(|error| format!("Driver returned an undecodable image: {error}"))?;
+    let extension = if mime.contains("png") { "png" } else { "jpg" };
+    let path = preview_path(dir, extension);
+    std::fs::create_dir_all(dir)
+        .map_err(|error| format!("Could not create preview dir: {error}"))?;
+    std::fs::write(&path, &bytes)
+        .map_err(|error| format!("Could not save screenshot: {error}"))?;
+    if bytes.len() > MAX_IMAGE_BYTES {
+        return Ok((path, None));
     }
+    let display_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| format!("screenshot.{extension}"));
+    Ok((
+        path,
+        Some(ImageAttachment {
+            display_name,
+            data_url: format!("data:{mime};base64,{base64}"),
+        }),
+    ))
 }
 
-/// Bound capture size for context: 1560px wide JPEG at quality 70.
-#[cfg(target_os = "macos")]
-fn normalize_jpeg(path: &Path) -> Result<(), String> {
-    let output = std::process::Command::new("/usr/bin/sips")
-        .args([
-            "-Z",
-            &SCREENSHOT_WIDTH.to_string(),
-            "-s",
-            "formatOptions",
-            &SCREENSHOT_JPEG_QUALITY.to_string(),
-        ])
-        .arg(path)
-        .output()
-        .map_err(|error| format!("Could not start sips: {error}"))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "sips normalize failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))
-    }
-}
-
-/// Dimensions via `sips` (JPEG headers need an SOF walk; the CLI is cheaper).
-#[cfg(target_os = "macos")]
-fn jpeg_dimensions(path: &Path) -> Option<String> {
-    let output = std::process::Command::new("/usr/bin/sips")
-        .args(["-g", "pixelWidth", "-g", "pixelHeight"])
-        .arg(path)
-        .output()
-        .ok()?;
-    parse_sips_dimensions(&String::from_utf8_lossy(&output.stdout))
-}
-
-#[cfg(target_os = "macos")]
-fn parse_sips_dimensions(text: &str) -> Option<String> {
-    let mut width = None;
-    let mut height = None;
-    for line in text.lines() {
-        let mut parts = line.split(':');
-        match (parts.next(), parts.next()) {
-            (Some(key), Some(value)) if key.trim() == "pixelWidth" => {
-                width = value.trim().parse::<u32>().ok()
-            }
-            (Some(key), Some(value)) if key.trim() == "pixelHeight" => {
-                height = value.trim().parse::<u32>().ok()
-            }
-            _ => {}
+/// Attach driver images to a [`ToolOutput`]: persist each for the user,
+/// attach each within the model byte cap, and note skipped ones.
+fn attach_driver_images(
+    result: &DriverResult,
+    dir: &Path,
+    label: &str,
+) -> Result<(Vec<PathBuf>, Vec<ImageAttachment>, String), String> {
+    let mut paths = Vec::new();
+    let mut images = Vec::new();
+    let mut skipped = 0usize;
+    for image in &result.images {
+        let (path, attached) = persist_image(&image.mime, &image.base64, dir)?;
+        paths.push(path);
+        match attached {
+            Some(attachment) => images.push(attachment),
+            None => skipped += 1,
         }
     }
-    Some(format!("{}x{}", width?, height?))
+    let mut note = format!(
+        "{} ({} image{} saved under {})",
+        label,
+        paths.len(),
+        if paths.len() == 1 { "" } else { "s" },
+        dir.display(),
+    );
+    if skipped > 0 {
+        note.push_str(&format!(
+            "; {skipped} image(s) exceeded the {MAX_IMAGE_BYTES}-byte model limit, metadata only"
+        ));
+    }
+    Ok((paths, images, note))
 }
 
-#[cfg(target_os = "macos")]
-fn perform_act(intent: &ComputerAct, pid: Option<i32>) -> Result<String, String> {
-    use core_graphics::event::{
-        CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, KeyCode,
-        ScrollEventUnit,
-    };
-    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
-    use core_graphics::geometry::CGPoint;
+/// Flash the mirror: the model just took a picture.
+fn note_screenshot(label: &str) {
+    threadlane_protocol::live::publish_overlay(
+        threadlane_protocol::live::LiveOverlayKind::Screenshot,
+        None,
+        None,
+        label,
+    );
+}
 
-    let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
-        .map_err(|_| "Could not create an input event source (grant Accessibility access in System Settings → Privacy & Security).".to_string())?;
-    // Background delivery posts straight to the target process: the cursor
-    // never moves and focus never changes. Untargeted acts use the HID
-    // stream (foreground behavior).
-    let post = |event: &CGEvent| match pid {
-        Some(pid) => event.post_to_pid(pid),
-        None => event.post(CGEventTapLocation::HID),
-    };
-    // Fire-and-forget delivery cannot confirm Chromium/Electron targets, which
-    // drop per-PID clicks at the renderer boundary; say so in the result.
-    let background_note = pid
-        .is_some()
-        .then_some(" (background — cursor untouched; Chromium/Electron targets may ignore it)");
-    let point = |x: f64, y: f64| CGPoint::new(x, y);
-    let flags = |modifiers: &[String]| {
-        let mut flags = CGEventFlags::empty();
-        for modifier in modifiers {
-            match modifier.as_str() {
-                "shift" => flags |= CGEventFlags::CGEventFlagShift,
-                "ctrl" => flags |= CGEventFlags::CGEventFlagControl,
-                "alt" => flags |= CGEventFlags::CGEventFlagAlternate,
-                "cmd" => flags |= CGEventFlags::CGEventFlagCommand,
-                _ => {}
-            }
+impl ComputerToolExecutor {
+    async fn screenshot_with_output(
+        &self,
+        args: &str,
+        work_dir: Option<&Path>,
+    ) -> Result<ToolOutput, String> {
+        if !driver_available() {
+            return Err(DRIVER_MISSING_HINT.to_string());
         }
-        flags
-    };
-    match intent {
-        ComputerAct::Move { x, y } => {
-            let event = CGEvent::new_mouse_event(
-                source,
-                CGEventType::MouseMoved,
-                point(*x, *y),
-                CGMouseButton::Left,
-            )
-            .map_err(|_| "Could not create mouse event.".to_string())?;
-            post(&event);
-            Ok(format!(
-                "Moved pointer to ({x:.0}, {y:.0}).{}",
-                background_note.unwrap_or("")
-            ))
-        }
-        ComputerAct::Click { x, y, modifiers } | ComputerAct::DoubleClick { x, y, modifiers } => {
-            let clicks = usize::from(matches!(intent, ComputerAct::DoubleClick { .. }));
-            let event_flags = flags(modifiers);
-            for _ in 0..=clicks {
-                let down = CGEvent::new_mouse_event(
-                    source.clone(),
-                    CGEventType::LeftMouseDown,
-                    point(*x, *y),
-                    CGMouseButton::Left,
+        let window_id: Option<i64> = serde_json::from_str::<serde_json::Value>(args)
+            .ok()
+            .and_then(|value| value.get("window_id")?.as_i64());
+        let target_label = match window_id {
+            Some(id) => format!("window {id}"),
+            None => "the main display".to_string(),
+        };
+        self.approve(
+            format!("Screenshot {target_label}"),
+            format!("Capture {target_label} via the CUA driver. You will see the image; the agent receives it too."),
+        )
+        .await?;
+        let (tool, tool_args) = match window_id {
+            Some(id) => {
+                let pid = resolve_window_pid(id).await?;
+                crate::mirror::ensure_feed_window(id);
+                (
+                    "get_window_state",
+                    serde_json::json!({"pid": pid, "window_id": id}),
                 )
-                .map_err(|_| "Could not create mouse event.".to_string())?;
-                down.set_flags(event_flags);
-                post(&down);
-                std::thread::sleep(Duration::from_millis(30));
-                let up = CGEvent::new_mouse_event(
-                    source.clone(),
-                    CGEventType::LeftMouseUp,
-                    point(*x, *y),
-                    CGMouseButton::Left,
-                )
-                .map_err(|_| "Could not create mouse event.".to_string())?;
-                up.set_flags(event_flags);
-                post(&up);
-                std::thread::sleep(Duration::from_millis(60));
             }
-            Ok(if clicks == 0 {
-                format!("Clicked ({x:.0}, {y:.0}).{}", background_note.unwrap_or(""))
-            } else {
+            None => {
+                crate::mirror::ensure_feed_display();
+                ("get_desktop_state", serde_json::json!({}))
+            }
+        };
+        let result = driver_call(tool, tool_args).await?;
+        if result.images.is_empty() {
+            return Err(format!(
+                "Driver returned no image for {target_label}: {}",
+                result.joined_text()
+            ));
+        }
+        let dir = previews_dir(work_dir);
+        let (paths, images, note) = attach_driver_images(&result, &dir, &target_label)?;
+        let mirror_dir = global_previews_dir().unwrap_or_else(|| dir.clone());
+        write_mirror_sidecar(
+            &mirror_dir,
+            paths.first().map(PathBuf::as_path),
+            &format!("Screenshot {target_label} (CUA driver)"),
+        );
+        let label = format!("Screenshot {target_label} (CUA driver)");
+        note_screenshot(&label);
+        let content = format!(
+            "{note}. {}",
+            result.joined_text().chars().take(2000).collect::<String>()
+        );
+        Ok(ToolOutput { content, images })
+    }
+
+    async fn ax_with_output(
+        &self,
+        args: &str,
+        work_dir: Option<&Path>,
+    ) -> Result<ToolOutput, String> {
+        if !driver_available() {
+            return Err(DRIVER_MISSING_HINT.to_string());
+        }
+        let parsed: serde_json::Value = serde_json::from_str(args)
+            .map_err(|error| format!("Invalid {COMPUTER_AX_TOOL} arguments: {error}"))?;
+        let pid = parsed
+            .get("pid")
+            .and_then(|value| value.as_i64())
+            .ok_or_else(|| {
+                format!("`{COMPUTER_AX_TOOL}` requires `pid` from computer_windows.")
+            })?;
+        let window_id = parsed
+            .get("window_id")
+            .and_then(|value| value.as_i64())
+            .ok_or_else(|| {
+                format!("`{COMPUTER_AX_TOOL}` requires `window_id` from computer_windows.")
+            })?;
+        let include_screenshot = parsed
+            .get("include_screenshot")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true);
+        if include_screenshot {
+            self.approve(
+                format!("Inspect window {window_id}"),
                 format!(
-                    "Double-clicked ({x:.0}, {y:.0}).{}",
-                    background_note.unwrap_or("")
-                )
-            })
+                    "Snapshot window {window_id} (pid {pid}) via the CUA driver: accessibility tree plus screenshot. You will see the image; the agent receives it too."
+                ),
+            )
+            .await?;
+        }
+        let mut tool_args = serde_json::json!({
+            "pid": pid,
+            "window_id": window_id,
+            "include_screenshot": include_screenshot,
+        });
+        for key in ["query", "max_elements", "max_depth"] {
+            if let Some(value) = parsed.get(key) {
+                tool_args[key] = value.clone();
+            }
+        }
+        let result = driver_call("get_window_state", tool_args).await?;
+        crate::mirror::ensure_feed_window(window_id);
+        let structured = result.structured.clone().unwrap_or(serde_json::Value::Null);
+        let mut sections =
+            vec![format!("Accessibility snapshot of window {window_id} (pid {pid}):")];
+        if let Some(reason) = structured
+            .get("degraded_reason")
+            .and_then(|reason| reason.as_str())
+        {
+            sections.push(format!(
+                "Degraded snapshot ({reason}): the tree may be empty — act by pixel off the screenshot."
+            ));
+        }
+        let tree = structured
+            .get("tree_markdown")
+            .and_then(|tree| tree.as_str())
+            .unwrap_or("");
+        if tree.is_empty() {
+            sections.push("Empty element tree.".to_string());
+        } else if tree.chars().count() > MAX_TREE_CHARS {
+            let truncated: String = tree.chars().take(MAX_TREE_CHARS).collect();
+            sections.push(format!(
+                "{truncated}\n…(tree truncated at {MAX_TREE_CHARS} chars; re-query with `query` or `max_elements` to narrow it)"
+            ));
+        } else {
+            sections.push(tree.to_string());
+        }
+        if let Some(snapshot) = structured
+            .get("snapshot_id")
+            .and_then(|snapshot| snapshot.as_str())
+        {
+            sections.push(format!(
+                "Snapshot {snapshot}: pass element_token (or element_index + this snapshot_id) from the tree to cua_call element actions. Indices expire on the next snapshot of this window."
+            ));
+        }
+        let mut content = sections.join("\n\n");
+        let mut images = Vec::new();
+        if !result.images.is_empty() {
+            let dir = previews_dir(work_dir);
+            let (paths, attached, note) =
+                attach_driver_images(&result, &dir, &format!("window {window_id} snapshot"))?;
+            let mirror_dir = global_previews_dir().unwrap_or_else(|| dir.clone());
+            write_mirror_sidecar(
+                &mirror_dir,
+                paths.first().map(PathBuf::as_path),
+                &format!("Inspect window {window_id} (CUA driver)"),
+            );
+            note_screenshot(&format!("Inspect window {window_id}"));
+            content.push_str(&format!("\n\n{note}."));
+            images = attached;
+        }
+        Ok(ToolOutput { content, images })
+    }
+
+    async fn act(&self, args: &str, work_dir: Option<&Path>) -> Result<String, String> {
+        if !driver_available() {
+            return Err(DRIVER_MISSING_HINT.to_string());
+        }
+        let intent = parse_computer_act(args)?;
+        let raw_target = parse_act_target(args)?;
+        let mut title = intent.approval_title();
+        if let Some(id) = raw_target {
+            title = format!("{title} in window {id}");
+        }
+        self.approve(
+            title.clone(),
+            format!(
+                "{title} via the CUA driver (background-first: cursor and focus usually stay untouched). Deny if the target looks wrong."
+            ),
+        )
+        .await?;
+        // Targeted coordinates are window-local screenshot pixels; untargeted
+        // ones are display pixels. The driver reverses Retina/downscale
+        // itself, so no scale bookkeeping is needed — the model reads
+        // positions off the last screenshot.
+        let pid = match raw_target {
+            Some(id) => {
+                crate::mirror::ensure_feed_window(id);
+                Some(resolve_window_pid(id).await?)
+            }
+            None => {
+                crate::mirror::ensure_feed_display();
+                None
+            }
+        };
+        let window_id = raw_target;
+        let outcome = self.perform_act(&intent, pid, window_id).await?;
+        publish_act_overlay(&intent, &title);
+        let mirror_dir = global_previews_dir().unwrap_or_else(|| previews_dir(work_dir));
+        write_mirror_sidecar(&mirror_dir, None, &format!("{title} — {outcome}"));
+        Ok(outcome)
+    }
+
+    /// Translate one compat intent into driver tool call(s).
+    async fn perform_act(
+        &self,
+        intent: &ComputerAct,
+        pid: Option<i64>,
+        window_id: Option<i64>,
+    ) -> Result<String, String> {
+        match intent {
+            ComputerAct::Click { x, y, modifiers } => {
+                let modifier = driver_modifiers(modifiers);
+                let args = match (pid, window_id) {
+                    (Some(pid), Some(window)) => serde_json::json!({
+                        "pid": pid, "window_id": window,
+                        "x": x, "y": y, "modifier": modifier,
+                    }),
+                    _ => serde_json::json!({
+                        "scope": "desktop", "x": x, "y": y, "modifier": modifier,
+                    }),
+                };
+                let result = driver_call("click", args).await?;
+                Ok(format!("Clicked ({x:.0}, {y:.0}). {}", result.joined_text()))
+            }
+            ComputerAct::DoubleClick { x, y, modifiers } => {
+                let modifier = driver_modifiers(modifiers);
+                // The dedicated `double_click` tool requires a pid, so
+                // untargeted (foreground) double-clicks go through `click`
+                // with a count of 2 in desktop scope — no window guessing.
+                let args = match (pid, window_id) {
+                    (Some(pid), _) => {
+                        let mut args = serde_json::json!({
+                            "pid": pid, "x": x, "y": y, "modifier": modifier,
+                        });
+                        if let Some(window) = window_id {
+                            args["window_id"] = serde_json::json!(window);
+                        }
+                        (true, args)
+                    }
+                    _ => (false, serde_json::json!({
+                        "scope": "desktop", "x": x, "y": y,
+                        "modifier": modifier, "count": 2,
+                    })),
+                };
+                let (targeted, args) = args;
+                let result = driver_call(if targeted { "double_click" } else { "click" }, args).await?;
+                Ok(format!(
+                    "Double-clicked ({x:.0}, {y:.0}). {}",
+                    result.joined_text()
+                ))
+            }
+            ComputerAct::Move { x, y } => {
+                // Window scope moves the agent overlay only; desktop scope
+                // moves the real pointer.
+                let args = match (pid, window_id) {
+                    (Some(pid), Some(window)) => serde_json::json!({
+                        "x": x, "y": y,
+                        "target": {"kind": "window", "pid": pid, "window_id": window},
+                    }),
+                    _ => serde_json::json!({
+                        "x": x, "y": y, "scope": "desktop",
+                    }),
+                };
+                let result = driver_call("move_cursor", args).await?;
+                Ok(format!("Moved to ({x:.0}, {y:.0}). {}", result.joined_text()))
+            }
+            ComputerAct::Scroll { dx, dy } => {
+                let (direction, magnitude) = if dx.abs() >= dy.abs() {
+                    (if *dx > 0.0 { "right" } else { "left" }, dx.abs())
+                } else {
+                    (if *dy > 0.0 { "down" } else { "up" }, dy.abs())
+                };
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let amount = (magnitude / 40.0).round().clamp(1.0, 50.0) as u64;
+                let mut args =
+                    serde_json::json!({"direction": direction, "amount": amount, "by": "line"});
+                match (pid, window_id) {
+                    (Some(pid), _) => {
+                        args["pid"] = serde_json::json!(pid);
+                        if let Some(window) = window_id {
+                            args["window_id"] = serde_json::json!(window);
+                        }
+                    }
+                    _ => {
+                        args["scope"] = serde_json::json!("desktop");
+                    }
+                }
+                let result = driver_call("scroll", args).await?;
+                Ok(format!(
+                    "Scrolled {direction} (amount {amount}). {}",
+                    result.joined_text()
+                ))
+            }
+            ComputerAct::Type { text } => {
+                let mut args = serde_json::json!({"text": text});
+                match (pid, window_id) {
+                    (Some(pid), _) => {
+                        args["pid"] = serde_json::json!(pid);
+                        if let Some(window) = window_id {
+                            args["window_id"] = serde_json::json!(window);
+                        }
+                    }
+                    _ => {
+                        args["scope"] = serde_json::json!("desktop");
+                    }
+                }
+                let result = driver_call("type_text", args).await?;
+                Ok(format!(
+                    "Typed {} characters. {}",
+                    text.chars().count(),
+                    result.joined_text()
+                ))
+            }
+            ComputerAct::Press { key, modifiers } => {
+                let modifier = driver_modifiers(modifiers);
+                let mut args = serde_json::json!({
+                    "key": driver_key(key),
+                    "modifiers": modifier,
+                });
+                match (pid, window_id) {
+                    (Some(pid), _) => {
+                        args["pid"] = serde_json::json!(pid);
+                        if let Some(window) = window_id {
+                            args["window_id"] = serde_json::json!(window);
+                        }
+                    }
+                    _ => {
+                        args["scope"] = serde_json::json!("desktop");
+                    }
+                }
+                let result = driver_call("press_key", args).await?;
+                Ok(format!("Pressed {key}. {}", result.joined_text()))
+            }
+        }
+    }
+
+    async fn cua_call_with_output(
+        &self,
+        args: &str,
+        work_dir: Option<&Path>,
+    ) -> Result<ToolOutput, String> {
+        if !driver_available() {
+            return Err(DRIVER_MISSING_HINT.to_string());
+        }
+        let parsed: serde_json::Value = serde_json::from_str(args)
+            .map_err(|error| format!("Invalid {CUA_CALL_TOOL} arguments: {error}"))?;
+        let tool = parsed
+            .get("tool")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|tool| !tool.is_empty())
+            .ok_or_else(|| format!("`{CUA_CALL_TOOL}` requires a driver `tool` name."))?;
+        if tool == "set_config" {
+            return Err("Driver configuration is host-owned: change it with `cua-driver config` in a terminal, not through the model.".to_string());
+        }
+        let tool_args = parsed
+            .get("arguments")
+            .cloned()
+            .unwrap_or(serde_json::json!({}));
+        if !cua_call_is_read_only(tool, &tool_args) {
+            let summary: String = serde_json::to_string(&tool_args)
+                .unwrap_or_default()
+                .chars()
+                .take(200)
+                .collect();
+            self.approve(
+                format!("CUA {tool}"),
+                format!("Run CUA driver tool `{tool}` with {summary}. Deny if the target looks wrong."),
+            )
+            .await?;
+        }
+        let result = driver_call(tool, tool_args).await?;
+        let mut content = result.joined_text();
+        if content.chars().count() > MAX_TREE_CHARS {
+            let truncated: String = content.chars().take(MAX_TREE_CHARS).collect();
+            content = format!("{truncated}\n…(output truncated at {MAX_TREE_CHARS} chars)");
+        }
+        let mut images = Vec::new();
+        if !result.images.is_empty() {
+            let dir = previews_dir(work_dir);
+            let (paths, attached, note) =
+                attach_driver_images(&result, &dir, &format!("CUA {tool}"))?;
+            let mirror_dir = global_previews_dir().unwrap_or_else(|| dir.clone());
+            write_mirror_sidecar(
+                &mirror_dir,
+                paths.first().map(PathBuf::as_path),
+                &format!("CUA {tool} (CUA driver)"),
+            );
+            note_screenshot(&format!("CUA {tool}"));
+            if content.is_empty() {
+                content = note;
+            } else {
+                content.push_str(&format!("\n\n{note}."));
+            }
+            images = attached;
+        }
+        if content.is_empty() {
+            content = format!("CUA driver tool `{tool}` returned no text.");
+        }
+        Ok(ToolOutput { content, images })
+    }
+}
+
+/// Read-only driver tools that skip the approval prompt in [`CUA_CALL_TOOL`].
+/// `get_window_state` is read-only only without a screenshot; anything that
+/// returns pixels prompts like `computer_screenshot`.
+fn cua_call_is_read_only(tool: &str, args: &serde_json::Value) -> bool {
+    match tool {
+        "list_windows" | "list_apps" | "get_accessibility_tree" | "get_screen_size"
+        | "get_cursor_position" | "check_permissions" | "get_config" | "get_session"
+        | "list_sessions" | "get_recording_state" | "get_agent_cursor_state"
+        | "check_for_update" => true,
+        "get_window_state" => args
+            .get("include_screenshot")
+            .and_then(|value| value.as_bool())
+            .is_some_and(|include| !include),
+        _ => false,
+    }
+}
+
+/// Publish the mirror overlay for an act. Positions are known only for
+/// desktop-scope (display pixel) acts; window-local ones ride label-only.
+fn publish_act_overlay(intent: &ComputerAct, label: &str) {
+    use threadlane_protocol::live::{publish_overlay, LiveOverlayKind};
+    match intent {
+        ComputerAct::Click { x, y, .. } => {
+            publish_overlay(LiveOverlayKind::Click, Some((*x, *y)), None, label);
+        }
+        ComputerAct::DoubleClick { x, y, .. } => {
+            publish_overlay(LiveOverlayKind::DoubleClick, Some((*x, *y)), None, label);
+        }
+        ComputerAct::Move { x, y } => {
+            publish_overlay(LiveOverlayKind::Move, Some((*x, *y)), None, label);
         }
         ComputerAct::Scroll { dx, dy } => {
-            // Vertical wheel first (macOS natural order), then horizontal.
-            for (wheel1, wheel2) in [(dy.round() as i32, 0), (0, dx.round() as i32)] {
-                if wheel1 == 0 && wheel2 == 0 {
-                    continue;
-                }
-                let event = CGEvent::new_scroll_event(
-                    source.clone(),
-                    ScrollEventUnit::PIXEL,
-                    2,
-                    wheel1,
-                    wheel2,
-                    0,
-                )
-                .map_err(|_| "Could not create scroll event.".to_string())?;
-                post(&event);
-            }
-            Ok(format!(
-                "Scrolled by ({dx:.0}, {dy:.0}).{}",
-                background_note.unwrap_or("")
-            ))
+            publish_overlay(LiveOverlayKind::Scroll, None, Some((*dx, *dy)), label);
         }
-        ComputerAct::Type { text } => {
-            let mut typed = 0usize;
-            for character in text.chars() {
-                let mut buffer = [0u8; 4];
-                let encoded = character.encode_utf8(&mut buffer);
-                let down = CGEvent::new_keyboard_event(source.clone(), 0, true)
-                    .map_err(|_| "Could not create keyboard event.".to_string())?;
-                down.set_string(encoded);
-                post(&down);
-                let up = CGEvent::new_keyboard_event(source.clone(), 0, false)
-                    .map_err(|_| "Could not create keyboard event.".to_string())?;
-                post(&up);
-                typed += 1;
-            }
-            Ok(format!(
-                "Typed {typed} characters.{}",
-                background_note.unwrap_or("")
-            ))
+        ComputerAct::Type { .. } => {
+            publish_overlay(LiveOverlayKind::Type, None, None, label);
         }
-        ComputerAct::Press { key, modifiers } => {
-            let event_flags = flags(modifiers);
-            // Single characters (cmd+L, ctrl+C) ride the unicode path with
-            // modifier flags; named keys use hardware keycodes.
-            if key.chars().count() == 1 {
-                let down = CGEvent::new_keyboard_event(source.clone(), 0, true)
-                    .map_err(|_| "Could not create keyboard event.".to_string())?;
-                down.set_flags(event_flags);
-                down.set_string(key);
-                post(&down);
-                let up = CGEvent::new_keyboard_event(source, 0, false)
-                    .map_err(|_| "Could not create keyboard event.".to_string())?;
-                up.set_flags(event_flags);
-                post(&up);
-                return Ok(format!(
-                    "Pressed {}{}.{}",
-                    if modifiers.is_empty() {
-                        String::new()
-                    } else {
-                        format!("{}+", modifiers.join("+"))
-                    },
-                    key,
-                    background_note.unwrap_or("")
-                ));
-            }
-            let keycode = match key.as_str() {
-                "Enter" => KeyCode::RETURN,
-                "Escape" => KeyCode::ESCAPE,
-                "Tab" => KeyCode::TAB,
-                "Space" => KeyCode::SPACE,
-                "Backspace" | "Delete" => KeyCode::DELETE,
-                "Up" => KeyCode::UP_ARROW,
-                "Down" => KeyCode::DOWN_ARROW,
-                "Left" => KeyCode::LEFT_ARROW,
-                "Right" => KeyCode::RIGHT_ARROW,
-                _ => return Err(format!("Unsupported key: {key}")),
-            };
-            let event_flags = flags(modifiers);
-            let down = CGEvent::new_keyboard_event(source.clone(), keycode, true)
-                .map_err(|_| "Could not create keyboard event.".to_string())?;
-            down.set_flags(event_flags);
-            post(&down);
-            let up = CGEvent::new_keyboard_event(source, keycode, false)
-                .map_err(|_| "Could not create keyboard event.".to_string())?;
-            up.set_flags(event_flags);
-            post(&up);
-            Ok(format!("Pressed {key}.{}", background_note.unwrap_or("")))
+        ComputerAct::Press { .. } => {
+            publish_overlay(LiveOverlayKind::Press, None, None, label);
         }
     }
 }
@@ -1674,29 +1287,39 @@ mod tests {
     }
 
     #[test]
-    fn resolve_without_target_keeps_foreground_delivery() {
-        let intent = parse_computer_act(r#"{"action":"click","x":10,"y":20}"#).unwrap();
-        let targeted = resolve_target(intent, None).unwrap();
-        assert_eq!(targeted.pid, None);
-        assert_eq!(targeted.app, None);
-        assert!(matches!(
-            targeted.intent,
-            ComputerAct::Click {
-                x: 10.0,
-                y: 20.0,
-                ..
-            }
-        ));
+    fn driver_key_mapping_matches_driver_names() {
+        assert_eq!(driver_key("Enter"), "return");
+        assert_eq!(driver_key("Escape"), "escape");
+        assert_eq!(driver_key("Space"), "space");
+        assert_eq!(driver_key("Delete"), "delete");
+        assert_eq!(driver_key("Up"), "up");
+        assert_eq!(driver_key("L"), "l");
     }
 
     #[test]
-    fn resolve_stale_target_errors_helpfully() {
-        let intent = parse_computer_act(r#"{"action":"click","x":10,"y":20}"#).unwrap();
-        let error = resolve_target(intent, Some(2_000_000_000)).unwrap_err();
-        #[cfg(target_os = "macos")]
-        assert!(error.contains("re-list"), "unexpected: {error}");
-        #[cfg(not(target_os = "macos"))]
-        assert!(error.contains("macOS"), "unexpected: {error}");
+    fn driver_modifiers_spell_alt_as_option() {
+        assert_eq!(
+            driver_modifiers(&["cmd".to_string(), "alt".to_string()]),
+            ["cmd".to_string(), "option".to_string()]
+        );
+    }
+
+    #[test]
+    fn read_only_allowlist_covers_discovery_only() {
+        assert!(cua_call_is_read_only("list_windows", &serde_json::json!({})));
+        assert!(cua_call_is_read_only(
+            "get_window_state",
+            &serde_json::json!({"include_screenshot": false})
+        ));
+        assert!(!cua_call_is_read_only(
+            "get_window_state",
+            &serde_json::json!({})
+        ));
+        assert!(!cua_call_is_read_only("click", &serde_json::json!({})));
+        assert!(!cua_call_is_read_only(
+            "get_desktop_state",
+            &serde_json::json!({})
+        ));
     }
 
     #[test]
@@ -1712,32 +1335,32 @@ mod tests {
                 COMPUTER_STATUS_TOOL,
                 COMPUTER_WINDOWS_TOOL,
                 COMPUTER_SCREENSHOT_TOOL,
+                COMPUTER_AX_TOOL,
                 COMPUTER_ACT_TOOL,
+                CUA_CALL_TOOL,
             ]
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
-    fn live_window_list_parses() {
-        // No TCC prompt: CGWindowList is metadata-only.
-        let result = mac::list_windows();
-        assert!(result.is_ok(), "window list failed: {result:?}");
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn sips_dimensions_parse() {
-        let sample = "/tmp/shot.jpg\n  pixelWidth: 1560\n  pixelHeight: 960\n";
-        assert_eq!(parse_sips_dimensions(sample).as_deref(), Some("1560x960"));
-        assert_eq!(parse_sips_dimensions("garbage"), None);
+    fn window_rows_parse_driver_shape() {
+        let structured = serde_json::json!({
+            "windows": [
+                {"window_id": 7, "pid": 100, "app_name": "Safari", "title": "Tab"},
+            ]
+        });
+        assert_eq!(
+            driver_window_rows(Some(&structured)),
+            [(7, 100, "Safari".to_string(), "Tab".to_string())]
+        );
+        assert!(driver_window_rows(None).is_empty());
     }
 
     #[test]
     fn mirror_sidecar_round_trips() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("computer-1.jpg");
-        std::fs::write(&path, b"fake-jpeg").unwrap();
+        let path = dir.path().join("computer-1.png");
+        std::fs::write(&path, b"fake-png").unwrap();
         write_mirror_sidecar(dir.path(), Some(&path), "Screenshot live");
         let sidecar: serde_json::Value =
             serde_json::from_slice(&std::fs::read(dir.path().join("latest.json")).unwrap())
@@ -1745,208 +1368,49 @@ mod tests {
         assert_eq!(sidecar["action"], "Screenshot live");
         assert!(sidecar["path"]
             .as_str()
-            .is_some_and(|path| path.ends_with("computer-1.jpg")));
+            .is_some_and(|path| path.ends_with("computer-1.png")));
         assert!(sidecar["ts_ms"].as_u64().is_some());
     }
 
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn global_previews_dir_is_shared_location() {
-        let dir = global_previews_dir().expect("home dir present");
-        assert!(dir.ends_with("previews"));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    #[ignore]
-    fn debug_composite_apis() {
-        use core_foundation::array::CFArray;
-        use core_foundation::base::{CFType, TCFType};
-        use core_foundation::number::CFNumber;
-        use core_graphics::display::CGDisplay;
-        use core_graphics::window::{
-            create_image, create_image_from_array, create_window_list, kCGNullWindowID,
-            kCGWindowImageDefault, kCGWindowListOptionOnScreenOnly,
-        };
-        let bounds = CGDisplay::main().bounds();
-        eprintln!("bounds: {:?}", bounds);
-        let single = create_image(
-            bounds,
-            kCGWindowListOptionOnScreenOnly,
-            kCGNullWindowID,
-            kCGWindowImageDefault,
-        );
-        eprintln!("single-call image: {}", single.is_some());
-        if let Some(image) = single {
-            eprintln!("size: {}x{}", image.width(), image.height());
-        }
-        // Raw system list, unfiltered: ItemRef<u32> derefs to the id value.
-        let all = create_window_list(kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
-        if let Some(all) = all {
-            eprintln!("system window count: {}", all.len());
-            let raw_ids: Vec<i32> = (0..all.len().min(5))
-                .filter_map(|i| all.get(i).map(|item| *item as i32))
-                .collect();
-            eprintln!("raw ids: {:?}", raw_ids);
-            // Variation 0: system array passed straight through.
-            let all2 =
-                create_window_list(kCGWindowListOptionOnScreenOnly, kCGNullWindowID).expect("list");
-            let direct = create_image_from_array(bounds, all2.to_untyped(), kCGWindowImageDefault);
-            eprintln!("from-array direct: {}", direct.is_some());
-            // Variation 1: single window id.
-            let one: Vec<CFType> = raw_ids
-                .iter()
-                .take(1)
-                .map(|id| CFNumber::from(*id).as_CFType())
-                .collect();
-            let arr1 = CFArray::from_CFTypes(&one).to_untyped();
-            let img1 = create_image_from_array(bounds, arr1, kCGWindowImageDefault);
-            eprintln!("from-array single: {}", img1.is_some());
-            // Variation 2: nominal resolution option.
-            use core_graphics::window::kCGWindowImageNominalResolution;
-            let typed: Vec<CFType> = raw_ids
-                .iter()
-                .map(|id| CFNumber::from(*id).as_CFType())
-                .collect();
-            let arr = CFArray::from_CFTypes(&typed).to_untyped();
-            let img = create_image_from_array(bounds, arr, kCGWindowImageNominalResolution);
-            eprintln!("from-array nominal: {}", img.is_some());
-        }
-    }
-
-    /// Live composite to BGRA: needs Screen Recording TCC, so ignored in CI.
-    /// Proves the bitmap-context path yields opaque, bounded, non-blank
-    /// frames with the geometry the mirror needs to map points.
-    #[cfg(target_os = "macos")]
-    #[test]
-    #[ignore]
-    fn live_composite_scales_to_bgra() {
-        use threadlane_protocol::live::LIVE_FRAME_MAX_WIDTH;
-        let composite = super::mac::composite_target(
-            crate::stream::StreamTarget::Display,
-            super::mac::CaptureResolution::Nominal,
-        )
-        .expect("display composite");
-        let (bgra, width, height) = composite.bgra(LIVE_FRAME_MAX_WIDTH).expect("bgra frame");
-        assert!(width <= LIVE_FRAME_MAX_WIDTH && width > 0 && height > 0);
-        assert_eq!(bgra.len(), (width * height * 4) as usize);
-        // The backdrop fill makes every pixel opaque, uncovered desktop
-        // included, which is what gpui's straight-alpha blend needs. A few
-        // pixels land on 254 after CoreGraphics resamples in the display's
-        // colour space; that is rounding, not transparency.
-        assert!(bgra.chunks_exact(4).all(|pixel| pixel[3] >= 250), "opaque");
-        assert!(composite.points_size.0 > 0.0);
-        let started = std::time::Instant::now();
-        for _ in 0..10 {
-            let composite = super::mac::composite_target(
-                crate::stream::StreamTarget::Display,
-                super::mac::CaptureResolution::Nominal,
-            )
-            .expect("display composite");
-            composite.bgra(LIVE_FRAME_MAX_WIDTH).expect("bgra frame");
-        }
-        eprintln!(
-            "live tier (nominal composite + bgra): {:.1}ms per frame at {}x{}",
-            started.elapsed().as_secs_f64() * 100.0,
-            width,
-            height
-        );
-        let started = std::time::Instant::now();
-        for _ in 0..5 {
-            super::capture_composited_for_target(
-                crate::stream::StreamTarget::Display,
-                super::SCREENSHOT_WIDTH,
-                super::SCREENSHOT_JPEG_QUALITY,
-            )
-            .expect("model jpeg");
-        }
-        eprintln!(
-            "model tier (best composite + jpeg): {:.1}ms per frame",
-            started.elapsed().as_secs_f64() * 200.0
-        );
-    }
-
-    /// Live capture: needs Screen Recording TCC, so ignored in CI. Run by
-    /// hand with `-- --ignored` to prove pixels flow end to end.
-    #[cfg(target_os = "macos")]
+    /// Live driver probe: needs `cua-driver` installed and a WindowServer, so
+    /// ignored in CI. Run by hand with `-- --ignored` to prove the pooled MCP
+    /// session (one handshake across status, windows, and feed polls), window
+    /// listing, and a real mirror frame work end to end. Read-only: no
+    /// approval channel, no dialogs (`check_permissions` runs prompt:false,
+    /// feed frames never enter model context).
     #[tokio::test]
     #[ignore]
-    async fn live_screenshot_attaches_image() {
-        struct AllowAll;
-        #[async_trait::async_trait]
-        impl crate::ComputerApproval for AllowAll {
-            async fn request_computer(
-                &self,
-                _title: &str,
-                _detail: &str,
-            ) -> crate::ComputerDecision {
-                crate::ComputerDecision::AllowAlways
+    async fn live_driver_status_and_windows() {
+        if !driver_available() {
+            eprintln!("skipped: no cua-driver binary");
+            return;
+        }
+        let status = computer_status().await;
+        assert!(
+            status.contains("CUA driver"),
+            "status should name the driver: {status}"
+        );
+        let windows = list_windows("{}").await.expect("window list works");
+        assert!(
+            windows.contains("id=") || windows.contains("No top-level windows"),
+            "unexpected listing: {windows}"
+        );
+        // The feed shares the pooled session: one handshake served all three
+        // calls above, and a display frame should land within a few polls.
+        crate::mirror::ensure_feed_display();
+        let mut frame = None;
+        for _ in 0..8 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            frame = threadlane_protocol::live::latest_frame();
+            if frame.is_some() {
+                break;
             }
         }
-        let dir = tempfile::tempdir().unwrap();
-        let permissions: Arc<dyn crate::ComputerApproval> = Arc::new(AllowAll);
-        let executor = ComputerToolExecutor::new(Some(permissions));
-        let output = executor
-            .execute_tool_with_output_in_workspace(COMPUTER_SCREENSHOT_TOOL, "{}", Some(dir.path()))
-            .await
-            .expect("handled")
-            .expect("screenshot ok");
-        assert_eq!(output.images.len(), 1);
-        assert!(output.images[0]
-            .data_url
-            .starts_with("data:image/jpeg;base64,"));
-
-        // Let the poller warm up, then prove the stream serves frames.
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let frame = crate::stream::fresh_frame(crate::stream::StreamTarget::Display);
-        assert!(
-            frame.is_some(),
-            "stream poller should have produced a display frame"
-        );
-    }
-
-    /// Live resolution: read-only window lookup plus coordinate shift. No
-    /// input is posted, so this is safe anywhere with a WindowServer.
-    #[cfg(target_os = "macos")]
-    #[test]
-    #[ignore]
-    fn live_target_resolution_shifts_coordinates() {
-        let ids = super::mac::capture_window_ids();
-        let id = ids.into_iter().next().expect("a visible window");
-        let (pid, owner, (origin_x, origin_y)) =
-            super::mac::find_window(id).expect("window resolves");
-        assert!(pid > 0, "unexpected pid for {owner}");
-        let intent = parse_computer_act(r#"{"action":"click","x":10,"y":20}"#).unwrap();
-        let targeted = resolve_target(intent, Some(id as i64)).unwrap();
-        assert_eq!(targeted.pid, Some(pid));
-        assert_eq!(targeted.app.as_deref(), Some(owner.as_str()));
-        assert!(matches!(
-            targeted.intent,
-            ComputerAct::Click { x, y, .. } if x == 10.0 + origin_x && y == 20.0 + origin_y
-        ));
-
-        // Window captures are cropped to the window, not the display canvas.
-        let infos = super::mac::window_infos().unwrap_or_default();
-        let big = infos
-            .into_iter()
-            .find(|window| window.bounds.2 > 400.0 && window.bounds.3 > 300.0)
-            .expect("a sizable window");
-        let (bytes, width, height, src_points) = super::capture_composited_for_target(
-            crate::stream::StreamTarget::Window(big.id as u32),
-            super::SCREENSHOT_WIDTH,
-            super::SCREENSHOT_JPEG_QUALITY,
-        )
-        .expect("window crop captures");
-        assert!(!bytes.is_empty());
-        let aspect = f64::from(width) / f64::from(height.max(1));
-        let expected = big.bounds.2 / big.bounds.3.max(1.0);
-        assert!(
-            (aspect - expected).abs() < 0.05,
-            "crop aspect {aspect} should match window {expected}"
-        );
-        assert!(
-            (src_points - big.bounds.2).abs() < 1.0,
-            "source width should be window points"
+        let frame = frame.expect("mirror feed should publish a display frame");
+        assert!(frame.width <= threadlane_protocol::live::LIVE_FRAME_MAX_WIDTH);
+        assert_eq!(
+            frame.bgra.len(),
+            frame.width as usize * frame.height as usize * 4
         );
     }
 
@@ -1957,12 +1421,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn status_reports_availability() {
+    async fn gated_tools_fail_closed_without_driver_or_permission_channel() {
+        // Without a permission channel every gated tool denies, whether or
+        // not the driver binary exists on this machine.
         let executor = ComputerToolExecutor::new(None);
-        let result = executor
-            .execute_tool(COMPUTER_STATUS_TOOL, "{}")
-            .await
-            .expect("handled");
-        assert!(result.is_ok());
+        for tool in [COMPUTER_SCREENSHOT_TOOL, COMPUTER_ACT_TOOL, CUA_CALL_TOOL] {
+            let result = executor
+                .execute_tool(tool, "{}")
+                .await
+                .expect("handled");
+            assert!(result.is_err(), "{tool} should fail closed");
+        }
     }
 }

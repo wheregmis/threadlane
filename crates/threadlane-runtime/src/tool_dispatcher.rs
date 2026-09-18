@@ -353,14 +353,17 @@ const CORE_TOOL_NAMES: &[&str] = &[
     "browser_screenshot",
     "browser_console_logs",
     "browser_wait",
-    // Native computer use (`threadlane-computer`, approved through
-    // `threadlane-permission`). Every screenshot and input action
-    // re-prompts for approval, so the schemas are safe to advertise;
-    // unattended sessions deny at execution.
+    // Computer use through the CUA driver (`threadlane-computer`, approved
+    // through `threadlane-permission`). Every screenshot, accessibility
+    // snapshot with pixels, input action, and mutating cua_call re-prompts
+    // for approval, so the schemas are safe to advertise; unattended
+    // sessions deny at execution.
     "computer_status",
     "computer_windows",
     "computer_screenshot",
+    "computer_ax",
     "computer_act",
+    "cua_call",
 ];
 
 impl ToolDispatcher {

@@ -1,11 +1,11 @@
-//! Native computer-use tools: canonical implementation in `threadlane_computer`
-//! (window introspection, screenshots, input control behind the
-//! `ComputerApproval` trait); engine wiring (`Capability` → dispatcher) lives
-//! here so the computer crate stays a leaf depending only on
-//! `threadlane-protocol`. Import leaf items from `threadlane_computer`
-//! directly.
+//! Computer-use tools through the CUA driver: canonical implementation in
+//! `threadlane_computer` (window introspection, accessibility snapshots,
+//! screenshots, input control behind the `ComputerApproval` trait); engine
+//! wiring (`Capability` → dispatcher) lives here so the computer crate stays
+//! a leaf depending only on `threadlane-protocol`. Import leaf items from
+//! `threadlane_computer` directly.
 
-/// Runtime capability adapter for native computer-use tools.
+/// Runtime capability adapter for computer-use tools.
 ///
 /// Lives in the engine (not `threadlane-computer`) so the computer crate
 /// stays a leaf depending only on `threadlane-protocol`: it exposes the
@@ -32,7 +32,8 @@ impl threadlane_runtime::Capability for ComputerCapability {
 #[cfg(test)]
 mod tests {
     use threadlane_computer::computer::{
-        COMPUTER_ACT_TOOL, COMPUTER_SCREENSHOT_TOOL, COMPUTER_STATUS_TOOL, COMPUTER_WINDOWS_TOOL,
+        COMPUTER_ACT_TOOL, COMPUTER_AX_TOOL, COMPUTER_SCREENSHOT_TOOL, COMPUTER_STATUS_TOOL,
+        COMPUTER_WINDOWS_TOOL, CUA_CALL_TOOL,
     };
 
     #[test]
@@ -63,7 +64,9 @@ mod tests {
             COMPUTER_STATUS_TOOL,
             COMPUTER_WINDOWS_TOOL,
             COMPUTER_SCREENSHOT_TOOL,
+            COMPUTER_AX_TOOL,
             COMPUTER_ACT_TOOL,
+            CUA_CALL_TOOL,
         ] {
             assert!(
                 names.iter().any(|name| name == tool),

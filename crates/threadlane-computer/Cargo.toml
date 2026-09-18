@@ -2,7 +2,7 @@
 name = "threadlane-computer"
 version = "0.1.0"
 edition = "2021"
-description = "Native computer-use tools for Threadlane: window introspection, screenshots, and input control"
+description = "Computer-use tools for Threadlane through the CUA driver: window introspection, accessibility snapshots, screenshots, and input control"
 
 [dependencies]
 threadlane-project.workspace = true
@@ -12,11 +12,7 @@ serde.workspace = true
 serde_json.workspace = true
 base64.workspace = true
 async-trait.workspace = true
+image.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-
-[target.'cfg(target_os = "macos")'.dependencies]
-core-graphics = { version = "0.25", features = ["elcapitan", "highsierra"] }
-core-foundation = "0.10"
-image.workspace = true

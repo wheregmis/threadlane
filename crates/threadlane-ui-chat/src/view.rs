@@ -433,12 +433,12 @@ impl ChatListView {
 
         let stream_model = model.clone();
         cx.spawn(async move |this, cx| {
-            // Dev hook: `THREADLANE_MIRROR_DEBUG=1` opens the mirror on the
-            // main display at launch, so the live feed can be observed and
-            // profiled without a model turn or an approval prompt. Nothing
-            // reaches a model through this path.
+            // Dev hook: `THREADLANE_MIRROR_DEBUG=1` opens the mirror at
+            // launch, so the popup can be observed without a model turn or
+            // an approval prompt. It shows the last screenshot sidecar until
+            // the first computer call lands. Nothing reaches a model through
+            // this path.
             if std::env::var_os("THREADLANE_MIRROR_DEBUG").is_some() {
-                threadlane_computer::watch_display_for_debug();
                 let _ = this.update(cx, |view, cx| view.open_mirror(cx));
             }
             while let Some(events) = next_chat_stream_batch(&mut stream_rx).await {
