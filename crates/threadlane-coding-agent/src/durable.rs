@@ -9,7 +9,7 @@ use super::subagents::{
     NEXT_SUBAGENT_UI_RUN_ID,
 };
 use threadlane_compaction::CompactionParams;
-use threadlane_context::{context_budget, BudgetConfig};
+use threadlane_context::{context_budget_for_project, BudgetConfig};
 use threadlane_skills::agents::AgentDefinition;
 use crate::commands::{execute_slash_command, parse_slash_command};
 use log::warn;
@@ -576,7 +576,12 @@ impl CodingAgent {
             .unwrap_or_default();
         let system_prompt = durable_prompt_snapshot(&self.agent.system_prompt());
         let context_window_limit = Some(
-            context_budget(&model, &BudgetConfig::from(self.agent.config())).limit,
+            context_budget_for_project(
+                &model,
+                &BudgetConfig::from(self.agent.config()),
+                Some(&self.work_dir),
+            )
+            .limit,
         );
         let work_dir = self.work_dir.to_string_lossy().into_owned();
         let Some(journal) = self.harness.as_mut() else {
@@ -729,7 +734,12 @@ impl CodingAgent {
                 })
                 .unwrap_or_default();
             let context_window_limit = Some(
-                context_budget(&model, &BudgetConfig::from(self.agent.config())).limit,
+                context_budget_for_project(
+                    &model,
+                    &BudgetConfig::from(self.agent.config()),
+                    Some(&self.work_dir),
+                )
+                .limit,
             );
             journal.capture_run_context(
                 run_id,

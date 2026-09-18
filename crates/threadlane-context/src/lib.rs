@@ -41,7 +41,15 @@ impl Default for BudgetConfig {
 }
 
 pub fn model_context_limit(model: &str) -> Option<usize> {
-    if let Some(limit) = threadlane_provider::model_registry::context_window_for(model, None) {
+    model_context_limit_for_project(model, None)
+}
+
+/// Project-aware variant: `<project>/.threadlane/models.json` overrides
+/// apply when the caller knows the project root.
+pub fn model_context_limit_for_project(model: &str, project_root: Option<&std::path::Path>) -> Option<usize> {
+    if let Some(limit) =
+        threadlane_provider::model_registry::context_window_for(model, project_root)
+    {
         return Some(limit);
     }
     let unadorned = model
@@ -121,6 +129,15 @@ impl ContextBudget {
 
 pub fn context_budget(model: &str, config: &BudgetConfig) -> ContextBudget {
     ContextBudget::from_limit(model_context_limit(model), config)
+}
+
+/// Project-aware variant: honors per-project registry overrides.
+pub fn context_budget_for_project(
+    model: &str,
+    config: &BudgetConfig,
+    project_root: Option<&std::path::Path>,
+) -> ContextBudget {
+    ContextBudget::from_limit(model_context_limit_for_project(model, project_root), config)
 }
 
 #[cfg(test)]
