@@ -207,3 +207,48 @@ done
 
     manager.shutdown().await;
 }
+
+/// Concurrent calls to one server share the session without confusing
+/// responses: every caller gets its own answer and no process respawns.
+#[tokio::test]
+async fn concurrent_calls_share_one_session_without_id_confusion() {
+    let dir = tempfile::tempdir().unwrap();
+    let spawn_log = dir.path().join("spawns.log");
+    let script = stub_server(dir.path(), &spawn_log);
+
+    McpSettings::save_global(
+        dir.path(),
+        &[McpServerConfig {
+            id: "stub".to_string(),
+            name: "Stub".to_string(),
+            transport: McpTransport::Stdio {
+                command: script.to_string_lossy().to_string(),
+                args: Vec::new(),
+                env: HashMap::new(),
+            },
+            enabled: true,
+            scope: McpScope::Global,
+        }],
+    )
+    .unwrap();
+
+    let manager = Arc::new(McpManager::new(Some(dir.path().to_path_buf()), None));
+    manager.discover_and_connect().await;
+    let calls = (0..16).map(|_| {
+        let executor = McpToolExecutor::new(Arc::clone(&manager));
+        tokio::spawn(async move { executor.execute_tool("mcp__stub__echo", "{}").await })
+    });
+    for (index, call) in calls.enumerate() {
+        let result = call.await.unwrap();
+        assert!(
+            matches!(result, Some(Ok(ref text)) if text == "ok"),
+            "concurrent call {index} should succeed, got {result:?}"
+        );
+    }
+    assert_eq!(
+        spawn_count(&spawn_log),
+        1,
+        "concurrent calls must share the session, not respawn or duplicate it"
+    );
+    manager.shutdown().await;
+}

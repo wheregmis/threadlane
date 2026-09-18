@@ -90,6 +90,10 @@ pub struct EditorTab {
     saved_content: String,
     is_dirty: bool,
     is_diff: bool,
+    /// File content loaded off the UI thread, awaiting application to the
+    /// editor on the next render (which owns the `Window` that `set_value`
+    /// requires). Applied once by `sync_pending_content`, then cleared.
+    pending_content: Option<String>,
     editor_state: Option<Entity<EditorState>>,
     text_view_state: Option<Entity<TextViewState>>,
     _subscription: Option<Subscription>,
@@ -228,6 +232,7 @@ impl EditorView {
             saved_content: content.to_string(),
             is_dirty: false,
             is_diff: true,
+            pending_content: None,
             editor_state: None,
             text_view_state: Some(markdown_state),
             _subscription: None,
@@ -256,19 +261,11 @@ impl EditorView {
             return;
         }
 
-        let full_path = project_dir.join(relative_path);
-        let content = match std::fs::read_to_string(&full_path) {
-            Ok(c) => c,
-            Err(err) => {
-                tracing::error!("Failed to open file {}: {}", full_path.display(), err);
-                self.set_status(format!("Unable to open {}: {err}", relative_path), true);
-                cx.notify();
-                return;
-            }
-        };
-
         let lang = detect_language(relative_path);
-        let content_for_sub = content.clone();
+        // The tab (and its editor entity, which needs a Window) is created
+        // synchronously with a loading placeholder; only the filesystem read
+        // moves to the background executor so a large file never stalls the
+        // UI thread. Content fills in when the read completes.
         let editor = cx.new(|cx| {
             EditorState::new(window, cx)
                 .language(lang)
@@ -279,7 +276,7 @@ impl EditorView {
                     tab_size: 4,
                     hard_tabs: false,
                 })
-                .default_value(&content)
+                .default_value("Loading…")
         });
 
         let target_path = relative_path.to_string();
@@ -308,10 +305,11 @@ impl EditorView {
             relative_path: relative_path.to_string(),
             file_name: tab_title,
             _language: lang,
-            saved_content: content_for_sub,
+            saved_content: String::new(),
             is_dirty: false,
             is_diff: false,
-            editor_state: Some(editor),
+            pending_content: None,
+            editor_state: Some(editor.clone()),
             text_view_state: None,
             _subscription: Some(subscription),
         });
@@ -319,6 +317,94 @@ impl EditorView {
         self.active_tab_index = Some(self.tabs.len() - 1);
         self.status_msg = None;
         cx.notify();
+
+        let load_project = project_dir.to_path_buf();
+        let load_path = relative_path.to_string();
+        let load_editor = editor;
+        let read_project = load_project.clone();
+        let read_path = load_path.clone();
+        let read = cx.background_executor().spawn(async move {
+            std::fs::read_to_string(read_project.join(&read_path))
+                .map_err(|error| error.to_string())
+        });
+        cx.spawn(async move |this, cx| {
+            let result = read.await;
+            let _ = this.update(cx, |this, cx| {
+                this.finish_file_open(&load_project, &load_path, &load_editor, result, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Completes an asynchronous file open started by `open_file_internal`.
+    ///
+    /// Window-free: the loaded bytes land on the tab as `pending_content`
+    /// (plus the saved baseline); the next render applies them to the editor
+    /// via `sync_pending_content`, which owns the `Window` that `set_value`
+    /// requires.
+    ///
+    /// Never clobbers user input: if the user typed into the loading tab
+    /// while the read was in flight, their text stays and the file content
+    /// becomes the saved baseline (marking the tab dirty, correctly).
+    fn finish_file_open(
+        &mut self,
+        project_dir: &Path,
+        relative_path: &str,
+        editor: &Entity<EditorState>,
+        result: Result<String, String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.iter_mut().find(|t| {
+            t.project_dir == project_dir
+                && t.relative_path == relative_path
+                && !t.is_diff
+        }) else {
+            return;
+        };
+        match result {
+            Ok(content) => {
+                let current = editor.read(cx).value();
+                if current.as_str() == "Loading…" || current.as_str().is_empty() {
+                    tab.pending_content = Some(content.clone());
+                    // Matches once `sync_pending_content` applies it.
+                    tab.is_dirty = false;
+                } else {
+                    tab.is_dirty = current.as_str() != content.as_str();
+                }
+                tab.saved_content = content;
+            }
+            Err(error) => {
+                tracing::error!(
+                    "Failed to open file {}: {}",
+                    project_dir.join(relative_path).display(),
+                    error
+                );
+                self.set_status(format!("Unable to open {relative_path}: {error}"), true);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Applies background-loaded file content to editors. Called from
+    /// `render` (which owns the `Window`), mirroring `sync_pending_file`.
+    /// Each tab applies at most once: content is taken, never re-read.
+    fn sync_pending_content(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut applied = false;
+        for tab in self.tabs.iter_mut().filter(|tab| !tab.is_diff) {
+            let Some(content) = tab.pending_content.take() else {
+                continue;
+            };
+            if let Some(editor) = tab.editor_state.clone() {
+                editor.update(cx, |editor, cx| {
+                    editor.set_value(content, window, cx);
+                });
+                tab.is_dirty = false;
+                applied = true;
+            }
+        }
+        if applied {
+            cx.notify();
+        }
     }
 
     fn set_status(&mut self, msg: String, is_error: bool) {
@@ -781,6 +867,7 @@ impl EditorView {
 impl Render for EditorView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_pending_file(window, cx);
+        self.sync_pending_content(window, cx);
         let theme = cx.theme().colors;
 
         div()

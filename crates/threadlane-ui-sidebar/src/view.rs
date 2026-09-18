@@ -1398,22 +1398,32 @@ impl SidebarView {
                             else {
                                 return;
                             };
-                            let result = build_diagnostic_export(
-                                &source,
-                                &session_id,
-                                &title,
-                                &work_dir,
-                                runtime.as_deref(),
-                                trajectory,
-                                true,
-                            )
-                            .and_then(|value| {
-                                serde_json::to_vec_pretty(&value).map_err(|error| error.to_string())
-                            })
-                            .and_then(|bytes| {
-                                std::fs::write(destination.path(), bytes)
-                                    .map_err(|error| error.to_string())
-                            });
+                            // Blocking file + JSON work hops to the background
+                            // executor: session logs can be tens of MB, and
+                            // this continuation already left the UI thread.
+                            let destination_path = destination.path().to_path_buf();
+                            let result = cx
+                                .background_executor()
+                                .spawn(async move {
+                                    build_diagnostic_export(
+                                        &source,
+                                        &session_id,
+                                        &title,
+                                        &work_dir,
+                                        runtime.as_deref(),
+                                        trajectory,
+                                        true,
+                                    )
+                                    .and_then(|value| {
+                                        serde_json::to_vec_pretty(&value)
+                                            .map_err(|error| error.to_string())
+                                    })
+                                    .and_then(|bytes| {
+                                        std::fs::write(&destination_path, bytes)
+                                            .map_err(|error| error.to_string())
+                                    })
+                                })
+                                .await;
                             let _ = model.update(cx, |state, cx| {
                                 state.session_status = Some(match result {
                                     Ok(()) => "Session diagnostics exported".into(),
@@ -1452,22 +1462,29 @@ impl SidebarView {
                             else {
                                 return;
                             };
-                            let result = build_diagnostic_export(
-                                &source,
-                                &session_id,
-                                &title,
-                                &work_dir,
-                                runtime.as_deref(),
-                                trajectory,
-                                false,
-                            )
-                            .and_then(|value| {
-                                serde_json::to_vec_pretty(&value).map_err(|error| error.to_string())
-                            })
-                            .and_then(|bytes| {
-                                std::fs::write(destination.path(), bytes)
-                                    .map_err(|error| error.to_string())
-                            });
+                            let destination_path = destination.path().to_path_buf();
+                            let result = cx
+                                .background_executor()
+                                .spawn(async move {
+                                    build_diagnostic_export(
+                                        &source,
+                                        &session_id,
+                                        &title,
+                                        &work_dir,
+                                        runtime.as_deref(),
+                                        trajectory,
+                                        false,
+                                    )
+                                    .and_then(|value| {
+                                        serde_json::to_vec_pretty(&value)
+                                            .map_err(|error| error.to_string())
+                                    })
+                                    .and_then(|bytes| {
+                                        std::fs::write(&destination_path, bytes)
+                                            .map_err(|error| error.to_string())
+                                    })
+                                })
+                                .await;
                             let _ = model.update(cx, |state, cx| {
                                 state.session_status = Some(match result {
                                     Ok(()) => "Trajectory exported".into(),

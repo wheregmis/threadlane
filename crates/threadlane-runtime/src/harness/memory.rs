@@ -1,9 +1,9 @@
-use super::reducer::{validate_candidate_entry, validate_candidate_record};
+use super::reducer::ReductionContext;
 use super::store::SessionStore;
 use super::types::{Entry, Record, ReduceError};
 #[cfg(test)]
 use threadlane_protocol::AgentMessage;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 #[derive(Debug, Clone)]
 pub struct MemoryStore {
@@ -12,6 +12,10 @@ pub struct MemoryStore {
     records: Vec<Record>,
     ids: HashSet<String>,
     next_seq: u64,
+    /// Streaming reduction state advanced by guard/commit pairs on append,
+    /// so validation no longer rebuilds the full context per append (O(n²)
+    /// on long sessions). Reads still reduce from scratch.
+    reduction: ReductionContext,
 }
 
 impl MemoryStore {
@@ -22,6 +26,8 @@ impl MemoryStore {
             records: Vec::new(),
             ids: HashSet::new(),
             next_seq: 1,
+            reduction: ReductionContext::build(&[], &[], BTreeMap::new(), &|_| None)
+                .expect("empty reduction builds"),
         }
     }
 
@@ -92,10 +98,12 @@ impl MemoryStore {
                 current: entry.seq,
             });
         }
-        validate_candidate_entry(self, &entry)?;
+        self.reduction.entry_guard(&entry)?;
         self.ids.insert(entry.id.clone());
         self.next_seq = entry.seq + 1;
         self.entries.push(entry);
+        self.reduction
+            .commit_entry(self.entries.last().expect("just pushed"));
         Ok(())
     }
 
@@ -114,12 +122,14 @@ impl MemoryStore {
                 .chain(self.entries.last().map(|entry| entry.seq))
                 .max(),
         )?;
-        validate_candidate_record(self, &record)?;
+        self.reduction.record_guard(&record)?;
         if !self.ids.insert(record.id().to_owned()) {
             return Err(ReduceError::DuplicateId(record.id().to_owned()));
         }
         self.next_seq = record.seq() + 1;
         self.records.push(record);
+        self.reduction
+            .commit_record(self.records.last().expect("just pushed"));
         Ok(())
     }
 }
@@ -201,5 +211,39 @@ mod tests {
                 current: 4
             }
         ));
+    }
+
+    /// The incremental guard/commit path must project identically to a fresh
+    /// full reduction at every step (the JsonlStore invariant, ported here).
+    #[test]
+    fn incremental_appends_match_full_reduction() {
+        use crate::harness::Reducer;
+        let mut store = MemoryStore::new("session");
+        for index in 1..=8u64 {
+            store
+                .try_append_entry(Entry {
+                    id: format!("entry-{index}"),
+                    parent_id: if index == 1 {
+                        None
+                    } else {
+                        Some(format!("entry-{}", index - 1))
+                    },
+                    lane: "main".into(),
+                    seq: index,
+                    timestamp: index,
+                    message: AgentMessage::user(format!("turn {index}"), vec![]),
+                    surface_op: crate::harness::SurfaceOperation::Append,
+                    terminate: false,
+                })
+                .unwrap();
+            let incremental = store.reduction.to_reduced_state();
+            let fresh = ReductionContext::from_store(&store)
+                .unwrap()
+                .to_reduced_state();
+            assert_eq!(format!("{incremental:?}"), format!("{fresh:?}"));
+        }
+        let full = Reducer::reduce(&store).unwrap();
+        let lane = full.lane("main").unwrap();
+        assert_eq!(lane.leaf_id.as_deref(), Some("entry-8"));
     }
 }

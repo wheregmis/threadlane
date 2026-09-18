@@ -21,11 +21,15 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, RwLock};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, RwLock,
+};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::{oneshot, Mutex as TokioMutex};
+use tokio::task::JoinHandle;
 
 const MCP_SETTINGS_FILE: &str = "mcp.json";
 const MCP_PROJECT_SETTINGS_RELATIVE_PATH: &str = ".threadlane/mcp.json";
@@ -242,11 +246,17 @@ pub struct McpServerRecord {
 /// The handshake is performed once when the process starts and the pipes stay
 /// open, so a tool call costs one request/response round trip instead of a
 /// process spawn plus a full `initialize` exchange.
+///
+/// Requests multiplex over the single stdio pair: a background reader task
+/// dispatches responses by id into per-request channels, so concurrent tool
+/// calls to the same server proceed in parallel instead of queueing behind
+/// one session-wide lock.
 struct McpSession {
-    child: Child,
-    stdin: ChildStdin,
-    reader: BufReader<ChildStdout>,
-    next_id: u64,
+    child: TokioMutex<Child>,
+    stdin: TokioMutex<ChildStdin>,
+    next_id: AtomicU64,
+    pending: Arc<TokioMutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>,
+    _reader: JoinHandle<()>,
 }
 
 impl McpSession {
@@ -283,11 +293,16 @@ impl McpSession {
             .take()
             .ok_or_else(|| "Failed to open stdout".to_string())?;
 
-        let mut session = Self {
-            child,
-            stdin,
-            reader: BufReader::new(stdout),
-            next_id: 1,
+        let pending: Arc<TokioMutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>> =
+            Arc::new(TokioMutex::new(HashMap::new()));
+        let reader = tokio::spawn(Self::pump_stdout(stdout, Arc::clone(&pending)));
+
+        let session = Self {
+            child: TokioMutex::new(child),
+            stdin: TokioMutex::new(stdin),
+            next_id: AtomicU64::new(1),
+            pending,
+            _reader: reader,
         };
 
         session
@@ -307,72 +322,106 @@ impl McpSession {
         Ok(session)
     }
 
-    async fn write_line(&mut self, message: &Value) -> Result<(), String> {
+    /// Background stdout pump: dispatches responses by id so concurrent
+    /// requests share the session. Server notifications (no id) and stray
+    /// lines are ignored. On EOF or read error every waiter fails instead
+    /// of hanging.
+    async fn pump_stdout(
+        stdout: ChildStdout,
+        pending: Arc<TokioMutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>,
+    ) {
+        let mut reader = BufReader::new(stdout);
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line).await {
+                Ok(0) => break,
+                Err(_) => break,
+                Ok(_) => {}
+            }
+            let Ok(message) = serde_json::from_str::<Value>(line.trim()) else {
+                continue;
+            };
+            let Some(id) = message.get("id").and_then(Value::as_u64) else {
+                continue;
+            };
+            let result = if let Some(error) = message.get("error") {
+                Err(error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("MCP error")
+                    .to_string())
+            } else {
+                Ok(message.get("result").cloned().unwrap_or(Value::Null))
+            };
+            if let Some(sender) = pending.lock().await.remove(&id) {
+                let _ = sender.send(result);
+            }
+        }
+        for (_, sender) in pending.lock().await.drain() {
+            let _ = sender.send(Err("MCP server closed its output stream".into()));
+        }
+    }
+
+    async fn write_line(&self, message: &Value) -> Result<(), String> {
         let mut line = message.to_string();
         line.push('\n');
-        self.stdin
+        let mut stdin = self.stdin.lock().await;
+        stdin
             .write_all(line.as_bytes())
             .await
             .map_err(|error| format!("Failed to write to MCP server: {error}"))?;
-        self.stdin
+        stdin
             .flush()
             .await
             .map_err(|error| format!("Failed to flush MCP server stdin: {error}"))
     }
 
-    async fn notify(&mut self, method: &str, params: Value) -> Result<(), String> {
+    async fn notify(&self, method: &str, params: Value) -> Result<(), String> {
         self.write_line(&json!({ "jsonrpc": "2.0", "method": method, "params": params }))
             .await
     }
 
-    /// Sends a request and reads until the matching response arrives.
+    /// Sends a request and resolves when the matching response arrives.
     ///
-    /// Notifications and unrelated responses are skipped rather than mistaken
-    /// for the answer, which a single blind `read_line` would do.
-    async fn request(&mut self, method: &str, params: Value) -> Result<Value, String> {
-        let id = self.next_id;
-        self.next_id += 1;
-        self.write_line(&json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": method,
-            "params": params,
-        }))
-        .await?;
-
-        let deadline = tokio::time::Instant::now() + MCP_REQUEST_TIMEOUT;
-        loop {
-            let mut line = String::new();
-            let read = tokio::time::timeout_at(deadline, self.reader.read_line(&mut line))
-                .await
-                .map_err(|_| format!("MCP request '{method}' timed out"))?
-                .map_err(|error| format!("Failed to read from MCP server: {error}"))?;
-            if read == 0 {
-                return Err("MCP server closed its output stream".to_string());
+    /// Shares the session with concurrent callers: writes serialize on the
+    /// stdin lock (held only for the write), while responses dispatch by id
+    /// through the reader task, so a slow tool call no longer blocks every
+    /// other call to the same server.
+    async fn request(&self, method: &str, params: Value) -> Result<Value, String> {
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let (sender, receiver) = oneshot::channel();
+        self.pending.lock().await.insert(id, sender);
+        if let Err(error) = self
+            .write_line(&json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": method,
+                "params": params,
+            }))
+            .await
+        {
+            self.pending.lock().await.remove(&id);
+            return Err(error);
+        }
+        match tokio::time::timeout(MCP_REQUEST_TIMEOUT, receiver).await {
+            Ok(Ok(result)) => result,
+            // The reader died or the session was retired: the sender is gone.
+            Ok(Err(_)) => Err("MCP server closed its output stream".into()),
+            Err(_) => {
+                self.pending.lock().await.remove(&id);
+                Err(format!("MCP request '{method}' timed out"))
             }
-            let Ok(message) = serde_json::from_str::<Value>(line.trim()) else {
-                continue;
-            };
-            if message.get("id").and_then(Value::as_u64) != Some(id) {
-                continue;
-            }
-            if let Some(error) = message.get("error") {
-                let text = error
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("MCP error");
-                return Err(text.to_string());
-            }
-            return Ok(message.get("result").cloned().unwrap_or(Value::Null));
         }
     }
 
-    /// Terminates the server process.
+    /// Terminates the server process (best-effort).
     ///
-    /// Takes `&mut self` rather than `self` so a session can be killed through
-    /// its shared handle without needing exclusive ownership of the `Arc`.
-    async fn kill(&mut self) {
-        let _ = self.child.kill().await;
+    /// Takes `&self` so a session can be killed through its shared handle
+    /// without needing exclusive ownership of the `Arc`.
+    fn kill(&self) {
+        if let Ok(mut child) = self.child.try_lock() {
+            let _ = child.start_kill();
+        }
     }
 }
 
@@ -388,7 +437,7 @@ pub struct McpManager {
     /// Each session carries its own lock so a call to one server never blocks a
     /// call to another; the outer map is held only long enough to look up or
     /// install the handle, never across the request round trip.
-    sessions: TokioMutex<HashMap<String, Arc<TokioMutex<McpSession>>>>,
+    sessions: TokioMutex<HashMap<String, Arc<McpSession>>>,
 }
 
 impl McpManager {
@@ -423,7 +472,7 @@ impl McpManager {
     pub async fn shutdown(&self) {
         let sessions = std::mem::take(&mut *self.sessions.lock().await);
         for (_, session) in sessions {
-            session.lock().await.kill().await;
+            session.kill();
         }
     }
 
@@ -489,7 +538,7 @@ impl McpManager {
                 .collect::<Vec<_>>()
         };
         join_all(retired.into_iter().map(|session| async move {
-            session.lock().await.kill().await;
+            session.kill();
         }))
         .await;
 
@@ -515,9 +564,9 @@ impl McpManager {
         // This path is reached only for a new or changed configuration.
         let previous = self.sessions.lock().await.remove(&config.id);
         if let Some(previous) = previous {
-            previous.lock().await.kill().await;
+            previous.kill();
         }
-        let mut session =
+        let session =
             match McpSession::connect(config, &self.client_name, &self.client_version).await {
                 Ok(session) => session,
                 Err(_error) => return Vec::new(),
@@ -527,7 +576,7 @@ impl McpManager {
         let response = match listed {
             Ok(response) => response,
             Err(_error) => {
-                session.kill().await;
+                session.kill();
                 return Vec::new();
             }
         };
@@ -560,7 +609,7 @@ impl McpManager {
         self.sessions
             .lock()
             .await
-            .insert(config.id.clone(), Arc::new(TokioMutex::new(session)));
+            .insert(config.id.clone(), Arc::new(session));
         mcp_tools
     }
 
@@ -600,7 +649,9 @@ impl McpManager {
         let (config, tool_name) = target?;
 
         // Resolve the handle under the map lock, then release it before doing
-        // any I/O so concurrent calls to other servers are not serialized.
+        // any I/O so concurrent calls are not serialized on the registry.
+        // A loser of a connect race kills its duplicate and uses the
+        // winner's session instead of orphaning a live process.
         let handle = {
             let existing = self.sessions.lock().await.get(&config.id).cloned();
             match existing {
@@ -617,34 +668,51 @@ impl McpManager {
                                 return Some(Err(format!("Failed to start MCP server: {error}")))
                             }
                         };
-                    let handle = Arc::new(TokioMutex::new(session));
-                    self.sessions
-                        .lock()
-                        .await
-                        .insert(config.id.clone(), Arc::clone(&handle));
-                    handle
+                    let handle = Arc::new(session);
+                    let mut sessions = self.sessions.lock().await;
+                    if let Some(winner) = sessions.get(&config.id) {
+                        let winner = Arc::clone(winner);
+                        drop(sessions);
+                        handle.kill();
+                        winner
+                    } else {
+                        sessions.insert(config.id.clone(), Arc::clone(&handle));
+                        handle
+                    }
                 }
             }
         };
 
-        let response = {
-            let mut session = handle.lock().await;
-            session
-                .request(
-                    "tools/call",
-                    json!({ "name": tool_name, "arguments": args }),
-                )
-                .await
-        };
+        // No session-wide lock across I/O: requests multiplex by id through
+        // the reader task, so concurrent calls to the same server proceed in
+        // parallel.
+        let response = handle
+            .request(
+                "tools/call",
+                json!({ "name": tool_name, "arguments": args }),
+            )
+            .await;
 
         let response = match response {
             Ok(response) => response,
             Err(error) => {
                 // The pipe is no longer trustworthy after a failed exchange;
-                // drop it so the next call starts a clean session.
-                let broken = self.sessions.lock().await.remove(&config.id);
-                if let Some(broken) = broken {
-                    broken.lock().await.kill().await;
+                // drop it so the next call starts a clean session. Only
+                // retire our own handle: a concurrent call may already have
+                // replaced it with a healthy session.
+                let retired = {
+                    let mut sessions = self.sessions.lock().await;
+                    if sessions
+                        .get(&config.id)
+                        .is_some_and(|current| Arc::ptr_eq(current, &handle))
+                    {
+                        sessions.remove(&config.id)
+                    } else {
+                        None
+                    }
+                };
+                if let Some(broken) = retired {
+                    broken.kill();
                 }
                 return Some(Err(error));
             }
