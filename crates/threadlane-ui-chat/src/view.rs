@@ -5451,7 +5451,9 @@ impl ChatListView {
                             .when(!has_commands, |list| {
                                 list.child(
                                     div()
-                                        .h(px(36.0))
+                                        // Same row height as command rows so
+                                        // filtering to empty doesn't jump.
+                                        .h(px(30.0))
                                         .flex()
                                         .items_center()
                                         .px_2()
@@ -5487,8 +5489,9 @@ impl ChatListView {
                                     .cursor_pointer()
                                     .child(
                                         div()
-                                            .w(px(112.0))
+                                            .w(px(160.0))
                                             .flex_none()
+                                            .truncate()
                                             .font_weight(if is_active {
                                                 FontWeight::BOLD
                                             } else {
@@ -6397,63 +6400,9 @@ impl Render for ChatListView {
                             .child(Spinner::new().small()).child("Loading conversation…")
                             .into_any_element()
                     } else if messages.is_empty() {
-                        div()
-                            .flex_1()
-                            .min_h_0()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .px_4()
-                            .child(
-                                div()
-                                    .w_full()
-                                    .max_w(px(440.0))
-                                    .flex()
-                                    .flex_col()
-                                    .items_center()
-                                    .gap_3()
-                                    .px_6()
-                                    .py_8()
-                                    .rounded_xl()
-                                    .border_1()
-                                    .border_color(theme.border)
-                                    .bg(theme.title_bar)
-                                    .child(
-                                        div()
-                                            .size(px(40.0))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .rounded_full()
-                                            .bg(theme.primary.opacity(0.12))
-                                            .text_color(theme.primary)
-                                            .child(IconName::Bot),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_base()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(theme.foreground)
-                                            .child("Ready when you are"),
-                                    )
-                                    .child(
-                                        div()
-                                            .max_w(px(320.0))
-                                            .text_center()
-                                            .text_sm()
-                                            .text_color(theme.muted_foreground)
-                                            .child(
-                                                "Describe what you want to build, investigate, or fix. Threadlane can use your project context and tools to help.",
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(theme.muted_foreground)
-                                            .child("Press Enter to send · Shift+Enter for a new line"),
-                                    ),
-                            )
-                            .into_any_element()
+                        // One empty state: an empty transcript renders the
+                        // same new-task hero wherever it appears.
+                        self.render_new_task(cx)
                     } else {
                         div()
                             .id("chat-transcript-container")

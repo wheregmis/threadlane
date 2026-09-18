@@ -379,11 +379,12 @@ impl SettingsView {
     }
 
     /// Renders the muted "no items" placeholder shared by the extension,
-    /// skill, and ACP agent lists.
+    /// skill, and ACP agent lists. Compact margins so narrow panes keep
+    /// content width instead of huge side gutters.
     fn empty_state(message: &str, colors: gpui_component::ThemeColor) -> AnyElement {
         div()
-            .p_6()
-            .mx_6()
+            .p_4()
+            .mx_2()
             .rounded_lg()
             .border_1()
             .border_color(colors.border)
