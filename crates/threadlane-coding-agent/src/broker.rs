@@ -628,11 +628,33 @@ impl HostCapabilityHandler {
                 let mut buf = stdout_buf.lock().await;
                 match framing {
                     "content-length" => {
-                        if let Some((message, consumed)) = extract_content_length_message(&buf) {
-                            buf.drain(..consumed);
-                            return Ok(serde_json::json!({"message": serde_json::json!({
-                                "data": message, "eof": false
-                            }).to_string()}));
+                        match extract_content_length_frame(&buf) {
+                            ContentFrame::Ready(message, consumed) => {
+                                buf.drain(..consumed);
+                                return Ok(serde_json::json!({"message": serde_json::json!({
+                                    "data": message, "eof": false
+                                }).to_string()}));
+                            }
+                            ContentFrame::TooLarge(consumed) => {
+                                buf.drain(..consumed);
+                                return Err(BrokerError {
+                                    code: "too_large".into(),
+                                    message: format!(
+                                        "content-length frame exceeds the {MAX_CONTENT_LENGTH_BYTES}-byte cap"
+                                    ),
+                                });
+                            }
+                            ContentFrame::NeedMore => {}
+                        }
+                        // An incomplete oversize frame can never complete
+                        // past the stdout cap: resync to the live edge on
+                        // timeout instead of leaving a corrupt prefix that
+                        // desyncs every later message. Ordinary partial
+                        // frames are untouched.
+                        if tokio::time::Instant::now() >= deadline
+                            && oversize_content_length_pending(&buf)
+                        {
+                            buf.clear();
                         }
                     }
                     "line" => {
@@ -1000,19 +1022,80 @@ fn string_argument<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, Brok
         .ok_or_else(|| invalid_argument(format!("missing or empty argument `{name}`")))
 }
 
-fn extract_content_length_message(buffer: &[u8]) -> Option<(String, usize)> {
-    let header_end = buffer.windows(4).position(|window| window == b"\r\n\r\n")? + 4;
-    let header = std::str::from_utf8(&buffer[..header_end]).ok()?;
-    let content_length = header.lines().find_map(|line| {
+/// Bounded content-length framing shared by the reader and the drain path.
+const MAX_CONTENT_LENGTH_BYTES: usize = 16 * 1024 * 1024;
+
+enum ContentFrame {
+    NeedMore,
+    Ready(String, usize),
+    /// Complete frame exceeding the cap: the caller drains `usize` bytes and
+    /// reports oversize instead of delivering megabytes.
+    TooLarge(usize),
+}
+
+fn extract_content_length_frame(buffer: &[u8]) -> ContentFrame {
+    let Some(header_end) = buffer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|position| position + 4)
+    else {
+        return ContentFrame::NeedMore;
+    };
+    let Ok(header) = std::str::from_utf8(&buffer[..header_end]) else {
+        return ContentFrame::NeedMore;
+    };
+    let Some(content_length) = header.lines().find_map(|line| {
         line.split_once(':').and_then(|(name, value)| {
             name.eq_ignore_ascii_case("content-length")
                 .then(|| value.trim().parse::<usize>().ok())
                 .flatten()
         })
-    })?;
-    let message_end = header_end.checked_add(content_length)?;
-    let body = buffer.get(header_end..message_end)?;
-    Some((String::from_utf8(body.to_vec()).ok()?, message_end))
+    }) else {
+        return ContentFrame::NeedMore;
+    };
+    let Some(message_end) = header_end.checked_add(content_length) else {
+        return ContentFrame::NeedMore;
+    };
+    if content_length > MAX_CONTENT_LENGTH_BYTES {
+        // Only report once the whole frame arrived: draining a partial
+        // oversize frame would desync every later message.
+        if buffer.len() >= message_end {
+            return ContentFrame::TooLarge(message_end);
+        }
+        return ContentFrame::NeedMore;
+    }
+    let Some(body) = buffer.get(header_end..message_end) else {
+        return ContentFrame::NeedMore;
+    };
+    match String::from_utf8(body.to_vec()) {
+        Ok(message) => ContentFrame::Ready(message, message_end),
+        Err(_) => ContentFrame::NeedMore,
+    }
+}
+/// True when the buffer opens with a content-length header declaring more
+/// than the cap: such a frame can never complete, so the timeout path may
+/// resync past it.
+fn oversize_content_length_pending(buffer: &[u8]) -> bool {
+    let Some(header_end) = buffer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|position| position + 4)
+    else {
+        return false;
+    };
+    let Ok(header) = std::str::from_utf8(&buffer[..header_end]) else {
+        return false;
+    };
+    header
+        .lines()
+        .find_map(|line| {
+            line.split_once(':').and_then(|(name, value)| {
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+        })
+        .is_some_and(|length| length > MAX_CONTENT_LENGTH_BYTES)
 }
 fn resolve_work_path(work_dir: &Path, relative: &str) -> Result<PathBuf, BrokerError> {
     let path = Path::new(relative);
@@ -1043,4 +1126,46 @@ fn resolve_work_path(work_dir: &Path, relative: &str) -> Result<PathBuf, BrokerE
         return Err(invalid_argument("path escapes work_dir"));
     }
     Ok(checked)
+}
+
+#[cfg(test)]
+mod framing_tests {
+    use super::*;
+
+    fn frame(body: &[u8]) -> Vec<u8> {
+        let mut buffer = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
+        buffer.extend_from_slice(body);
+        buffer
+    }
+
+    #[test]
+    fn complete_frames_parse_and_oversize_reports() {
+        match extract_content_length_frame(&frame(b"hello")) {
+            ContentFrame::Ready(message, consumed) => {
+                assert_eq!(message, "hello");
+                assert_eq!(consumed, frame(b"hello").len());
+            }
+            other => panic!("expected Ready, got {}", matches!(other, ContentFrame::NeedMore)),
+        }
+        assert!(matches!(
+            extract_content_length_frame(b"Content-Length: 5\r\n\r\nhel"),
+            ContentFrame::NeedMore
+        ));
+        assert!(matches!(
+            extract_content_length_frame(b"no headers here"),
+            ContentFrame::NeedMore
+        ));
+        // Oversize only reports once the whole frame arrived (no desync).
+        let huge_len = MAX_CONTENT_LENGTH_BYTES + 1;
+        let mut partial =
+            format!("Content-Length: {huge_len}\r\n\r\n").into_bytes();
+        partial.extend_from_slice(b"part");
+        assert!(matches!(
+            extract_content_length_frame(&partial),
+            ContentFrame::NeedMore
+        ));
+        assert!(oversize_content_length_pending(&partial));
+        assert!(!oversize_content_length_pending(&frame(b"hello")));
+        assert!(!oversize_content_length_pending(b"garbage"));
+    }
 }

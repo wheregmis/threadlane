@@ -342,12 +342,18 @@ impl ExtensionManager {
                 if fs::symlink_metadata(disabled_marker(&module_path)).is_ok() {
                     continue;
                 }
-                let extension = WasiExtension::load_from_file(&module_path).map_err(|error| {
-                    format!(
-                        "Failed to load extension '{}': {error}",
-                        module_path.display()
-                    )
-                })?;
+                // Strict manifests are enforced at load; a single bad module
+                // warns and skips instead of failing the whole discovery.
+                let extension = match WasiExtension::load_from_file(&module_path) {
+                    Ok(extension) => extension,
+                    Err(error) => {
+                        tracing::warn!(
+                            "Skipping unloadable extension '{}': {error}",
+                            module_path.display()
+                        );
+                        continue;
+                    }
+                };
                 validate_extension_id(&extension.manifest.name).map_err(|error| {
                     format!(
                         "Invalid extension manifest name in '{}': {error}",

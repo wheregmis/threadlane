@@ -8829,6 +8829,7 @@ dependencies = [
  "tempfile",
  "threadlane-project",
  "threadlane-protocol",
+ "tracing",
  "wasmi",
 ]
 
